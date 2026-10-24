@@ -9,6 +9,7 @@ import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerC
 import { followCodexActiveAccount } from '../codex-account-switch'
 import { CLAUDEUI_DISABLED_FEATURES } from '../codex-features'
 import { logger } from '../../services/logger'
+import { ApprovalAnswerRejected } from '../../services/approval-errors'
 import type { EngineSpawnOptions } from '../../providers/ISession'
 import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
@@ -1044,6 +1045,60 @@ describe('Codex first session', () => {
         sandboxPolicy: expect.objectContaining({ type: 'workspaceWrite' })
       })
     )
+  })
+
+  // A3b — a malformed answer to a parked question is not an answer: the request stays parked and
+  // the answer seam keeps its card (`ApprovalAnswerRejected`).
+  describe('a question card answered badly', () => {
+    const questions = [
+      {
+        id: 'q1',
+        header: 'Pick',
+        question: 'Which one?',
+        isOther: false,
+        isSecret: false,
+        options: [{ label: 'A', description: '' }]
+      }
+    ]
+    const park = async () => {
+      const f = fixture({ permissionMode: 'default' })
+      await f.session.run('hello')
+      const asked = f.approval({ questions }, 'item/tool/requestUserInput')
+      return { ...f, asked, requestId: (asked.card as { requestId: string }).requestId }
+    }
+
+    it.each([
+      ['no answers at all', 'allow' as const, undefined],
+      ['an answer that is missing', 'allow' as const, {}],
+      ['an answer that is not an offered choice', 'allow' as const, { q1: 'Z' }],
+      ['a decision that is not allow', 'deny' as const, { q1: 'A' }]
+    ])(
+      '%s throws ApprovalAnswerRejected and the request stays answerable',
+      async (_n, decision, answers) => {
+        const { session, asked, requestId } = await park()
+        expect(() => session.resolveApproval(requestId, decision, answers)).toThrow(
+          ApprovalAnswerRejected
+        )
+        // Still parked: a good answer settles it.
+        session.resolveApproval(requestId, 'allow', { q1: 'A' })
+        expect(await asked.result).toEqual({ answers: { q1: { answers: ['A'] } } })
+      }
+    )
+
+    it('a stale id is a plain error, not a rejected answer (its card must go)', async () => {
+      const { session, asked, requestId } = await park()
+      session.resolveApproval(requestId, 'allow', { q1: 'A' })
+      await asked.result
+      let thrown: unknown
+      try {
+        session.resolveApproval(requestId, 'allow', { q1: 'A' })
+      } catch (err) {
+        thrown = err
+      }
+      expect(thrown).toBeInstanceOf(Error)
+      expect(thrown).not.toBeInstanceOf(ApprovalAnswerRejected)
+      expect((thrown as Error).message).toContain('Stale or unknown')
+    })
   })
 
   it('answers plan mode read-only without a card and declines every mutation', async () => {

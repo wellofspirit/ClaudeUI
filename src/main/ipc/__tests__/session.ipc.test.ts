@@ -605,6 +605,29 @@ describe('session.ipc', () => {
       expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
     })
 
+    it('an answer retires the card on every client: emits session:approval-dismiss for the routing id (pi, xeng:)', async () => {
+      const dismissals: unknown[][] = []
+      harness.onEvent('session:approval-dismiss', (...args) => dismissals.push(args))
+      await harness.call('session:approval-response', 'pi-rid', 'req-pi', 'allow')
+      await harness.call('session:approval-response', 'parent-rid', 'xeng:perm-9', 'deny')
+      expect(dismissals).toEqual([
+        ['pi-rid', { requestId: 'req-pi' }],
+        ['parent-rid', { requestId: 'xeng:perm-9' }]
+      ])
+    })
+
+    it('a resolve that throws still dismisses the card and still rejects', async () => {
+      const dismissals: unknown[][] = []
+      harness.onEvent('session:approval-dismiss', (...args) => dismissals.push(args))
+      sessionStub.resolveApproval.mockImplementationOnce(() => {
+        throw new Error('Stale or unknown Codex approval')
+      })
+      await expect(
+        harness.call('session:approval-response', 'codex-rid', 'req-x', 'allow')
+      ).rejects.toThrow('Stale or unknown Codex approval')
+      expect(dismissals).toEqual([['codex-rid', { requestId: 'req-x' }]])
+    })
+
     it('falls through to the session when the dispatcher declines to consume', async () => {
       crossEngineSpies.resolveApproval.mockReturnValueOnce(false)
       await harness.call('session:approval-response', 'rid-1', 'xeng:stale', 'allow')

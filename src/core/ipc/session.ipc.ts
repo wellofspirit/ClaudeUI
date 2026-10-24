@@ -64,7 +64,8 @@ import {
 } from '../services/usage-dashboard'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
-import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
+import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { answerApproval } from './approval-response'
 import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
@@ -588,14 +589,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       answers?: Record<string, string>,
       updatedPermissions?: PermissionSuggestion[]
     ) => {
-      // Reserved `xeng:` prefix → forwarded cross-engine dispatch approval (ADR-033).
-      if (
-        requestId.startsWith(XENG_REQUEST_PREFIX) &&
-        crossEngineDispatcher.resolveApproval(requestId, decision, answers, updatedPermissions)
-      ) {
-        return
-      }
-      manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
+      // Routing (`xeng:` dispatch cards vs the session) and the cross-client dismiss: approval-response.ts.
+      answerApproval(manager, routingId, requestId, decision, answers, updatedPermissions)
     }
   })
 

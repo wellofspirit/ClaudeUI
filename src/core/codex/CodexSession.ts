@@ -74,6 +74,7 @@ import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { voicePackPlatformKey } from '../../shared/voice-pack'
 import { logger } from '../services/logger'
+import { ApprovalAnswerRejected } from '../services/approval-errors'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import {
@@ -4110,20 +4111,21 @@ export class CodexSession extends BaseSession {
     if (!pending) throw new Error('Stale or unknown Codex approval')
     if (pending.questions) {
       if (decision !== 'allow' || !answers)
-        throw new Error('Codex questions require explicit answers')
+        throw new ApprovalAnswerRejected('Codex questions require explicit answers')
       const nativeAnswers: Record<string, { answers: string[] }> = Object.create(null)
       for (const question of pending.questions) {
         const duplicateText =
           pending.questions.filter((entry) => entry.question === question.question).length > 1
         const answer =
           answers[question.id] ?? (duplicateText ? undefined : answers[question.question])
-        if (typeof answer !== 'string') throw new Error('Missing Codex question answer')
+        if (typeof answer !== 'string')
+          throw new ApprovalAnswerRejected('Missing Codex question answer')
         if (
           question.options?.length &&
           !question.isOther &&
           !question.options.some((option) => option.label === answer)
         )
-          throw new Error('Codex question answer is not an offered choice')
+          throw new ApprovalAnswerRejected('Codex question answer is not an offered choice')
         nativeAnswers[question.id] = { answers: [answer] }
       }
       pending.settle({ answers: nativeAnswers })
