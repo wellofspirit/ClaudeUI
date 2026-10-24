@@ -2,7 +2,9 @@
  * `makeSessionJudgeTransport` — the owners' one wiring of the HTTP judge. What this pins is the
  * failure report: `onUnavailable` fires for a route that cannot be called AND for a call that
  * fails (HTTP 429, an outage), so the session's one banner says why every gated action is asking
- * the human instead of the call looking like an ordinary permission prompt.
+ * the human instead of the call looking like an ordinary permission prompt. The exception is the
+ * two "answered, but unusably" codes: those report nothing, in every mode, because the
+ * latched banner's copy is wrong for a per-reply event.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -25,12 +27,14 @@ import {
   CHAT_DONE,
   chatDelta,
   chatFinish,
+  respDelta,
   routeFor,
   sseStream
 } from '../judge-http/__tests__/helpers'
 import { refreshChatgptAccounts, resetChatgptAccounts } from '../judge-accounts'
 import { clearCooldowns, coolingUntil } from '../judge-cooldown'
 import { judgeRouteKey } from '../judge-http/transport'
+import { JUDGE_OFF_FORMAT_CODE, JUDGE_OVER_BUDGET_CODE, JudgeWireError } from '../judge-http/types'
 import {
   fallbackJudgeAccountFor,
   fallbackJudgeLabel,
@@ -133,6 +137,31 @@ describe('makeSessionJudgeTransport — failure reports', () => {
     await expect(call).rejects.toThrow('auto-mode judge aborted')
     expect(onUnavailable).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['off-format', JUDGE_OFF_FORMAT_CODE, [respDelta('We need assess the proposed action')]],
+    ['over-budget', JUDGE_OVER_BUDGET_CODE, [respDelta('<severity>5'), respDelta('x'.repeat(1100))]]
+  ] as const)(
+    'an unusable-but-answered reply (%s) reports nothing, and still throws',
+    async (_label, code, frames) => {
+      // The model answered and the route is fine: `both` mode's stage 1 escalates on these, so
+      // there is nothing to warn the human about — but the classifier still needs the throw.
+      mockFetch.mockResolvedValue(
+        new Response(sseStream([...frames]), {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' }
+        })
+      )
+      const { transport, onUnavailable } = setup()
+      const err = await transport({
+        ...REQ,
+        allowedPrefixes: ['<severity>', '<thinking>']
+      }).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(JudgeWireError)
+      expect((err as JudgeWireError).code).toBe(code)
+      expect(onUnavailable).not.toHaveBeenCalled()
+    }
+  )
 
   it('a call that succeeds reports nothing', async () => {
     mockResolve.mockResolvedValue({ ok: true, route: routeFor('openai', 'gpt-4.1-mini') })

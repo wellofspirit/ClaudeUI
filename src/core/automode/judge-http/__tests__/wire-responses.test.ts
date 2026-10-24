@@ -9,9 +9,9 @@ import {
   JUDGE_EMPTY_REPLY_MESSAGE,
   JUDGE_OVER_BUDGET_MESSAGE
 } from '../stream-text'
-import { JudgeWireError } from '../types'
+import { JUDGE_OFF_FORMAT_CODE, JudgeWireError } from '../types'
 import { buildResponsesBody, readResponsesStream } from '../wire-responses'
-import { framesOf, resp, respDelta, routeFor } from './helpers'
+import { countingFrames, framesOf, resp, respDelta, routeFor } from './helpers'
 
 const SYSTEM = 'POLICY — the whole judge system prompt\n  with its whitespace kept  '
 const USER = 'transcript + proposed action + instruction'
@@ -269,6 +269,39 @@ describe('readResponsesStream', () => {
     await expect(
       readResponsesStream(framesOf([respDelta('x'.repeat(11)), completed()]), { maxChars: 10 })
     ).rejects.toThrow(JUDGE_OVER_BUDGET_MESSAGE)
+  })
+
+  it('an off-format first text delta throws coded and pulls no further frame', async () => {
+    const { frames, pulls } = countingFrames(
+      framesOf([respDelta('We need assess the action'), respDelta('<severity>5'), completed()])
+    )
+    const err = await readResponsesStream(frames, {
+      maxChars: 1024,
+      allowedPrefixes: ['<severity>', '<thinking>']
+    }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(JudgeWireError)
+    expect((err as JudgeWireError).code).toBe(JUDGE_OFF_FORMAT_CODE)
+    expect(pulls()).toBe(1)
+  })
+
+  it('a reasoning summary delta is not text: prose there does not trip allowedPrefixes', async () => {
+    const reasoning: string[] = []
+    const out = await readResponsesStream(
+      framesOf([
+        resp({ type: 'response.reasoning_summary_text.delta', delta: 'We need assess the action' }),
+        respDelta('<severity>3'),
+        completed()
+      ]),
+      {
+        maxChars: 1024,
+        allowedPrefixes: ['<severity>', '<thinking>'],
+        onReasoningDelta: (d) => reasoning.push(d)
+      }
+    )
+
+    expect(out).toMatchObject({ text: '<severity>3', finish: 'stop' })
+    expect(reasoning).toEqual(['We need assess the action'])
   })
 
   it('after the stop cut, a runaway tail ends the read with the verdict in hand', async () => {

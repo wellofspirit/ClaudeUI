@@ -138,6 +138,12 @@ export interface JudgeStreamResult {
 export interface JudgeStreamOptions {
   /** Cut the text at the first occurrence of any of these (exclusive), client-side. */
   stopSequences?: string[]
+  /**
+   * The reply must open with one of these (case-insensitive, leading whitespace ignored); a
+   * mismatch aborts the call as soon as the kept text can no longer become one of them. Absent =
+   * no check.
+   */
+  allowedPrefixes?: readonly string[]
   /** Hard budget on accumulated text; exceeding it aborts the call. */
   maxChars: number
   /**
@@ -201,6 +207,15 @@ export interface JudgeCallCapture {
 
 /** Longest `reasoning` a capture keeps, in characters (≈256 KiB of ASCII). */
 export const JUDGE_CAPTURE_REASONING_MAX_CHARS = 256 * 1024
+
+/**
+ * {@link JudgeWireError.code}s the reader sets when the model ANSWERED, but unusably: the reply
+ * ran past its character budget, or opened with something other than the request's
+ * `allowedPrefixes`. Not route trouble — `both` mode's stage 1 escalates on them, and they never
+ * raise the "can't judge here" banner. Namespaced to stay clear of real provider codes.
+ */
+export const JUDGE_OVER_BUDGET_CODE = 'judge:over-budget'
+export const JUDGE_OFF_FORMAT_CODE = 'judge:off-format'
 
 /**
  * A judge call failed on the wire: a non-2xx status, an error event, a stream

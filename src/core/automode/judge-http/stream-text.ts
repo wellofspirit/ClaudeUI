@@ -5,6 +5,8 @@
  */
 
 import {
+  JUDGE_OFF_FORMAT_CODE,
+  JUDGE_OVER_BUDGET_CODE,
   JudgeWireError,
   type JudgeStreamOptions,
   type JudgeStreamResult,
@@ -16,6 +18,8 @@ export const JUDGE_BUDGET_EXHAUSTED_MESSAGE =
   'the model used its whole budget without answering — pick a judge with reasoning off or a larger budget'
 export const JUDGE_EMPTY_REPLY_MESSAGE = 'empty judge reply'
 export const JUDGE_OVER_BUDGET_MESSAGE = 'judge output exceeded its budget'
+/** Thrown when a reply opens with something other than the request's `allowedPrefixes`. */
+export const JUDGE_OFF_FORMAT_MESSAGE = 'judge reply did not open with the required format'
 /** Thrown when a stream ends without the wire's terminal marker: the reply may be cut short. */
 export const JUDGE_STREAM_TRUNCATED_MESSAGE = 'stream ended before the response completed'
 
@@ -29,6 +33,11 @@ export const JUDGE_STREAM_TRUNCATED_MESSAGE = 'stream ended before the response 
  * - **The character budget.** Text past `maxChars` aborts the call. Once the
  *   stop cut has happened, deltas past the budget no longer throw — the verdict
  *   is already in hand — they end the drain instead (see {@link push}).
+ * - **The opening format.** When the request names `allowedPrefixes`, the kept
+ *   text must begin with one of them. The check stops as soon as the text can
+ *   no longer become any of them, so a prose reply is abandoned on its first
+ *   delta instead of being read to the budget. A prefix split across deltas is
+ *   fine: a text that is still a strict prefix of one of them keeps passing.
  */
 export class JudgeTextAccumulator {
   private text = ''
@@ -37,11 +46,18 @@ export class JudgeTextAccumulator {
   private readonly stops: string[]
   private readonly maxChars: number
   private readonly onDelta: ((text: string) => void) | undefined
+  private readonly prefixes: string[]
+  /** The text opened with one of `prefixes` (or there are none); no further checks. */
+  private prefixed: boolean
 
-  constructor(opts: Pick<JudgeStreamOptions, 'stopSequences' | 'maxChars' | 'onDelta'>) {
+  constructor(
+    opts: Pick<JudgeStreamOptions, 'stopSequences' | 'maxChars' | 'onDelta' | 'allowedPrefixes'>
+  ) {
     this.stops = (opts.stopSequences ?? []).filter((s) => s.length > 0)
     this.maxChars = opts.maxChars
     this.onDelta = opts.onDelta
+    this.prefixes = (opts.allowedPrefixes ?? []).map((p) => p.toLowerCase())
+    this.prefixed = this.prefixes.length === 0
   }
 
   /**
@@ -51,7 +67,7 @@ export class JudgeTextAccumulator {
    * the sake of a usage count would only run the call into its stage timeout
    * and lose the verdict.
    *
-   * @throws JudgeWireError when the kept text exceeds the budget.
+   * @throws JudgeWireError when the kept text opens off-format, or exceeds the budget.
    */
   push(delta: string): boolean {
     // The capture tap sees EVERY delta, ahead of the stop and budget logic below.
@@ -70,8 +86,29 @@ export class JudgeTextAccumulator {
       this.text = this.text.slice(0, cut)
       this.stopped = true
     }
-    if (this.text.length > this.maxChars) throw new JudgeWireError(JUDGE_OVER_BUDGET_MESSAGE)
+    this.checkPrefixes()
+    if (this.text.length > this.maxChars) {
+      throw new JudgeWireError(JUDGE_OVER_BUDGET_MESSAGE, { code: JUDGE_OVER_BUDGET_CODE })
+    }
     return true
+  }
+
+  /**
+   * The opening-format rule on the KEPT text: throw as soon as it can no longer become any allowed
+   * prefix, and stop checking once it opens with one. Whitespace-only text is skipped — the
+   * model may lead with a newline.
+   */
+  private checkPrefixes(): void {
+    if (this.prefixed) return
+    const t = this.text.trimStart().toLowerCase()
+    if (t === '') return
+    if (this.prefixes.some((p) => t.startsWith(p))) {
+      this.prefixed = true
+      return
+    }
+    if (!this.prefixes.some((p) => p.startsWith(t))) {
+      throw new JudgeWireError(JUDGE_OFF_FORMAT_MESSAGE, { code: JUDGE_OFF_FORMAT_CODE })
+    }
   }
 
   /**
