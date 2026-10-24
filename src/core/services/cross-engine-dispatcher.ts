@@ -6202,8 +6202,8 @@ export class CrossEngineDispatcher {
 
   /**
    * opencode's own directories as `external_directory` allows, in every mode
-   * (cached; an `/api/info` failure is not). The target's user rules carry no
-   * `additionalDirectories` (ADR-033), so these are the only allows under the ask.
+   * (cached; an `/api/info` failure is not). The only other allows under the ask
+   * are the ones compiled from the target's scope (`targetRules`, ADR-108 as amended).
    */
   private async targetOwnDirAllows(inputs: TargetRuleInputs): Promise<V2Rule[]> {
     if (inputs.ownDirAllows) return inputs.ownDirAllows

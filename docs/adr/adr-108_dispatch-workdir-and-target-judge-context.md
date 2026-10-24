@@ -65,7 +65,9 @@ target treats them as its workspace just as the user's own sessions do.
    bypass (ADR-084), opencode's compiled `external_directory` allows and the host pre-check, Codex's
    `workspaceWrite.writableRoots` and ClaudeUI's outside-workspace check on Codex file changes, and `--add-dir` for a
    Claude target. Directories sent to an engine (Codex roots, `--add-dir`) are only those that exist as directories at
-   send time: Codex rejects a relative root and fails the whole turn.
+   send time: Codex rejects a relative root and fails the whole turn. pi, opencode and Codex targets re-read the scope
+   per gate call or turn; a Claude target gets it as `--add-dir` at process start, like its `--settings` deny/ask
+   rules, so a settings edit reaches a running Claude target at its next spawn or resume.
 3. The judge's environment and redirect scope read the same list from the ruleset; the separate context-only channel
    of §4 is gone.
 4. Unchanged: a target never gets the user's allow rules (ADR-033), and its deny/ask rules are still the union of §3.
