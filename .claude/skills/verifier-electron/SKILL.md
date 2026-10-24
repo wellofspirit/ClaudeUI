@@ -271,6 +271,53 @@ managed: true})`, then `window.api.setSharedProviderApiKey(id, key)`, then
 - **Baseline for "same as before" claims:** `git archive <base> | tar -x -C
 <scratch>/base`, junction `node_modules`, build and launch it with its own home;
   unlink the junction afterwards (PowerShell `(Get-Item p -Force).Delete()`).
+  A base extracted under the main checkout needs no junction: it resolves
+  `node_modules` upward. Two instances (change and base) can share one stand-in on
+  separate control ports; scope each run by the stand-in log's line offset.
+
+## Multi-client and approval-card drives
+
+Learned verifying cross-client approval dismiss and dispatch-target scope.
+
+- **A second client** needs the remote server, but `scripts/lib/scroll-bench/launch.mjs`
+  forces `CLAUDEUI_DISABLE_REMOTE=1`: write a launcher without it, and only with a
+  FRESH isolated home (its empty remote config has no serve record, so Tailscale is
+  never touched; hash `tailscale serve status` before and after). Then
+  `window.api.setRemoteConfig({bindHost: '127.0.0.1'})`,
+  `startRemoteServer({host: '127.0.0.1'})`, `setRemotePassword('<throwaway>')`, open
+  `status.lanUrl` (`http://127.0.0.1:<port>/remote`) in Playwright Chromium and log in
+  through `[data-testid="PasswordLogin.input"]` + Enter (policy `off` still wants a
+  `#k=` token). The web client has no `__claudeuiVerifier`: assert by `data-testid`
+  (`ApprovalButtons.allow|deny`, `ApprovalCardView.*`, `FloatingApproval`).
+- **Tell a dismiss from a tool-result removal**: the reducer also drops a card when its
+  tool result arrives, so gate a `sleep 10` command and read about 1.5 s after the
+  click while the session is still `running`; read the desktop replica
+  (`__claudeuiVerifier.canonical.sessions[id].pendingApprovals`, an object) as well as
+  the DOM. An answered `AskUserQuestionBlock` stays in the transcript as a summary:
+  count `pendingApprovals`, not the block.
+- **Card flow**: new sessions start in `auto` (`changePermissionMode(id, 'default')`
+  for cards); pi and Claude raise one card at a time, so two pending cards need two
+  sessions; an opencode parent in `default` first shows its own dispatch card, and the
+  target's `xeng:` card follows on the parent's routing id.
+- **Dispatch-target evidence**: an opencode target's ruleset is in
+  `<home>/.local/share/opencode/opencode.db` (copy with `-wal`/`-shm`), table
+  `session_v2`, column `permission`, `title = 'xeng-dispatch'`; a Claude target's flags
+  (`--add-dir`, `--settings`) from `Get-CimInstance Win32_Process` while its card is
+  pending (filter on `vendor\claude-cli\bun-claude`, which excludes a packaged app).
+  Name each fixture file uniquely (`VERIFY_<x>.txt`) to attribute judge calls; the
+  action under review is the last command after the judge text's final "Proposed next
+  action" block.
+- **Codex without a provider**: copy the managed store's `codex/<version>` into the
+  scratch store and RESTART the app (Codex is detected at boot), point it at a localhost
+  fixture provider with a fixture key, and use a catalog model id (`gpt-5.5`). The
+  sandbox the binary actually ran is in the rollout's `turn_context.sandbox_policy`
+  (`<CODEX_HOME>/sessions/**/rollout-*.jsonl`); approval decisions in
+  `<CODEX_HOME>/logs_2.sqlite` (`FileChangeRequestApproval … Accept|Decline`).
+  `request_user_input` fires only in plan mode and Codex forces `isOther`, so only the
+  missing-answer rejections are reachable live. An accepted `apply_patch` may stall
+  against a fixture provider on Windows: interrupt the session after the decision.
+- **pi's bash strips backslashes** (`cat D:\x` becomes `D:x`): use forward slashes in
+  pi commands.
 
 ## Isolation, terminals and native modules
 
