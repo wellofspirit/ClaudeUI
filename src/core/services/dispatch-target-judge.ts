@@ -103,18 +103,6 @@ export interface DispatchTargetJudgeOptions {
   /** The target's working directory (a `workdir` launch: not its dispatcher's). */
   cwd: string
   /**
-   * Directories that COUNT AS LOCAL to the judge but that the engine does not grant the target:
-   * the dispatching session's own directory when the target runs elsewhere (a sibling worktree)
-   * and the user's additional directories. Read per call.
-   *
-   * CONTEXT ONLY: they reach exactly two consumers, the classifier's Environment text and the
-   * redirect measurement's in-scope roots (`withContextDirs`). They are never in
-   * `call.permissions()`, which feeds the read-only gate and the allow-rule gate (an additional
-   * directory there is an allow path) and the engine's own ruleset: a target is governed by its
-   * autonomy mode, not by what the user pre-approved for their own chats (ADR-033).
-   */
-  contextDirs?: () => readonly string[]
-  /**
    * The DISPATCHING session's routing id (`fromRoutingId`) — judge usage rows land under it.
    * A thunk when the dispatcher can be re-keyed under a running target (ADR-105): read per call.
    */
@@ -164,7 +152,12 @@ export interface DispatchTargetJudgeCall {
   honoursWorkdir: boolean
   /** The caller cannot vouch for the shell command's working directory → no read-only gate. */
   skipReadOnlyGate?: boolean
-  /** The target's rules — the user's deny/ask tiers, allow empty (`userDenyAsk`). */
+  /**
+   * The target's rules (`targetRules`): the user's deny/ask tiers, allow empty, and the target's
+   * scope as `additionalDirectories` (the user's, plus the dispatcher's own directory when the
+   * target runs elsewhere). The read-only gate, the redirect measurement and the Environment text
+   * all take their in-scope roots from it.
+   */
   permissions: () => Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>
 }
 
@@ -210,36 +203,6 @@ export function reviewFromPipeline(
     case 'none':
       return { kind: 'unavailable', why: 'the review was cancelled' }
   }
-}
-
-/** A directory's comparison key: separators and trailing slash folded, case folded on win32. */
-function dirKey(dir: string, platform: NodeJS.Platform): string {
-  let key = dir.trim()
-  if (platform === 'win32') key = key.replaceAll('\\', '/').toLowerCase()
-  while (key.length > 1 && key.endsWith('/') && !key.endsWith(':/')) key = key.slice(0, -1)
-  return key
-}
-
-/**
- * `dirs` without blanks, non-strings, repeats and `except`, in order, first spelling kept. Two
- * spellings of one directory are one on win32 (case, `\` against `/`, a trailing slash); elsewhere
- * only the trailing slash is folded. A path is never resolved or touched on disk.
- */
-export function uniqueDirs(
-  dirs: readonly (string | null | undefined)[],
-  except?: string,
-  platform: NodeJS.Platform = process.platform
-): string[] {
-  const seen = new Set<string>(except ? [dirKey(except, platform)] : [])
-  const out: string[] = []
-  for (const dir of dirs) {
-    if (typeof dir !== 'string' || dir.trim() === '') continue
-    const key = dirKey(dir, platform)
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(dir)
-  }
-  return out
 }
 
 export class DispatchTargetJudge {
@@ -437,15 +400,11 @@ export class DispatchTargetJudge {
         const loading = this.opts.loadMessages?.()
         return loading ? loading.then((parent) => this.mergeMessages(parent)) : this.judgeMessages()
       },
-      // The two consumers of the context directories; `permissions` above stays plain.
-      environment: () => this.environment(this.withContextDirs(call.permissions())),
+      // The target's scope (its additional directories) reaches the judge through `permissions`:
+      // the Environment text and the redirect measurement's in-scope roots read it there.
+      environment: () => this.environment(call.permissions()),
       captureActionMeta: (toolName, input) =>
-        this.captureActionMeta(
-          toolName,
-          input,
-          call.honoursWorkdir,
-          this.withContextDirs(call.permissions())
-        ),
+        this.captureActionMeta(toolName, input, call.honoursWorkdir, call.permissions()),
       outcomes: () => (this.outcomes.size ? Object.fromEntries(this.outcomes) : undefined),
       denials,
       twoStageMode: () => this.autoMode.twoStageMode ?? 'both',
@@ -633,37 +592,10 @@ export class DispatchTargetJudge {
   }
 
   /**
-   * `permissions` with the {@link DispatchTargetJudgeOptions.contextDirs} added to its additional
-   * directories, for the Environment text and the redirect scope ONLY (never `hooks.permissions`).
-   * A read that fails leaves the directories out: the judge then treats them as external, the
-   * stricter reading.
-   */
-  private withContextDirs<T extends Pick<ClaudePermissions, 'additionalDirectories'>>(
-    permissions: T
-  ): T {
-    let extra: readonly string[] = []
-    try {
-      extra = this.opts.contextDirs?.() ?? []
-    } catch (err) {
-      logger.warn(
-        'CrossEngineDispatcher',
-        `target judge: could not read the context directories: ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-    if (extra.length === 0) return permissions
-    return {
-      ...permissions,
-      additionalDirectories: uniqueDirs([...(permissions.additionalDirectories ?? []), ...extra])
-    }
-  }
-
-  /**
    * The classifier's Environment section. `permissions` is the target's
-   * `userDenyAsk(cwd, parentCwd)` — the user's deny/ask rules, allow empty — which is
-   * exactly what the engine enforces for a target, so the judge is told the
-   * rules that actually bind it. Its additional directories are the
-   * {@link DispatchTargetJudgeOptions.contextDirs} (see `withContextDirs`), not
-   * the rules' own (a target has none).
+   * `targetRules(cwd, parentCwd)` — the user's deny/ask rules, allow empty, and the target's
+   * scope as its additional directories — which is exactly what the engine enforces for a
+   * target, so the judge is told the rules and the directories that actually bind it.
    */
   private async environment(
     permissions: Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>

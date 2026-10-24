@@ -29,9 +29,9 @@ beforeEach(async () => {
   resetFactoryCounter()
   app = await bootTestApp()
 
-  // Simulate main's normal-resolution path: resolveApproval() resolves the
-  // promise AND emits session:approval-dismiss (see claude-session.ts's
-  // canUseTool, updated so remote/multi-window views drop the card too).
+  // Simulate main's answer path: the shared answer seam (core/ipc/approval-response.ts)
+  // resolves the approval and emits session:approval-dismiss for every engine, so
+  // remote/multi-window views drop the card too.
   app.bridge.ipcMain.removeHandler?.('session:approval-response')
   app.bridge.ipcMain.handle(
     'session:approval-response',

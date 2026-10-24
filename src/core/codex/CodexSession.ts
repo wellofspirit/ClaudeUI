@@ -74,6 +74,12 @@ import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { voicePackPlatformKey } from '../../shared/voice-pack'
 import { logger } from '../services/logger'
+import { ApprovalAnswerRejected } from '../services/approval-errors'
+import {
+  existingDirectories,
+  resolveAdditionalDirectories,
+  uniqueDirs
+} from '../services/additional-directories'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import {
@@ -601,6 +607,8 @@ export class CodexSession extends BaseSession {
   private permissionMode: string
   /** "Allow for this session" clicks, in the shared engine's key vocabulary. */
   private sessionAllows = new Set<string>()
+  /** The additional directories the current turn started with (`turnPolicy`); null before the first turn. */
+  private turnDirs: string[] | null = null
   private pending = new Map<string, Pending>()
   /** Guardian-denial overrides by requestId — never `this.pending` (see the type). */
   private guardianOverrides = new Map<string, GuardianOverride>()
@@ -1965,8 +1973,11 @@ export class CodexSession extends BaseSession {
   } {
     const model = this.model ?? this.effectiveModel
     const effort = this.effort ?? this.native?.reasoningEffort ?? undefined
+    // One resolved list per turn, for the sandbox's writable roots AND `insideWorkspace`, so the
+    // gate and the sandbox never disagree within a turn. Settings edits apply from the next turn.
+    this.turnDirs = this.additionalDirs()
     return {
-      ...codexTurnPolicy(this.permissionMode),
+      ...codexTurnPolicy(this.permissionMode, existingDirectories(this.turnDirs, 'CodexSession')),
       ...(model !== undefined
         ? { collaborationMode: codexCollaborationMode(this.permissionMode, model, effort) }
         : {})
@@ -4027,9 +4038,25 @@ export class CodexSession extends BaseSession {
     return { decision }
   }
 
+  /**
+   * The user's additional directories (merged user/project/local settings for this cwd) as
+   * absolute paths, entries resolved against this session's cwd: its workspace beyond the cwd.
+   * Codex adds the cwd to the sandbox itself.
+   */
+  private additionalDirs(): string[] {
+    return uniqueDirs(
+      resolveAdditionalDirectories(mergedClaudeRulesFor(this.cwd).additionalDirectories, this.cwd),
+      this.cwd
+    )
+  }
+
+  /** In the cwd or in one of the additional directories the current turn was started with. */
   private insideWorkspace(target: string): boolean {
-    const relative = path.relative(this.cwd, path.resolve(this.cwd, target))
-    return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+    const resolved = path.resolve(this.cwd, target)
+    return [this.cwd, ...(this.turnDirs ?? this.additionalDirs())].some((root) => {
+      const relative = path.relative(root, resolved)
+      return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+    })
   }
 
   /**
@@ -4110,20 +4137,21 @@ export class CodexSession extends BaseSession {
     if (!pending) throw new Error('Stale or unknown Codex approval')
     if (pending.questions) {
       if (decision !== 'allow' || !answers)
-        throw new Error('Codex questions require explicit answers')
+        throw new ApprovalAnswerRejected('Codex questions require explicit answers')
       const nativeAnswers: Record<string, { answers: string[] }> = Object.create(null)
       for (const question of pending.questions) {
         const duplicateText =
           pending.questions.filter((entry) => entry.question === question.question).length > 1
         const answer =
           answers[question.id] ?? (duplicateText ? undefined : answers[question.question])
-        if (typeof answer !== 'string') throw new Error('Missing Codex question answer')
+        if (typeof answer !== 'string')
+          throw new ApprovalAnswerRejected('Missing Codex question answer')
         if (
           question.options?.length &&
           !question.isOther &&
           !question.options.some((option) => option.label === answer)
         )
-          throw new Error('Codex question answer is not an offered choice')
+          throw new ApprovalAnswerRejected('Codex question answer is not an offered choice')
         nativeAnswers[question.id] = { answers: [answer] }
       }
       pending.settle({ answers: nativeAnswers })

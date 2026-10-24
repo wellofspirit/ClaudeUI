@@ -43,7 +43,6 @@ import {
   TARGET_TRAJECTORY_MAX,
   reviewFromPipeline,
   recordTrajectoryMessage,
-  uniqueDirs,
   type DispatchTargetJudgeOptions
 } from '../dispatch-target-judge'
 import { resetChatgptAccounts } from '../../automode/judge-accounts'
@@ -342,7 +341,7 @@ describe('DispatchTargetJudge', () => {
   })
 })
 
-describe('DispatchTargetJudge — context directories (workdir + additional directories)', () => {
+describe('DispatchTargetJudge — the target’s scope (additional directories via permissions)', () => {
   // Real directories (a redirect is only cleared into a directory that exists), on NO temp root:
   // the OS temp dir is always in scope for a redirect, so the host's temp variables are pointed
   // at a directory of their own for these tests.
@@ -377,8 +376,18 @@ describe('DispatchTargetJudge — context directories (workdir + additional dire
   })
 
   /** A judge whose target runs in `repo`, its parent in `parent`. */
-  function ctxSetup(over: Partial<DispatchTargetJudgeOptions> = {}) {
-    return setup({ twoStageMode: 'fast' }, { cwd: repo, ...over })
+  function ctxSetup(dirs: () => string[] = () => []) {
+    const { call, ...rest } = setup({ twoStageMode: 'fast' }, { cwd: repo })
+    return {
+      ...rest,
+      // The target's scope reaches the judge only as the rules' additional directories
+      // (`CrossEngineDispatcher.targetRules`): the one channel the gates, the redirect
+      // measurement and the Environment text all read.
+      call: {
+        ...call,
+        permissions: () => ({ allow: [], ask: [], deny: [], additionalDirectories: dirs() })
+      }
+    }
   }
   const slashed = (p: string): string => p.replaceAll('\\', '/')
   const redirectInto = (target: string) => ({
@@ -386,37 +395,39 @@ describe('DispatchTargetJudge — context directories (workdir + additional dire
     toolName: 'bash',
     input: { command: `echo hi > "${slashed(target)}/out.txt"` }
   })
+  const readOf = (target: string) => ({
+    toolUseId: 'call-read',
+    toolName: 'bash',
+    input: { command: `cat "${slashed(target)}/notes.txt"` }
+  })
   const dirsLine = /count as local\): (.*)/
-  const promptOf = (r: JudgeRequest): string => `${r.system}\n${r.user}`
+  const promptOf = (r: JudgeRequest): string => `${r.system}
+${r.user}`
 
   it('the Environment lists the parent directory and an additional one as local', async () => {
-    const { judge, call, requests } = ctxSetup({ contextDirs: () => [parent, extra] })
+    const { judge, call, requests } = ctxSetup(() => [parent, extra])
     await judge.judge(bash, call)
     expect(dirsLine.exec(promptOf(requests[0]))?.[1]).toBe(`${parent}, ${extra}`)
   })
 
-  it('merges with the call permissions’ own directories, once each, and reads them fresh per call', async () => {
+  it('reads the scope fresh per call', async () => {
     let dirs = [extra]
-    const { judge, call, requests } = ctxSetup({ contextDirs: () => dirs })
-    const withOwn = {
-      ...call,
-      permissions: () => ({ allow: [], ask: [], deny: [], additionalDirectories: [extra] })
-    }
-    await judge.judge(bash, withOwn)
-    dirs = [parent]
-    await judge.judge({ ...bash, toolUseId: 'second' }, withOwn)
+    const { judge, call, requests } = ctxSetup(() => dirs)
+    await judge.judge(bash, call)
+    dirs = [extra, parent]
+    await judge.judge({ ...bash, toolUseId: 'second' }, call)
     const seen = requests.map((r) => dirsLine.exec(promptOf(r))?.[1])
     expect(seen).toEqual([extra, `${extra}, ${parent}`])
   })
 
-  it('no context directories: the Environment is what it was (no additional-directories line)', async () => {
+  it('no scope directories: the Environment is what it was (no additional-directories line)', async () => {
     const { judge, call, requests } = ctxSetup()
     await judge.judge(bash, call)
     expect(promptOf(requests[0])).not.toMatch(dirsLine)
   })
 
   it('a redirect into an additional directory is in scope; without it, it is not', async () => {
-    const withDirs = ctxSetup({ contextDirs: () => [extra] })
+    const withDirs = ctxSetup(() => [extra])
     await withDirs.judge.judge(redirectInto(extra), withDirs.call)
     expect(withDirs.requests[0].user).toContain('"allInScope":true')
 
@@ -426,98 +437,29 @@ describe('DispatchTargetJudge — context directories (workdir + additional dire
   })
 
   it('a redirect into the parent directory is in scope when the target runs elsewhere', async () => {
-    const { judge, call, requests } = ctxSetup({ contextDirs: () => [parent] })
+    const { judge, call, requests } = ctxSetup(() => [parent])
     await judge.judge(redirectInto(parent), call)
     expect(requests[0].user).toContain('"allInScope":true')
     await judge.judge(redirectInto(elsewhere), call)
     expect(requests[1].user).toContain('"allInScope":false')
   })
 
-  it('CONTEXT ONLY: the read-only gate does not treat a context directory as in scope', async () => {
-    const read = {
-      toolUseId: 'call-read',
-      toolName: 'bash',
-      input: { command: `cat "${slashed(extra)}/notes.txt"` }
-    }
-    // The control: the same directory GRANTED through the call's permissions is an allow path —
-    // a plainly read-only command there needs no judge.
-    const granted = ctxSetup()
-    expect(
-      await granted.judge.judge(read, {
-        ...granted.call,
-        permissions: () => ({ allow: [], ask: [], deny: [], additionalDirectories: [extra] })
-      })
-    ).toEqual({ kind: 'allow' })
-    expect(granted.requests).toHaveLength(0)
-
-    // As context only, it is outside the workspace: the call goes to the judge.
-    const contextOnly = ctxSetup({ contextDirs: () => [extra, parent] })
-    expect(await contextOnly.judge.judge(read, contextOnly.call)).toEqual({ kind: 'allow' })
-    expect(contextOnly.requests).toHaveLength(1)
+  it('B1: the read-only gate allows a read under a scope directory without a judge call', async () => {
+    const { judge, call, requests } = ctxSetup(() => [extra])
+    expect(await judge.judge(readOf(extra), call)).toEqual({ kind: 'allow' })
+    expect(requests).toHaveLength(0)
   })
 
-  it('never writes the context directories into the permissions the gates read', async () => {
-    const handed: Array<{ additionalDirectories: string[] }> = []
-    const { judge, call } = ctxSetup({ contextDirs: () => [extra] })
-    const spy = {
-      ...call,
-      permissions: () => {
-        const p = { allow: [], ask: [], deny: [], additionalDirectories: [] as string[] }
-        handed.push(p)
-        return p
-      }
-    }
-    await judge.judge(bash, spy)
-    await judge.reviewHandBack('Done.', spy)
-    expect(handed.length).toBeGreaterThan(0)
-    for (const p of handed) expect(p.additionalDirectories).toEqual([])
-  })
-
-  it('a context-directories read that throws leaves them out; the call is still judged', async () => {
-    const { judge, call, requests } = ctxSetup({
-      contextDirs: () => {
-        throw new Error('settings.json is not JSON')
-      }
-    })
-    expect(await judge.judge(bash, call)).toEqual({ kind: 'allow' })
+  it('B1: the same read outside every scope root still goes to the judge', async () => {
+    const { judge, call, requests } = ctxSetup(() => [extra, parent])
+    expect(await judge.judge(readOf(elsewhere), call)).toEqual({ kind: 'allow' })
     expect(requests).toHaveLength(1)
-    expect(promptOf(requests[0])).not.toMatch(dirsLine)
-    expect(mockLogger.warn).toHaveBeenCalledWith(
-      'CrossEngineDispatcher',
-      expect.stringContaining('could not read the context directories')
-    )
   })
 
-  it('the hand-back review is told the context directories too', async () => {
-    const { judge, call, requests } = ctxSetup({ contextDirs: () => [parent, extra] })
+  it('the hand-back review is told the scope directories too', async () => {
+    const { judge, call, requests } = ctxSetup(() => [parent, extra])
     await judge.reviewHandBack('Done.', call)
     expect(dirsLine.exec(promptOf(requests[0]))?.[1]).toBe(`${parent}, ${extra}`)
-  })
-})
-
-describe('uniqueDirs', () => {
-  it('drops blanks, non-strings and repeats; keeps the first spelling and the order', () => {
-    expect(
-      uniqueDirs(['/a', undefined, '', '  ', '/b', '/a', null, '/c/'], undefined, 'linux')
-    ).toEqual(['/a', '/b', '/c/'])
-    expect(uniqueDirs(['/a/', '/a'], undefined, 'linux')).toEqual(['/a/'])
-  })
-
-  it('posix: letter case tells directories apart', () => {
-    expect(uniqueDirs(['/Repo', '/repo'], undefined, 'linux')).toEqual(['/Repo', '/repo'])
-  })
-
-  it('win32: letter case, separators and a trailing slash do not', () => {
-    expect(
-      uniqueDirs(['D:\\Work\\Repo', 'd:/work/repo/', 'D:\\Work\\Other'], undefined, 'win32')
-    ).toEqual(['D:\\Work\\Repo', 'D:\\Work\\Other'])
-  })
-
-  it('except removes the directory the target already runs in', () => {
-    expect(uniqueDirs(['D:\\W\\Repo', 'D:\\W\\Extra'], 'd:/w/repo', 'win32')).toEqual([
-      'D:\\W\\Extra'
-    ])
-    expect(uniqueDirs(['/p', '/p/x'], '/p', 'linux')).toEqual(['/p/x'])
   })
 })
 

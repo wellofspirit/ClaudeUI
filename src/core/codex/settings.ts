@@ -54,14 +54,21 @@ export function savedCodexOverrides(value: unknown): CodexSettings {
   }
 }
 
+/**
+ * The native sandbox for a mode. `writableRoots` are the user's additional directories, ALREADY
+ * absolute and existing (`existingDirectories`): Codex adds the thread's cwd on top, and a
+ * relative path fails the whole `turn/start` (`AbsolutePathBuf`). Only `workspace-write` carries
+ * them; reads are full-disk in every mode.
+ */
 export function codexSandboxPolicy(
-  mode: 'read-only' | 'workspace-write' | 'danger-full-access'
+  mode: 'read-only' | 'workspace-write' | 'danger-full-access',
+  writableRoots: readonly string[] = []
 ): SandboxPolicy {
   if (mode === 'read-only') return { type: 'readOnly', networkAccess: false }
   if (mode === 'danger-full-access') return { type: 'dangerFullAccess' }
   return {
     type: 'workspaceWrite',
-    writableRoots: [],
+    writableRoots: [...writableRoots],
     networkAccess: false,
     excludeTmpdirEnvVar: false,
     excludeSlashTmp: false

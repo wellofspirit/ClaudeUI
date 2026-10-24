@@ -14826,9 +14826,9 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
   })
 
   // The rules a target in ANOTHER directory (a sibling git worktree) is bound by are the union of
-  // the parent's and its own; the judge counts the parent's directory and the user's additional
-  // directories as local — as context only, never as an allow path.
-  describe('a target in another directory: the rules union and the judge context', () => {
+  // the parent's and its own; its scope is the parent's directory plus the user's additional
+  // directories (ADR-108 as amended) — real scope on every engine, never the user's allow rules.
+  describe('a target in another directory: the rules union and the target scope', () => {
     const PARENT_DENY = 'Bash(git push:*)'
     const TARGET_ASK = 'Bash(docker run:*)'
     const BOTH_DENY = 'Bash(rm -rf:*)'
@@ -14865,6 +14865,113 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
       // (the dispatcher also reads the additional directories of the parent for `workdir`; none
       // is given here, so the one read is the rules')
       expect(loadUserRules.mock.calls.filter(([cwd]) => cwd === parent)).toHaveLength(1)
+    })
+
+    it('B6: Claude is started with --add-dir for the parent directory and each existing additional directory', async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'add-dir-claude')
+      const granted = mkdir(base, 'granted-claude')
+      const missing = join(base, 'granted-claude-missing')
+      const { target, run } = claude({ loadUserRules: rulesBy(wt, [granted, missing, 'relative']) })
+      await run({ engine: 'claude', prompt: 'x', workdir: wt })
+      // The parent's directory first, then the user's; a nonexistent or relative-and-missing
+      // entry is never handed to the engine.
+      expect(target.spawnCalls[0].additionalDirectories).toEqual([parent, granted])
+    })
+
+    it('B6: with no workdir only the user’s directories are passed (the parent is the cwd), none → omitted', async () => {
+      const granted = mkdir(base, 'granted-claude-plain')
+      const withDirs = claude({ loadUserRules: rulesBy(parent, [granted]) })
+      await withDirs.run({ engine: 'claude', prompt: 'x' })
+      expect(withDirs.target.spawnCalls[0].additionalDirectories).toEqual([granted])
+
+      const none = claude({ loadUserRules: rulesBy(parent) })
+      await none.run({ engine: 'claude', prompt: 'x' })
+      expect(none.target.spawnCalls[0]).not.toHaveProperty('additionalDirectories')
+    })
+
+    it('AM1: a relative entry is resolved against the settings that carried it, before the union', async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'am1')
+      const fromParent = mkdir(parent, 'libs')
+      mkdir(wt, 'libs')
+      const { target, run } = claude({
+        loadUserRules: (cwd: string) =>
+          userRules({
+            // The same text in both: two different directories, one per source cwd.
+            additionalDirectories: cwd === parent || cwd === real(wt) ? ['libs'] : []
+          })
+      })
+      await run({ engine: 'claude', prompt: 'x', workdir: wt })
+      expect(target.spawnCalls[0].additionalDirectories).toEqual([
+        parent,
+        fromParent,
+        join(real(wt), 'libs')
+      ])
+    })
+
+    it('B5: a Codex target in another directory gets writable roots, and the gate honours them', async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'codex-roots')
+      const granted = mkdir(base, 'granted-codex-roots')
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        loadUserRules: rulesBy(wt, [granted, join(base, 'granted-codex-missing'), 'relative'])
+      })
+      const ctx = ctxIn({ fromEngine: 'claude', getAutonomyMode: () => 'acceptEdits' })
+      const pending = dispatcher.dispatch({ engine: 'codex', prompt: 'x', workdir: wt }, ctx)
+      await tick()
+      const turnStart = target.requests.find((r) => r.method === 'turn/start')!
+      expect(turnStart.params.sandboxPolicy).toMatchObject({
+        type: 'workspaceWrite',
+        writableRoots: [parent, granted]
+      })
+      const patch = async (path: string, id: string) => {
+        target.notify('item/started', {
+          threadId: CODEX_THREAD_ID,
+          turnId: CODEX_TURN_ID,
+          item: codexFileChangeItem(path, { id })
+        })
+        const answer = target.serverRequest('item/fileChange/requestApproval', {
+          threadId: CODEX_THREAD_ID,
+          turnId: CODEX_TURN_ID,
+          itemId: id,
+          startedAtMs: 0
+        })
+        const settled = await Promise.race([answer, tick().then(() => 'asked' as const)])
+        return { answer, settled }
+      }
+      // Inside an additional directory and inside the parent's directory: no card.
+      expect((await patch(join(granted, 'a.txt'), 'p1')).settled).toEqual({ decision: 'accept' })
+      expect((await patch(join(parent, 'b.txt'), 'p2')).settled).toEqual({ decision: 'accept' })
+      // Outside every root it is still a human ask (B7's mirror image).
+      const outsideAsk = await patch(join(outside, 'c.txt'), 'p3')
+      expect(outsideAsk.settled).toBe('asked')
+      const card = ctx.emit.mock.calls
+        .filter((c) => c[0] === 'session:approval-request')
+        .at(-1)![1] as {
+        requestId: string
+      }
+      dispatcher.resolveApproval(card.requestId, 'deny')
+      await outsideAsk.answer
+      target.completeTurn()
+      await pending
+    })
+
+    it('B5: plan mode sends readOnly (no roots) to a Codex target', async () => {
+      const granted = mkdir(base, 'granted-codex-plan')
+      const target = makeFakeCodexTarget()
+      const { dispatcher } = makeCodexHarness({
+        attachCodexTarget: target.spawnCodexTarget,
+        loadUserRules: rulesBy(parent, [granted])
+      })
+      const pending = dispatcher.dispatch(
+        { engine: 'codex', prompt: 'x' },
+        ctxIn({ fromEngine: 'claude', getAutonomyMode: () => 'plan' })
+      )
+      await tick()
+      const turnStart = target.requests.find((r) => r.method === 'turn/start')!
+      expect(turnStart.params.sandboxPolicy).toEqual({ type: 'readOnly', networkAccess: false })
+      target.completeTurn()
+      await pending
     })
 
     it('pi: a deny rule only the parent has refuses, and an ask rule only the worktree has asks', async () => {
@@ -14942,15 +15049,24 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
         await t.finish()
       })
 
-      it('they are context only: a read-only command in an additional directory is still judged', async () => {
+      it('B1: a read-only command under an additional directory (or the parent’s) needs no judge; one outside every root does', async () => {
         const wt = mkdir(parent, '.claude', 'worktrees', 'judge-pi-ro')
         const granted = mkdir(base, 'granted-pi-ro')
         const t = await start(wt, [granted])
-        const inGranted = `cat "${granted.replaceAll('\\', '/')}/notes.txt"`
-        expect(await t.gate('pi-1', inGranted)).toEqual({ behavior: 'allow' })
-        expect(t.judge.requests).toHaveLength(1)
-        // The control: a read-only command in the target's own directory needs no judge.
+        const slashed = (p: string): string => p.replaceAll('\\', '/')
+        // Roots: the target's own directory, the user's directory, the parent's directory.
+        expect(await t.gate('pi-1', `cat "${slashed(granted)}/notes.txt"`)).toEqual({
+          behavior: 'allow'
+        })
         expect(await t.gate('pi-2', 'cat notes.txt')).toEqual({ behavior: 'allow' })
+        expect(await t.gate('pi-3', `cat "${slashed(parent)}/notes.txt"`)).toEqual({
+          behavior: 'allow'
+        })
+        expect(t.judge.requests).toHaveLength(0)
+        // Outside every root it still goes to the judge.
+        expect(await t.gate('pi-4', `cat "${slashed(outside)}/notes.txt"`)).toEqual({
+          behavior: 'allow'
+        })
         expect(t.judge.requests).toHaveLength(1)
         await t.finish()
       })

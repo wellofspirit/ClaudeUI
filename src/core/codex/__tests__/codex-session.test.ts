@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BoundedSet, CodexSession, ENDED_TURN_CAP } from '../CodexSession'
 import { CodexHostRegistry, type CodexHostClient } from '../CodexHost'
@@ -9,6 +9,7 @@ import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerC
 import { followCodexActiveAccount } from '../codex-account-switch'
 import { CLAUDEUI_DISABLED_FEATURES } from '../codex-features'
 import { logger } from '../../services/logger'
+import { ApprovalAnswerRejected } from '../../services/approval-errors'
 import type { EngineSpawnOptions } from '../../providers/ISession'
 import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
@@ -41,7 +42,8 @@ const forks = vi.hoisted(() => new Map<string, string>())
 const rules = vi.hoisted(() => ({
   allow: [] as string[],
   deny: [] as string[],
-  ask: [] as string[]
+  ask: [] as string[],
+  additionalDirectories: [] as string[]
 }))
 const savedRules = vi.hoisted(() => vi.fn())
 vi.mock('../../services/sync-host', () => ({ emitEvent: events }))
@@ -76,7 +78,7 @@ vi.mock('../../services/claude-settings', () => ({
     allow: scope === 'user' ? [...rules.allow] : [],
     deny: scope === 'user' ? [...rules.deny] : [],
     ask: scope === 'user' ? [...rules.ask] : [],
-    additionalDirectories: [],
+    additionalDirectories: scope === 'user' ? [...rules.additionalDirectories] : [],
     defaultMode: undefined
   }),
   saveClaudePermissions: savedRules
@@ -238,6 +240,7 @@ afterEach(() => {
   rules.allow = []
   rules.deny = []
   rules.ask = []
+  rules.additionalDirectories = []
   mcp.servers = {}
   mcp.skipped = []
   userConfig.extra = {}
@@ -1001,9 +1004,9 @@ describe('Codex first session', () => {
 
   const MODES = [
     ['plan', 'untrusted', { type: 'readOnly', networkAccess: false }, 'user'],
-    ['default', 'untrusted', { type: 'workspaceWrite' }, 'user'],
-    ['acceptEdits', 'untrusted', { type: 'workspaceWrite' }, 'user'],
-    ['auto', 'on-request', { type: 'workspaceWrite' }, 'auto_review']
+    ['default', 'untrusted', { type: 'workspaceWrite', writableRoots: [] }, 'user'],
+    ['acceptEdits', 'untrusted', { type: 'workspaceWrite', writableRoots: [] }, 'user'],
+    ['auto', 'on-request', { type: 'workspaceWrite', writableRoots: [] }, 'auto_review']
   ] as const
 
   it.each(MODES)(
@@ -1041,9 +1044,147 @@ describe('Codex first session', () => {
       expect.objectContaining({
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review',
-        sandboxPolicy: expect.objectContaining({ type: 'workspaceWrite' })
+        sandboxPolicy: expect.objectContaining({ type: 'workspaceWrite', writableRoots: [] })
       })
     )
+  })
+
+  // The user's additional directories (PermissionsDialog) are the session's workspace: the
+  // sandbox's writable roots and ClaudeUI's own outside-workspace downgrade both honour them.
+  describe('additional directories', () => {
+    let base: string
+    let extra: string
+    beforeEach(() => {
+      base = mkdtempSync(join(tmpdir(), 'codex-addl-'))
+      extra = join(base, 'extra')
+      mkdirSync(extra)
+    })
+    afterEach(() => rmSync(base, { recursive: true, force: true }))
+    const turnStartPolicy = (request: ReturnType<typeof fixture>['request']) =>
+      (
+        request.mock.calls.findLast(([method]) => method === 'turn/start')![1] as {
+          sandboxPolicy: Record<string, unknown>
+        }
+      ).sandboxPolicy
+
+    it.each(['default', 'acceptEdits', 'auto'] as const)(
+      'B4: %s sends the resolved, existing directories as writableRoots',
+      async (mode) => {
+        rules.additionalDirectories = [
+          extra,
+          // Dropped before the engine sees them: a missing directory and a relative entry that
+          // resolves (against the session cwd) to one.
+          join(base, 'missing'),
+          'relative-entry',
+          // The same directory twice (a trailing slash).
+          `${extra}/`
+        ]
+        const { session, request } = fixture({ permissionMode: mode })
+        await session.run('hello')
+        expect(turnStartPolicy(request)).toMatchObject({
+          type: 'workspaceWrite',
+          writableRoots: [extra]
+        })
+      }
+    )
+
+    it('B4: ~ is the user’s home', async () => {
+      rules.additionalDirectories = ['~']
+      const { session, request } = fixture({ permissionMode: 'default' })
+      await session.run('hello')
+      expect(turnStartPolicy(request)).toMatchObject({ writableRoots: [homedir()] })
+    })
+
+    it('B4: plan mode sends readOnly, no roots', async () => {
+      rules.additionalDirectories = [extra]
+      const { session, request } = fixture({ permissionMode: 'plan' })
+      await session.run('hello')
+      expect(turnStartPolicy(request)).toEqual({ type: 'readOnly', networkAccess: false })
+    })
+
+    it('B4: no additional directories keeps the roots empty; an edit applies from the next turn', async () => {
+      const { session, request, notify } = fixture()
+      await session.run('hello')
+      expect(turnStartPolicy(request)).toMatchObject({ writableRoots: [] })
+      notify('turn/completed', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'completed', items: [] }
+      })
+      rules.additionalDirectories = [extra]
+      await session.run('again')
+      expect(turnStartPolicy(request)).toMatchObject({ writableRoots: [extra] })
+    })
+
+    it('B4: an acceptEdits file change inside an additional directory is allowed, outside every root it asks', async () => {
+      rules.additionalDirectories = [extra]
+      const { session, fileChange } = fixture({ permissionMode: 'acceptEdits' })
+      await session.run('hello')
+      const inside = fileChange([join(extra, 'a.txt')], 'add', 'patch-in')
+      expect(inside.card).toBeUndefined()
+      expect(await inside.result).toEqual({ decision: 'accept' })
+      const outside = fileChange([join(base, 'elsewhere', 'b.txt')], 'add', 'patch-out')
+      expect(outside.card).toBeDefined()
+    })
+
+    it('B4: without the directory the same change asks (the downgrade the fix lifts)', async () => {
+      const { session, fileChange } = fixture({ permissionMode: 'acceptEdits' })
+      await session.run('hello')
+      expect(fileChange([join(extra, 'a.txt')], 'add', 'patch-in').card).toBeDefined()
+    })
+  })
+
+  // A3b — a malformed answer to a parked question is not an answer: the request stays parked and
+  // the answer seam keeps its card (`ApprovalAnswerRejected`).
+  describe('a question card answered badly', () => {
+    const questions = [
+      {
+        id: 'q1',
+        header: 'Pick',
+        question: 'Which one?',
+        isOther: false,
+        isSecret: false,
+        options: [{ label: 'A', description: '' }]
+      }
+    ]
+    const park = async () => {
+      const f = fixture({ permissionMode: 'default' })
+      await f.session.run('hello')
+      const asked = f.approval({ questions }, 'item/tool/requestUserInput')
+      return { ...f, asked, requestId: (asked.card as { requestId: string }).requestId }
+    }
+
+    it.each([
+      ['no answers at all', 'allow' as const, undefined],
+      ['an answer that is missing', 'allow' as const, {}],
+      ['an answer that is not an offered choice', 'allow' as const, { q1: 'Z' }],
+      ['a decision that is not allow', 'deny' as const, { q1: 'A' }]
+    ])(
+      '%s throws ApprovalAnswerRejected and the request stays answerable',
+      async (_n, decision, answers) => {
+        const { session, asked, requestId } = await park()
+        expect(() => session.resolveApproval(requestId, decision, answers)).toThrow(
+          ApprovalAnswerRejected
+        )
+        // Still parked: a good answer settles it.
+        session.resolveApproval(requestId, 'allow', { q1: 'A' })
+        expect(await asked.result).toEqual({ answers: { q1: { answers: ['A'] } } })
+      }
+    )
+
+    it('a stale id is a plain error, not a rejected answer (its card must go)', async () => {
+      const { session, asked, requestId } = await park()
+      session.resolveApproval(requestId, 'allow', { q1: 'A' })
+      await asked.result
+      let thrown: unknown
+      try {
+        session.resolveApproval(requestId, 'allow', { q1: 'A' })
+      } catch (err) {
+        thrown = err
+      }
+      expect(thrown).toBeInstanceOf(Error)
+      expect(thrown).not.toBeInstanceOf(ApprovalAnswerRejected)
+      expect((thrown as Error).message).toContain('Stale or unknown')
+    })
   })
 
   it('answers plan mode read-only without a card and declines every mutation', async () => {

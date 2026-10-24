@@ -596,6 +596,40 @@ describe('registerRemoteHandlers', () => {
     expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
   })
 
+  it('an answer retires the card on every client: emits session:approval-dismiss for the routing id (pi, xeng:)', async () => {
+    // pi's resolveApproval and the dispatcher's claude/pi/codex-kind cards emit
+    // nothing on a human answer, and the answering client only drops its own copy.
+    await dispatcher.handle(
+      makeRequest('session:approval-response', 'pi-rid', 'req-pi', 'allow'),
+      remoteConn
+    )
+    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'pi-rid', {
+      requestId: 'req-pi'
+    })
+    await dispatcher.handle(
+      makeRequest('session:approval-response', 'parent-rid', 'xeng:perm-9', 'deny'),
+      remoteConn
+    )
+    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'parent-rid', {
+      requestId: 'xeng:perm-9'
+    })
+  })
+
+  it('a resolve that throws still dismisses the card and still rejects', async () => {
+    sessionStub.resolveApproval.mockImplementationOnce(() => {
+      throw new Error('Stale or unknown Codex approval')
+    })
+    await expect(
+      dispatcher.handle(
+        makeRequest('session:approval-response', 'codex-rid', 'req-x', 'allow'),
+        remoteConn
+      )
+    ).rejects.toThrow('Stale or unknown Codex approval')
+    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'codex-rid', {
+      requestId: 'req-x'
+    })
+  })
+
   it("routes a known dispatch toolUseId to the cross-engine dispatcher's stopDispatch, scoped by routingId (ADR-033 M3)", async () => {
     crossEngineSpies.stopDispatch.mockReturnValueOnce(true)
     const res = await dispatcher.handle(

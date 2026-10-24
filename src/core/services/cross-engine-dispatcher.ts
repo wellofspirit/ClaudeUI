@@ -95,7 +95,12 @@ import { peekPiModels } from '../pi/model-discovery'
 import { editClearsAgentControl } from '../opencode/agent-control-gate'
 // ADR-088 — ClaudeUI's judge for pi/opencode targets. Leaf modules (the
 // automode pipeline + the judge transport), no session class.
-import { DispatchTargetJudge, uniqueDirs } from './dispatch-target-judge'
+import { DispatchTargetJudge } from './dispatch-target-judge'
+import {
+  existingDirectories,
+  resolveAdditionalDirectories,
+  uniqueDirs
+} from './additional-directories'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import {
   blockApprovalNotice,
@@ -571,6 +576,12 @@ export interface ClaudeQuerySpawnOpts {
    * `options.settings` as `--settings`).
    */
   settings?: Record<string, unknown>
+  /**
+   * `--add-dir` for each: the target's scope (`targetRules`), absolute and existing only. The
+   * process loads no settings source (`settingSources: []`), so this is the ONLY way cli.js learns
+   * of the user's additional directories.
+   */
+  additionalDirectories?: string[]
   /** In-process MCP servers for the target: its `hand_back` (ADR-105 §3). */
   mcpServers?: Record<string, McpServerConfig>
   /** Tools the process may call without asking (`--allowedTools`): `hand_back` and `session_message`, only in `dontAsk`/`bypassPermissions`. */
@@ -1170,7 +1181,7 @@ interface TargetRuleInputs {
   client: DispatchTargetClient
   /** Where the target runs. */
   cwd: string
-  /** The dispatching session's directory (`ctx.cwd`): its rules bind the target too (`userDenyAsk`). */
+  /** The dispatching session's directory (`ctx.cwd`): its rules and directories bind the target too (`targetRules`). */
   parentCwd: string
   /** `GET /api/agent` — the default agent. */
   agents: Agent_Info[] | null
@@ -1574,7 +1585,7 @@ interface CodexTargetEntry extends TargetLedgerFields {
   /**
    * The mode the thread's NATIVE policy currently runs under (ADR-088): set
    * from `ctx.getAutonomyMode()` at creation (`thread/start`'s baseline) and
-   * REFRESHED at every `turn/start`, which sends `codexTurnPolicy(mode)` so
+   * REFRESHED at every `turn/start`, which sends `codexTurnPolicy(mode, roots)` so
    * the thread follows the parent's live mode turn by turn.
    *
    * The gate (`decideCodexTargetRequest`) reads THIS, never the live
@@ -1588,6 +1599,12 @@ interface CodexTargetEntry extends TargetLedgerFields {
    * shared engine natively speaks this vocabulary.
    */
   autonomyMode: string
+  /**
+   * The target's scope (`targetRules(...).additionalDirectories`) as of its last `turn/start`: the
+   * writable roots that turn was started with and the extra roots `insideCodexWorkspace` accepts,
+   * so the gate and the sandbox agree within a turn. Null before the first turn.
+   */
+  turnDirs: string[] | null
   /** Resolved native model id (`thread/start`'s echo), fixed for the target's life. */
   model: string
   /** The latest dispatch prompt (set at every turn start) — the report review's subagent task. */
@@ -1914,12 +1931,15 @@ function codexRefusal(method: string): unknown {
   return { decision: 'decline' }
 }
 
-/** Is `target` inside `cwd`? Same containment test `CodexSession.insideWorkspace`
- *  makes — duplicated rather than lifted because CodexSession.ts is not this
- *  slice's to refactor beyond the policy table it already exports. */
-function insideCodexWorkspace(cwd: string, target: string): boolean {
-  const rel = relativePath(cwd, resolvePath(cwd, target))
-  return rel !== '' && !rel.startsWith('..') && !isAbsolutePath(rel)
+/** Is `target` inside `cwd` or one of `dirs` (the target's additional directories)? Same
+ *  containment test `CodexSession.insideWorkspace` makes — duplicated rather than lifted because
+ *  CodexSession.ts is not this slice's to refactor beyond the policy table it already exports. */
+function insideCodexWorkspace(cwd: string, dirs: readonly string[], target: string): boolean {
+  const resolved = resolvePath(cwd, target)
+  return [cwd, ...dirs].some((root) => {
+    const rel = relativePath(root, resolved)
+    return rel !== '' && !rel.startsWith('..') && !isAbsolutePath(rel)
+  })
 }
 
 /**
@@ -2663,6 +2683,9 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
           : {}),
       settingSources: [],
       ...(opts.settings ? { settings: opts.settings } : {}),
+      ...(opts.additionalDirectories?.length
+        ? { additionalDirectories: opts.additionalDirectories }
+        : {}),
       ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
       ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
       ...(opts.onInboundFrame ? { onInboundFrame: opts.onInboundFrame } : {}),
@@ -3046,47 +3069,46 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * The user's deny and ask rules for a target, with an EMPTY allow tier (ADR-085
-   * §3, owner ruling 3: deny/ask rules hold in every mode, dispatch targets
-   * included). Targets never get the user's allow rules or additional
-   * directories — a dispatched agent is governed by its autonomy mode, not by
-   * what the user pre-approved for their own chats (ADR-033). Read fresh per
-   * call, like the interactive sessions' gates.
+   * The rules and scope a target runs under: the user's deny and ask rules with an EMPTY allow
+   * tier (ADR-085 §3: deny/ask rules hold in every mode, dispatch targets included), and the
+   * target's scope as `additionalDirectories`. A target is governed by its autonomy mode, not by
+   * what the user pre-approved for their own chats, so it never gets the user's allow rules
+   * (ADR-033); what it does get is a workspace (ADR-108 as amended): the user's additional
+   * directories, plus the dispatching session's own directory when the target runs elsewhere (a
+   * `workdir`, say a sibling git worktree, that cannot otherwise see the repo it came from). Read
+   * fresh per call, like the interactive sessions' gates.
    *
-   * The rules are the UNION of those loaded for the PARENT's directory and for the
-   * TARGET's (they differ when `dispatch_agent` gave a `workdir`, say a sibling git
-   * worktree): the parent's gitignored `.claude/settings.local.json` still binds a
-   * target that runs elsewhere, and the target's own project rules still bind it. A
-   * union only tightens. Parent's first, de-duplicated, order-stable; the caller's
-   * restriction last.
+   * Both are the UNION of what is loaded for the PARENT's directory and for the TARGET's: the
+   * parent's gitignored `.claude/settings.local.json` still binds a target that runs elsewhere,
+   * and the target's own project settings still apply to it. A union of deny/ask only tightens;
+   * the directories widen the scope, but never past what the user listed or the parent could
+   * already reach (`workdir` is held to the same set, `resolveDispatchWorkdir`). Each additional
+   * directory is resolved against the cwd of the settings that carried it BEFORE the union (a
+   * relative entry in the target's project settings is relative to the target), then
+   * de-duplicated. Parent's first, order-stable; the caller's restriction last.
    */
-  private userDenyAsk(
+  private targetRules(
     targetCwd: string,
     parentCwd: string,
     restriction?: CallerRestriction
   ): MergedClaudeRules {
-    const loaded = uniqueDirs([parentCwd, targetCwd]).map((dir) => this.loadUserRules(dir))
+    const sources = uniqueDirs([parentCwd, targetCwd])
+    const loaded = sources.map((dir) => ({ dir, rules: this.loadUserRules(dir) }))
     return {
-      deny: [...new Set([...loaded.flatMap((r) => r.deny), ...(restriction?.deny ?? [])])],
-      ask: [...new Set([...loaded.flatMap((r) => r.ask), ...(restriction?.ask ?? [])])],
+      deny: [...new Set([...loaded.flatMap((r) => r.rules.deny), ...(restriction?.deny ?? [])])],
+      ask: [...new Set([...loaded.flatMap((r) => r.rules.ask), ...(restriction?.ask ?? [])])],
       allow: [],
-      additionalDirectories: [],
+      additionalDirectories: uniqueDirs(
+        [
+          parentCwd,
+          ...loaded.flatMap(({ dir, rules }) =>
+            resolveAdditionalDirectories(rules.additionalDirectories, dir)
+          )
+        ],
+        targetCwd
+      ),
       defaultMode: undefined
     }
-  }
-
-  /**
-   * What the target's judge counts as local besides the target's own directory (CONTEXT ONLY — see
-   * `DispatchTargetJudgeOptions.contextDirs`): the dispatching session's directory when the target
-   * runs elsewhere, and the user's additional directories as they are for that session, read fresh.
-   * It feeds the judge's Environment text and redirect scope and nothing else: not the gates, not
-   * `userDenyAsk`, not an engine ruleset.
-   */
-  private judgeContextDirs(entry: { cwd: string; ctx: { cwd: string } }): string[] {
-    return uniqueDirs(
-      [entry.ctx.cwd, ...(this.loadUserRules(entry.ctx.cwd).additionalDirectories ?? [])],
-      entry.cwd
-    )
   }
 
   /**
@@ -4966,7 +4988,7 @@ export class CrossEngineDispatcher {
           currentMode: mode,
           stillPending: live,
           signal,
-          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+          permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
         })
     switch (entry.kind) {
       case 'opencode':
@@ -4993,7 +5015,6 @@ export class CrossEngineDispatcher {
       configEngine: 'codex',
       fixedModel: () => entry.model,
       cwd: entry.cwd,
-      contextDirs: () => this.judgeContextDirs(entry),
       routingId: () => entry.ctx.fromRoutingId,
       // The usage row is a pi-route row: it must not name a Codex thread as a pi session.
       sessionId: () => null,
@@ -5728,7 +5749,6 @@ export class CrossEngineDispatcher {
       const judge = new DispatchTargetJudge({
         engine: 'opencode',
         cwd,
-        contextDirs: () => this.judgeContextDirs(entry),
         routingId: () => entry.ctx.fromRoutingId,
         sessionId: () => entry.sessionId,
         model: () => entry.model,
@@ -6008,8 +6028,9 @@ export class CrossEngineDispatcher {
 
   /**
    * The target's ruleset for `mode`: the interactive session's
-   * `buildSessionRuleset` over the user's deny/ask rules ONLY (ADR-085 §3,
-   * ADR-033: never their allow rules or additional directories), then
+   * `buildSessionRuleset` over the user's deny/ask rules and the target's scope
+   * (`targetRules`: its additional directories compile to `external_directory`
+   * allows; ADR-085 §3, ADR-033: never their allow rules), then
    * the target-only rules (`TARGET_DISPATCH_DENY`, `targetSessionToolRules`, `TARGET_QUESTION_DENY`) — no dispatch back (ADR-033 §4) and no questions
    * (nobody to answer them). Whole-category denies go last (hidden tools).
    */
@@ -6029,7 +6050,7 @@ export class CrossEngineDispatcher {
     const built = buildSessionRuleset({
       mode,
       autoMode,
-      permissions: this.userDenyAsk(inputs.cwd, inputs.parentCwd, restriction),
+      permissions: this.targetRules(inputs.cwd, inputs.parentCwd, restriction),
       mcpServers,
       cwd: inputs.cwd,
       ...(worktree ? { worktree } : {}),
@@ -6181,8 +6202,8 @@ export class CrossEngineDispatcher {
 
   /**
    * opencode's own directories as `external_directory` allows, in every mode
-   * (cached; an `/api/info` failure is not). The target's user rules carry no
-   * `additionalDirectories` (ADR-033), so these are the only allows under the ask.
+   * (cached; an `/api/info` failure is not). The only other allows under the ask
+   * are the ones compiled from the target's scope (`targetRules`, ADR-108 as amended).
    */
   private async targetOwnDirAllows(inputs: TargetRuleInputs): Promise<V2Rule[]> {
     if (inputs.ownDirAllows) return inputs.ownDirAllows
@@ -6513,17 +6534,17 @@ export class CrossEngineDispatcher {
     this.forwardOpencodeTargetAsk(entry, approval, route)
   }
 
-  /** The host pre-check over a target: the user's deny/ask tiers only, no session allows. */
+  /** The host pre-check over a target: the user's deny/ask tiers and the target's scope, no allows. */
   private targetPrecheckContext(entry: OpencodeTargetEntry): HostPrecheckContext {
-    const rules = this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+    const rules = this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
     return {
       mode: liveMode(entry.ctx),
       rules: { deny: rules.deny, ask: rules.ask, allow: [] },
       userRules: entry.hostRules,
       sessionAllows: NO_SESSION_ALLOWS,
       cwd: entry.cwd,
-      // Targets get no additional directories (ADR-033, as `userDenyAsk` says).
-      additionalDirectories: [],
+      // The target's scope (`targetRules`): what the user listed plus the parent's directory.
+      additionalDirectories: rules.additionalDirectories,
       onError: (err) =>
         logger.warn(
           'CrossEngineDispatcher',
@@ -6653,7 +6674,7 @@ export class CrossEngineDispatcher {
           stillPending: () => entry.judging.has(id) && this.targets.get(entry.sessionId) === entry,
           honoursWorkdir: true,
           ...(typeof input.command === 'string' ? {} : { skipReadOnlyGate: true }),
-          permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+          permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
         }
       )
     } finally {
@@ -7497,7 +7518,12 @@ export class CrossEngineDispatcher {
     const mode = mapAutonomyToClaudeTargetMode(liveMode(ctx))
     // ADR-085 §3 — the user's deny/ask rules as the target's flag
     // settings (never the allow tier); omitted when there are none.
-    const { deny, ask } = this.userDenyAsk(cwd, ctx.cwd, ctx.callerRestriction)
+    const { deny, ask, additionalDirectories } = this.targetRules(
+      cwd,
+      ctx.cwd,
+      ctx.callerRestriction
+    )
+    const addDirs = existingDirectories(additionalDirectories, 'CrossEngineDispatcher')
     entry.query = await this.spawnClaudeQuery({
       cwd,
       model,
@@ -7508,6 +7534,8 @@ export class CrossEngineDispatcher {
       prompt: entry.channel,
       ...ids,
       ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {}),
+      // The target's scope as `--add-dir` (ADR-108 as amended): cli.js loads no settings here.
+      ...(addDirs.length > 0 ? { additionalDirectories: addDirs } : {}),
       // The target's report channel (ADR-105 §3): a one-tool server of its own. It is in the
       // process's `allowedTools` only where cli.js would otherwise DENY it: `dontAsk` (an ask is a
       // denial there) and `bypassPermissions` (never asks). Every asking mode leaves it out:
@@ -7806,7 +7834,7 @@ export class CrossEngineDispatcher {
     if (isShellToolName(toolName) && typeof input.command === 'string') {
       const hit = denyAskHit(
         input.command,
-        this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+        this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
       )
       if (hit?.tier === 'deny') {
         logger.info(
@@ -8530,7 +8558,6 @@ export class CrossEngineDispatcher {
     entry.judge = new DispatchTargetJudge({
       engine: 'pi',
       cwd,
-      contextDirs: () => this.judgeContextDirs(entry),
       routingId: () => entry.ctx.fromRoutingId,
       sessionId: () => entry.sessionId,
       model: () => entry.model,
@@ -8704,17 +8731,17 @@ export class CrossEngineDispatcher {
       const denied = sessionToolDenyRule(
         X_AGENT_MESSAGE_TOOL,
         payload.input,
-        this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+        this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
         entry.cwd
       )
       if (denied) return { behavior: 'deny', reason: `Denied by permission rule: ${denied}` }
       if (!auto) return { behavior: 'allow' }
     }
-    // `userDenyAsk` carries no allow tier, so PiSession's `withoutAllowRules`
+    // `targetRules` carries no allow tier, so PiSession's `withoutAllowRules`
     // step would be a no-op here — not called.
     const verdict = decideWithSource(payload.toolName, payload.input, {
       mode: auto ? 'acceptEdits' : mode,
-      rules: this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+      rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       sessionAllows: EMPTY_PI_SESSION_ALLOWS,
       // The acceptEdits base matches agent-control paths cwd-relative
       // (ADR-084 §3); without it an absolute path inside a target running in a
@@ -8759,7 +8786,7 @@ export class CrossEngineDispatcher {
           entry.sessionId !== null &&
           this.targets.get(entry.sessionId) === entry,
         honoursWorkdir: false,
-        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+        permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
       }
     )
     // Stopped while the judge ran: never forward a drained ask.
@@ -9405,6 +9432,7 @@ export class CrossEngineDispatcher {
       connection: undefined as unknown as CodexThreadConnection,
       ctx,
       autonomyMode: liveMode(ctx),
+      turnDirs: null,
       model: '',
       lastPrompt: '',
       // Replaced below, once the account behind the host is known.
@@ -9634,7 +9662,7 @@ export class CrossEngineDispatcher {
    * no-op) or folded into the response, and settling from here is the only
    * thing that would ever settle it.
    *
-   * The native policy is sent on EVERY turn (`codexTurnPolicy(mode)` — the
+   * The native policy is sent on EVERY turn (`codexTurnPolicy(mode, roots)` — the
    * same call `CodexSession` makes; `turn/start` overrides it "for this turn
    * and subsequent turns"), so the thread follows the parent's LIVE mode at
    * each turn start (ADR-088 ruling 3). `thread/start` still carries the
@@ -9645,6 +9673,14 @@ export class CrossEngineDispatcher {
   private driveCodexTurn(entry: CodexTargetEntry, prompt: string): Promise<CodexTurnOutcome> {
     const mode = liveMode(entry.ctx)
     entry.autonomyMode = mode
+    // The scope this turn starts with: the sandbox's writable roots (absolute, existing ones only)
+    // and, until the next turn, the gate's extra roots (`insideCodexWorkspace`).
+    const dirs = this.targetRules(
+      entry.cwd,
+      entry.ctx.cwd,
+      entry.ctx.callerRestriction
+    ).additionalDirectories
+    entry.turnDirs = dirs
     entry.draining = false
     entry.turnStartedAtMs = Date.now()
     entry.lastAgentText = ''
@@ -9659,7 +9695,7 @@ export class CrossEngineDispatcher {
           threadId: entry.sessionId!,
           clientUserMessageId: uuidv4(),
           input: codexTurnInput(prompt),
-          ...codexTurnPolicy(mode)
+          ...codexTurnPolicy(mode, existingDirectories(dirs, 'CrossEngineDispatcher'))
         })
         .then(
           (result) => {
@@ -10094,7 +10130,7 @@ export class CrossEngineDispatcher {
     const denied = sessionToolDenyRule(
       X_AGENT_MESSAGE_TOOL,
       args,
-      this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+      this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       entry.cwd
     )
     if (denied) return answer(`Denied by permission rule: ${denied}`, true)
@@ -10117,7 +10153,7 @@ export class CrossEngineDispatcher {
           run.stopController.signal,
           run.cancelController.signal
         ]),
-        permissions: () => this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+        permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
       })
       if (review.kind === 'block') return answer(messageBlockedText(review.reason), true)
       if (review.kind !== 'allow') return answer(MESSAGE_UNREVIEWED_TEXT, true)
@@ -10334,13 +10370,14 @@ export class CrossEngineDispatcher {
     gated: Array<{ tool: string; input: Record<string, unknown>; path?: string }>
   ): { decision: PermissionDecision; reason?: string } {
     if (gated.length === 0) return { decision: 'ask' }
+    const rules = this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
     const engineCtx = {
       // `auto` gates as `default` — the interactive rule (`CodexSession.gate()`):
       // under `auto_review` the native guardian has already approved everything
       // it was willing to, so whatever reaches this gate is what it ESCALATED,
       // and escalations belong to the human, never to a silent mode-base allow.
       mode: entry.autonomyMode === 'auto' ? 'default' : entry.autonomyMode,
-      rules: this.userDenyAsk(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+      rules,
       sessionAllows: EMPTY_CODEX_SESSION_ALLOWS,
       cwd: entry.cwd
     }
@@ -10359,7 +10396,7 @@ export class CrossEngineDispatcher {
         step === 'allow' &&
         verdict.source === 'mode-base' &&
         item.path !== undefined &&
-        !insideCodexWorkspace(entry.cwd, item.path)
+        !insideCodexWorkspace(entry.cwd, entry.turnDirs ?? rules.additionalDirectories, item.path)
       )
         step = 'ask'
       if (step === 'deny')

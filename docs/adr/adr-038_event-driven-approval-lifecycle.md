@@ -1,6 +1,7 @@
 # ADR-038: Approval lifecycle is event-driven — never inferred from turn state
 
-**Status:** Accepted
+**Status:** Accepted. Amended 2026-10-24: a human answer retires the card on every client, from the shared answer
+seam (see the end).
 **Date:** 2026-07-27
 **Relates to:** [ADR-033](adr-033_cross-engine-dispatch.md) (cross-engine dispatch — origin of the `session:approval-dismiss` forwarding pattern), [ADR-022](adr-022_opencode-permission-mapping.md) (opencode permission mapping)
 
@@ -71,3 +72,20 @@ session that shares a `routingId` with its replacement cannot clobber the replac
   cancel/interrupt/abort each emit per-request dismisses). Caveat recorded honestly: the current
   suites exercise harness replicas of the hook/session logic rather than the production modules,
   so the live-app drive remains the decisive verification for this pipeline.
+
+## Amendment 2026-10-24: a human answer retires the card on every client
+
+**Context.** Pending approvals are replicated canonical state: the desktop renderer and every remote client fold the
+same `approval-request` / `approval-dismiss` events, and a reconnecting client's snapshot copies the canonical list.
+The answering client removed only its own copy. Claude and Codex echoed a dismiss after the answer and opencode got one
+from the engine's `permission.replied`, but pi and every cross-engine dispatch card (`xeng:`) did not, so their cards
+stayed on every other client, and in every later snapshot, until the session disconnected.
+
+**Decision.** The answer itself retires the card. Both `session:approval-response` handlers (desktop and remote) call
+one function, `answerApproval` (`src/core/ipc/approval-response.ts`), which routes the answer as before and then emits
+`session:approval-dismiss { requestId }` on the routing id the client named, whatever the engine or card kind. It also
+emits when the resolve throws (a stale or unknown id is a card nobody can answer), except for an
+`ApprovalAnswerRejected` error: the engine refused the answer itself and is still waiting, so the card stays. The
+"user's own resolution" in the removal list above is therefore no longer local to the answering client. The emission
+duty for internal resolutions (abort, cancel, interrupt, expiry) is unchanged, and the engines' own echoes stay: the
+removal is idempotent.

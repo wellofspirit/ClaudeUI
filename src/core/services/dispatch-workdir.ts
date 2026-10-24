@@ -10,8 +10,8 @@
  * that leads out of it is outside.
  */
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
+import { expandHome, resolveAdditionalDirectories } from './additional-directories'
 import { uiPath, withinOrEqual } from './session-tools'
 
 export type WorkdirResolution =
@@ -21,12 +21,6 @@ export type WorkdirResolution =
       cwd: string
     }
   | { ok: false; text: string }
-
-/** `~` and `~/x` are the user's home; `~name` is not expanded (it is a relative name). */
-function expandHome(p: string): string {
-  if (p === '~') return os.homedir()
-  return p.startsWith('~/') || p.startsWith('~\\') ? path.join(os.homedir(), p.slice(2)) : p
-}
 
 /**
  * Resolve `workdir` (absolute, `~`-relative, or relative to `parentCwd`) and check that it is an
@@ -46,10 +40,7 @@ export function resolveDispatchWorkdir(
   const resolved = path.resolve(parentCwd, expandHome(workdir))
   const shown = workdir === resolved ? resolved : `${workdir} (${resolved})`
   const roots = [
-    ...new Set([
-      parentCwd,
-      ...additionalDirectories.map((dir) => path.resolve(parentCwd, expandHome(dir)))
-    ])
+    ...new Set([parentCwd, ...resolveAdditionalDirectories(additionalDirectories, parentCwd)])
   ]
   if (!roots.some((root) => withinOrEqual(root, resolved))) {
     return {

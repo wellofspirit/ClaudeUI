@@ -96,6 +96,18 @@ on macOS or Linux. Process tree: with one session mid-`ping` and again with two 
 two `codex-code-mode-host.exe`, two `PING.EXE`, two Codex `pwsh.exe`), nothing survived five seconds after the app closed;
 the taskkill-first helper reaps the whole tree. Linux evidence is in the Linux section below.
 
+**Writable roots (2026-10-24, ADR-108 amendment).** Every `turn/start` in `workspace-write` (default, acceptEdits,
+auto) carries the user's `additionalDirectories` as `sandboxPolicy.workspaceWrite.writableRoots`: resolved to
+absolute paths (`~` expanded, relative against the session's directory), de-duplicated, and only those that exist as
+directories (Codex rejects a relative root and fails the turn). Plan mode stays `readOnly`. ClaudeUI's own
+outside-workspace check on file changes accepts the same list, so an acceptEdits change in an additional directory
+is not downgraded to a card. Dispatch targets use their scope (ADR-108 amendment). Since 0.163.0 the Windows sandbox
+is configurable (`[windows] sandbox = "unelevated" | "elevated"` in `~/.codex/config.toml`, which ClaudeUI shares,
+also on the Codex settings page); it is off unless configured. Off, writable roots are inert on Windows: every
+unmatched command and every patch still prompts, and ClaudeUI's check is the whole effect. On, each writable root
+gets a persistent inherited allow ACE the first time a command uses it (one DACL rewrite of the whole tree, never
+revoked), and the deny-write protection covers `.git`, `.codex` and `.agents` only directly under each root.
+
 ClaudeUI's harness installer (`src/core/harness/install/`, ADR-082 §4) installs the reviewed binaries of the pin for every host in `src/shared/harness-manifests/codex.json#platforms` — macOS arm64, Windows x64 (`codex.exe` and `codex-code-mode-host.exe`) and Linux x64/arm64 (the statically linked musl assets) — into `~/.claude/ui/harnesses/codex/<version>/`. Codex is not bundled (ADR-082 §8, which replaced the `vendor/codex-cli` packaging of `e5bf09b6`): the Installed page installs it, and in a development checkout `postinstall` runs `bun run ensure-codex`, a thin wrapper over the same installer. On a host the manifest does not cover (Windows arm64 today) the wrapper skips with one line and exits 0, and the engine gates itself off. Generated
 initialize types are exact CLI output; envelopes are derived from the pinned
 CLI's JSON schema because its TypeScript generator omits them. M1b adds typed
