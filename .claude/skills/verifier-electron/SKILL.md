@@ -184,7 +184,8 @@ node scripts/app-shot.mjs --click '[title="Settings"]' --click 'text=All Setting
 ```
 
 Known selectors: settings gear = `[title="Settings"]`; quick-panel → full dialog =
-`text=All Settings`. For new selectors, run with `--keep` and inspect, or grep the
+`text=All Settings`; a settings page = `[data-testid="SettingsDialog.railSub"]:has-text("<page>")`
+(its group may already be expanded — clicking the group header collapses it, so check first). For new selectors, run with `--keep` and inspect, or grep the
 renderer source for `title=`/`aria-label`/button text.
 
 ## Driving a full session turn (only with the owner's OK for a live turn)
@@ -220,17 +221,62 @@ judge run:
   `window.api.loadEngineConfig('pi').autoMode.judgeModel`.
 - `[harness] detection (boot): … pi none` reports PATH detection only; the managed
   store's pi still spawns.
+- **autoMode is read at session start and cached**: `judgeModel` / `twoStageMode`
+  changes bind only a NEW session — create one per mode.
+
+## Judge drives without a real provider (local stand-in)
+
+Learned verifying judge-reply capture: a local OpenAI-compatible stand-in serves
+both the agent and the judge, so a judge scenario (over-budget stage 1, stop cut
+with trailing text, reasoning fields, 429/500, a hang) is scripted exactly and no
+call leaves the machine.
+
+- **Network first.** Before any engine spawns: `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
+  to a dead local port and `NO_PROXY=127.0.0.1,localhost` — the judge transport
+  honours `NO_PROXY`, so without it the stand-in is unreachable too.
+- **Register the stand-in** from the renderer:
+  `window.api.saveSharedProvider({id, name, kind: 'custom', protocol:
+'openai-completions' | 'openai-responses', baseUrl: 'http://127.0.0.1:<port>/v1',
+models: [{id}], routes: {pi: {enabled: true}, opencode: {enabled: true}},
+managed: true})`, then `window.api.setSharedProviderApiKey(id, key)`, then
+  `sessionStore.getState().reloadEngineModels('opencode')` + `reloadModels()` and
+  wait ~7 s (opencode's models arrive after pi's). The model value is
+  `<providerId>/<modelId>`; point the judge at it through
+  `loadEngineConfig(engine)` → `autoMode: {judgeModel, twoStageMode}` →
+  `saveEngineConfig`. An `openai-responses` provider gives the Responses wire (the
+  ChatGPT-like shape: client-side stop and budget).
+- **Steer the agent without consent.** Map a token in the prompt (`[job:NAME]`) to a
+  tool call the stand-in emits (`shell` / pi `bash`: `echo MARK_NAME > cap_NAME.txt`);
+  a command typed verbatim would be consent. Pick the judge scenario from the LAST
+  marker in the judge's user message — the transcript repeats earlier actions.
+- **Check the session's model before every prompt** (`standin/<model>`); abort on a
+  mismatch rather than let an engine fall back to a hosted model.
+- **Baseline for "same as before" claims:** `git archive <base> | tar -x -C
+<scratch>/base`, junction `node_modules`, build and launch it with its own home;
+  unlink the junction afterwards (PowerShell `(Get-Item p -Force).Delete()`).
 
 ## Isolation, terminals and native modules
 
 Learned verifying an Electron patch bump (node-pty + better-sqlite3 under a new build):
 
 - **Isolated home.** `app-shot.mjs` passes `process.env` through and has no
-  isolation flag: on Windows set `APPDATA`, `LOCALAPPDATA`, `USERPROFILE` and `HOME`
-  to a throwaway folder before launching (a custom driver also passes
-  `--user-data-dir=<folder>/electron`). In a clean home the log's
-  `[SessionHistory] Failed to read projects directory` (ENOENT) and a missing
-  optional engine are expected, not failures.
+  isolation flag. `scripts/lib/scroll-bench/launch.mjs` `launchApp({app, home,
+extraEnv})` shims `os.homedir()` and strips credential-shaped env names; pass the
+  rest in `extraEnv`: `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,
+  `XDG_DATA_HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME`,
+  `CLAUDE_CONFIG_DIR` and `CLAUDEUI_HARNESS_STORE`, all on the throwaway folder, plus
+  `--user-data-dir=<folder>/electron`. HOME alone is not isolation on Windows (the
+  app resolves the profile from `USERPROFILE`). Prove it after the first launch: the
+  scratch `.claude/ui` exists and the sidebar has no real sessions. In a clean home
+  the log's `[SessionHistory] Failed to read projects directory` (ENOENT) and a
+  missing optional engine are expected, not failures.
+- **Engines in isolation.** Copy the needed versions from
+  `~/.claude/ui/harnesses/<engine>/<version>` into a scratch store and point
+  `CLAUDEUI_HARNESS_STORE` at it; never write to the real store.
+- **Building without postinstall** (a worktree installed with `--ignore-scripts`):
+  `bunx electron-vite build --logLevel warn` writes `out/`; the only symptom of the
+  missing Claude Code binary is `[harness] bundled Claude Code not found`, harmless
+  for opencode and pi drives.
 - **The first screen is `WelcomeState`** (not `WelcomeScreen`, which also exists in
   the source).
 - **Terminal.** The panel is closed by default: `TerminalPanel.newTab` is in the DOM
