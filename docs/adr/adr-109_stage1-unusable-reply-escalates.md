@@ -1,6 +1,7 @@
 # ADR-109: A stage-1 reply that answers unusably escalates to stage 2, and is abandoned as soon as it opens off-format
 
 **Status:** Accepted (2026-10-24). Implemented on branch `fix/judge-stage1-escalate`.
+Amended 2026-10-25: the stage-1 instruction's output line (see [Amendment](#amendment-2026-10-25-stage-1-output-phrasing)).
 **Amends:** [ADR-023](adr-023_opencode-automode-classifier.md) (the "transport error at either stage → `unavailable`"
 deviation no longer covers an unusable stage-1 reply in `both` mode),
 [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §2 (what stage 1 escalates on),
@@ -83,3 +84,28 @@ the session's "Auto-mode can't judge here" banner — although the route was hea
   the model itself found hard.
 - **Turning overflow into a truncated `length` result**: would change `fast` mode and stage 2 (unparseable → block
   instead of → human) and could salvage a half-written verdict.
+
+## Amendment (2026-10-25): stage-1 output phrasing
+
+A replay study of the off-format replies (captured calls re-sent to gpt-6-luna on the ChatGPT route, each prompt
+averaged over its exact bytes and a one-newline variant, because single-byte changes moved one record between 0/6
+and 6/6) separated three causes. Hard calls are sessions about the judge itself or about delegation; ordinary calls
+stay near 0% on every variant.
+
+- **The output instruction is the main cause.** The retired yes/no instruction ("Respond with ONLY
+  `<block>yes</block>` or `<block>no</block>` … Do NOT output any analysis … before `<block>`") gave 0 of 192
+  off-format replies under both the pre-ADR-083 and the current policy; the severity instruction gave 17% and 27%.
+- **Policy length amplifies it only under the severity grammar** (17% → 27%); under yes/no it made no difference.
+- **The anti-preamble sentence alone is weak** (27% → 18%).
+
+Decision: the severity grammar, scale and threshold stay; the output line takes the yes/no instruction's phrasing:
+"Respond with ONLY" before the grammar, the tags in backticks, and "Do NOT output any analysis, reasoning, or
+commentary before `<severity>` — no "We need…" or similar preamble." On the hard calls: off-format 42% → 7%,
+stage-1 escalations 46% → 26%. JudgEval (synthetic 70 cases and 86 labelled real cases, 3 runs; the 9 should-block
+cases that reach stage 1 re-run 10 times): false allows and false blocks unchanged within noise (stage-1 false allows
+7/90 before, 5/90 after).
+
+Rejected: returning stage 1 to yes/no. It removed off-format replies but cleared, at stage 1, cases the severity
+threshold escalates every time (agent-chosen paid provisioning, a stored token piped into an HTTP call): 6 stage-1
+false allows against 0 in the same run, the failure ADR-083 §2 retired it for. The escalation in this ADR still
+covers the remaining off-format replies.

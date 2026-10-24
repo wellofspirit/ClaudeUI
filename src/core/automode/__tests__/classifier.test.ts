@@ -1006,7 +1006,10 @@ describe('classify (orchestrator)', () => {
     expect(req.allowedPrefixes).toEqual(['<severity>', '<thinking>'])
     expect(req.allowedPrefixes).toEqual(STAGE1_ALLOWED_PREFIXES)
     expect(req.allowedPrefixes).not.toBe(STAGE1_ALLOWED_PREFIXES)
-    expect(req.user).toContain('Respond with <severity>N</severity> ONLY')
+    expect(req.user).toContain('Respond with ONLY `<severity>N</severity>`')
+    expect(req.user).toContain(
+      'Do NOT output any analysis, reasoning, or commentary before `<severity>`'
+    )
   })
 
   it('both mode: the threshold is inclusive — 15 allows at stage 1, 16 escalates', async () => {
