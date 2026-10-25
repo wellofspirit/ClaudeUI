@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config'
 import { availableParallelism, homedir } from 'os'
-import { resolve } from 'path'
+import { existsSync } from 'fs'
+import { dirname, resolve } from 'path'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { playwright } from '@vitest/browser-playwright'
@@ -14,6 +15,14 @@ import { MOBILE_PROFILES } from './scripts/lib/mobile-profiles.mjs'
  */
 const realHarnessStore =
   process.env.CLAUDEUI_HARNESS_STORE ?? resolve(homedir(), '.claude', 'ui', 'harnesses')
+
+/** The node_modules Node resolves from here: this checkout's, or (in a worktree) the main checkout's. */
+const nodeModulesRoot = (() => {
+  for (let dir = __dirname; ; dir = dirname(dir)) {
+    if (existsSync(resolve(dir, 'node_modules'))) return resolve(dir, 'node_modules')
+    if (dirname(dir) === dir) return resolve(__dirname, 'node_modules')
+  }
+})()
 
 const sharedAlias = {
   '@renderer': resolve(__dirname, 'src/renderer/src'),
@@ -77,6 +86,11 @@ const unitTest = {
 
 export default defineConfig({
   resolve: { alias: sharedAlias },
+  // A git worktree under .claude/worktrees has no node_modules of its own and resolves the main
+  // checkout's: the browser project's Vite server must serve from there too (fonts, CSS), or every
+  // browser suite fails with a NetworkError. `allow` alone is not honoured when several projects run
+  // together, hence `strict: false` — a headless, localhost-only test server.
+  server: { fs: { allow: [__dirname, nodeModulesRoot], strict: false } },
   test: {
     // Avoid oversubscribing high-core hosts while Chromium runs alongside Node
     // workers; keep low-core CI at Vitest's usual availableParallelism() - 1.

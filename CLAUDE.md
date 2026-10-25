@@ -33,7 +33,7 @@ Architecture, services, persistence, multi-engine design → `docs/architecture/
 - `bun run dev` — development mode with hot reload (main-process changes need an app restart)
 - `bun run build` — Claude Code binary (`ensure-cli`) + electron-vite build, no typecheck (run `bun run typecheck` separately); `build:win` / `build:mac` / `build:linux` add the typecheck (not on linux) and an electron-builder package (`--dir`, unpacked, on win/mac)
 - `bun run typecheck` / `bun run lint` / `bun run format:check` — `bun run format` rewrites the **whole repo**; format only the files you touched (`bunx prettier --write <files>`)
-- `scripts/gates.sh` — the commit gate: typecheck, lint, `bun run test`. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
+- `scripts/gates.sh` — the commit gate (fast): typecheck, lint of the changed files, and the tests related to the changed files; `scripts/gates.sh --full` runs the whole suite (before a PR). Both work in a git worktree. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
 - `bun run ensure` — the Claude Code binary and the tested opencode, pi and Codex, together; `postinstall` runs it after the native rebuild
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary and boot-probe it; version pinned by `package.json#claudeCliVersion`, which must equal `src/shared/harness-manifests/claude.json#tested`
 - `bun run ensure-opencode` / `ensure-pi` / `ensure-codex` — install the tested version (`src/shared/harness-manifests/<id>.json#tested`) into the managed store through the app's own installer (`CLAUDEUI_HARNESS_STORE` moves the store); `update-*` reinstalls it

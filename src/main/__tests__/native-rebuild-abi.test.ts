@@ -13,19 +13,19 @@
 import { describe, it, expect } from 'vitest'
 import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 
-const root = resolve(__dirname, '../../..')
+// Resolved the way Node resolves them (walking up), so a git worktree without its own
+// node_modules finds the main checkout's, as the app itself does.
+const rootRequire = createRequire(__filename)
 
 describe('native rebuild ABI lookup', () => {
   it("node-abi, as @electron/rebuild resolves it, knows the installed Electron's ABI", () => {
     const electronVersion: string = JSON.parse(
-      readFileSync(resolve(root, 'node_modules/electron/package.json'), 'utf8')
+      readFileSync(rootRequire.resolve('electron/package.json'), 'utf8')
     ).version
     // The copy the rebuilder itself loads, not whichever one the root hoists.
-    const rebuildRequire = createRequire(
-      resolve(root, 'node_modules/@electron/rebuild/package.json')
-    )
+    // (its exports map hides package.json, so resolve from its entry point)
+    const rebuildRequire = createRequire(rootRequire.resolve('@electron/rebuild'))
     const { getAbi } = rebuildRequire('node-abi') as {
       getAbi: (target: string, runtime: string) => string
     }
