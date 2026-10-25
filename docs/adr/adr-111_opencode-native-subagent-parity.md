@@ -95,7 +95,9 @@ carrying the run's usage, run index, summary and background flag.
   a background child's cancelled completion wakes the parent anyway, so the note adds no turn. opencode's own
   result says only "Subagent cancelled". A non-user agent message would mark the session's origin as tainted and
   count against its agent-turn budget, which a Stop click should not do. Teardown and parent interrupts send no
-  note.
+  note. The note is user-role text (the auto-mode judge reads it as a `User:` line), so it carries nothing the
+  model authored: it names the agent by its type (a safe identifier, else `subagent`) and the call id, never
+  the call's description or prompt.
 - `backgroundTasks` is true; `backgroundTask` is not implemented.
 - A foreground run omits `isBackgrounded`. The cards offer "Send to background" only for an explicit `false`, and
   opencode's background route would move every blocked job of the turn, not the one card.

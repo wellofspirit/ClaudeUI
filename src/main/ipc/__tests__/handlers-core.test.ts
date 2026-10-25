@@ -1491,7 +1491,7 @@ describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
 
   describe('stopTask tells the model the user stopped the agent (a host-instruction, once)', () => {
     const NOTE =
-      'The user stopped the subagent "x". Do not restart it or redo its work unless the user asks.'
+      'The user stopped the "x" subagent started by your call call_1. Do not restart it or redo its work unless the user asks.'
     const stoppable = (rid: string, stop: () => Promise<Record<string, unknown>>) =>
       liveSession(rid, { stopTask: vi.fn(stop) })
 

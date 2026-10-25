@@ -26,7 +26,7 @@
  * not store them (as in 1.x).
  */
 import type { ChatMessage, ContentBlock, TaskNotification } from '../../shared/types'
-import { taskSummary, tokenTotal, type RunUsage } from './subagent-run'
+import { SUPERSEDED_SUMMARY, taskSummary, tokenTotal, type RunUsage } from './subagent-run'
 import type {
   Session_Message_Assistant,
   Session_Message_Info,
@@ -261,24 +261,48 @@ function convertChild(
   const background =
     toolInputRecord(state.input).background === true ||
     (state.status === 'completed' && subagentBackgrounded(state.metadata))
+  const calls = walk.calls.get(childID) ?? []
+  const index = calls.findIndex((call) => call.toolId === tool.id)
+  // A background call a LATER call took over while its child still ran (opencode
+  // steers a running child with a `sessionID` call): its segment ends without an
+  // idle row, because the child's one idle row lands in the later call's segment.
+  // Live, the mapper settles such a run `completed` with SUPERSEDED_SUMMARY
+  // (`event-mapper.ts`), so cold reads the same. A call with no later call that
+  // has no idle row really was unfinished (the app quit while it ran).
+  // Usage keeps what the segment's rows give: the step in flight at the steer
+  // may be attributed to the later run here, where live counts it for the run
+  // whose step it was at its end. The run's end is the later call's start.
+  const next = index >= 0 ? calls[index + 1] : undefined
+  const superseded =
+    state.status !== 'error' &&
+    subagentBackgrounded(state.metadata) &&
+    next !== undefined &&
+    rows !== undefined &&
+    !rows.some((row) => row.type === 'idle')
   const status: TaskNotification['status'] =
     state.status === 'error'
       ? state.error.type === 'aborted'
         ? 'stopped'
         : 'failed'
-      : subagentBackgrounded(state.metadata)
-        ? childOutcome(rows)
-        : 'completed'
-  const usage = rows ? runUsage(tool, rows, background) : undefined
+      : superseded
+        ? 'completed'
+        : subagentBackgrounded(state.metadata)
+          ? childOutcome(rows)
+          : 'completed'
+  const usage = rows
+    ? runUsage(tool, rows, background, superseded ? next.start : undefined)
+    : undefined
   history.taskNotifications.push({
     taskId: childID,
     toolUseId: tool.id,
     status,
     outputFile: '',
     // A foreground run's result is the call's; a background run's, what its child said last.
-    summary: taskSummary(background ? lastText(rows) : toolResult(tool)?.result),
+    summary: superseded
+      ? SUPERSEDED_SUMMARY
+      : taskSummary(background ? lastText(rows) : toolResult(tool)?.result),
     ...(usage ? { usage } : {}),
-    runIndex: (walk.calls.get(childID)?.findIndex((call) => call.toolId === tool.id) ?? -1) + 1,
+    runIndex: index + 1,
     ...(background ? { isBackgrounded: true } : {})
   })
 }
@@ -296,13 +320,15 @@ function lastText(rows: readonly Session_Message_Info[] | undefined): string {
  * One run's figures as the mapper counts them live (`event-mapper.ts` `meter`):
  * the child's own metered steps' input + output + reasoning, its distinct tool
  * calls, and the time from the call's start to its end — the call's result for
- * a foreground run, the child's idle row for a background one. Undefined when
+ * a foreground run, the child's idle row for a background one (the later call's
+ * start when that call took the run over). Undefined when
  * the rows do not say when it ended (nothing is invented).
  */
 function runUsage(
   tool: Session_Message_Assistant_Tool,
   rows: readonly Session_Message_Info[],
-  background: boolean
+  background: boolean,
+  supersededAt?: number
 ): RunUsage | undefined {
   let totalTokens = 0
   const uses = new Set<string>()
@@ -312,7 +338,7 @@ function runUsage(
     for (const part of row.content) if (part.type === 'tool') uses.add(part.id)
   }
   const end = background
-    ? rows.findLast((row) => row.type === 'idle')?.time.created
+    ? (rows.findLast((row) => row.type === 'idle')?.time.created ?? supersededAt)
     : tool.time.completed
   if (end === undefined) return undefined
   return {

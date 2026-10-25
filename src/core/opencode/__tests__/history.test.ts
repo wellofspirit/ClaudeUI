@@ -436,6 +436,87 @@ ${'x'.repeat(150)}
     ).toBe('failed')
   })
 
+  describe('a background call a later call took over while its child ran (live: SUPERSEDED_SUMMARY)', () => {
+    const call = (id: string, ran: number): Part => ({
+      type: 'tool',
+      id,
+      name: 'subagent',
+      state: {
+        status: 'completed',
+        input: { agent: 'general', background: true },
+        content: [{ type: 'text', text: 'working in the background' }],
+        metadata: { sessionID: 'ses_c', status: 'running' }
+      },
+      time: { created: ran - 1, ran, completed: ran + 1 }
+    })
+    const rows = [
+      assistant('msg_a', 1, [call('call_1', 2)]),
+      assistant('msg_b', 20, [call('call_2', 21)])
+    ]
+
+    it('reads `completed` with the superseded summary, keeping runIndex and isBackgrounded', () => {
+      // One idle row, at the end of the later run: the steered run has none of its own.
+      const child = [
+        user('msg_cu1', 3, 'first prompt'),
+        assistant('msg_c1', 4, [{ type: 'text', text: 'first run so far' }], {
+          cost: 0.01,
+          tokens: TOKENS
+        }),
+        user('msg_cu2', 22, 'second prompt'),
+        assistant('msg_c2', 23, [{ type: 'text', text: 'both done' }]),
+        idle('i', 40)
+      ]
+      const { taskNotifications } = convertOpencodeHistory(rows, new Map([['ses_c', child]]))
+      expect(taskNotifications).toMatchObject([
+        {
+          toolUseId: 'call_1',
+          status: 'completed',
+          summary: 'continued by a later call',
+          runIndex: 1,
+          isBackgrounded: true,
+          // Ends where the later call starts.
+          usage: { totalTokens: 125, durationMs: 19 }
+        },
+        {
+          toolUseId: 'call_2',
+          status: 'completed',
+          summary: 'both done',
+          runIndex: 2,
+          isBackgrounded: true
+        }
+      ])
+    })
+
+    it('a run that has its own idle row keeps that outcome even with a later call', () => {
+      const child = [
+        user('msg_cu1', 3, 'first prompt'),
+        assistant('msg_c1', 4, [{ type: 'text', text: 'first done' }]),
+        idle('i1', 5, 'failed'),
+        user('msg_cu2', 22, 'second prompt'),
+        idle('i2', 40)
+      ]
+      const { taskNotifications } = convertOpencodeHistory(rows, new Map([['ses_c', child]]))
+      expect(taskNotifications[0]).toMatchObject({ status: 'failed', summary: 'first done' })
+    })
+
+    it('the LAST call with no idle row is still `unfinished` (the app quit while it ran)', () => {
+      const child = [
+        user('msg_cu1', 3, 'first prompt'),
+        idle('i1', 5),
+        user('msg_cu2', 22, 'second prompt'),
+        assistant('msg_c2', 23, [{ type: 'text', text: 'halfway' }])
+      ]
+      const { taskNotifications } = convertOpencodeHistory(rows, new Map([['ses_c', child]]))
+      expect(taskNotifications[1]).toMatchObject({ status: 'unfinished', runIndex: 2 })
+      expect(taskNotifications[1].summary).toBe('halfway')
+    })
+
+    it('a child whose rows could not be read is `unfinished`, not superseded', () => {
+      const { taskNotifications } = convertOpencodeHistory(rows)
+      expect(taskNotifications.map((n) => n.status)).toEqual(['unfinished', 'unfinished'])
+    })
+  })
+
   it('a session migrated from 1.x keeps `task` + `metadata.sessionId` and `apply_patch` files', () => {
     const rows = [
       assistant('msg_a', 1, [

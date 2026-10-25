@@ -1670,10 +1670,16 @@ export class OpencodeSession extends BaseSession {
         }
       }
     }
-    const label = this.childAgentLabel(this.subagentTask({ parentToolUseId: toolUseId }))
+    // The note is a user-role prompt the auto-mode judge reads as a `User:` line,
+    // so it carries nothing the model authored: the call's `description` and
+    // `prompt` stay out. It names the agent by its TYPE (opencode validates the
+    // `agent` id; a safe identifier charset is enforced here regardless) and the
+    // call id the model already knows.
+    const type = cleanAgentLabel(this.subagentTask({ parentToolUseId: toolUseId })?.type ?? '')
+    const agentType = /^[A-Za-z0-9._-]{1,64}$/.test(type) ? type : 'subagent'
     return {
       success: true,
-      hostNote: `The user stopped the subagent "${label}". Do not restart it or redo its work unless the user asks.`
+      hostNote: `The user stopped the "${agentType}" subagent started by your call ${toolUseId}. Do not restart it or redo its work unless the user asks.`
     }
   }
 
