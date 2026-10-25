@@ -823,6 +823,11 @@ export interface AgentTypeInfo {
    * engine fixes elsewhere. Read-only; Settings shows it beside the type.
    */
   model?: string
+  /**
+   * Why the type will not run as declared (opencode: an `effort` that is not a
+   * variant of the declared model). Only the async catalog read sets it.
+   */
+  warning?: string
 }
 
 export interface OpencodeAgentDetail extends OpencodeAgentSummary {
@@ -1460,6 +1465,11 @@ export interface TaskStartedData {
    * the id every other subagent channel is keyed by. On a resume this is NOT
    * the id the wire reported (see `runToolUseId`); ClaudeSession normalizes it
    * so a resumed agent re-arms the card that spawned it (ADR-073).
+   *
+   * opencode is the exception: each run is its own CALL with its own card and
+   * roster row (a resume is a new `subagent {sessionID}` call), so its
+   * `toolUseId` is the id of the call that ran THIS run and `taskId` (the child
+   * session) is what ties the runs together.
    */
   toolUseId: string
   taskId: string
@@ -1477,7 +1487,9 @@ export interface TaskStartedData {
    * foreground — the only kind "Send to background" can move — and `true` once
    * it runs in the background, from the start or after a `background_tasks`
    * flip, which ClaudeSession reports by re-sending this event for the same
-   * run. Absent when the engine or task type has no such notion.
+   * run. Absent when the engine or task type has no such notion — and for an
+   * opencode foreground run, which cannot be moved (2.1.2's background route is
+   * whole-session): it omits the flag so no card offers "Send to background".
    */
   isBackgrounded?: boolean
   /**

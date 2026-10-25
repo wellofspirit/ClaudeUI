@@ -97,11 +97,25 @@ export function foldOutputs(
         })
         break
       }
-      case 'task-notification':
-        if (into.taskNotifications.some((n) => n.toolUseId === output.notification.toolUseId))
-          throw new Error(`duplicate task-notification: ${output.notification.toolUseId}`)
-        into.taskNotifications.push(output.notification)
+      case 'task-notification': {
+        const { notification } = output
+        const earlier = into.taskNotifications.findIndex(
+          (n) => n.toolUseId === notification.toolUseId
+        )
+        // The one repeat the reducer folds on purpose: the same run's notification re-sent
+        // with fuller usage after a re-read landed steps behind it (the mapper's refresh).
+        const sansUsage = (n: TaskNotification) => JSON.stringify({ ...n, usage: 0 })
+        if (
+          earlier >= 0 &&
+          (sansUsage(into.taskNotifications[earlier]) !== sansUsage(notification) ||
+            JSON.stringify(into.taskNotifications[earlier].usage) ===
+              JSON.stringify(notification.usage))
+        )
+          throw new Error(`duplicate task-notification: ${notification.toolUseId}`)
+        if (earlier >= 0) into.taskNotifications[earlier] = notification
+        else into.taskNotifications.push(notification)
         break
+      }
       default:
         break
     }

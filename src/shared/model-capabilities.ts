@@ -1171,9 +1171,16 @@ export function resolveClaudeCapabilities(
  * take-back is a real dequeue.
  * voice:true — on-device speech-to-text (ADR-101), the same worker as pi and Codex;
  * OpencodeSession ANDs the host's `voicePackPlatformKey() !== null`.
- * subagents:true (Phase 8d) — opencode's `task` tool spawns child sessions whose
- * transcripts stream on the shared SSE; the event-mapper routes them to
- * session:subagent-* events keyed by the parent task part's callID.
+ * subagents:true (Phase 8d) — opencode's `subagent` tool (2.x; `task` in 1.x) spawns
+ * child sessions whose transcripts stream on the shared SSE; the event-mapper routes
+ * them to session:subagent-* events keyed by the parent call's id.
+ * backgroundTasks:true — the gate `handlers-core.stopTask` checks: a per-child Stop on
+ * every subagent card, row and detail panel (`OpencodeSession.stopTask` interrupts the
+ * child and its live descendants). "Send to background" is deliberately NOT offered
+ * (no `backgroundTask`, and the foreground run never says `isBackgrounded: false`):
+ * opencode 2.1.2's `POST /session/:id/background` moves a WHOLE SESSION's blocking work
+ * (shells and commands too), not one call. `background: true` calls still run and are
+ * tracked (task lifecycle events); the watch/read-range members stay absent (their handlers no-op).
  * fork:false / forkFromMessage:false — the end-to-end path is unwired:
  * `OpencodeClient.forkSession()` exists but has no production caller,
  * `OpencodeSession` ignores its `_resumeSessionAt`/`_forkSession` spawn params,
@@ -1183,7 +1190,7 @@ export function resolveClaudeCapabilities(
 export const OPENCODE_ENGINE_CAPABILITIES: EngineCapabilities = {
   voice: true,
   hostedMcp: true,
-  backgroundTasks: false,
+  backgroundTasks: true,
   subagents: true,
   plan: true,
   fork: false,
@@ -1365,9 +1372,9 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     cost-seeding posture.
  *   - backgroundTasks → true since ADR-089 S2: it is the gate
  *     `handlers-core.stopTask` checks, and a host-run subagent's TaskCard has
- *     a per-agent Stop (`PiSession.stopTask`). "Send to background" stays
- *     inert: it also needs `activeTasks[id].isBackgrounded === false`, which
- *     pi never sends. Background runs themselves arrive in S3.
+ *     a per-agent Stop (`PiSession.stopTask`). Since ADR-089 S3 pi also sends
+ *     `isBackgrounded` and implements `backgroundTask`, so "Send to background"
+ *     works on a foreground run and background runs exist.
  *   - voice → true since ADR-101: pi has no transcription of its own, so the
  *     session starts the host's on-device worker (`BaseSession.voiceStartServer`)
  *     and PiSession's `capabilities` getter ANDs `voicePackPlatformKey() !== null`

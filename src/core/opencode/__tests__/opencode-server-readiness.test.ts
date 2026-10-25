@@ -174,15 +174,54 @@ describe('waitForPermissionGuard (ADR-097 §3, S6: no heuristic fallback)', () =
     }
   }
 
-  it('active once the plugin confirms both hooks', async () => {
+  it('active once the plugin confirms every hook (permission, MCP, model gate)', async () => {
     const { deps, paths } = guardDeps([
       new Error('ECONNREFUSED'),
       { status: 200, body: { output: { permissionHook: true, mcpDirect: false } } },
-      { status: 200, body: { output: { permissionHook: true, mcpDirect: true } } }
+      // An older plugin build without the model gate is not enough.
+      {
+        status: 200,
+        body: { output: { permissionHook: true, mcpDirect: true } }
+      },
+      {
+        status: 200,
+        body: { output: { permissionHook: true, mcpDirect: true, modelGate: false } }
+      },
+      {
+        status: 200,
+        body: { output: { permissionHook: true, mcpDirect: true, modelGate: true } }
+      }
     ])
     const guard = await waitForPermissionGuard({ pluginExpected: true }, deps)
     expect(guard.state).toBe('active')
+    expect(paths).toHaveLength(5)
     expect(paths.every((p) => p === '/api/rpc/claudeui-xeng/guard')).toBe(true)
+  })
+
+  it('reports allowlistLoaded without requiring it (an unparsed list is a warning, not a refusal)', async () => {
+    for (const [reported, expected] of [
+      [true, true],
+      [false, false],
+      [undefined, false]
+    ] as const) {
+      const { deps } = guardDeps([
+        {
+          status: 200,
+          body: {
+            output: {
+              permissionHook: true,
+              mcpDirect: true,
+              modelGate: true,
+              allowlistLoaded: reported
+            }
+          }
+        }
+      ])
+      await expect(waitForPermissionGuard({ pluginExpected: true }, deps)).resolves.toMatchObject({
+        state: 'active',
+        allowlistLoaded: expected
+      })
+    }
   })
 
   it('missing at once when no plugin was injected (never asks the MCP status)', async () => {

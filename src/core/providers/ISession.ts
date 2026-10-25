@@ -213,7 +213,12 @@ export interface ISession {
   watchBackground?(toolUseId: string): void
   unwatchBackground?(toolUseId: string): void
   readBackgroundRange?(toolUseId: string, offset: number, length: number): string
-  stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
+  /**
+   * Stop one agent. `hostNote`: text the caller sends the session's model as a
+   * `host-instruction` prompt once the stop took effect (opencode: its upstream
+   * only says "Subagent cancelled"); the caller never forwards it to the UI.
+   */
+  stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string; hostNote?: string }>
   backgroundTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
 
   /**

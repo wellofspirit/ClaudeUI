@@ -471,6 +471,87 @@ describe('loadClaudeAgentsForOpencode', () => {
     })
   })
 
+  describe('effort (R4: the top-level key becomes the model variant)', () => {
+    const file = (fields: string, name = 'e'): string =>
+      agentMd(`name: ${name}\ndescription: d\n${fields}`)
+    const model = (id: string): string => `harness:\n  opencode:\n    model: ${id}`
+
+    it('effort + harness.opencode.model without a variant → model "<p/id>#<effort>", unvalidated', () => {
+      const r = rig()
+      r.userFile('e', file(`effort: high\n${model('openai/gpt-6-luna')}`))
+      const out = r.load()
+      expect(out.agents.e.model).toBe('openai/gpt-6-luna#high')
+      expect(out.injected).toEqual([
+        { name: 'e', scope: 'user', model: 'openai/gpt-6-luna#high', effort: 'high' }
+      ])
+      expect(out.diagnostics).toEqual([])
+      // Whatever the word is: the shim does not know the model's variants.
+      r.userFile('x', file(`effort: not-a-variant\n${model('openai/gpt-6-luna')}`, 'x'))
+      expect(r.load().agents.x.model).toBe('openai/gpt-6-luna#not-a-variant')
+    })
+
+    it('an explicit #variant wins over effort (no effort recorded for validation)', () => {
+      const r = rig()
+      r.userFile('e', file(`effort: max\n${model('openai/gpt-6-luna#low')}`))
+      const out = r.load()
+      expect(out.agents.e.model).toBe('openai/gpt-6-luna#low')
+      expect(out.injected[0]).not.toHaveProperty('effort')
+    })
+
+    it('effort without harness.opencode.model: a diagnostic, the agent is injected unchanged', () => {
+      const r = rig()
+      const f = r.userFile('e', file('effort: high'))
+      const out = r.load()
+      expect(out.agents.e).not.toHaveProperty('model')
+      expect(out.diagnostics).toEqual([
+        `${f}: effort needs harness.opencode.model on opencode; ignored`
+      ])
+    })
+
+    it('reads the top-level effort only: not `thinking`, not harness.opencode.effort', () => {
+      const r = rig()
+      r.userFile('e', file(`thinking: high\n${model('openai/gpt-6-luna')}\n    effort: high`))
+      const out = r.load()
+      expect(out.agents.e.model).toBe('openai/gpt-6-luna')
+      expect(out.diagnostics).toEqual([])
+    })
+
+    it('a value that is not a single word is ignored with a diagnostic (never a malformed model)', () => {
+      const r = rig()
+      const files = ['"a b"', '"x#y"', '""', '7', '[high]'].map((value, i) =>
+        r.userFile(`e${i}`, file(`effort: ${value}\n${model('openai/gpt-6-luna')}`, `e${i}`))
+      )
+      const out = r.load()
+      for (let i = 0; i < files.length; i++) {
+        expect(out.agents[`e${i}`].model).toBe('openai/gpt-6-luna')
+        expect(out.diagnostics.join(' | ')).toContain(`${files[i]}: effort is not a single word`)
+      }
+    })
+
+    it('the allowlist still judges the BASE model (variant ignored)', () => {
+      const r = rig()
+      r.userFile('e', file(`effort: high\n${model('openai/gpt-6-luna')}`))
+      expect(r.load({ modelAllowlist: { openai: ['gpt-6-luna'] } }).agents.e.model).toBe(
+        'openai/gpt-6-luna#high'
+      )
+      expect(r.load({ modelAllowlist: { openai: ['gpt-5'] } }).agents).toEqual({})
+    })
+
+    it('is a pure function of the files and the allowlist (same input, same output)', () => {
+      const r = rig()
+      r.userFile('e', file(`effort: high\n${model('openai/gpt-6-luna')}`))
+      expect(JSON.stringify(r.load())).toBe(JSON.stringify(r.load()))
+    })
+
+    it('permissionMode and background are not mapped (R4)', () => {
+      const r = rig()
+      r.userFile('e', file(`permissionMode: plan\nbackground: true\n${model('openai/gpt-6-luna')}`))
+      const out = r.load()
+      expect(Object.keys(out.agents.e).sort()).toEqual(['description', 'mode', 'model', 'system'])
+      expect(out.diagnostics).toEqual([])
+    })
+  })
+
   describe('precedence and native agents', () => {
     it('harness-native wins, case-insensitively, with a diagnostic', () => {
       const r = rig()

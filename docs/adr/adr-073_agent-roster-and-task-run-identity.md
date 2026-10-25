@@ -1,6 +1,6 @@
 # ADR-073: An agent is a `task_id`, a run is a `tool_use_id` — and the roster that reads them
 
-**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended 2026-10-07 by §10: the list is one tree with the background shells nested under the agent that launched them, and every row is one line at every width (superseding §9's two shapes and the separate shells section). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`. Amended 2026-10-17 by §11: a row's dot is the session dot (no yellow), and a row resolves the model its agent ran on. Amended 2026-10-19 by §10/§11: a finished agent with work still running below it is steady green, finished, stopped and loaded rows are grey, and rows are never dimmed.
+**Status:** Accepted (2026-09-22, with §4 below recording the code as built). Amended 2026-09-23 by §5: agent identity outlives the parent process. Amended 2026-09-29 by §6: the panel roster opens on Running, folds by section, scrolls on its own, and a row click toggles its entry. Amended 2026-09-30 by §7: nested agents are listed at every depth, background shells only while they run, and the pill and tab show a dot and a bare number. Amended 2026-10-01 by §8: an opencode run's terminal status comes from its `task` part, and a `session.error` is never terminal. Amended 2026-10-06 by §9: the overlay is bounded by the composer, not the viewport, and a roster narrower than 480px lays its rows out on two lines, and the type badge becomes a letter tile ([ADR-094](adr-094_agent-type-colour-coding.md)). Amended 2026-10-07 by §10: the list is one tree with the background shells nested under the agent that launched them, and every row is one line at every width (superseding §9's two shapes and the separate shells section). Amended by [ADR-078](adr-078_stream-frame-ownership-and-truncated-calls.md): an agent that resumes ITSELF while the session is idle runs with no tool_use id at all; its partials carry only `agent_id` and are placed on the origin by agent id. Proposed 2026-09-21 from the owner's rulings of that day and mockups `3bf7d244` (final), `8addd12a`, `e4ba1fac`. Amended 2026-10-17 by §11: a row's dot is the session dot (no yellow), and a row resolves the model its agent ran on. Amended 2026-10-19 by §10/§11: a finished agent with work still running below it is steady green, finished, stopped and loaded rows are grey, and rows are never dimmed. Amended 2026-10-25 by [ADR-111](adr-111_opencode-native-subagent-parity.md): opencode sends task lifecycle events (live usage, run index, background state), runs background subagents, and a reopened opencode session loads its children's transcripts.
 **Amends:** [ADR-040](adr-040_engine-neutral-task-lifecycle-events.md) — `activeTasks` is no longer keyed only by the spawning tool call, and the `taskId → toolUseId` mapping is no longer evicted on a terminal notification.
 **Relates to:** [ADR-027](adr-027_test-data-attributes.md) (the `data-testid` tiers the new surfaces carry), [ADR-033](adr-033_cross-engine-dispatch.md) (dispatch cards share the `task` ToolView), [ADR-035](adr-035_pi-engine-backend.md) / [ADR-036](adr-036_unified-auth-vault.md) (pi subagents), [ADR-070](adr-070_one-auth-surface.md) (the measured top-bar tiers this adds a control to), `docs/protocol-cc/04-system-subtypes.md` §4.4/§4.5/§4.6 (the wire shapes, amended by the probe below)
 
@@ -145,6 +145,7 @@ lifecycle events; opencode, pi and Codex fall through to ADR-040's legacy heuris
   is one row naming its members, not N rows. Splitting it would need a synthetic id scheme through
   the whole task pipeline.
 - **Only Claude can show live usage and a resume count.** Other engines' rows show elapsed time.
+  _Superseded: pi sends lifecycle events since ADR-089, and opencode since [ADR-111](adr-111_opencode-native-subagent-parity.md) §3 (on opencode each run is its own call, so a resume is a new row with a higher run index); Codex still does not._
 
 The derivation is memoized on `messages` identity (or backed by a reducer-maintained `taskOrder`), so
 a `task_progress` tick does not re-scan a long transcript once per agent per tick.
@@ -417,8 +418,8 @@ child's), ClaudeUI sends exactly one notification:
 - `failed`: any other error.
 
 A child's `session.idle` now only seals the child's streams. The exception is a **background** call
-(`metadata.background`, opencode's experimental background subagents, which ClaudeUI does not
-enable). Its part completes while the child runs on, so the child's idle sends the notification.
+(`metadata.background`; opencode 2.x's `subagent` tool takes `background: true` with no gate, and
+ClaudeUI does not block it — [ADR-111](adr-111_opencode-native-subagent-parity.md) §3). Its part completes while the child runs on, so the child's idle sends the notification.
 
 **The child mapping lives as long as the call.** A `childSessions` entry is removed when the call's
 part settles, matched by callID, so a child resumed with `task_id` under a newer call keeps its
@@ -628,7 +629,9 @@ dispatch row uses its actual model when a message carries one, else the requeste
   events. What changes is that a task's identity is the task id, and one task can have several runs.
 - §7 follow-ups, not addressed: a reopened nested agent that died mid-run reads "done", not
   "unfinished" (the `unfinished` fold covers only the main transcript's agents); and a reopened
-  opencode session loads no child transcripts at all.
+  opencode session loads no child transcripts at all. _(Outdated: `history.ts` `readOpencodeHistory` loads the
+  children's transcripts, and since [ADR-111](adr-111_opencode-native-subagent-parity.md) their notifications carry
+  run index and usage.)_
 - §8 depends on opencode wording in two places: the `Task cancelled` string, and the
   `ContextOverflowError` name. Re-check both, and `processor.ts` `halt`, at every opencode bump. If
   two calls ever mapped to the same child at once (a resume registered before the old part settled),

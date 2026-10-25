@@ -20,6 +20,20 @@
  *    or a project file alike, and only for a model ClaudeUI's opencode model
  *    allowlist permits; a refused or malformed model skips the agent (never a
  *    substitute model). With none the agent inherits the parent's.
+ *  - `effort` (the file's top-level key; `thinking` is not read) maps to the
+ *    model's `#variant` — opencode 2.x has no effort field, a variant IS its
+ *    reasoning control — and only when `harness.opencode.model` is set without a
+ *    `#variant` of its own: `model: "<p/id>#<effort>"`. An explicit variant
+ *    wins; with no model there is nothing to attach it to (diagnostic, ignored).
+ *    The mapping is UNVALIDATED here on purpose: the output feeds
+ *    `configIdentity`, so it must be a pure function of the agent files and the
+ *    allowlist (a discovery read would make the server key depend on the model
+ *    cache and could start a second server at boot). An effort that is not one
+ *    of the model's variants makes the agent fail every run; the agent type
+ *    catalog checks it asynchronously against model discovery and warns.
+ *  - Not mapped on opencode 2.x (ADR-103): `permissionMode` (no agent field; only
+ *    permission rules) and `background` (a per-call parameter of the `subagent`
+ *    tool, not an agent field).
  *  - `permissions` are DENY-ONLY (never an allow, so an agent cannot open
  *    anything the user's rules or the parent's ruleset keep closed): a `tools`
  *    list denies every tool action (and `question`, unless it names
@@ -112,6 +126,8 @@ interface ClaudeAgentDef {
   disallowedTools: string[]
   /** `harness.opencode.model`, validated. */
   model?: string
+  /** The top-level `effort` key (trimmed, one token), mapped to a model `#variant` at injection. */
+  effort?: string
   /** The `color` frontmatter key (trimmed, non-empty); for the agent type catalog only. */
   color?: string
 }
@@ -154,6 +170,16 @@ function parseClaudeAgent(
     }
   }
 
+  let effort: string | undefined
+  const rawEffort = Object.prototype.hasOwnProperty.call(doc.data, 'effort')
+    ? (doc.data as Record<string, unknown>).effort
+    : undefined
+  if (rawEffort !== undefined && rawEffort !== null) {
+    const token = typeof rawEffort === 'string' ? rawEffort.trim() : ''
+    if (token !== '' && !/[\s#]/.test(token)) effort = token
+    else warn('effort is not a single word (a model variant name); ignored')
+  }
+
   const color = typeof doc.data.color === 'string' ? doc.data.color.trim() : ''
 
   return {
@@ -165,6 +191,7 @@ function parseClaudeAgent(
     tools,
     disallowedTools: disallowedRaw.kind === 'list' ? disallowedRaw.tools : [],
     ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     ...(color ? { color } : {})
   }
 }
@@ -294,7 +321,10 @@ export interface InjectedAgentInfo {
   name: string
   scope: 'user' | 'project'
   color?: string
+  /** The injected agent's model, `#variant` included (an `effort` mapped by the shim shows here). */
   model?: string
+  /** Set when the shim turned the file's `effort` into this model's variant: the catalog validates it. */
+  effort?: string
 }
 
 export interface ClaudeAgentShimOptions {
@@ -370,11 +400,17 @@ export function loadClaudeAgentsForOpencode(opts: ClaudeAgentShimOptions): Claud
       continue
     }
     const rules = claudeAgentDenyRules(def, opts.mcpServers, diagnostics)
+    const withEffort =
+      def.model !== undefined && def.effort !== undefined && !def.model.includes('#')
+    if (def.effort !== undefined && def.model === undefined) {
+      diagnostics.push(`${def.filePath}: effort needs harness.opencode.model on opencode; ignored`)
+    }
+    const model = withEffort ? `${def.model}#${def.effort}` : def.model
     const agent: Config_AgentEncoded = {
       description: def.description,
       mode: 'subagent',
       system: def.body === '' ? CLAUDE_AGENT_PREAMBLE : `${CLAUDE_AGENT_PREAMBLE}\n\n${def.body}`,
-      ...(def.model ? { model: def.model } : {}),
+      ...(model ? { model } : {}),
       ...(rules.length > 0 ? { permissions: rules } : {})
     }
     const agentBytes = byteLength(JSON.stringify(agent))
@@ -397,7 +433,8 @@ export function loadClaudeAgentsForOpencode(opts: ClaudeAgentShimOptions): Claud
       name: def.name,
       scope: def.scope,
       ...(def.color ? { color: def.color } : {}),
-      ...(def.model ? { model: def.model } : {})
+      ...(model ? { model } : {}),
+      ...(withEffort ? { effort: def.effort } : {})
     })
   }
   return { agents, injected, diagnostics }

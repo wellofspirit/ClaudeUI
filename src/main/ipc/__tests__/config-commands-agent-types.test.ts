@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 const catalog = vi.hoisted(() => ({
-  listAgentTypes: vi.fn((engine: string) => [{ type: `${engine}-type`, source: 'builtin' }])
+  listAgentTypesChecked: vi.fn((engine: string) => [{ type: `${engine}-type`, source: 'builtin' }])
 }))
 vi.mock('../../../core/services/agent-type-catalog', () => catalog)
 
@@ -28,7 +28,7 @@ const command = commands.find((c) => c.channel === 'config:list-agent-types')!
 const invoke = (...args: unknown[]): Promise<unknown> =>
   (command.handler as (...a: unknown[]) => Promise<unknown>)(...args)
 
-beforeEach(() => catalog.listAgentTypes.mockClear())
+beforeEach(() => catalog.listAgentTypesChecked.mockClear())
 
 describe('config:list-agent-types', () => {
   it('is a read-only `config` query', () => {
@@ -41,23 +41,23 @@ describe('config:list-agent-types', () => {
         ok: true,
         data: [{ type: `${engine}-type`, source: 'builtin' }]
       })
-      expect(catalog.listAgentTypes).toHaveBeenLastCalledWith(engine, '/repo/app')
+      expect(catalog.listAgentTypesChecked).toHaveBeenLastCalledWith(engine, '/repo/app')
     }
   })
 
   it('treats a missing, empty or non-string cwd as none', async () => {
     await invoke('claude', '')
-    expect(catalog.listAgentTypes).toHaveBeenLastCalledWith('claude', undefined)
+    expect(catalog.listAgentTypesChecked).toHaveBeenLastCalledWith('claude', undefined)
     await invoke('claude')
-    expect(catalog.listAgentTypes).toHaveBeenLastCalledWith('claude', undefined)
+    expect(catalog.listAgentTypesChecked).toHaveBeenLastCalledWith('claude', undefined)
     await invoke('claude', { not: 'a path' })
-    expect(catalog.listAgentTypes).toHaveBeenLastCalledWith('claude', undefined)
+    expect(catalog.listAgentTypesChecked).toHaveBeenLastCalledWith('claude', undefined)
   })
 
   it('refuses an unknown engine, including a path-shaped one, before the catalog is read', async () => {
     for (const bad of ['gemini', '', '../claude', 'constructor', undefined]) {
       expect(await invoke(bad, '/repo/app')).toMatchObject({ ok: false })
     }
-    expect(catalog.listAgentTypes).not.toHaveBeenCalled()
+    expect(catalog.listAgentTypesChecked).not.toHaveBeenCalled()
   })
 })

@@ -222,6 +222,27 @@ describe('Agent colours settings', () => {
       expect(modelOf('follower')).toBeNull()
     })
 
+    it('shows a catalog warning on the type (an opencode effort that is not a variant)', async () => {
+      Object.assign(window.api, {
+        listAgentTypes: vi.fn(async () => [
+          {
+            type: 'deep',
+            source: 'user',
+            model: 'openai/gpt-6-sol',
+            warning:
+              'effort "ultra" is not a variant of openai/gpt-6-sol; the agent will fail to run'
+          },
+          { type: 'fine', source: 'user', model: 'openai/gpt-6-sol' }
+        ])
+      })
+      render(<Section engine="opencode" />)
+      await waitFor(() => expect(screen.getAllByTestId('AgentColours.row')).toHaveLength(2))
+      expect(within(rowOf('deep')).getByTestId('AgentColours.warning').textContent).toContain(
+        'effort "ultra" is not a variant'
+      )
+      expect(within(rowOf('fine')).queryByTestId('AgentColours.warning')).toBeNull()
+    })
+
     it('shows the picker’s short name for a declared model that has one', async () => {
       useSessionStore.setState({
         availableModels: [

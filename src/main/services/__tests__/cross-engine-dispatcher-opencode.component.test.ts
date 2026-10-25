@@ -1763,6 +1763,52 @@ describe('opencode target — approvals', () => {
       fake.finish('oc-sess-1')
       await running
     })
+
+    it('the target inherits the spawn / websearch / skill asks (R3), and the judge reads them — no allow rule skips it', async () => {
+      const judge = makeScriptedJudge()
+      const { client, fake, ctx, running } = await runningTarget(
+        {
+          ...autoDeps(judge),
+          // Even a user allow for every one of them: a target never takes allow rules, and its
+          // judge has no allow-rule skip (the interactive session's `allowRuleAction` hook).
+          loadUserRules: () => userRules({ allow: ['Task', 'Agent', 'WebSearch', 'Skill(demo)'] })
+        },
+        { autonomyMode: 'auto' }
+      )
+      const rules = createdRules(client)
+      for (const action of ['subagent', 'websearch', 'skill'])
+        expect(rules).toContainEqual({ action, resource: '*', effect: 'ask' })
+      expect(
+        rules.some(
+          (r) => r.effect === 'allow' && ['subagent', 'websearch', 'skill'].includes(r.action)
+        )
+      ).toBe(false)
+      fake.ask('oc-sess-1', {
+        id: 'per_w',
+        action: 'websearch',
+        resources: ['rust news'],
+        callID: 'call_w',
+        input: { query: 'rust news' }
+      })
+      fake.ask('oc-sess-1', {
+        id: 'per_s',
+        action: 'subagent',
+        resources: ['explore'],
+        callID: 'call_s',
+        input: { agent: 'explore', description: 'look', prompt: 'read the repo' }
+      })
+      await tick(8)
+      expect(judge.requests).toHaveLength(2)
+      expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_w', {
+        decision: 'once'
+      })
+      expect(client.replyPermission).toHaveBeenCalledWith('oc-sess-1', 'per_s', {
+        decision: 'once'
+      })
+      expect(emitted(ctx, 'session:approval-request')).toHaveLength(0)
+      fake.finish('oc-sess-1')
+      await running
+    })
   })
 
   it('every reject the dispatcher sent in this suite carried a message', () => {

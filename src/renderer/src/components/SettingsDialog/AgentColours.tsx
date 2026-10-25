@@ -227,6 +227,14 @@ function TypeRow({
               />
             </>
           )}
+          {info.warning && (
+            <>
+              {' · '}
+              <span data-testid="AgentColours.warning" className="text-warning">
+                {info.warning}
+              </span>
+            </>
+          )}
           {override && <ResetLink testid="AgentColours" onReset={() => onPick(undefined)} />}
         </>
       }

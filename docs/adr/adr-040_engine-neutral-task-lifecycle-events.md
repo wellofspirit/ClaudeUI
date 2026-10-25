@@ -43,7 +43,7 @@ tool input, tool results, or turn state.
   the `run_in_background` input — until the matching notification arrives. TaskCard and TaskEntry
   share this predicate.
 - **Legacy fallback, on purpose:** engines that never emit `task_started` (opencode and pi child
-  sessions, historical transcripts, cross-engine dispatch cards driven by synthesized
+  sessions — both send it since ADR-089 and [ADR-111](adr-111_opencode-native-subagent-parity.md) —, historical transcripts, cross-engine dispatch cards driven by synthesized
   notifications) have no record and keep the pre-existing heuristic
   (`isBackground ? !bgNotification : !hasResult`) byte-for-byte. The new signal only ever _adds_
   running-ness; it cannot regress engines that don't speak it.

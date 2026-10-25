@@ -38,6 +38,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
+import { cleanAgentLabel } from '../automode/agent-label'
 import { AutoModeDenialTracker } from '../automode/denial-tracker'
 import { recordToolOutcome, type ToolOutcome } from '../automode/ground-truth'
 import {
@@ -481,12 +482,6 @@ export function taskNotificationText(opts: {
 const attr = (v: string): string => v.replace(/["<>\r\n]/g, ' ')
 
 /**
- * An agent's label as delivered titles and summaries show it: a model-authored
- * description can carry quotes, markup or line breaks (ADR-089 review F5).
- */
-const cleanLabel = (v: string): string => attr(v).trim().slice(0, 64) || 'agent'
-
-/**
  * The identity block appended to every launch's system prompt (S2): who the
  * agent is, who launched it and how to reach it, and how agent messages look.
  * Built from host state only. The spawner is `main` at depth 1 (the main
@@ -500,7 +495,9 @@ export function piAgentIdentityBlock(opts: {
   spawner: { label: string; handle: string } | null
 }): string {
   const who = opts.name ? ` and your name is "${opts.name}"` : ''
-  const spawner = opts.spawner ? `agent "${cleanLabel(opts.spawner.label)}"` : 'the main session'
+  const spawner = opts.spawner
+    ? `agent "${cleanAgentLabel(opts.spawner.label)}"`
+    : 'the main session'
   const handle = opts.spawner ? opts.spawner.handle : 'main'
   return [
     `Your agent id is ${opts.agentId}${who}. You were launched by ${spawner}.`,
@@ -850,14 +847,14 @@ export class PiSubagentManager {
       agentId: opts.agentId,
       originToolUseId: opts.originToolUseId,
       name: opts.name,
-      label: cleanLabel(opts.label),
+      label: cleanAgentLabel(opts.label),
       definition: opts.definition,
       subagentType: opts.subagentType,
       model: opts.model,
       depth: opts.depth,
       spawnerAgentId: opts.spawnerAgentId,
       spawnerToolUseId: opts.spawnerToolUseId,
-      spawnerLabel: opts.spawnerLabel === null ? null : cleanLabel(opts.spawnerLabel),
+      spawnerLabel: opts.spawnerLabel === null ? null : cleanAgentLabel(opts.spawnerLabel),
       canSpawn: opts.canSpawn,
       background: opts.background,
       runIndex: opts.runIndex ?? 0,
@@ -876,7 +873,7 @@ export class PiSubagentManager {
         definition: opts.definition ?? ({ name: opts.subagentType } as PiAgentDefinition),
         description: opts.description,
         prompt: opts.prompt,
-        label: cleanLabel(opts.label),
+        label: cleanAgentLabel(opts.label),
         runner: () => this.live.get(opts.originToolUseId)?.runner ?? null,
         outcomes: new Map(),
         denials: new AutoModeDenialTracker(),

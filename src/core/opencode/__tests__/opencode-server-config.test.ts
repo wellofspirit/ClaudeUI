@@ -84,8 +84,10 @@ describe('buildOpencodeConfig (opencode 2.x)', () => {
     expect(servers.claudeui).toMatchObject({ url: 'http://127.0.0.1:19000/mcp', oauth: false })
   })
 
-  it('plugins lists the directory plugin, and is absent without one', () => {
-    expect(parse({ pluginDir: '/p/claudeui-xeng' }).plugins).toEqual(['/p/claudeui-xeng'])
+  it('plugins lists the directory plugin as a {package, options} entry, and is absent without one', () => {
+    expect(parse({ pluginDir: '/p/claudeui-xeng' }).plugins).toEqual([
+      { package: '/p/claudeui-xeng', options: { modelAllowlist: {} } }
+    ])
     expect(parse({ pluginDir: null })).not.toHaveProperty('plugins')
     expect(parse({})).not.toHaveProperty('plugins')
   })
@@ -142,6 +144,34 @@ describe('configIdentity', () => {
         agentPermissions: { general: [{ action: 'shell', resource: '*', effect: 'ask' }] }
       })
     ).not.toBe(base)
+  })
+
+  it('the model allowlist reaches the plugin as its options (canonical: sorted, deduplicated)', () => {
+    const plugins = parse({
+      pluginDir: '/p/claudeui-xeng',
+      modelAllowlist: { openai: ['gpt-b', 'gpt-a', 'gpt-a'], anthropic: [] }
+    }).plugins
+    expect(plugins).toEqual([
+      {
+        package: '/p/claudeui-xeng',
+        options: { modelAllowlist: { openai: ['gpt-a', 'gpt-b'], anthropic: [] } }
+      }
+    ])
+  })
+
+  it('the model allowlist is part of the identity (a change is a new server); order is not', () => {
+    const base = { bridgedMcp: BRIDGED, pluginDir: '/p', modelAllowlist: { openai: ['a', 'b'] } }
+    const id = configIdentity(base)
+    expect(configIdentity({ ...base, modelAllowlist: { openai: ['b', 'a'] } })).toBe(id)
+    expect(configIdentity({ ...base, modelAllowlist: { openai: ['a'] } })).not.toBe(id)
+    expect(configIdentity({ ...base, modelAllowlist: { openai: ['a', 'b'], pi: [] } })).not.toBe(id)
+    // `{provider: []}` restricts the provider to nothing: not the same as no entry.
+    expect(configIdentity({ ...base, modelAllowlist: { openai: [] } })).not.toBe(
+      configIdentity({ ...base, modelAllowlist: {} })
+    )
+    expect(configIdentity({ ...base, modelAllowlist: {} })).toBe(
+      configIdentity({ bridgedMcp: BRIDGED, pluginDir: '/p' })
+    )
   })
 
   it('treats absent and empty the same (no spurious second server)', () => {

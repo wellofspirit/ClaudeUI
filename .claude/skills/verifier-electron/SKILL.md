@@ -356,6 +356,52 @@ Learned verifying pi path containment, judge-off and Agent/Task rules.
   browser project `server.fs.allow: [<worktree>, <main>/node_modules]`; run
   `VITE_CONFIG_NATIVE_IGNORE_WARNING=true bunx vitest run --config <scratch> --project browser`.
 
+## Subagent drives (opencode native subagents)
+
+Learned verifying the opencode subagent parity arc (ADR-111).
+
+- **Ports**: concurrent verifiers collide on fixed stand-in and driver ports; pick distinct ones per run.
+- **The stand-in emits the subagent call** from a prompt token (`[spawn:agent|description|prompt|model|sessionID]`),
+  so the user never types the payload. Hide judge markers from the spawn's OWN review by writing `MRK_` in the
+  prompt and having the stand-in expand it to `MARK_` only inside the child's tool call. Key the judge on
+  `body.model` (a dedicated judge model id), not on the prompt. The static read-only path never asks for
+  `echo …`; use a redirect (`echo X > f.txt`) or `touch` to reach the judge. A judge HTTP 500 forces the human
+  fallback card.
+- **Evidence**: `__claudeuiVerifier.canonical().sessions[id].pendingApprovals[].agent.label` (child cards only),
+  `TaskCard.reviewChip` / `ToolCard.reviewChip`, `TaskCard.expand` (instructions and result are collapsed). Save
+  every judge request body: the merged child transcript is only visible there.
+- **Allowlist**: `window.api.setProviderModelAllowlist('opencode', providerId, ids | null)`; it reaches new
+  sessions only (a new pooled server), so open a fresh session after changing it. Effort warnings:
+  `window.api.listAgentTypes('opencode', cwd)` (field `type`), and in Settings the opencode rail's "Agent colours"
+  sub-page (`AgentColours.warning`), not Appearance → Agents.
+- **Nesting**: opencode's built-in `general` and `explore` deny `subagent`, so a grandchild needs a custom agent
+  that allows it plus `experimental.subagent_depth` ≥ 2 (the first child request may still offer `subagent`
+  before ClaudeUI's child ruleset lands).
+- **An opencode dispatch target needs a pi (or Claude/Codex) parent**: opencode's dispatch tool cannot target
+  opencode. Copy the managed `pi/<version>` into the scratch store, restart, `reloadEngineModels('pi')`, and set
+  BOTH engines' `autoMode.judgeModel`.
+- **Backslashes are halved** on their way through the shell tool: a `\d` in a `sed` or `bash -c` argument arrives as
+  `\d`. Put regexes in heredoc files (`<<'EOF'`) or `String.raw` node scripts.
+- **Idle timeout**: `sessionStore.getState().updateSettings({sessionTimeoutMins: 0.5})` (the Settings minimum is
+  5 min); it applies at a live session's next timer reset. The renderer keeps `status.state` `idle` after a
+  disconnect: read the main log's `[OpencodeSession] Idle timeout — auto-disconnecting` and the sidebar dot
+  `SessionItem.statusDot[data-state]` (`inactive`).
+- **"Ready for input"**: stub `document.hasFocus = () => false` and spy on `window.Notification` (a stub class with
+  `permission = 'granted'`); sanity-check with a plain no-subagent turn first.
+- **Selectors**: `SessionItem.statusDot` (`data-state` running | subagents | idle | attention | inactive,
+  `data-subagents`); the roster opens with `AgentTab`, rows are `AgentRow` (`.stop`, `.resumed`, `.metrics`,
+  `.status[data-status]`); its filter defaults to Running and is sticky (`AgentRoster.filter.all` for finished
+  rows); `TaskCard.stop|sendToBackground|background|resumed|openInPanel`; `TaskEntry.stop`; host notes
+  `MessageBubble.hostLabel`; the composer's Stop `InputBox.cancel`. `sessions[id].activeTasks` records carry
+  `runIndex`, `isBackgrounded`, `wakesParent`; ids rekey to `ses_…` after the first turn.
+- **Project config from the session's cwd**: a project `opencode.json` with `"experimental": {"subagent_depth": 2}`
+  and a custom agent (`"agent": {"nest": {"mode": "subagent", "permission": {"subagent": "allow"}}}`) gives depth 2;
+  `"permission": {"subagent": "ask"}` is the only way a default-mode spawn raises a card. Claude-form allow rules go
+  in `<cwd>/.claude/settings.local.json`; skills in `<cwd>/.opencode/skills/<name>/SKILL.md`.
+- **Hash checks**: the owner's running app rewrites the real `opencode.db`; exclude it from before/after hashes.
+- **Reopen**: quit through the driver, relaunch on the same home, click `SessionItem[data-id=…]` (expand its project
+  row when it is not in Recent); the store holds no sessions until one is opened.
+
 ## Isolation, terminals and native modules
 
 Learned verifying an Electron patch bump (node-pty + better-sqlite3 under a new build):
