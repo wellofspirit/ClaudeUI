@@ -1,6 +1,6 @@
 # ADR-091: Judge blocks hold for the user; session-booted targets are local
 
-**Status:** Accepted (2026-10-03). Built on branch `pre-release`; part 5 records the live-judge tuning.
+**Status:** Accepted (2026-10-03). Built on branch `pre-release`; part 5 records the live-judge tuning. Amended 2026-10-25 by [ADR-111](adr-111_opencode-native-subagent-parity.md): §4 covers opencode task children too.
 **Amends:** [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) (rule corpus),
 [ADR-088](adr-088_dispatch-autonomy-inheritance.md) and [ADR-089](adr-089_pi-subagents-host-run.md)
 (what a delegated call's judge reads). **Relates to:** [ADR-067](adr-067_codex-shared-permission-model.md)
@@ -94,7 +94,8 @@ The causes fall into four groups:
 
 ### 4. Delegated judges read the transcript in time order
 
-The judge transcript for a pi child or a pi/opencode dispatch target becomes:
+The judge transcript for a pi child, an opencode task child (since [ADR-111](adr-111_opencode-native-subagent-parity.md) §1, with its own outcomes and denial
+caps) or a pi/opencode dispatch target becomes:
 
 - the parent transcript;
 - the parent's still-queued user turns;

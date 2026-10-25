@@ -148,6 +148,13 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   waits (5 s cap) until `GET /api/session/active` lists none of them (`session-support.ts`
   `stopOpencodeSessions`): a server shutdown keeps a running execution's claim, and opencode would
   resume it headless on its next start.
+- A CHILD session takes the same `interrupt` (ADR-111 §4, `stopTask`): its job is cancelled; a
+  foreground parent call fails `Subagent cancelled (sessionID …)` and the parent turn goes on; a
+  background child's cancellation reaches the parent as a synthetic `<subagent state="cancelled">`
+  completion, which wakes it. A parent interrupt cancels its foreground children only.
+- `POST …/background` moves EVERY foreground job the session is blocked on (subagents, shells,
+  commands) to the background and posts a synthetic "User requested … moved to the background"
+  note; there is no per-job route, so ClaudeUI does not call it (ADR-111 §4).
 
 ## Permissions (ADR-097 §3; `permission-v2.ts`, `permission-keys.ts`)
 
@@ -187,6 +194,12 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   `session.created{parentID}`, on the child's `session.agent.selected` and on every parent
   re-apply (`child-rulesets.ts`, shared by chats and dispatch targets); a PATCH that fails twice
   interrupts the child and refuses its asks (fail closed).
+- `subagent` asks with `resources:[agent id]`, `save:[agent id]`, no `metadata`: the call's input
+  (`agent`, `description`, `prompt`, `model`, `sessionID`, `background`) comes from its
+  `tool.called`, which is published before the ask. The depth check (`experimental.subagent_depth`,
+  default 1) runs before the ask. `websearch` asks with `resources:[query]`, `metadata` = input;
+  `skill` with `resources:[skill id]`, after the skill lookup. Auto mode asks for all three
+  (ADR-111 §2).
 
 ## Forms
 
@@ -198,21 +211,22 @@ Dispatch targets hide `question` (nobody can answer) and cancel any form that st
 ## The `claudeui-xeng` plugin (`resources/opencode/claudeui-xeng/`)
 
 A DIRECTORY plugin (2.x ignores a plugin path that is a file, with only a warning), import-free,
-default export `{id, setup(ctx)}`, listed in the injected `plugins`. Only the opencode ClaudeUI
-spawns loads it.
+default export `{id, setup(ctx)}`, listed in the injected `plugins` as `{package, options}` (the
+options reach `ctx.options` in `setup`, which re-runs when opencode re-creates an idle-evicted
+location, after an hour by default). Only the opencode ClaudeUI spawns loads it.
 
-| Hook / RPC                    | Why                                                                                                                                                                                                                                                                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tool.hook('execute.before')` | Stamps `__xeng_caller_session` and `__xeng_call_id` into `claudeui_dispatch_agent`'s arguments (events keep the model's input)                                                                                                                                                                                                        |
-| `permission.evaluate`         | Re-evaluates the CONFIGURED rules (agent, then session) read back by session id and keeps the STRICTER effect, so the user's saved "always" rows never answer ClaudeUI's gates; for a child it also holds the agent's own rules alone. Tighten-only; unreadable rules → `ask`; runs only when opencode's own deny check found no deny |
-| `mcp.transform`               | Sets `codemode:false` on every resolved MCP server in place, so the user's own servers are direct tools (Code Mode's `execute` stays hidden), without reading their headers or env                                                                                                                                                    |
-| `rpc claudeui-xeng.tools`     | Lists the registered `claudeui_*` tools (hosted-tools readiness)                                                                                                                                                                                                                                                                      |
-| `rpc claudeui-xeng.guard`     | `{permissionHook, mcpDirect}` — both hooks registered (the turn-running acquire requires it)                                                                                                                                                                                                                                          |
+| Hook / RPC                    | Why                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool.hook('execute.before')` | Stamps `__xeng_caller_session` and `__xeng_call_id` into `claudeui_dispatch_agent`'s arguments (events keep the model's input). On `subagent`, gates the effective model (call `model` > a resumed same-agent child's model > the target agent's) against ClaudeUI's allowlist, read from the plugin entry's `options.modelAllowlist`; a thrown `Error` fails that call alone and the model reads its message (ADR-111 §5) |
+| `permission.evaluate`         | Re-evaluates the CONFIGURED rules (agent, then session) read back by session id and keeps the STRICTER effect, so the user's saved "always" rows never answer ClaudeUI's gates; for a child it also holds the agent's own rules alone. Tighten-only; unreadable rules → `ask`; runs only when opencode's own deny check found no deny                                                                                      |
+| `mcp.transform`               | Sets `codemode:false` on every resolved MCP server in place, so the user's own servers are direct tools (Code Mode's `execute` stays hidden), without reading their headers or env                                                                                                                                                                                                                                         |
+| `rpc claudeui-xeng.tools`     | Lists the registered `claudeui_*` tools (hosted-tools readiness)                                                                                                                                                                                                                                                                                                                                                           |
+| `rpc claudeui-xeng.guard`     | `{permissionHook, mcpDirect, modelGate}` — every hook registered (the turn-running acquire requires it)                                                                                                                                                                                                                                                                                                                    |
 
 ## Hosted MCP and caller identity (ADR-097 §4; `mcp-http-host.ts`, `opencode-hosted-tools.ts`)
 
 - ClaudeUI serves its hosted tools (`render_mermaid`, `create_mockup`, `show_mockup`,
-  `dispatch_agent`) as the `claudeui` MCP server per opencode server: Streamable HTTP on loopback,
+  `dispatch_agent`, `list_models` — the allowlisted models a subagent may name, ADR-111 §5) as the `claudeui` MCP server per opencode server: Streamable HTTP on loopback,
   a static bearer, `oauth:false`, `codemode:false`; one MCP session per opencode location.
 - opencode puts `_meta["ai.opencode/sessionID"]` on EVERY `tools/call`. It wins: the engine sets it
   outside anything the model or a plugin controls. The plugin's stamp is the fallback for a request

@@ -1,7 +1,7 @@
 # ADR-103: Claude Code agent definitions in pi and opencode
 
 **Status:** Accepted (2026-10-16). Implementation on branch `agent-shim`; resume notes in
-`docs/agent-shim-handoff.md`.
+`docs/agent-shim-handoff.md`. Amended 2026-10-25 by [ADR-111](adr-111_opencode-native-subagent-parity.md): opencode maps `effort`; `permissionMode` and `background` stay unmapped.
 **Amends:** [ADR-089](adr-089_pi-subagents-host-run.md) (the pi agent registry gains Claude Code's agent
 folders and the `harness.pi.model` key; `source` becomes `scope` + `origin`).
 **Relates to:** [ADR-097](adr-097_opencode-v2-only.md) §2–§4 (the injected `OPENCODE_CONFIG_CONTENT`, server
@@ -75,6 +75,9 @@ harness sees another's choices.
   ClaudeUI's opencode allowlist skips the agent rather than substitute one). opencode's `system` REPLACES its
   default prompt where pi's `--append-system-prompt` appends; the preamble carries the harness detail so the
   agent file does not have to.
+- _Amended 2026-10-25 ([ADR-111](adr-111_opencode-native-subagent-parity.md) §6):_ a top-level `effort` becomes `#<effort>` on `harness.opencode.model` when
+  that model has no variant of its own (unvalidated at injection; the agent type catalog warns when it is not one
+  of the model's variants). `permissionMode` and `background` are not mapped: opencode agents have no such fields.
 - Tools become **deny-only** permissions: a deny for every action the tools list does not name (and for every
   MCP server it does not name), plus the `disallowedTools`. Never an allow: an allow would widen the
   default rules (e.g. turn the `.env` read asks into allows) and an all-deny would, through the child-session

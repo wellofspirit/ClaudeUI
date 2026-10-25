@@ -6,7 +6,8 @@ pass remain; S9's rule that a dropped target's session is deleted amended 2026-1
 [ADR-105](adr-105_background-dispatch.md): X-Agent sessions are kept and resumed from the ledger;
 §5's "user rows are never touched" amended 2026-10-21: an explicit Remove deletes every credential
 row of the provider, see the end of §5; a target's ruleset carries the user's additional directories since the
-[ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) amendment of 2026-10-24).
+[ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) amendment of 2026-10-24; auto mode asks for `subagent`, `websearch` and `skill` for the judge since
+[ADR-111](adr-111_opencode-native-subagent-parity.md), 2026-10-25).
 It comes from the spike in
 [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md), which has the evidence, citations and live
 transcripts this ADR relies on. **Owner decisions recorded 2026-10-06:**
@@ -195,7 +196,8 @@ session `ask` but never a `deny`; Code Mode's `execute` runtime has an ungated `
   re-apply (the child's copy is a snapshot) and on `session.agent.selected` (a resumed child can
   switch agent); `evaluateChildCall(agentRules, action, resource)` is the host's backstop for an
   ask that comes before the PATCH or that the agent carves itself. Live: the first request is built before the PATCH lands, the call after it (blocked).
-  Static spawn asks and the `subagent:<name>` backstop are not needed in 2.x.
+  Static spawn asks and the `subagent:<name>` backstop are not needed in 2.x. _(Auto mode asks for `subagent`
+  again since [ADR-111](adr-111_opencode-native-subagent-parity.md) §2 — not for the child ruleset, but so the judge reads the delegation payload.)_
 - Overlay (`agents.<name>.permissions`, the manager's default provider): `plan` denies `general`,
   which keeps it out of plan mode's subagent list.
 - **Saved "always" allows are ignored (owner decision 2026-10-06).** The `claudeui-xeng` plugin's
