@@ -8,7 +8,16 @@
  * dir (skipped, with the reason, where the platform refuses to create one).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import {
@@ -2292,8 +2301,10 @@ describe('pathFacts — real links in a temp dir', () => {
  * answer from a table of links (anything else is an ordinary directory), a call on a namespace
  * (`/net`) or UNC spelling throws (the gate must never touch it), and `realpath` only records and
  * answers from `real` (or echoes). `makeVirtualFs` folds a link target's `..` by TEXT, so it
- * cannot stand in for the kernel here: with `a -> /net/h/q`, `a/../b` is `/net/h/b` to the kernel
- * and a sibling of `a` to a text fold.
+ * cannot stand in for the POSIX kernel here: with `a -> /net/h/q`, `a/../b` is `/net/h/b` to the
+ * kernel and a sibling of `a` to a text fold. The table only answers `lstat` / `readlink`: the
+ * ORDER (follow then climb on POSIX, text fold on win32) is the walk's own, and the real-links
+ * test below pins it against what the OS does.
  */
 function kernelLikeFs(
   platform: 'posix' | 'win32',
@@ -2437,7 +2448,7 @@ describe('F5-1 — the POSIX link walk follows a link before it climbs a `..` (k
   })
 })
 
-describe('F5-1 — the win32 link walk follows a link before it climbs a `..`', () => {
+describe('F6-1 — the win32 link walk folds a `..` in a link target as text against the link’s directory', () => {
   const winScope = (fs: PathScopeFs): PiPathScope => ({
     cwd: 'D:\\repo',
     roots: ['D:\\repo'],
@@ -2445,33 +2456,59 @@ describe('F5-1 — the win32 link walk follows a link before it climbs a `..`', 
     homeDir: 'C:\\Users\\u',
     fs
   })
+  const realpaths = (calls: string[]): string[] => calls.filter((c) => c.startsWith('realpath'))
 
-  it('`a\\..\\b` with `a` a link to a UNC share is remote, with no realpath and no call on the share', () => {
+  it('`a\\..\\b` is `b` next to the link, whatever `a` is: a link `b` to a UNC share is remote, with no realpath', () => {
+    // Windows: `docs -> a\..\b` is `D:\repo\b` (a is never followed); `b -> \\h\s` is the share.
     const { fs, calls } = kernelLikeFs('win32', {
       'D:\\repo\\docs': `a${BS}..${BS}b`,
-      'D:\\repo\\a': `${BS}${BS}attacker.example${BS}share${BS}q`
+      'D:\\repo\\a': 'D:\\other\\q',
+      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
     })
     for (const tool of F4_TOOLS) {
       calls.length = 0
       const f = pathFacts(tool, toolInput(tool, 'docs\\readme.md'), winScope(fs))!
       expect(f, tool).toMatchObject({ state: 'unresolved', remote: true })
-      expect(
-        calls.filter((c) => c.startsWith('realpath')),
-        tool
-      ).toEqual([])
+      expect(realpaths(calls), tool).toEqual([])
+      expect(calls, tool).not.toContain('lstat D:\\other\\q')
     }
   })
 
-  it('a link whose target climbs out of a link to a local directory is placed from where the kernel lands', () => {
+  it('the same text fold does not over-ask: a link `a` to a UNC share is never visited when the target climbs out of `a`', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      {
+        'D:\\repo\\docs': `a${BS}..${BS}b`,
+        'D:\\repo\\a': `${BS}${BS}attacker.example${BS}share${BS}q`
+      },
+      { 'D:\\repo\\docs\\n.ts': 'D:\\repo\\b\\n.ts' }
+    )
+    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
+    expect(f).toMatchObject({ remote: false, landing: 'D:\\repo\\b\\n.ts', inScope: true })
+    expect(calls).toContain('lstat D:\\repo\\b')
+  })
+
+  it('a link whose target climbs out of a link to a local directory is placed from the folded spelling', () => {
     const { fs, calls } = kernelLikeFs(
       'win32',
       { 'D:\\repo\\docs': `a${BS}..${BS}b`, 'D:\\repo\\a': 'D:\\other\\q' },
-      { 'D:\\repo\\docs\\n.ts': 'D:\\other\\b\\n.ts' }
+      { 'D:\\repo\\docs\\n.ts': 'D:\\repo\\b\\n.ts' }
     )
     const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
-    expect(f).toMatchObject({ remote: false, landing: 'D:\\other\\b\\n.ts', inScope: false })
-    expect(calls).toContain('lstat D:\\other\\b')
-    expect(calls).not.toContain('lstat D:\\repo\\b')
+    expect(f).toMatchObject({ remote: false, landing: 'D:\\repo\\b\\n.ts', inScope: true })
+    expect(calls).toContain('lstat D:\\repo\\b')
+    expect(calls).not.toContain('lstat D:\\other\\b')
+  })
+
+  it('an absolute target is folded too: `D:\\other\\q\\..\\r` is `D:\\other\\r`', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\docs': `D:${BS}other${BS}q${BS}..${BS}r`,
+      'D:\\other\\q': `${BS}${BS}attacker.example${BS}share`
+    })
+    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
+    expect(f.remote).toBe(false)
+    expect(calls).toContain('lstat D:\\other\\r')
+    expect(calls).not.toContain('lstat D:\\other\\q')
   })
 
   it('a device component in the raw target is still judged before the target is followed', () => {
@@ -2480,6 +2517,145 @@ describe('F5-1 — the win32 link walk follows a link before it climbs a `..`', 
       state: 'unresolved',
       device: true
     })
+  })
+})
+
+describe('F6-2 — a win32 link target with a root that is not `X:\\` is unplaceable before any further call', () => {
+  const winScope = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+
+  it.each([
+    ['an NT device path to the MUP', `${BS}Device${BS}Mup${BS}h${BS}s`],
+    ['an NT global-namespace UNC', `${BS}GLOBAL??${BS}UNC${BS}h${BS}s`],
+    ['an NT device', `${BS}Device${BS}Serial0`],
+    ['DosDevices', `${BS}DosDevices${BS}UNC${BS}h${BS}s`],
+    ['GLOBALROOT', `${BS}GLOBALROOT${BS}Device${BS}Mup${BS}h`],
+    ['a session path', `${BS}Sessions${BS}1${BS}x`],
+    ['a rooted driveless path', `${BS}Windows`],
+    ['a rooted driveless path with a forward slash', '/Device/Mup/h/s'],
+    ['a drive-relative path', 'D:foo']
+  ])(
+    '%s is unreadable: unresolved, not remote, no realpath / exists / further lstat',
+    (_n, target) => {
+      const { fs, calls } = kernelLikeFs('win32', { 'D:\\repo\\docs': target })
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const f = pathFacts(tool, toolInput(tool, 'docs\\readme.md'), winScope(fs))!
+        expect(f, tool).toMatchObject({ state: 'unresolved', remote: false, inScope: false })
+        expect(f.landing, tool).toBeUndefined()
+        expect(
+          calls.filter((c) => /^(?:realpath|exists)/.test(c)),
+          tool
+        ).toEqual([])
+        // the walk ended at the link: nothing after `lstat D:\repo\docs` / `readlink` was asked
+        expect(
+          calls.filter((c) => c.startsWith('lstat') && !c.startsWith('lstat D:\\repo')),
+          tool
+        ).toEqual([])
+      }
+    }
+  )
+
+  it.each([`${BS}??${BS}UNC${BS}h${BS}s`, `${BS}${BS}h${BS}s`, '//h/s'])(
+    'the target %s stays remote',
+    (target) => {
+      const { fs } = kernelLikeFs('win32', { 'D:\\repo\\docs': target })
+      expect(pathFacts('read', { path: 'docs\\f' }, winScope(fs))).toMatchObject({
+        state: 'unresolved',
+        remote: true
+      })
+    }
+  )
+
+  it.each(['d:\\other', 'D:/other', 'sub\\dir'])(
+    'the target %s (an `X:\\` or a relative one) is walked, not refused',
+    (target) => {
+      const { fs } = kernelLikeFs('win32', { 'D:\\repo\\docs': target })
+      expect(pathFacts('read', { path: 'docs\\f' }, winScope(fs))).toMatchObject({
+        state: 'resolved',
+        remote: false
+      })
+    }
+  )
+})
+
+describe('F6-1 — the link walk visits the directory the OS really lands in (real links, both platforms)', () => {
+  let base = ''
+  let cwd = ''
+  let linksWork = true
+  const sep = path.sep
+
+  beforeAll(() => {
+    // the native real path of the temp dir: no 8.3 short names, no /var -> /private/var in the way
+    base = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-path-walk-')))
+    cwd = path.join(base, 'x')
+    mkdirSync(path.join(cwd, 'b'), { recursive: true })
+    mkdirSync(path.join(base, 'deep', 'dir'), { recursive: true })
+    mkdirSync(path.join(base, 'deep', 'b'), { recursive: true })
+    writeFileSync(path.join(cwd, 'b', 'f.txt'), 'x/b')
+    writeFileSync(path.join(base, 'deep', 'b', 'f.txt'), 'deep/b')
+    try {
+      // `a -> ../deep/dir`; `s -> a/../b`: the POSIX kernel follows `a` and climbs from deep/dir
+      // (deep/b), while Windows folds the `..` as text against x (x/b)
+      symlinkSync(['..', 'deep', 'dir'].join(sep), path.join(cwd, 'a'), 'dir')
+      symlinkSync(['a', '..', 'b'].join(sep), path.join(cwd, 's'), 'dir')
+    } catch {
+      linksWork = false
+    }
+  })
+
+  afterAll(() => {
+    // unlink the links without following them, then remove only what this test created
+    for (const name of ['s', 'a']) {
+      try {
+        unlinkSync(path.join(cwd, name))
+      } catch {
+        /* never created */
+      }
+    }
+    for (const name of ['s', 'a']) {
+      let stillLink = false
+      try {
+        stillLink = lstatSync(path.join(cwd, name)).isSymbolicLink()
+      } catch {
+        /* gone */
+      }
+      if (stillLink) return // refuse to recurse past a link that could not be removed
+    }
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  it('lstats the directory realpath lands in, and not the other one', (ctx) => {
+    if (!linksWork) {
+      return ctx.skip() // symlinkSync is refused here (no privilege / Developer Mode)
+    }
+    const landed = realpathSync.native(path.join(cwd, 's'))
+    const candidates = [path.join(cwd, 'b'), path.join(base, 'deep', 'b')]
+    expect(candidates).toContain(landed)
+    const other = candidates.find((c) => c !== landed)!
+
+    const lstats: string[] = []
+    const fs: PathScopeFs = {
+      ...hostPathFs,
+      lstat: (p) => {
+        lstats.push(p)
+        return hostPathFs.lstat(p)
+      }
+    }
+    const f = pathFacts(
+      'read',
+      { path: ['s', 'f.txt'].join(sep) },
+      { cwd, roots: [cwd], platform: process.platform, homeDir: base, fs }
+    )!
+    expect(f).toMatchObject({ state: 'resolved', remote: false })
+    expect(f.landing).toBe(path.join(landed, 'f.txt'))
+    expect(lstats).toContain(landed)
+    expect(lstats).not.toContain(other)
   })
 })
 

@@ -378,13 +378,21 @@ type PlacementTrap = 'remote' | 'device' | 'unreadable'
  * chain past {@link MAX_LINK_HOPS}, answers 'unreadable': the caller treats the path as
  * unplaceable. Only a missing entry ends the walk with undefined: nothing past it exists to be a link.
  *
- * It walks the way the kernel (and Claude Code's own link walk) does, never folding a `..` by
- * text: a link target is first judged on its RAW text, then its components are spliced in front of
- * the parts still to walk, UNNORMALISED, and a `..` is `dirname(current)`. That is valid because
- * every prefix in `current` has already been shown not to be a link, so what `..` climbs to is
- * the textual parent. Folding the target up front (`path.resolve`) would call
- * `/net/h/../../tmp` (`/tmp`) or `a/../b` with `a -> /net/h/q` local, while the kernel follows
- * the link and only then climbs. Every new prefix gets the remote / namespace check.
+ * POSIX walks the way the kernel does, never folding a `..` by text: a link target is first
+ * judged on its RAW text, then its components are spliced in front of the parts still to walk,
+ * UNNORMALISED, and a `..` is `dirname(current)`. That is valid because every prefix in `current`
+ * has already been shown not to be a link, so what `..` climbs to is the textual parent. Folding
+ * the target up front (`path.resolve`) would call `/net/h/../../tmp` (`/tmp`) or `a/../b` with
+ * `a -> /net/h/q` local, while the kernel follows the link and only then climbs. Every new prefix
+ * gets the remote / namespace check. Claude Code's own walk follows-then-climbs on win32 too;
+ * we deliberately do not mirror that there.
+ *
+ * win32 is different: Windows folds a `..` in a link target as TEXT against the link's own
+ * directory (with `x\a -> ..\deep\dir` and `x\s -> a\..\b`, `realpath(x\s)` is `x\b`). So the raw
+ * target is judged (UNC / `\??\` -> remote, a DOS device part -> device), a root that is neither
+ * empty nor `X:\` (an NT object path such as `\Device\Mup\h\s`, or `D:foo`) is 'unreadable', and
+ * the rest is folded against the link's directory, checked for a UNC result, and its components
+ * are walked from the root of the result.
  */
 function linkTrap(
   abs: string,
@@ -430,13 +438,25 @@ function linkTrap(
       return 'unreadable'
     }
     const base = flavor.dirname(current)
-    // The target's own text, before any component of it is looked at.
     if (win) {
+      // The target's own text, before any component of it is looked at.
       if (REMOTE_LINK_TARGET.test(target)) return 'remote'
       if (hasDosDevicePart(target)) return 'device'
-    } else if (
-      isPosixNamespacePath(target.startsWith('/') ? target : `${base}/${target}`, platform)
-    ) {
+      // A root that is neither empty (a relative target) nor `X:\` cannot be placed from here:
+      // `\Device\…`, `\GLOBAL??\…`, `\DosDevices\…` are NT object paths the kernel follows (libuv
+      // returns them unchanged), and `D:foo` is relative to the current directory of drive D.
+      const { root: winRoot } = flavor.parse(target)
+      if (winRoot !== '' && !/^[a-z]:[\\/]$/i.test(winRoot)) return 'unreadable'
+      // Windows folds a `..` in a link target as TEXT against the link's own directory
+      // (`a\..\b` is `b`, whatever `a` is), so fold first and walk what is left.
+      const dest = flavor.resolve(base, target)
+      if (isRemoteWindowsPath(dest)) return 'remote'
+      const { root: destRoot } = flavor.parse(dest)
+      current = destRoot
+      todo.push(...componentsOf(dest.slice(destRoot.length)).reverse())
+      continue
+    }
+    if (isPosixNamespacePath(target.startsWith('/') ? target : `${base}/${target}`, platform)) {
       return 'remote'
     }
     const { root: targetRoot } = flavor.parse(target)
