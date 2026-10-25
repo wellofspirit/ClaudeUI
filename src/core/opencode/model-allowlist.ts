@@ -17,6 +17,9 @@ import { loadEngineConfig } from '../services/ui-config'
  * so a hand-edited value fails CLOSED: a lone string is a one-model list, an
  * array keeps its string ids, and any other value allows none of that provider.
  */
+/** Malformed entries already warned about (`provider:value`). */
+const warnedMalformed = new Set<string>()
+
 export function loadOpencodeModelAllowlist(): Record<string, string[]> {
   try {
     const raw: unknown = loadEngineConfig('opencode').opencodeConfig?.modelAllowlist
@@ -33,10 +36,15 @@ export function loadOpencodeModelAllowlist(): Record<string, string[]> {
           : Array.isArray(ids)
             ? ids.filter((id): id is string => typeof id === 'string')
             : []
-      logger.warn(
-        'ModelAllowlist',
-        `malformed modelAllowlist entry for "${provider}": restricted to ${out[provider].length} model(s)`
-      )
+      // Read on every config build, discovery and catalog read: warn once per bad value.
+      const key = `${provider}:${JSON.stringify(ids)}`
+      if (!warnedMalformed.has(key)) {
+        warnedMalformed.add(key)
+        logger.warn(
+          'ModelAllowlist',
+          `malformed modelAllowlist entry for "${provider}": restricted to ${out[provider].length} model(s)`
+        )
+      }
     }
     return out
   } catch {

@@ -98,8 +98,8 @@ carrying the run's usage, run index, summary and background flag.
   note. The note is user-role text (the auto-mode judge reads it as a `User:` line), so it carries nothing the
   model authored: it names the agent by its type (a safe identifier, else `subagent`) and the call id, never
   the call's description or prompt. The call id is provider-stream data, so it is quoted only when it matches
-  `[A-Za-z0-9_.:-]{1,128}` (else "one of your calls"), and the wording is "started by call <id>": a nested call
-  was made by the child, not by the caller.
+  `[A-Za-z0-9_.:-]{1,128}` (else the note says "started by one of your calls"), and the wording is "started by call <id>": a
+  nested call was made by the child, not by the caller.
 - A Stop whose child interrupt cannot be sent is rolled back for the sessions not reached; a descendant that was
   interrupted keeps its `stopped` end.
 - `backgroundTasks` is true; `backgroundTask` is not implemented.
@@ -121,8 +121,9 @@ the already gated parent. An off-list model throws a message that names the allo
 - **Fail closed.** Missing options refuse a model-bearing call.
 - **Guard.** The guard RPC requires `modelGate` and also reports `allowlistLoaded` (the options parsed). ClaudeUI
   logs a warning when it is false and does not refuse: the gate already fails closed per call.
-- **One validation.** `loadOpencodeModelAllowlist` keeps only providers whose value is an array of strings, and
-  drops the rest with a debug line; every consumer trusts its result.
+- **One validation, failing closed.** `loadOpencodeModelAllowlist` validates the shape once and every consumer
+  trusts its result. A present key always restricts: a lone string is a one-model list, an array keeps its string
+  ids, and any other value allows none of that provider. Each malformed entry logs a warning.
 
 ClaudeUI hosts `claudeui_list_models`: the allowlisted models with their `#variant` options, built from ClaudeUI's
 own discovery (pi's `list_models`). Its description keeps opencode's rule: pass a model only when the user asks.
@@ -133,7 +134,7 @@ The shim turns a file's top-level `effort` into `#<effort>` on `harness.opencode
 variant of its own. It is not validated at injection: the shim's output keys the server, so it must be a pure
 function of the files and the allowlist. The agent type catalog checks it against discovery and warns in Settings
 (an unknown variant fails every run of that agent). The check uses the cached discovery, else waits at most 2 s
-on one; it never waits on a server start, and no answer is no warning. opencode agents have no `permissionMode` or default
+for discovery (which may start the pooled server); no answer within that is no warning. opencode agents have no `permissionMode` or default
 `background` field, so neither is mapped.
 
 ## Consequences

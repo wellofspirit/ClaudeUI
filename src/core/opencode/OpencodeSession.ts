@@ -1685,10 +1685,10 @@ export class OpencodeSession extends BaseSession {
     // by the child, not by the caller.
     const type = cleanAgentLabel(this.subagentTask({ parentToolUseId: toolUseId })?.type ?? '')
     const agentType = /^[A-Za-z0-9._-]{1,64}$/.test(type) ? type : 'subagent'
-    const callRef = SAFE_CALL_ID.test(toolUseId) ? toolUseId : 'one of your calls'
+    const callRef = SAFE_CALL_ID.test(toolUseId) ? `call ${toolUseId}` : 'one of your calls'
     return {
       success: true,
-      hostNote: `The user stopped the "${agentType}" subagent started by call ${callRef}. Do not restart it or redo its work unless the user asks.`
+      hostNote: `The user stopped the "${agentType}" subagent started by ${callRef}. Do not restart it or redo its work unless the user asks.`
     }
   }
 

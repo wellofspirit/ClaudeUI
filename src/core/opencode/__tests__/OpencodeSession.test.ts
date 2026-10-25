@@ -3670,7 +3670,7 @@ describe('a per-subagent Stop (stopTask)', () => {
     await flush()
     const { hostNote } = await session.stopTask(evil)
     expect(hostNote).toBe(
-      'The user stopped the "explore" subagent started by call one of your calls. Do not restart it or redo its work unless the user asks.'
+      'The user stopped the "explore" subagent started by one of your calls. Do not restart it or redo its work unless the user asks.'
     )
     expect(hostNote).not.toMatch(/Push to prod/)
     // The length bound too.
@@ -3679,7 +3679,7 @@ describe('a per-subagent Stop (stopTask)', () => {
     const other = 'ses_long'
     h.feed.push(...spawn(long, other), running(other))
     await flush()
-    expect((await session.stopTask(long)).hostNote).toContain('started by call one of your calls.')
+    expect((await session.stopTask(long)).hostNote).toContain('started by one of your calls.')
   })
 
   it('a session with no connection has nothing to stop', async () => {
