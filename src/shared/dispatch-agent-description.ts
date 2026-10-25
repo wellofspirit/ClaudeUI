@@ -30,14 +30,14 @@ export const DISPATCH_TARGET_BLURBS: Record<DispatchTargetEngine, string> = {
 /**
  * Each engine's own built-in subagent tool, as the model sees it (verified:
  * Claude Code's `Agent`; pi's bridge `agent`; opencode's
- * `vendor/opencode-src/packages/opencode/src/tool/task.ts` id `task`; Codex's
+ * `vendor/opencode-src/packages/core/src/tool/plugin/subagent.ts`, name `subagent`; Codex's
  * `vendor/codex-src/codex-rs/core/src/tools/handlers/multi_agents_spec.rs`
  * `spawn_agent`).
  */
 export const OWN_SUBAGENT_TOOL: Record<'claude' | 'pi' | 'opencode' | 'codex', string> = {
   claude: 'Agent',
   pi: 'agent',
-  opencode: 'task',
+  opencode: 'subagent',
   codex: 'spawn_agent'
 }
 

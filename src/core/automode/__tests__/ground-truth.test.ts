@@ -461,6 +461,12 @@ describe('analyzeRedirects', () => {
       ['sub/.ssh/authorized_keys', '.ssh'],
       ['.profile', '.profile'],
       ['.bash_profile', '.bash_profile'],
+      // agent-control list (cli.js 2.1.308 additions): single and multi-component entries
+      ['.idea/workspace.xml', '.idea'],
+      ['sub/.yarn/cache/x.zip', '.yarn'],
+      ['bunfig.toml', 'bunfig.toml'],
+      ['.config/git/config', '.config/git'],
+      ['sub/.CONFIG/Git/ignore', '.CONFIG/Git'],
       // Case-folded: a case-insensitive filesystem would honour this write.
       ['.BASHRC', '.BASHRC']
     ]
@@ -469,6 +475,12 @@ describe('analyzeRedirects', () => {
         expect(posix(`echo x > ${target}`)?.protectedHits).toEqual([hit])
       })
     }
+
+    it('a near miss of the `.config/git` sequence is not a hit', () => {
+      for (const target of ['.config/gitx/a', '.config/foo', 'git/config', '.config/x/git/a']) {
+        expect(posix(`echo x > ${target}`)?.protectedHits, target).toEqual([])
+      }
+    })
 
     it('deduplicates repeated hits', () => {
       const r = posix('echo x > .git/a > .git/b')

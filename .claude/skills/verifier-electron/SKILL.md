@@ -319,6 +319,43 @@ Learned verifying cross-client approval dismiss and dispatch-target scope.
 - **pi's bash strips backslashes** (`cat D:\x` becomes `D:x`): use forward slashes in
   pi commands.
 
+## Permission-ladder drives (pi, opencode)
+
+Learned verifying pi path containment, judge-off and Agent/Task rules.
+
+- **Session cwd in Windows form.** Pass `cygpath -m <dir>` to `createNewSession`: an MSYS
+  path (`/c/Users/…`) fails as "Cannot use simple-git on a directory that does not exist"
+  and then a misleading `spawn …\pi.exe ENOENT`.
+- **Forcing a judge call.** Read-only commands (`echo`, `cat`) take the read-only fast
+  path and an exact allow rule takes the ADR-085 allow-rule gate, so neither reaches the
+  judge: use a mutating command (`touch VERIFY_x.txt`, a redirect) to count judge calls.
+- **Judge on/off and rule files are read at session start**: `loadEngineConfig('pi')` →
+  `autoMode.enabled` → `saveEngineConfig`, or the isolated home's `.claude/settings.json`;
+  create a new session after each change.
+- **pi re-keys its session id after the first turn**: re-read `activeSessionId` before an
+  IPC call (`respondApproval` with the old id silently does nothing).
+- **Stop visibility**: `TaskCard.stop`, `AgentRow.stop`, `TaskEntry.stop`; the roster
+  opens (toggles) on `AgentPill`/`AgentTab`; `status.capabilities.backgroundTasks` is in
+  the store. A long native task: have the stand-in's child prompt run `sleep N`.
+- **Isolate the OS temp dir too** for pi drives: TEMP/TMP/TMPDIR in the launch env (assert
+  `os.tmpdir()` in `app.evaluate` first). The scratchpad is
+  `<TEMP>\claudeui\<cwd key>\<session-id>\scratchpad`; pi's spawn args (`--session-id`,
+  `--append-system-prompt`) show in `Get-CimInstance Win32_Process` (`Name -eq 'pi.exe'`;
+  filter on your scratch path — the owner's own app has pi children too).
+- **Pin proof**: pi's write/edit result echoes the path it used (`Successfully wrote to <abs>`),
+  so write with an odd spelling (`@x`, `file:///…`, `/c/…`) and read the result text.
+- **pi's default tool set** has no `grep`/`find`/`ls`, and plan mode hides `edit`/`write`:
+  those ladder rows are reachable only in unit tests.
+- **Historical pi session after a relaunch**: click its sidebar `[data-id]` first, then set
+  engine and model before prompting. Delete: right-click `[data-id]` →
+  `SessionItem.delete` → `DeleteConfirmModal.confirm`. A pi dispatch target resumes by
+  `session_message` only with `dispatch.defaultModel` set in `engines/pi.json`.
+- **Browser test project in a worktree** (the plain run fails with `NetworkError`): a
+  scratch `vitest.browser-wt.config.ts` that imports the worktree's `vitest.config.ts` by
+  `file:///` URL, maps `test.projects` with `root` set to the worktree, and gives the
+  browser project `server.fs.allow: [<worktree>, <main>/node_modules]`; run
+  `VITE_CONFIG_NATIVE_IGNORE_WARNING=true bunx vitest run --config <scratch> --project browser`.
+
 ## Isolation, terminals and native modules
 
 Learned verifying an Electron patch bump (node-pty + better-sqlite3 under a new build):

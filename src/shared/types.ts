@@ -1197,7 +1197,7 @@ export interface DispatchConfig {
  *
  * Engine-neutral as of phase 4: read per engine from `engines/<engineId>.json`
  * by BOTH opencode and pi, which share the whole policy core
- * (`src/main/automode/`) and differ only in their permission intercept and
+ * (`src/core/automode/`) and differ only in their permission intercept and
  * judge transport. Claude is the exception — cli.js ships its own classifier,
  * so none of this reaches it.
  */
@@ -1348,6 +1348,12 @@ export interface ClaudePermissions {
    * a value that carries no information.
    */
   disableAutoMode?: string | undefined
+  /**
+   * `permissions.blockReadsOutsideWorkingDirectories` is `true` in this scope (cli.js: true in
+   * any source wins): file-tool reads outside the working directories are refused in every
+   * mode. Present only when true, so an unset scope compares equal to the old shape.
+   */
+  blockReadsOutsideWorkingDirectories?: boolean
 }
 
 export type PermissionScope = 'user' | 'project' | 'local'

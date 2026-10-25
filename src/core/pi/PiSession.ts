@@ -107,8 +107,7 @@ import {
   decideWithSource,
   piToolKind,
   mergedClaudeRulesFor,
-  withoutAllowRules,
-  sessionAllowKey,
+  piSessionAllowKey,
   normalizeWhitespace,
   PI_TOOL_TO_CLAUDE_TOOL,
   PI_HOSTED_TOOL_NAMES,
@@ -116,6 +115,8 @@ import {
   PLAN_EXIT_OUTSIDE_PLAN_REASON,
   sessionToolDenyRule
 } from './permission-engine'
+import { buildPiPathScope, withPathGuard, type PiPathScope } from './pi-path-scope'
+import { ensurePiScratchpad, scratchpadPromptArgs, type ScratchpadEnv } from './pi-scratchpad'
 import { isSessionToolName, type SessionToolName } from '../../shared/session-tools-description'
 import { piSessionToolsEnv } from '../services/session-tool-specs'
 import {
@@ -473,7 +474,7 @@ export class PiSession extends BaseSession {
       hold?: { reason: string; denials: AutoModeDenialTracker; cancel: () => void }
     }
   >()
-  /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
+  /** "Allow for this session" entries — `bash:<normalized command>`, `edit:<abs path>` / `write:<abs path>`, else the bare pi tool name (see permission-engine.ts's piSessionAllowKey). */
   private sessionAllows = new Set<string>()
   /**
    * The MCP catalog this session's pi registers (ADR-096): read at each spawn,
@@ -487,6 +488,30 @@ export class PiSession extends BaseSession {
   private mcpSkipWarned = false
   /** Lazily loaded, cached merge of the user/project/local Claude permission scopes. Invalidated by notifySettingsChanged() and by persistAllowRules() (so a just-persisted rule is honored on the very next gate call in this same session). */
   private cachedRules: MergedClaudeRules | null = null
+  /**
+   * This session's scratchpad (read + write in scope in every mode) and the project temp dir (read
+   * root), as the path scope takes them: canonical spellings, or undefined while the session has
+   * none (the containment rung then simply has no such root).
+   */
+  private scratchpadDir: string | undefined
+  private projectTempDir: string | undefined
+  /**
+   * The scratchpad's session key, fixed at the first spawn. It is pi's own session id, the one
+   * ClaudeUI persists, rekeys to, resumes by and deletes by: a resumed session's id, or (for a
+   * fresh one) an id ClaudeUI mints and hands pi as `--session-id`, so it is known BEFORE the
+   * spawn that needs it. A fork (pi mints the new id after the spawn) and a respawn after a crash
+   * (pi starts a new session) keep the first key: their scratchpad is reused, but deleting the
+   * session by its new id does not find it.
+   */
+  private scratchKey: string | undefined
+  private readonly scratchpadEnv: Partial<ScratchpadEnv> | undefined
+  /** {@link pathScope}'s memo: rebuilt when the merged rules are (settings change), or a root changes. */
+  private pathScopeMemo: {
+    rules: MergedClaudeRules
+    scratch?: string
+    temp?: string
+    scope: PiPathScope
+  } | null = null
 
   // ── Auto mode (`auto`/`full`) LLM gatekeeper — phase 4 ───────────────────────
   /** Memoized `engines/pi.json#autoMode` (see autoModeConfig()). */
@@ -628,9 +653,12 @@ export class PiSession extends BaseSession {
       spawnPiChild?: SpawnPiChildFn
       subagentsRoot?: string
       loadAgentRegistry?: (cwd: string) => PiAgentRegistry
+      /** Where the scratchpad lives (tests); production uses the OS temp dir. */
+      scratchpad?: Partial<ScratchpadEnv>
     } = {}
   ) {
     super(routingId, win, cwd)
+    this.scratchpadEnv = deps.scratchpad
     this.loadAgentRegistry = deps.loadAgentRegistry ?? ((dir) => loadPiAgentRegistry({ cwd: dir }))
     // The host reads this session LIVE (routingId changes on a rekey).
     // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -644,6 +672,7 @@ export class PiSession extends BaseSession {
           return session.cwd
         },
         currentModel: () => session._model,
+        scratchpadDir: () => session.scratchpadDir,
         skillDirsEnv: () => session.computeSkillDirsEnv(),
         bridgedMcpServers: () => session.mcpCatalog?.servers ?? {},
         send: (channel, data) => session.send(channel, data),
@@ -897,6 +926,19 @@ export class PiSession extends BaseSession {
     return catalog
   }
 
+  /**
+   * Create (or find again) this session's scratchpad and publish it to the path scope and the
+   * judge's environment. A session that cannot have one (a planted link, a foreign owner) simply
+   * has none: containment works without it.
+   */
+  private prepareScratchpad(): { sessionId: string } | undefined {
+    this.scratchKey ??= this.resumeSessionId && !this.forkSession ? this.resumeSessionId : uuid()
+    const pad = ensurePiScratchpad(this.cwd, this.scratchKey, this.scratchpadEnv)
+    this.scratchpadDir = pad?.dir
+    this.projectTempDir = pad?.projectTemp
+    return pad ? { sessionId: this.scratchKey } : undefined
+  }
+
   private async doStart(): Promise<void> {
     const launch = locatePiLaunch()
     if (!launch) throw new Error(harnessUnavailableMessage('pi'))
@@ -963,13 +1005,20 @@ export class PiSession extends BaseSession {
           )
         }
       }
+      const scratchpad = this.prepareScratchpad()
       if (this.resumeSessionId) {
         // Resolve the on-disk file for the resume id; fall back to the raw id
         // (verified: --session accepts an absolute file path) if not found —
         // pi will then report whatever it can, rather than us refusing to spawn.
         const resolvedPath = findPiSessionFile(this.resumeSessionId)
         args.push('--session', resolvedPath ?? this.resumeSessionId)
+      } else if (scratchpad && this.piSessionId === null) {
+        // A fresh session's id is chosen here (`--session-id` creates it), so the scratchpad is
+        // keyed by the id the session is known by from its first turn to its deletion.
+        args.push('--session-id', scratchpad.sessionId)
       }
+      // The model is told where its scratch space is, as Claude Code's is; no scratchpad, no flag.
+      args.push(...scratchpadPromptArgs(this.scratchpadDir))
 
       client = new PiRpcClient(launch, {
         cwd: this.cwd,
@@ -2187,26 +2236,27 @@ export class PiSession extends BaseSession {
    * inner fn only decides; it never mints a hosted-tool grant itself.
    *
    * AUTO MODE'S BASE (phase 4, mirrors OpencodeSession.applyPermissionMode's
-   * `const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode`): with the
-   * classifier active, the mode BASE fed to the engine is `acceptEdits`, not
-   * `auto`. Without this the wiring would be dead code — `modeBaseDecision`
-   * answers 'allow' for every kind under `auto`/`full`, so nothing except a
-   * user-authored ask rule could ever reach the branch below, and those go
-   * straight to the human by G9. The downgrade is what routes bash/dispatch/
-   * unknown-kind calls into the judge while reads and edits stay auto-allowed
-   * (cli.js's fast-path-A equivalence). With auto mode DISABLED, `auto` keeps
-   * its historical allow-everything base — there would be no classifier to
-   * compensate for a tightening.
+   * `const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode`): the ladder is
+   * handed the user's effective mode and `judge: isAutoMode(mode)` and picks the base
+   * itself (permission-engine.ts `ladderBase`). With the classifier active the base is
+   * `acceptEdits`, not `auto`: without that the wiring would be dead code, because an
+   * allow-everything base leaves nothing but a user ask rule to reach the branch below
+   * (and those go straight to the human by G9). The downgrade is what routes bash/
+   * dispatch/unknown-kind calls into the judge while reads and edits stay auto-allowed
+   * (cli.js's fast-path-A equivalence). With auto mode DISABLED (`autoMode.enabled:
+   * false`) there is no judge, so `auto`/`full` read the `default` base with the full
+   * rule set: a human is asked exactly as in `default` and the user's allow rules are
+   * their way to stop being asked — never the old allow-everything base (H2).
    *
-   * AUTO MODE'S RULES (cli.js §3 step 2 parity): the user's ALLOW rules are
-   * filtered out of what the engine decides on, so the actions they would have
-   * silently auto-allowed fall through to the `acceptEdits` base's 'ask' and
-   * reach the classifier instead of bypassing it. Applied HERE, at the
-   * composition seam, rather than inside the pure ladder — see
-   * `withoutAllowRules` for the full reasoning, the live evasion that motivated
-   * it, and why this leaves G9's `source: 'ask-rule'` provenance exact (deny and
-   * ask are both evaluated before the allow tier, so filtering the allow tier
-   * cannot change which of them answers).
+   * AUTO MODE'S RULES (cli.js §3 step 2 parity): under a judged auto mode the user's
+   * ALLOW rules are filtered out of what the ladder decides on, so the actions they would
+   * have silently auto-allowed fall through to the `acceptEdits` base's 'ask' and reach the
+   * classifier instead of bypassing it. The strip lives inside the ladder (one place that
+   * knows "judged auto") — see `withoutAllowRules` for the full reasoning, the live evasion
+   * that motivated it, and why this leaves G9's `source: 'ask-rule'` provenance exact (deny
+   * and ask are both evaluated before the allow tier). A session allow is not stripped, but
+   * it no longer silences the judge for agents, messages, unclassified tools or
+   * agent-control edits (`sessionAllowHolds`, H3).
    */
   private gateToolCallInner = (payload: PiToolCallPayload): Promise<GateDecision> =>
     this.decideToolCall(payload, null)
@@ -2229,7 +2279,45 @@ export class PiSession extends BaseSession {
    * on EVERY call (live, owner ruling 1), and every deny reason uses it where
    * the session's own call reads `this.permissionMode`.
    */
-  private async decideToolCall(
+  private decideToolCall(
+    payload: PiToolCallPayload,
+    scope: PiChildScope | null
+  ): Promise<GateDecision> {
+    // Path containment's two bookends (pi-path-scope.ts): an allowed path-tool call is pinned to
+    // the path that was gated, and one that sat on a human approval is re-checked afterwards.
+    return withPathGuard(payload.toolName, payload.input, this.pathScope(), () =>
+      this.decideToolCallLadder(payload, scope)
+    )
+  }
+
+  /**
+   * The workspace the containment rung checks pi's path tools against: cwd + the user's
+   * additional directories (resolved, with project-settings provenance for the read block) + this
+   * session's scratchpad and project temp dir. Shared by a host-run subagent's calls (the
+   * parent's workspace).
+   */
+  private pathScope(): PiPathScope {
+    const rules = this.currentRules()
+    const memo = this.pathScopeMemo
+    if (
+      memo &&
+      memo.rules === rules &&
+      memo.scratch === this.scratchpadDir &&
+      memo.temp === this.projectTempDir
+    ) {
+      return memo.scope
+    }
+    const scope = buildPiPathScope({
+      cwd: this.cwd,
+      rules,
+      scratchpad: this.scratchpadDir,
+      projectTemp: this.projectTempDir
+    })
+    this.pathScopeMemo = { rules, scratch: this.scratchpadDir, temp: this.projectTempDir, scope }
+    return scope
+  }
+
+  private async decideToolCallLadder(
     payload: PiToolCallPayload,
     scope: PiChildScope | null
   ): Promise<GateDecision> {
@@ -2239,9 +2327,14 @@ export class PiSession extends BaseSession {
     const rules = this.currentRules()
     const autoMode = this.isAutoMode(mode)
     const verdict = decideWithSource(toolName, input, {
-      mode: autoMode ? 'acceptEdits' : mode,
-      rules: autoMode ? withoutAllowRules(rules) : rules,
+      // The user's effective mode and whether the judge is on: the ladder derives its base (and
+      // strips the allow tier for a judged auto mode) from the pair — see `ladderBase`.
+      mode,
+      judge: autoMode,
+      rules,
       sessionAllows: this.sessionAllows,
+      sessionAllowsByPath: true,
+      scope: this.pathScope(),
       cwd: this.cwd,
       // pi's MCP tool names are sanitized (ADR-096): spell rules the same way.
       mcpRuleKey: piMcpRuleKey
@@ -2252,16 +2345,17 @@ export class PiSession extends BaseSession {
     // child takes is gated by this same live mode anyway. After the deny-rule
     // check, before the mode base. In auto mode it falls through: the `task`
     // kind under the `acceptEdits` base asks, and the judge decides.
-    // (The deny-rule guard cannot fire yet: no rule row maps Agent/Task to a
-    // pi kind — permission-engine.ts CLAUDE_TOOL_TO_KIND.)
+    // A user `Agent`/`Task` rule is not bypassed: a deny rule refuses the launch and an ask rule
+    // puts the human card in front of it, in every mode (in auto, G9 sends it to the human).
     // `send_message` takes the same rung (ADR-089 S3b, Q6): a message that
     // resumes or redirects an agent is delegation, judged like a spawn in auto.
-    // (As above, the deny-rule guard cannot fire yet: no rule row maps a
-    // Claude tool to the `detail`/`note` kinds these two tools carry.)
+    // (No rule row maps a Claude tool to the `detail`/`note` kinds it and
+    // `task_stop` carry, so the two source checks cannot fire for them.)
     if (
       (toolName === 'agent' || toolName === 'send_message') &&
       !autoMode &&
-      verdict.source !== 'deny-rule'
+      verdict.source !== 'deny-rule' &&
+      verdict.source !== 'ask-rule'
     ) {
       return { behavior: 'allow' }
     }
@@ -2279,6 +2373,11 @@ export class PiSession extends BaseSession {
       if (verdict.source === 'deny-rule' && verdict.rule) {
         return { behavior: 'deny', reason: `Denied by permission rule: ${verdict.rule}` }
       }
+      // The containment rung's own denials (a write through a symbolic link, a read the read block
+      // refuses) carry the model-facing text.
+      if (verdict.source === 'path-scope' && verdict.message) {
+        return { behavior: 'deny', reason: verdict.message }
+      }
       // exit_plan OUTSIDE plan mode (M5a addendum): registerTool
       // auto-activates the tool, so the model can see/call exit_plan in any
       // mode until the extension's session_start hook hides it —
@@ -2295,6 +2394,17 @@ export class PiSession extends BaseSession {
         return { behavior: 'deny', reason: PLAN_MODE_DENY_REASON }
       }
       return { behavior: 'deny', reason: 'Denied by permission rules' }
+    }
+
+    // A human-only ask from the containment rung (an unplaceable path, a Windows path trick, an
+    // edit a link carried out of the workspace): a person decides, in every mode — the judge
+    // never sees it, as it never sees a user ask rule.
+    if (verdict.source === 'path-scope') {
+      logger.info(
+        'PiSession',
+        `human-only: ${verdict.pathReason ?? 'path'} (${toolName}${autoMode ? ', auto mode' : ''})`
+      )
+      return this.askHuman(payload, verdict.message, scope)
     }
 
     // 'ask' — in auto mode the classifier gets first refusal; anything it
@@ -2758,7 +2868,9 @@ export class PiSession extends BaseSession {
     // (either would skip the gate's scope and mode-parity checks next time).
     const standing = !isSessionToolName(pending.toolName)
     if (decision === 'allowForSession' && standing) {
-      this.sessionAllows.add(sessionAllowKey(pending.toolName, pending.input))
+      this.sessionAllows.add(
+        piSessionAllowKey(pending.toolName, pending.input, this.cwd, this.pathScope())
+      )
     }
     pending.resolve({ behavior: 'allow' })
 
@@ -2875,19 +2987,27 @@ export class PiSession extends BaseSession {
    *  engine decides with, so the judge and the engine never disagree about what
    *  the rules say — including across a `cachedRules` invalidation.
    *
-   *  pi has no `additionalDirectories` enforcement of its own
-   *  (permission-engine.ts documents the deliberate deferral), but the user's
-   *  configured list is still the honest answer to "which directories did the
-   *  user grant?", so it is reported to the judge exactly as opencode reports
-   *  it. */
+   *  The user's configured `additionalDirectories` are the honest answer to
+   *  "which directories did the user grant?" (they are also the containment
+   *  rung's roots), so they are reported to the judge exactly as opencode
+   *  reports them; the scratchpad, when the session has one, is listed with
+   *  them. */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
     const remotes = await this.sessionGitRemotes()
+    const rules = this.currentRules()
     return buildClassifierEnvironment({
       cwd: this.cwd,
       platform: process.platform,
       remotes,
       repoVisibility: this.sessionRepoVisibility,
-      permissions: this.currentRules(),
+      // The scratchpad is in scope for this session's file tools (path containment), so the judge
+      // is told it is a directory the session may use.
+      permissions: this.scratchpadDir
+        ? {
+            ...rules,
+            additionalDirectories: [...rules.additionalDirectories, this.scratchpadDir]
+          }
+        : rules,
       shared: this.sharedAutoModeConfig()
     })
   }

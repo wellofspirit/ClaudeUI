@@ -47,6 +47,7 @@ import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
+import { removePiScratchpad } from '../pi/pi-scratchpad'
 import { blobStore } from './blob-store'
 import {
   childSessionFile,
@@ -672,7 +673,8 @@ export function resolvePiForkAnchor(sessionId: string, messageIndex: number): Fo
 
 /**
  * Delete a pi session: unlink its .jsonl file and prune the parent
- * `--<mangled-cwd>--` dir if it's now empty. Best-effort: logs + swallows on
+ * `--<mangled-cwd>--` dir if it's now empty, then remove its scratchpad
+ * (ADR-110, `pi/pi-scratchpad.ts`: only once the session itself is gone). Best-effort: logs + swallows on
  * any error (mirrors deleteOpencodeSession) — never throws to the IPC layer. Resolves
  * `false` when the session is still there afterwards (a caller that ends things with
  * the session, like a parent's X-Agents, must not act on a delete that did not happen).
@@ -684,6 +686,14 @@ export function resolvePiForkAnchor(sessionId: string, messageIndex: number): Fo
  * then parsed to confirm, and everything they reach is kept.
  */
 export async function deletePiSession(sessionId: string): Promise<boolean> {
+  const deleted = await deletePiSessionFile(sessionId)
+  // The session's scratchpad (ADR-110) is keyed by this same id, and exists before the session
+  // has a file (nothing is written until its first turn). It goes with the session, nowhere else.
+  if (deleted) removePiScratchpad(sessionId)
+  return deleted
+}
+
+async function deletePiSessionFile(sessionId: string): Promise<boolean> {
   try {
     const filePath = findPiSessionFile(sessionId)
     if (!filePath) return true

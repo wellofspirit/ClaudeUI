@@ -1318,6 +1318,26 @@ describe('Codex first session', () => {
     expect(outside.card).toMatchObject({ toolName: 'fileChange' })
   })
 
+  // The shared ladder's judge flag is opt-in (pi passes it, Codex does not): a Codex session in
+  // `full` keeps the allow-everything mode base — a command runs with no card — while `auto`
+  // is mapped to `default` by the session itself. (Codex's bare-name session-allow keys are
+  // pinned in permission-engine.test.ts.)
+  it("Codex full is unchanged by pi's judge-off rule: an exec approval is allowed with no card", async () => {
+    const { session, approval } = fixture({ permissionMode: 'full' })
+    await session.run('hello')
+    const run = approval({ command: 'rm -rf build' })
+    expect(run.card).toBeUndefined()
+    expect(await run.result).toEqual({ decision: 'accept' })
+  })
+
+  it('Codex auto still gates as default: an exec approval asks the human', async () => {
+    const { session, approval } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    expect(approval({ command: 'rm -rf build' }).card).toMatchObject({
+      toolName: 'commandExecution'
+    })
+  })
+
   it('never suggests a rule that would match every command', async () => {
     const { session, approval } = fixture()
     await session.run('hello')

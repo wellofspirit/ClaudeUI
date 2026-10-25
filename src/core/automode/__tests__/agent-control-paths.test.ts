@@ -5,10 +5,12 @@
  * agent's instructions with no review at all.
  */
 import { describe, it, expect } from 'vitest'
+import { wildcardMatch } from '../../opencode/wildcard'
 import {
   AGENT_CONTROL_DIRS,
   AGENT_CONTROL_FILES,
   agentControlEditPatterns,
+  agentControlSequenceHits,
   isAgentControlPath,
   isAgentControlTarget
 } from '../agent-control-paths'
@@ -43,6 +45,75 @@ describe('isAgentControlPath — what matches', () => {
     '.pi/extensions/evil.ts',
     '.agents/skills/x/SKILL.md'
   ])('%s', (p) => {
+    expect(isAgentControlPath(p)).toBe(true)
+  })
+
+  // cli.js 2.1.308 DANGEROUS_DIRECTORIES / DANGEROUS_FILES beyond the original list.
+  it.each([
+    '.idea/workspace.xml',
+    '.cargo/config.toml',
+    '.yarn/cache/x.zip',
+    '.yarn/releases/yarn-4.js',
+    '.mvn/wrapper/maven-wrapper.properties',
+    '.gitconfig',
+    '.gitmodules',
+    '.bashrc',
+    '.bash_profile',
+    '.zshrc',
+    '.zprofile',
+    '.profile',
+    '.zshenv',
+    '.zlogin',
+    '.zlogout',
+    '.bash_login',
+    '.bash_aliases',
+    '.bash_logout',
+    '.envrc',
+    '.ripgreprc',
+    '.claude.json',
+    '.npmrc',
+    '.yarnrc',
+    '.yarnrc.yml',
+    '.pnp.cjs',
+    '.pnp.loader.mjs',
+    '.pnpmfile.cjs',
+    'bunfig.toml',
+    '.bunfig.toml',
+    '.bazelrc',
+    '.bazelversion',
+    '.bazeliskrc',
+    '.pre-commit-config.yaml',
+    'lefthook.yml',
+    '.lefthook.yml',
+    'lefthook.yaml',
+    '.lefthook.yaml',
+    'gradle/wrapper/gradle-wrapper.properties',
+    'maven-wrapper.properties',
+    'pyrightconfig.json',
+    'packages/a/.npmrc',
+    'packages/a/BUNFIG.TOML'
+  ])('cli.js list: %s', (p) => {
+    expect(isAgentControlPath(p)).toBe(true)
+  })
+
+  // A multi-component entry is an adjacent run of components, at any depth.
+  it.each([
+    '.config/git',
+    '.config/git/config',
+    '.config/git/ignore',
+    'home/u/.config/git/config',
+    '/home/u/.config/git/attributes',
+    'C:\\Users\\u\\.config\\git\\config',
+    '.CONFIG/GIT/config',
+    '.Config/Git',
+    // Win32 trailing dots/spaces and ADS suffixes on either component
+    '.config./git /config',
+    '.config::$DATA/git::$INDEX_ALLOCATION/config',
+    // `.` is dropped; a lexical `..` collapses
+    '.config/./git/config',
+    '.config/sub/../git/config',
+    '.config//git///config'
+  ])('nested entry: %s', (p) => {
     expect(isAgentControlPath(p)).toBe(true)
   })
 
@@ -128,9 +199,70 @@ describe('isAgentControlPath — near misses that must NOT match', () => {
     expect(isAgentControlPath(p)).toBe(false)
   })
 
+  it.each([
+    // `.config/git` is a SEQUENCE: neither half alone, nor a lookalike, nor a gap
+    '.config',
+    '.config/foo',
+    '.config/gitx/config',
+    '.config/git-extras/x',
+    '.config/.git-ish',
+    '.configs/git/config',
+    'x.config/git/config',
+    '.config/x/git/config',
+    'git/config',
+    'git',
+    'src/git/config',
+    // `..` is a barrier: this names `git`, not `.config/git`
+    '.config/../git/config',
+    '.config/..',
+    // names only match as written: backups, examples, stems
+    '.npmrc.bak',
+    'npmrc',
+    'bunfig.toml.example',
+    'bunfig.json',
+    'lefthook.yml.bak',
+    'lefthook.json',
+    '.ideas/x',
+    'my.idea/x',
+    '.idea-notes.md',
+    '.cargo-home/x',
+    'cargo/config.toml',
+    '.yarn-notes/x',
+    '.yarnrc.yml.orig',
+    '.mvnw',
+    'mvn/wrapper.properties',
+    'gradle/wrapper/gradle-wrapper.jar',
+    'gradle-wrapper.properties.bak',
+    'pyrightconfig.jsonc',
+    '.pre-commit-config.yml',
+    // a FILE name only counts as the last component
+    '.npmrc/x',
+    'bunfig.toml/x.ts',
+    '.bashrc/x'
+  ])('near miss: %s', (p) => {
+    expect(isAgentControlPath(p)).toBe(false)
+  })
+
   it('a drive letter never matches', () => {
     expect(isAgentControlPath('C:\\repo\\src\\a.ts')).toBe(false)
     expect(isAgentControlPath('C:')).toBe(false)
+  })
+})
+
+describe('agentControlSequenceHits', () => {
+  it("reports each matched run once, in the path's own spelling", () => {
+    expect(agentControlSequenceHits(['a', '.CONFIG', 'Git', 'config'])).toEqual(['.CONFIG/Git'])
+    expect(agentControlSequenceHits(['.config', 'git', 'x', '.config', 'git'])).toEqual([
+      '.config/git'
+    ])
+    expect(agentControlSequenceHits(['.config', 'sub', '..', 'git'])).toEqual(['.config/git'])
+  })
+
+  it('reports nothing for single-component entries, near misses and barriers', () => {
+    expect(agentControlSequenceHits(['.git', 'config'])).toEqual([])
+    expect(agentControlSequenceHits(['.config', 'gitx'])).toEqual([])
+    expect(agentControlSequenceHits(['.config', '..', 'git'])).toEqual([])
+    expect(agentControlSequenceHits([])).toEqual([])
   })
 })
 
@@ -155,12 +287,15 @@ describe('isAgentControlTarget — resolved against the session cwd', () => {
     expect(isAgentControlTarget('src\\a.ts', 'D:\\repo')).toBe(false)
     expect(isAgentControlTarget('d:\\REPO\\src\\a.ts', 'D:\\repo')).toBe(false)
     expect(isAgentControlTarget('.git\\config', 'D:\\repo')).toBe(true)
+    expect(isAgentControlTarget('.config\\git\\config', 'D:\\repo')).toBe(true)
+    expect(isAgentControlTarget('.config\\gitx\\config', 'D:\\repo')).toBe(false)
     expect(isAgentControlTarget('E:\\x\\.claude\\settings.json', 'D:\\repo')).toBe(true)
     expect(isAgentControlTarget('..\\..\\settings.json', 'D:\\r\\.claude\\worktrees\\x')).toBe(true)
   })
 
   it('no cwd: the path as given', () => {
     expect(isAgentControlTarget('.git/config', undefined)).toBe(true)
+    expect(isAgentControlTarget('.config/git/config', undefined)).toBe(true)
     expect(isAgentControlTarget('src/a.ts', undefined)).toBe(false)
   })
 })
@@ -175,5 +310,55 @@ describe('agentControlEditPatterns', () => {
       expect(patterns).toEqual(expect.arrayContaining([f, `*/${f}`]))
     }
     expect(patterns).toHaveLength(AGENT_CONTROL_DIRS.length * 4 + AGENT_CONTROL_FILES.length * 2)
+  })
+
+  it('renders a sequence entry with its `/` kept', () => {
+    const patterns = agentControlEditPatterns()
+    expect(AGENT_CONTROL_DIRS).toContain('.config/git')
+    expect(patterns).toEqual(
+      expect.arrayContaining(['.config/git', '.config/git/*', '*/.config/git', '*/.config/git/*'])
+    )
+  })
+
+  // The predicate and the opencode patterns come from ONE table: for every
+  // entry, a path the predicate flags must be matched by some pattern (opencode
+  // asks and the gate's clears must agree), and near misses by neither.
+  const matchedByPatterns = (p: string): boolean =>
+    agentControlEditPatterns().some((pat) => wildcardMatch(p, pat, 'linux'))
+  const spellings = (entry: string): string[] => [
+    entry,
+    `${entry}/x`,
+    `a/b/${entry}`,
+    `a/b/${entry}/c/d`,
+    `../${entry}/x`,
+    `/abs/${entry}/x`
+  ]
+
+  it.each(AGENT_CONTROL_DIRS.map((d) => [d]))('directory %s: predicate and patterns agree', (d) => {
+    for (const p of spellings(d)) {
+      expect(isAgentControlPath(p), p).toBe(true)
+      expect(matchedByPatterns(p), p).toBe(true)
+    }
+  })
+
+  it.each(AGENT_CONTROL_FILES.map((f) => [f]))('file %s: predicate and patterns agree', (f) => {
+    for (const p of [f, `a/b/${f}`, `../${f}`, `/abs/${f}`]) {
+      expect(isAgentControlPath(p), p).toBe(true)
+      expect(matchedByPatterns(p), p).toBe(true)
+    }
+    // as a directory component a file name is neither
+    expect(isAgentControlPath(`${f}/x`), f).toBe(false)
+    expect(matchedByPatterns(`${f}/x`), f).toBe(false)
+  })
+
+  it('`.config/git/config` is both a predicate hit and an opencode pattern hit; near misses are neither', () => {
+    for (const p of ['.config/git/config', 'home/u/.config/git/ignore', '.config/git']) {
+      expect(isAgentControlPath(p)).toBe(true)
+      expect(matchedByPatterns(p)).toBe(true)
+    }
+    for (const p of ['.config/gitx/config', 'x.config/git', '.config/foo', 'git/config']) {
+      expect(isAgentControlPath(p)).toBe(false)
+      expect(matchedByPatterns(p)).toBe(false)
+    }
   })
 })

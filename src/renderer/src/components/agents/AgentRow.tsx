@@ -196,6 +196,11 @@ export function AgentRow({
   const setTaskStopping = useSessionStore((s) => s.setTaskStopping)
   const clearTaskStopping = useSessionStore((s) => s.clearTaskStopping)
   const engineId = useActiveSession((s) => s.status.engineId)
+  // A native task is stopped through the session, which only engines with background tasks
+  // implement; a dispatch row is stopped through the dispatcher.
+  const stopSupported = useActiveSession(
+    (s) => row.dispatch !== undefined || s.status.capabilities.backgroundTasks
+  )
   const tile = useAgentTile(engineId, row.type, row.dispatch, knownTypes)
   // The agent's name takes the tier colour of the model it runs on (never a shell's).
   const tierColors = useSessionStore((s) => s.settings.agentModelTierColors)
@@ -333,6 +338,7 @@ export function AgentRow({
         </span>
       )}
       {(row.isRunning || row.isQueued) &&
+        stopSupported &&
         !isContext &&
         (row.depth === 0 || hasLifecycle || row.isQueued) && (
           <button

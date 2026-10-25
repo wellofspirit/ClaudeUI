@@ -142,6 +142,12 @@ import type { PiBridgeHost, PiBridgeHandler } from '../../../core/pi/PiBridgeHos
 import { SyncCore } from '../../../core/sync/sync-core'
 import { addHostObserver, emitEvent, syncCore } from '../../../core/services/sync-host'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
+import { PATH_CHANGED_REASON } from '../../../core/pi/pi-path-scope'
+import {
+  ensurePiScratchpad,
+  scratchpadProjectKey,
+  scratchpadPrompt
+} from '../../../core/pi/pi-scratchpad'
 import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
 import { callerRestrictionFromAgent } from '../../../core/opencode/caller-restriction'
 import {
@@ -254,6 +260,8 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     codexResumeLockWindowMs: 0,
     // A pi target's session directory is "on disk" unless a test says otherwise.
     piSessionDirExists: () => true,
+    // Hermetic: no pi target makes a scratchpad under the real OS temp dir unless a test says so.
+    piScratchpad: () => undefined,
     // The fake cwds below (`/tmp/xeng-project`) are not on disk: a resumed target's directory
     // "exists" unless a test says otherwise.
     targetCwdExists: () => true,
@@ -338,6 +346,11 @@ function makeExtra(overrides: Partial<SdkToolExtra> = {}): SdkToolExtra {
 }
 
 const tick = (): Promise<void> => new Promise((r) => setImmediate(r))
+
+/** What an allowed pi path-tool call answers (H1): `allow` with `path` pinned to the canonical absolute path that was gated. */
+function pinnedAllow(path: string): { behavior: 'allow'; updatedInput: unknown } {
+  return { behavior: 'allow', updatedInput: expect.objectContaining({ path }) }
+}
 
 /**
  * Advance FAKE timers (and flush the microtasks in between) — the watchdog
@@ -2832,9 +2845,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
 
 describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage approval gate', () => {
   // ADR-088: an auto parent's pi target is JUDGED (see the ADR-088 block
-  // below); only with pi's own judge switched off does auto keep the
-  // historical allow-all base.
-  it("T8: 'auto' with pi's autoMode.enabled false auto-allows a mutating tool with NO forwarded approval and no judge call", async () => {
+  // below); with pi's own judge switched off auto reads the `default` base over the target's
+  // rules (H2, R13): nobody reviews, so a human is asked.
+  it("T8: 'auto' with pi's autoMode.enabled false FORWARDS a mutating tool as a human ask — no judge call, no silent allow", async () => {
     const target = makeFakePiTarget()
     const makeJudgeTransport = vi.fn()
     const { dispatcher } = makeHarness({
@@ -2849,13 +2862,62 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
 
-    const decision = await target.gateHandler()({
+    const decisionPromise = target.gateHandler()({
       toolCallId: 'pi-call-1',
       toolName: 'bash',
       input: { command: 'rm -rf x' }
     })
-    expect(decision).toEqual({ behavior: 'allow' })
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    await tick()
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    expect(call).toBeTruthy()
+    const approval = call![1] as { requestId: string; toolUseId?: string }
+    expect(approval.requestId.startsWith(XENG_REQUEST_PREFIX)).toBe(true)
+    expect(approval.toolUseId).toBe('pi-call-1')
+    expect(makeJudgeTransport).not.toHaveBeenCalled()
+
+    expect(dispatcher.resolveApproval(approval.requestId, 'deny', { feedback: 'no' })).toBe(true)
+    expect(await decisionPromise).toEqual({ behavior: 'deny', reason: 'no' })
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("'auto' with pi's judge off: a read in the target's cwd is allowed unasked, an edit is forwarded, a user deny rule still denies, the user's allow tier is not inherited", async () => {
+    const target = makeFakePiTarget()
+    const makeJudgeTransport = vi.fn()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { enabled: false }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport,
+      loadUserRules: () => userRules({ allow: ['Bash(echo hi)'], deny: ['Bash(rm:*)'] })
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    const asks = (): number =>
+      ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request').length
+
+    expect(
+      await target.gateHandler()({ toolCallId: 'r1', toolName: 'read', input: { path: 'a.txt' } })
+    ).toEqual(pinnedAllow('/tmp/xeng-project/a.txt'))
+    expect(
+      await target.gateHandler()({
+        toolCallId: 'd1',
+        toolName: 'bash',
+        input: { command: 'rm -rf x' }
+      })
+    ).toEqual({ behavior: 'deny', reason: 'Denied by permission rule: Bash(rm:*)' })
+    expect(asks()).toBe(0)
+    void target.gateHandler()({ toolCallId: 'e1', toolName: 'edit', input: { path: 'a.txt' } })
+    await tick()
+    expect(asks()).toBe(1)
+    void target.gateHandler()({ toolCallId: 'b1', toolName: 'bash', input: { command: 'echo hi' } })
+    await tick()
+    expect(asks()).toBe(2)
     expect(makeJudgeTransport).not.toHaveBeenCalled()
 
     target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
@@ -2878,7 +2940,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
       toolName: 'read',
       input: { path: 'a.txt' }
     })
-    expect(decision).toEqual({ behavior: 'allow' })
+    expect(decision).toEqual(pinnedAllow('/tmp/xeng-project/a.txt'))
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
 
     target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
@@ -2905,7 +2967,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
       toolName: 'edit',
       input: { path: '/repo/.claude/worktrees/feat/src/a.ts' }
     })
-    expect(decision).toEqual({ behavior: 'allow' })
+    expect(decision).toEqual(pinnedAllow('/repo/.claude/worktrees/feat/src/a.ts'))
     expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
 
     target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
@@ -3088,7 +3150,7 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
         toolName: 'edit',
         input: { path: 'src/b.ts' }
       })
-    ).toEqual({ behavior: 'allow' })
+    ).toEqual(pinnedAllow('/tmp/xeng-project/src/b.ts'))
     expect(
       await target.gateHandler()({
         toolCallId: 'pi-bash-1',
@@ -7227,7 +7289,9 @@ describe('CrossEngineDispatcher — ADR-088: judged dispatch targets', () => {
         reason: 'Auto mode blocked: destroys data'
       })
 
-      expect(await t.gate('pi-call-3', 'read', { path: 'a.txt' })).toEqual({ behavior: 'allow' })
+      expect(await t.gate('pi-call-3', 'read', { path: 'a.txt' })).toEqual(
+        pinnedAllow('/tmp/xeng-project/a.txt')
+      )
       // pi-call-1's allow (one) + pi-call-2's block (two samples, decision 3).
       expect(t.judge.requests).toHaveLength(3)
       expect(approvals(t.ctx)).toHaveLength(1)
@@ -15257,5 +15321,428 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
       expect(dispatcher.inFlightCount).toBe(0)
       expect(ledger.rows.get(row.id)!.state).toBe('idle')
     })
+  })
+})
+
+/**
+ * Slice C (H1) — path containment on a pi dispatch target. The target's workspace is its own cwd
+ * plus `targetRules`' additional directories (and the dispatching session's directory); the verdict
+ * routes like the interactive session's: a containment DENY answers the target with its text, a
+ * human-only ask is forwarded to the dispatching user in EVERY mode (never judged), an out-of-scope
+ * edit is forwarded (judge off) or judged, an outside read follows the table. Real directories under
+ * the OS temp dir, so the link cases exercise the real host filesystem seam.
+ */
+describe('CrossEngineDispatcher — pi target path containment (H1)', () => {
+  const links: string[] = []
+  const mkdir = (...parts: string[]): string => {
+    const dir = join(...parts)
+    mkdirSync(dir, { recursive: true })
+    return dir
+  }
+  const piCfg = (): EngineConfig => ({
+    dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+    autoMode: { enabled: false }
+  })
+  const judgedCfg = (): EngineConfig => ({
+    dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+    autoMode: { twoStageMode: 'fast' }
+  })
+  const approvals = (ctx: ReturnType<typeof makeCtx>): Array<Record<string, unknown>> =>
+    ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:approval-request')
+      .map((c) => c[1] as Record<string, unknown>)
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await tick()
+  }
+
+  let base = ''
+  let parent = ''
+  let outside = ''
+  // Can this platform create a directory link (a junction on Windows)? Probed in a throwaway dir at
+  // collection time so `it.skipIf` can use the answer; the real tree is made in beforeAll.
+  const canLink = (() => {
+    const dir = mkdtempSync(join(tmpdir(), 'xeng-h1-probe-'))
+    try {
+      mkdirSync(join(dir, 'target'))
+      symlinkSync(join(dir, 'target'), join(dir, 'dl'), 'junction')
+      unlinkSync(join(dir, 'dl'))
+      return true
+    } catch {
+      return false
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })()
+
+  beforeAll(() => {
+    base = realpathSync.native(mkdtempSync(join(tmpdir(), 'xeng-h1-')))
+    parent = mkdir(base, 'project')
+    outside = mkdir(base, 'elsewhere')
+    writeFileSync(join(outside, 'f.txt'), 'f\n')
+    writeFileSync(join(parent, 'a.txt'), 'a\n')
+    if (canLink) {
+      symlinkSync(outside, join(parent, 'out'), 'junction')
+      links.push(join(parent, 'out'))
+    }
+  })
+  afterAll(() => {
+    for (const link of links) {
+      try {
+        unlinkSync(link)
+      } catch {
+        /* already gone */
+      }
+    }
+    if (base) rmSync(base, { recursive: true, force: true })
+  })
+
+  async function start(opts: {
+    mode: string
+    judged?: boolean
+    rules?: (cwd: string) => MergedClaudeRules
+  }) {
+    const target = makeFakePiTarget()
+    const judge = makeScriptedJudge()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: opts.judged ? judgedCfg : piCfg,
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport: judge.make,
+      loadUserRules: opts.rules ?? (() => userRules())
+    })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      cwd: parent,
+      getAutonomyMode: () => opts.mode,
+      getMessages: () => [
+        { id: 'p1', role: 'user', content: [{ type: 'text', text: 'tidy up' }], timestamp: 0 }
+      ]
+    })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    const gate = (toolCallId: string, toolName: string, input: Record<string, unknown>) =>
+      target.gateHandler()({ toolCallId, toolName, input })
+    const finish = async (): Promise<void> => {
+      target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await pending
+    }
+    return { target, judge, dispatcher, ctx, gate, finish }
+  }
+
+  it('judge OFF (any autonomy): an edit outside the target workspace is forwarded to the dispatching user, never judged; an outside read asks too', async () => {
+    for (const mode of ['default', 'auto']) {
+      const t = await start({ mode })
+      void t.gate('w1', 'write', { path: join(outside, 'new.txt') })
+      await settle()
+      void t.gate('r1', 'read', { path: join(outside, 'f.txt') })
+      await settle()
+      expect(approvals(t.ctx), mode).toHaveLength(2)
+      expect(t.judge.requests).toHaveLength(0)
+      // inside the workspace: a read is allowed outright (pinned)
+      expect(await t.gate('r2', 'read', { path: 'a.txt' })).toEqual(
+        pinnedAllow(join(parent, 'a.txt'))
+      )
+      await t.finish()
+    }
+  })
+
+  it('judged auto: an outside read is allowed with no judge call and no card; an outside edit is judged', async () => {
+    const t = await start({ mode: 'auto', judged: true })
+    const outsideFile = join(outside, 'f.txt')
+    expect(await t.gate('r1', 'read', { path: outsideFile })).toEqual(pinnedAllow(outsideFile))
+    expect(await t.gate('r2', 'grep', { pattern: 'f', path: outside })).toEqual(
+      pinnedAllow(outside)
+    )
+    expect(t.judge.requests).toHaveLength(0)
+    expect(approvals(t.ctx)).toHaveLength(0)
+    const target = join(outside, 'new.txt')
+    expect(await t.gate('w1', 'write', { path: target })).toEqual(pinnedAllow(target))
+    expect(t.judge.requests).toHaveLength(1)
+    // an in-workspace edit is not judged
+    expect(await t.gate('w2', 'edit', { path: 'a.txt' })).toEqual(
+      pinnedAllow(join(parent, 'a.txt'))
+    )
+    expect(t.judge.requests).toHaveLength(1)
+    await t.finish()
+  })
+
+  it('acceptEdits: an in-workspace edit is allowed (pinned), a sensitive one and an outside one are forwarded', async () => {
+    const t = await start({ mode: 'acceptEdits' })
+    expect(await t.gate('w1', 'edit', { path: 'a.txt' })).toEqual(
+      pinnedAllow(join(parent, 'a.txt'))
+    )
+    void t.gate('w2', 'edit', { path: '.npmrc' })
+    await settle()
+    void t.gate('w3', 'edit', { path: join(outside, 'x.txt') })
+    await settle()
+    expect(approvals(t.ctx)).toHaveLength(2)
+    await t.finish()
+  })
+
+  describe('permissions.blockReadsOutsideWorkingDirectories', () => {
+    const blocked = (over: Partial<MergedClaudeRules> = {}) =>
+      userRules({ blockReadsOutsideWorkingDirectories: true, ...over })
+
+    it('an outside read is denied with the settings message in default AND judged auto — no card, no judge', async () => {
+      for (const [mode, judged] of [
+        ['default', false],
+        ['auto', true]
+      ] as const) {
+        const t = await start({ mode, judged, rules: () => blocked() })
+        const decision = await t.gate('r1', 'read', { path: join(outside, 'f.txt') })
+        expect(decision.behavior, mode).toBe('deny')
+        expect((decision as { reason?: string }).reason).toContain(
+          'blockReadsOutsideWorkingDirectories'
+        )
+        expect(approvals(t.ctx)).toHaveLength(0)
+        expect(t.judge.requests).toHaveLength(0)
+        expect(await t.gate('r2', 'read', { path: 'a.txt' })).toEqual(
+          pinnedAllow(join(parent, 'a.txt'))
+        )
+        await t.finish()
+      }
+    })
+
+    it("a block set only in the worktree's settings still binds the target (the union)", async () => {
+      const wt = mkdir(parent, '.claude', 'worktrees', 'h1-union')
+      const target = makeFakePiTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: piCfg,
+        spawnPiTarget: target.spawnPiTarget,
+        loadUserRules: (cwd: string) =>
+          cwd === uiPath(realpathSync.native(wt)) ? blocked() : userRules()
+      })
+      const ctx = makeCtx({ fromEngine: 'claude', fromRoutingId: 'parent-A', cwd: parent })
+      const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x', workdir: wt }, ctx)
+      await tick()
+      const decision = await target.gateHandler()({
+        toolCallId: 'r1',
+        toolName: 'read',
+        input: { path: join(outside, 'f.txt') }
+      })
+      expect(decision.behavior).toBe('deny')
+      target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      await pending
+    })
+
+    it('an additional directory only PROJECT settings listed does not count for reads under the block; a user-listed one does', async () => {
+      const viaProject = blocked({
+        additionalDirectories: [outside],
+        nonProjectAdditionalDirectories: []
+      })
+      const t1 = await start({ mode: 'default', rules: () => viaProject })
+      expect((await t1.gate('r1', 'read', { path: join(outside, 'f.txt') })).behavior).toBe('deny')
+      await t1.finish()
+
+      const viaUser = blocked({
+        additionalDirectories: [outside],
+        nonProjectAdditionalDirectories: [outside]
+      })
+      const t2 = await start({ mode: 'default', rules: () => viaUser })
+      expect(await t2.gate('r1', 'read', { path: join(outside, 'f.txt') })).toEqual(
+        pinnedAllow(join(outside, 'f.txt'))
+      )
+      await t2.finish()
+    })
+
+    it('with no provenance (a loader that does not report it) every additional directory counts', async () => {
+      const t = await start({
+        mode: 'default',
+        rules: () => blocked({ additionalDirectories: [outside] })
+      })
+      expect(await t.gate('r1', 'read', { path: join(outside, 'f.txt') })).toEqual(
+        pinnedAllow(join(outside, 'f.txt'))
+      )
+      await t.finish()
+    })
+  })
+
+  it('an additional directory is a root for edits too (acceptEdits allows inside it)', async () => {
+    const t = await start({
+      mode: 'acceptEdits',
+      rules: () => userRules({ additionalDirectories: [outside] })
+    })
+    const file = join(outside, 'edit.txt')
+    expect(await t.gate('w1', 'write', { path: file })).toEqual(pinnedAllow(file))
+    expect(approvals(t.ctx)).toHaveLength(0)
+    await t.finish()
+  })
+
+  describe('links', () => {
+    it.skipIf(!canLink)(
+      'judged auto: an edit THROUGH a link out of the workspace is forwarded to the user with zero judge calls; approval pins it',
+      async () => {
+        const t = await start({ mode: 'auto', judged: true })
+        const pending = t.gate('l1', 'edit', { path: 'out/f.txt' })
+        await settle()
+        const [card] = approvals(t.ctx)
+        expect(card).toMatchObject({
+          toolUseId: 'l1',
+          decisionReason: expect.stringContaining('symbolic link')
+        })
+        expect(t.judge.requests).toHaveLength(0)
+        t.dispatcher.resolveApproval(card.requestId as string, 'allow')
+        expect(await pending).toEqual(pinnedAllow(join(parent, 'out', 'f.txt')))
+        expect(t.judge.requests).toHaveLength(0)
+        await t.finish()
+      }
+    )
+
+    it.skipIf(!canLink)(
+      'a write whose path is itself a link is denied with the refusal text, in every mode',
+      async () => {
+        for (const mode of ['default', 'acceptEdits', 'auto']) {
+          const t = await start({ mode })
+          const decision = await t.gate('l2', 'write', { path: 'out' })
+          expect(decision.behavior, mode).toBe('deny')
+          expect((decision as { reason?: string }).reason).toContain('Refusing to write')
+          expect(approvals(t.ctx)).toHaveLength(0)
+          await t.finish()
+        }
+      }
+    )
+
+    it.skipIf(!canLink)(
+      'a link made at the approved path while the forwarded card was open denies the call',
+      async () => {
+        const t = await start({ mode: 'default' })
+        const pending = t.gate('l3', 'write', { path: 'later/x.txt' })
+        await settle()
+        const [card] = approvals(t.ctx)
+        const swapped = join(parent, 'later')
+        symlinkSync(outside, swapped, 'junction')
+        links.push(swapped)
+        t.dispatcher.resolveApproval(card.requestId as string, 'allow')
+        expect(await pending).toEqual({ behavior: 'deny', reason: PATH_CHANGED_REASON })
+        await t.finish()
+      }
+    )
+  })
+
+  it('a deny rule still answers first, on the path pi will open (`@src` spelling)', async () => {
+    const t = await start({
+      mode: 'acceptEdits',
+      rules: () => userRules({ deny: ['Edit(a.txt)'] })
+    })
+    expect(await t.gate('d1', 'edit', { path: '@a.txt' })).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: Edit(a.txt)'
+    })
+    await t.finish()
+  })
+})
+
+/**
+ * Slice E (ADR-110) — a pi dispatch target has its OWN scratchpad, keyed by its ledger row id (so a
+ * resume finds the same directory), told to the model in the spawn args and in scope for its file
+ * tools in every mode. Real directories under a unique temp base (the dispatcher's `piScratchpad`
+ * seam points `ensurePiScratchpad` at it).
+ */
+describe('CrossEngineDispatcher — pi target scratchpad (ADR-110)', () => {
+  let base = ''
+  let parent = ''
+  const approvals = (ctx: ReturnType<typeof makeCtx>): Array<Record<string, unknown>> =>
+    ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:approval-request')
+      .map((c) => c[1] as Record<string, unknown>)
+  const flagValues = (args: readonly string[] | undefined, name: string): string[] =>
+    (args ?? []).flatMap((a, i) => (a === name ? [args![i + 1]] : []))
+  const piCfg = (): EngineConfig => ({
+    dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+    autoMode: { enabled: false }
+  })
+
+  beforeAll(() => {
+    base = realpathSync.native(mkdtempSync(join(tmpdir(), 'xeng-e-')))
+    parent = join(base, 'project')
+    mkdirSync(parent)
+  })
+  afterAll(() => {
+    if (base) rmSync(base, { recursive: true, force: true })
+  })
+
+  function harness(over: { scratchpad?: boolean } = {}) {
+    const target = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    const ledger = makeFakeDispatchLedger()
+    const made: string[] = []
+    const { dispatcher } = makeHarness({
+      ledger,
+      loadEngineConfig: piCfg,
+      spawnPiTarget: target.spawnPiTarget,
+      piScratchpad:
+        over.scratchpad === false
+          ? () => undefined
+          : (cwd, key) => {
+              made.push(key)
+              return ensurePiScratchpad(cwd, key, { tmpdir: () => base })
+            }
+    })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      fromRoutingId: 'parent-E',
+      cwd: parent,
+      getAutonomyMode: () => 'default'
+    })
+    const turn = async (req: Parameters<CrossEngineDispatcher['dispatch']>[0]) => {
+      const pending = dispatcher.dispatch(req, ctx)
+      await tick()
+      target.pushEvent(piAssistantMessageEnd({ text: 'answer' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      return pending
+    }
+    return { target, ledger, dispatcher, ctx, made, turn }
+  }
+
+  it('spawns with its own scratchpad paragraph (keyed by the ledger row), and the same one again on a resume', async () => {
+    const h = harness()
+    await h.turn({ engine: 'pi', prompt: 'one' })
+    const first = h.target.spawnCalls[0].args
+    const [prompt] = flagValues(first, '--append-system-prompt')
+    const row = h.ledger.rowFor('pi', 'pi-sess-A')!
+    expect(h.made).toEqual([`dispatch-${row.id}`])
+    const dir = join(
+      realpathSync.native(join(base, 'claudeui')),
+      scratchpadProjectKey(parent),
+      `dispatch-${row.id}`,
+      'scratchpad'
+    )
+    expect(prompt).toBe(scratchpadPrompt(dir))
+    expect(existsSync(dir)).toBe(true)
+    // the session flags are untouched
+    expect(flagValues(first, '--session-id')).toHaveLength(1)
+
+    h.dispatcher.disposeFor('parent-E')
+    await h.turn({ engine: 'pi', prompt: 'two', sessionId: 'pi-sess-A' })
+    const second = h.target.spawnCalls[1].args
+    expect(flagValues(second, '--append-system-prompt')).toEqual([prompt])
+    expect(h.made).toEqual([`dispatch-${row.id}`, `dispatch-${row.id}`])
+  })
+
+  it('a target that could not have a scratchpad spawns without the flag', async () => {
+    const h = harness({ scratchpad: false })
+    await h.turn({ engine: 'pi', prompt: 'one' })
+    expect(h.target.spawnCalls[0].args).not.toContain('--append-system-prompt')
+  })
+
+  it('its file tools reach the scratchpad in default mode with no card; the rest of the OS temp dir still asks', async () => {
+    const h = harness()
+    const pending = h.dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, h.ctx)
+    await tick()
+    const [prompt] = flagValues(h.target.spawnCalls[0].args, '--append-system-prompt')
+    const dir = prompt.slice('Scratchpad directory: '.length).split('. Use it for')[0]
+    const gate = h.target.gateHandler()
+    const inside = join(dir, 'out.txt')
+    expect(await gate({ toolCallId: 'e1', toolName: 'write', input: { path: inside } })).toEqual({
+      behavior: 'allow',
+      updatedInput: expect.objectContaining({ path: inside })
+    })
+    expect(approvals(h.ctx)).toHaveLength(0)
+    void gate({ toolCallId: 'e2', toolName: 'write', input: { path: join(base, 'elsewhere.txt') } })
+    for (let i = 0; i < 8; i++) await tick()
+    expect(approvals(h.ctx)).toHaveLength(1)
+    h.target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    h.target.pushEvent(PI_AGENT_SETTLED)
+    await pending
   })
 })

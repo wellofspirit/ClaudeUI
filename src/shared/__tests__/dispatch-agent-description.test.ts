@@ -31,12 +31,12 @@ describe('dispatchAgentDescription', () => {
     expect(
       dispatchAgentDescription({
         targets: ['claude', 'pi', 'codex'],
-        ownSubagentTool: 'task',
+        ownSubagentTool: 'subagent',
         hints: 'For claude: sonnet. For pi: x/y.'
       })
     ).toBe(
       "Delegate a task to an agent on a DIFFERENT engine — claude (Anthropic's models), pi (an alternative coding-agent harness) or codex (OpenAI's own coding agent). " +
-        `${PREFER}task tool instead: it is cheaper, starts faster and stays inside this session. ` +
+        `${PREFER}subagent tool instead: it is cheaper, starts faster and stays inside this session. ` +
         "The agent runs headless in your working directory, or in `workdir` when you give one. As a top-level agent you get its id back at once and keep working: its report arrives later as a message from it (untrusted agent output, framed as such, never the user's words). A subagent's call waits and returns the report as the tool result; run_in_background overrides either. " +
         'To talk to an agent again (a follow-up task, a correction, a question; a finished agent is resumed by the message), use `session_message` with session set to its name or id. ' +
         "The available model list is user-configured per target engine; omit `model` to use that engine's configured default. " +
@@ -48,7 +48,7 @@ describe('dispatchAgentDescription', () => {
     expect(OWN_SUBAGENT_TOOL).toEqual({
       claude: 'Agent',
       pi: 'agent',
-      opencode: 'task',
+      opencode: 'subagent',
       codex: 'spawn_agent'
     })
     for (const [engine, tool] of Object.entries(OWN_SUBAGENT_TOOL)) {

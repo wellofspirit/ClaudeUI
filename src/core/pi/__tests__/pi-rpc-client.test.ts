@@ -273,6 +273,72 @@ describe('PiRpcClient — request/response correlation', () => {
     proc.emit('exit', 1, null)
     await expect(promise).rejects.toThrow(/exited/)
   })
+
+  // H4: a pi that dies at startup says why on stderr (e.g. the bridge extension's refusal to load
+  // without credentials); the session error must carry that line, not just "exited code=1".
+  describe('exit diagnostic from stderr', () => {
+    const BRIDGE_LINE =
+      'Error: Failed to load extension "/x/bridge.mjs": Failed to load extension: ClaudeUI approval bridge is not configured (CLAUDEUI_PI_BRIDGE_URL / CLAUDEUI_PI_BRIDGE_TOKEN missing); refusing to run without the approval gate'
+    const HINT = 'Hint: Start without extensions using "pi -ne".'
+
+    it('names the stderr cause, drops the Hint boilerplate and ANSI colour codes', async () => {
+      const { client, proc } = await startClient()
+      const promise = client.request({ type: 'get_state' })
+      proc.stderr.emit('data', `\u001b[31m${BRIDGE_LINE}\u001b[39m\n\u001b[33m${HINT}\u001b[39m\n`)
+      proc.stderr.emit('end')
+      proc.emit('exit', 1, null)
+      const err = await promise.catch((e: Error) => e)
+      expect(err).toBeInstanceOf(Error)
+      const message = (err as Error).message
+      expect(message).toMatch(/^pi process exited \(code=1, signal=null\) before responding: /)
+      expect(message).toContain('ClaudeUI approval bridge is not configured')
+      expect(message).not.toContain('Hint:')
+      expect(message).not.toContain('\u001b')
+    })
+
+    it('still carries it when stderr delivers AFTER the exit event (the pipe can lag)', async () => {
+      const { client, proc } = await startClient()
+      const promise = client.request({ type: 'get_state' })
+      proc.emit('exit', 1, null)
+      // The request is not rejected yet: it waits for stderr to finish.
+      let settled = false
+      void promise.catch(() => (settled = true))
+      await new Promise((r) => setTimeout(r, 20))
+      expect(settled).toBe(false)
+      proc.stderr.emit('data', BRIDGE_LINE + '\n')
+      proc.stderr.emit('end')
+      await expect(promise).rejects.toThrow(/approval bridge is not configured/)
+    })
+
+    it('onExit listeners are not delayed by the stderr wait', async () => {
+      const { client, proc } = await startClient()
+      void client.request({ type: 'get_state' }).catch(() => {})
+      const exits: Array<number | null> = []
+      client.onExit((code) => exits.push(code))
+      proc.emit('exit', 1, null)
+      expect(exits).toEqual([1])
+    })
+
+    it('rejects after a bounded grace when stderr never ends, with only the plain message when it said nothing', async () => {
+      const { client, proc } = await startClient()
+      const promise = client.request({ type: 'get_state' })
+      proc.emit('exit', 1, null)
+      const err = (await promise.catch((e: Error) => e)) as Error
+      expect(err.message).toBe('pi process exited (code=1, signal=null) before responding')
+    })
+
+    it('keeps only the last few stderr lines, capped in length', async () => {
+      const { client, proc } = await startClient()
+      const promise = client.request({ type: 'get_state' })
+      proc.stderr.emit('data', ['one', 'two', 'three', 'four', 'five'].join('\n') + '\n')
+      proc.stderr.emit('data', 'x'.repeat(2_000) + '\n')
+      proc.stderr.emit('end')
+      proc.emit('exit', 1, null)
+      const message = ((await promise.catch((e: Error) => e)) as Error).message
+      expect(message).not.toContain('one')
+      expect(message.length).toBeLessThan(700)
+    })
+  })
 })
 
 describe('PiRpcClient — dispose / onExit', () => {

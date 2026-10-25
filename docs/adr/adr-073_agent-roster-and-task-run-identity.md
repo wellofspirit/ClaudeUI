@@ -371,7 +371,7 @@ was delivered and dropped.
 
 - **Claude:** as above.
 - **opencode:** a subagent may call `task` when `subagent_depth` > 1 (default 1) and its agent's
-  permissions allow it (`vendor/opencode-src/packages/opencode/src/tool/task.ts:104-117,145-149`;
+  permissions allow it (`vendor/opencode-src/packages/core/src/tool/plugin/subagent.ts`;
   ClaudeUI exposes the setting). `handleChildEvent` now registers a child's own `task` call the way
   the own-session path does, so a grandchild's messages reach a bucket under its call id and its
   `session.idle` becomes that call's task-notification. _(Superseded by §8: the terminal notification

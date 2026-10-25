@@ -611,6 +611,9 @@ export function TaskCard({
   // prefix to sanitize) — safe to match unconditionally since only pi ever
   // emits that exact bare name (Claude/opencode use their own prefixed names).
   const isDispatch = isDispatchToolName(block.toolName)
+  // A native task is stopped through the session (session:stop-task -> stopTask), which only
+  // engines with background tasks implement; a dispatch goes through the dispatcher instead.
+  const canStop = canAct && (isDispatch || backgroundTasksEnabled)
   // How a settled X-Agent ended, when only the notification says it (a failed or stopped
   // run, a reload's "interrupted"): the body above is the launch acknowledgement or empty.
   const endNote = dispatchEndNote({
@@ -842,7 +845,7 @@ export function TaskCard({
             queued
           </span>
         )}
-        {(isRunning || isQueued) && !isStopping && canAct && !isPendingApproval && (
+        {(isRunning || isQueued) && !isStopping && canStop && !isPendingApproval && (
           <button
             data-testid="TaskCard.stop"
             onClick={(e) => {

@@ -19,6 +19,7 @@ import {
   type DispatchLedgerStore,
   type DispatchTargetRow
 } from './dispatch-target-ledger'
+import { dispatchScratchpadKey, removePiScratchpad } from '../pi/pi-scratchpad'
 import { claudeSessionsWithNoRecord } from './session-meta-prune'
 import { logger } from './logger'
 
@@ -29,6 +30,8 @@ export interface HarnessCleanupDeps {
   deleteOpencodeSession?: (sessionId: string) => Promise<void>
   /** Remove a pi X-Agent's session directory. */
   removeDir?: (dir: string) => Promise<void>
+  /** Remove a pi X-Agent's scratchpad by its key (link-safe, never throws). */
+  removeScratchpad?: (key: string) => void
   /** Where the pi session directory sits under (tests). Defaults to the user's home. */
   home?: string
 }
@@ -52,6 +55,9 @@ export async function removeHarnessState(
     } else if (row.engine === 'pi') {
       // The id is a validated ref (`dispatchPiSessionDir` throws on anything else), so the
       // path is always the one directory under ~/.claude/ui/dispatch/pi.
+      // Its scratchpad (ADR-110) is session state too: gone with the X-Agent, never before.
+      // First: it never throws, and the removal below may.
+      ;(deps.removeScratchpad ?? removePiScratchpad)(dispatchScratchpadKey(row.id))
       await (deps.removeDir ?? removeTree)(dispatchPiSessionDir(row.id, deps.home))
     }
   } catch (err) {

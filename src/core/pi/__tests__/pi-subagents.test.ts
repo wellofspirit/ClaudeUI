@@ -40,6 +40,7 @@ import {
 import { AutoModeDenialTracker } from '../../automode/denial-tracker'
 import { HostedGrants } from '../hosted-grants'
 import { logger } from '../../services/logger'
+import { scratchpadPrompt } from '../pi-scratchpad'
 import type { PiAgentDelivery } from '../pi-delivery'
 
 type Cmd = Record<string, unknown>
@@ -2776,6 +2777,45 @@ describe('PiSubagentManager — S2: identity in the system prompt, foreground ch
     fake.children[2].push({ type: 'agent_start' })
     fake.children[2].push(deliveredEvent(deliveriesOn(fake.children[2])[0]))
     fake.children[2].push({ type: 'agent_settled' })
+  })
+
+  it('a child is told its PARENT’s scratchpad (ADR-110), live at every launch; a parent without one adds nothing', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    let scratch: string | undefined = '/t/claudeui/proj/sess/scratchpad'
+    host.scratchpadDir = () => scratch
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const text = promptOf(mgr, lead)
+    expect(
+      text.endsWith(`
+
+${scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')}`)
+    ).toBe(true)
+    // the prompt FILE is what pi appends: the flag still names the file, not argv text
+    expect(lead.opts.args!.slice(4, 6)).toEqual([
+      '--append-system-prompt',
+      mgr.record(agentIdOf(lead))!.promptFile
+    ])
+
+    // a grandchild shares the same (the parent session's) scratchpad
+    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    expect(promptOf(mgr, fake.children[1])).toContain(
+      scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')
+    )
+
+    // no scratchpad: the file is the identity block and nothing after it
+    scratch = undefined
+    await mgr.run({ description: 'd2', prompt: 'p2', name: 'plain' }, 'call-P', null)
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    const plain = promptOf(mgr, fake.children[2])
+    expect(plain).not.toContain('Scratchpad directory')
+    for (const c of fake.children) c.push({ type: 'agent_settled' })
   })
 
   it('an unnamed spawner is addressed by its id', async () => {

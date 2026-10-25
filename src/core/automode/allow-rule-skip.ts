@@ -583,14 +583,43 @@ const CWD_TOKEN: StrictToken = {
   ucomma: false
 }
 
-/** Every agent-control name, as a sample a write glob must not match (`.cl*`, `*.md`). */
-const AGENT_CONTROL_SAMPLES: readonly string[] = [...AGENT_CONTROL_DIRS, ...AGENT_CONTROL_FILES]
+/** Every single-component agent-control name, as a sample a write glob must not match (`.cl*`, `*.md`). */
+const AGENT_CONTROL_SAMPLES: readonly string[] = [
+  ...AGENT_CONTROL_DIRS,
+  ...AGENT_CONTROL_FILES
+].filter((name) => !name.includes('/'))
+
+/** The multi-component entries (`.config/git`), one component list each. */
+const AGENT_CONTROL_SEQUENCES: readonly (readonly string[])[] = AGENT_CONTROL_DIRS.filter((d) =>
+  d.includes('/')
+).map((d) => d.split('/'))
 
 const GLOB_CHAR_RE = /[*?[]/
+
+/** Does this component carry a literal character next to its glob (`.cl*`, not `*`)? */
+function isLiteralGlob(component: string): boolean {
+  return GLOB_CHAR_RE.test(component) && !GLOB_ONLY_RE.test(component)
+}
 
 /** Could this glob component (with a literal character) match an agent-control name? */
 function globMayMatchAgentControl(component: string): boolean {
   return AGENT_CONTROL_SAMPLES.some((sample) => wildcardMatch(sample, component, 'win32'))
+}
+
+/**
+ * Could a run of adjacent components, at least one a glob with a literal
+ * character, name a multi-component entry (`.config/g*` → `.config/git`)?
+ * Each component is matched against its own entry component, never across `/`.
+ */
+function globRunMayMatchAgentControlSequence(parts: readonly string[]): boolean {
+  return AGENT_CONTROL_SEQUENCES.some((seq) => {
+    for (let i = 0; i + seq.length <= parts.length; i++) {
+      const run = parts.slice(i, i + seq.length)
+      if (!run.some(isLiteralGlob)) continue
+      if (seq.every((name, k) => wildcardMatch(name, run[k], 'win32'))) return true
+    }
+    return false
+  })
 }
 
 /**
@@ -605,9 +634,13 @@ function globMayMatchAgentControl(component: string): boolean {
  */
 function agentControlGuard(piece: string, effCwd: string): string | undefined {
   if (isAgentControlTarget(piece, effCwd)) return 'path:agent-control'
-  for (const part of piece.split(/[\\/]/)) {
+  const parts = piece.split(/[\\/]/)
+  for (const part of parts) {
     if (!GLOB_CHAR_RE.test(part) || GLOB_ONLY_RE.test(part)) continue
     if (globMayMatchAgentControl(part)) return `path:pattern-may-match-agent-control ${part}`
+  }
+  if (globRunMayMatchAgentControlSequence(parts)) {
+    return `path:pattern-may-match-agent-control ${piece}`
   }
   return undefined
 }
@@ -648,6 +681,9 @@ function findFilterRefusal(values: readonly string[]): string | undefined {
           return `write:find:pattern-may-match-agent-control ${value}`
         }
       } else if (isSensitiveComponent(part)) return `write:find:sensitive ${value}`
+    }
+    if (globRunMayMatchAgentControlSequence(parts)) {
+      return `write:find:pattern-may-match-agent-control ${value}`
     }
     if (isAgentControlPath(value)) return `write:find:agent-control ${value}`
     const last = parts[parts.length - 1]

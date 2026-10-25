@@ -170,6 +170,13 @@ import {
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
+import { buildPiPathScope, withPathGuard, type PiPathScope } from '../pi/pi-path-scope'
+import {
+  dispatchScratchpadKey,
+  ensurePiScratchpad,
+  scratchpadPromptArgs,
+  type PiScratchpad
+} from '../pi/pi-scratchpad'
 import type { CodexMethods } from '../codex/protocol/methods'
 import type { Model } from '../codex/protocol/v2/Model'
 import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
@@ -811,6 +818,11 @@ export interface DispatcherDeps {
   codexHoldsThread?: (threadId: string) => boolean
   /** Does a pi target's session directory still exist? Defaults to `fs.existsSync`. */
   piSessionDirExists?: (dir: string) => boolean
+  /**
+   * A pi target's own scratchpad (ADR-110) for a key stable across its resumes. Defaults to
+   * `ensurePiScratchpad` under the OS temp dir; undefined = the target has none.
+   */
+  piScratchpad?: (cwd: string, key: string) => PiScratchpad | undefined
   /**
    * Does the directory an X-Agent was created in still exist? A resume is refused when it does not
    * (a removed git worktree): the harness would otherwise start in a cwd that is gone, or fall back
@@ -1502,6 +1514,11 @@ interface PiTargetEntry extends TargetLedgerFields {
   sessionId: string | null
   fromRoutingId: string
   cwd: string
+  /**
+   * The target's OWN scratchpad and the project temp dir of its cwd (ADR-110), keyed by its
+   * ledger row id so a resume finds the same directory. Undefined when it could not be made.
+   */
+  scratchpad: PiScratchpad | undefined
   /** The child process + its OWN loopback approval-gate host (ADR-033 §4 — a
    *  dispatch target gets its own bridge, never shares the dispatching
    *  session's), driven by the shared `PiChildRunner` (ADR-089). */
@@ -1513,8 +1530,8 @@ interface PiTargetEntry extends TargetLedgerFields {
    * mode snapshot on this entry: pi's gate is ClaudeUI's own (the bridge
    * asks per call), so nothing native has to agree with it. The mode is
    * passed DIRECTLY (no translation) as `permission-engine.ts`'s
-   * `decideWithSource()` `mode`, except that a judged auto mode decides from
-   * the `acceptEdits` base (see `gatePiTargetToolCall`).
+   * `decideWithSource()` `mode`, with `judge` = whether the target's judge is on
+   * (the ladder derives its base from the pair: see `gatePiTargetToolCall`).
    */
   ctx: RunContext
   /** True while a turn is being driven — same busy-reject rationale as
@@ -2793,12 +2810,20 @@ function piTargetSpawnFlags(
   sessionDir: string,
   sessionId: string,
   handBack: boolean,
-  messaging: boolean
+  messaging: boolean,
+  scratchpadDir?: string
 ): Pick<PiTargetSpawnOpts, 'args' | 'env'> {
   return {
     // Persisted and hidden (ADR-105, the ADR-089 sub-agent precedent): the same two
-    // flags create the session and resume it (pi opens the file when it exists).
-    args: ['--session-dir', sessionDir, '--session-id', sessionId],
+    // flags create the session and resume it (pi opens the file when it exists). The target is
+    // told about its own scratchpad (ADR-110), when it has one.
+    args: [
+      '--session-dir',
+      sessionDir,
+      '--session-id',
+      sessionId,
+      ...scratchpadPromptArgs(scratchpadDir)
+    ],
     env: (bridge) => buildPiTargetChildEnv(bridge, handBack, messaging)
   }
 }
@@ -2824,6 +2849,7 @@ export class CrossEngineDispatcher {
   private readonly codexResumeLockRetryMs: number
   private readonly codexHoldsThread: (threadId: string) => boolean
   private readonly piSessionDirExists: (dir: string) => boolean
+  private readonly piScratchpad: (cwd: string, key: string) => PiScratchpad | undefined
   private readonly targetCwdExists: (cwd: string) => boolean
   private readonly requireHandBack: boolean
   private readonly reports: DispatchReportStore
@@ -2915,6 +2941,7 @@ export class CrossEngineDispatcher {
     this.codexHoldsThread =
       deps.codexHoldsThread ?? ((threadId) => codexHostRegistry.holdsThread(threadId))
     this.piSessionDirExists = deps.piSessionDirExists ?? existsSync
+    this.piScratchpad = deps.piScratchpad ?? ((cwd, key) => ensurePiScratchpad(cwd, key))
     this.targetCwdExists = deps.targetCwdExists ?? existsSync
     this.requireHandBack = deps.requireHandBack ?? false
     this.reports = deps.reports ?? dispatchReports
@@ -3094,7 +3121,24 @@ export class CrossEngineDispatcher {
   ): MergedClaudeRules {
     const sources = uniqueDirs([parentCwd, targetCwd])
     const loaded = sources.map((dir) => ({ dir, rules: this.loadUserRules(dir) }))
+    // Provenance for the read block (path containment): any source setting it binds the target,
+    // and the directories only PROJECT settings listed do not count for reads. A rule loader
+    // without provenance counts every entry.
+    const blockReads = loaded.some((r) => r.rules.blockReadsOutsideWorkingDirectories === true)
     return {
+      ...(blockReads ? { blockReadsOutsideWorkingDirectories: true } : {}),
+      nonProjectAdditionalDirectories: uniqueDirs(
+        [
+          parentCwd,
+          ...loaded.flatMap(({ dir, rules }) =>
+            resolveAdditionalDirectories(
+              rules.nonProjectAdditionalDirectories ?? rules.additionalDirectories,
+              dir
+            )
+          )
+        ],
+        targetCwd
+      ),
       deny: [...new Set([...loaded.flatMap((r) => r.rules.deny), ...(restriction?.deny ?? [])])],
       ask: [...new Set([...loaded.flatMap((r) => r.rules.ask), ...(restriction?.ask ?? [])])],
       allow: [],
@@ -8538,6 +8582,8 @@ export class CrossEngineDispatcher {
       canMessage: sessionToolsAvailable(),
       fromRoutingId: ctx.fromRoutingId,
       cwd,
+      // The ledger row id is stable across resumes (and what ending the X-Agent removes it by).
+      scratchpad: this.piScratchpad(cwd, dispatchScratchpadKey(row.id)),
       // Populated below, once the runner has started — the gate handler and
       // stream closures capture `entry` BY REFERENCE (mirrors
       // createClaudeTargetShell), so it's safe to construct before this field
@@ -8624,7 +8670,8 @@ export class CrossEngineDispatcher {
             dispatchPiSessionDir(row.id),
             harnessId,
             entry.handBack,
-            entry.canMessage
+            entry.canMessage,
+            entry.scratchpad?.dir
           )
         },
         ownerToolUseId: () => entry.ctx.toolUseId,
@@ -8680,7 +8727,8 @@ export class CrossEngineDispatcher {
    * forwarded card (ADR-091 §3: Keep blocked / Approve anyway, Keep blocked on
    * expiry); anything it cannot decide (unavailable, denial cap, the mode left
    * auto meanwhile) goes to the human.
-   * With pi's judge disabled, auto stays the historical allow-all base.
+   * With pi's judge disabled, auto/full read the `default` base over the same rules
+   * (H2): the target's asks are forwarded to the human, not allowed.
    *
    * A 'deny' is either a user deny rule (reported with the rule) or the mode
    * base (plan mode's read-only refusals, `exit_plan` outside plan mode) —
@@ -8707,7 +8755,29 @@ export class CrossEngineDispatcher {
    * gate deliberately does NOT consult, so its practical value would be
    * limited to a future INTERACTIVE pi session, not this or a future dispatch.
    */
-  private async gatePiTargetToolCall(
+  private gatePiTargetToolCall(
+    entry: PiTargetEntry,
+    payload: PiToolCallPayload
+  ): Promise<GateDecision> {
+    // Path containment's bookends (pi/pi-path-scope.ts), as on PiSession: an allowed path-tool
+    // call is pinned to the path that was gated, and one that sat on a forwarded human approval is
+    // re-checked afterwards.
+    return withPathGuard(payload.toolName, payload.input, this.piTargetPathScope(entry), () =>
+      this.gatePiTargetToolCallLadder(entry, payload)
+    )
+  }
+
+  /** The target's workspace for path containment: its cwd + `targetRules`' scope (the user's additional directories, the dispatching session's directory). */
+  private piTargetPathScope(entry: PiTargetEntry): PiPathScope {
+    return buildPiPathScope({
+      cwd: entry.cwd,
+      rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+      scratchpad: entry.scratchpad?.dir,
+      projectTemp: entry.scratchpad?.projectTemp
+    })
+  }
+
+  private async gatePiTargetToolCallLadder(
     entry: PiTargetEntry,
     payload: PiToolCallPayload
   ): Promise<GateDecision> {
@@ -8737,12 +8807,17 @@ export class CrossEngineDispatcher {
       if (denied) return { behavior: 'deny', reason: `Denied by permission rule: ${denied}` }
       if (!auto) return { behavior: 'allow' }
     }
-    // `targetRules` carries no allow tier, so PiSession's `withoutAllowRules`
-    // step would be a no-op here — not called.
+    // The ladder gets the parent's live mode and whether the target's judge is on, and derives
+    // the base from the pair: judged auto -> `acceptEdits` (its asks go to the judge below);
+    // judge off -> the `default` base over the target's own rules (`allow: []` stays: a
+    // target never inherits what the user pre-approved), so a bash call is a forwarded ask
+    // and not the old allow-everything base (H2).
     const verdict = decideWithSource(payload.toolName, payload.input, {
-      mode: auto ? 'acceptEdits' : mode,
+      mode,
+      judge: auto,
       rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       sessionAllows: EMPTY_PI_SESSION_ALLOWS,
+      scope: this.piTargetPathScope(entry),
       // The acceptEdits base matches agent-control paths cwd-relative
       // (ADR-084 §3); without it an absolute path inside a target running in a
       // `.claude/worktrees/<name>` checkout would ask on every edit.
@@ -8759,10 +8834,17 @@ export class CrossEngineDispatcher {
         reason:
           verdict.source === 'deny-rule'
             ? `Denied by permission rule: ${verdict.rule}`
-            : 'Denied by dispatch autonomy mode'
+            : verdict.source === 'path-scope' && verdict.message
+              ? verdict.message
+              : 'Denied by dispatch autonomy mode'
       }
     }
 
+    // A human-only ask from the containment rung: the dispatching user decides, in every mode (the
+    // judge never sees it).
+    if (verdict.source === 'path-scope') {
+      return this.forwardPiTargetAsk(entry, payload, verdict.message)
+    }
     if (!auto) return this.forwardPiTargetAsk(entry, payload)
     // G9 — a user-authored ask rule outranks the judge (zero judge calls).
     if (verdict.source === 'ask-rule') {
