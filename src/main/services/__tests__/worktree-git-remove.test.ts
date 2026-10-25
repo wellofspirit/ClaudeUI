@@ -444,10 +444,12 @@ describe('removeWorktrees: refusals', () => {
     fs.writeFileSync(path.join(inner, 'a.txt'), 'a')
     await git.add('a.txt')
     await git.commit('initial')
-    // Register `outer` as a (valid-looking) linked worktree of the inner repo, by hand.
+    // Register `outer` as a (valid-looking) linked worktree of the inner repo, by hand. HEAD is
+    // read first and the admin dir is then built with no await in between: a half-built admin
+    // dir (no `gitdir` file yet) is prunable, and a background git job removed it on Linux CI.
+    const head = (await git.revparse(['HEAD'])).trim()
     const admin = path.join(inner, '.git', 'worktrees', 'outer')
     fs.mkdirSync(admin, { recursive: true })
-    const head = (await git.revparse(['HEAD'])).trim()
     fs.writeFileSync(path.join(admin, 'HEAD'), `${head}\n`)
     fs.writeFileSync(path.join(admin, 'commondir'), '../..\n')
     fs.writeFileSync(
