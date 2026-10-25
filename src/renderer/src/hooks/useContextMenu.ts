@@ -14,6 +14,9 @@ export type ContextMenuPosition = { x: number; y: number }
  *   it would overflow the viewport edges, so menus opened near the window
  *   edge don't get clipped.
  *
+ * `openAt(x, y)` opens it at client coordinates instead — for a visible button that
+ * opens the same menu (touch screens never fire a context-menu event).
+ *
  * Usage:
  *   const menu = useContextMenu()
  *   <div onContextMenu={menu.open}>...</div>
@@ -26,18 +29,27 @@ export function useContextMenu(): {
   ref: React.RefObject<HTMLDivElement | null>
   style: React.CSSProperties
   open: (e: React.MouseEvent) => void
+  /** Open at viewport (client) coordinates, e.g. under a button. */
+  openAt: (clientX: number, clientY: number) => void
   close: () => void
 } {
   const [anchor, setAnchor] = useState<ContextMenuPosition | null>(null)
   const [resolved, setResolved] = useState<ContextMenuPosition | null>(null)
   const ref = useRef<HTMLDivElement | null>(null)
 
-  const open = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
+  const openAt = useCallback((clientX: number, clientY: number) => {
     const zoom = useSessionStore.getState().settings.uiFontScale
-    setAnchor({ x: e.clientX / zoom, y: e.clientY / zoom })
+    setAnchor({ x: clientX / zoom, y: clientY / zoom })
     setResolved(null)
   }, [])
+
+  const open = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      openAt(e.clientX, e.clientY)
+    },
+    [openAt]
+  )
 
   const close = useCallback(() => {
     setAnchor(null)
@@ -95,5 +107,5 @@ export function useContextMenu(): {
       }
     : {}
 
-  return { isOpen: anchor !== null, ref, style, open, close }
+  return { isOpen: anchor !== null, ref, style, open, openAt, close }
 }

@@ -2261,7 +2261,6 @@ export interface SessionState {
   clearConversation: (routingId: string) => Promise<void>
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
-  clearWorktreeInfo: (routingId: string) => void
   setQuitWorktrees: (
     sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
   ) => void
@@ -3967,9 +3966,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   // Worktree actions. `worktreeInfoMap` is SEALED (`config:sessions-changed`), and
-  // the per-session `worktreeInfo` is projected from it — one map, one writer, so
-  // the reducer's worktree-EXIT rule (drop the entry when cwd returns to
-  // `originalCwd`) can no longer disagree with a second code path.
+  // the per-session `worktreeInfo` is projected from it — one map, one writer. An
+  // entry leaves it main-side (ExitWorktree observed, a worktree removed).
   setWorktreeInfo: (routingId, info) => {
     const state = useSessionStore.getState()
     const worktreeInfoMap = { ...state.worktreeInfoMap }
@@ -3984,14 +3982,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (info?.worktreePath && state.sessions[routingId]?.cwd !== info.worktreePath) {
       patchLocalSession(routingId, { cwd: info.worktreePath })
     }
-    saveSessionConfig(state, { worktreeInfoMap })
-  },
-
-  clearWorktreeInfo: (routingId) => {
-    const state = useSessionStore.getState()
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    delete worktreeInfoMap[routingId]
-    patchLocalApp({ worktreeInfoMap })
     saveSessionConfig(state, { worktreeInfoMap })
   },
 

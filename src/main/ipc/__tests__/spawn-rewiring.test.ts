@@ -99,8 +99,7 @@ vi.mock('../../../core/services/git-service', () => ({
 vi.mock('../../../core/services/worktree', () => ({
   createWorktree: vi.fn(async () => ({ path: '/tmp/wt', branch: 'feat' })),
   getWorktreeStatus: vi.fn(async () => ({ dirty: false })),
-  removeWorktree: vi.fn(async () => {}),
-  listWorktrees: vi.fn(async () => [])
+  removeWorktree: vi.fn(async () => {})
 }))
 vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => []),

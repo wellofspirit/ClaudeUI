@@ -98,6 +98,8 @@ import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
 import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
+import { applySessionMoved } from '../services/worktree-detect'
+import { emitEvent } from '../services/sync-host'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { opencodeAuthHooks } from './opencode-auth-hooks'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
@@ -1322,6 +1324,14 @@ export class OpencodeSession extends BaseSession {
         this.appliedModelKey = this.modelKey(o.model)
         return
       case 'session-renamed':
+        return
+      case 'session-moved':
+        // 3d: mark (or unmark) the session's worktree; `cwd` stays the spawn cwd.
+        try {
+          applySessionMoved(this.routingId, o.directory, this.cwd, emitEvent)
+        } catch (err) {
+          logger.warn('OpencodeSession', `could not record session.moved: ${String(err)}`)
+        }
         return
       case 'session-deleted':
         logger.warn('OpencodeSession', `opencode session ${this.openSessionId} was deleted`)

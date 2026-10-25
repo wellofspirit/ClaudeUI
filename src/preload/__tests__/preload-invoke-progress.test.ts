@@ -47,6 +47,15 @@ type Api = {
     projectKey: string,
     onProgress?: (p: unknown) => void
   ) => Promise<unknown>
+  removeWorktrees: (
+    cwd: string,
+    ids: string[],
+    onProgress?: (p: unknown) => void
+  ) => Promise<unknown>
+  measureWorktree: (cwd: string, id: string, onProgress?: (p: unknown) => void) => Promise<unknown>
+  inventoryWorktrees: (cwd: string) => Promise<unknown>
+  confirmQuit: (removeWorktreePaths?: string[]) => Promise<void>
+  ackQuitPrompt: () => Promise<void>
 }
 let api: Api
 
@@ -166,6 +175,64 @@ describe('preload — loadSessionHistory progress', () => {
     expect(onProgress).toHaveBeenCalledWith({ done: 2, total: 8, phase: 'costs' })
     finish({ totalCostUsd: 1 })
     await p
+  })
+
+  // ADR-112 — the worktree manager. These channels answer the safeHandler envelope, and the
+  // progress path returns it raw, so the wrapper must unwrap it itself.
+  it('removeWorktrees: plain invoke without a callback; with one it rides invoke:with-progress and unwraps the envelope', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: [{ id: 'a', outcome: 'removed' }]
+    })
+    await expect(api.removeWorktrees('/repo', ['a'])).resolves.toEqual([
+      { id: 'a', outcome: 'removed' }
+    ])
+    expect(electron.ipcRenderer.invoke.mock.lastCall).toEqual([
+      'worktree:remove-many',
+      '/repo',
+      ['a']
+    ])
+
+    const onProgress = vi.fn()
+    await expect(api.removeWorktrees('/repo', ['a'], onProgress)).resolves.toEqual([
+      { id: 'a', outcome: 'removed' }
+    ])
+    const [channel, callId, inner, ...wire] = electron.ipcRenderer.invoke.mock.lastCall!
+    expect(channel).toBe('invoke:with-progress')
+    expect(inner).toBe('worktree:remove-many')
+    expect(wire).toEqual(['/repo', ['a']])
+    expect(typeof callId).toBe('string')
+  })
+
+  it('measureWorktree with a callback rejects with the handler’s error, not an envelope', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue({ ok: false, error: 'worktree not found: x' })
+    await expect(api.measureWorktree('/repo', 'x', vi.fn())).rejects.toThrow(
+      'worktree not found: x'
+    )
+    expect(electron.ipcRenderer.invoke.mock.lastCall![2]).toBe('worktree:measure')
+  })
+
+  it('inventoryWorktrees is a plain unwrapped invoke', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue({ ok: true, data: { entries: [] } })
+    await expect(api.inventoryWorktrees('/repo')).resolves.toEqual({ entries: [] })
+    expect(electron.ipcRenderer.invoke.mock.lastCall).toEqual(['worktree:inventory', '/repo'])
+  })
+
+  it('confirmQuit sends the worktree paths (an empty list when none)', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue(undefined)
+    await api.confirmQuit()
+    expect(electron.ipcRenderer.invoke.mock.lastCall).toEqual(['app:quit-confirm', []])
+    await api.confirmQuit(['/repo/.claude/worktrees/a'])
+    expect(electron.ipcRenderer.invoke.mock.lastCall).toEqual([
+      'app:quit-confirm',
+      ['/repo/.claude/worktrees/a']
+    ])
+  })
+
+  it('ackQuitPrompt invokes app:quit-prompting', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue(undefined)
+    await api.ackQuitPrompt()
+    expect(electron.ipcRenderer.invoke.mock.lastCall).toEqual(['app:quit-prompting'])
   })
 
   it('does not expose the raw progress channel on the context bridge (N3)', () => {

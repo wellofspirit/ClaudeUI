@@ -13,7 +13,7 @@ import type {
   PermissionSuggestion,
   TerminalAvailability
 } from '../shared/types'
-import type { IdeAvailability, IdeEntry } from '../shared/remote-protocol'
+import type { IdeAvailability, IdeEntry, InvokeProgress } from '../shared/remote-protocol'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
 import { derivePasswordProof } from './password-proof'
@@ -39,15 +39,30 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
   // (SyncCore phase 0 ack discipline).
   const on = (channel: string): ReturnType<RemoteConnection['on']> => connection.on(channel)
 
-  // Helper: invoke that mirrors preload's unwrap() for safeHandler envelopes
-  async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
-    const result = await connection.invoke(channel, ...args)
+  // Mirrors preload's unwrap() for safeHandler envelopes: `{ ok: false, error }` throws.
+  function unwrapEnvelope<T>(channel: string, result: unknown): T {
     if (result && typeof result === 'object' && 'ok' in result) {
       const envelope = result as { ok: boolean; data?: unknown; error?: string }
       if (!envelope.ok) throw new Error(envelope.error ?? `Remote ${channel} failed`)
       return envelope.data as T
     }
     return result as T
+  }
+
+  async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
+    return unwrapEnvelope<T>(channel, await connection.invoke(channel, ...args))
+  }
+
+  // The progress twin of `unwrap` (ADR-102): same envelope, reported through `onProgress`.
+  async function unwrapWithProgress<T>(
+    channel: string,
+    args: unknown[],
+    onProgress: (progress: InvokeProgress) => void
+  ): Promise<T> {
+    return unwrapEnvelope<T>(
+      channel,
+      await connection.invokeWithProgress(channel, args, onProgress)
+    )
   }
 
   const api: ClaudeAPI = {
@@ -607,19 +622,29 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // capability the `git:*` mutations below already ride, and the gate is
     // SERVER-side. Creating or removing a worktree is git work on the host's
     // repos: no dialog, no window, nothing host-physical. Every handler is
-    // safeHandler-wrapped, so `unwrap` carries the real reason back — where
-    // `listWorktrees` used to answer `[]`, which the modal read as "this repo has
-    // no worktrees" rather than "this client cannot ask".
+    // safeHandler-wrapped, so `unwrap` carries the real reason back (an empty
+    // answer would read as "this repo has no worktrees" rather than "this client
+    // cannot ask").
     createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
     removeWorktree: (worktreePath, branch, gitRoot) =>
       unwrap('worktree:remove', worktreePath, branch, gitRoot),
-    listWorktrees: (cwd) => unwrap('worktree:list', cwd),
+    inventoryWorktrees: (cwd) => unwrap('worktree:inventory', cwd),
+    inspectWorktree: (cwd, id) => unwrap('worktree:inspect', cwd, id),
+    measureWorktree: (cwd, id, onProgress) =>
+      onProgress
+        ? unwrapWithProgress('worktree:measure', [cwd, id], onProgress)
+        : unwrap('worktree:measure', cwd, id),
+    removeWorktrees: (cwd, ids, onProgress) =>
+      onProgress
+        ? unwrapWithProgress('worktree:remove-many', [cwd, ids], onProgress)
+        : unwrap('worktree:remove-many', cwd, ids),
 
     // App lifecycle — quit is desktop-only; no-ops that resolve on web.
     confirmQuit: async () => {}, // No-op on web
     cancelQuit: async () => {}, // No-op on web
+    ackQuitPrompt: async () => {}, // No-op on web
 
     // Git — route through remote server
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),

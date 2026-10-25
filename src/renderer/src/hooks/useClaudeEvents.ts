@@ -41,6 +41,7 @@ import { showVoiceNotice } from '../lib/voice/voice-notice'
 import { voiceController } from '../lib/voice/voice-controller'
 import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
 import { hasWakingTask } from '../lib/task-types'
+import { isCreatedWorktree } from '../../../shared/linked-worktree'
 import { approvalActionName } from '../components/chat/tool-registry/approval-action'
 import type {
   SessionResult,
@@ -496,13 +497,17 @@ export function useClaudeEvents(): void {
       // Before-quit: check for active worktrees
       window.api.onBeforeQuit(() => {
         const store = useSessionStore.getState()
-        const activeWorktrees = Object.entries(store.worktreeInfoMap).map(
-          ([routingId, worktreeInfo]) => ({ routingId, worktreeInfo })
-        )
+        // Only worktrees ClaudeUI created are offered for removal (C-S11); a detected one
+        // belongs to whoever made it.
+        const activeWorktrees = Object.entries(store.worktreeInfoMap)
+          .filter(([, worktreeInfo]) => isCreatedWorktree(worktreeInfo))
+          .map(([routingId, worktreeInfo]) => ({ routingId, worktreeInfo }))
         if (activeWorktrees.length === 0) {
           window.api.confirmQuit()
         } else {
           store.setQuitWorktrees(activeWorktrees)
+          // The modal is up: stop main's 5 s force-quit fallback, the user may take their time.
+          window.api.ackQuitPrompt().catch(() => {})
         }
       }),
       // Voice input events

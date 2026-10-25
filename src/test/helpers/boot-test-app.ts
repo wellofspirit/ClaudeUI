@@ -265,11 +265,17 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       unwrap('worktree:status', worktreePath, originalHead),
     removeWorktree: (worktreePath, branch, gitRoot) =>
       unwrap('worktree:remove', worktreePath, branch, gitRoot),
-    listWorktrees: (cwd) => unwrap('worktree:list', cwd),
+    inventoryWorktrees: (cwd) => unwrap('worktree:inventory', cwd),
+    inspectWorktree: (cwd, id) => unwrap('worktree:inspect', cwd, id),
+    // The harness bridge has no progress channel: the callback is simply never called.
+    measureWorktree: (cwd, id) => unwrap('worktree:measure', cwd, id),
+    removeWorktrees: (cwd, ids) => unwrap('worktree:remove-many', cwd, ids),
 
     // App
-    confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+    confirmQuit: (removeWorktreePaths) =>
+      ipcRenderer.invoke('app:quit-confirm', removeWorktreePaths ?? []),
     cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
+    ackQuitPrompt: () => ipcRenderer.invoke('app:quit-prompting'),
 
     // Git
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),

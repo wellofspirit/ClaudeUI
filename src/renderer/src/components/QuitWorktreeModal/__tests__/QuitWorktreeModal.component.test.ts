@@ -5,7 +5,8 @@
  *   1. renders null when no quit worktrees
  *   2. onCancel clears quitWorktrees
  *   3. onKeepAll clears + confirmQuit
- *   4. onRemoveAll removes each worktree + confirmQuit
+ *   4. onRemoveAll hands the chosen worktree PATHS to confirmQuit (main removes them after the
+ *      teardown, C-S1); the modal itself deletes nothing and no longer clears worktreeInfo
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -38,16 +39,19 @@ describe('QuitWorktreeModal FC', () => {
   let confirmQuitCalls: number
   let cancelQuitCalls: number
   let removeCalls: number
+  let confirmQuitPaths: string[][]
 
   beforeEach(async () => {
     app = await bootTestApp()
     viewProps = null
+    confirmQuitPaths = []
     confirmQuitCalls = 0
     cancelQuitCalls = 0
     removeCalls = 0
 
-    app.bridge.ipcMain.handle('app:quit-confirm', async () => {
+    app.bridge.ipcMain.handle('app:quit-confirm', async (_e, paths: string[]) => {
       confirmQuitCalls++
+      confirmQuitPaths.push(paths)
     })
     app.bridge.ipcMain.handle('app:quit-cancel', async () => {
       cancelQuitCalls++
@@ -112,22 +116,80 @@ describe('QuitWorktreeModal FC', () => {
     expect(useSessionStore.getState().quitWorktrees).toBeNull()
   })
 
-  it('onRemoveAll removes each worktree and calls confirmQuit', async () => {
+  it('onRemoveAll hands the worktree paths to confirmQuit and deletes nothing itself', async () => {
     useSessionStore.setState({
       quitWorktrees: [
         { routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') },
         { routingId: 'r2', worktreeInfo: makeWorktreeInfo('wt2') }
-      ]
+      ],
+      worktreeInfoMap: {
+        r1: makeWorktreeInfo('wt1'),
+        r2: makeWorktreeInfo('wt2')
+      }
     })
     await renderFC()
 
     await act(async () => {
-      await viewProps!.onRemoveAll()
+      viewProps!.onRemoveAll()
       await new Promise((r) => setTimeout(r, 0))
     })
 
-    expect(removeCalls).toBe(2)
     expect(confirmQuitCalls).toBe(1)
-    expect(useSessionStore.getState().quitWorktrees).toBeNull()
+    expect(confirmQuitPaths).toEqual([
+      ['/d/repo/.claude/worktrees/wt1', '/d/repo/.claude/worktrees/wt2']
+    ])
+    // main removes after teardown; the renderer neither removes nor saves a trimmed map
+    expect(removeCalls).toBe(0)
+    expect(Object.keys(useSessionStore.getState().worktreeInfoMap)).toEqual(['r1', 'r2'])
+    // the modal stays up, busy, until the window closes
+    expect(useSessionStore.getState().quitWorktrees).toHaveLength(2)
+    expect(viewProps!.removing).toBe(true)
+  })
+
+  it('two sessions in one worktree send its path once', async () => {
+    useSessionStore.setState({
+      quitWorktrees: [
+        { routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') },
+        { routingId: 'r2', worktreeInfo: makeWorktreeInfo('wt1') }
+      ]
+    })
+    await renderFC()
+    await act(async () => {
+      viewProps!.onRemoveAll()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(confirmQuitPaths).toEqual([['/d/repo/.claude/worktrees/wt1']])
+  })
+
+  it('Keep all sends no paths', async () => {
+    useSessionStore.setState({
+      quitWorktrees: [{ routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') }]
+    })
+    await renderFC()
+    await act(async () => {
+      viewProps!.onKeepAll()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(confirmQuitPaths).toEqual([[]])
+  })
+
+  it('stays busy once main has the confirmation, even if a before-quit event arrives: the app is exiting', async () => {
+    useSessionStore.setState({
+      quitWorktrees: [{ routingId: 'r1', worktreeInfo: makeWorktreeInfo('wt1') }]
+    })
+    await renderFC()
+    await act(async () => {
+      viewProps!.onRemoveAll()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(viewProps!.removing).toBe(true)
+
+    // main does not ask again after a confirmation; were a before-quit to arrive, the modal
+    // must not re-arm the buttons while main deletes the folders
+    await act(async () => {
+      app.emit('app:before-quit')
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(viewProps!.removing).toBe(true)
   })
 })

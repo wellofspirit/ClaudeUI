@@ -162,7 +162,7 @@ describe('the fold projects into the store', () => {
     expect(store().settings).toBe(beforeSettings)
   })
 
-  it('projects the app-level worktree map onto each session, so the exit rule clears both', () => {
+  it('projects the app-level worktree map onto each session', () => {
     seed.created('r1', { cwd: '/wt/feature' })
     emitSync('config:sessions-changed', [
       {
@@ -181,11 +181,84 @@ describe('the fold projects into the store', () => {
     ])
     expect(store().sessions['r1'].worktreeInfo?.worktreeName).toBe('feature')
 
-    // cwd back to the original ⇒ the reducer drops the map entry ⇒ the per-session
-    // mirror clears with it, through one code path instead of two.
+    // status.cwd is the spawn cwd and never follows a worktree: a status with the original cwd
+    // must NOT drop the entry (it used to, on the very next status).
     seed.status('r1', makeSessionStatus({ state: 'idle', cwd: '/project' }))
+    expect(store().worktreeInfoMap['r1']).toBeDefined()
+    expect(store().sessions['r1'].worktreeInfo?.worktreeName).toBe('feature')
+
+    // The entry leaves with config:sessions-changed (ExitWorktree observed main-side), and the
+    // per-session mirror clears with it.
+    emitSync('config:sessions-changed', [{ worktreeInfoMap: {} }])
     expect(store().worktreeInfoMap['r1']).toBeUndefined()
     expect(store().sessions['r1'].worktreeInfo).toBeNull()
+  })
+
+  describe('a session whose cwd is a linked worktree (marker on the directory listing)', () => {
+    const linked = {
+      worktreePath: 'C:/Users/me/.codex/worktrees/ab12/repo',
+      repoRoot: 'C:/Users/me/repo',
+      name: 'ab12/repo',
+      branch: ''
+    }
+    const listing = (cwd: string): unknown[] => [
+      { cwd, projectKey: 'k', folderName: 'repo', sessions: [], linkedWorktree: linked }
+    ]
+
+    it('projects a synthesised worktree info, matched across separators and drive-letter case', () => {
+      seed.created('r1', { cwd: 'c:\\users\\me\\.codex\\worktrees\\ab12\\repo' })
+      expect(store().sessions['r1'].worktreeInfo).toBeNull()
+      seed.directories(listing(linked.worktreePath))
+      expect(store().sessions['r1'].worktreeInfo).toMatchObject({
+        worktreePath: linked.worktreePath,
+        worktreeName: 'ab12/repo',
+        worktreeBranch: '',
+        originalCwd: linked.repoRoot,
+        originalHeadCommit: '',
+        origin: 'detected'
+      })
+      // Not an app-level entry: the cleanup and quit modals still read only the recorded map.
+      expect(store().worktreeInfoMap['r1']).toBeUndefined()
+    })
+
+    it('an explicit worktreeInfoMap entry wins over the marker', () => {
+      seed.created('r1', { cwd: linked.worktreePath })
+      emitSync('config:sessions-changed', [
+        {
+          worktreeInfoMap: {
+            r1: {
+              worktreePath: '/elsewhere',
+              worktreeBranch: 'b',
+              worktreeName: 'explicit',
+              originalCwd: '/p',
+              gitRoot: '/p',
+              originalHeadCommit: '',
+              createdAt: 0
+            }
+          }
+        }
+      ])
+      seed.directories(listing(linked.worktreePath))
+      expect(store().sessions['r1'].worktreeInfo?.worktreeName).toBe('explicit')
+    })
+
+    it('clears when the marker goes, and a listing refresh leaves unrelated sessions untouched', () => {
+      seed.created('r1', { cwd: linked.worktreePath })
+      seed.created('r2', { cwd: '/plain' })
+      seed.directories(listing(linked.worktreePath))
+      expect(store().sessions['r1'].worktreeInfo).not.toBeNull()
+      const r2 = store().sessions['r2']
+      const r1 = store().sessions['r1']
+
+      // Same worktree, new array (every refresh): value-equal, so no re-projection at all.
+      seed.directories(listing(linked.worktreePath))
+      expect(store().sessions['r2']).toBe(r2)
+      expect(store().sessions['r1']).toBe(r1)
+
+      seed.directories([])
+      expect(store().sessions['r1'].worktreeInfo).toBeNull()
+      expect(store().sessions['r2']).toBe(r2)
+    })
   })
 })
 

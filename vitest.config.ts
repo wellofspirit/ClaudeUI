@@ -69,7 +69,8 @@ const unitTest = {
     '**/*.component.test.{ts,tsx}',
     '**/*.browser.test.{ts,tsx}',
     'src/main/services/__tests__/git-service*.test.ts',
-    'src/main/services/__tests__/worktree.test.ts'
+    'src/main/services/__tests__/worktree.test.ts',
+    'src/main/services/__tests__/worktree-git-*.test.ts'
   ],
   testTimeout: 5000
 }
@@ -117,7 +118,8 @@ export default defineConfig({
           setupFiles: ['./src/test/setup/node.setup.ts'],
           include: [
             'src/main/services/__tests__/git-service*.test.ts',
-            'src/main/services/__tests__/worktree.test.ts'
+            'src/main/services/__tests__/worktree.test.ts',
+            'src/main/services/__tests__/worktree-git-*.test.ts'
           ],
           testTimeout: 30000
         }

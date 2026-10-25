@@ -1101,12 +1101,10 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
           }
         }
 
-      // Worktree exit: cwd returned to the recorded original.
-      const wt = next.worktreeInfoMap[id]
-      if (wt && status.cwd && status.cwd === wt.originalCwd) {
-        const { [id]: _dropped, ...rest } = next.worktreeInfoMap
-        next = { ...next, worktreeInfoMap: rest }
-      }
+      // No worktree-exit rule here: `status.cwd` is the SPAWN cwd for every engine, so
+      // comparing it with `originalCwd` (also the spawn cwd) dropped a detected entry on the
+      // very next status. An entry is forgotten main-side (a successful ExitWorktree, a
+      // removal) and arrives as `config:sessions-changed`.
       return next
     }
 

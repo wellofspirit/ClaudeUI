@@ -8,7 +8,7 @@
  * the host pre-check and the judge pipeline are REAL — only the wire and the
  * host's settings/auth/discovery are doubles.
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
@@ -75,7 +75,9 @@ const h = vi.hoisted(() => {
     /** What `peekOpencodeModels()` answers (the catalog cache); null = cold. */
     peekModels: null as null | unknown[],
     /** Replaces `sessionToolsGate` for one test (the real gate answers when null). */
-    sessionGate: null as null | ((...args: unknown[]) => unknown)
+    sessionGate: null as null | ((...args: unknown[]) => unknown),
+    /** The persisted `sessions.json` the worktree recorder reads and writes. */
+    sessionConfig: {} as Record<string, unknown>
   }
 })
 
@@ -104,6 +106,10 @@ vi.mock('../../services/claude-settings', () => ({
   loadClaudeAutoModeFlags: () => ({ classifyAllShell: false })
 }))
 vi.mock('../../services/ui-config', async (importOriginal) => ({
+  loadSessionConfig: () => ({ ...h.sessionConfig }),
+  saveSessionConfig: (config: Record<string, unknown>) => {
+    h.sessionConfig = { ...config }
+  },
   loadEngineConfig: () => h.engineConfig,
   loadSharedAutoModeConfig: () => h.shared,
   normalizeBlockHoldSeconds: (await importOriginal<typeof import('../../services/ui-config')>())
@@ -209,6 +215,12 @@ import type { OpencodeMapperOutput } from '../event-mapper'
 import { convertOpencodeHistory } from '../history'
 import { setOpencodeAuthHooks } from '../opencode-auth-hooks'
 import { discoverOpencodeModels } from '../model-discovery'
+import {
+  fabricateRepo,
+  fabricateWorktree,
+  makeScratchDir
+} from '../../../test/helpers/fabricated-worktree'
+import { forgetLinkedWorktrees } from '../../services/worktree-root'
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -2571,6 +2583,53 @@ describe('session tool asks (claudeui_session_*)', () => {
     expect(payloads('session:approval-request')).toMatchObject([
       { requestId: 'per_sh', always: ['ls'] }
     ])
+  })
+})
+
+describe('session.moved marks the session’s worktree (slice 3d)', () => {
+  let base: string
+  let repo: string
+  let worktree: string
+
+  beforeEach(() => {
+    forgetLinkedWorktrees()
+    h.sessionConfig = {}
+    base = makeScratchDir('claudeui-oc-moved-')
+    repo = fabricateRepo(join(base, 'repo'))
+    worktree = fabricateWorktree(repo, join(base, 'data', 'worktree', 'abcdef', 'brave-fox'), 'bf')
+  })
+  afterEach(() => rmSync(base, { recursive: true, force: true, maxRetries: 5 }))
+
+  const moved = (directory: string): OpencodeFeedItem =>
+    event('session.moved', {
+      sessionID: SID,
+      location: { directory },
+      projectID: 'prj',
+      subpath: ''
+    })
+  const recorded = (): Record<string, { worktreePath: string; origin?: string }> =>
+    (h.sessionConfig.worktreeInfoMap ?? {}) as Record<
+      string,
+      { worktreePath: string; origin?: string }
+    >
+
+  it('records the worktree from the mapper output through the session, and unrecords it on a move back', async () => {
+    session = new OpencodeSession('route-1', null, repo, { model: 'openai/gpt-x' })
+    subscribeWindowToSync({
+      webContents: { send: (channel: string, ...args: unknown[]) => sent.push([channel, ...args]) }
+    })
+    await startTurn()
+
+    h.feed.push(moved(worktree))
+    await flush()
+    expect(recorded()['route-1']).toMatchObject({ worktreePath: worktree, origin: 'detected' })
+    expect(sent.some(([channel]) => channel === 'config:sessions-changed')).toBe(true)
+    // The session itself keeps its spawn cwd.
+    expect(session.cwd).toBe(repo)
+
+    h.feed.push(moved(repo))
+    await flush()
+    expect(recorded()['route-1']).toBeUndefined()
   })
 })
 

@@ -491,6 +491,7 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'session:pick-folder': 'host',
   'app:quit-confirm': 'host',
   'app:quit-cancel': 'host',
+  'app:quit-prompting': 'host',
   'app:open-in-vscode': 'host',
   // Raw shell — reachable over remote as of phase 2, but ONLY behind the
   // desktop opt-in toggle + a stepped-up, decaying `shell` grant (ADR-052

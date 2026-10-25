@@ -169,10 +169,13 @@ export interface CodexHostAcquireOptions {
    */
   thread?: string
   /**
-   * The child's working directory. Only the FIRST acquirer of a host sets it:
-   * home-scoped reads (`thread/list`, `thread/read`, `model/list`) do not depend
-   * on it, and `config/read` / `config/batchWrite` carry an explicit `cwd`
-   * parameter, so nothing a host answers changes with the process's own cwd.
+   * IGNORED (kept so callers still compile): the app-server always spawns with the
+   * user's home as its cwd. Home-scoped reads (`thread/list`, `thread/read`,
+   * `model/list`) do not depend on it, and `config/read` / `config/batchWrite` carry an
+   * explicit `cwd` parameter, so nothing a host answers changes with the process's own cwd.
+   * Taking the first acquirer's cwd made the shared process (which outlives every session)
+   * hold a project or worktree directory as its cwd, and on Windows a worktree could then
+   * not be deleted while any Codex session had ever run in it (ADR-112, C-S12).
    */
   cwd?: string
   /** Replaces inheritance when supplied; also decides which HOME is keyed. */
@@ -818,6 +821,8 @@ export class CodexHost {
   }
 }
 
+const CLOSED_MESSAGE = 'CodexHostRegistry shut down'
+
 /**
  * Every live host, keyed `<normalised home>|acct:<vault account>` or
  * `<normalised home>|native`.
@@ -828,6 +833,8 @@ export class CodexHost {
  */
 export class CodexHostRegistry {
   private readonly hosts = new Map<string, CodexHost>()
+  /** Set by {@link shutdown}: no host starts any more. */
+  private closed = false
   private readonly deps: Required<Pick<CodexHostDeps, 'createClient' | 'createHook' | 'idleMs'>> & {
     activeAccountId: () => Promise<string | null>
   }
@@ -860,6 +867,7 @@ export class CodexHostRegistry {
    * when there is no account to inject.
    */
   async acquire(options: CodexHostAcquireOptions = {}): Promise<CodexHostHandle> {
+    if (this.closed) throw new Error(CLOSED_MESSAGE)
     const homeKey = codexHomeKey(codexHomeForEnv(options.env))
     // The holder first, when one was asked for: which ACCOUNT the process runs
     // as is irrelevant to a thread that is already loaded somewhere, and
@@ -867,6 +875,8 @@ export class CodexHostRegistry {
     const holder = options.thread ? this.holderFor(homeKey, options.thread) : undefined
     if (holder) return holder.acquire(options.label)
     const account = await this.resolveAccount(options.identity)
+    // A shutdown that ran while the account resolved must not be followed by a spawn.
+    if (this.closed) throw new Error(CLOSED_MESSAGE)
     const key = `${homeKey}|${account}`
     let host = this.hosts.get(key)
     if (!host) {
@@ -875,7 +885,7 @@ export class CodexHostRegistry {
         homeKey,
         account === NATIVE ? undefined : { accountId: account.slice('acct:'.length) },
         {
-          cwd: options.cwd ?? homedir(),
+          cwd: homedir(),
           ...(options.env ? { env: options.env } : {}),
           ...(options.requestTimeoutMs !== undefined
             ? { requestTimeoutMs: options.requestTimeoutMs }
@@ -933,6 +943,16 @@ export class CodexHostRegistry {
   dispose(): void {
     for (const host of [...this.hosts.values()]) host.close('host-disposed')
     this.hosts.clear()
+  }
+
+  /**
+   * {@link dispose} for good: the app is quitting, and anything that still asks for a host
+   * (a directory listing, a session starting after the teardown) must be refused instead of
+   * spawning a fresh app-server nobody will ever reap.
+   */
+  shutdown(): void {
+    this.closed = true
+    this.dispose()
   }
 }
 

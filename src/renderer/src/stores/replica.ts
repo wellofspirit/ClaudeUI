@@ -71,6 +71,7 @@ import {
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 import { AUTONOMY_TO_PERMISSION } from '../../../shared/permission-modes'
 import type { PermissionMode, SessionStatus, WorktreeInfo } from '../../../shared/types'
+import { linkedWorktreeFor, worktreeInfoFromLinked } from '../../../shared/linked-worktree'
 import {
   useSessionStore,
   markViewEvicted,
@@ -839,7 +840,10 @@ function buildPatch(
 
   // --- per session --------------------------------------------------------
   const rekey = options.rekey ?? null
-  const worktreesMoved = force || prev.worktreeInfoMap !== next.worktreeInfoMap
+  // The pill's worktree is the explicit entry, else the linked worktree the session's cwd is in
+  // (a marker on the directory listing), so a listing change re-projects too.
+  const worktreesMoved =
+    force || prev.worktreeInfoMap !== next.worktreeInfoMap || prev.directories !== next.directories
   if (force || prev.sessions !== next.sessions || worktreesMoved || rekey) {
     let changed = false
     const sessions: Record<string, PerSessionState> = { ...state.sessions }
@@ -854,14 +858,21 @@ function buildPatch(
     }
     for (const [id, c] of Object.entries(next.sessions)) {
       const resident = sessions[id]
+      // Computed only when the cheap checks pass, and compared by value: a listing refresh must
+      // not re-project (and so re-render) every resident session whose worktree did not change.
+      const worktree = worktreesMoved ? worktreeOf(next, id, c.cwd) : undefined
       const untouched =
         !force &&
         !(rekey && rekey.newId === id) &&
         resident !== undefined &&
         prev.sessions[id] === c &&
-        prev.worktreeInfoMap[id] === next.worktreeInfoMap[id]
+        (!worktreesMoved || sameWorktree(resident.worktreeInfo, worktree ?? null))
       if (untouched) continue
-      sessions[id] = projectSession(resident, c, next.worktreeInfoMap[id])
+      sessions[id] = projectSession(
+        resident,
+        c,
+        worktreesMoved ? worktree : worktreeOf(next, id, c.cwd)
+      )
       changed = true
     }
     // Entries canonical HAD and no longer has (an explicit drop, or the retiring
@@ -877,6 +888,29 @@ function buildPatch(
   }
 
   return patch
+}
+
+/** The worktree a session shows: its recorded entry (wins), else the linked worktree its cwd is in. */
+function worktreeOf(next: CanonicalState, id: string, cwd: string): WorktreeInfo | undefined {
+  const explicit = next.worktreeInfoMap[id]
+  if (explicit) return explicit
+  const linked = linkedWorktreeFor(next.directories, cwd)
+  return linked ? worktreeInfoFromLinked(linked) : undefined
+}
+
+function sameWorktree(a: WorktreeInfo | null, b: WorktreeInfo | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.worktreePath === b.worktreePath &&
+    a.worktreeBranch === b.worktreeBranch &&
+    a.worktreeName === b.worktreeName &&
+    a.originalCwd === b.originalCwd &&
+    a.gitRoot === b.gitRoot &&
+    a.originalHeadCommit === b.originalHeadCommit &&
+    a.createdAt === b.createdAt &&
+    a.origin === b.origin
+  )
 }
 
 /**
@@ -924,9 +958,7 @@ function projectSession(
     selectedModel: c.selectedModel,
     authRequired: c.authRequired,
     ...(c.codexModelExplicit !== undefined ? { codexModelExplicit: c.codexModelExplicit } : {}),
-    // The per-session mirror of the app-level map, so `session:status`'s
-    // worktree-exit rule (the reducer drops the entry when cwd returns to
-    // `originalCwd`) clears the card without a second code path.
+    // The per-session mirror of the app-level map (plus the linked-worktree marker of its cwd).
     worktreeInfo: worktreeInfo ?? null
   }
 }

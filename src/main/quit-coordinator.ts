@@ -8,7 +8,12 @@
  *      prompt, and arm a fallback timer. Services stay ALIVE — a cancel must
  *      leave the app fully working, so nothing is torn down here.
  *   2. Confirmed `before-quit` (after `confirm()` or the fallback timer): tear
- *      the services down and let the quit proceed.
+ *      the services down and let the quit proceed. When the renderer confirmed
+ *      WITH worktree paths (the quit modal's "Remove all"), the quit is vetoed
+ *      once more right after the teardown while those directories are deleted
+ *      (no engine or shell holds their cwd any more), then `quit()` re-enters
+ *      and passes. The fallback timer is cleared by `confirm()`, so it can never
+ *      cut a confirmed removal off.
  *
  * Extracted from `index.ts` (a) to fix the verified bug where services were
  * destroyed on the first, possibly-cancelled pass, and (b) so the state
@@ -36,6 +41,15 @@ export interface QuitCoordinatorDeps {
   prepareQuit?: () => Promise<void>
   /** Bound on `prepareQuit` (ms). Default 4000. */
   prepareTimeoutMs?: number
+  /**
+   * Delete the worktree directories the renderer confirmed (C-S1, ADR-112). Runs once, AFTER
+   * `teardownServices` and before the process exits; it must stop whatever still holds those
+   * directories itself (sessions, shells) and never throws into the quit — a rejection is
+   * swallowed so the quit goes on.
+   */
+  removeWorktrees?: (paths: string[]) => Promise<void>
+  /** Bound on `removeWorktrees` (ms): a hung delete cannot keep the app open. Default 120000. */
+  removeTimeoutMs?: number
 }
 
 export class QuitCoordinator {
@@ -44,6 +58,10 @@ export class QuitCoordinator {
   private timer: ReturnType<typeof setTimeout> | null = null
   private preparing = false
   private prepared = false
+  /** Worktree paths the renderer confirmed for removal; consumed once after the teardown. */
+  private pendingRemoval: string[] = []
+  private removing = false
+  private removed = false
   private readonly fallbackMs: number
 
   constructor(private readonly deps: QuitCoordinatorDeps) {
@@ -58,13 +76,18 @@ export class QuitCoordinator {
   handleBeforeQuit(preventQuit: () => void): void {
     // A second quit while `prepareQuit` still runs (Cmd+Q again) must not tear
     // the services down under it: veto it; the prepare's own bound quits.
-    if (this.preparing && !this.prepared) {
+    if ((this.preparing && !this.prepared) || this.removing) {
       preventQuit()
       return
     }
     if (this.confirmed) {
-      // Real quit — tear down once, then let Electron proceed (no preventDefault).
+      // Real quit — tear down once, then let Electron proceed (no preventDefault) —
+      // unless confirmed worktrees still have to go: veto, delete them, quit again.
       this.teardown()
+      if (this.pendingRemoval.length > 0 && this.deps.removeWorktrees && !this.removed) {
+        preventQuit()
+        this.runRemoval(this.deps.removeWorktrees)
+      }
       return
     }
     // First pass — keep everything running; ask the renderer and arm a fallback.
@@ -73,11 +96,26 @@ export class QuitCoordinator {
     this.armFallback()
   }
 
-  /** Renderer confirmed the quit (Keep-all / Remove-all). */
-  confirm(): void {
+  /**
+   * Renderer confirmed the quit (Keep-all / Remove-all). `worktreePaths`: the worktrees
+   * "Remove all" chose, deleted after the teardown (see {@link QuitCoordinatorDeps.removeWorktrees}).
+   */
+  confirm(worktreePaths: string[] = []): void {
     this.clearTimer()
     this.confirmed = true
+    // A repeated confirm (double click) with no paths must not drop an earlier one's.
+    const paths = worktreePaths.filter((p) => typeof p === 'string' && p !== '')
+    if (paths.length > 0) this.pendingRemoval = paths
     this.proceed()
+  }
+
+  /**
+   * The renderer is showing its quit modal: stop the fallback timer, which exists only for a
+   * renderer that never answers. `confirm()` / `cancel()` follow when the user decides. Ignored
+   * once the quit is confirmed (nothing to wait for any more).
+   */
+  promptShown(): void {
+    if (!this.confirmed) this.clearTimer()
   }
 
   /**
@@ -120,6 +158,24 @@ export class QuitCoordinator {
     void Promise.race([prepared, timeout]).finally(() => {
       clearTimeout(bound)
       this.prepared = true
+      this.deps.quit()
+    })
+  }
+
+  /** Delete the confirmed worktrees (bounded), then re-enter the quit. */
+  private runRemoval(remove: (paths: string[]) => Promise<void>): void {
+    const paths = this.pendingRemoval
+    this.pendingRemoval = []
+    this.removing = true
+    let bound: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<void>((done) => {
+      bound = setTimeout(done, this.deps.removeTimeoutMs ?? 120_000)
+    })
+    const removal = (async () => remove(paths))().catch(() => undefined)
+    void Promise.race([removal, timeout]).finally(() => {
+      clearTimeout(bound)
+      this.removing = false
+      this.removed = true
       this.deps.quit()
     })
   }

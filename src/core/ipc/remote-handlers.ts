@@ -19,6 +19,7 @@ import {
   loadBackgroundOutput
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
+import { trackMockupWatcher } from '../services/mockup-watch-registry'
 import { syncTimingReports } from '../services/sync-timing-report'
 import { SYNC_REPORT_TIMING_CHANNEL } from '../shared/sync/sync-timing'
 import { gitServiceManager } from '../services/git-service'
@@ -1432,7 +1433,11 @@ export function registerRemoteHandlers(
 
   const mockupWatchers = new Map<
     string,
-    { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }
+    {
+      watcher: fs.FSWatcher
+      debounceTimer: ReturnType<typeof setTimeout> | null
+      untrack: () => void
+    }
   >()
 
   const closeMockupWatcher = (key: string): void => {
@@ -1444,6 +1449,7 @@ export function registerRemoteHandlers(
       /* already closed */
     }
     if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+    entry.untrack()
     mockupWatchers.delete(key)
   }
 
@@ -1466,7 +1472,8 @@ export function registerRemoteHandlers(
 
       const entry = {
         watcher: null! as fs.FSWatcher,
-        debounceTimer: null as ReturnType<typeof setTimeout> | null
+        debounceTimer: null as ReturnType<typeof setTimeout> | null,
+        untrack: (): void => {}
       }
 
       // Recursive + debounced, matching the desktop IPC watcher in session.ipc.ts.
@@ -1485,6 +1492,8 @@ export function registerRemoteHandlers(
       // uncaughtException, and the dead watcher would otherwise stay in the map
       // behind the has() guard above — permanently blocking re-watch. Drop it.
       entry.watcher.on('error', () => closeMockupWatcher(key))
+      // Visible to the worktree remover, which closes the watches under a removed path first.
+      entry.untrack = trackMockupWatcher(dirPath, () => closeMockupWatcher(key))
 
       mockupWatchers.set(key, entry)
     }

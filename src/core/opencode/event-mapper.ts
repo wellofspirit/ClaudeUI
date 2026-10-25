@@ -240,6 +240,8 @@ export type OpencodeMapperOutput =
     }
   | ({ readonly kind: 'inbox' } & OpencodeInboxChange)
   | { readonly kind: 'session-renamed'; readonly title: string }
+  /** The own session moved to another directory (`session.moved`); `directory` is where it works now. */
+  | { readonly kind: 'session-moved'; readonly directory: string }
   | { readonly kind: 'model-selected'; readonly model: Model_Ref }
   | { readonly kind: 'agent-selected'; readonly agent: string }
   | { readonly kind: 'session-deleted' }
@@ -902,6 +904,9 @@ export class OpencodeEventMapper {
       }
       case 'session.renamed':
         if (own) out.push({ kind: 'session-renamed', title: event.data.title })
+        return
+      case 'session.moved':
+        if (own) out.push({ kind: 'session-moved', directory: event.data.location.directory })
         return
       case 'session.model.selected':
         s.model = event.data.model

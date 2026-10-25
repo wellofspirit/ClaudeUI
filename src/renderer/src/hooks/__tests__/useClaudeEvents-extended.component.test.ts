@@ -69,7 +69,11 @@ beforeEach(async () => {
   resetFactoryCounter()
   // The hook's own `saveSlashCommands` / `confirmQuit` assertions need spies the
   // bridge-backed api does not provide.
-  Object.assign(window.api, { saveSlashCommands: vi.fn(), confirmQuit: vi.fn() })
+  Object.assign(window.api, {
+    saveSlashCommands: vi.fn(),
+    confirmQuit: vi.fn(),
+    ackQuitPrompt: vi.fn(() => Promise.resolve())
+  })
 
   useSessionStore.setState({
     activeSessionId: null,
@@ -1158,6 +1162,31 @@ describe('useClaudeEvents extended component tests', () => {
       app.emit('app:before-quit')
 
       expect(window.api.confirmQuit as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
+      // No modal, nothing to wait for: the fallback timer is not main's to stop.
+      expect(window.api.ackQuitPrompt as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    })
+
+    it('acks the prompt to main when it shows the quit modal, so the 5 s fallback stops (S3)', () => {
+      useSessionStore.setState({
+        worktreeInfoMap: {
+          'route-1': {
+            worktreePath: '/project/worktrees/feature-x',
+            worktreeBranch: 'feature-x',
+            worktreeName: 'feature-x',
+            originalCwd: '/project',
+            gitRoot: '/project',
+            originalHeadCommit: 'abc123',
+            createdAt: Date.now(),
+            origin: 'created'
+          }
+        }
+      })
+      mirrorStoreIntoReplica()
+
+      app.emit('app:before-quit')
+
+      expect(useSessionStore.getState().quitWorktrees).toHaveLength(1)
+      expect(window.api.ackQuitPrompt as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
     })
 
     it('calls setQuitWorktrees with active worktrees instead of confirming quit', () => {
@@ -1182,6 +1211,57 @@ describe('useClaudeEvents extended component tests', () => {
       const state = useSessionStore.getState()
       expect(state.quitWorktrees).toHaveLength(1)
       expect(state.quitWorktrees![0].routingId).toBe('route-1')
+    })
+
+    it('offers only worktrees ClaudeUI created for removal (C-S11)', () => {
+      const base: WorktreeInfo = {
+        worktreePath: '/project/worktrees/created',
+        worktreeBranch: 'created',
+        worktreeName: 'created',
+        originalCwd: '/project',
+        gitRoot: '/project',
+        originalHeadCommit: 'abc123',
+        createdAt: Date.now()
+      }
+      useSessionStore.setState({
+        worktreeInfoMap: {
+          'route-created': { ...base, origin: 'created' },
+          'route-detected': { ...base, worktreePath: '/p/wt/detected', origin: 'detected' },
+          // legacy entry without `origin`: no head commit recorded = detected
+          'route-legacy-detected': { ...base, worktreePath: '/p/wt/legacy', originalHeadCommit: '' }
+        }
+      })
+      mirrorStoreIntoReplica()
+
+      app.emit('app:before-quit')
+
+      expect(useSessionStore.getState().quitWorktrees!.map((w) => w.routingId)).toEqual([
+        'route-created'
+      ])
+    })
+
+    it('does not ask when every recorded worktree was detected, not created', () => {
+      useSessionStore.setState({
+        quitWorktrees: null,
+        worktreeInfoMap: {
+          r1: {
+            worktreePath: '/p/wt/detected',
+            worktreeBranch: 'b',
+            worktreeName: 'detected',
+            originalCwd: '/p',
+            gitRoot: '/p',
+            originalHeadCommit: '',
+            createdAt: 0,
+            origin: 'detected'
+          }
+        }
+      })
+      mirrorStoreIntoReplica()
+
+      app.emit('app:before-quit')
+
+      expect(window.api.confirmQuit as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
+      expect(useSessionStore.getState().quitWorktrees).toBeNull()
     })
 
     it('calls confirmQuit after all worktrees are removed', () => {
@@ -1911,8 +1991,8 @@ describe('useClaudeEvents extended component tests', () => {
     })
   })
 
-  describe('session:status worktree exit detection', () => {
-    it('clears worktreeInfo when cwd returns to originalCwd', () => {
+  describe('session:status never drops a worktree entry', () => {
+    it('does NOT clear worktreeInfo when the status cwd is the original cwd (it is the spawn cwd)', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/project/app')
       useSessionStore.getState().setWorktreeInfo(routingId, {
@@ -1935,8 +2015,8 @@ describe('useClaudeEvents extended component tests', () => {
         })
       )
 
-      expect(useSessionStore.getState().sessions[routingId].worktreeInfo).toBeNull()
-      expect(useSessionStore.getState().worktreeInfoMap[routingId]).toBeUndefined()
+      expect(useSessionStore.getState().sessions[routingId].worktreeInfo).not.toBeNull()
+      expect(useSessionStore.getState().worktreeInfoMap[routingId]).toBeDefined()
     })
 
     it('does not clear worktreeInfo when cwd is still in the worktree path', () => {

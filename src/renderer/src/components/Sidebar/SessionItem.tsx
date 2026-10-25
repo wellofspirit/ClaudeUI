@@ -9,6 +9,7 @@ import { countDotTasks } from '../../lib/task-types'
 import { StatusDot, deriveSessionDotState } from './StatusDot'
 import { originLinkOf, sessionTitleOf } from '../../lib/session-links'
 import { useIsMobile } from '../../hooks/useIsMobile'
+import { linkedWorktreeFor } from '../../../../shared/linked-worktree'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -86,7 +87,14 @@ export const SessionItem = memo(function SessionItem({
       }
     })
   )
-  const isWorktree = useSessionStore((s) => !!s.worktreeInfoMap[info.sessionId])
+  // A recorded entry (EnterWorktree / session.moved / created here), or the session's cwd being a
+  // linked worktree per the directory listing (any engine, any layout). The live session's cwd
+  // wins over the listing's, which can lag a brand-new session.
+  const isWorktree = useSessionStore(
+    (s) =>
+      !!s.worktreeInfoMap[info.sessionId] ||
+      linkedWorktreeFor(s.directories, s.sessions[info.sessionId]?.cwd || info.cwd) !== null
+  )
   // The link to the session that started this one, when there is one (slices 1b, 5):
   // the hint names it on every row (grouped or not), and the menu moves the row in or
   // out of the group.
@@ -170,8 +178,23 @@ export const SessionItem = memo(function SessionItem({
           group relative flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
           ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}
           ${hidden ? 'opacity-45 italic' : ''}
+          ${isWorktree ? 'isolate' : ''}
         `}
       >
+        {/* Worktree tint (always visible): strongest at the right edge, fully transparent 30% in
+            from it. Behind the row's content (z -10 inside this row's stacking context, above the
+            row's own background) and under the hover icon backdrop, which paints later. */}
+        {isWorktree && (
+          <div
+            data-testid="SessionItem.worktreeTint"
+            aria-hidden="true"
+            className="absolute inset-0 -z-10 rounded-md pointer-events-none"
+            style={{
+              backgroundImage:
+                'linear-gradient(to left, var(--color-worktree-tint) 0%, transparent 30%)'
+            }}
+          />
+        )}
         <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
           <StatusDot
             state={dotState}

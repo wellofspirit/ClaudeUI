@@ -84,8 +84,16 @@ pre .token.table {
   --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
+/* Worktree session rows (Sidebar/SessionItem): the right-edge tint, --color-agent-violet at low
+   alpha. A plain :root rule, not @theme, because only inline styles read it and Tailwind drops
+   theme variables no utility uses. Dark is the default; light and monokai override below. */
+:root {
+  --color-worktree-tint: rgb(178 139 240 / 0.16);
+}
+
 /* ── Light theme ── */
 [data-theme='light'] {
+  --color-worktree-tint: rgb(90 47 168 / 0.1);
   --color-bg-primary: #f0f0f0;
   --color-bg-secondary: #dddfe3;
   --color-bg-tertiary: #c5c8cf;
@@ -127,6 +135,7 @@ pre .token.table {
 
 /* ── Monokai theme ── */
 [data-theme='monokai'] {
+  --color-worktree-tint: rgb(174 129 255 / 0.16);
   --color-bg-primary: #272822;
   --color-bg-secondary: #1e1f1a;
   --color-bg-tertiary: #3e3d32;

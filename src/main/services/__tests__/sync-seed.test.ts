@@ -14,7 +14,14 @@
  * pre-4b empty value instead of taking app boot down with it.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import {
+  fabricateRepo,
+  fabricateWorktree,
+  makeScratchDir
+} from '../../../test/helpers/fabricated-worktree'
 
 const {
   pruneOrphanClaudeSessionMeta,
@@ -68,6 +75,7 @@ import {
   resetDirectoryRefreshStateForTests
 } from '../../../core/services/sync-seed'
 import { syncCore } from '../../../core/services/sync-host'
+import { forgetLinkedWorktrees } from '../../../core/services/worktree-root'
 import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
 import { updateDispatchTarget } from '../../../core/services/db'
 
@@ -542,5 +550,99 @@ describe('listAllDirectories', () => {
     listDirectories.mockResolvedValue(EMPTY_GROUP)
     listCodexSessions.mockResolvedValue([])
     expect(await listAllDirectories()).toEqual(EMPTY_GROUP)
+  })
+})
+
+/**
+ * C-S10. The sidebar's worktree tint reads `DirectoryGroup.linkedWorktree`, computed here from the
+ * filesystem for EVERY engine's group (opencode and Codex worktrees live outside the repo, so a
+ * lexical `.claude/worktrees` check would miss them).
+ */
+describe('listAllDirectories: linked worktree marker', () => {
+  let base: string
+  let repo: string
+  let wt: string
+
+  beforeEach(() => {
+    forgetLinkedWorktrees()
+    base = makeScratchDir('claudeui-seed-')
+    repo = fabricateRepo(path.join(base, 'repo'))
+    wt = fabricateWorktree(repo, path.join(repo, '.claude', 'worktrees', 'foo'), 'foo')
+  })
+  afterEach(() => {
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  const group = (cwd: string, engineId: 'claude' | 'opencode' | 'pi' = 'claude') => ({
+    cwd,
+    projectKey: cwd.replace(/[^a-zA-Z0-9]/g, '-'),
+    folderName: path.basename(cwd),
+    sessions: [
+      {
+        sessionId: `${engineId}-${path.basename(cwd)}`,
+        cwd,
+        projectKey: cwd.replace(/[^a-zA-Z0-9]/g, '-'),
+        title: 't',
+        timestamp: 1,
+        lastActivityAt: 1,
+        engineId
+      }
+    ]
+  })
+
+  it('marks a group whose cwd is a linked worktree, and only that group', async () => {
+    listDirectories.mockResolvedValue([group(repo), group(wt)])
+    const merged = await listAllDirectories()
+    expect(merged.find((g) => g.cwd === wt)?.linkedWorktree).toEqual({
+      worktreePath: wt,
+      repoRoot: repo,
+      name: 'foo',
+      branch: 'worktree-feat'
+    })
+    expect(merged.find((g) => g.cwd === repo)?.linkedWorktree).toBeUndefined()
+  })
+
+  it('marks groups that only a non-Claude engine contributes (outside the managed root)', async () => {
+    const outside = fabricateWorktree(
+      repo,
+      path.join(base, 'share', 'worktree', 'abcdef', 'brave-fox'),
+      'fox'
+    )
+    listDirectories.mockResolvedValue([])
+    listOpencodeSessionsGlobal.mockResolvedValue(group(outside, 'opencode').sessions)
+    const merged = await listAllDirectories()
+    expect(merged.find((g) => g.cwd === outside)?.linkedWorktree).toMatchObject({
+      worktreePath: outside,
+      name: 'brave-fox'
+    })
+  })
+
+  it('a group whose directory is gone is simply unmarked', async () => {
+    listDirectories.mockResolvedValue([group(path.join(base, 'deleted-worktree'))])
+    const merged = await listAllDirectories()
+    expect(merged[0].linkedWorktree).toBeUndefined()
+  })
+
+  it('a worktree appearing beats the emit throttle (it is part of the membership key)', async () => {
+    vi.useFakeTimers()
+    try {
+      const plain = path.join(base, 'plain')
+      fs.mkdirSync(plain)
+      listDirectories.mockResolvedValue([group(plain)])
+      await refreshCanonicalDirectories()
+      const afterFirst = syncCore.currentSeq()
+
+      // The same directory becomes a linked worktree (`git worktree` adopted it): same sessions,
+      // same titles, only the marker differs.
+      fabricateWorktree(repo, plain, 'adopted')
+      forgetLinkedWorktrees()
+      await refreshCanonicalDirectories()
+      expect(syncCore.currentSeq()).toBe(afterFirst) // throttled…
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(syncCore.currentSeq()).toBeGreaterThan(afterFirst) // …but booked, not dropped
+      expect(syncCore.getSnapshot().directories[0].linkedWorktree?.worktreePath).toBe(plain)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

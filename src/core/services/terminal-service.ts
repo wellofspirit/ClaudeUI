@@ -104,6 +104,11 @@ export class TerminalService {
     this.manager.setRemoteSink(sink)
   }
 
+  /** Live terminals' ids and spawn cwds, for the worktree manager's holder check (ADR-112). */
+  liveTerminals(): Array<{ id: string; cwd: string }> {
+    return this.manager.liveCwds()
+  }
+
   /** Test/inspection seam. */
   ptyManager(): PtyManager {
     return this.manager
