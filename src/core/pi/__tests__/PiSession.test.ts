@@ -9898,7 +9898,7 @@ describe('PiSession — scratchpad (ADR-110)', () => {
     async () => {
       const victim = real.path.join(root, 'victim')
       real.fs.mkdirSync(victim, { recursive: true })
-      const base = real.path.join(tmpBase, 'claudeui')
+      const base = real.path.join(tmpBase, scratchBaseName(process.getuid?.()))
       real.fs.symlinkSync(victim, base, 'junction')
       links.push(base)
       const win = new MockWindow()

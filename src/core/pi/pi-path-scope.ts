@@ -51,7 +51,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ClaudePermissions } from '../../shared/types'
 import { isAgentControlPath } from '../automode/agent-control-paths'
-import { resolveAdditionalDirectories, uniqueDirs } from '../services/additional-directories'
+import { uniqueDirs } from '../services/additional-directories'
 
 // ---------------------------------------------------------------------------
 // pi's path normalisation (port)
@@ -256,17 +256,30 @@ export function platformForCwd(cwd: string): NodeJS.Platform {
  */
 export function buildPiPathScope(input: PiPathScopeInput): PiPathScope {
   const platform = input.platform ?? platformForCwd(input.cwd)
-  const additional = resolveAdditionalDirectories(input.rules.additionalDirectories, input.cwd)
+  const flavor = flavorOf(platform)
+  const home = input.homeDir ?? homedir()
+  // Resolved with the SCOPE's path flavor and home (not the host's): a win32 scope's `\\host\share`
+  // entry stays UNC — a remote root, never probed — whatever host builds the scope.
+  const resolveEntries = (entries: readonly (string | null | undefined)[] | undefined): string[] =>
+    (entries ?? [])
+      .filter((e): e is string => typeof e === 'string' && e.trim() !== '')
+      .map((e) => {
+        const entry = e.trim()
+        const expanded =
+          entry === '~'
+            ? home
+            : entry.startsWith('~/') || entry.startsWith('~\\')
+              ? flavor.join(home, entry.slice(2))
+              : entry
+        return flavor.resolve(input.cwd, expanded)
+      })
+  const additional = resolveEntries(input.rules.additionalDirectories)
   const roots = uniqueDirs([input.cwd, ...additional], undefined, platform)
   const block = input.rules.blockReadsOutsideWorkingDirectories === true
   const trusted = input.rules.nonProjectAdditionalDirectories
   const fenceRoots =
     block && trusted !== undefined
-      ? uniqueDirs(
-          [input.cwd, ...resolveAdditionalDirectories(trusted, input.cwd)],
-          undefined,
-          platform
-        )
+      ? uniqueDirs([input.cwd, ...resolveEntries(trusted)], undefined, platform)
       : roots
   return {
     cwd: input.cwd,
