@@ -408,6 +408,15 @@ describe('modeGates', () => {
     expect(modeGates('autoEdit')).toEqual(modeGates('acceptEdits'))
   })
 
+  it('acceptEdits asks on the nested `.config/git` entry and a cli.js-list file, rendered from the one table', () => {
+    const edits = modeGates('acceptEdits')
+      .filter((g) => g.action === 'edit')
+      .map((g) => g.resource)
+    expect(edits).toEqual(
+      expect.arrayContaining(['*/.config/git/*', '.config/git', '*/.npmrc', '*/.idea/*'])
+    )
+  })
+
   it('plan: shell, webfetch and external_directory ask (edits are enforced after the user rules)', () => {
     expect(modeGates('plan')).toEqual([
       r('shell', 'ask'),

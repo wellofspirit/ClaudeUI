@@ -18,13 +18,25 @@
  *    opencode `edit` ask patterns by {@link agentControlEditPatterns}
  *    (`opencode/permission-v2.ts`).
  *
+ * The list is ours UNION cli.js 2.1.308's `DANGEROUS_DIRECTORIES` /
+ * `DANGEROUS_FILES` (package-manager and shell rc files, build/linter configs,
+ * hook runners): Claude raises a safety check for each of them, so the
+ * edit-auto-accepting bases must not wave them through either.
+ *
+ * A directory entry may be several components (`.config/git`): the predicate
+ * matches the components as an adjacent run, and the opencode patterns are the
+ * entry itself with `/` kept — both generated from the one table, so the two
+ * engines cannot disagree about a nested entry.
+ *
  * Pure: no fs, no platform lookups — it must decide the same way wherever the
  * command runs (remote hosts included).
  */
 import path from 'node:path'
 
 /** Directories matched as ANY path component, at any depth, including as the
- *  last component (a linked worktree's `.git` is a FILE pointing at the gitdir). */
+ *  last component (a linked worktree's `.git` is a FILE pointing at the gitdir).
+ *  An entry with `/` (`.config/git`) is a SEQUENCE: those components, adjacent
+ *  and in order, at any depth. */
 export const AGENT_CONTROL_DIRS: readonly string[] = [
   '.git',
   '.claude',
@@ -40,7 +52,16 @@ export const AGENT_CONTROL_DIRS: readonly string[] = [
   // Agent Skills location pi discovers from cwd up to the repo root
   // (vendor/pi-src/packages/coding-agent/docs/skills.md) — skills are
   // instructions future sessions load.
-  '.agents'
+  '.agents',
+  // cli.js 2.1.308 DANGEROUS_DIRECTORIES beyond ours: IDE project config,
+  // package-manager and build-tool config/caches, and git's XDG config (git
+  // reads `$XDG_CONFIG_HOME/git/config` — `core.fsmonitor`/`core.sshCommand`
+  // there arm code execution like `.git/config`).
+  '.idea',
+  '.cargo',
+  '.yarn',
+  '.mvn',
+  '.config/git'
 ]
 
 /** File names matched as the LAST path component, at any depth. */
@@ -55,10 +76,55 @@ export const AGENT_CONTROL_FILES: readonly string[] = [
   'opencode.json',
   'opencode.jsonc',
   // The single-file form of `.devcontainer/` — same run-on-open mechanism.
-  '.devcontainer.json'
+  '.devcontainer.json',
+  // cli.js 2.1.308 DANGEROUS_FILES beyond ours: git config, shell rc/profile
+  // files (run on every shell start), direnv and ripgrep config, package-manager
+  // and runtime config that runs scripts or redirects registries, build-tool
+  // and hook-runner configs, wrapper properties that pick the downloaded
+  // toolchain, and the linter config.
+  '.gitconfig',
+  '.gitmodules',
+  '.bashrc',
+  '.bash_profile',
+  '.zshrc',
+  '.zprofile',
+  '.profile',
+  '.zshenv',
+  '.zlogin',
+  '.zlogout',
+  '.bash_login',
+  '.bash_aliases',
+  '.bash_logout',
+  '.envrc',
+  '.ripgreprc',
+  '.claude.json',
+  '.npmrc',
+  '.yarnrc',
+  '.yarnrc.yml',
+  '.pnp.cjs',
+  '.pnp.loader.mjs',
+  '.pnpmfile.cjs',
+  'bunfig.toml',
+  '.bunfig.toml',
+  '.bazelrc',
+  '.bazelversion',
+  '.bazeliskrc',
+  '.pre-commit-config.yaml',
+  'lefthook.yml',
+  '.lefthook.yml',
+  'lefthook.yaml',
+  '.lefthook.yaml',
+  'gradle-wrapper.properties',
+  'maven-wrapper.properties',
+  'pyrightconfig.json'
 ]
 
-const DIR_SET = new Set(AGENT_CONTROL_DIRS.map(foldName))
+/** Single-component directory entries, folded. */
+const SINGLE_DIR_SET = new Set(AGENT_CONTROL_DIRS.filter((d) => !d.includes('/')).map(foldName))
+/** Multi-component directory entries as folded component sequences (`.config/git` → `['.config', 'git']`). */
+const SEQUENCE_DIRS: readonly (readonly string[])[] = AGENT_CONTROL_DIRS.filter((d) =>
+  d.includes('/')
+).map((d) => d.split('/').map(foldName))
 const FILE_SET = new Set(AGENT_CONTROL_FILES.map(foldName))
 
 /**
@@ -111,12 +177,53 @@ export function foldName(component: string): string {
 export function isAgentControlPath(filePath: string): boolean {
   const components = filePath.split(/[\\/]+/).filter((c) => c.length > 0)
   const last = components.length - 1
-  return components.some((raw, i) => {
+  const single = components.some((raw, i) => {
     if (SHORT_NAME_ALIAS.test(raw)) return true
     const name = foldName(raw)
     if (name === '') return false
-    return DIR_SET.has(name) || (i === last && FILE_SET.has(name))
+    return SINGLE_DIR_SET.has(name) || (i === last && FILE_SET.has(name))
   })
+  return single || agentControlSequenceHits(components).length > 0
+}
+
+/**
+ * The multi-component entries (`.config/git`) a path contains, each reported
+ * once as the matched run in the path's own spelling joined with `/`. Empty
+ * when none matches. Single-component entries are NOT reported here: callers
+ * that list hit components (the redirect scanner's protected-component check)
+ * already look at components one by one and need only this for the runs a
+ * per-component look cannot see.
+ *
+ * `components` is the path already split on both separators. `.` is dropped;
+ * `..` breaks adjacency, and the lexically collapsed form (`.config/x/../git`)
+ * is matched too, so no spelling of the same components slips past an entry.
+ */
+export function agentControlSequenceHits(components: readonly string[]): string[] {
+  if (SEQUENCE_DIRS.length === 0) return []
+  const named = components
+    .filter((c) => c.length > 0)
+    .map((raw) => ({ raw, name: raw === '..' ? '..' : foldName(raw) }))
+    .filter((c) => c.name !== '')
+  const collapsed: typeof named = []
+  for (const c of named) {
+    if (c.name !== '..') collapsed.push(c)
+    else if (collapsed.length > 0 && collapsed[collapsed.length - 1].name !== '..') collapsed.pop()
+    else collapsed.push(c)
+  }
+  const hits: string[] = []
+  for (const seq of SEQUENCE_DIRS) {
+    for (const list of [named, collapsed]) {
+      for (let i = 0; i + seq.length <= list.length; i++) {
+        if (!seq.every((n, k) => list[i + k].name === n)) continue
+        const run = list
+          .slice(i, i + seq.length)
+          .map((c) => c.raw)
+          .join('/')
+        if (!hits.includes(run)) hits.push(run)
+      }
+    }
+  }
+  return hits
 }
 
 /**

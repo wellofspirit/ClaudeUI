@@ -102,6 +102,16 @@ describe('editClearsAgentControl', () => {
     expect(editClearsAgentControl(['src/a.ts'], { filePath: '/repo/src/a.ts' }, '/repo')).toBe(true)
   })
 
+  it('the cli.js-list additions and the nested `.config/git` are not clear either', () => {
+    for (const p of ['.npmrc', 'bunfig.toml', '.idea/workspace.xml', '.config/git/config']) {
+      expect(editClearsAgentControl([p], { filePath: `/repo/${p}` }, '/repo'), p).toBe(false)
+    }
+    // …a near miss of the sequence is
+    expect(
+      editClearsAgentControl(['.config/gitx/a'], { filePath: '/repo/.config/gitx/a' }, '/repo')
+    ).toBe(true)
+  })
+
   it('a control path in any target is not', () => {
     expect(
       editClearsAgentControl(['.git/config'], { filePath: '/repo/.git/config' }, '/repo')

@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os'
 import {
   AGENT_CONTROL_DIRS,
   AGENT_CONTROL_FILES,
+  agentControlSequenceHits,
   foldName,
   isAgentControlPath
 } from './agent-control-paths'
@@ -2728,6 +2729,9 @@ export function protectedComponentsOf(components: readonly string[]): string[] {
     // match where `isAgentControlPath` would match them.
     if (isAgentControlPath(i === last ? component : `${component}/x`)) hits.push(component)
   }
+  // Multi-component entries (`.config/git`) are invisible to the per-component
+  // look above: report each matched run once, joined as written.
+  for (const run of agentControlSequenceHits(components)) hits.push(run)
   return hits
 }
 
