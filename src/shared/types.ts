@@ -1348,6 +1348,12 @@ export interface ClaudePermissions {
    * a value that carries no information.
    */
   disableAutoMode?: string | undefined
+  /**
+   * `permissions.blockReadsOutsideWorkingDirectories` is `true` in this scope (cli.js: true in
+   * any source wins): file-tool reads outside the working directories are refused in every
+   * mode. Present only when true, so an unset scope compares equal to the old shape.
+   */
+  blockReadsOutsideWorkingDirectories?: boolean
 }
 
 export type PermissionScope = 'user' | 'project' | 'local'

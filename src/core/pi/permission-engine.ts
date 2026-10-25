@@ -30,6 +30,15 @@ import { allowCovers, denyAskHit, type DenyAskHit } from '../permissions/shell-r
 import { readOnlyVerdict } from '../automode/read-only'
 import { hostRealpath } from '../automode/read-only-gate'
 import { logger } from '../services/logger'
+import {
+  humanOnlyMessage,
+  pathFacts,
+  piResolvePath,
+  readBlockMessage,
+  symlinkWriteMessage,
+  type PiPathFacts,
+  type PiPathScope
+} from './pi-path-scope'
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny'
 
@@ -47,17 +56,41 @@ export type PermissionDecision = 'allow' | 'ask' | 'deny'
  * we simply report what it matched.
  */
 export type PermissionDecisionSource =
-  'deny-rule' | 'hosted-auto-allow' | 'ask-rule' | 'session-allow' | 'allow-rule' | 'mode-base'
+  | 'deny-rule'
+  | 'hosted-auto-allow'
+  | 'ask-rule'
+  | 'session-allow'
+  | 'allow-rule'
+  | 'mode-base'
+  // The containment rung's own verdicts (H1): a leaf-symlink or read-block DENY, and the
+  // HUMAN-ONLY asks (an unplaceable path, a Windows path trick, an edit a link carried out of
+  // the workspace). Like `ask-rule`, an ask with this source goes to the human in every mode —
+  // auto mode's judge never sees it.
+  | 'path-scope'
+
+/** Why the containment rung answered as it did (carried on the verdict for the callers' routing and wording). */
+export type PathVerdictReason =
+  'outside-scope' | 'unresolved' | 'human-only' | 'symlink' | 'read-block'
 
 export interface PermissionVerdict {
   decision: PermissionDecision
   source: PermissionDecisionSource
   /** The user-authored Claude rule string that matched, for the rule-sourced verdicts. */
   rule?: string
+  /** Set by the containment rung (a `ctx.scope` call on a path tool): why a path-sensitive verdict is what it is. */
+  pathReason?: PathVerdictReason
+  /** The model-facing deny text, or the card line of a human-only ask, for a `path-scope` verdict. */
+  message?: string
 }
 
-/** The merged (user + project + local scope) Claude permission rule set. Same shape as ClaudePermissions — merging three scopes together yields no new fields. */
-export type MergedClaudeRules = ClaudePermissions
+/**
+ * The merged (user + project + local scope) Claude permission rule set: ClaudePermissions plus
+ * the provenance the containment rung needs and a plain three-scope merge loses.
+ */
+export interface MergedClaudeRules extends ClaudePermissions {
+  /** The entries of `additionalDirectories` that did NOT come from project settings (the read block does not honour project-sourced ones). Absent = no provenance: all count. */
+  nonProjectAdditionalDirectories?: string[]
+}
 
 export interface PermissionEngineContext {
   /**
@@ -88,6 +121,17 @@ export interface PermissionEngineContext {
   sessionAllows: ReadonlySet<string>
   /** `sessionAllows` holds pi's per-path edit/write keys ({@link piSessionAllowKey}); absent = the bare-name keys (Codex). */
   sessionAllowsByPath?: boolean
+  /**
+   * The workspace the containment rung checks pi's path tools (`read`, `edit`, `write`, `grep`,
+   * `find`, `ls`) against — see `pi-path-scope.ts`. ONLY the pi callers pass it (PiSession, its
+   * children, the pi dispatch target, all with a `judge`): absent, the ladder has no notion of
+   * "outside the workspace" and behaves exactly as before, which is what Codex (its own
+   * `insideWorkspace`) and every scope-less caller rely on. With it the ladder resolves each call's
+   * path as pi will (`@x`, `~/x`, `file://`, …), matches path rules and session-allow keys on that
+   * canonical path, and answers per the containment table (see {@link scopedBase}).
+   * `bypassPermissions` ignores it (allow-everything is its contract).
+   */
+  scope?: PiPathScope
   /**
    * The session's working directory — lets `ruleMatchesTool` resolve a
    * path-bearing tool call's `path`/`file_path` argument (pi's own tool
@@ -415,8 +459,8 @@ function extractToolPath(input: Record<string, unknown>): string | undefined {
  *
  * An absolute path OUTSIDE `cwd` relativizes to a `../`-prefixed string,
  * which correctly fails a plain relative glob like `src/**` — this is the
- * additionalDirectories/external-directory case; see this file's
- * `additionalDirectories` deferral comment on `MergedClaudeRules`.
+ * additionalDirectories/external-directory case; see the
+ * containment rung (`ctx.scope`), which holds the additional directories as roots.
  *
  * `cwd` absent falls back to matching the RAW path as-is (backslash-
  * normalized only), best-effort — documented, not silently pretended to be
@@ -652,17 +696,34 @@ export function sessionAllowKey(toolName: string, input: Record<string, unknown>
  * business, not the key's.
  *
  * The add side (PiSession.resolveApproval) and the lookup side (the ladder) both build the key
- * here, from the same input and cwd, so they agree by construction. The path is the plain
- * cwd-resolved form of the call's own spelling; a spelling pi would read differently
- * (`@x`, `~/x`, `file://…`) can only produce a key that is never matched again (an extra ask),
- * never a broader allow — and the containment slice pins the call to the path it gated.
+ * here, from the same input, cwd and scope, so they agree by construction. With a `scope` the
+ * path is pi's own resolution of the call's `path` ({@link piResolvePath}: `@x`, `~/x`,
+ * `file://…`, unicode spaces) — the very path the containment guard pins the call to — so two
+ * spellings of one file share a key and two files never do. Without one (a scope-less caller) it is
+ * the plain cwd-resolved form of the call's own spelling.
  */
 export function piSessionAllowKey(
   toolName: string,
   input: Record<string, unknown>,
-  cwd: string | undefined
+  cwd: string | undefined,
+  scope?: PiPathScope
 ): string {
   if (toolName !== 'edit' && toolName !== 'write') return sessionAllowKey(toolName, input)
+  if (scope) {
+    // pi reads `path` only (its schema has no alias); a call without one writes nothing.
+    const arg = typeof input.path === 'string' ? input.path : undefined
+    let canonical = arg ?? ''
+    if (arg !== undefined) {
+      try {
+        const platform = scope.platform ?? process.platform
+        canonical = piResolvePath(arg, scope.cwd, platform, scope.homeDir)
+        if (platform === 'win32') canonical = canonical[0].toUpperCase() + canonical.slice(1)
+      } catch {
+        /* an unusable path: the raw spelling is a key that never matches a resolvable one */
+      }
+    }
+    return `${toolName}:${canonical}`
+  }
   const raw = extractToolPath(input)
   let canonical = raw ?? ''
   if (raw !== undefined && cwd) {
@@ -1151,31 +1212,25 @@ export function planModeOutranksRules(
  * everything else (so render_mermaid/create_mockup/show_mockup never prompt
  * or depend on mode/rules) — see PI_AUTO_ALLOW_HOSTED_TOOLS' doc comment.
  *
- * `ctx.rules.additionalDirectories` and `ctx.rules.defaultMode` are
- * DELIBERATELY not consulted here — both merged into `MergedClaudeRules` (so
- * their presence is harmless/inert, never causes a crash or a surprise
- * default-allow) but not yet acted on:
+ * PATH CONTAINMENT (H1, `ctx.scope`; pi callers only). After the deny tier: an edit through a
+ * symbolic link and a read the read block refuses are denied (`path-scope`); after the ask tier a
+ * path that cannot be placed, a Windows path trick and a link-carried edit are HUMAN-ONLY asks
+ * (`path-scope`, never the judge's); the session allow, the allow tier and the base then follow,
+ * the base per {@link scopedBase}'s table. The additional directories reach the ladder as the
+ * scope's roots (`buildPiPathScope`), not through `ctx.rules.additionalDirectories`, which this
+ * function still does not read (the auto-mode read-only gate and opencode's `external_directory`
+ * consume it elsewhere). A call with no scope has no notion of "outside the workspace".
  *
- *  - `additionalDirectories`: not a rung of this ladder, which has no path
- *    containment for read/edit/write/search (they fall straight through to the
- *    mode base regardless of path, so pi needs no `external_directory`
- *    concept). They are consumed elsewhere: the auto-mode read-only gate takes
- *    them as extra in-scope roots (`automode/read-only.ts`), and on opencode
- *    2.x ClaudeUI's own `external_directory` ask (in every mode,
- *    `opencode/permission-v2.ts`) is lifted for them by `<dir>/*` allows
- *    compiled from this field. (ADR-022's `{*:allow}` baseline for
- *    `external_directory` is 1.x history, superseded by ADR-097.)
- *  - `defaultMode`: unconsumed on the opencode side too (OpencodeSession.ts
- *    merges it into its own rules struct and never reads it back) — there is
- *    no cross-engine parity behavior to mirror. Claude Code itself uses
- *    `defaultMode` to pick a NEW session's STARTING permission mode when the
- *    user hasn't chosen one — a session-bootstrap concern for whoever
- *    constructs `PiSession`'s initial `this.permissionMode`, not a per-call
- *    concern for `decide()` (which cannot tell "still at the unset initial
- *    default" apart from "the user explicitly chose the `default`/ask
- *    autonomy tier" — treating the two the same here would make
- *    `defaultMode` silently override a live user choice for the rest of the
- *    session, which is worse than not implementing it). Deferred.
+ * `ctx.rules.defaultMode` is DELIBERATELY not consulted here — merged into `MergedClaudeRules`
+ * (so its presence is harmless/inert) but not acted on: unconsumed on the opencode side too
+ * (OpencodeSession.ts merges it into its own rules struct and never reads it back) — there is no
+ * cross-engine parity behavior to mirror. Claude Code itself uses `defaultMode` to pick a NEW
+ * session's STARTING permission mode when the user hasn't chosen one — a session-bootstrap
+ * concern for whoever constructs `PiSession`'s initial `this.permissionMode`, not a per-call
+ * concern for `decide()` (which cannot tell "still at the unset initial default" apart from "the
+ * user explicitly chose the `default`/ask autonomy tier" — treating the two the same here would
+ * make `defaultMode` silently override a live user choice for the rest of the session, which is
+ * worse than not implementing it). Deferred.
  */
 export function decide(
   toolName: string,
@@ -1216,16 +1271,65 @@ export function decideWithSource(
   const ctx: PermissionEngineContext = judged
     ? { ...rawCtx, rules: withoutAllowRules(rawCtx.rules) }
     : rawCtx
+  // The containment rung (H1): only for a scope-carrying caller, only on pi's path tools, and
+  // never under bypassPermissions (allow-everything is its contract).
+  const scope = ctx.mode === 'bypassPermissions' ? undefined : ctx.scope
+  const facts = scope ? pathFacts(toolName, input, scope) : undefined
+  // Path rules match the path pi will open, not the model's spelling of it (`@.git/config`).
+  const matchInput =
+    facts && typeof input.path === 'string' ? { ...input, path: facts.execPath } : input
   const match = (rules: readonly string[]): string | undefined =>
-    rules.find((r) => ruleMatchesTool(r, kind, toolName, input, ctx.cwd, ctx.mcpRuleKey))
+    rules.find((r) => ruleMatchesTool(r, kind, toolName, matchInput, ctx.cwd, ctx.mcpRuleKey))
   // Only Bash rules can match the command kind; both of its rule tiers in one call.
   const shell =
     kind === 'command'
       ? denyAskHit(commandOf(input), { deny: ctx.rules.deny, ask: ctx.rules.ask })
       : undefined
 
-  const denyRule = kind === 'command' ? tierRule(shell, 'deny') : match(ctx.rules.deny)
+  // Deny rules are checked against EVERY spelling of the path (as Claude does): the canonical
+  // path pi opens, the model's own spelling and the symbolic-link landing — a `Read(//secret/**)`
+  // deny holds for an in-project link that lands in /secret. Ask and allow rules stay on the
+  // canonical path (an allow must not widen through a spelling the user did not write).
+  const matchDeny = (): string | undefined => {
+    const hit = match(ctx.rules.deny)
+    if (hit !== undefined || !facts || typeof input.path !== 'string') return hit
+    const others = [input.path, ...(facts.landing === undefined ? [] : [facts.landing])]
+    for (const other of others) {
+      const spelled = ctx.rules.deny.find((r) =>
+        ruleMatchesTool(r, kind, toolName, { ...input, path: other }, ctx.cwd, ctx.mcpRuleKey)
+      )
+      if (spelled !== undefined) return spelled
+    }
+    return undefined
+  }
+  const denyRule = kind === 'command' ? tierRule(shell, 'deny') : matchDeny()
   if (denyRule !== undefined) return { decision: 'deny', source: 'deny-rule', rule: denyRule }
+  if (scope && facts) {
+    // Claude's `_he`: an edit through a symbolic link is refused in every mode (the link's own
+    // target is the file to name) — and so is a dangling link, which could point anywhere.
+    if (facts.write && facts.leafIsSymlink) {
+      return {
+        decision: 'deny',
+        source: 'path-scope',
+        pathReason: 'symlink',
+        message: symlinkWriteMessage(facts.execPath)
+      }
+    }
+    // The read block is a fence, not a preference: a deny, whatever the mode, and nothing below
+    // (a session allow, an allow rule, the judge) can lift it.
+    if (
+      scope.blockOutsideReads &&
+      !facts.write &&
+      (!facts.inFence || facts.state === 'unresolved')
+    ) {
+      return {
+        decision: 'deny',
+        source: 'path-scope',
+        pathReason: 'read-block',
+        message: readBlockMessage(facts, scope)
+      }
+    }
+  }
   // ADR-085 ruling 7 — plan mode wins over every rung below for a mutating call: a user ask rule
   // no longer surfaces a card for it, and neither a session allow nor an allow rule allows it.
   // The deny rung stays above (a user deny gives the more specific reason). `mode-base` so the
@@ -1251,13 +1355,33 @@ export function decideWithSource(
   }
   const askRule = kind === 'command' ? tierRule(shell, 'ask') : match(ctx.rules.ask)
   if (askRule !== undefined) return { decision: 'ask', source: 'ask-rule', rule: askRule }
+  // HUMAN-ONLY (R4, R8): a path we cannot place, a Windows path form that can name another
+  // object, an edit a symbolic link carried out of the workspace. A person decides, in every
+  // mode: not the judge (the callers route a `path-scope` ask straight to the human), and not a
+  // standing allow, an allow rule or the base below.
+  if (scope && facts) {
+    const humanOnly =
+      facts.state === 'unresolved'
+        ? 'unresolved'
+        : facts.write && (facts.suspiciousWindows || facts.carriedOut)
+          ? 'human-only'
+          : undefined
+    if (humanOnly) {
+      return {
+        decision: 'ask',
+        source: 'path-scope',
+        pathReason: humanOnly,
+        message: humanOnlyMessage(facts)
+      }
+    }
+  }
   if (
     ctx.sessionAllows.has(
       ctx.sessionAllowsByPath
-        ? piSessionAllowKey(toolName, input, ctx.cwd)
+        ? piSessionAllowKey(toolName, input, ctx.cwd, rawCtx.scope)
         : sessionAllowKey(toolName, input)
     ) &&
-    sessionAllowHolds(kind, input, ctx, judged)
+    sessionAllowHolds(kind, input, ctx, judged, facts)
   ) {
     return { decision: 'allow', source: 'session-allow' }
   }
@@ -1268,10 +1392,55 @@ export function decideWithSource(
       : match(ctx.rules.allow)
   if (allowRule !== undefined) return { decision: 'allow', source: 'allow-rule', rule: allowRule }
 
+  if (facts) {
+    const decision = scopedBase(base, judged, facts, kind, input, ctx.cwd, planScope)
+    return {
+      decision,
+      source: 'mode-base',
+      ...(decision !== 'allow' && !facts.inScope ? { pathReason: 'outside-scope' as const } : {})
+    }
+  }
   return {
     decision: modeBaseDecision(base, kind, input, ctx.cwd, planScope),
     source: 'mode-base'
   }
+}
+
+/**
+ * The mode base for a path-tool call the containment rung has the facts of (H1). Rows, with
+ * "judged auto" meaning `auto`/`full` with the judge on and `default` also standing for
+ * `auto`/`full` with it off (see {@link ladderBase}):
+ *
+ * | base        | read/search in | read/search out | edit/write in             | edit/write out |
+ * | ----------- | -------------- | --------------- | ------------------------- | -------------- |
+ * | default     | allow          | ask             | ask                       | ask            |
+ * | acceptEdits | allow          | ask             | allow; sensitive -> ask   | ask            |
+ * | plan        | allow          | ask             | deny                      | deny           |
+ * | judged auto | allow          | allow           | allow; sensitive -> judge | judge          |
+ *
+ * (A judged `ask` is the judge's to answer: the caller sends a `mode-base` ask to it.) The
+ * scratchpad is the one standing exception: an edit or write inside it is allowed in every base
+ * but plan — sensitive names inside it still follow the row above (safer than Claude, which
+ * waves them through). `bypassPermissions` never gets here.
+ *
+ * Anything that is not a path tool's read/write (bash, agent, mcp, …) keeps {@link modeBaseDecision}.
+ */
+function scopedBase(
+  base: string,
+  judged: boolean,
+  facts: PiPathFacts,
+  kind: ToolKind,
+  input: Record<string, unknown>,
+  cwd: string | undefined,
+  planScope?: PlanReadOnlyScope
+): 'allow' | 'ask' | 'deny' {
+  if (facts.write) {
+    if (base === 'plan') return modeBaseDecision(base, kind, input, cwd, planScope)
+    if (facts.inScratchpad && !facts.sensitive) return 'allow'
+    return base === 'acceptEdits' && facts.inScope && !facts.sensitive ? 'allow' : 'ask'
+  }
+  if (facts.inScope) return 'allow'
+  return base === 'acceptEdits' && judged ? 'allow' : 'ask'
 }
 
 /**
@@ -1308,10 +1477,19 @@ function sessionAllowHolds(
   kind: ToolKind,
   input: Record<string, unknown>,
   ctx: PermissionEngineContext,
-  judged: boolean
+  judged: boolean,
+  facts: PiPathFacts | undefined
 ): boolean {
   if (!judged) return true
   if (kind === 'task' || kind === 'detail' || kind === 'unknown') return false
+  if (facts) {
+    // The containment facts, where the caller has them: a path outside the workspace, or one we
+    // could not place, is the judge's whatever a click once allowed — as is a sensitive edit,
+    // judged on every spelling of the path rather than the model's.
+    if (!facts.inScope || facts.state === 'unresolved') return false
+    if (facts.write && facts.sensitive) return false
+    return true
+  }
   if ((kind === 'fileEdit' || kind === 'fileWrite') && editsAgentControlPath(input, ctx.cwd)) {
     return false
   }
@@ -1435,6 +1613,9 @@ export function mergedClaudeRulesFor(cwd: string): MergedClaudeRules {
       additionalDirectories: [],
       defaultMode: undefined
     }
+    // Provenance the containment rung needs (a plain concatenation loses it): which directories
+    // PROJECT settings did not list, and whether any scope sets the read block.
+    const nonProject: string[] = []
     const scopes: PermissionScope[] = ['user', 'project', 'local']
     for (const scope of scopes) {
       const p = loadClaudePermissions(scope, cwd)
@@ -1442,7 +1623,12 @@ export function mergedClaudeRulesFor(cwd: string): MergedClaudeRules {
       merged.deny.push(...p.deny)
       merged.ask.push(...p.ask)
       merged.additionalDirectories.push(...p.additionalDirectories)
+      if (scope !== 'project') nonProject.push(...p.additionalDirectories)
+      if (p.blockReadsOutsideWorkingDirectories === true) {
+        merged.blockReadsOutsideWorkingDirectories = true
+      }
     }
+    merged.nonProjectAdditionalDirectories = nonProject
     return merged
   } catch (err) {
     logger.warn(

@@ -42,6 +42,8 @@ import {
   sessionToolDenyRule
 } from '../permission-engine'
 import { piMcpRuleKey } from '../pi-mcp-bridge'
+import type { PiPathScope } from '../pi-path-scope'
+import { makeVirtualFs, type VirtualNode } from '../../../test/helpers/virtual-path-fs'
 import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
 
 function rules(partial: Partial<MergedClaudeRules> = {}): MergedClaudeRules {
@@ -891,29 +893,7 @@ describe('decide — ABSOLUTE / home-dir / Windows-absolute rule specifiers', ()
   })
 })
 
-describe('additionalDirectories / defaultMode — deliberately deferred, must stay inert (never default-allow)', () => {
-  it('additionalDirectories present in rules does not widen access for a path outside cwd/scope', () => {
-    const ctx = {
-      mode: 'default', // mode base for edit is 'ask'
-      rules: rules({ additionalDirectories: ['/extra'] }),
-      sessionAllows: NO_SESSION_ALLOWS,
-      cwd: '/repo'
-    }
-    // A path under the "additional directory" gets NO special treatment —
-    // behaves exactly like any other out-of-cwd path (falls through to mode base).
-    expect(decide('edit', { path: '/extra/notes.md' }, ctx)).toBe('ask')
-  })
-
-  it('additionalDirectories does not make an unrelated allow rule match a path it otherwise would not', () => {
-    const ctx = {
-      mode: 'default',
-      rules: rules({ allow: ['Edit(src/**)'], additionalDirectories: ['/extra'] }),
-      sessionAllows: NO_SESSION_ALLOWS,
-      cwd: '/repo'
-    }
-    expect(decide('edit', { path: '/extra/notes.md' }, ctx)).toBe('ask')
-  })
-
+describe('defaultMode — deliberately not consulted by the ladder (never default-allow)', () => {
   it('defaultMode present in rules does not override the live session mode', () => {
     const ctx = {
       mode: 'default', // live mode chosen by the user/session — mode base for edit is 'ask'
@@ -2243,6 +2223,778 @@ describe('decide — session allows (H3)', () => {
       })
       expect(decide('agent', {}, withRules({ deny: ['Agent'] }))).toBe('deny')
       expect(decideWithSource('agent', {}, withRules({ ask: ['Agent'] })).source).toBe('ask-rule')
+    })
+  })
+})
+
+/**
+ * Slice C (H1): the ladder's containment rung. Every case runs against an in-memory filesystem
+ * (`makeVirtualFs`) with POSIX or win32 semantics, so links, unreadable entries and the Windows
+ * path forms are exercised on any host. Each assertion below fails on the engine without the rung
+ * (the ladder then has no notion of "outside the workspace").
+ */
+describe('decide — path containment (H1, ctx.scope)', () => {
+  const BASE_NODES: Record<string, VirtualNode> = {
+    '/repo': 'dir',
+    '/repo/src': 'dir',
+    '/repo/src/a.ts': 'file',
+    '/repo/.git': 'dir',
+    '/repo/.git/config': 'file',
+    '/repo/.git/hooks': 'dir',
+    '/home': 'dir',
+    '/home/u': 'dir',
+    '/home/u/.ssh': 'dir',
+    '/home/u/.ssh/id_rsa': 'file',
+    '/home/u/.bashrc': 'file',
+    '/etc': 'dir',
+    '/etc/passwd': 'file',
+    '/secret': 'dir',
+    '/secret/k': 'file',
+    '/outside': 'dir',
+    '/outside/f': 'file',
+    '/extra': 'dir',
+    '/extra/notes.md': 'file',
+    '/tmp': 'dir'
+  }
+
+  function scopeOf(
+    extra: Record<string, VirtualNode> = {},
+    over: Partial<PiPathScope> = {},
+    denied: string[] = []
+  ): PiPathScope {
+    return {
+      cwd: '/repo',
+      roots: ['/repo'],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs: makeVirtualFs('posix', { ...BASE_NODES, ...extra }, { denied }),
+      ...over
+    }
+  }
+
+  function ctxOf(
+    mode: string,
+    judge: boolean | undefined,
+    scope: PiPathScope | undefined,
+    over: Partial<MergedClaudeRules> = {},
+    sessionAllows: string[] = []
+  ) {
+    return {
+      mode,
+      judge,
+      rules: rules(over),
+      sessionAllows: new Set(sessionAllows),
+      sessionAllowsByPath: true,
+      cwd: '/repo',
+      scope
+    }
+  }
+
+  const allowKey = (tool: string, input: Record<string, unknown>, scope: PiPathScope) =>
+    piSessionAllowKey(tool, input, '/repo', scope)
+
+  describe('the per-mode table (spec: read/edit x inside/outside)', () => {
+    // [mode, judge, tool, path, expected]
+    const TABLE: Array<[string, boolean, string, string, string]> = [
+      // default, and auto/full with the judge off (they read the default base, R14)
+      ['default', false, 'read', 'src/a.ts', 'allow'],
+      ['default', false, 'read', '/etc/passwd', 'ask'],
+      ['default', false, 'edit', 'src/a.ts', 'ask'],
+      ['default', false, 'edit', '/outside/new.txt', 'ask'],
+      ['auto', false, 'read', '/etc/passwd', 'ask'],
+      ['auto', false, 'edit', 'src/a.ts', 'ask'],
+      ['full', false, 'read', '/etc/passwd', 'ask'],
+      // acceptEdits
+      ['acceptEdits', false, 'read', 'src/a.ts', 'allow'],
+      ['acceptEdits', false, 'read', '/etc/passwd', 'ask'],
+      ['acceptEdits', false, 'edit', 'src/a.ts', 'allow'],
+      ['acceptEdits', false, 'write', 'src/new.ts', 'allow'],
+      ['acceptEdits', false, 'edit', '.npmrc', 'ask'],
+      ['acceptEdits', false, 'edit', '.git/config', 'ask'],
+      ['acceptEdits', false, 'edit', '/outside/f', 'ask'],
+      ['acceptEdits', false, 'write', '~/.bashrc', 'ask'],
+      // plan
+      ['plan', false, 'read', 'src/a.ts', 'allow'],
+      ['plan', false, 'read', '/etc/passwd', 'ask'],
+      ['plan', false, 'edit', 'src/a.ts', 'deny'],
+      ['plan', false, 'edit', '/outside/f', 'deny'],
+      // judged auto/full: outside READS are allowed (Claude's classifier-safe set), outside EDITS go to the judge
+      ['auto', true, 'read', 'src/a.ts', 'allow'],
+      ['auto', true, 'read', '/etc/passwd', 'allow'],
+      ['auto', true, 'read', '~/.ssh/id_rsa', 'allow'],
+      ['auto', true, 'edit', 'src/a.ts', 'allow'],
+      ['auto', true, 'edit', '/outside/f', 'ask'],
+      ['auto', true, 'write', '~/.bashrc', 'ask'],
+      ['auto', true, 'edit', '.git/hooks/pre-commit', 'ask'],
+      ['full', true, 'read', '/etc/passwd', 'allow'],
+      ['full', true, 'edit', '/outside/f', 'ask']
+    ]
+    it.each(TABLE)('%s (judge %s): %s %s -> %s', (mode, judge, tool, p, expected) => {
+      expect(decide(tool, { path: p }, ctxOf(mode, judge, scopeOf()))).toBe(expected)
+    })
+
+    it('the same rows WITHOUT a scope are the legacy ladder (Codex keeps it): an outside read is allowed, an outside edit asks', () => {
+      const none = ctxOf('default', undefined, undefined)
+      expect(decide('read', { path: '/etc/passwd' }, none)).toBe('allow')
+      expect(decideWithSource('read', { path: '/etc/passwd' }, none)).toEqual({
+        decision: 'allow',
+        source: 'mode-base'
+      })
+      expect(decide('edit', { path: '/etc/passwd' }, none)).toBe('ask')
+    })
+
+    it('an outside-scope mode-base ask carries pathReason outside-scope (so callers can word the card)', () => {
+      expect(
+        decideWithSource('read', { path: '~/.ssh/id_rsa' }, ctxOf('default', false, scopeOf()))
+      ).toEqual({ decision: 'ask', source: 'mode-base', pathReason: 'outside-scope' })
+      expect(
+        decideWithSource('read', { path: 'src/a.ts' }, ctxOf('default', false, scopeOf()))
+      ).toEqual({ decision: 'allow', source: 'mode-base' })
+    })
+
+    it('bypassPermissions ignores the scope (allow-everything is its contract), even a leaf symlink and a read block', () => {
+      const scope = scopeOf({ '/repo/ln': { link: '/repo/src/a.ts' } }, { blockOutsideReads: true })
+      const bypass = ctxOf('bypassPermissions', false, scope)
+      expect(decide('edit', { path: '/outside/f' }, bypass)).toBe('allow')
+      expect(decide('edit', { path: 'ln' }, bypass)).toBe('allow')
+      expect(decide('read', { path: '/etc/passwd' }, bypass)).toBe('allow')
+    })
+  })
+
+  describe('search tools: only `path` is contained (R10)', () => {
+    it('grep/find/ls with no path search the cwd: in scope', () => {
+      for (const tool of ['grep', 'find', 'ls']) {
+        expect(decide(tool, { pattern: 'x' }, ctxOf('default', false, scopeOf()))).toBe('allow')
+      }
+    })
+    it('a path outside (`..`, absolute, `~`) asks in default and is allowed in judged auto', () => {
+      for (const p of ['..', '/etc', '~']) {
+        expect(decide('grep', { pattern: 'x', path: p }, ctxOf('default', false, scopeOf()))).toBe(
+          'ask'
+        )
+        expect(decide('ls', { path: p }, ctxOf('auto', true, scopeOf()))).toBe('allow')
+      }
+    })
+    it('a pattern/glob that names an outside location is only a filter: no rung', () => {
+      const c = ctxOf('default', false, scopeOf())
+      expect(decide('find', { pattern: '/etc/**', path: 'src' }, c)).toBe('allow')
+      expect(decide('grep', { pattern: '../../x', path: 'src' }, c)).toBe('allow')
+    })
+  })
+
+  describe("pi's own path spellings reach the right file", () => {
+    it('`@/etc/passwd`, `file:///etc/passwd` and `~/.ssh/id_rsa` are OUTSIDE (not cwd-relative names)', () => {
+      for (const p of ['@/etc/passwd', 'file:///etc/passwd', '~/.ssh/id_rsa', '@~/.ssh/id_rsa']) {
+        expect(decide('read', { path: p }, ctxOf('default', false, scopeOf())), p).toBe('ask')
+      }
+    })
+    it('`~user/x` is relative (pi does not expand it): in scope', () => {
+      expect(decide('read', { path: '~user/x' }, ctxOf('default', false, scopeOf()))).toBe('allow')
+    })
+    it('an `@`-prefixed in-project path is in scope and matched by rules on its canonical path', () => {
+      const scope = scopeOf()
+      expect(decide('read', { path: '@src/a.ts' }, ctxOf('default', false, scope))).toBe('allow')
+      // `@.git/config` is the file `.git/config`: a deny/ask rule on it holds
+      expect(
+        decideWithSource(
+          'edit',
+          { path: '@.git/config' },
+          ctxOf('acceptEdits', false, scope, { deny: ['Edit(.git/**)'] })
+        )
+      ).toMatchObject({ decision: 'deny', source: 'deny-rule', rule: 'Edit(.git/**)' })
+      expect(
+        decideWithSource(
+          'edit',
+          { path: '@.git/config' },
+          ctxOf('acceptEdits', false, scope, { ask: ['Edit(.git/**)'] })
+        )
+      ).toMatchObject({ decision: 'ask', source: 'ask-rule' })
+    })
+    it('an additional directory is in scope (the roots the scope was built with); the directory next to it is not', () => {
+      const scope = scopeOf(
+        { '/home/u/proj': 'dir', '/home/u/proj/n': 'file' },
+        { roots: ['/repo', '/extra', '/home/u/proj'] }
+      )
+      expect(decide('edit', { path: '/extra/notes.md' }, ctxOf('acceptEdits', false, scope))).toBe(
+        'allow'
+      )
+      expect(decide('read', { path: '~/proj/n' }, ctxOf('default', false, scope))).toBe('allow')
+      expect(decide('edit', { path: '/extra2/notes.md' }, ctxOf('acceptEdits', false, scope))).toBe(
+        'ask'
+      )
+    })
+  })
+
+  describe('links', () => {
+    const LINKS: Record<string, VirtualNode> = {
+      '/repo/out': { link: '/outside' }, // directory link leaving the project
+      '/repo/ln': { link: '/repo/src/a.ts' }, // a leaf symlink (target in scope)
+      '/repo/hk': { link: '/repo/.git/hooks' }, // in-project link onto a sensitive directory
+      '/repo/dangling': { link: '/nowhere' },
+      '/repo/loopa': { link: '/repo/loopb' },
+      '/repo/loopb': { link: '/repo/loopa' }
+    }
+
+    it('a directory link out of the project: read asks (default) and is allowed (judged auto)', () => {
+      const scope = scopeOf(LINKS)
+      expect(decide('read', { path: 'out/f' }, ctxOf('default', false, scope))).toBe('ask')
+      expect(decide('read', { path: 'out/f' }, ctxOf('auto', true, scope))).toBe('allow')
+    })
+
+    it('an edit THROUGH a link out is human-only: a path-scope ask in every mode, never the judge', () => {
+      const scope = scopeOf(LINKS)
+      for (const [mode, judge] of [
+        ['default', false],
+        ['acceptEdits', false],
+        ['auto', true],
+        ['auto', false],
+        ['full', true]
+      ] as const) {
+        expect(
+          decideWithSource('edit', { path: 'out/f' }, ctxOf(mode, judge, scope)),
+          mode
+        ).toEqual({
+          decision: 'ask',
+          source: 'path-scope',
+          pathReason: 'human-only',
+          message: expect.stringContaining('through a symbolic link')
+        })
+      }
+    })
+
+    it("human-only outranks a session allow and an allow rule (a click on the model's spelling never covers the landing)", () => {
+      const scope = scopeOf(LINKS)
+      const key = allowKey('edit', { path: 'out/f' }, scope)
+      expect(
+        decideWithSource('edit', { path: 'out/f' }, ctxOf('default', false, scope, {}, [key]))
+      ).toMatchObject({ decision: 'ask', source: 'path-scope', pathReason: 'human-only' })
+      expect(
+        decideWithSource(
+          'edit',
+          { path: 'out/f' },
+          ctxOf('default', false, scope, { allow: ['Edit(out/**)'] })
+        )
+      ).toMatchObject({ decision: 'ask', source: 'path-scope' })
+    })
+
+    it('an ask rule on the path still answers FIRST (rule source, so the user sees which rule)', () => {
+      expect(
+        decideWithSource(
+          'edit',
+          { path: 'out/f' },
+          ctxOf('default', false, scopeOf(LINKS), { ask: ['Edit(out/**)'] })
+        )
+      ).toMatchObject({ decision: 'ask', source: 'ask-rule', rule: 'Edit(out/**)' })
+    })
+
+    it("a leaf symlink write is DENIED in every mode with Claude's wording; a read through it is fine", () => {
+      const scope = scopeOf(LINKS)
+      for (const [mode, judge] of [
+        ['default', false],
+        ['acceptEdits', false],
+        ['auto', true],
+        ['full', false]
+      ] as const) {
+        const v = decideWithSource('write', { path: 'ln' }, ctxOf(mode, judge, scope))
+        expect(v, mode).toMatchObject({
+          decision: 'deny',
+          source: 'path-scope',
+          pathReason: 'symlink'
+        })
+        expect(v.message).toBe(
+          "Refusing to write /repo/ln: it is a symbolic link. Write to the link's target path instead"
+        )
+      }
+      expect(decide('read', { path: 'ln' }, ctxOf('default', false, scope))).toBe('allow')
+    })
+
+    it('a leaf symlink deny outranks an allow rule and a session allow, but a USER deny rule answers first', () => {
+      const scope = scopeOf(LINKS)
+      const key = allowKey('edit', { path: 'ln' }, scope)
+      expect(
+        decideWithSource(
+          'edit',
+          { path: 'ln' },
+          ctxOf('default', false, scope, { allow: ['Edit(ln)'] }, [key])
+        )
+      ).toMatchObject({ decision: 'deny', source: 'path-scope', pathReason: 'symlink' })
+      expect(
+        decideWithSource(
+          'edit',
+          { path: 'ln' },
+          ctxOf('default', false, scope, { deny: ['Edit(ln)'] })
+        )
+      ).toMatchObject({ decision: 'deny', source: 'deny-rule' })
+    })
+
+    it('a dangling link at the leaf is a symlink deny too (it could land anywhere)', () => {
+      expect(
+        decideWithSource('write', { path: 'dangling' }, ctxOf('default', false, scopeOf(LINKS)))
+      ).toMatchObject({ decision: 'deny', pathReason: 'symlink' })
+    })
+
+    it('an in-project link onto a sensitive directory is a sensitive edit by its landing', () => {
+      const scope = scopeOf(LINKS)
+      // acceptEdits would auto-allow an in-scope edit; the landing is .git/hooks -> ask
+      expect(decide('edit', { path: 'hk/pre-commit' }, ctxOf('acceptEdits', false, scope))).toBe(
+        'ask'
+      )
+      // judged auto: the judge reviews it (a plain in-scope edit is allowed outright)
+      expect(decide('edit', { path: 'hk/pre-commit' }, ctxOf('auto', true, scope))).toBe('ask')
+      expect(decide('edit', { path: 'src/new.ts' }, ctxOf('auto', true, scope))).toBe('allow')
+    })
+
+    it('a dangling link or a link loop in the chain is UNRESOLVED: a human-only ask in every mode, for reads too', () => {
+      const scope = scopeOf(LINKS)
+      for (const p of ['dangling/x', 'loopa/x']) {
+        for (const [mode, judge] of [
+          ['default', false],
+          ['auto', true],
+          ['acceptEdits', false]
+        ] as const) {
+          expect(
+            decideWithSource('read', { path: p }, ctxOf(mode, judge, scope)),
+            `${mode} ${p}`
+          ).toMatchObject({ decision: 'ask', source: 'path-scope', pathReason: 'unresolved' })
+        }
+        expect(decideWithSource('edit', { path: p }, ctxOf('auto', true, scope))).toMatchObject({
+          decision: 'ask',
+          source: 'path-scope',
+          pathReason: 'unresolved'
+        })
+      }
+    })
+
+    it('an unreadable ancestor (EACCES) is unresolved too, and beats an allow rule and a session allow', () => {
+      const scope = scopeOf({ '/repo/locked': 'dir', '/repo/locked/x.ts': 'file' }, {}, [
+        '/repo/locked'
+      ])
+      const key = allowKey('edit', { path: 'locked/x.ts' }, scope)
+      expect(
+        decideWithSource(
+          'edit',
+          { path: 'locked/x.ts' },
+          ctxOf('acceptEdits', false, scope, { allow: ['Edit(locked/**)'] }, [key])
+        )
+      ).toMatchObject({ decision: 'ask', source: 'path-scope', pathReason: 'unresolved' })
+    })
+  })
+
+  describe('deny rules match EVERY spelling of the path, incl. the symlink landing; ask/allow stay canonical', () => {
+    const scope = () => scopeOf({ '/repo/inlink': { link: '/secret' } })
+
+    it('Read(//secret/**) denies a read through an in-project link landing in /secret', () => {
+      expect(
+        decideWithSource(
+          'read',
+          { path: 'inlink/k' },
+          ctxOf('auto', true, scope(), { deny: ['Read(//secret/**)'] })
+        )
+      ).toEqual({ decision: 'deny', source: 'deny-rule', rule: 'Read(//secret/**)' })
+      // control: with no deny rule the same call is an outside read the judged mode allows
+      expect(decide('read', { path: 'inlink/k' }, ctxOf('auto', true, scope()))).toBe('allow')
+    })
+
+    it('...and an edit through it (deny beats the human-only carried-out rung), in every mode', () => {
+      for (const mode of ['default', 'acceptEdits', 'auto']) {
+        expect(
+          decideWithSource(
+            'edit',
+            { path: 'inlink/k' },
+            ctxOf(mode, mode === 'auto', scope(), { deny: ['Edit(//secret/**)'] })
+          ),
+          mode
+        ).toMatchObject({ decision: 'deny', source: 'deny-rule' })
+      }
+    })
+
+    it("the model's own spelling is still matched (a relative deny on the link name)", () => {
+      expect(
+        decideWithSource(
+          'read',
+          { path: 'inlink/k' },
+          ctxOf('default', false, scope(), { deny: ['Read(inlink/**)'] })
+        )
+      ).toMatchObject({ decision: 'deny', source: 'deny-rule' })
+    })
+
+    it('an ASK rule on the landing does not fire (ask stays on the canonical path)', () => {
+      expect(
+        decideWithSource(
+          'read',
+          { path: 'inlink/k' },
+          ctxOf('auto', true, scope(), { ask: ['Read(//secret/**)'] })
+        )
+      ).toEqual({ decision: 'allow', source: 'mode-base' })
+    })
+
+    it('an ALLOW rule on the landing does not widen: the carried-out edit is still human-only', () => {
+      expect(
+        decideWithSource(
+          'edit',
+          { path: 'inlink/k' },
+          ctxOf('default', false, scope(), { allow: ['Edit(//secret/**)'] })
+        )
+      ).toMatchObject({ decision: 'ask', source: 'path-scope', pathReason: 'human-only' })
+    })
+
+    it('a path that does not touch the denied tree is untouched', () => {
+      expect(
+        decide(
+          'read',
+          { path: 'src/a.ts' },
+          ctxOf('auto', true, scope(), { deny: ['Read(//secret/**)'] })
+        )
+      ).toBe('allow')
+    })
+  })
+
+  describe('read block (permissions.blockReadsOutsideWorkingDirectories)', () => {
+    const blocked = (extra: Record<string, VirtualNode> = {}, over: Partial<PiPathScope> = {}) =>
+      scopeOf(extra, { blockOutsideReads: true, ...over })
+
+    it('an outside read is a DENY (source path-scope, with the settings hint) in every mode', () => {
+      for (const [mode, judge] of [
+        ['default', false],
+        ['acceptEdits', false],
+        ['plan', false],
+        ['auto', true],
+        ['full', true]
+      ] as const) {
+        const v = decideWithSource('read', { path: '~/.ssh/id_rsa' }, ctxOf(mode, judge, blocked()))
+        expect(v, mode).toMatchObject({
+          decision: 'deny',
+          source: 'path-scope',
+          pathReason: 'read-block'
+        })
+        expect(v.message).toContain('blockReadsOutsideWorkingDirectories')
+        expect(v.message).toContain('/home/u/.ssh/id_rsa')
+      }
+    })
+
+    it('in-project reads and searches are untouched; an outside search is denied', () => {
+      expect(decide('read', { path: 'src/a.ts' }, ctxOf('auto', true, blocked()))).toBe('allow')
+      expect(decide('grep', { pattern: 'x' }, ctxOf('auto', true, blocked()))).toBe('allow')
+      expect(decide('find', { pattern: 'x', path: '/etc' }, ctxOf('auto', true, blocked()))).toBe(
+        'deny'
+      )
+    })
+
+    it('it beats a session allow and an allow rule (a fence, not a preference)', () => {
+      expect(
+        decideWithSource(
+          'read',
+          { path: '/etc/passwd' },
+          ctxOf('default', false, blocked(), { allow: ['Read(//etc/**)'] }, ['read'])
+        )
+      ).toMatchObject({ decision: 'deny', source: 'path-scope' })
+    })
+
+    it('a link-carried read is denied by its landing; an unresolved read is denied too', () => {
+      const scope = blocked({
+        '/repo/out': { link: '/outside' },
+        '/repo/dangling': { link: '/nowhere' }
+      })
+      expect(decideWithSource('read', { path: 'out/f' }, ctxOf('auto', true, scope))).toMatchObject(
+        {
+          decision: 'deny',
+          pathReason: 'read-block'
+        }
+      )
+      expect(
+        decideWithSource('read', { path: 'dangling/x' }, ctxOf('auto', true, scope))
+      ).toMatchObject({ decision: 'deny', pathReason: 'read-block' })
+    })
+
+    it('does not touch writes: an outside edit keeps its row', () => {
+      expect(decide('edit', { path: '/outside/f' }, ctxOf('auto', true, blocked()))).toBe('ask')
+      expect(decide('edit', { path: '/outside/f' }, ctxOf('default', false, blocked()))).toBe('ask')
+    })
+
+    it('an additional directory sourced only from PROJECT settings is outside the fence (fenceRoots), a user one is inside', () => {
+      const scope = blocked(
+        {},
+        { roots: ['/repo', '/extra', '/outside'], fenceRoots: ['/repo', '/outside'] }
+      )
+      // /extra (project-sourced) is a root for ordinary scope but not for the blocked read
+      expect(decide('read', { path: '/extra/notes.md' }, ctxOf('auto', true, scope))).toBe('deny')
+      expect(decide('read', { path: '/outside/f' }, ctxOf('auto', true, scope))).toBe('allow')
+      // it still counts for an edit's scope
+      expect(decide('edit', { path: '/extra/notes.md' }, ctxOf('acceptEdits', false, scope))).toBe(
+        'allow'
+      )
+    })
+
+    it('the scratchpad and the project temp dir stay readable under the block', () => {
+      const scope = blocked(
+        { '/tmp/cui/p/s/scratchpad': 'dir', '/tmp/cui/p': 'dir' },
+        { scratchpad: '/tmp/cui/p/s/scratchpad', readRoots: ['/tmp/cui/p'] }
+      )
+      const c = ctxOf('auto', true, scope)
+      expect(decide('read', { path: '/tmp/cui/p/s/scratchpad/x' }, c)).toBe('allow')
+      expect(decide('read', { path: '/tmp/cui/p/other' }, c)).toBe('allow')
+      expect(decide('read', { path: '/tmp/elsewhere' }, c)).toBe('deny')
+    })
+  })
+
+  describe('scratchpad and project temp dir (R1)', () => {
+    const SCRATCH = '/tmp/claudeui/proj/sess/scratchpad'
+    const withScratch = () =>
+      scopeOf(
+        {
+          '/tmp/claudeui': 'dir',
+          '/tmp/claudeui/proj': 'dir',
+          '/tmp/claudeui/proj/sess': 'dir',
+          [SCRATCH]: 'dir'
+        },
+        { scratchpad: SCRATCH, readRoots: ['/tmp/claudeui/proj'] }
+      )
+
+    it.each(['default', 'acceptEdits', 'auto'])(
+      '%s: a scratchpad write is allowed (mode-base) without a rule',
+      (mode) => {
+        expect(
+          decideWithSource(
+            'write',
+            { path: `${SCRATCH}/out.txt` },
+            ctxOf(mode, mode === 'auto', withScratch())
+          )
+        ).toEqual({ decision: 'allow', source: 'mode-base' })
+      }
+    )
+
+    it('plan still denies a scratchpad write (pi is stricter than Claude there)', () => {
+      expect(
+        decide('write', { path: `${SCRATCH}/out.txt` }, ctxOf('plan', false, withScratch()))
+      ).toBe('deny')
+    })
+
+    it('a sensitive file name inside the scratchpad still asks (safer than Claude)', () => {
+      expect(
+        decide('write', { path: `${SCRATCH}/.npmrc` }, ctxOf('default', false, withScratch()))
+      ).toBe('ask')
+      expect(
+        decide('write', { path: `${SCRATCH}/.bashrc` }, ctxOf('auto', true, withScratch()))
+      ).toBe('ask')
+    })
+
+    it('a user deny/ask rule on a scratchpad path still outranks the allowance', () => {
+      const target = { path: `${SCRATCH}/out.txt` }
+      expect(
+        decide(
+          'write',
+          target,
+          ctxOf('default', false, withScratch(), { deny: [`Write(/${SCRATCH}/**)`] })
+        )
+      ).toBe('deny')
+      expect(
+        decideWithSource(
+          'write',
+          target,
+          ctxOf('default', false, withScratch(), { ask: [`Write(/${SCRATCH}/**)`] })
+        ).source
+      ).toBe('ask-rule')
+    })
+
+    it('the project temp dir is READABLE, not writable; the rest of temp is outside', () => {
+      const c = (mode: string) => ctxOf(mode, false, withScratch())
+      expect(decide('read', { path: '/tmp/claudeui/proj/other-session/x' }, c('default'))).toBe(
+        'allow'
+      )
+      expect(decide('write', { path: '/tmp/claudeui/proj/x' }, c('acceptEdits'))).toBe('ask')
+      expect(decide('read', { path: '/tmp/x' }, c('default'))).toBe('ask')
+      expect(decide('write', { path: '/tmp/x' }, c('acceptEdits'))).toBe('ask')
+    })
+
+    it('a scratchpad that has become a link no longer matches as spelled: the landing falls outside', () => {
+      const scope = scopeOf(
+        {
+          '/tmp/claudeui': 'dir',
+          '/tmp/claudeui/proj': 'dir',
+          '/tmp/claudeui/proj/sess': 'dir',
+          [SCRATCH]: { link: '/outside' }
+        },
+        { scratchpad: SCRATCH }
+      )
+      expect(decide('write', { path: `${SCRATCH}/out.txt` }, ctxOf('default', false, scope))).toBe(
+        'ask'
+      )
+    })
+  })
+
+  describe('judged auto: a session allow never silences the judge outside the workspace (H3 + H1)', () => {
+    const LINKS: Record<string, VirtualNode> = {
+      '/repo/hk': { link: '/repo/.git/hooks' },
+      '/repo/out': { link: '/outside' }
+    }
+
+    it('an out-of-scope edit session allow is skipped under the judge, honoured without one', () => {
+      const scope = scopeOf(LINKS)
+      const input = { path: '/outside/f' }
+      const key = allowKey('edit', input, scope)
+      expect(decideWithSource('edit', input, ctxOf('auto', true, scope, {}, [key]))).toEqual({
+        decision: 'ask',
+        source: 'mode-base',
+        pathReason: 'outside-scope'
+      })
+      expect(decideWithSource('edit', input, ctxOf('default', false, scope, {}, [key]))).toEqual({
+        decision: 'allow',
+        source: 'session-allow'
+      })
+    })
+
+    it('a sensitive edit by LANDING (an in-project link onto .git/hooks) is skipped under the judge', () => {
+      const scope = scopeOf(LINKS)
+      const input = { path: 'hk/pre-commit' }
+      const key = allowKey('edit', input, scope)
+      expect(decideWithSource('edit', input, ctxOf('auto', true, scope, {}, [key]))).toMatchObject({
+        decision: 'ask',
+        source: 'mode-base'
+      })
+      expect(decideWithSource('edit', input, ctxOf('default', false, scope, {}, [key]))).toEqual({
+        decision: 'allow',
+        source: 'session-allow'
+      })
+    })
+
+    it('an in-scope ordinary edit is still honoured under the judge', () => {
+      const scope = scopeOf(LINKS)
+      const input = { path: 'src/a.ts' }
+      expect(
+        decideWithSource(
+          'edit',
+          input,
+          ctxOf('auto', true, scope, {}, [allowKey('edit', input, scope)])
+        )
+      ).toEqual({ decision: 'allow', source: 'session-allow' })
+    })
+  })
+
+  describe("piSessionAllowKey with a scope: pi's own resolution is the key", () => {
+    it('`@x`, `x` and the absolute spelling share one key; `~/x` and `file://` resolve like pi', () => {
+      const scope = scopeOf()
+      const k = piSessionAllowKey('edit', { path: 'src/a.ts' }, '/repo', scope)
+      expect(k).toBe('edit:/repo/src/a.ts')
+      expect(piSessionAllowKey('edit', { path: '@src/a.ts' }, '/repo', scope)).toBe(k)
+      expect(piSessionAllowKey('edit', { path: '/repo/src/a.ts' }, '/repo', scope)).toBe(k)
+      expect(piSessionAllowKey('write', { path: '~/x.txt' }, '/repo', scope)).toBe(
+        'write:/home/u/x.txt'
+      )
+      expect(piSessionAllowKey('write', { path: 'file:///etc/x' }, '/repo', scope)).toBe(
+        'write:/etc/x'
+      )
+    })
+
+    it('without a scope the key is the plain cwd-resolved spelling: `@x` is a different (never re-matched) key', () => {
+      expect(piSessionAllowKey('edit', { path: '@src/a.ts' }, '/repo')).not.toBe(
+        piSessionAllowKey('edit', { path: 'src/a.ts' }, '/repo')
+      )
+    })
+
+    it("a call with no string path keys to an empty path (it writes nothing); a `file_path` alias is NOT read (pi's schema has none)", () => {
+      const scope = scopeOf()
+      expect(piSessionAllowKey('edit', {}, '/repo', scope)).toBe('edit:')
+      expect(piSessionAllowKey('edit', { file_path: 'b.ts' }, '/repo', scope)).toBe('edit:')
+    })
+
+    it('a win32 scope keys with win32 semantics and an upper-case drive', () => {
+      const scope: PiPathScope = {
+        cwd: 'D:\\repo',
+        roots: ['D:\\repo'],
+        platform: 'win32',
+        homeDir: 'C:\\Users\\u',
+        fs: makeVirtualFs('win32', { 'D:\\repo': 'dir' })
+      }
+      expect(piSessionAllowKey('edit', { path: 'src\\a.ts' }, 'D:\\repo', scope)).toBe(
+        'edit:D:\\repo\\src\\a.ts'
+      )
+      expect(piSessionAllowKey('edit', { path: 'd:/repo/src/a.ts' }, 'D:\\repo', scope)).toBe(
+        'edit:D:\\repo\\src\\a.ts'
+      )
+      expect(piSessionAllowKey('edit', { path: '/c/x' }, 'D:\\repo', scope)).toBe('edit:C:\\x')
+    })
+  })
+
+  describe('win32 sessions', () => {
+    const win = (extra: Record<string, VirtualNode> = {}): PiPathScope => ({
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', {
+        'D:\\repo': 'dir',
+        'D:\\repo\\src': 'dir',
+        'D:\\repo\\src\\a.ts': 'file',
+        'C:\\Users\\u': 'dir',
+        ...extra
+      })
+    })
+    const wctx = (mode: string, judge: boolean, scope: PiPathScope) => ({
+      ...ctxOf(mode, judge, scope),
+      cwd: 'D:\\repo'
+    })
+
+    it('in-project (case-insensitively) is in scope; `/etc/x` is D:\\etc\\x (outside); `/c/x` is C:\\x (outside)', () => {
+      expect(
+        decide('edit', { path: 'D:\\REPO\\src\\a.ts' }, wctx('acceptEdits', false, win()))
+      ).toBe('allow')
+      expect(decide('edit', { path: '/etc/x' }, wctx('acceptEdits', false, win()))).toBe('ask')
+      expect(decide('read', { path: '/c/x' }, wctx('default', false, win()))).toBe('ask')
+      expect(decide('read', { path: '/c/x' }, wctx('auto', true, win()))).toBe('allow')
+    })
+
+    it.each(['notes.txt.', 'NUL', 'nul.txt', 'a.txt::$DATA', '\\\\?\\C:\\x', 'src\\...\\x'])(
+      'a suspicious form (%s) is a human-only edit in every mode',
+      (p) => {
+        for (const [mode, judge] of [
+          ['acceptEdits', false],
+          ['auto', true],
+          ['default', false]
+        ] as const) {
+          expect(
+            decideWithSource('edit', { path: p }, wctx(mode, judge, win())),
+            `${mode} ${p}`
+          ).toMatchObject({ decision: 'ask', source: 'path-scope', pathReason: 'human-only' })
+        }
+      }
+    )
+
+    it('...and a suspicious READ is just an outside read (default asks, judged auto allows)', () => {
+      expect(
+        decideWithSource('read', { path: 'NUL' }, wctx('default', false, win()))
+      ).toMatchObject({ decision: 'ask', source: 'mode-base' })
+      expect(decide('read', { path: 'NUL' }, wctx('auto', true, win()))).toBe('allow')
+    })
+  })
+
+  describe('mergedClaudeRulesFor: the provenance the fence needs', () => {
+    it("lists the additional directories that did NOT come from project settings, and any scope's read block", () => {
+      mockLoadClaudePermissions.mockImplementation((scope: string) => {
+        if (scope === 'user') return { allow: [], deny: [], ask: [], additionalDirectories: ['/u'] }
+        if (scope === 'project')
+          return {
+            allow: [],
+            deny: [],
+            ask: [],
+            additionalDirectories: ['/p'],
+            blockReadsOutsideWorkingDirectories: true
+          }
+        return { allow: [], deny: [], ask: [], additionalDirectories: ['/l'] }
+      })
+      const merged = mergedClaudeRulesFor('/cwd')
+      expect(merged.additionalDirectories).toEqual(['/u', '/p', '/l'])
+      expect(merged.nonProjectAdditionalDirectories).toEqual(['/u', '/l'])
+      expect(merged.blockReadsOutsideWorkingDirectories).toBe(true)
+    })
+
+    it('the read block is unset when no scope sets it (and never `false`)', () => {
+      mockLoadClaudePermissions.mockImplementation(() => ({
+        allow: [],
+        deny: [],
+        ask: [],
+        additionalDirectories: []
+      }))
+      expect(mergedClaudeRulesFor('/cwd').blockReadsOutsideWorkingDirectories).toBeUndefined()
     })
   })
 })

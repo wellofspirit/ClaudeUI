@@ -5,7 +5,7 @@
  * accounting — against a MOCKED PiRpcClient (no real pi binary spawned).
  * Mirrors the style of src/main/opencode/__tests__/OpencodeSession.test.ts.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
@@ -403,13 +403,35 @@ vi.mock('../../auth/PiAuthProvider', () => ({
 }))
 // `realpathSync.native` is the read-only gate's host realpath (ADR-084):
 // identity, so every path "exists" as itself and no test touches the real disk.
-vi.mock('node:fs', () => ({
-  existsSync: mockExistsSync,
-  realpathSync: Object.assign((p: string) => p, { native: (p: string) => p }),
-  // Host-run subagents (ADR-089): a child's session dir + appended prompt file.
-  mkdirSync: vi.fn(),
-  writeFileSync: vi.fn()
+// The path-containment block (H1) flips `realFs.on` to run the host-fs seam against a REAL temp
+// project (links, junctions); everywhere else the doubles below answer: `lstat` and `access` fail
+// ("nothing there, no link"), `realpath` is the identity.
+const realFs = vi.hoisted(() => ({
+  on: false,
+  // The REAL modules (this file mocks `node:fs` / `node:os`), for the temp project's own setup.
+  fs: require('node:fs') as typeof import('node:fs'),
+  os: require('node:os') as typeof import('node:os'),
+  path: require('node:path') as typeof import('node:path')
 }))
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  const enoent = (p: unknown): never => {
+    throw Object.assign(new Error(`ENOENT: ${String(p)}`), { code: 'ENOENT' })
+  }
+  const realpath = (p: string): string => (realFs.on ? actual.realpathSync(p) : p)
+  return {
+    ...actual,
+    existsSync: mockExistsSync,
+    realpathSync: Object.assign(realpath, {
+      native: (p: string) => (realFs.on ? actual.realpathSync.native(p) : p)
+    }),
+    lstatSync: (p: string) => (realFs.on ? actual.lstatSync(p) : enoent(p)),
+    accessSync: (p: string, mode?: number) => (realFs.on ? actual.accessSync(p, mode) : enoent(p)),
+    // Host-run subagents (ADR-089): a child's session dir + appended prompt file.
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn()
+  }
+})
 // ADR-084 §2's git config capture — `null` (cannot verify) by default, so the
 // read-only bypass never clears a git command and no gitConfigArmed meta line
 // appears unless a test says the repo config was measured. The other captures
@@ -463,6 +485,7 @@ import { slimTranscript } from '../../automode/classifier'
 import { resetChatgptAccounts } from '../../automode/judge-accounts'
 import { piMcpName } from '../pi-mcp-bridge'
 import { PLAN_MODE_DENY_REASON } from '../permission-engine'
+import { PATH_CHANGED_REASON } from '../pi-path-scope'
 import { loadPiAgentRegistry, type PiAgentDefinition } from '../pi-agent-registry'
 import { logger } from '../../services/logger'
 import { startRunningDispatch } from '../../../test/helpers/running-dispatch'
@@ -662,6 +685,14 @@ async function gate(
     reason?: string
     updatedInput?: Record<string, unknown>
   }>
+}
+
+/**
+ * What an allowed path-tool call answers (H1): `allow`, with `path` pinned to the canonical
+ * absolute path that was gated (`/cwd/...` here is a POSIX-style cwd on every host).
+ */
+function pinnedAllow(path: string): { behavior: 'allow'; updatedInput: unknown } {
+  return { behavior: 'allow', updatedInput: expect.objectContaining({ path }) }
 }
 
 /**
@@ -1253,7 +1284,7 @@ describe('PiSession — bridge abandonment cleanup', () => {
 
     // The surviving gate is still answerable.
     session.resolveApproval(b.requestId, 'allow')
-    await expect(second).resolves.toEqual({ behavior: 'allow' })
+    await expect(second).resolves.toEqual(pinnedAllow('/cwd/b.ts'))
   })
 
   it('an abandoned /tool-call revokes any one-shot hosted-tool grant it had already minted', async () => {
@@ -2718,7 +2749,7 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     ]
 
     session.resolveApproval(approval.requestId, 'allow')
-    await expect(pending).resolves.toEqual({ behavior: 'allow' })
+    await expect(pending).resolves.toEqual(pinnedAllow('/cwd/x.ts'))
 
     // A SECOND identical gate call still asks (no session-wide allow was recorded).
     void gate('call_5', 'edit', { path: 'x.ts' })
@@ -3020,7 +3051,9 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
       enableAutoMode()
       const win = new MockWindow()
       const session = await autoSession('rid-review-fast', win)
-      expect(await gate('call_r3', 'read', { path: '/cwd/a.txt' })).toEqual({ behavior: 'allow' })
+      expect(await gate('call_r3', 'read', { path: '/cwd/a.txt' })).toEqual(
+        pinnedAllow('/cwd/a.txt')
+      )
       expect(judgeCalls).toHaveLength(0)
       expect(reviews(win)).toEqual([])
       session.dispose()
@@ -3941,9 +3974,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-base', win)
 
-    expect(await gate('call_e1', 'read', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
-    expect(await gate('call_e2', 'ls', { path: 'src' })).toEqual({ behavior: 'allow' })
-    expect(await gate('call_e3', 'edit', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_e1', 'read', { path: 'src/x.ts' })).toEqual(
+      pinnedAllow('/cwd/src/x.ts')
+    )
+    expect(await gate('call_e2', 'ls', { path: 'src' })).toEqual(pinnedAllow('/cwd/src'))
+    expect(await gate('call_e3', 'edit', { path: 'src/x.ts' })).toEqual(
+      pinnedAllow('/cwd/src/x.ts')
+    )
     expect(judgeCalls).toHaveLength(0)
     expect(sentChannels(win)).not.toContain('session:approval-request')
     session.dispose()
@@ -3957,10 +3994,14 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-agent-control', win)
 
-    expect(await gate('call_ac1', 'edit', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_ac1', 'edit', { path: 'src/x.ts' })).toEqual(
+      pinnedAllow('/cwd/src/x.ts')
+    )
     expect(judgeCalls).toHaveLength(0)
 
-    expect(await gate('call_ac2', 'write', { path: '.git/config' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_ac2', 'write', { path: '.git/config' })).toEqual(
+      pinnedAllow('/cwd/.git/config')
+    )
     expect(judgeCalls).toHaveLength(1)
     expect(sentChannels(win)).not.toContain('session:approval-request')
     session.dispose()
@@ -4065,7 +4106,9 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const win = new MockWindow()
     const session = await autoSession('rid-auto-off-rules', win)
 
-    expect(await gate('call_g2', 'read', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_g2', 'read', { path: 'src/x.ts' })).toEqual(
+      pinnedAllow('/cwd/src/x.ts')
+    )
     expect(await gate('call_g3', 'bash', { command: 'git status' })).toEqual({ behavior: 'allow' })
     expect(await gate('call_g4', 'bash', { command: 'rm -rf x' })).toEqual({
       behavior: 'deny',
@@ -4085,9 +4128,11 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     const first = gate('call_p1', 'edit', { path: 'src/a.ts' })
     await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
     session.resolveApproval(humanCards(win)[0].requestId, 'allowForSession')
-    await expect(first).resolves.toEqual({ behavior: 'allow' })
+    await expect(first).resolves.toEqual(pinnedAllow('/cwd/src/a.ts'))
 
-    expect(await gate('call_p2', 'edit', { path: '/cwd/src/a.ts' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_p2', 'edit', { path: '/cwd/src/a.ts' })).toEqual(
+      pinnedAllow('/cwd/src/a.ts')
+    )
     expect(humanCards(win)).toHaveLength(1)
 
     // another file, and `write` of the same file, are still gated
@@ -4123,11 +4168,13 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     allows.add('edit:/cwd/.git/hooks/pre-commit')
     allows.add('edit:/cwd/src/a.ts')
 
-    expect(await gate('call_s1', 'edit', { path: 'src/a.ts' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_s1', 'edit', { path: 'src/a.ts' })).toEqual(
+      pinnedAllow('/cwd/src/a.ts')
+    )
     expect(judgeCalls).toHaveLength(0)
-    expect(await gate('call_s2', 'edit', { path: '.git/hooks/pre-commit' })).toEqual({
-      behavior: 'allow'
-    })
+    expect(await gate('call_s2', 'edit', { path: '.git/hooks/pre-commit' })).toEqual(
+      pinnedAllow('/cwd/.git/hooks/pre-commit')
+    )
     expect(judgeCalls).toHaveLength(1)
     session.dispose()
   })
@@ -6620,7 +6667,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       toolName: 'read',
       input: { path: '/cwd/a.ts' }
     })
-    expect(read).toEqual({ behavior: 'allow' })
+    expect(read).toEqual(pinnedAllow('/cwd/a.ts'))
     expect(judgeCalls).toHaveLength(1)
     child.push({ type: 'agent_settled' })
     await result
@@ -8943,5 +8990,478 @@ describe('PiSession — the session tools (slice 2)', () => {
       expect(seen).not.toHaveBeenCalled()
       expect(sessionToolsDouble.audit).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+/**
+ * Slice C (H1) — path containment through the real gate, against a REAL temp project (`realFs.on`
+ * runs pi-path-scope's host-fs seam on the disk): the verdict per mode, the human-only asks, the
+ * read block, the pin on the allow, the re-check after a delayed approval, and a host-run
+ * child sharing its parent's workspace. Link cases use a directory symlink (a junction on
+ * Windows, which needs no privilege); the file-leaf case is skipped where a file symlink cannot
+ * be created.
+ */
+describe('PiSession — path containment (H1), real temp project', () => {
+  const real = realFs
+  let root = ''
+  let project = ''
+  let outside = ''
+  const at = (...p: string[]): string => real.path.join(project, ...p)
+  const links: string[] = []
+
+  /** Can this platform create a directory link (a junction on Windows) and a file symlink? Probed in a throwaway dir at collection time, so `it.skipIf` can use the answer. */
+  const linkSupport = (() => {
+    const dir = real.fs.mkdtempSync(real.path.join(real.os.tmpdir(), 'claudeui-h1-probe-'))
+    const result = { dir: false, file: false }
+    try {
+      real.fs.mkdirSync(real.path.join(dir, 'target'))
+      real.fs.writeFileSync(real.path.join(dir, 'target.txt'), 'x')
+      try {
+        real.fs.symlinkSync(real.path.join(dir, 'target'), real.path.join(dir, 'dl'), 'junction')
+        real.fs.unlinkSync(real.path.join(dir, 'dl'))
+        result.dir = true
+      } catch {
+        /* no directory links here */
+      }
+      try {
+        real.fs.symlinkSync(real.path.join(dir, 'target.txt'), real.path.join(dir, 'fl'), 'file')
+        real.fs.unlinkSync(real.path.join(dir, 'fl'))
+        result.file = true
+      } catch {
+        /* no file symlinks here */
+      }
+    } finally {
+      real.fs.rmSync(dir, { recursive: true, force: true })
+    }
+    return result
+  })()
+  const canLink = linkSupport.dir
+  const canFileLink = linkSupport.file
+
+  /** A directory symlink (junction on Windows) at `link` → `target`; false where the platform refuses. */
+  function dirLink(target: string, link: string): boolean {
+    try {
+      real.fs.symlinkSync(target, link, 'junction')
+      links.push(link)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  beforeAll(() => {
+    realFs.on = true
+    root = real.fs.realpathSync.native(
+      real.fs.mkdtempSync(real.path.join(real.os.tmpdir(), 'claudeui-h1-'))
+    )
+    project = real.path.join(root, 'proj')
+    outside = real.path.join(root, 'outside')
+    real.fs.mkdirSync(real.path.join(project, 'src'), { recursive: true })
+    real.fs.mkdirSync(outside, { recursive: true })
+    real.fs.writeFileSync(at('src', 'a.ts'), 'a\n')
+    real.fs.writeFileSync(real.path.join(outside, 'f.txt'), 'f\n')
+    real.fs.writeFileSync(real.path.join(root, 'plain.txt'), 'p\n')
+    if (canLink) dirLink(outside, at('out'))
+    if (canFileLink) {
+      real.fs.symlinkSync(at('src', 'a.ts'), at('filelink.ts'), 'file')
+      links.push(at('filelink.ts'))
+    }
+  })
+  afterAll(() => {
+    realFs.on = false
+    for (const l of links) {
+      try {
+        real.fs.unlinkSync(l)
+      } catch {
+        try {
+          real.fs.rmdirSync(l)
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+    if (root) real.fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  function enableAutoMode(): void {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: true, twoStageMode: 'fast' } })
+  }
+
+  async function open(
+    routingId: string,
+    win: MockWindow,
+    mode: string,
+    cwd = project
+  ): Promise<PiSession> {
+    const session = new PiSession(routingId, win as never, cwd, {})
+    await session.setPermissionMode(mode)
+    await session.run('hi')
+    return session
+  }
+
+  async function onlyCard(win: MockWindow): Promise<{ requestId: string }> {
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+    return humanCards(win)[0]
+  }
+
+  describe('reads', () => {
+    it('default: an in-project read is allowed and PINNED to its absolute path; an outside read asks', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-h1-read-default', win, 'default')
+      expect(await gate('c1', 'read', { path: 'src/a.ts' })).toEqual(pinnedAllow(at('src', 'a.ts')))
+      expect(humanCards(win)).toHaveLength(0)
+
+      const outsidePath = real.path.join(root, 'plain.txt')
+      const pending = gate('c2', 'read', { path: outsidePath })
+      const card = await onlyCard(win)
+      session.resolveApproval(card.requestId, 'allow')
+      expect(await pending).toEqual(pinnedAllow(outsidePath))
+      session.dispose()
+    })
+
+    it('judged auto: an outside read is allowed with no card and no judge call', async () => {
+      enableAutoMode()
+      const win = new MockWindow()
+      const session = await open('rid-h1-read-auto', win, 'auto')
+      const outsidePath = real.path.join(root, 'plain.txt')
+      expect(await gate('c3', 'read', { path: outsidePath })).toEqual(pinnedAllow(outsidePath))
+      expect(await gate('c3b', 'grep', { pattern: 'p', path: root })).toEqual(pinnedAllow(root))
+      expect(humanCards(win)).toHaveLength(0)
+      expect(judgeCalls).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('judge OFF, auto: an outside read asks like Ask mode', async () => {
+      const win = new MockWindow() // the suite default is `autoMode.enabled: false`
+      const session = await open('rid-h1-read-judge-off', win, 'auto')
+      void gate('c4', 'read', { path: real.path.join(root, 'plain.txt') })
+      await onlyCard(win)
+      expect(judgeCalls).toHaveLength(0)
+      session.dispose()
+    })
+
+    it('the read block (user settings) denies an outside read in every mode, with the settings message and no card', async () => {
+      mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+        allow: [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined,
+        ...(scope === 'user' ? { blockReadsOutsideWorkingDirectories: true } : {})
+      }))
+      for (const mode of ['default', 'auto']) {
+        if (mode === 'auto') enableAutoMode()
+        const win = new MockWindow()
+        const session = await open(`rid-h1-block-${mode}`, win, mode)
+        const decision = await gate(`cb-${mode}`, 'read', {
+          path: real.path.join(root, 'plain.txt')
+        })
+        expect(decision.behavior, mode).toBe('deny')
+        expect(decision.reason).toContain('blockReadsOutsideWorkingDirectories')
+        expect(humanCards(win)).toHaveLength(0)
+        // in-project reads still work
+        expect(await gate(`cb2-${mode}`, 'read', { path: 'src/a.ts' })).toEqual(
+          pinnedAllow(at('src', 'a.ts'))
+        )
+        session.dispose()
+      }
+      expect(judgeCalls).toHaveLength(0)
+    })
+
+    it('an additional directory from USER settings is in scope; one from PROJECT settings stops counting once the read block is set', async () => {
+      mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+        allow: [],
+        deny: [],
+        ask: [],
+        defaultMode: undefined,
+        additionalDirectories: scope === 'user' ? [outside] : scope === 'project' ? [root] : [],
+        ...(scope === 'user' ? { blockReadsOutsideWorkingDirectories: true } : {})
+      }))
+      const win = new MockWindow()
+      const session = await open('rid-h1-addl', win, 'default')
+      const inUserDir = real.path.join(outside, 'f.txt')
+      expect(await gate('ca1', 'read', { path: inUserDir })).toEqual(pinnedAllow(inUserDir))
+      // `root` came from project settings only: not a read root under the block
+      const viaProjectDir = real.path.join(root, 'plain.txt')
+      expect((await gate('ca2', 'read', { path: viaProjectDir })).behavior).toBe('deny')
+      session.dispose()
+    })
+  })
+
+  describe('edits', () => {
+    it('acceptEdits: an in-project edit is allowed (pinned); an outside edit and a sensitive one ask', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-h1-edit-ae', win, 'acceptEdits')
+      expect(await gate('e1', 'edit', { path: 'src/a.ts' })).toEqual(pinnedAllow(at('src', 'a.ts')))
+      expect(humanCards(win)).toHaveLength(0)
+      void gate('e2', 'write', { path: real.path.join(root, 'new.txt') })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+      void gate('e3', 'write', { path: '.npmrc' })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+      session.dispose()
+    })
+
+    it('judged auto: an outside edit goes to the judge (one call); an in-project edit does not', async () => {
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      const win = new MockWindow()
+      const session = await open('rid-h1-edit-auto', win, 'auto')
+      const target = real.path.join(root, 'new.txt')
+      expect(await gate('e4', 'write', { path: target })).toEqual(pinnedAllow(target))
+      expect(judgeCalls).toHaveLength(1)
+      expect(await gate('e5', 'edit', { path: 'src/a.ts' })).toEqual(pinnedAllow(at('src', 'a.ts')))
+      expect(judgeCalls).toHaveLength(1)
+      expect(humanCards(win)).toHaveLength(0)
+      session.dispose()
+    })
+
+    it.skipIf(!canLink)(
+      'judged auto: an edit THROUGH a link out of the project is human-only — a card, zero judge calls — and pinned on approval',
+      async () => {
+        enableAutoMode()
+        judgeScript.replies = ['<block>no</block>']
+        const win = new MockWindow()
+        const session = await open('rid-h1-link-edit', win, 'auto')
+        const pending = gate('l1', 'edit', { path: 'out/f.txt' })
+        const card = await onlyCard(win)
+        expect(judgeCalls).toHaveLength(0)
+        session.resolveApproval(card.requestId, 'allow')
+        expect(await pending).toEqual(pinnedAllow(at('out', 'f.txt')))
+        expect(judgeCalls).toHaveLength(0)
+        session.dispose()
+      }
+    )
+
+    it.skipIf(!canLink)(
+      'judged auto: a read through the link is allowed (the outside-read row), still no judge',
+      async () => {
+        enableAutoMode()
+        const win = new MockWindow()
+        const session = await open('rid-h1-link-read', win, 'auto')
+        expect(await gate('l2', 'read', { path: 'out/f.txt' })).toEqual(
+          pinnedAllow(at('out', 'f.txt'))
+        )
+        expect(humanCards(win)).toHaveLength(0)
+        expect(judgeCalls).toHaveLength(0)
+        session.dispose()
+      }
+    )
+
+    it.skipIf(!canLink)(
+      "a write whose path IS a link is denied in every mode (Claude's refusal wording), no card",
+      async () => {
+        for (const mode of ['default', 'acceptEdits', 'full']) {
+          const win = new MockWindow()
+          const session = await open(`rid-h1-leaf-${mode}`, win, mode)
+          const decision = await gate(`ll-${mode}`, 'write', { path: 'out' })
+          expect(decision.behavior, mode).toBe('deny')
+          expect(decision.reason).toBe(
+            `Refusing to write ${at('out')}: it is a symbolic link. Write to the link's target path instead`
+          )
+          expect(humanCards(win)).toHaveLength(0)
+          session.dispose()
+        }
+      }
+    )
+
+    it.skipIf(!canFileLink)('a leaf FILE symlink write is denied too', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-h1-leaf-file', win, 'acceptEdits')
+      const decision = await gate('lf', 'edit', { path: 'filelink.ts' })
+      expect(decision.behavior).toBe('deny')
+      expect(decision.reason).toContain('Refusing to write')
+      session.dispose()
+    })
+
+    it('a deny rule on a path outranks everything and names the rule', async () => {
+      mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+        allow: [],
+        deny: scope === 'project' ? ['Edit(src/**)'] : [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }))
+      const win = new MockWindow()
+      const session = await open('rid-h1-denyrule', win, 'acceptEdits')
+      expect(await gate('d1', 'edit', { path: '@src/a.ts' })).toEqual({
+        behavior: 'deny',
+        reason: 'Denied by permission rule: Edit(src/**)'
+      })
+      session.dispose()
+    })
+  })
+
+  describe('the pin and the re-check', () => {
+    it('an allowed path call carries `updatedInput` with the canonical path and every other argument untouched; bash gets none', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-h1-pin', win, 'acceptEdits')
+      expect(
+        await gate('p1', 'edit', { path: '@src/a.ts', edits: [{ oldText: 'a', newText: 'b' }] })
+      ).toEqual({
+        behavior: 'allow',
+        updatedInput: { path: at('src', 'a.ts'), edits: [{ oldText: 'a', newText: 'b' }] }
+      })
+      expect(await gate('p2', 'ls', {})).toEqual(pinnedAllow(project))
+      mockLoadClaudePermissions.mockImplementation(() => ({
+        allow: ['Bash(echo hi)'],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }))
+      await session.notifySettingsChanged()
+      expect(await gate('p3', 'bash', { command: 'echo hi' })).toEqual({ behavior: 'allow' })
+      session.dispose()
+    })
+
+    it.skipIf(!canLink)(
+      'a link created at the approved path while the card was open denies the call (the path changed)',
+      async () => {
+        const win = new MockWindow()
+        const session = await open('rid-h1-swap', win, 'default')
+        const swapped = at('later')
+        const pending = gate('s1', 'write', { path: 'later/x.txt' })
+        const card = await onlyCard(win)
+        expect(dirLink(outside, swapped)).toBe(true)
+        session.resolveApproval(card.requestId, 'allow')
+        expect(await pending).toEqual({ behavior: 'deny', reason: PATH_CHANGED_REASON })
+        session.dispose()
+      }
+    )
+
+    it('an unchanged path approves normally after a delay', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-h1-noswap', win, 'default')
+      const pending = gate('s2', 'write', { path: 'fresh/y.txt' })
+      const card = await onlyCard(win)
+      session.resolveApproval(card.requestId, 'allow')
+      expect(await pending).toEqual(pinnedAllow(at('fresh', 'y.txt')))
+      session.dispose()
+    })
+  })
+
+  describe('session allows', () => {
+    it('allowForSession on an outside edit is honoured outside the judge, skipped under it', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-h1-sa', win, 'default')
+      const target = real.path.join(root, 'sa.txt')
+      const pending = gate('sa1', 'write', { path: target })
+      const card = await onlyCard(win)
+      session.resolveApproval(card.requestId, 'allowForSession')
+      await pending
+      expect(await gate('sa2', 'write', { path: target })).toEqual(pinnedAllow(target))
+      expect(humanCards(win)).toHaveLength(1) // the second call never asked
+      // the same standing allow does not silence the judge in judged auto mode
+      enableAutoMode()
+      judgeScript.replies = ['<block>no</block>']
+      await session.setPermissionMode('auto')
+      expect(await gate('sa3', 'write', { path: target })).toEqual(pinnedAllow(target))
+      expect(judgeCalls).toHaveLength(1)
+      session.dispose()
+    })
+  })
+
+  describe('scratchpad', () => {
+    it("a write inside this session's scratchpad is allowed in default mode with no card; its sensitive names still ask", async () => {
+      const scratch = real.path.join(root, 'scratch')
+      real.fs.mkdirSync(scratch, { recursive: true })
+      const win = new MockWindow()
+      const session = await open('rid-h1-scratch', win, 'default')
+      ;(session as unknown as { scratchpadDir: string }).scratchpadDir = scratch
+      const target = real.path.join(scratch, 'out.txt')
+      expect(await gate('sc1', 'write', { path: target })).toEqual(pinnedAllow(target))
+      expect(humanCards(win)).toHaveLength(0)
+      void gate('sc2', 'write', { path: real.path.join(scratch, '.npmrc') })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+      // outside the scratchpad nothing changed
+      void gate('sc3', 'write', { path: real.path.join(root, 'out.txt') })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+      session.dispose()
+    })
+  })
+
+  describe("host-run subagent children share the parent's workspace", () => {
+    async function withChild(
+      routingId: string,
+      win: MockWindow,
+      mode: string
+    ): Promise<{ session: PiSession; child: FakeChildProc; done: () => Promise<void> }> {
+      const kids = makeFakeChildren()
+      const session = new PiSession(
+        routingId,
+        win as never,
+        project,
+        { model: 'openai-codex/gpt-5.6-luna', permissionMode: mode },
+        { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
+      )
+      await session.run('PARENT-INTENT')
+      const input = { description: 'Tidy', prompt: 'CHILD-TASK', run_in_background: false }
+      expect((await gate('call-agent', 'agent', input)).behavior).toBe('allow')
+      const result = hostedTool('agent', input, 'call-agent')
+      await vi.waitFor(() => expect(kids.children.length).toBe(1))
+      const child = kids.children[0]
+      await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
+      return {
+        session,
+        child,
+        done: async () => {
+          child.push({ type: 'agent_settled' })
+          await result
+        }
+      }
+    }
+
+    it("under a default parent a child's outside read asks the same human; an in-project read is pinned", async () => {
+      const win = new MockWindow()
+      const { session, child, done } = await withChild('rid-h1-child-default', win, 'default')
+      const outsidePath = real.path.join(root, 'plain.txt')
+      const asked = child.opts.gateHandler({
+        toolCallId: 'k1',
+        toolName: 'read',
+        input: { path: outsidePath }
+      })
+      const card = await onlyCard(win)
+      session.resolveApproval(card.requestId, 'allow')
+      expect(await asked).toEqual(pinnedAllow(outsidePath))
+      expect(
+        await child.opts.gateHandler({
+          toolCallId: 'k2',
+          toolName: 'read',
+          input: { path: 'src/a.ts' }
+        })
+      ).toEqual(pinnedAllow(at('src', 'a.ts')))
+      await done()
+      session.dispose()
+    })
+
+    it.skipIf(!canLink)(
+      "under a judged auto parent a child's outside read is allowed unjudged and its edit through a link is a human card",
+      async () => {
+        enableAutoMode()
+        judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
+        const win = new MockWindow()
+        const { session, child, done } = await withChild('rid-h1-child-auto', win, 'auto')
+        expect(judgeCalls).toHaveLength(1)
+        const outsidePath = real.path.join(root, 'plain.txt')
+        expect(
+          await child.opts.gateHandler({
+            toolCallId: 'k3',
+            toolName: 'read',
+            input: { path: outsidePath }
+          })
+        ).toEqual(pinnedAllow(outsidePath))
+        const asked = child.opts.gateHandler({
+          toolCallId: 'k4',
+          toolName: 'edit',
+          input: { path: 'out/f.txt', edits: [] }
+        })
+        const card = await onlyCard(win)
+        expect(judgeCalls).toHaveLength(1)
+        session.resolveApproval(card.requestId, 'allow')
+        expect(await asked).toEqual(pinnedAllow(at('out', 'f.txt')))
+        await done()
+        session.dispose()
+      }
+    )
   })
 })

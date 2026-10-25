@@ -76,7 +76,10 @@ function normalizePermissions(raw: unknown, topLevelDisableAutoMode?: unknown): 
       ? (p.additionalDirectories as string[])
       : [],
     defaultMode: typeof p.defaultMode === 'string' ? p.defaultMode : undefined,
-    disableAutoMode: typeof p.disableAutoMode === 'string' ? p.disableAutoMode : topLevel
+    disableAutoMode: typeof p.disableAutoMode === 'string' ? p.disableAutoMode : topLevel,
+    ...(p.blockReadsOutsideWorkingDirectories === true
+      ? { blockReadsOutsideWorkingDirectories: true }
+      : {})
   }
 }
 
@@ -236,6 +239,10 @@ export function saveClaudePermissions(
       : {}
   if (typeof existingPerms.disableAutoMode === 'string') {
     permsObj.disableAutoMode = existingPerms.disableAutoMode
+  }
+  // Same for the read block (pi enforces it now): a permission edit must not silently lift it.
+  if (existingPerms.blockReadsOutsideWorkingDirectories === true) {
+    permsObj.blockReadsOutsideWorkingDirectories = true
   }
 
   if (Object.keys(permsObj).length === 0) {

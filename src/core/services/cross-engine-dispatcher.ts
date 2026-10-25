@@ -170,6 +170,7 @@ import {
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
+import { buildPiPathScope, withPathGuard, type PiPathScope } from '../pi/pi-path-scope'
 import type { CodexMethods } from '../codex/protocol/methods'
 import type { Model } from '../codex/protocol/v2/Model'
 import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
@@ -3094,7 +3095,24 @@ export class CrossEngineDispatcher {
   ): MergedClaudeRules {
     const sources = uniqueDirs([parentCwd, targetCwd])
     const loaded = sources.map((dir) => ({ dir, rules: this.loadUserRules(dir) }))
+    // Provenance for the read block (path containment): any source setting it binds the target,
+    // and the directories only PROJECT settings listed do not count for reads. A rule loader
+    // without provenance counts every entry.
+    const blockReads = loaded.some((r) => r.rules.blockReadsOutsideWorkingDirectories === true)
     return {
+      ...(blockReads ? { blockReadsOutsideWorkingDirectories: true } : {}),
+      nonProjectAdditionalDirectories: uniqueDirs(
+        [
+          parentCwd,
+          ...loaded.flatMap(({ dir, rules }) =>
+            resolveAdditionalDirectories(
+              rules.nonProjectAdditionalDirectories ?? rules.additionalDirectories,
+              dir
+            )
+          )
+        ],
+        targetCwd
+      ),
       deny: [...new Set([...loaded.flatMap((r) => r.rules.deny), ...(restriction?.deny ?? [])])],
       ask: [...new Set([...loaded.flatMap((r) => r.rules.ask), ...(restriction?.ask ?? [])])],
       allow: [],
@@ -8708,7 +8726,27 @@ export class CrossEngineDispatcher {
    * gate deliberately does NOT consult, so its practical value would be
    * limited to a future INTERACTIVE pi session, not this or a future dispatch.
    */
-  private async gatePiTargetToolCall(
+  private gatePiTargetToolCall(
+    entry: PiTargetEntry,
+    payload: PiToolCallPayload
+  ): Promise<GateDecision> {
+    // Path containment's bookends (pi/pi-path-scope.ts), as on PiSession: an allowed path-tool
+    // call is pinned to the path that was gated, and one that sat on a forwarded human approval is
+    // re-checked afterwards.
+    return withPathGuard(payload.toolName, payload.input, this.piTargetPathScope(entry), () =>
+      this.gatePiTargetToolCallLadder(entry, payload)
+    )
+  }
+
+  /** The target's workspace for path containment: its cwd + `targetRules`' scope (the user's additional directories, the dispatching session's directory). */
+  private piTargetPathScope(entry: PiTargetEntry): PiPathScope {
+    return buildPiPathScope({
+      cwd: entry.cwd,
+      rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+    })
+  }
+
+  private async gatePiTargetToolCallLadder(
     entry: PiTargetEntry,
     payload: PiToolCallPayload
   ): Promise<GateDecision> {
@@ -8748,6 +8786,7 @@ export class CrossEngineDispatcher {
       judge: auto,
       rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       sessionAllows: EMPTY_PI_SESSION_ALLOWS,
+      scope: this.piTargetPathScope(entry),
       // The acceptEdits base matches agent-control paths cwd-relative
       // (ADR-084 §3); without it an absolute path inside a target running in a
       // `.claude/worktrees/<name>` checkout would ask on every edit.
@@ -8764,10 +8803,17 @@ export class CrossEngineDispatcher {
         reason:
           verdict.source === 'deny-rule'
             ? `Denied by permission rule: ${verdict.rule}`
-            : 'Denied by dispatch autonomy mode'
+            : verdict.source === 'path-scope' && verdict.message
+              ? verdict.message
+              : 'Denied by dispatch autonomy mode'
       }
     }
 
+    // A human-only ask from the containment rung: the dispatching user decides, in every mode (the
+    // judge never sees it).
+    if (verdict.source === 'path-scope') {
+      return this.forwardPiTargetAsk(entry, payload, verdict.message)
+    }
     if (!auto) return this.forwardPiTargetAsk(entry, payload)
     // G9 — a user-authored ask rule outranks the judge (zero judge calls).
     if (verdict.source === 'ask-rule') {
