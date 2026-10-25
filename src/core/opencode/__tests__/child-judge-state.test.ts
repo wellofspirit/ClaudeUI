@@ -77,4 +77,47 @@ describe('ChildJudgeStates', () => {
     expect(states.state('ses_a').denials).not.toBe(states.state('ses_b').denials)
     expect(states.state('ses_a')).toBe(states.state('ses_a'))
   })
+
+  it('seeds a reopened chat from the children’s stored steps: assistant content, results as outcomes', () => {
+    const states = new ChildJudgeStates()
+    const tokens = { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } }
+    states.seedFromHistory(
+      new Map([
+        [
+          'ses_a',
+          [
+            { id: 'msg_u', type: 'user', text: 'the prompt', time: { created: 1 } },
+            {
+              id: 'msg_a1',
+              type: 'assistant',
+              agent: 'explore',
+              model: { providerID: 'p', id: 'm' },
+              content: [
+                { type: 'reasoning', text: 'secret musings' },
+                {
+                  type: 'tool',
+                  id: 't1',
+                  name: 'shell',
+                  state: {
+                    status: 'error',
+                    input: { command: 'ls' },
+                    error: { type: 'x', message: 'boom' }
+                  },
+                  time: { created: 2 }
+                }
+              ],
+              cost: 0.01,
+              tokens,
+              time: { created: 2, completed: 3 }
+            }
+          ]
+        ]
+      ] as never)
+    )
+    const seeded = states.state('ses_a')
+    expect([...seeded.trajectory.keys()]).toEqual(['msg_a1'])
+    // No thinking and no tool_result block: the live snapshots carry neither.
+    expect(seeded.trajectory.get('msg_a1')?.content.map((b) => b.type)).toEqual(['tool_use'])
+    expect([...seeded.outcomes]).toEqual([['t1', 'error']])
+  })
 })

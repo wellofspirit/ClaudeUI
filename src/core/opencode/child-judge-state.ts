@@ -15,6 +15,7 @@ import type { ChatMessage } from '../../shared/types'
 import { AutoModeDenialTracker } from '../automode/denial-tracker'
 import { recordToolOutcome, type ToolOutcome } from '../automode/ground-truth'
 import { recordTrajectoryMessage } from '../automode/trajectory'
+import { assistantChatMessage, type OpencodeChildRows } from './history'
 
 export interface ChildJudgeState {
   /** The child's own assistant messages by id (thinking blocks stripped), bounded. */
@@ -50,13 +51,37 @@ export class ChildJudgeStates {
   /** A child's step, as the mapper emitted it under its owner call. */
   recordMessage(ownerToolUseId: string, message: ChatMessage): void {
     const child = this.callToChild.get(ownerToolUseId)
-    if (!child) return
+    if (child) this.record(child, message)
+  }
+
+  private record(childSessionId: string, message: ChatMessage): void {
     // The classifier drops thinking blocks; they would only cost memory here.
     const content = message.content.filter((block) => block.type !== 'thinking')
     recordTrajectoryMessage(
-      this.state(child).trajectory,
+      this.state(childSessionId).trajectory,
       content.length === message.content.length ? message : { ...message, content }
     )
+  }
+
+  /**
+   * A reopened chat: the children's stored steps and their calls' outcomes, so a
+   * child resumed by a later call is judged with what it did before (the live
+   * session's own records start empty). One pass over rows the history load
+   * already holds.
+   */
+  seedFromHistory(children: OpencodeChildRows): void {
+    for (const [childSessionId, rows] of children)
+      for (const row of rows) {
+        if (row.type !== 'assistant') continue
+        const message = assistantChatMessage(row)
+        if (!message) continue
+        // The mapper's live snapshots carry no results: they travel as outcomes.
+        const content = message.content.filter((block) => block.type !== 'tool_result')
+        for (const block of message.content)
+          if (block.type === 'tool_result')
+            this.recordOutcome(childSessionId, block.toolUseId, block.isError ? 'error' : 'ok')
+        this.record(childSessionId, { ...message, content })
+      }
   }
 
   /** A child's tool call settled (its result, a judge block, a user reject). */

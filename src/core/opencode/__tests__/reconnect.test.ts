@@ -87,12 +87,13 @@ describe('reconcileAfterReconnect', () => {
     expect(out.map((o) => o.kind)).toEqual([
       'message',
       'subagent-started',
+      'task-started',
       // the own session is not active and wrote no idle: ended without one
       'stopped',
       // round 2: the child the first read linked
       'message'
     ])
-    expect(out[3]).toMatchObject({ kind: 'message', ownerToolUseId: 'call_sub' })
+    expect(out[4]).toMatchObject({ kind: 'message', ownerToolUseId: 'call_sub' })
     expect(mapper.followedSessions()).toEqual([SID, 'ses_c'])
   })
 

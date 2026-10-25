@@ -42,7 +42,9 @@ import type {
   PendingApproval,
   PermissionDenialBlock,
   PermissionSuggestion,
-  TaskNotification
+  TaskNotification,
+  TaskProgress,
+  TaskStartedData
 } from '../../shared/types'
 import type { ItemStreamOpen, ItemStreamSeal, ItemStreamTarget } from '../shared/sync/item-stream'
 import type {
@@ -78,6 +80,8 @@ import {
   toolSuccessResult,
   userChatMessage
 } from './content'
+import { callsByChild, type OpencodeChildRows } from './history'
+import { SUPERSEDED_SUMMARY, taskSummary, tokenTotal } from './subagent-run'
 
 // --- Outputs ----------------------------------------------------------------
 
@@ -180,6 +184,13 @@ export type OpencodeMapperOutput =
       readonly childSessionId: string
       readonly ownerToolUseId?: string
     }
+  /**
+   * A subagent run began (`session:task-started`): at every link of a child to a
+   * call, and again for the same run once it turns out backgrounded.
+   */
+  | { readonly kind: 'task-started'; readonly data: TaskStartedData }
+  /** A step of a run ended (`session:task-progress`): its usage so far. */
+  | { readonly kind: 'task-progress'; readonly progress: TaskProgress }
   /** The ONE terminal notification of a subagent call (foreground: its tool result; background: the child's end). */
   | { readonly kind: 'task-notification'; readonly notification: TaskNotification }
   | {
@@ -326,6 +337,27 @@ interface ToolState {
   childSession?: string
   /** When the call started (`tool.called`, = the stored part's `time.ran`). */
   startedAt?: number
+}
+
+/** One run of a subagent child: the steps and tools it ran under ONE call (`subagent-run.ts`). */
+interface RunState {
+  readonly toolId: string
+  readonly childID: string
+  /** The call of the session that made this call (null at top level). */
+  readonly parentToolUseId: string | null
+  readonly startedAt: number
+  /** 1-based position among the calls that ran this child. */
+  readonly runIndex: number
+  background: boolean
+  /** The terminal notification went out (a superseded run's too). */
+  notified: boolean
+  /** What it said, kept to re-send with fuller usage when a re-read adds steps behind it. */
+  final?: TaskNotification
+  refresh: boolean
+  /** Σ(input + output + reasoning) over the child's own steps of this run. */
+  tokens: number
+  readonly toolUses: Set<string>
+  lastToolName?: string
 }
 
 interface SessionState {
@@ -482,6 +514,10 @@ export class OpencodeEventMapper {
   private readonly pending = new Map<string, { parentID: string; buffer: OpencodeEvent[] }>()
   /** Every call that ran a child, in start order (a resumed child has several). */
   private readonly childCalls = new Map<string, { toolId: string; start?: number }[]>()
+  /** The runs this mapper saw start, by their call: the figures of progress and notification. */
+  private readonly runs = new Map<string, RunState>()
+  /** Epoch ms of the event (or stored row) being applied: the clock of `usage.durationMs`. */
+  private at = 0
   /** Open approval cards: request/form id → the asking session and the call it is about. */
   private readonly approvals = new Map<string, { sessionID: string; callID?: string }>()
   private readonly suggest: OpencodeEventMapperOptions['suggest']
@@ -532,6 +568,7 @@ export class OpencodeEventMapper {
     if (event.type === 'server.connected') return []
     const sessionID = eventSessionID(event)
     if (!sessionID) return []
+    this.at = event.created
     if (event.type === 'session.created') return this.announce(event)
     const session = this.sessionOf(sessionID)
     if (!session) {
@@ -656,6 +693,7 @@ export class OpencodeEventMapper {
         const tool = this.toolOf(s, message, event.data.id, undefined, out)
         tool.startedAt ??= event.created
         tool.input = toolInputRecord(event.data.input)
+        this.noteRunTool(message, tool)
         this.setToolBlock(message, tool)
         out.push(this.messageOutput(message))
         return
@@ -1038,6 +1076,7 @@ export class OpencodeEventMapper {
     }
     tool = { id, name: name ?? 'unknown', message, input: {}, settled: false, asked: false }
     s.tools.set(id, tool)
+    this.noteRunTool(message, tool)
     const item: ItemState = {
       kind: 'tool',
       toolId: id,
@@ -1100,24 +1139,99 @@ export class OpencodeEventMapper {
       calls.sort((a, b) => (a.start as number) - (b.start as number))
     this.childCalls.set(childID, calls)
     let child = this.children.get(childID)
+    const previous = child?.owner
     if (child) {
       child.owner = tool.id
-      child.background = false
       child.notified = false
       child.endedAs = undefined
     } else {
       child = newSession(childID, tool.id)
       this.children.set(childID, child)
     }
+    // opencode lets a `sessionID` call STEER a child that is still running (it
+    // joins the child's job): the earlier call is then never told its child
+    // ended — settle its card now, or its task record would hold the parent
+    // as waiting for good.
+    if (previous && previous !== tool.id)
+      this.notifyTask(childID, previous, 'completed', out, SUPERSEDED_SUMMARY)
+    const run: RunState = {
+      toolId: tool.id,
+      childID,
+      parentToolUseId: tool.message.owner ?? null,
+      startedAt: tool.startedAt ?? this.at,
+      runIndex: calls.findIndex((call) => call.toolId === tool.id) + 1,
+      // `tool.called` carries the model's own input (before opencode's repair hook).
+      background: tool.input.background === true,
+      notified: false,
+      refresh: false,
+      tokens: 0,
+      toolUses: new Set()
+    }
+    this.runs.set(tool.id, run)
+    child.background = run.background
     out.push({
       kind: 'subagent-started',
       toolUseId: tool.id,
       childSessionId: childID,
       ...this.ownerOf(tool.message)
     })
+    out.push(this.taskStarted(run, tool))
     const pending = this.pending.get(childID)
     this.pending.delete(childID)
-    for (const event of pending?.buffer ?? []) this.apply(child, event, out)
+    const at = this.at
+    for (const event of pending?.buffer ?? []) {
+      this.at = event.created ?? this.at
+      this.apply(child, event, out)
+    }
+    this.at = at
+  }
+
+  /**
+   * The run's `session:task-started` (ADR-073). `toolUseId` is the PER-RUN call
+   * (each call has its own card and roster row; a resume is a new call), and
+   * every run wakes the parent when it ends (pi parity).
+   */
+  private taskStarted(run: RunState, tool: ToolState): OpencodeMapperOutput {
+    const description = tool.input.description
+    return {
+      kind: 'task-started',
+      data: {
+        toolUseId: run.toolId,
+        taskId: run.childID,
+        taskType: 'local_agent',
+        runIndex: run.runIndex,
+        startedAt: run.startedAt,
+        wakesParent: true,
+        // Owner ruling R1: opencode 2.1.2 cannot move ONE call to the background, so a
+        // foreground run OMITS the flag — the cards offer "Send to background" only for an
+        // explicit `isBackgrounded: false`.
+        ...(run.background ? { isBackgrounded: true } : {}),
+        ...(typeof description === 'string' && description ? { description } : {})
+      }
+    }
+  }
+
+  /** A tool the child ran, for its run's `toolUses` and `lastToolName`. */
+  private noteRunTool(message: MessageState, tool: ToolState): void {
+    const run = message.owner ? this.runs.get(message.owner) : undefined
+    if (!run) return
+    if (run.notified && this.reading && !run.toolUses.has(tool.id)) run.refresh = true
+    run.toolUses.add(tool.id)
+    if (tool.name !== 'unknown') run.lastToolName = tool.name
+  }
+
+  private runUsage(run: RunState): NonNullable<TaskNotification['usage']> {
+    return {
+      totalTokens: run.tokens,
+      toolUses: run.toolUses.size,
+      durationMs: Math.max(0, this.at - run.startedAt)
+    }
+  }
+
+  /** True while a background child's run has not ended: the session must outlast it. */
+  hasLiveBackgroundChild(): boolean {
+    for (const run of this.runs.values()) if (run.background && !run.notified) return true
+    return false
   }
 
   private settleTool(
@@ -1173,9 +1287,20 @@ export class OpencodeEventMapper {
     if (!childID) return
     if (tool.childSession !== childID) this.linkChild(tool, childID, out)
     const child = this.children.get(childID)
+    // A run a later call took over has its notification already, and the child is that call's now.
+    const current = child?.owner === tool.id
     if (outcome.ok && subagentBackgrounded(outcome.metadata)) {
+      if (!current) return
+      const run = this.runs.get(tool.id)
+      if (run && !run.background && !run.notified) {
+        // It went to the background without the model asking (another client
+        // moved it): same run, now backgrounded.
+        run.background = true
+        out.push(this.taskStarted(run, tool))
+      }
       // The child may already have ended (a near-instant run): its outcome is the notification.
-      if (child?.endedAs && !child.running) this.notifyTask(childID, tool.id, child.endedAs, out)
+      if (child?.endedAs && !child.running)
+        this.notifyTask(childID, tool.id, child.endedAs, out, this.childText(child, tool.id))
       else if (child) child.background = true
       return
     }
@@ -1183,26 +1308,78 @@ export class OpencodeEventMapper {
       childID,
       tool.id,
       outcome.ok ? 'completed' : outcome.error.type === 'aborted' ? 'stopped' : 'failed',
-      out
+      out,
+      result.result
     )
   }
 
+  /** The last text a child said in the run of `toolId`: a background run's result. */
+  private childText(child: SessionState, toolId: string): string {
+    let text = ''
+    for (const message of child.messages.values()) {
+      if (message.owner !== toolId) continue
+      for (const block of message.blocks) if (block.type === 'text' && block.text) text = block.text
+    }
+    return text
+  }
+
+  /**
+   * The ONE terminal notification of a call's run. A superseded run (the child
+   * now belongs to a later call) is told without touching the child.
+   */
   private notifyTask(
     childID: string,
     toolUseId: string,
     status: TaskNotification['status'],
-    out: Out
+    out: Out,
+    text?: string
   ): void {
+    const run = this.runs.get(toolUseId)
+    if (run?.notified) return
     const child = this.children.get(childID)
-    if (child) {
-      if (child.notified) return
+    const current = child?.owner === toolUseId
+    if (!run && current && child.notified) return
+    if (run) run.notified = true
+    if (child && current) {
       child.notified = true
       this.sealSession(child, out)
     }
-    out.push({
-      kind: 'task-notification',
-      notification: { taskId: childID, toolUseId, status, outputFile: '', summary: '' }
-    })
+    const notification: TaskNotification = {
+      taskId: childID,
+      toolUseId,
+      status,
+      outputFile: '',
+      summary: taskSummary(text),
+      ...(run
+        ? {
+            usage: this.runUsage(run),
+            runIndex: run.runIndex,
+            ...(run.background ? { isBackgrounded: true } : {})
+          }
+        : {})
+    }
+    if (run) run.final = notification
+    out.push({ kind: 'task-notification', notification })
+  }
+
+  /**
+   * A re-read of a child's rows can land steps behind the terminal notification
+   * (the call settled first, in the own session's rows): send it again with the
+   * run's final usage. The reducer folds a second notification of the same run
+   * into the first, keeping the fuller usage.
+   */
+  private refreshNotifications(out: Out): void {
+    for (const run of this.runs.values()) {
+      if (!run.refresh || !run.final) continue
+      run.refresh = false
+      out.push({
+        kind: 'task-notification',
+        notification: {
+          ...run.final,
+          usage: { ...this.runUsage(run), durationMs: run.final.usage?.durationMs ?? 0 }
+        }
+      })
+    }
   }
 
   // ── Turn ends ──────────────────────────────────────────────────────────────
@@ -1279,7 +1456,8 @@ export class OpencodeEventMapper {
         outcome === 'succeeded' ? 'completed' : outcome === 'failed' ? 'failed' : 'stopped'
       // A background child's end is its call's one terminal notification; if the
       // call has not said it went to the background yet, the outcome waits for it.
-      if (s.background && s.owner) this.notifyTask(s.id, s.owner, status, out)
+      if (s.background && s.owner)
+        this.notifyTask(s.id, s.owner, status, out, this.childText(s, s.owner))
       else s.endedAs = status
       return
     }
@@ -1455,6 +1633,26 @@ export class OpencodeEventMapper {
       kind: 'step-usage',
       usage: this.stepUsage(s, message, usage.cost, usage.tokens, finish)
     })
+    const run = s !== this.own && message.owner ? this.runs.get(message.owner) : undefined
+    if (!run) return
+    run.tokens += tokenTotal(usage.tokens)
+    // Steps of an ended run (a re-read of rows behind its notification) change nothing on its
+    // card but its usage.
+    if (run.notified) {
+      if (this.reading) run.refresh = true
+      return
+    }
+    out.push({
+      kind: 'task-progress',
+      progress: {
+        toolUseId: run.toolId,
+        toolName: 'subagent',
+        parentToolUseId: run.parentToolUseId,
+        elapsedTimeSeconds: Math.max(0, Math.floor((this.at - run.startedAt) / 1000)),
+        usage: this.runUsage(run),
+        ...(run.lastToolName ? { lastToolName: run.lastToolName } : {})
+      }
+    })
   }
 
   private stepUsage(
@@ -1484,7 +1682,11 @@ export class OpencodeEventMapper {
    */
   seed(
     messages: readonly Session_Message_Info[],
-    options: { sessionTotals?: { cost: number; tokens: TokenUsage_Info } } = {}
+    options: {
+      sessionTotals?: { cost: number; tokens: TokenUsage_Info }
+      /** The stored rows of the children the history loaded (nested ones included). */
+      children?: OpencodeChildRows
+    } = {}
   ): void {
     this.seeding = true
     try {
@@ -1492,6 +1694,16 @@ export class OpencodeEventMapper {
     } finally {
       this.seeding = false
     }
+    // Children are not followed, but the calls that ran them are remembered, so a
+    // resume's run index continues from the stored runs.
+    for (const [childID, calls] of callsByChild([messages, ...(options.children?.values() ?? [])]))
+      this.childCalls.set(
+        childID,
+        calls.map((call) => ({
+          toolId: call.toolId,
+          ...(call.start !== undefined ? { start: call.start } : {})
+        }))
+      )
     // The cold status line counted the session's whole cumulative (title
     // generation included, `opencodeHistorySeed`): that is all accounted for.
     if (options.sessionTotals) this.accounted = options.sessionTotals
@@ -1517,6 +1729,7 @@ export class OpencodeEventMapper {
       if (s === this.own) this.reconcileInbox(s, read.inbox ?? [], read.messages, out)
       this.reconcileRunning(s, read.messages, before, snapshot.active[s.id] !== undefined, out)
     }
+    this.refreshNotifications(out)
     return out
   }
 
@@ -1592,6 +1805,7 @@ export class OpencodeEventMapper {
     )
     message.timestamp = row.time.created
     message.model = row.model
+    this.at = row.time.completed ?? row.time.created
     let changed = false
     const seen = { text: 0, reasoning: 0 }
     for (const part of row.content) {
@@ -1615,7 +1829,8 @@ export class OpencodeEventMapper {
         if (part.state.status === 'running')
           // What progress said while we were away (the shell id, the child link).
           this.toolProgress(tool, part.state.metadata, out)
-        else
+        else {
+          this.at = part.time?.completed ?? this.at
           this.settleTool(
             s,
             tool,
@@ -1629,6 +1844,7 @@ export class OpencodeEventMapper {
                 },
             out
           )
+        }
         continue
       }
       const ordinal = seen[part.type]++
@@ -1762,6 +1978,7 @@ export class OpencodeEventMapper {
         s.turnStartedAt = turnStart(rows, last)
         if (s === this.own) out.push({ kind: 'turn-start' })
       }
+      this.at = last.time.created
       // The stored row keeps the outcome, not the error: take the step's, if one failed.
       const failedStep = rows
         .slice(0, rows.indexOf(last))

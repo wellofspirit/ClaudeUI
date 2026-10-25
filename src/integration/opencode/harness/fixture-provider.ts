@@ -24,6 +24,10 @@
  *   [submodel:<provider/id>]  `subagent` call (agent `general`) passing that `model`; prompt `child says hi`
  *   [subresume] `subagent` call RESUMING the last child named in the conversation
  *               (`sessionID="ses_…"` of an earlier result); its prompt is `[read]` too
+ *   [subbg]     BACKGROUND `subagent` call (`background: true`, agent `general`) whose child
+ *               prompt is `child works [slow]` (the child streams for SLOW_CHUNKS × `slowChunkMs`)
+ *   [substeer]  BACKGROUND `subagent` call STEERING the last child named in the conversation
+ *               (`sessionID: ses_…` of a background result) while it still runs; prompt `steer [read]`
  *   [reason]    `reasoning_content` deltas, then text
  *   [read]      `read` of `notes.txt`
  *   [readabs:<path>]  `read` of the ABSOLUTE path (no `]` in it) — outside-the-workspace reads
@@ -335,6 +339,35 @@ export async function startFixtureProvider(
             ]
           }
         )
+      if (text.includes('[subbg]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract background',
+            prompt: 'child works [slow]',
+            agent: 'general',
+            background: true
+          }
+        )
+      if (text.includes('[substeer]')) {
+        const named = messages
+          .map((message) => messageText(message.content))
+          .join('\n')
+          .match(/sessionID[=:] ?"?(ses_[A-Za-z0-9]+)/g)
+        const sessionID = named?.at(-1)?.match(/ses_[A-Za-z0-9]+/)?.[0]
+        return streamToolCall(
+          res,
+          sessionID ? tools.find((tool) => tool === 'subagent') : undefined,
+          {
+            description: 'contract steer',
+            prompt: 'steer [read]',
+            agent: 'general',
+            background: true,
+            ...(sessionID ? { sessionID } : {})
+          }
+        )
+      }
       if (text.includes('[subresume]')) {
         const named = messages
           .map((message) => messageText(message.content))

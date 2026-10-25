@@ -263,9 +263,107 @@ describe('convertOpencodeHistory', () => {
         }
       ]
     })
+    // No usage: this fixture's call carries no end time and its child's step no tokens (nothing is invented).
     expect(history.taskNotifications).toEqual([
-      { taskId: 'ses_c', toolUseId: 'call_1', status: 'completed', outputFile: '', summary: '' }
+      {
+        taskId: 'ses_c',
+        toolUseId: 'call_1',
+        status: 'completed',
+        outputFile: '',
+        summary: 'fine',
+        runIndex: 1
+      }
     ])
+  })
+
+  it('a notification carries the run’s usage, summary and index as the mapper counts them live', () => {
+    const call = (extra: Partial<Extract<Part, { type: 'tool' }>> = {}): Part => ({
+      type: 'tool',
+      id: 'call_1',
+      name: 'subagent',
+      state: {
+        status: 'completed',
+        input: { agent: 'general' },
+        content: [
+          {
+            type: 'text',
+            text: `<subagent sessionID="ses_c" state="completed">
+${'x'.repeat(150)}
+</subagent>`
+          }
+        ],
+        metadata: { sessionID: 'ses_c', status: 'completed' }
+      },
+      time: { created: 1, ran: 2, completed: 20 },
+      ...extra
+    })
+    const child = [
+      assistant(
+        'msg_c1',
+        3,
+        [
+          {
+            type: 'tool',
+            id: 'call_r',
+            name: 'read',
+            state: {
+              status: 'completed',
+              input: {},
+              content: [{ type: 'text', text: 'x' }],
+              metadata: {}
+            },
+            time: { created: 3 }
+          }
+        ],
+        { cost: 0.01, tokens: TOKENS }
+      ),
+      // A step with no figures (still running when read) counts for nothing.
+      assistant('msg_c2', 5, [{ type: 'text', text: 'done' }], { cost: 0.02, tokens: TOKENS }),
+      assistant('msg_c3', 7, [{ type: 'text', text: 'unmetered' }])
+    ]
+    const [note] = convertOpencodeHistory(
+      [assistant('msg_a', 1, [call()])],
+      new Map([['ses_c', child]])
+    ).taskNotifications
+    expect(note).toMatchObject({
+      runIndex: 1,
+      // input + output + reasoning of the two metered steps; cache is not part of it.
+      usage: { totalTokens: 2 * 125, toolUses: 1, durationMs: 18 }
+    })
+    expect(note.summary).toBe('x'.repeat(100))
+    // A foreground run says nothing of the background.
+    expect(note).not.toHaveProperty('isBackgrounded')
+  })
+
+  it('a background call is marked, summarised by its child’s last text, timed to the child’s idle', () => {
+    const rows = [
+      assistant('msg_a', 1, [
+        {
+          type: 'tool',
+          id: 'call_1',
+          name: 'subagent',
+          state: {
+            status: 'completed',
+            input: { background: true },
+            content: [{ type: 'text', text: 'working in the background' }],
+            metadata: { sessionID: 'ses_c', status: 'running' }
+          },
+          time: { created: 1, ran: 2, completed: 3 }
+        }
+      ])
+    ]
+    const child = [
+      assistant('msg_c', 4, [{ type: 'text', text: 'all done' }], { cost: 0.01, tokens: TOKENS }),
+      idle('i', 50)
+    ]
+    const [note] = convertOpencodeHistory(rows, new Map([['ses_c', child]])).taskNotifications
+    expect(note).toMatchObject({
+      status: 'completed',
+      isBackgrounded: true,
+      summary: 'all done',
+      runIndex: 1,
+      usage: { totalTokens: 125, toolUses: 0, durationMs: 48 }
+    })
   })
 
   it.each([
@@ -316,6 +414,8 @@ describe('convertOpencodeHistory', () => {
     expect(texts('call_1')).toEqual(['first run'])
     expect(texts('call_2')).toEqual(['second run'])
     expect(history.taskNotifications.map((n) => n.toolUseId)).toEqual(['call_1', 'call_2'])
+    // The second call is the child's second run.
+    expect(history.taskNotifications.map((n) => n.runIndex)).toEqual([1, 2])
   })
 
   it('a background call takes its child’s stored outcome, or `unfinished`', () => {

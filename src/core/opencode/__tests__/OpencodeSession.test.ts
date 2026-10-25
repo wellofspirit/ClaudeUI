@@ -3064,3 +3064,337 @@ describe('auto mode: spawn, web search and skill asks (R3)', () => {
     expect(patched.some((r) => r.action === 'subagent' && r.effect === 'ask')).toBe(false)
   })
 })
+
+// ─── The task lifecycle on the wire, and the idle timer around a background child ──────────────
+
+describe('subagent task lifecycle: events and the idle timer', () => {
+  const IDLE_MS = 60_000
+  const MODEL = { providerID: 'openai', id: 'gpt-x' }
+  afterEach(() => vi.useRealTimers())
+
+  /** The own session's step runs a `subagent` call that links `child`; `background` is the model's own flag. */
+  const spawn = (callId: string, child: string, input: Record<string, unknown> = {}) => [
+    event('session.created', {
+      sessionID: child,
+      parentID: SID,
+      agent: 'explore',
+      projectID: 'prj',
+      location: { directory: CWD },
+      slug: child,
+      version: '2'
+    }),
+    event('session.tool.input.started', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callId,
+      name: 'subagent'
+    }),
+    event('session.tool.called', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callId,
+      input: { agent: 'explore', description: `task ${callId}`, prompt: 'go', ...input },
+      executed: false
+    }),
+    event('session.tool.progress', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callId,
+      metadata: { sessionID: child, status: 'running' }
+    })
+  ]
+  const settled = (callId: string, child: string, status: 'running' | 'completed') =>
+    event('session.tool.success', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callId,
+      content: [
+        { type: 'text', text: `<subagent sessionID="${child}" state="${status}">\nok\n</subagent>` }
+      ],
+      metadata: { sessionID: child, status },
+      executed: false
+    })
+  const ownTurn = () => [
+    event('session.execution.started', { sessionID: SID }),
+    event('session.step.started', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      agent: 'build',
+      model: MODEL,
+      started: clock + 1
+    })
+  ]
+  const ownEnds = () => [
+    event('session.step.ended', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      finish: 'tool-calls',
+      cost: 0.01,
+      tokens: TOKENS
+    }),
+    event('session.execution.succeeded', { sessionID: SID })
+  ]
+  const childRuns = (child: string) => [
+    event('session.execution.started', { sessionID: child }),
+    event('session.step.started', {
+      sessionID: child,
+      assistantMessageID: 'msg_c1',
+      agent: 'explore',
+      model: MODEL,
+      started: clock + 1
+    }),
+    event('session.step.ended', {
+      sessionID: child,
+      assistantMessageID: 'msg_c1',
+      finish: 'stop',
+      cost: 0.01,
+      tokens: TOKENS
+    })
+  ]
+  const childEnds = (child: string) => event('session.execution.succeeded', { sessionID: child })
+
+  async function idleSession(): Promise<ReturnType<typeof vi.spyOn>> {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    session = makeSession()
+    const cancel = vi.spyOn(session, 'cancel').mockImplementation(() => {})
+    session.setInactivityTimeout(IDLE_MS)
+    await startTurn()
+    return cancel
+  }
+
+  it('sends task-started, task-progress and the notification with the run’s figures', async () => {
+    await idleSession()
+    h.feed.push(...ownTurn(), ...spawn('call_a', CHILD), ...childRuns(CHILD), childEnds(CHILD))
+    h.feed.push(settled('call_a', CHILD, 'completed'), ...ownEnds())
+    await flush()
+    expect(payloads('session:task-started')).toEqual([
+      {
+        toolUseId: 'call_a',
+        taskId: CHILD,
+        taskType: 'local_agent',
+        runIndex: 1,
+        startedAt: expect.any(Number),
+        wakesParent: true,
+        description: 'task call_a'
+      }
+    ])
+    expect(payloads('session:task-progress')).toMatchObject([
+      {
+        toolUseId: 'call_a',
+        toolName: 'subagent',
+        parentToolUseId: null,
+        usage: { totalTokens: 125 }
+      }
+    ])
+    expect(payloads('session:task-notification')).toMatchObject([
+      { toolUseId: 'call_a', status: 'completed', runIndex: 1, usage: { totalTokens: 125 } }
+    ])
+  })
+
+  it('does not auto-disconnect while a background child runs, and does once it has ended', async () => {
+    const cancel = await idleSession()
+    h.feed.push(
+      ...ownTurn(),
+      ...spawn('call_a', CHILD, { background: true }),
+      settled('call_a', CHILD, 'running'),
+      ...ownEnds()
+    )
+    await flush()
+    expect(payloads('session:task-started')).toMatchObject([
+      { toolUseId: 'call_a', isBackgrounded: true }
+    ])
+    // The parent's turn is over; only the child still works.
+    vi.advanceTimersByTime(5 * IDLE_MS)
+    expect(cancel).not.toHaveBeenCalled()
+
+    h.feed.push(...childRuns(CHILD), childEnds(CHILD))
+    await flush()
+    expect(payloads('session:task-notification')).toMatchObject([
+      { toolUseId: 'call_a', status: 'completed', isBackgrounded: true }
+    ])
+    // The held timer is armed again by the child's end, and runs its full length.
+    vi.advanceTimersByTime(IDLE_MS - 1)
+    expect(cancel).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(2)
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('a foreground child does not hold the timer', async () => {
+    const cancel = await idleSession()
+    h.feed.push(
+      ...ownTurn(),
+      ...spawn('call_a', CHILD),
+      ...childRuns(CHILD),
+      childEnds(CHILD),
+      settled('call_a', CHILD, 'completed'),
+      ...ownEnds()
+    )
+    await flush()
+    vi.advanceTimersByTime(IDLE_MS + 1)
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('a call that turns out backgrounded (moved by another client) holds the timer from then on', async () => {
+    const cancel = await idleSession()
+    h.feed.push(
+      ...ownTurn(),
+      ...spawn('call_a', CHILD),
+      settled('call_a', CHILD, 'running'),
+      ...ownEnds()
+    )
+    await flush()
+    expect(payloads('session:task-started').map((d) => d.isBackgrounded)).toEqual([undefined, true])
+    vi.advanceTimersByTime(5 * IDLE_MS)
+    expect(cancel).not.toHaveBeenCalled()
+  })
+})
+
+describe('a reopened chat resumes a stored child', () => {
+  const OLD = 'ses_old_child'
+  const MODEL = { providerID: 'openai', id: 'gpt-x' }
+  const storedCall = {
+    type: 'tool',
+    id: 'call_old',
+    name: 'subagent',
+    state: {
+      status: 'completed',
+      input: { agent: 'explore', description: 'first look', prompt: 'look' },
+      content: [
+        { type: 'text', text: `<subagent sessionID="${OLD}" state="completed">\nseen\n</subagent>` }
+      ],
+      metadata: { sessionID: OLD, status: 'completed' }
+    },
+    time: { created: 11, ran: 12, completed: 30 }
+  }
+  const ownRows = [
+    { id: 'msg_u1', type: 'user', text: 'old question', time: { created: 10 } },
+    {
+      id: 'msg_a0',
+      type: 'assistant',
+      agent: 'build',
+      model: MODEL,
+      content: [storedCall],
+      cost: 0.01,
+      tokens: TOKENS,
+      time: { created: 11, completed: 31 }
+    },
+    { id: 'msg_idle', type: 'idle', outcome: 'succeeded', time: { created: 32 } }
+  ]
+  const childRows = [
+    {
+      id: 'msg_c0',
+      type: 'assistant',
+      agent: 'explore',
+      model: MODEL,
+      content: [
+        {
+          type: 'tool',
+          id: 'call_c0',
+          name: 'shell',
+          state: {
+            status: 'completed',
+            input: { command: 'git status OLD-MARK' },
+            content: [{ type: 'text', text: 'clean' }],
+            metadata: {}
+          },
+          time: { created: 20, ran: 20, completed: 21 }
+        }
+      ],
+      cost: 0.01,
+      tokens: TOKENS,
+      time: { created: 20, completed: 25 }
+    },
+    { id: 'msg_cidle', type: 'idle', outcome: 'succeeded', time: { created: 29 } }
+  ]
+
+  async function reopened(): Promise<void> {
+    h.client.listMessages.mockImplementation(async (id: string) =>
+      id === SID ? ownRows : id === OLD ? childRows : []
+    )
+    h.engineConfig.autoMode = { twoStageMode: 'fast' }
+    h.judge.mockResolvedValue('<block>no</block>')
+    session = makeSession({ resumeSessionId: SID, permissionMode: 'auto' })
+    h.feed.push(connected())
+    await session.run('next')
+    await flush()
+  }
+  const resumeCall = () => [
+    event('session.execution.started', { sessionID: SID }),
+    event('session.step.started', {
+      sessionID: SID,
+      assistantMessageID: 'msg_new',
+      agent: 'build',
+      model: MODEL,
+      started: Date.now()
+    }),
+    event('session.tool.input.started', {
+      sessionID: SID,
+      assistantMessageID: 'msg_new',
+      id: 'call_new',
+      name: 'subagent'
+    }),
+    event('session.tool.called', {
+      sessionID: SID,
+      assistantMessageID: 'msg_new',
+      id: 'call_new',
+      input: { agent: 'explore', description: 'second look', prompt: 'again', sessionID: OLD },
+      executed: false
+    }),
+    event('session.tool.progress', {
+      sessionID: SID,
+      assistantMessageID: 'msg_new',
+      id: 'call_new',
+      metadata: { sessionID: OLD, status: 'running' }
+    })
+  ]
+
+  it('the resuming call is the child’s next run', async () => {
+    await reopened()
+    h.feed.push(...resumeCall())
+    await flush()
+    expect(payloads('session:task-started')).toMatchObject([
+      { toolUseId: 'call_new', taskId: OLD, runIndex: 2, description: 'second look' }
+    ])
+  })
+
+  it('the resumed child is judged knowing what it did before the reopen', async () => {
+    await reopened()
+    h.feed.push(
+      ...resumeCall(),
+      event('session.step.started', {
+        sessionID: OLD,
+        assistantMessageID: 'msg_c1',
+        agent: 'explore',
+        model: MODEL,
+        started: Date.now()
+      }),
+      event('session.tool.input.started', {
+        sessionID: OLD,
+        assistantMessageID: 'msg_c1',
+        id: 'call_c1',
+        name: 'shell'
+      }),
+      event('session.tool.called', {
+        sessionID: OLD,
+        assistantMessageID: 'msg_c1',
+        id: 'call_c1',
+        input: { command: 'npm publish NEW-ASK' },
+        executed: false
+      }),
+      event('permission.asked', {
+        id: 'per_c1',
+        sessionID: OLD,
+        action: 'shell',
+        resources: ['npm publish NEW-ASK'],
+        save: ['npm publish NEW-ASK'],
+        metadata: {},
+        source: { type: 'tool', messageID: 'msg_c1', id: 'call_c1' }
+      })
+    )
+    await vi.waitFor(() => expect(h.judge).toHaveBeenCalled())
+    const user = h.judge.mock.calls[0][0].user as string
+    expect(user).toContain('NEW-ASK')
+    expect(user).toContain('OLD-MARK')
+    expect(user.indexOf('OLD-MARK')).toBeLessThan(user.indexOf('NEW-ASK'))
+  })
+})

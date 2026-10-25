@@ -550,6 +550,21 @@ export class OpencodeSession extends BaseSession {
     return this.permissionMode
   }
 
+  /** A live background subagent keeps the session: its end (and its notification) must find it. */
+  protected override idleTimerHeld(): boolean {
+    return this.mapper?.hasLiveBackgroundChild() === true || super.idleTimerHeld()
+  }
+
+  /**
+   * A background child started or ended: hold the idle timer for it, or arm the
+   * one that was held (pi's `backgroundWorkChanged`). A busy session re-arms at
+   * its turn's end.
+   */
+  private backgroundWorkChanged(): void {
+    if (this.isProcessing) return
+    this.rearmIdleTimer()
+  }
+
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
     if (this.idleTimerHeld()) return
@@ -958,7 +973,8 @@ export class OpencodeSession extends BaseSession {
     try {
       const { rows, children } = await readOpencodeHistory((id) => client.listMessages(id), info.id)
       const sessionTotals = { cost: info.cost, tokens: info.tokens }
-      this.mapper?.seed(rows, { sessionTotals })
+      this.mapper?.seed(rows, { sessionTotals, children })
+      this.childJudge.seedFromHistory(children)
       const parsed = parseModelString(this._model)
       const seed = opencodeHistorySeed(rows, parsed, {
         children: children.values(),
@@ -1236,8 +1252,17 @@ export class OpencodeSession extends BaseSession {
           void this.childKeeper.patchChild(o.childSessionId)
         else void this.adoptUnknownChildren()
         return
+      case 'task-started':
+        this.send('session:task-started', o.data)
+        // A run that is (or turned out) background holds the idle timer.
+        if (o.data.isBackgrounded) this.backgroundWorkChanged()
+        return
+      case 'task-progress':
+        this.send('session:task-progress', o.progress)
+        return
       case 'task-notification':
         this.send('session:task-notification', o.notification)
+        if (o.notification.isBackgrounded) this.backgroundWorkChanged()
         return
       case 'approval':
         this.onApproval(o.approval, o.route)

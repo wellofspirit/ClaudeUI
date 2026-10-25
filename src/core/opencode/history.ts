@@ -26,6 +26,7 @@
  * not store them (as in 1.x).
  */
 import type { ChatMessage, ContentBlock, TaskNotification } from '../../shared/types'
+import { taskSummary, tokenTotal, type RunUsage } from './subagent-run'
 import type {
   Session_Message_Assistant,
   Session_Message_Info,
@@ -143,7 +144,7 @@ export function convertOpencodeHistory(
   return history
 }
 
-interface ChildCall {
+export interface ChildCall {
   readonly toolId: string
   /** When the call started (ms), if the row says. */
   readonly start: number | undefined
@@ -165,7 +166,7 @@ function childOfCall(tool: Session_Message_Assistant_Tool): string | undefined {
 }
 
 /** Every subagent call per child session, in the order they started. */
-function callsByChild(
+export function callsByChild(
   sessions: Iterable<readonly Session_Message_Info[]>
 ): Map<string, ChildCall[]> {
   const calls = new Map<string, ChildCall[]>()
@@ -256,6 +257,10 @@ function convertChild(
     walk.path.delete(childID)
   }
   if (state.status === 'running') return
+  // The mapper's `background`: the model's own input, or the result saying the child still ran.
+  const background =
+    toolInputRecord(state.input).background === true ||
+    (state.status === 'completed' && subagentBackgrounded(state.metadata))
   const status: TaskNotification['status'] =
     state.status === 'error'
       ? state.error.type === 'aborted'
@@ -264,13 +269,57 @@ function convertChild(
       : subagentBackgrounded(state.metadata)
         ? childOutcome(rows)
         : 'completed'
+  const usage = rows ? runUsage(tool, rows, background) : undefined
   history.taskNotifications.push({
     taskId: childID,
     toolUseId: tool.id,
     status,
     outputFile: '',
-    summary: ''
+    // A foreground run's result is the call's; a background run's, what its child said last.
+    summary: taskSummary(background ? lastText(rows) : toolResult(tool)?.result),
+    ...(usage ? { usage } : {}),
+    runIndex: (walk.calls.get(childID)?.findIndex((call) => call.toolId === tool.id) ?? -1) + 1,
+    ...(background ? { isBackgrounded: true } : {})
   })
+}
+
+/** What the child said last in these rows (a background run's result). */
+function lastText(rows: readonly Session_Message_Info[] | undefined): string {
+  let text = ''
+  for (const row of rows ?? [])
+    if (row.type === 'assistant')
+      for (const part of row.content) if (part.type === 'text' && part.text) text = part.text
+  return text
+}
+
+/**
+ * One run's figures as the mapper counts them live (`event-mapper.ts` `meter`):
+ * the child's own metered steps' input + output + reasoning, its distinct tool
+ * calls, and the time from the call's start to its end — the call's result for
+ * a foreground run, the child's idle row for a background one. Undefined when
+ * the rows do not say when it ended (nothing is invented).
+ */
+function runUsage(
+  tool: Session_Message_Assistant_Tool,
+  rows: readonly Session_Message_Info[],
+  background: boolean
+): RunUsage | undefined {
+  let totalTokens = 0
+  const uses = new Set<string>()
+  for (const row of rows) {
+    if (row.type !== 'assistant') continue
+    if (row.tokens !== undefined && row.cost !== undefined) totalTokens += tokenTotal(row.tokens)
+    for (const part of row.content) if (part.type === 'tool') uses.add(part.id)
+  }
+  const end = background
+    ? rows.findLast((row) => row.type === 'idle')?.time.created
+    : tool.time.completed
+  if (end === undefined) return undefined
+  return {
+    totalTokens,
+    toolUses: uses.size,
+    durationMs: Math.max(0, end - (tool.time.ran ?? tool.time.created))
+  }
 }
 
 /** The child sessions a session's subagent calls ran (to read before converting). */
