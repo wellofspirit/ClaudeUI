@@ -1,7 +1,6 @@
 /**
- * D8: the project menu opens on right-click only, which iOS never fires. A visible ⋯ button on the
- * project header opens the same menu: hover-revealed on pointer devices, always shown on touch and
- * narrow screens, reachable from the keyboard.
+ * D8: the project menu opens on right-click only, which iOS never fires. A ⋯ button on the project
+ * header opens the same menu on touch screens; pointer devices never render it (no row width spent).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
@@ -117,22 +116,12 @@ describe('DirectoryItem ⋯ button', () => {
     expect(props.onDoubleClick).not.toHaveBeenCalled()
   })
 
-  it('is hover-revealed on pointer devices and always shown on touch / narrow screens', () => {
+  it('takes no layout on pointer devices and shows only on touch screens', () => {
     renderItem()
-    const cls = button().className
-    expect(cls).toContain('opacity-0')
-    expect(cls).toContain('group-hover:opacity-100')
-    expect(cls).toContain('focus-visible:opacity-100')
-    expect(cls).toContain('[@media(hover:none)]:opacity-100')
-    expect(cls).toContain('max-md:opacity-100')
-    // the header row is the hover group
-    expect(button().parentElement?.className).toContain('group')
-  })
-
-  it('stays visible while its menu is open', () => {
-    renderItem()
-    fireEvent.click(button())
-    expect(button().className).not.toContain('opacity-0')
+    const cls = button().className.split(/\s+/)
+    expect(cls).toContain('hidden')
+    expect(cls).toContain('[@media(hover:none)]:flex')
+    expect(cls).not.toContain('flex')
   })
 
   it('right-click still opens the menu', () => {
@@ -154,9 +143,9 @@ describe('DirectoryItem ⋯ button', () => {
     ])
   })
 
-  it('keeps a 32 px target on touch screens at desktop widths too (N10)', () => {
+  it('keeps a 32 px touch target (N10)', () => {
     renderItem()
-    expect(button().className).toContain('[@media(hover:none)]:w-8')
-    expect(button().className).toContain('[@media(hover:none)]:h-8')
+    expect(button().className).toContain('w-8')
+    expect(button().className).toContain('h-8')
   })
 })
