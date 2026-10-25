@@ -112,7 +112,10 @@ error union when tagged), our timeout `OpencodeTimeoutError` (60 s; `generate` 2
   a 4xx other than 408/429 is fatal (the server is not the one we spawned).
 - Consumed events (curated in `events.ts`; anything else fails `isOpencodeEvent`):
   - durable: `session.created`, `session.agent.selected`, `session.model.selected`,
-    `session.renamed`, `session.permissions`, `session.deleted`, `session.inbox.enqueued/
+    `session.renamed`, `session.moved{location.directory,projectID,subpath}` (a `session_move`
+    or the TUI moved the session; the mapper reports the own session's new directory and
+    `OpencodeSession` records or forgets its worktree entry, `cwd` unchanged),
+    `session.permissions`, `session.deleted`, `session.inbox.enqueued/
 delivered/cancelled/delivery.changed`, `session.execution.started/succeeded/failed/
 interrupted{reason}`, `session.step.started/streamed/ended/failed`, `session.text.started/
 ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,

@@ -338,9 +338,21 @@ Zustand in one `set()`. Consequences:
 - **The last client-computation violation moved to main.** `worktreeInfoMap` is no
   longer parsed out of a tool result in the renderer: `services/worktree-detect.ts`
   does it once, observed at the funnel's delivery point (where canonical already
-  carries the tool_result attached to its tool_use, so the `EnterWorktree` gate
+  carries the tool_result attached to its tool_use, so the tool-name gate
   checks real state), and persists through the ordinary `config:sessions-changed`
-  save.
+  save. Both directions are observed: a successful `EnterWorktree` records the worktree
+  (only a linked worktree of the session's own repository; an entry for a different one is
+  overwritten) and a successful `ExitWorktree` forgets it; each tool call is acted on once, so
+  a re-delivered result cannot undo a newer one. A `created` entry (the worktree ClaudeUI made)
+  is never overwritten or forgotten by detection, only by the removal path. opencode's
+  `session.moved` records or forgets the same way. `status.cwd` is the spawn cwd and no longer
+  drops an entry.
+- **`DirectoryGroup.linkedWorktree` is a projection of the filesystem, not client state.**
+  `sync-seed.listAllDirectories` marks every group whose cwd is a linked git worktree (any
+  engine, any layout; filesystem facts only), and the marker rides the replicated
+  `directories` listing. The replica synthesises a `worktreeInfo` from it for sessions without
+  an explicit `worktreeInfoMap` entry, and the sidebar tints those rows. Hits are revalidated
+  on every use and misses are trusted for 30 s.
 
 **The projection audits itself at every turn end (F4, 2026-09-15).**
 `renderer/src/utils/projection-audit.ts` registers a post-apply observer (never a
