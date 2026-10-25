@@ -480,6 +480,13 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
 }))
 
 import { allowRuleActionFor, PiSession } from '../PiSession'
+import { writeFileSync as mockedWriteFileSync } from 'node:fs'
+import {
+  scratchpadProjectKey,
+  scratchpadPrompt,
+  type ScratchpadEnv,
+  type ScratchpadFs
+} from '../pi-scratchpad'
 import { allowRuleGate } from '../../automode/allow-rule-gate'
 import { slimTranscript } from '../../automode/classifier'
 import { resetChatgptAccounts } from '../../automode/judge-accounts'
@@ -9463,5 +9470,279 @@ describe('PiSession — path containment (H1), real temp project', () => {
         session.dispose()
       }
     )
+  })
+})
+
+/**
+ * Slice E (ADR-110) — the per-session scratchpad through the real PiSession: created at spawn under
+ * a unique temp base (the `scratchpad` seam; this file's `node:fs` is mocked, so the seam carries
+ * the REAL fs), told to the model with `--append-system-prompt` (main session and host-run
+ * children), in scope for the file tools in every mode, listed to the judge, found again by a
+ * resume, and absent — with the session still running — when a link was planted in its way.
+ */
+describe('PiSession — scratchpad (ADR-110)', () => {
+  const real = realFs
+  let root = ''
+  let project = ''
+  let tmpBase = ''
+  const links: string[] = []
+  const padWarn = vi.fn<(message: string) => void>()
+
+  const realScratchFs: ScratchpadFs = {
+    mkdir: (p, mode) => {
+      real.fs.mkdirSync(p, { mode })
+    },
+    lstat: (p) => real.fs.lstatSync(p),
+    realpath: (p) => real.fs.realpathSync.native(p),
+    readdir: (p) => real.fs.readdirSync(p),
+    unlink: (p) => real.fs.unlinkSync(p),
+    rmdir: (p) => real.fs.rmdirSync(p)
+  }
+  const padEnv = (over: Partial<ScratchpadEnv> = {}): Partial<ScratchpadEnv> => ({
+    tmpdir: () => tmpBase,
+    fs: realScratchFs,
+    warn: padWarn,
+    ...over
+  })
+  const padRoot = (): string => real.fs.realpathSync.native(real.path.join(tmpBase, 'claudeui'))
+  const expectedDir = (key: string): string =>
+    real.path.join(padRoot(), scratchpadProjectKey(project), key, 'scratchpad')
+  const flagValues = (args: string[], name: string): string[] =>
+    args.flatMap((a, i) => (a === name ? [args[i + 1]] : []))
+  const canLink = (() => {
+    const dir = real.fs.mkdtempSync(real.path.join(real.os.tmpdir(), 'claudeui-e-probe-'))
+    try {
+      real.fs.mkdirSync(real.path.join(dir, 'target'))
+      real.fs.symlinkSync(real.path.join(dir, 'target'), real.path.join(dir, 'dl'), 'junction')
+      real.fs.unlinkSync(real.path.join(dir, 'dl'))
+      return true
+    } catch {
+      return false
+    } finally {
+      real.fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })()
+
+  beforeAll(() => {
+    realFs.on = true
+    root = real.fs.realpathSync.native(
+      real.fs.mkdtempSync(real.path.join(real.os.tmpdir(), 'claudeui-e-'))
+    )
+    project = real.path.join(root, 'proj')
+    real.fs.mkdirSync(project)
+  })
+  beforeEach(() => {
+    padWarn.mockClear()
+    // A fresh OS-temp stand-in per test.
+    tmpBase = real.fs.mkdtempSync(real.path.join(root, 'tmp-'))
+  })
+  afterAll(() => {
+    realFs.on = false
+    for (const l of links) {
+      try {
+        real.fs.unlinkSync(l)
+      } catch {
+        /* gone */
+      }
+    }
+    if (root) real.fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  const open = (
+    rid: string,
+    win: MockWindow,
+    opts: Record<string, unknown> = {},
+    deps: Record<string, unknown> = {}
+  ): PiSession => new PiSession(rid, win as never, project, opts, { scratchpad: padEnv(), ...deps })
+
+  it('a fresh session: the id is chosen by ClaudeUI (--session-id), the scratchpad is keyed by it, and the model is told the path', async () => {
+    const win = new MockWindow()
+    const session = open('rid-e-fresh', win)
+    await session.run('hi')
+    const args = lastSpawnOpts().args
+    const [id] = flagValues(args, '--session-id')
+    expect(id).toMatch(/^[0-9a-f-]{36}$/)
+    const dir = expectedDir(id)
+    expect(real.fs.statSync(dir).isDirectory()).toBe(true)
+    expect(flagValues(args, '--append-system-prompt')).toEqual([scratchpadPrompt(dir)])
+    expect(args).not.toContain('--session')
+    expect(padWarn).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('a write in the scratchpad is auto-allowed in DEFAULT mode (pinned, no card); the rest of the OS temp dir still asks', async () => {
+    const win = new MockWindow()
+    const session = open('rid-e-write', win)
+    await session.setPermissionMode('default')
+    await session.run('hi')
+    const dir = expectedDir(flagValues(lastSpawnOpts().args, '--session-id')[0])
+    const inside = real.path.join(dir, 'out.txt')
+    expect(await gate('e1', 'write', { path: inside })).toEqual(pinnedAllow(inside))
+    expect(humanCards(win)).toHaveLength(0)
+    void gate('e2', 'write', { path: real.path.join(tmpBase, 'elsewhere.txt') })
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+    // the project temp dir is readable, not writable
+    const projectTemp = real.path.dirname(real.path.dirname(dir))
+    const shared = real.path.join(projectTemp, 'shared.txt')
+    real.fs.writeFileSync(shared, 's')
+    expect(await gate('e3', 'read', { path: shared })).toEqual(pinnedAllow(shared))
+    void gate('e4', 'write', { path: shared })
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+    session.dispose()
+  })
+
+  it('the judge Environment lists the scratchpad as a directory the session may use', async () => {
+    const session = open('rid-e-env', new MockWindow())
+    await session.run('hi')
+    const dir = expectedDir(flagValues(lastSpawnOpts().args, '--session-id')[0])
+    const env = await (
+      session as unknown as {
+        classifierEnvironment(): Promise<{ additionalDirectories?: string[] }>
+      }
+    ).classifierEnvironment()
+    expect(env.additionalDirectories).toContain(dir)
+    session.dispose()
+  })
+
+  it('a resume keeps pi’s id (--session, no --session-id), keys the scratchpad by it, and finds the same directory after a restart', async () => {
+    const first = open('rid-e-resume-1', new MockWindow(), { resumeSessionId: 'pi-sess-resume' })
+    await first.run('hi')
+    const args = lastSpawnOpts().args
+    expect(flagValues(args, '--session')).toEqual(['pi-sess-resume'])
+    expect(args).not.toContain('--session-id')
+    const dir = expectedDir('pi-sess-resume')
+    expect(flagValues(args, '--append-system-prompt')).toEqual([scratchpadPrompt(dir)])
+    real.fs.writeFileSync(real.path.join(dir, 'notes.txt'), 'kept')
+    first.dispose()
+
+    // "app restart": a new PiSession object for the same pi session id
+    const second = open('rid-e-resume-2', new MockWindow(), { resumeSessionId: 'pi-sess-resume' })
+    await second.run('hi again')
+    expect(flagValues(lastSpawnOpts().args, '--append-system-prompt')).toEqual([
+      scratchpadPrompt(dir)
+    ])
+    expect(real.fs.readFileSync(real.path.join(dir, 'notes.txt'), 'utf8')).toBe('kept')
+    second.dispose()
+  })
+
+  it('a respawn of a fresh session reuses its scratchpad and does NOT pass --session-id again (pi’s session behaviour is unchanged)', async () => {
+    const session = open('rid-e-respawn', new MockWindow())
+    await session.run('one')
+    const firstArgs = lastSpawnOpts().args
+    session.cancel()
+    await session.run('two')
+    const secondArgs = lastSpawnOpts().args
+    expect(flagValues(firstArgs, '--session-id')).toHaveLength(1)
+    expect(secondArgs).not.toContain('--session-id')
+    expect(flagValues(secondArgs, '--append-system-prompt')).toEqual(
+      flagValues(firstArgs, '--append-system-prompt')
+    )
+    session.dispose()
+  })
+
+  it('a fork gets a scratchpad of its own (not the source’s) and keeps `--session` for the source', async () => {
+    const session = open('rid-e-fork', new MockWindow(), {
+      resumeSessionId: 'source-sess',
+      resumeSessionAt: 'entry-u2',
+      forkSession: true
+    })
+    await session.run('hi')
+    const args = lastSpawnOpts().args
+    expect(flagValues(args, '--session')).toEqual(['source-sess'])
+    expect(args).not.toContain('--session-id')
+    const [prompt] = flagValues(args, '--append-system-prompt')
+    expect(prompt).toBeDefined()
+    expect(prompt).not.toContain('source-sess')
+    session.dispose()
+  })
+
+  it.skipIf(!canLink)(
+    'a link planted at the base: no scratchpad, a warning, nothing written through the link — and the session still runs under containment',
+    async () => {
+      const victim = real.path.join(root, 'victim')
+      real.fs.mkdirSync(victim, { recursive: true })
+      const base = real.path.join(tmpBase, 'claudeui')
+      real.fs.symlinkSync(victim, base, 'junction')
+      links.push(base)
+      const win = new MockWindow()
+      const session = open('rid-e-planted', win)
+      await session.setPermissionMode('default')
+      await session.run('hi')
+      const args = lastSpawnOpts().args
+      expect(args).not.toContain('--append-system-prompt')
+      expect(args).not.toContain('--session-id')
+      expect(padWarn).toHaveBeenCalledWith(expect.stringContaining('no scratchpad'))
+      expect(real.fs.readdirSync(victim)).toEqual([])
+      // containment still holds: an outside write asks
+      void gate('p1', 'write', { path: real.path.join(root, 'out.txt') })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+      session.dispose()
+    }
+  )
+
+  describe('host-run children', () => {
+    const promptFileText = (): string[] =>
+      vi
+        .mocked(mockedWriteFileSync)
+        .mock.calls.filter((c) => String(c[0]).endsWith('system-prompt.md'))
+        .map((c) => String(c[1]))
+
+    async function runChild(
+      session: PiSession,
+      kids: ReturnType<typeof makeFakeChildren>
+    ): Promise<void> {
+      await session.run('PARENT-INTENT')
+      const input = { description: 'Tidy', prompt: 'CHILD-TASK', run_in_background: false }
+      expect((await gate('call-agent', 'agent', input)).behavior).toBe('allow')
+      const result = hostedTool('agent', input, 'call-agent')
+      await vi.waitFor(() => expect(kids.children.length).toBe(1))
+      const child = kids.children[0]
+      await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
+      child.push({ type: 'agent_settled' })
+      await result
+    }
+
+    it("a child's appended prompt carries the PARENT's scratchpad paragraph", async () => {
+      vi.mocked(mockedWriteFileSync).mockClear()
+      const kids = makeFakeChildren()
+      const session = open(
+        'rid-e-child',
+        new MockWindow(),
+        { model: 'openai-codex/gpt-5.6-luna', permissionMode: 'default' },
+        { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
+      )
+      await runChild(session, kids)
+      const dir = expectedDir(flagValues(lastSpawnOpts().args, '--session-id')[0])
+      const texts = promptFileText()
+      expect(texts).toHaveLength(1)
+      expect(texts[0].endsWith(`\n\n${scratchpadPrompt(dir)}`)).toBe(true)
+      session.dispose()
+    })
+
+    it('without a scratchpad the child prompt has no such paragraph', async () => {
+      vi.mocked(mockedWriteFileSync).mockClear()
+      const kids = makeFakeChildren()
+      const session = open(
+        'rid-e-child-none',
+        new MockWindow(),
+        { model: 'openai-codex/gpt-5.6-luna', permissionMode: 'default' },
+        {
+          spawnPiChild: kids.spawn,
+          subagentsRoot: '/fake/subagents',
+          scratchpad: padEnv({
+            fs: {
+              ...realScratchFs,
+              mkdir: () => {
+                throw new Error('EACCES')
+              }
+            }
+          })
+        }
+      )
+      await runChild(session, kids)
+      expect(promptFileText()).toHaveLength(1)
+      expect(promptFileText()[0]).not.toContain('Scratchpad directory')
+      session.dispose()
+    })
   })
 })

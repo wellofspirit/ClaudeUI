@@ -143,6 +143,11 @@ import { SyncCore } from '../../../core/sync/sync-core'
 import { addHostObserver, emitEvent, syncCore } from '../../../core/services/sync-host'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-engine'
 import { PATH_CHANGED_REASON } from '../../../core/pi/pi-path-scope'
+import {
+  ensurePiScratchpad,
+  scratchpadProjectKey,
+  scratchpadPrompt
+} from '../../../core/pi/pi-scratchpad'
 import type { MergedClaudeRules } from '../../../core/pi/permission-engine'
 import { callerRestrictionFromAgent } from '../../../core/opencode/caller-restriction'
 import {
@@ -255,6 +260,8 @@ function makeHarness(overrides: Partial<DispatcherDeps> = {}): {
     codexResumeLockWindowMs: 0,
     // A pi target's session directory is "on disk" unless a test says otherwise.
     piSessionDirExists: () => true,
+    // Hermetic: no pi target makes a scratchpad under the real OS temp dir unless a test says so.
+    piScratchpad: () => undefined,
     // The fake cwds below (`/tmp/xeng-project`) are not on disk: a resumed target's directory
     // "exists" unless a test says otherwise.
     targetCwdExists: () => true,
@@ -15623,5 +15630,119 @@ describe('CrossEngineDispatcher — pi target path containment (H1)', () => {
       reason: 'Denied by permission rule: Edit(a.txt)'
     })
     await t.finish()
+  })
+})
+
+/**
+ * Slice E (ADR-110) — a pi dispatch target has its OWN scratchpad, keyed by its ledger row id (so a
+ * resume finds the same directory), told to the model in the spawn args and in scope for its file
+ * tools in every mode. Real directories under a unique temp base (the dispatcher's `piScratchpad`
+ * seam points `ensurePiScratchpad` at it).
+ */
+describe('CrossEngineDispatcher — pi target scratchpad (ADR-110)', () => {
+  let base = ''
+  let parent = ''
+  const approvals = (ctx: ReturnType<typeof makeCtx>): Array<Record<string, unknown>> =>
+    ctx.emit.mock.calls
+      .filter((c) => c[0] === 'session:approval-request')
+      .map((c) => c[1] as Record<string, unknown>)
+  const flagValues = (args: readonly string[] | undefined, name: string): string[] =>
+    (args ?? []).flatMap((a, i) => (a === name ? [args![i + 1]] : []))
+  const piCfg = (): EngineConfig => ({
+    dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+    autoMode: { enabled: false }
+  })
+
+  beforeAll(() => {
+    base = realpathSync.native(mkdtempSync(join(tmpdir(), 'xeng-e-')))
+    parent = join(base, 'project')
+    mkdirSync(parent)
+  })
+  afterAll(() => {
+    if (base) rmSync(base, { recursive: true, force: true })
+  })
+
+  function harness(over: { scratchpad?: boolean } = {}) {
+    const target = makeFakePiTarget({ sessionId: 'pi-sess-A' })
+    const ledger = makeFakeDispatchLedger()
+    const made: string[] = []
+    const { dispatcher } = makeHarness({
+      ledger,
+      loadEngineConfig: piCfg,
+      spawnPiTarget: target.spawnPiTarget,
+      piScratchpad:
+        over.scratchpad === false
+          ? () => undefined
+          : (cwd, key) => {
+              made.push(key)
+              return ensurePiScratchpad(cwd, key, { tmpdir: () => base })
+            }
+    })
+    const ctx = makeCtx({
+      fromEngine: 'claude',
+      fromRoutingId: 'parent-E',
+      cwd: parent,
+      getAutonomyMode: () => 'default'
+    })
+    const turn = async (req: Parameters<CrossEngineDispatcher['dispatch']>[0]) => {
+      const pending = dispatcher.dispatch(req, ctx)
+      await tick()
+      target.pushEvent(piAssistantMessageEnd({ text: 'answer' }))
+      target.pushEvent(PI_AGENT_SETTLED)
+      return pending
+    }
+    return { target, ledger, dispatcher, ctx, made, turn }
+  }
+
+  it('spawns with its own scratchpad paragraph (keyed by the ledger row), and the same one again on a resume', async () => {
+    const h = harness()
+    await h.turn({ engine: 'pi', prompt: 'one' })
+    const first = h.target.spawnCalls[0].args
+    const [prompt] = flagValues(first, '--append-system-prompt')
+    const row = h.ledger.rowFor('pi', 'pi-sess-A')!
+    expect(h.made).toEqual([`dispatch-${row.id}`])
+    const dir = join(
+      realpathSync.native(join(base, 'claudeui')),
+      scratchpadProjectKey(parent),
+      `dispatch-${row.id}`,
+      'scratchpad'
+    )
+    expect(prompt).toBe(scratchpadPrompt(dir))
+    expect(existsSync(dir)).toBe(true)
+    // the session flags are untouched
+    expect(flagValues(first, '--session-id')).toHaveLength(1)
+
+    h.dispatcher.disposeFor('parent-E')
+    await h.turn({ engine: 'pi', prompt: 'two', sessionId: 'pi-sess-A' })
+    const second = h.target.spawnCalls[1].args
+    expect(flagValues(second, '--append-system-prompt')).toEqual([prompt])
+    expect(h.made).toEqual([`dispatch-${row.id}`, `dispatch-${row.id}`])
+  })
+
+  it('a target that could not have a scratchpad spawns without the flag', async () => {
+    const h = harness({ scratchpad: false })
+    await h.turn({ engine: 'pi', prompt: 'one' })
+    expect(h.target.spawnCalls[0].args).not.toContain('--append-system-prompt')
+  })
+
+  it('its file tools reach the scratchpad in default mode with no card; the rest of the OS temp dir still asks', async () => {
+    const h = harness()
+    const pending = h.dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, h.ctx)
+    await tick()
+    const [prompt] = flagValues(h.target.spawnCalls[0].args, '--append-system-prompt')
+    const dir = prompt.slice('Scratchpad directory: '.length).split('. Use it for')[0]
+    const gate = h.target.gateHandler()
+    const inside = join(dir, 'out.txt')
+    expect(await gate({ toolCallId: 'e1', toolName: 'write', input: { path: inside } })).toEqual({
+      behavior: 'allow',
+      updatedInput: expect.objectContaining({ path: inside })
+    })
+    expect(approvals(h.ctx)).toHaveLength(0)
+    void gate({ toolCallId: 'e2', toolName: 'write', input: { path: join(base, 'elsewhere.txt') } })
+    for (let i = 0; i < 8; i++) await tick()
+    expect(approvals(h.ctx)).toHaveLength(1)
+    h.target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    h.target.pushEvent(PI_AGENT_SETTLED)
+    await pending
   })
 })

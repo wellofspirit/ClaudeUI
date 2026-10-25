@@ -23,6 +23,7 @@ import {
   sweepOrphanDispatchTargets
 } from '../../../core/services/dispatch-target-end'
 import type { DispatchTargetRow } from '../../../core/services/dispatch-target-ledger'
+import { ensurePiScratchpad, removePiScratchpad } from '../../../core/pi/pi-scratchpad'
 
 const row = (over: Partial<DispatchTargetRow> = {}): DispatchTargetRow => ({
   id: 's-abc123',
@@ -64,6 +65,33 @@ describe('removeHarnessState', () => {
     await removeHarnessState(row({ id: 's-abc123', engine: 'pi' }), { home })
     expect(fs.existsSync(piDir('s-abc123'))).toBe(false)
     expect(fs.existsSync(path.join(piDir('s-other1'), 'session.jsonl'))).toBe(true)
+  })
+
+  it('removes a pi X-Agent’s scratchpad (ADR-110) by its ledger id — its own, not another X-Agent’s or a session’s', async () => {
+    const own = ensurePiScratchpad('/proj', 'dispatch-s-abc123', { tmpdir: () => home })!
+    const other = ensurePiScratchpad('/proj', 'dispatch-s-other1', { tmpdir: () => home })!
+    const session = ensurePiScratchpad('/proj', 's-abc123', { tmpdir: () => home })!
+    fs.writeFileSync(path.join(own.dir, 'x.txt'), 'x')
+    await removeHarnessState(row({ id: 's-abc123', engine: 'pi' }), {
+      home,
+      removeScratchpad: (key) => removePiScratchpad(key, { tmpdir: () => home })
+    })
+    expect(fs.existsSync(own.dir)).toBe(false)
+    expect(fs.existsSync(other.dir)).toBe(true)
+    expect(fs.existsSync(session.dir)).toBe(true)
+  })
+
+  it('only a pi row asks for a scratchpad removal', async () => {
+    const removeScratchpad = vi.fn()
+    for (const engine of ['claude', 'codex', 'opencode'] as const)
+      await removeHarnessState(row({ engine }), {
+        home,
+        removeScratchpad,
+        deleteOpencodeSession: async () => {}
+      })
+    expect(removeScratchpad).not.toHaveBeenCalled()
+    await removeHarnessState(row({ engine: 'pi' }), { home, removeScratchpad })
+    expect(removeScratchpad).toHaveBeenCalledWith('dispatch-s-abc123')
   })
 
   it('a directory that is already gone is not an error', async () => {

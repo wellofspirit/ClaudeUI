@@ -116,6 +116,7 @@ import {
   sessionToolDenyRule
 } from './permission-engine'
 import { buildPiPathScope, withPathGuard, type PiPathScope } from './pi-path-scope'
+import { ensurePiScratchpad, scratchpadPromptArgs, type ScratchpadEnv } from './pi-scratchpad'
 import { isSessionToolName, type SessionToolName } from '../../shared/session-tools-description'
 import { piSessionToolsEnv } from '../services/session-tool-specs'
 import {
@@ -494,6 +495,16 @@ export class PiSession extends BaseSession {
    */
   private scratchpadDir: string | undefined
   private projectTempDir: string | undefined
+  /**
+   * The scratchpad's session key, fixed at the first spawn. It is pi's own session id, the one
+   * ClaudeUI persists, rekeys to, resumes by and deletes by: a resumed session's id, or (for a
+   * fresh one) an id ClaudeUI mints and hands pi as `--session-id`, so it is known BEFORE the
+   * spawn that needs it. A fork (pi mints the new id after the spawn) and a respawn after a crash
+   * (pi starts a new session) keep the first key: their scratchpad is reused, but deleting the
+   * session by its new id does not find it.
+   */
+  private scratchKey: string | undefined
+  private readonly scratchpadEnv: Partial<ScratchpadEnv> | undefined
   /** {@link pathScope}'s memo: rebuilt when the merged rules are (settings change), or a root changes. */
   private pathScopeMemo: {
     rules: MergedClaudeRules
@@ -642,9 +653,12 @@ export class PiSession extends BaseSession {
       spawnPiChild?: SpawnPiChildFn
       subagentsRoot?: string
       loadAgentRegistry?: (cwd: string) => PiAgentRegistry
+      /** Where the scratchpad lives (tests); production uses the OS temp dir. */
+      scratchpad?: Partial<ScratchpadEnv>
     } = {}
   ) {
     super(routingId, win, cwd)
+    this.scratchpadEnv = deps.scratchpad
     this.loadAgentRegistry = deps.loadAgentRegistry ?? ((dir) => loadPiAgentRegistry({ cwd: dir }))
     // The host reads this session LIVE (routingId changes on a rekey).
     // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -658,6 +672,7 @@ export class PiSession extends BaseSession {
           return session.cwd
         },
         currentModel: () => session._model,
+        scratchpadDir: () => session.scratchpadDir,
         skillDirsEnv: () => session.computeSkillDirsEnv(),
         bridgedMcpServers: () => session.mcpCatalog?.servers ?? {},
         send: (channel, data) => session.send(channel, data),
@@ -911,6 +926,19 @@ export class PiSession extends BaseSession {
     return catalog
   }
 
+  /**
+   * Create (or find again) this session's scratchpad and publish it to the path scope and the
+   * judge's environment. A session that cannot have one (a planted link, a foreign owner) simply
+   * has none: containment works without it.
+   */
+  private prepareScratchpad(): { sessionId: string } | undefined {
+    this.scratchKey ??= this.resumeSessionId && !this.forkSession ? this.resumeSessionId : uuid()
+    const pad = ensurePiScratchpad(this.cwd, this.scratchKey, this.scratchpadEnv)
+    this.scratchpadDir = pad?.dir
+    this.projectTempDir = pad?.projectTemp
+    return pad ? { sessionId: this.scratchKey } : undefined
+  }
+
   private async doStart(): Promise<void> {
     const launch = locatePiLaunch()
     if (!launch) throw new Error(harnessUnavailableMessage('pi'))
@@ -977,13 +1005,20 @@ export class PiSession extends BaseSession {
           )
         }
       }
+      const scratchpad = this.prepareScratchpad()
       if (this.resumeSessionId) {
         // Resolve the on-disk file for the resume id; fall back to the raw id
         // (verified: --session accepts an absolute file path) if not found —
         // pi will then report whatever it can, rather than us refusing to spawn.
         const resolvedPath = findPiSessionFile(this.resumeSessionId)
         args.push('--session', resolvedPath ?? this.resumeSessionId)
+      } else if (scratchpad && this.piSessionId === null) {
+        // A fresh session's id is chosen here (`--session-id` creates it), so the scratchpad is
+        // keyed by the id the session is known by from its first turn to its deletion.
+        args.push('--session-id', scratchpad.sessionId)
       }
+      // The model is told where its scratch space is, as Claude Code's is; no scratchpad, no flag.
+      args.push(...scratchpadPromptArgs(this.scratchpadDir))
 
       client = new PiRpcClient(launch, {
         cwd: this.cwd,

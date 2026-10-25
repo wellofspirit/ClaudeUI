@@ -171,6 +171,12 @@ import {
 } from '../pi/permission-engine'
 import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
 import { buildPiPathScope, withPathGuard, type PiPathScope } from '../pi/pi-path-scope'
+import {
+  dispatchScratchpadKey,
+  ensurePiScratchpad,
+  scratchpadPromptArgs,
+  type PiScratchpad
+} from '../pi/pi-scratchpad'
 import type { CodexMethods } from '../codex/protocol/methods'
 import type { Model } from '../codex/protocol/v2/Model'
 import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
@@ -812,6 +818,11 @@ export interface DispatcherDeps {
   codexHoldsThread?: (threadId: string) => boolean
   /** Does a pi target's session directory still exist? Defaults to `fs.existsSync`. */
   piSessionDirExists?: (dir: string) => boolean
+  /**
+   * A pi target's own scratchpad (ADR-110) for a key stable across its resumes. Defaults to
+   * `ensurePiScratchpad` under the OS temp dir; undefined = the target has none.
+   */
+  piScratchpad?: (cwd: string, key: string) => PiScratchpad | undefined
   /**
    * Does the directory an X-Agent was created in still exist? A resume is refused when it does not
    * (a removed git worktree): the harness would otherwise start in a cwd that is gone, or fall back
@@ -1503,6 +1514,11 @@ interface PiTargetEntry extends TargetLedgerFields {
   sessionId: string | null
   fromRoutingId: string
   cwd: string
+  /**
+   * The target's OWN scratchpad and the project temp dir of its cwd (ADR-110), keyed by its
+   * ledger row id so a resume finds the same directory. Undefined when it could not be made.
+   */
+  scratchpad: PiScratchpad | undefined
   /** The child process + its OWN loopback approval-gate host (ADR-033 §4 — a
    *  dispatch target gets its own bridge, never shares the dispatching
    *  session's), driven by the shared `PiChildRunner` (ADR-089). */
@@ -2794,12 +2810,20 @@ function piTargetSpawnFlags(
   sessionDir: string,
   sessionId: string,
   handBack: boolean,
-  messaging: boolean
+  messaging: boolean,
+  scratchpadDir?: string
 ): Pick<PiTargetSpawnOpts, 'args' | 'env'> {
   return {
     // Persisted and hidden (ADR-105, the ADR-089 sub-agent precedent): the same two
-    // flags create the session and resume it (pi opens the file when it exists).
-    args: ['--session-dir', sessionDir, '--session-id', sessionId],
+    // flags create the session and resume it (pi opens the file when it exists). The target is
+    // told about its own scratchpad (ADR-110), when it has one.
+    args: [
+      '--session-dir',
+      sessionDir,
+      '--session-id',
+      sessionId,
+      ...scratchpadPromptArgs(scratchpadDir)
+    ],
     env: (bridge) => buildPiTargetChildEnv(bridge, handBack, messaging)
   }
 }
@@ -2825,6 +2849,7 @@ export class CrossEngineDispatcher {
   private readonly codexResumeLockRetryMs: number
   private readonly codexHoldsThread: (threadId: string) => boolean
   private readonly piSessionDirExists: (dir: string) => boolean
+  private readonly piScratchpad: (cwd: string, key: string) => PiScratchpad | undefined
   private readonly targetCwdExists: (cwd: string) => boolean
   private readonly requireHandBack: boolean
   private readonly reports: DispatchReportStore
@@ -2916,6 +2941,7 @@ export class CrossEngineDispatcher {
     this.codexHoldsThread =
       deps.codexHoldsThread ?? ((threadId) => codexHostRegistry.holdsThread(threadId))
     this.piSessionDirExists = deps.piSessionDirExists ?? existsSync
+    this.piScratchpad = deps.piScratchpad ?? ((cwd, key) => ensurePiScratchpad(cwd, key))
     this.targetCwdExists = deps.targetCwdExists ?? existsSync
     this.requireHandBack = deps.requireHandBack ?? false
     this.reports = deps.reports ?? dispatchReports
@@ -8556,6 +8582,8 @@ export class CrossEngineDispatcher {
       canMessage: sessionToolsAvailable(),
       fromRoutingId: ctx.fromRoutingId,
       cwd,
+      // The ledger row id is stable across resumes (and what ending the X-Agent removes it by).
+      scratchpad: this.piScratchpad(cwd, dispatchScratchpadKey(row.id)),
       // Populated below, once the runner has started — the gate handler and
       // stream closures capture `entry` BY REFERENCE (mirrors
       // createClaudeTargetShell), so it's safe to construct before this field
@@ -8642,7 +8670,8 @@ export class CrossEngineDispatcher {
             dispatchPiSessionDir(row.id),
             harnessId,
             entry.handBack,
-            entry.canMessage
+            entry.canMessage,
+            entry.scratchpad?.dir
           )
         },
         ownerToolUseId: () => entry.ctx.toolUseId,
@@ -8742,7 +8771,9 @@ export class CrossEngineDispatcher {
   private piTargetPathScope(entry: PiTargetEntry): PiPathScope {
     return buildPiPathScope({
       cwd: entry.cwd,
-      rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+      rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+      scratchpad: entry.scratchpad?.dir,
+      projectTemp: entry.scratchpad?.projectTemp
     })
   }
 

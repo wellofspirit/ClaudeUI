@@ -83,6 +83,7 @@ import { PI_ASYNC_LAUNCHED_PREFIX, piAgentModelLine } from '../../shared/pi-agen
 // `~/.claude/ui/pi-subagents` — where every child's session dir lives (the
 // store derives the `~/.claude/ui` root locally, without the vault's graph).
 import { piSubagentSessionsRoot, type PiAgentLinkRecord } from './pi-subagent-store'
+import { scratchpadPrompt } from './pi-scratchpad'
 import { piSubagentToolEntry, type PiMcpServerEntry } from './pi-mcp-bridge'
 
 /** Live children (all depths) one session may run at once. */
@@ -106,6 +107,11 @@ export interface PiSubagentHost {
   readonly cwd: string
   /** The parent's model picker value, live — a child's model when neither the call nor its definition names one. */
   currentModel(): string
+  /**
+   * The parent's scratchpad directory, live (undefined = the parent has none). A child shares its
+   * parent's scope, so it is told to use the same one. Absent = none.
+   */
+  scratchpadDir?(): string | undefined
   /** The parent's skill-dirs env (`CLAUDEUI_PI_SKILL_DIRS`), or `{}`. */
   skillDirsEnv(): Record<string, string>
   /**
@@ -901,9 +907,11 @@ export class PiSubagentManager {
     // F8: the prompt file always matches the definition the flags come from.
     try {
       mkdirSync(record.dir, { recursive: true, mode: 0o700 })
+      const scratchpad = this.host.scratchpadDir?.()
       writeFileSync(
         record.promptFile,
-        `${definition.prompt}\n\n${PI_SUBAGENT_SUFFIX}\n\n${this.identityBlock(record)}`,
+        `${definition.prompt}\n\n${PI_SUBAGENT_SUFFIX}\n\n${this.identityBlock(record)}` +
+          (scratchpad ? `\n\n${scratchpadPrompt(scratchpad)}` : ''),
         { encoding: 'utf-8', mode: 0o600 }
       )
     } catch (err) {
