@@ -8767,6 +8767,20 @@ export class CrossEngineDispatcher {
     )
   }
 
+  /**
+   * The rules the pi target's judge reads its environment from: `targetRules`, plus the target's
+   * own scratchpad listed with the directories (as `PiSession.classifierEnvironment` does for a
+   * session): the file tools may use it without a prompt, so the judge must not read a write
+   * there as outside the granted directories.
+   */
+  private piTargetJudgeRules(entry: PiTargetEntry): MergedClaudeRules {
+    const rules = this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+    const scratchpad = entry.scratchpad?.dir
+    return scratchpad
+      ? { ...rules, additionalDirectories: [...rules.additionalDirectories, scratchpad] }
+      : rules
+  }
+
   /** The target's workspace for path containment: its cwd + `targetRules`' scope (the user's additional directories, the dispatching session's directory). */
   private piTargetPathScope(entry: PiTargetEntry): PiPathScope {
     return buildPiPathScope({
@@ -8868,7 +8882,7 @@ export class CrossEngineDispatcher {
           entry.sessionId !== null &&
           this.targets.get(entry.sessionId) === entry,
         honoursWorkdir: false,
-        permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+        permissions: () => this.piTargetJudgeRules(entry)
       }
     )
     // Stopped while the judge ran: never forward a drained ask.

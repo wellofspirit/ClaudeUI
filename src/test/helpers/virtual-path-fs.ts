@@ -3,7 +3,7 @@
  * links, unreadable entries — with win32 or POSIX path semantics chosen by the caller, so the
  * Windows and POSIX halves of the containment logic are testable on any host.
  *
- * Only what `landingOf` / the facts ask: `realpath`, `lstat`, `exists`. Link targets are resolved
+ * Only what `landingOf` / the facts ask: `realpath`, `lstat`, `readlink`, `exists`. Link targets are resolved
  * against the link's directory; a chain longer than 40 hops is ELOOP; a missing entry is ENOENT
  * (ENOTDIR under a file); an entry in `denied` is EACCES.
  */
@@ -84,6 +84,11 @@ export function makeVirtualFs(
     lstat: (p) => {
       const { node } = walk(p, false)
       return { isSymbolicLink: () => typeof node === 'object' }
+    },
+    readlink: (p) => {
+      const { node } = walk(p, false)
+      if (typeof node !== 'object') throw errno('EINVAL', p)
+      return node.link
     },
     exists: (p) => {
       try {

@@ -13,16 +13,24 @@ import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   PATH_CHANGED_REASON,
+  absoluteRuleSpecifier,
   buildPiPathScope,
   hostPathFs,
+  humanOnlyMessage,
+  isRemoteWindowsPath,
   normalizeWindowsShellPath,
+  outsideAllowRules,
   pathFacts,
   piResolvePath,
+  pinFor,
+  pinMismatchReason,
   platformForCwd,
+  rawSpellingHolds,
   readCandidate,
   sameFacts,
   suspiciousWindowsPath,
   withPathGuard,
+  type PathScopeFs,
   type PiPathScope
 } from '../pi-path-scope'
 import { makeVirtualFs, type VirtualNode } from '../../../test/helpers/virtual-path-fs'
@@ -906,6 +914,733 @@ describe('sameFacts', () => {
     ).toBe(true)
     expect(sameFacts(a, { ...a, inScope: false }, 'linux')).toBe(false)
     expect(sameFacts(a, { ...a, state: 'unresolved', landing: undefined }, 'linux')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice F (exit review of PR #144)
+// ---------------------------------------------------------------------------
+
+/** A recording wrapper around a virtual win32 fs: every call, with its argument, in order. */
+function recordingWinFs(nodes: Record<string, VirtualNode>) {
+  const inner = makeVirtualFs('win32', nodes)
+  const calls: string[] = []
+  const fs: PathScopeFs = {
+    realpath: (p) => (calls.push(`realpath ${p}`), inner.realpath(p)),
+    lstat: (p) => (calls.push(`lstat ${p}`), inner.lstat(p)),
+    readlink: (p) => (calls.push(`readlink ${p}`), inner.readlink(p)),
+    exists: (p) => (calls.push(`exists ${p}`), inner.exists(p))
+  }
+  return { fs, calls, inner }
+}
+
+const BS = String.fromCharCode(92)
+const REMOTE_ARG = /^(?:\w+ )(?:[\\/]{2})/
+
+describe('R1 — a network path is never handed to the filesystem (the gate itself must not speak SMB / WebDAV)', () => {
+  const REMOTE_SPELLINGS = [
+    `${BS}${BS}attacker.example${BS}share${BS}x`,
+    '//attacker.example/share/x',
+    `${BS}${BS}attacker.example@SSL${BS}DavWWWRoot${BS}x`,
+    `${BS}${BS}attacker.example@443${BS}DavWWWRoot${BS}x`,
+    'file://attacker.example/share/x',
+    `${BS}${BS}?${BS}UNC${BS}attacker.example${BS}share${BS}x`,
+    `${BS}${BS}?${BS}C:${BS}Windows${BS}win.ini`,
+    `${BS}${BS}.${BS}PhysicalDrive0`,
+    `@${BS}${BS}attacker.example${BS}share${BS}x`
+  ]
+  const LOCAL_NAMESPACE = [
+    `${BS}${BS}?${BS}C:${BS}Windows${BS}win.ini`,
+    `${BS}${BS}.${BS}PhysicalDrive0`
+  ]
+  const TOOLS = ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const
+
+  it.each(REMOTE_SPELLINGS)(
+    '%s: unresolved + remote with no filesystem call at all (no roots to place either)',
+    (p) => {
+      const { fs, calls } = recordingWinFs({})
+      const scope: PiPathScope = {
+        cwd: 'D:\\repo',
+        roots: [],
+        platform: 'win32',
+        homeDir: 'C:\\Users\\u',
+        fs
+      }
+      for (const tool of TOOLS) {
+        calls.length = 0
+        const input = tool === 'write' ? { path: p, content: 'x' } : { path: p }
+        const f = pathFacts(tool, input, scope)!
+        expect(calls, `${tool} ${p}`).toEqual([])
+        expect(f, `${tool} ${p}`).toMatchObject({
+          state: 'unresolved',
+          remote: true,
+          inScope: false,
+          inFence: false,
+          carriedOut: false
+        })
+        expect(f.landing).toBeUndefined()
+        // F3-3: a local namespace spelling (the extended-length and device prefixes on a drive or a
+        // device) is a device / extended-length path, not a network one; a real UNC, WebDAV or
+        // extended-length UNC spelling keeps the network wording
+        if (LOCAL_NAMESPACE.includes(p)) {
+          expect(humanOnlyMessage(f), p).toContain('device or extended-length path')
+          expect(humanOnlyMessage(f), p).not.toMatch(/is a network path/)
+        } else {
+          expect(humanOnlyMessage(f), p).toContain('is a network path')
+          expect(humanOnlyMessage(f), p).not.toContain('device or extended-length')
+        }
+      }
+    }
+  )
+
+  it('a remote path never reaches a root, a scratchpad or the cwd probe either (the roots are placed locally)', () => {
+    const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir' })
+    const scope = buildPiPathScope({
+      cwd: 'D:\\repo',
+      // a project-settings additional directory that is itself UNC must not be probed
+      rules: { additionalDirectories: [`${BS}${BS}attacker.example${BS}share`] },
+      platform: 'win32',
+      fs,
+      homeDir: 'C:\\Users\\u'
+    })
+    for (const tool of TOOLS) {
+      const input = tool === 'write' ? { path: 'src\\a.ts', content: 'x' } : { path: 'src\\a.ts' }
+      calls.length = 0
+      pathFacts(tool, input, scope)
+      expect(
+        calls.filter((c) => REMOTE_ARG.test(c) || /attacker/i.test(c)),
+        tool
+      ).toEqual([])
+    }
+  })
+
+  it('a link whose target is UNC (directly, via a chain, or in an ancestor of a link target) is unresolved before any realpath', () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      'D:\\repo\\evil': { link: `${BS}${BS}attacker.example${BS}share` },
+      'D:\\repo\\hop': { link: 'D:\\repo\\evil' },
+      'D:\\repo\\rel': { link: `..${BS}other${BS}via` },
+      'D:\\other': 'dir',
+      'D:\\other\\via': { link: `${BS}${BS}?${BS}UNC${BS}attacker.example${BS}share` },
+      'D:\\repo\\ok': { link: 'D:\\repo\\src' },
+      'D:\\repo\\src': 'dir'
+    })
+    const scope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs
+    }
+    for (const rel of [
+      'evil',
+      'evil\\x',
+      'hop',
+      'hop\\deep\\x',
+      'rel\\x',
+      'D:\\repo\\evil\\..\\evil\\x'
+    ]) {
+      for (const tool of TOOLS) {
+        calls.length = 0
+        const input = tool === 'write' ? { path: rel, content: 'x' } : { path: rel }
+        const f = pathFacts(tool, input, scope)!
+        expect(f, `${tool} ${rel}`).toMatchObject({ state: 'unresolved', remote: true })
+        // only local lstat / readlink calls on the way; nothing on a UNC spelling, and no realpath on the link
+        expect(
+          calls.filter((c) => REMOTE_ARG.test(c)),
+          `${tool} ${rel}`
+        ).toEqual([])
+        expect(
+          calls.filter((c) => c.startsWith('realpath') && /evil|hop|rel|via/.test(c)),
+          `${tool} ${rel}`
+        ).toEqual([])
+      }
+    }
+    // control: a link to a local directory is followed as before
+    const ok = pathFacts('write', { path: 'ok\\n.ts', content: 'x' }, scope)!
+    expect(ok).toMatchObject({ remote: false, landing: 'D:\\repo\\src\\n.ts', inScope: true })
+  })
+
+  it("read's fallback variants are checked too: a link-to-UNC under the narrow-space variant name is not looked at", () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      [`D:\\repo\\Shot 1.00${'\u202F'}PM.png`]: {
+        link: `${BS}${BS}attacker.example${BS}share${BS}f`
+      }
+    })
+    const scope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs
+    }
+    const f = pathFacts('read', { path: 'Shot 1.00 PM.png' }, scope)!
+    expect(f).toMatchObject({ state: 'unresolved', remote: true })
+    expect(calls.filter((c) => c.startsWith('exists') && /attacker/i.test(c))).toEqual([])
+    expect(calls.filter((c) => c.startsWith('realpath'))).not.toContain(
+      `realpath D:\\repo\\Shot 1.00${'\u202F'}PM.png`
+    )
+  })
+
+  it('POSIX is untouched: a backslash path is a file name there, resolved through the fs as ever', () => {
+    const f = factsOf('read', { path: `${BS}${BS}host${BS}x` })
+    expect(f.remote).toBe(false)
+    expect(f.execPath).toBe(`/repo/${BS}${BS}host${BS}x`)
+  })
+
+  it('isRemoteWindowsPath: two leading separators, nothing else', () => {
+    for (const p of [`${BS}${BS}h${BS}s`, '//h/s', `${BS}${BS}?${BS}C:${BS}x`, `${BS}/h`])
+      expect(isRemoteWindowsPath(p), p).toBe(true)
+    for (const p of ['D:\\x', '/x', 'x\\y', 'D:\\a\\\\b'])
+      expect(isRemoteWindowsPath(p), p).toBe(false)
+  })
+
+  it('sameFacts: remote is part of what decides a verdict', () => {
+    const f = factsOf('read', { path: 'src/a.ts' })
+    expect(sameFacts(f, { ...f, remote: true }, 'linux')).toBe(false)
+  })
+})
+
+describe('R2 — the pin is a spelling pi re-resolves to exactly the gated path', () => {
+  const allow = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
+  const HOME = '/home/u'
+  const opens = (pin: string, cwd: string, platform: NodeJS.Platform, home: string): string =>
+    piResolvePath(pin, cwd, platform, home)
+
+  function scopeAt(cwd: string, home: string, nodes: Record<string, VirtualNode>, over = {}) {
+    return {
+      cwd,
+      roots: [cwd],
+      platform: 'linux' as const,
+      homeDir: home,
+      fs: makeVirtualFs('posix', { [cwd]: 'dir', ...nodes }),
+      ...over
+    } satisfies PiPathScope
+  }
+
+  it.each([
+    ['U+3000 in the cwd', '/home/u/My\u3000Project'],
+    ['U+00A0 in the cwd', '/home/u/My\u00A0Project'],
+    ['U+202F in the cwd', '/home/u/My\u202FProject']
+  ])(
+    '%s: the pin is the cwd-relative spelling, and pi opens exactly the gated file',
+    async (_n, cwd) => {
+      const scope = scopeAt(cwd, HOME, {})
+      for (const [tool, input] of [
+        ['write', { path: 'src/new.txt', content: 'x' }],
+        ['edit', { path: './notes.txt', edits: [] }],
+        ['grep', { pattern: 'x' }],
+        ['ls', { path: '' }]
+      ] as const) {
+        const facts = factsOf(tool, input, scope)
+        // the bug: the absolute spelling is NOT a fixed point (pi folds the cwd's own space)
+        expect(opens(facts.execPath, cwd, 'linux', HOME), tool).not.toBe(facts.execPath)
+        const decision = await withPathGuard(tool, input, scope, allow)
+        expect(decision.behavior, tool).toBe('allow')
+        const pin = (decision as unknown as { updatedInput: { path: string } }).updatedInput.path
+        expect(opens(pin, cwd, 'linux', HOME), `${tool} -> ${pin}`).toBe(facts.execPath)
+        expect(pin.startsWith('/'), `${tool} -> ${pin}`).toBe(false)
+      }
+    }
+  )
+
+  it('a home with a unicode space: `~/x` inside the cwd tree pins relative (step 2); outside the tree no pin survives and `~/x`, absolute after normalisation, passes UNPINNED (step 3) — never pinned to another file', async () => {
+    const home = '/home/u\u3000x'
+    // home under the cwd: the relative spelling carries no unicode space
+    const cwd = '/work　x'
+    const inside = scopeAt(cwd, `${cwd}/h`, {})
+    expect(
+      await withPathGuard('write', { path: '~/f.txt', content: 'x' }, inside, allow)
+    ).toMatchObject({ behavior: 'allow', updatedInput: { path: 'h/f.txt' } })
+    // home elsewhere, with the space in its own name: no rewritten spelling survives pi's folding,
+    // but `~/f.txt` itself opens `${home}/f.txt` (pi expands `~` after folding) — left unpinned
+    const outside = scopeAt(cwd, home, {})
+    const decision = await withPathGuard('write', { path: '~/f.txt', content: 'x' }, outside, allow)
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(opens('~/f.txt', cwd, 'linux', home)).toBe(`${home}/f.txt`)
+    expect(pinMismatchReason('/p')).toContain('/p')
+  })
+
+  it('a scratchpad path: pinned as is when it is a fixed point, and pinned as its FOLDED fixed point (never the original spelling) when its own name holds a unicode space', async () => {
+    const scratch = '/tmp/claudeui-1000/proj/sess/scratchpad'
+    const cwd = '/home/u/My\u3000Project'
+    const scope = scopeAt(
+      cwd,
+      HOME,
+      {
+        '/tmp': 'dir',
+        '/tmp/claudeui-1000': 'dir',
+        '/tmp/claudeui-1000/proj': 'dir',
+        '/tmp/claudeui-1000/proj/sess': 'dir',
+        [scratch]: 'dir'
+      },
+      { scratchpad: scratch }
+    )
+    const decision = await withPathGuard(
+      'write',
+      { path: `${scratch}/out.txt`, content: 'x' },
+      scope,
+      allow
+    )
+    expect(decision).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { path: `${scratch}/out.txt` }
+    })
+    // a scratchpad whose own path holds the space: the model's spelling is folded by pi (and by us),
+    // so what is gated is the folded path, which is pinned as a fixed point — never the original
+    const odd = '/tmp/My\u00A0Tmp/claudeui-1000/p/s/scratchpad'
+    const oddScope = scopeAt(HOME, HOME, {}, { scratchpad: odd })
+    const d2 = await withPathGuard('write', { path: `${odd}/o.txt`, content: 'x' }, oddScope, allow)
+    const pin = (d2 as unknown as { updatedInput: { path: string } }).updatedInput.path
+    expect(pin).toBe('/tmp/My Tmp/claudeui-1000/p/s/scratchpad/o.txt')
+    expect(opens(pin, HOME, 'linux', HOME)).toBe(pin)
+  })
+
+  it('win32: a cwd with an ideographic space pins the relative spelling', async () => {
+    const cwd = 'C:\\work\\新しい\u3000フォルダー'
+    const scope: PiPathScope = {
+      cwd,
+      roots: [cwd],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { [cwd]: 'dir' })
+    }
+    const decision = await withPathGuard('write', { path: 'src/a.txt', content: 'x' }, scope, allow)
+    const pin = (decision as unknown as { updatedInput: { path: string } }).updatedInput.path
+    expect(pin).toBe('src\\a.txt')
+    expect(opens(pin, cwd, 'win32', 'C:\\Users\\u')).toBe(`${cwd}\\src\\a.txt`)
+  })
+
+  it("read's macOS variant (narrow no-break space): pi folds it, so the resolved (pre-variant) spelling is pinned and pi re-derives the variant", async () => {
+    const variant = `/repo/Screenshot 10.00.00${NNBSP}AM.png`
+    const scope = posixScope()
+    const facts = factsOf('read', { path: 'Screenshot 10.00.00 AM.png' }, scope)
+    expect(facts.execPath).toBe(variant)
+    const decision = await withPathGuard(
+      'read',
+      { path: 'Screenshot 10.00.00 AM.png' },
+      scope,
+      allow
+    )
+    expect(decision).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { path: '/repo/Screenshot 10.00.00 AM.png' }
+    })
+  })
+
+  it('pinFor: the absolute path when it is a fixed point; undefined when nothing round-trips', () => {
+    const scope = scopeAt('/repo', HOME, {})
+    expect(pinFor('/repo/a.ts', '/repo/a.ts', scope)).toBe('/repo/a.ts')
+    expect(pinFor('/etc/x', '/etc/x', scope)).toBe('/etc/x')
+    expect(pinFor('/repo', '/repo', scope)).toBe('/repo')
+    // a path that itself holds a folded character cannot be spelled to pi at all
+    expect(pinFor('/repo/a\u3000b', '/repo/a\u3000b', scope)).toBeUndefined()
+    // the cwd-relative spelling is only a pin while it stays under the cwd (no leading `..`)
+    const tainted = scopeAt('/h/A　B/proj', HOME, {})
+    expect(pinFor('/h/A　B/proj/a.ts', '/h/A　B/proj/a.ts', tainted)).toBe('a.ts')
+    expect(pinFor('/h/A　B/shared/f', '/h/A　B/shared/f', tainted)).toBeUndefined()
+    expect(pinFor('/h/A　B', '/h/A　B', tainted)).toBeUndefined()
+    // an unusable cwd (pi would throw)
+    expect(pinFor('/x', '/x', { ...scope, cwd: 'file://host/x' })).toBeUndefined()
+  })
+})
+
+describe('F2-1 / F2-2 — the pin ladder: absolute, cwd-relative (never climbing), the model spelling (only where trustworthy), else deny', () => {
+  const allow = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
+  const HOME = '/h/u'
+  // pi resolves a relative path against process.cwd(), the PHYSICAL cwd on POSIX; ours is logical
+  const CWD = '/h/A\u3000B/proj'
+  const SHARED = '/h/A\u3000B/shared'
+  const NODES: Record<string, VirtualNode> = {
+    '/h': 'dir',
+    '/h/u': 'dir',
+    '/h/A\u3000B': 'dir',
+    [CWD]: 'dir',
+    [`${CWD}/src`]: 'dir',
+    [SHARED]: 'dir'
+  }
+  const scopeAt = (over: Partial<PiPathScope> = {}): PiPathScope => ({
+    cwd: CWD,
+    roots: [CWD, SHARED],
+    platform: 'linux',
+    homeDir: HOME,
+    fs: makeVirtualFs('posix', NODES),
+    ...over
+  })
+  const pinOf = (d: unknown): string => (d as { updatedInput: { path: string } }).updatedInput.path
+
+  it('step 2, allow: a path under the cwd pins the cwd-relative spelling, even when the model climbed out and back (`../proj/x`)', async () => {
+    const scope = scopeAt()
+    for (const [input, pin] of [
+      [{ path: 'src/new.txt', content: 'x' }, 'src/new.txt'],
+      [{ path: '../proj/x.txt', content: 'x' }, 'x.txt'],
+      [{ path: './src/../y.txt', content: 'x' }, 'y.txt']
+    ] as const) {
+      const decision = await withPathGuard('write', input, scope, allow)
+      expect(pinOf(decision), input.path).toBe(pin)
+      expect(piResolvePath(pin, CWD, 'linux', HOME), input.path).toBe(
+        factsOf('write', input, scope).execPath
+      )
+    }
+  })
+
+  it('step 2, deny: a target that is only reachable by a spelling climbing above the cwd is never pinned relative (reviewer probe)', async () => {
+    const scope = scopeAt()
+    // the facts agree that this is an in-scope additional directory...
+    const facts = factsOf('write', { path: '../shared/f.txt', content: 'x' }, scope)
+    expect(facts).toMatchObject({ execPath: `${SHARED}/f.txt`, inScope: true })
+    // ...but pi would resolve `../shared/f.txt` against its own (physical) cwd, so no pin exists
+    expect(pinFor(facts.execPath, facts.resolved, scope)).toBeUndefined()
+    for (const tool of ['write', 'edit'] as const) {
+      for (const p of ['../shared/f.txt', 'src/../../shared/f.txt', '@../shared/f.txt']) {
+        const decision = await withPathGuard(tool, { path: p, content: 'x' }, scope, allow)
+        expect(decision, `${tool} ${p}`).toEqual({
+          behavior: 'deny',
+          reason: pinMismatchReason(`${SHARED}/f.txt`)
+        })
+      }
+    }
+  })
+
+  it('step 3, allow: a spelling that is absolute after normalisation (`~/`, `file://`) passes through unpinned when it opens the gated path', async () => {
+    const home = '/h/u\u3000x'
+    const scope = scopeAt({ homeDir: home })
+    const viaHome = await withPathGuard('write', { path: '~/f.txt', content: 'x' }, scope, allow)
+    expect(viaHome).toEqual({ behavior: 'allow' })
+    expect(piResolvePath('~/f.txt', CWD, 'linux', home)).toBe(`${home}/f.txt`)
+    // the shared directory by URL: execPath holds the (unfolded) U+3000, which no absolute pin survives
+    const url = 'file:///h/A%E3%80%80B/shared/f.txt'
+    const facts = factsOf('write', { path: url, content: 'x' }, scope)
+    expect(facts.execPath).toBe(`${SHARED}/f.txt`)
+    expect(pinFor(facts.execPath, facts.resolved, scope)).toBeUndefined()
+    expect(await withPathGuard('write', { path: url, content: 'x' }, scope, allow)).toEqual({
+      behavior: 'allow'
+    })
+  })
+
+  it('step 3, deny: win32 drive-relative `D:..\\x` is never passed through (pi uses its per-drive cwd)', async () => {
+    const cwd = 'D:\\a\u3000b\\proj'
+    const shared = 'D:\\a\u3000b\\shared'
+    const scope: PiPathScope = {
+      cwd,
+      roots: [cwd, shared],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { [cwd]: 'dir', [shared]: 'dir' })
+    }
+    const input = { path: 'D:..\\shared\\f.txt', content: 'x' }
+    const facts = factsOf('write', input, scope)
+    expect(facts.execPath).toBe(`${shared}\\f.txt`)
+    // the cwd-relative spelling climbs, so step 2 is out and the raw spelling is all that is left
+    expect(pinFor(facts.execPath, facts.resolved, scope)).toBeUndefined()
+    expect(await withPathGuard('write', input, scope, allow)).toEqual({
+      behavior: 'deny',
+      reason: pinMismatchReason(`${shared}\\f.txt`)
+    })
+    // `D:f.txt` stays under the cwd: step 2 pins it
+    const under = await withPathGuard('write', { path: 'D:f.txt', content: 'x' }, scope, allow)
+    expect(pinOf(under)).toBe('f.txt')
+  })
+
+  describe('rawSpellingHolds', () => {
+    const holds = (raw: string, scope: PiPathScope): boolean => {
+      const f = factsOf('write', { path: raw, content: 'x' }, scope)
+      return rawSpellingHolds(f, scope)
+    }
+    const posix = scopeAt({
+      cwd: '/repo',
+      roots: ['/repo'],
+      fs: makeVirtualFs('posix', { '/repo': 'dir' })
+    })
+    const win: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { 'D:\\repo': 'dir' })
+    }
+
+    it('relative spellings that stay under the cwd, absolute ones and `~` hold', () => {
+      for (const p of [
+        'a.txt',
+        './a.txt',
+        'a/../b.txt',
+        '/etc/x',
+        '~/x',
+        '~',
+        '@a.txt',
+        '..\\x',
+        '~user/x'
+      ])
+        expect(holds(p, posix), p).toBe(true)
+    })
+
+    it('a relative spelling that climbs above the cwd after normalisation does not', () => {
+      for (const p of ['../x', 'a/../../x', '@../x', '..', './../x', '../../etc/passwd'])
+        expect(holds(p, posix), p).toBe(false)
+    })
+
+    it('win32: drive-relative and rooted-driveless spellings do not; a drive path, UNC and a relative path do', () => {
+      for (const p of ['C:x', 'D:..\\x', 'd:x.txt', '\\repo\\x.txt', '/repo/x.txt', '\\x'])
+        expect(holds(p, win), p).toBe(false)
+      for (const p of ['x.txt', '.\\x.txt', 'D:\\repo\\x.txt', 'D:/repo/x.txt', '/c/x', '~/x'])
+        expect(holds(p, win), p).toBe(true)
+      expect(holds('..\\x', win)).toBe(false)
+    })
+
+    it('a spelling that does not open the gated path does not hold (and a throwing one never)', () => {
+      const f = factsOf('write', { path: 'a.txt', content: 'x' }, posix)
+      expect(rawSpellingHolds({ ...f, execPath: '/other', resolved: '/other' }, posix)).toBe(false)
+      expect(rawSpellingHolds({ ...f, raw: 'file://host/x' }, posix)).toBe(false)
+    })
+  })
+})
+
+describe('F2-4 — a DOS device name is placed with no filesystem call (win32)', () => {
+  const TOOLS = ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const
+  const DEVICES = [
+    'NUL',
+    'nul',
+    'CON',
+    'PRN',
+    'AUX',
+    'COM1',
+    'COM9',
+    'LPT1',
+    'lpt9',
+    'CONIN$',
+    'CONOUT$',
+    'NUL.txt',
+    'com1.log',
+    'src\\CON\\x.ts',
+    'src\\sub\\AUX.d\\y',
+    'D:\\repo\\NUL',
+    '/repo/prn.txt',
+    '@COM2'
+  ]
+  const scopeWith = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+
+  it.each(DEVICES)('%s: unresolved + device, every tool, ZERO filesystem calls', (p) => {
+    const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir', 'D:\\repo\\src': 'dir' })
+    const scope = scopeWith(fs)
+    for (const tool of TOOLS) {
+      calls.length = 0
+      const input = tool === 'write' ? { path: p, content: 'x' } : { path: p }
+      const f = pathFacts(tool, input, scope)!
+      expect(calls, `${tool} ${p}`).toEqual([])
+      expect(f, `${tool} ${p}`).toMatchObject({
+        state: 'unresolved',
+        device: true,
+        remote: false,
+        inScope: false,
+        inFence: false,
+        carriedOut: false
+      })
+      expect(f.landing).toBeUndefined()
+      expect(humanOnlyMessage(f)).toContain('Windows device')
+    }
+  })
+
+  it('names that merely contain a device word are ordinary: the filesystem is consulted and nothing is flagged', () => {
+    for (const p of ['console.ts', 'nullable.ts', 'com10', 'src\\communicate\\x', 'auxiliary.md']) {
+      const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir', 'D:\\repo\\src': 'dir' })
+      const f = pathFacts('write', { path: p, content: 'x' }, scopeWith(fs))!
+      expect(f.device, p).toBe(false)
+      expect(calls.length, p).toBeGreaterThan(0)
+    }
+  })
+
+  it('F3-4: a link whose TARGET has a DOS device component (directly, relative, via a chain, or in a link-target ancestor) is unresolved + device, and the device is never looked at', () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      'D:\\repo\\src': 'dir',
+      'D:\\repo\\devlink': { link: 'NUL' },
+      'D:\\repo\\abslink': { link: 'D:\\repo\\sub\\COM1' },
+      'D:\\repo\\rellink': { link: '..\\other\\via' },
+      'D:\\other': 'dir',
+      'D:\\other\\via': { link: 'CON.txt' },
+      'D:\\repo\\hop': { link: 'D:\\repo\\devlink' },
+      'D:\\repo\\dirlink': { link: 'D:\\repo\\AUX' },
+      'D:\\repo\\okay': { link: 'D:\\repo\\src' },
+      'D:\\repo\\conlink': { link: 'D:\\repo\\console.ts' },
+      // the text names a device even though the path collapses to an ordinary directory
+      'D:\\repo\\collapse': { link: 'NUL\\..\\src' }
+    })
+    const scope = scopeWith(fs)
+    // the arguments of every call that names a device component
+    const onDevice = (): string[] =>
+      calls.filter((c) => /[\\/](?:nul|con|aux|com\d|lpt\d)(?:[.:\s]|$)/i.test(c.split(' ')[1]))
+    for (const rel of [
+      'devlink',
+      'devlink\\x',
+      'abslink',
+      'rellink\\x',
+      'hop',
+      'hop\\deep\\x',
+      'dirlink\\x',
+      'collapse\\x'
+    ]) {
+      for (const tool of TOOLS) {
+        calls.length = 0
+        const input = tool === 'write' ? { path: rel, content: 'x' } : { path: rel }
+        const f = pathFacts(tool, input, scope)!
+        expect(f, `${tool} ${rel}`).toMatchObject({
+          state: 'unresolved',
+          device: true,
+          remote: false,
+          inScope: false,
+          carriedOut: false
+        })
+        expect(f.landing).toBeUndefined()
+        expect(onDevice(), `${tool} ${rel}`).toEqual([])
+        expect(
+          calls.filter((c) => c.startsWith('realpath')),
+          `${tool} ${rel}`
+        ).toEqual([])
+        expect(humanOnlyMessage(f)).toContain('Windows device')
+      }
+    }
+    // controls: a link to a local directory, and to a name that merely contains a device word
+    const ok = pathFacts('write', { path: 'okay\\n.ts', content: 'x' }, scope)!
+    expect(ok).toMatchObject({ device: false, remote: false, landing: 'D:\\repo\\src\\n.ts' })
+    const conlink = pathFacts('read', { path: 'conlink' }, scope)!
+    expect(conlink.device).toBe(false)
+  })
+
+  it('sameFacts: the device flag decides a verdict', () => {
+    const { fs } = recordingWinFs({ 'D:\\repo': 'dir' })
+    const f = pathFacts('read', { path: 'NUL' }, scopeWith(fs))!
+    expect(sameFacts(f, { ...f, device: false }, 'win32')).toBe(false)
+  })
+
+  it('POSIX is untouched: a file called `nul` is an ordinary file', () => {
+    const f = factsOf('read', { path: 'nul' })
+    expect(f.device).toBe(false)
+    expect(f.state).toBe('missing-leaf')
+  })
+})
+
+describe('F3-6 — landingAliases: the landing under a root’s logical spelling', () => {
+  const nodes: Record<string, VirtualNode> = {
+    '/physical': 'dir',
+    '/physical/src': 'dir',
+    '/physical/src/a.ts': 'file',
+    '/physical/lnk': { link: '/outside' },
+    '/outside': 'dir',
+    '/outside/f': 'file',
+    '/logical': { link: '/physical' }
+  }
+  const scope = (): PiPathScope => ({
+    cwd: '/logical',
+    roots: ['/logical'],
+    platform: 'linux',
+    homeDir: '/home/u',
+    fs: makeVirtualFs('posix', nodes)
+  })
+
+  it('a root reached through a link: the landing is also spelled under the root, and a missing leaf too', () => {
+    expect(pathFacts('read', { path: 'src/a.ts' }, scope())).toMatchObject({
+      landing: '/physical/src/a.ts',
+      landingAliases: ['/logical/src/a.ts']
+    })
+    expect(pathFacts('write', { path: 'src/new.ts', content: 'x' }, scope())).toMatchObject({
+      landing: '/physical/src/new.ts',
+      landingAliases: ['/logical/src/new.ts']
+    })
+  })
+
+  it('no alias when no root is a link, or the landing is outside the root’s real path', () => {
+    const plain = { ...scope(), cwd: '/physical', roots: ['/physical'] }
+    expect(pathFacts('read', { path: 'src/a.ts' }, plain)!.landingAliases).toBeUndefined()
+    expect(pathFacts('read', { path: 'lnk/f' }, scope())!).toMatchObject({ landing: '/outside/f' })
+    expect(pathFacts('read', { path: 'lnk/f' }, scope())!.landingAliases).toBeUndefined()
+  })
+})
+
+describe('N2 — a missing leaf that appears during the approval is not a changed path', () => {
+  it('sameFacts ignores `state` when both landings are equal and neither side is unresolved', () => {
+    const a = factsOf('write', { path: 'src/new.ts', content: '' })
+    expect(a.state).toBe('missing-leaf')
+    expect(sameFacts(a, { ...a, state: 'resolved' }, 'linux')).toBe(true)
+    // but unresolved on either side still differs
+    expect(sameFacts(a, { ...a, state: 'unresolved', landing: undefined }, 'linux')).toBe(false)
+    expect(sameFacts({ ...a, state: 'unresolved', landing: undefined }, a, 'linux')).toBe(false)
+    // and a different landing still differs
+    expect(sameFacts(a, { ...a, state: 'resolved', landing: '/repo/src/other.ts' }, 'linux')).toBe(
+      false
+    )
+  })
+
+  it('withPathGuard: the file being created while the card is open still allows (and pins)', async () => {
+    const vfs = makeVirtualFs('posix', POSIX_NODES)
+    const scope = posixScope({ fs: vfs })
+    const decision = await withPathGuard(
+      'write',
+      { path: 'src/created-meanwhile.ts', content: 'x' },
+      scope,
+      async () => {
+        vfs.set('/repo/src/created-meanwhile.ts', 'file')
+        return { behavior: 'allow' as const }
+      }
+    )
+    expect(decision).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { path: '/repo/src/created-meanwhile.ts' }
+    })
+  })
+})
+
+describe('R4 helpers — path-scoped "always allow" rules for an outside target', () => {
+  it('absoluteRuleSpecifier: `//` absolute on POSIX, `//c/…` for a drive; refuses roots, relative, UNC and glob characters', () => {
+    expect(absoluteRuleSpecifier('/opt/data', 'linux')).toBe('//opt/data')
+    expect(absoluteRuleSpecifier('/opt/data/', 'linux')).toBe('//opt/data')
+    expect(absoluteRuleSpecifier('C:\\Users\\u\\docs', 'win32')).toBe('//c/Users/u/docs')
+    expect(absoluteRuleSpecifier('D:\\x', 'win32')).toBe('//d/x')
+    for (const [p, platform] of [
+      ['/', 'linux'],
+      ['C:\\', 'win32'],
+      ['relative/dir', 'linux'],
+      [`${BS}${BS}host${BS}share${BS}x`, 'win32'],
+      ['/opt/da*ta', 'linux'],
+      ['/opt/da?ta', 'linux'],
+      ['/opt/(x)', 'linux']
+    ] as const)
+      expect(absoluteRuleSpecifier(p, platform), p).toBeUndefined()
+  })
+
+  it("read -> Read(//<dir>/**), edit/write -> Edit(//<dir>/**) on the target's directory", () => {
+    expect(outsideAllowRules('read', '/opt/data/a.txt', 'linux')).toEqual([
+      { toolName: 'Read', ruleContent: '//opt/data/**' }
+    ])
+    for (const tool of ['edit', 'write'])
+      expect(outsideAllowRules(tool, '/opt/data/new.txt', 'linux')).toEqual([
+        { toolName: 'Edit', ruleContent: '//opt/data/**' }
+      ])
+    expect(outsideAllowRules('read', 'C:\\Users\\u\\n.txt', 'win32')).toEqual([
+      { toolName: 'Read', ruleContent: '//c/Users/u/**' }
+    ])
+  })
+
+  it('a search covers the searched path itself and everything under it (Read, never a bare tool rule)', () => {
+    for (const tool of ['grep', 'find', 'ls'])
+      expect(outsideAllowRules(tool, '/opt/data', 'linux')).toEqual([
+        { toolName: 'Read', ruleContent: '//opt/data' },
+        { toolName: 'Read', ruleContent: '//opt/data/**' }
+      ])
+  })
+
+  it('nothing to offer for a root target, a non-path tool, or a glob-character directory', () => {
+    expect(outsideAllowRules('read', '/etc', 'linux')).toBeUndefined() // dir '/' is a root
+    expect(outsideAllowRules('grep', '/', 'linux')).toBeUndefined()
+    expect(outsideAllowRules('bash', '/opt/x', 'linux')).toBeUndefined()
+    expect(outsideAllowRules('write', '/opt/a*/x', 'linux')).toBeUndefined()
   })
 })
 

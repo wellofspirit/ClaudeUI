@@ -35,6 +35,7 @@ import {
   hostScratchpadFs,
   isScratchpadSessionKey,
   removePiScratchpad,
+  scratchBaseName,
   scratchpadProjectKey,
   scratchpadPrompt,
   scratchpadPromptArgs,
@@ -73,7 +74,8 @@ describe('pi scratchpad', () => {
     symlinkSync(target, at, 'junction')
     links.push(at)
   }
-  const base = (): string => join(tmp, 'claudeui')
+  const hostUid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  const base = (): string => join(tmp, scratchBaseName(hostUid))
   const CWD = join(tmpdir(), 'some-project') // never created: only its spelling matters
 
   beforeAll(() => {
@@ -124,6 +126,29 @@ describe('pi scratchpad', () => {
       expect(warn).not.toHaveBeenCalled()
     })
 
+    it('the base is claudeui on Windows and claudeui-<uid> on POSIX (a second local user cannot be locked out)', () => {
+      expect(scratchBaseName(undefined)).toBe('claudeui')
+      expect(scratchBaseName(1000)).toBe('claudeui-1000')
+      const other = {
+        ...hostScratchpadFs,
+        lstat: (p: string) => ({ ...lstatLike(p), uid: 1000, mode: 0o40700 })
+      }
+      const mine = ensurePiScratchpad(CWD, 'sess-1', env({ uid: 1000, fs: other }))!
+      expect(mine.dir).toContain(join(realpathSync.native(tmp), 'claudeui-1000'))
+      // another uid builds its own tree: it neither reuses nor is refused by this one
+      const theirs = ensurePiScratchpad(
+        CWD,
+        'sess-1',
+        env({
+          uid: 2000,
+          fs: { ...other, lstat: (p: string) => ({ ...lstatLike(p), uid: 2000, mode: 0o40700 }) }
+        })
+      )!
+      expect(theirs.dir).toContain(join(realpathSync.native(tmp), 'claudeui-2000'))
+      expect(theirs.dir).not.toBe(mine.dir)
+      expect(warn).not.toHaveBeenCalled()
+    })
+
     it.skipIf(!canLink)(
       'is built on the REALPATH of the base: a symlinked temp dir does not leak into the spelling',
       () => {
@@ -133,7 +158,7 @@ describe('pi scratchpad', () => {
         link(real, spelled)
         const pad = ensurePiScratchpad(CWD, 'sess-1', env({ tmpdir: () => spelled }))
         expect(pad).toBeDefined()
-        const root = realpathSync.native(join(real, 'claudeui'))
+        const root = realpathSync.native(join(real, scratchBaseName(hostUid)))
         expect(pad!.dir.startsWith(root)).toBe(true)
         expect(pad!.dir).not.toContain('spelled-tmp')
       }
@@ -283,7 +308,7 @@ describe('pi scratchpad', () => {
       }) satisfies ScratchpadFs
 
     it.each([
-      ['the base', (p: string) => p.endsWith('claudeui')],
+      ['the base', (p: string) => p.endsWith('claudeui-1000')],
       ['the project dir', (p: string) => p.endsWith(scratchpadProjectKey(CWD))],
       ['the session dir', (p: string) => p.endsWith('sess-1')],
       ['the scratchpad', (p: string) => p.endsWith('scratchpad')]
@@ -341,6 +366,20 @@ describe('pi scratchpad', () => {
       expect(existsSync(base())).toBe(true)
     })
 
+    it('removal looks under the same uid-suffixed base creation used', () => {
+      const owned = (uid: number) => ({
+        ...hostScratchpadFs,
+        lstat: (p: string) => ({ ...lstatLike(p), uid, mode: 0o40700 })
+      })
+      const pad = ensurePiScratchpad(CWD, 'sess-1', env({ uid: 1000, fs: owned(1000) }))!
+      // another uid has no such base: nothing to remove, nothing touched
+      removePiScratchpad('sess-1', env({ uid: 2000, fs: owned(2000) }))
+      expect(existsSync(pad.dir)).toBe(true)
+      removePiScratchpad('sess-1', env({ uid: 1000, fs: owned(1000) }))
+      expect(existsSync(pad.dir)).toBe(false)
+      expect(warn).not.toHaveBeenCalled()
+    })
+
     it('finds the session under whichever project dir holds it', () => {
       const here = ensurePiScratchpad(CWD, 'sess-1', env())!
       const there = ensurePiScratchpad(`${CWD}-other`, 'sess-2', env())!
@@ -396,6 +435,14 @@ describe('pi scratchpad', () => {
     })
   })
 })
+
+function lstatLike(p: string): {
+  isDirectory: () => boolean
+  isSymbolicLink: () => boolean
+} {
+  const st = lstatSync(p)
+  return { isDirectory: () => st.isDirectory(), isSymbolicLink: () => st.isSymbolicLink() }
+}
 
 function mkdirAndReturn(p: string): string {
   mkdirSync(p, { mode: 0o700 })

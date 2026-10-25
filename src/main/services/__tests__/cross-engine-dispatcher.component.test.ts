@@ -145,6 +145,7 @@ import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../../core/pi/permission-
 import { PATH_CHANGED_REASON } from '../../../core/pi/pi-path-scope'
 import {
   ensurePiScratchpad,
+  scratchBaseName,
   scratchpadProjectKey,
   scratchpadPrompt
 } from '../../../core/pi/pi-scratchpad'
@@ -15069,13 +15070,16 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
         dispatch: { defaultModel: id === 'pi' ? 'openai-codex/gpt-5.6-luna' : 'openai/gpt-5' },
         autoMode: { twoStageMode: 'fast' }
       })
-      async function start(workdir: string | undefined, additional: string[]) {
+      async function start(workdir: string | undefined, additional: string[], scratchpad?: string) {
         const target = makeFakePiTarget()
         const judge = makeScriptedJudge()
         const { dispatcher } = makeHarness({
           loadEngineConfig: judgedCfg,
           spawnPiTarget: target.spawnPiTarget,
           makeJudgeTransport: judge.make,
+          ...(scratchpad
+            ? { piScratchpad: () => ({ dir: scratchpad, projectTemp: join(scratchpad, '..') }) }
+            : {}),
           loadUserRules: workdir
             ? rulesBy(workdir, additional)
             : () => userRules({ additionalDirectories: additional })
@@ -15102,6 +15106,15 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
         const t = await start(wt, [granted])
         expect(await t.gate('pi-1', 'npm run build')).toEqual({ behavior: 'allow' })
         expect(localLine.exec(promptOf(t.judge.requests[0]))?.[1]).toBe(`${parent}, ${granted}`)
+        await t.finish()
+      })
+
+      it('the target’s own scratchpad is listed with the directories, as a pi session lists its own (ADR-110)', async () => {
+        const granted = mkdir(base, 'granted-pi-scratch')
+        const scratch = join(base, 'pi-scratch-dir')
+        const t = await start(undefined, [granted], scratch)
+        expect(await t.gate('pi-1', 'npm run build')).toEqual({ behavior: 'allow' })
+        expect(localLine.exec(promptOf(t.judge.requests[0]))?.[1]).toBe(`${granted}, ${scratch}`)
         await t.finish()
       })
 
@@ -15702,7 +15715,7 @@ describe('CrossEngineDispatcher — pi target scratchpad (ADR-110)', () => {
     const row = h.ledger.rowFor('pi', 'pi-sess-A')!
     expect(h.made).toEqual([`dispatch-${row.id}`])
     const dir = join(
-      realpathSync.native(join(base, 'claudeui')),
+      realpathSync.native(join(base, scratchBaseName(process.getuid?.()))),
       scratchpadProjectKey(parent),
       `dispatch-${row.id}`,
       'scratchpad'

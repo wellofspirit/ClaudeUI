@@ -115,7 +115,13 @@ import {
   PLAN_EXIT_OUTSIDE_PLAN_REASON,
   sessionToolDenyRule
 } from './permission-engine'
-import { buildPiPathScope, withPathGuard, type PiPathScope } from './pi-path-scope'
+import {
+  buildPiPathScope,
+  isPiPathTool,
+  outsideAllowRules,
+  withPathGuard,
+  type PiPathScope
+} from './pi-path-scope'
 import { ensurePiScratchpad, scratchpadPromptArgs, type ScratchpadEnv } from './pi-scratchpad'
 import { isSessionToolName, type SessionToolName } from '../../shared/session-tools-description'
 import { piSessionToolsEnv } from '../services/session-tool-specs'
@@ -474,7 +480,7 @@ export class PiSession extends BaseSession {
       hold?: { reason: string; denials: AutoModeDenialTracker; cancel: () => void }
     }
   >()
-  /** "Allow for this session" entries — `bash:<normalized command>`, `edit:<abs path>` / `write:<abs path>`, else the bare pi tool name (see permission-engine.ts's piSessionAllowKey). */
+  /** "Allow for this session" entries — `bash:<normalized command>`, `<path tool>:<abs path>` (read, edit, write, grep, find, ls), else the bare pi tool name (see permission-engine.ts's piSessionAllowKey). */
   private sessionAllows = new Set<string>()
   /**
    * The MCP catalog this session's pi registers (ADR-096): read at each spawn,
@@ -2404,7 +2410,7 @@ export class PiSession extends BaseSession {
         'PiSession',
         `human-only: ${verdict.pathReason ?? 'path'} (${toolName}${autoMode ? ', auto mode' : ''})`
       )
-      return this.askHuman(payload, verdict.message, scope)
+      return this.askHuman(payload, verdict.message, scope, undefined, verdict)
     }
 
     // 'ask' — in auto mode the classifier gets first refusal; anything it
@@ -2414,10 +2420,10 @@ export class PiSession extends BaseSession {
       const auto = await this.classifyAutoMode(payload, verdict, scope)
       if (auto.kind === 'decided') return auto.decision
       if (auto.kind === 'hold') return this.holdBlock(payload, auto, scope)
-      return this.askHuman(payload, auto.reason, scope)
+      return this.askHuman(payload, auto.reason, scope, undefined, verdict)
     }
 
-    return this.askHuman(payload, undefined, scope)
+    return this.askHuman(payload, undefined, scope, undefined, verdict)
   }
 
   /**
@@ -2479,7 +2485,8 @@ export class PiSession extends BaseSession {
     payload: PiToolCallPayload,
     decisionReason?: string,
     scope: PiChildScope | null = null,
-    block?: { reason: string; ms: number }
+    block?: { reason: string; ms: number },
+    verdict?: PermissionVerdict
   ): Promise<GateDecision> {
     const { toolCallId, toolName, input } = payload
     return new Promise<GateDecision>((resolve) => {
@@ -2509,7 +2516,9 @@ export class PiSession extends BaseSession {
             }
           : {})
       })
-      const suggestions = timer ? undefined : this.buildApprovalSuggestions(toolName, input)
+      const suggestions = timer
+        ? undefined
+        : this.buildApprovalSuggestions(toolName, input, verdict)
       const approval: PendingApproval = {
         requestId,
         toolUseId: toolCallId,
@@ -2780,26 +2789,50 @@ export class PiSession extends BaseSession {
    * PREFIX rule (`Bash(<command>:*)` — the whole typed command plus a
    * trailing glob, matching Claude's own suggestion convention and round-
    * tripping through permission-engine.ts's bash prefix matcher); every other
-   * mapped tool gets a bare tool rule. Returns undefined for a pi tool with no
+   * mapped tool gets a bare tool rule — except where the containment rung asked: a
+   * HUMAN-ONLY card (`path-scope`: an unplaceable or network path, a link-carried edit) gets no
+   * suggestion at all (a standing rule must not be one click away from a call the gate
+   * deliberately keeps for a person), nor does any edit/write card on an agent-control path
+   * (`pathSensitive`, in the workspace or out: a bare `Edit` rule would cover it), and a call that asked only because its target is OUTSIDE
+   * the workspace gets rules scoped to where it LANDS (`Read(//<dir>/**)` / `Edit(//<dir>/**)`,
+   * {@link outsideAllowRules}; the symbolic-link landing, not the in-project link's spelling), never the bare tool. Returns undefined for a pi tool with no
    * Claude analog (mcp/custom/unknown) — nothing persistable to suggest.
    */
   private buildApprovalSuggestions(
     toolName: string,
-    input: Record<string, unknown>
+    input: Record<string, unknown>,
+    verdict?: PermissionVerdict
   ): PermissionSuggestion[] | undefined {
     const claudeTool = PI_TOOL_TO_CLAUDE_TOOL[toolName]
     if (!claudeTool) return undefined
+    if (verdict?.source === 'path-scope' || verdict?.pathSensitive) return undefined
+    // A user ASK rule answered a file tool: the ask tier outranks every allow rule, so a saved allow
+    // could never silence this card — it would only widen what other calls may do.
+    if (verdict?.source === 'ask-rule' && isPiPathTool(toolName)) return undefined
 
-    const ruleContent =
-      toolName === 'bash' ? `${normalizeWhitespace(String(input.command ?? ''))}:*` : undefined
-    const rule = { toolName: claudeTool, ...(ruleContent ? { ruleContent } : {}) }
+    let rules: Array<{ toolName: string; ruleContent?: string }>
+    if (verdict?.pathReason === 'outside-scope') {
+      const scoped = verdict.pathTarget
+        ? outsideAllowRules(
+            toolName,
+            verdict.pathTarget,
+            this.pathScope().platform ?? process.platform
+          )
+        : undefined
+      if (!scoped) return undefined
+      rules = scoped
+    } else {
+      const ruleContent =
+        toolName === 'bash' ? `${normalizeWhitespace(String(input.command ?? ''))}:*` : undefined
+      rules = [{ toolName: claudeTool, ...(ruleContent ? { ruleContent } : {}) }]
+    }
 
     const destinations = ['userSettings', 'projectSettings', 'localSettings'] as const
     return destinations.map((destination) => ({
       type: 'addRules',
       behavior: 'allow',
       destination,
-      rules: [rule]
+      rules
     }))
   }
 
