@@ -1032,9 +1032,9 @@ describe('R1 — a network path is never handed to the filesystem (the gate itse
       'D:\\repo': 'dir',
       'D:\\repo\\evil': { link: `${BS}${BS}attacker.example${BS}share` },
       'D:\\repo\\hop': { link: 'D:\\repo\\evil' },
-      'D:\\repo\\rel': { link: `..${BS}other${BS}via` },
-      'D:\\other': 'dir',
-      'D:\\other\\via': { link: `${BS}${BS}?${BS}UNC${BS}attacker.example${BS}share` },
+      'D:\\repo\\rel': { link: `sub${BS}via` },
+      'D:\\repo\\sub': 'dir',
+      'D:\\repo\\sub\\via': { link: `${BS}${BS}?${BS}UNC${BS}attacker.example${BS}share` },
       'D:\\repo\\ok': { link: 'D:\\repo\\src' },
       'D:\\repo\\src': 'dir'
     })
@@ -1476,9 +1476,9 @@ describe('F2-4 — a DOS device name is placed with no filesystem call (win32)',
       'D:\\repo\\src': 'dir',
       'D:\\repo\\devlink': { link: 'NUL' },
       'D:\\repo\\abslink': { link: 'D:\\repo\\sub\\COM1' },
-      'D:\\repo\\rellink': { link: '..\\other\\via' },
-      'D:\\other': 'dir',
-      'D:\\other\\via': { link: 'CON.txt' },
+      'D:\\repo\\rellink': { link: 'sub\\via' },
+      'D:\\repo\\sub': 'dir',
+      'D:\\repo\\sub\\via': { link: 'CON.txt' },
       'D:\\repo\\hop': { link: 'D:\\repo\\devlink' },
       'D:\\repo\\dirlink': { link: 'D:\\repo\\AUX' },
       'D:\\repo\\okay': { link: 'D:\\repo\\src' },
@@ -2449,7 +2449,7 @@ describe('F5-1 — the POSIX link walk follows a link before it climbs a `..` (k
   })
 })
 
-describe('F6-1 — the win32 link walk folds a `..` in a link target as text against the link’s directory', () => {
+describe('F6-1 / F8 — the win32 link walk folds an absolute link target as text, and refuses a relative one that climbs', () => {
   const winScope = (fs: PathScopeFs): PiPathScope => ({
     cwd: 'D:\\repo',
     roots: ['D:\\repo'],
@@ -2457,48 +2457,53 @@ describe('F6-1 — the win32 link walk folds a `..` in a link target as text aga
     homeDir: 'C:\\Users\\u',
     fs
   })
-  const realpaths = (calls: string[]): string[] => calls.filter((c) => c.startsWith('realpath'))
+  const touched = (calls: string[]): string[] =>
+    calls.filter((c) => c.startsWith('realpath') || c.startsWith('exists'))
 
-  it('`a\\..\\b` is `b` next to the link, whatever `a` is: a link `b` to a UNC share is remote, with no realpath', () => {
-    // Windows: `docs -> a\..\b` is `D:\repo\b` (a is never followed); `b -> \\h\s` is the share.
-    const { fs, calls } = kernelLikeFs('win32', {
-      'D:\\repo\\docs': `a${BS}..${BS}b`,
-      'D:\\repo\\a': 'D:\\other\\q',
-      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
-    })
+  // F8: these were walked by text in F6 (`docs -> a\..\b` is `D:\repo\b`, whatever `a` is). The text
+  // fold is the symlink reading only; a junction keeps its own spelling, so a relative target that
+  // climbs is unplaceable on win32 (no realpath, nothing looked at past the link itself).
+  it.each([
+    [
+      '`a\\..\\b` with a link `b` to a UNC share',
+      { 'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share` }
+    ],
+    ['`a\\..\\b` with `a` a link to a local directory', { 'D:\\repo\\a': 'D:\\other\\q' }],
+    [
+      '`a\\..\\b` with `a` a link to a UNC share',
+      { 'D:\\repo\\a': `${BS}${BS}attacker.example${BS}share${BS}q` }
+    ]
+  ])('a relative target that climbs is unplaceable, with no realpath: %s', (_name, extra) => {
+    const { fs, calls } = kernelLikeFs('win32', { 'D:\\repo\\docs': `a${BS}..${BS}b`, ...extra })
     for (const tool of F4_TOOLS) {
       calls.length = 0
       const f = pathFacts(tool, toolInput(tool, 'docs\\readme.md'), winScope(fs))!
-      expect(f, tool).toMatchObject({ state: 'unresolved', remote: true })
-      expect(realpaths(calls), tool).toEqual([])
+      expect(f, tool).toMatchObject({ state: 'unresolved', inScope: false, device: false })
+      expect(touched(calls), tool).toEqual([])
+      expect(calls, tool).not.toContain('lstat D:\\repo\\b')
       expect(calls, tool).not.toContain('lstat D:\\other\\q')
     }
   })
 
-  it('the same text fold does not over-ask: a link `a` to a UNC share is never visited when the target climbs out of `a`', () => {
+  it('a relative target without a `..` is folded against the link’s directory and placed (control)', () => {
     const { fs, calls } = kernelLikeFs(
       'win32',
+      { 'D:\\repo\\docs': `sub${BS}.${BS}x`, 'D:\\repo\\plain': 'b' },
       {
-        'D:\\repo\\docs': `a${BS}..${BS}b`,
-        'D:\\repo\\a': `${BS}${BS}attacker.example${BS}share${BS}q`
-      },
-      { 'D:\\repo\\docs\\n.ts': 'D:\\repo\\b\\n.ts' }
+        'D:\\repo\\docs\\n.ts': 'D:\\repo\\sub\\x\\n.ts',
+        'D:\\repo\\plain\\n.ts': 'D:\\repo\\b\\n.ts'
+      }
     )
-    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
-    expect(f).toMatchObject({ remote: false, landing: 'D:\\repo\\b\\n.ts', inScope: true })
-    expect(calls).toContain('lstat D:\\repo\\b')
-  })
-
-  it('a link whose target climbs out of a link to a local directory is placed from the folded spelling', () => {
-    const { fs, calls } = kernelLikeFs(
-      'win32',
-      { 'D:\\repo\\docs': `a${BS}..${BS}b`, 'D:\\repo\\a': 'D:\\other\\q' },
-      { 'D:\\repo\\docs\\n.ts': 'D:\\repo\\b\\n.ts' }
-    )
-    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
-    expect(f).toMatchObject({ remote: false, landing: 'D:\\repo\\b\\n.ts', inScope: true })
-    expect(calls).toContain('lstat D:\\repo\\b')
-    expect(calls).not.toContain('lstat D:\\other\\b')
+    expect(pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))).toMatchObject({
+      state: 'resolved',
+      landing: 'D:\\repo\\sub\\x\\n.ts',
+      inScope: true
+    })
+    expect(calls).toContain('lstat D:\\repo\\sub\\x')
+    expect(pathFacts('read', { path: 'plain\\n.ts' }, winScope(fs))).toMatchObject({
+      state: 'resolved',
+      landing: 'D:\\repo\\b\\n.ts'
+    })
   })
 
   it('an absolute target is folded too: `D:\\other\\q\\..\\r` is `D:\\other\\r`', () => {
@@ -2585,7 +2590,7 @@ describe('F6-2 — a win32 link target with a root that is not `X:\\` is unplace
   )
 })
 
-describe('F6-1 — the link walk visits the directory the OS really lands in (real links, both platforms)', () => {
+describe('F6-1 / F8 — the link walk visits the directory the OS really lands in (real links; win32 refuses the climbing one)', () => {
   let base = ''
   let cwd = ''
   let linksWork = true
@@ -2602,9 +2607,11 @@ describe('F6-1 — the link walk visits the directory the OS really lands in (re
     writeFileSync(path.join(base, 'deep', 'b', 'f.txt'), 'deep/b')
     try {
       // `a -> ../deep/dir`; `s -> a/../b`: the POSIX kernel follows `a` and climbs from deep/dir
-      // (deep/b), while Windows folds the `..` as text against x (x/b)
+      // (deep/b), while Windows folds the `..` as text against x (x/b) for a symlink; the walk
+      // refuses it there (F8). `t -> b` descends only: placed everywhere.
       symlinkSync(['..', 'deep', 'dir'].join(sep), path.join(cwd, 'a'), 'dir')
       symlinkSync(['a', '..', 'b'].join(sep), path.join(cwd, 's'), 'dir')
+      symlinkSync('b', path.join(cwd, 't'), 'dir')
     } catch {
       linksWork = false
     }
@@ -2612,14 +2619,14 @@ describe('F6-1 — the link walk visits the directory the OS really lands in (re
 
   afterAll(() => {
     // unlink the links without following them, then remove only what this test created
-    for (const name of ['s', 'a']) {
+    for (const name of ['t', 's', 'a']) {
       try {
         unlinkSync(path.join(cwd, name))
       } catch {
         /* never created */
       }
     }
-    for (const name of ['s', 'a']) {
+    for (const name of ['t', 's', 'a']) {
       let stillLink = false
       try {
         stillLink = lstatSync(path.join(cwd, name)).isSymbolicLink()
@@ -2631,7 +2638,7 @@ describe('F6-1 — the link walk visits the directory the OS really lands in (re
     rmSync(base, { recursive: true, force: true })
   })
 
-  it('lstats the directory realpath lands in, and not the other one', (ctx) => {
+  it('lstats the directory realpath lands in, and not the other one (win32: the climbing link is unplaceable)', (ctx) => {
     if (!linksWork) {
       return ctx.skip() // symlinkSync is refused here (no privilege / Developer Mode)
     }
@@ -2653,14 +2660,39 @@ describe('F6-1 — the link walk visits the directory the OS really lands in (re
       { path: ['s', 'f.txt'].join(sep) },
       { cwd, roots: [cwd], platform: process.platform, homeDir: base, fs }
     )!
+    if (process.platform === 'win32') {
+      expect(f.state).toBe('unresolved')
+      expect(lstats).not.toContain(other)
+      return
+    }
     expect(f).toMatchObject({ state: 'resolved', remote: false })
     expect(f.landing).toBe(path.join(landed, 'f.txt'))
     expect(lstats).toContain(landed)
     expect(lstats).not.toContain(other)
   })
+
+  it('control: a relative link without `..` is placed everywhere, from the directory it descends into', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    const lstats: string[] = []
+    const fs: PathScopeFs = {
+      ...hostPathFs,
+      lstat: (p) => {
+        lstats.push(p)
+        return hostPathFs.lstat(p)
+      }
+    }
+    const f = pathFacts(
+      'read',
+      { path: ['t', 'f.txt'].join(sep) },
+      { cwd, roots: [cwd], platform: process.platform, homeDir: base, fs }
+    )!
+    expect(f).toMatchObject({ state: 'resolved', remote: false })
+    expect(f.landing).toBe(path.join(cwd, 'b', 'f.txt'))
+    expect(lstats).toContain(path.join(cwd, 'b'))
+  })
 })
 
-describe('F7-1 — a relative `..` above an absolute link is folded against both spellings (win32: a junction keeps its own name)', () => {
+describe('F7-1 / F8 — a relative link target with a `..` is unplaceable on win32 (a junction keeps its own name, a symlink does not; readlink cannot tell)', () => {
   const winScope = (fs: PathScopeFs): PiPathScope => ({
     cwd: 'D:\\repo',
     roots: ['D:\\repo'],
@@ -2671,7 +2703,7 @@ describe('F7-1 — a relative `..` above an absolute link is folded against both
   const touched = (calls: string[]): string[] =>
     calls.filter((c) => c.startsWith('realpath') || c.startsWith('exists'))
 
-  it('`J -> D:\\real`, `real\\s -> ..\\b`, `repo\\b -> \\\\h\\s`: `J\\s\\f` is unplaceable with no realpath (junction J reads `repo\\b`, symlink J reads `D:\\b`)', () => {
+  it('`J -> D:\\real`, `real\\s -> ..\\b`, `repo\\b -> \\\\h\\s`: `J\\s\\f` is unplaceable with no realpath (junction J reads `repo\\b`, symlink J reads `D:\\b`; reviewer case A)', () => {
     const { fs, calls } = kernelLikeFs('win32', {
       'D:\\repo\\J': 'D:\\real',
       'D:\\real\\s': `..${BS}b`,
@@ -2709,19 +2741,80 @@ describe('F7-1 — a relative `..` above an absolute link is folded against both
     expect(calls.some((c) => c.startsWith('realpath'))).toBe(true)
   })
 
-  it('control: a `..` that climbs only within the absolute link’s target agrees (and is walked)', () => {
-    const { fs, calls } = kernelLikeFs(
-      'win32',
-      { 'D:\\repo\\J': 'D:\\real', 'D:\\real\\sub\\s': `..${BS}z` },
-      { 'D:\\repo\\J\\sub\\s\\f': 'D:\\real\\z\\f' }
-    )
+  it('even a `..` that climbs only within the absolute link\u2019s target is refused (the rule is the `..`, not where it lands)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\real',
+      'D:\\real\\sub\\s': `..${BS}z`
+    })
     const f = pathFacts('read', { path: 'J\\sub\\s\\f' }, winScope(fs))!
-    expect(f).toMatchObject({ state: 'resolved', landing: 'D:\\real\\z\\f' })
-    expect(calls).toContain('lstat D:\\real\\z')
+    expect(f.state).toBe('unresolved')
+    expect(touched(calls)).toEqual([])
+    expect(calls).not.toContain('lstat D:\\real\\z')
   })
 
-  it('the junction spelling stays in force after an agreeing relative link: a later climb out of the target is still unplaceable', () => {
-    // J -> D:\real; real\s -> sub (agrees); real\sub\t -> ..\..\b climbs out of the target
+  it('reviewer case H: a junction whose target text runs through another junction, then a `..` link: unplaceable, no realpath (w\\J => r1\\J2\\sub, r1\\J2 => r2, r2\\sub\\s -> ..\\b)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\r1\\J2\\sub',
+      'D:\\r1\\J2': 'D:\\r2',
+      'D:\\r2\\sub\\s': `..${BS}b`,
+      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
+    })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'J\\s\\f'), winScope(fs))!
+      expect(f.state, tool).toBe('unresolved')
+      expect(f.inScope, tool).toBe(false)
+      expect(touched(calls), tool).toEqual([])
+    }
+  })
+
+  it('reviewer case P2: a junction whose target text runs through a relative link, then a `..` link: unplaceable, no realpath (w\\J => r1\\s\\sub, r1\\s -> x, r1\\x\\sub\\s2 -> ..\\b)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\r1\\s\\sub',
+      'D:\\r1\\s': 'x',
+      'D:\\r1\\x\\sub\\s2': `..${BS}b`,
+      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
+    })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'J\\s2\\f'), winScope(fs))!
+      expect(f.state, tool).toBe('unresolved')
+      expect(touched(calls), tool).toEqual([])
+    }
+  })
+
+  it('control: a relative target without a `..` inside a junction\u2019s target keeps walking, through several hops, and is placed', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      {
+        'D:\\repo\\J': 'D:\\r1\\s\\sub',
+        'D:\\r1\\s': 'x',
+        'D:\\r1\\x\\sub\\t': `plain${BS}.${BS}leaf`
+      },
+      { 'D:\\repo\\J\\t\\f': 'D:\\r1\\x\\sub\\plain\\leaf\\f' }
+    )
+    const f = pathFacts('read', { path: 'J\\t\\f' }, winScope(fs))!
+    expect(f).toMatchObject({ state: 'resolved', landing: 'D:\\r1\\x\\sub\\plain\\leaf\\f' })
+    expect(calls).toContain('lstat D:\\r1\\x\\sub\\plain\\leaf')
+  })
+
+  it('control: an absolute target (folded as text) and a plain relative sibling are still placed', () => {
+    const { fs } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\abs': `D:${BS}o${BS}q${BS}..${BS}r`, 'D:\\repo\\rel': 'b' },
+      { 'D:\\repo\\abs\\f': 'D:\\o\\r\\f', 'D:\\repo\\rel\\f': 'D:\\repo\\b\\f' }
+    )
+    expect(pathFacts('read', { path: 'abs\\f' }, winScope(fs))).toMatchObject({
+      landing: 'D:\\o\\r\\f'
+    })
+    expect(pathFacts('read', { path: 'rel\\f' }, winScope(fs))).toMatchObject({
+      landing: 'D:\\repo\\b\\f',
+      inScope: true
+    })
+  })
+
+  it('a climb after an ordinary relative link is still unplaceable', () => {
+    // J -> D:\real; real\s -> sub (walked); real\sub\t -> ..\..\b climbs
     const { fs, calls } = kernelLikeFs('win32', {
       'D:\\repo\\J': 'D:\\real',
       'D:\\real\\s': 'sub',
@@ -2732,14 +2825,11 @@ describe('F7-1 — a relative `..` above an absolute link is folded against both
     expect(calls.some((c) => c.startsWith('realpath'))).toBe(false)
   })
 
-  it('a relative `..` that does not sit above an absolute link keeps the F6 text fold (no extra asks)', () => {
-    const { fs } = kernelLikeFs(
-      'win32',
-      { 'D:\\repo\\docs': `a${BS}..${BS}b` },
-      { 'D:\\repo\\docs\\n.ts': 'D:\\repo\\b\\n.ts' }
-    )
+  it('a relative `..` that does not sit above an absolute link is refused too (no text fold of a relative target)', () => {
+    const { fs, calls } = kernelLikeFs('win32', { 'D:\\repo\\docs': `a${BS}..${BS}b` })
     const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
-    expect(f).toMatchObject({ state: 'resolved', landing: 'D:\\repo\\b\\n.ts', inScope: true })
+    expect(f.state).toBe('unresolved')
+    expect(touched(calls)).toEqual([])
   })
 
   it('POSIX is unchanged: the same shape folds in the kernel’s order and is placed', () => {
@@ -2758,7 +2848,7 @@ describe('F7-1 — a relative `..` above an absolute link is folded against both
   })
 })
 
-describe('F7-1 — the link walk never places a path through a link it did not read (real junctions and symlinks)', () => {
+describe('F7-1 / F8 — the link walk never places a path through a link it did not read (real junctions and symlinks)', () => {
   let base = ''
   let linksWork = true
   const sep = path.sep
@@ -2772,24 +2862,52 @@ describe('F7-1 — the link walk never places a path through a link it did not r
     mkdirSync(dir, { recursive: true })
     writeFileSync(path.join(dir, 'f'), dir)
   }
+  /**
+   * Every `b` a `..` could climb to is a link to a sentinel directory (a stand-in for `b -> \\host\share`):
+   * landing inside a sentinel means the OS followed that link, so the walk must have read it.
+   */
+  const sentinels: Array<{ dir: string; link: string }> = []
+  const sentinelLink = (link: string, dir: string): void => {
+    tag(dir)
+    mkdirSync(path.dirname(link), { recursive: true })
+    mk(dir, link, 'dir')
+    sentinels.push({ dir, link })
+  }
 
   beforeAll(() => {
     base = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-path-junc-')))
     try {
       // A: w\J => real0 (junction); real0\s -> ..\b; w\b -> sentinel (a stand-in for `w\b -> \\host\share`)
       tag(at('A', 'real0'))
-      tag(at('A', 'sentinel'))
       tag(at('A', 'b'))
       mkdirSync(at('A', 'w'), { recursive: true })
       mk(at('A', 'real0'), at('A', 'w', 'J'), 'junction')
       mk(['..', 'b'].join(sep), at('A', 'real0', 's'), 'dir')
-      mk(at('A', 'sentinel'), at('A', 'w', 'b'), 'dir')
-      // B: w\J => deep\real; deep\real\sub\s -> ..\..\b ; both `w\b` and `deep\b` are directories
-      tag(at('B', 'w', 'b'))
-      tag(at('B', 'deep', 'b'))
+      sentinelLink(at('A', 'w', 'b'), at('A', 'sentinel'))
+      // B: w\J => deep\real; deep\real\sub\s -> ..\..\b ; `w\b` and `deep\b` are links
+      sentinelLink(at('B', 'w', 'b'), at('B', 'sent-w'))
+      sentinelLink(at('B', 'deep', 'b'), at('B', 'sent-deep'))
       mkdirSync(at('B', 'deep', 'real', 'sub'), { recursive: true })
       mk(at('B', 'deep', 'real'), at('B', 'w', 'J'), 'junction')
       mk(['..', '..', 'b'].join(sep), at('B', 'deep', 'real', 'sub', 's'), 'dir')
+      // H: w\J => r1\J2\sub (junction, text through another junction); r1\J2 => r2 (junction);
+      // r2\sub\s -> ..\b. A `b` exists beside every directory the `..` could climb to.
+      sentinelLink(at('H', 'w', 'b'), at('H', 'sent-w'))
+      sentinelLink(at('H', 'r1', 'b'), at('H', 'sent-r1'))
+      sentinelLink(at('H', 'r2', 'b'), at('H', 'sent-r2'))
+      mkdirSync(at('H', 'r2', 'sub'), { recursive: true })
+      mk(at('H', 'r2'), at('H', 'r1', 'J2'), 'junction')
+      mk(at('H', 'r1', 'J2', 'sub'), at('H', 'w', 'J'), 'junction')
+      mk(['..', 'b'].join(sep), at('H', 'r2', 'sub', 's'), 'dir')
+      // P2: w\J => r1\s\sub (junction, text through a relative symlink); r1\s -> x;
+      // r1\x\sub\s2 -> ..\b
+      mkdirSync(at('P2', 'r1', 'x', 'sub'), { recursive: true })
+      sentinelLink(at('P2', 'w', 'b'), at('P2', 'sent-w'))
+      sentinelLink(at('P2', 'r1', 'b'), at('P2', 'sent-r1'))
+      sentinelLink(at('P2', 'r1', 'x', 'b'), at('P2', 'sent-x'))
+      mk('x', at('P2', 'r1', 's'), 'dir')
+      mk(at('P2', 'r1', 's', 'sub'), at('P2', 'w', 'J'), 'junction')
+      mk(['..', 'b'].join(sep), at('P2', 'r1', 'x', 'sub', 's2'), 'dir')
     } catch {
       linksWork = false
     }
@@ -2823,11 +2941,16 @@ describe('F7-1 — the link walk never places a path through a link it did not r
   function expectNeverPlacedThroughAnUnreadLink(cwd: string, rel: string): void {
     const landed = realpathSync.native(path.resolve(cwd, rel))
     const lstats: string[] = []
+    const readlinks: string[] = []
     const fs: PathScopeFs = {
       ...hostPathFs,
       lstat: (p) => {
         lstats.push(p.toLowerCase())
         return hostPathFs.lstat(p)
+      },
+      readlink: (p) => {
+        readlinks.push(p.toLowerCase())
+        return hostPathFs.readlink(p)
       }
     }
     const f = pathFacts(
@@ -2838,6 +2961,12 @@ describe('F7-1 — the link walk never places a path through a link it did not r
     if (f.state === 'unresolved') return
     expect(f.landing?.toLowerCase()).toBe(landed.toLowerCase())
     expect(lstats).toContain(path.dirname(landed).toLowerCase())
+    // landed inside a sentinel: the link that leads there must have been read
+    for (const { dir, link } of sentinels) {
+      if (landed.toLowerCase().startsWith(dir.toLowerCase() + sep)) {
+        expect(readlinks, link).toContain(link.toLowerCase())
+      }
+    }
   }
 
   it('A: `w\\J` a junction to `real0`, `real0\\s -> ..\\b`, `w\\b` a link: unplaceable, or the directory the OS lands in was read', (ctx) => {
@@ -2850,13 +2979,25 @@ describe('F7-1 — the link walk never places a path through a link it did not r
     expectNeverPlacedThroughAnUnreadLink(at('B', 'w'), ['J', 'sub', 's', 'f'].join(sep))
   })
 
+  it('H: a junction whose target text runs through another junction, then `s -> ..\\b`: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    expectNeverPlacedThroughAnUnreadLink(at('H', 'w'), ['J', 's', 'f'].join(sep))
+  })
+
+  it('P2: a junction whose target text runs through a relative symlink, then `s2 -> ..\\b`: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    expectNeverPlacedThroughAnUnreadLink(at('P2', 'w'), ['J', 's2', 'f'].join(sep))
+  })
+
   it.runIf(process.platform === 'win32')(
-    'on Windows both are refused (the walk cannot tell the junction from a symlink)',
+    'on Windows all four are refused (the walk cannot tell the junction from a symlink)',
     (ctx) => {
       if (!linksWork) return ctx.skip()
       for (const [cwd, rel] of [
         [at('A', 'w'), 'J\\s\\f'],
-        [at('B', 'w'), 'J\\sub\\s\\f']
+        [at('B', 'w'), 'J\\sub\\s\\f'],
+        [at('H', 'w'), 'J\\s\\f'],
+        [at('P2', 'w'), 'J\\s2\\f']
       ]) {
         const f = pathFacts(
           'read',
