@@ -208,10 +208,10 @@ describe.skipIf(SKIP)('pi RPC smoke', () => {
 /**
  * Shared-skills discovery smoke test (M3). Spawns the REAL ClaudeUI bridge
  * extension (PI_BRIDGE_EXTENSION_SOURCE, not a probe fixture) with
- * CLAUDEUI_PI_SKILL_DIRS pointing at a tmp fixture skill dir — no
- * CLAUDEUI_PI_BRIDGE_URL/TOKEN set, proving the resources_discover handler
- * activates independently of the approval-bridge gate (see
- * pi-bridge-source.ts's env-var-independence design). NO credentials, NO
+ * CLAUDEUI_PI_SKILL_DIRS pointing at a tmp fixture skill dir, proving the
+ * resources_discover handler works. The bridge needs its URL/token to load at
+ * all (H4: it throws without them); here they are inert placeholders — nothing
+ * contacts the bridge unless a tool is called. NO credentials, NO
  * model call: get_commands works unauthenticated (verified by the sibling
  * 'pi RPC smoke' describe block above), so this belongs in the
  * non-credential-gated file per the M3 kickoff spec.
@@ -302,7 +302,9 @@ describe.skipIf(SKIP)('pi RPC smoke — shared skills (M3)', () => {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        // Deliberately NO CLAUDEUI_PI_BRIDGE_URL/TOKEN — proves independence.
+        // The extension throws without both (H4); nothing ever connects to this placeholder.
+        CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9',
+        CLAUDEUI_PI_BRIDGE_TOKEN: 'placeholder-not-a-credential',
         CLAUDEUI_PI_SKILL_DIRS: skillsParent
       }
     })
@@ -337,7 +339,7 @@ describe.skipIf(SKIP)('pi RPC smoke — shared skills (M3)', () => {
   })
 
   it.skipIf(BINARY_MISSING)(
-    'get_commands lists skill:<fixture> when CLAUDEUI_PI_SKILL_DIRS points at it (no bridge URL/token needed)',
+    'get_commands lists skill:<fixture> when CLAUDEUI_PI_SKILL_DIRS points at it',
     async () => {
       const resp = await sendCommand({ type: 'get_commands' })
       expect(resp.success).toBe(true)
@@ -346,5 +348,104 @@ describe.skipIf(SKIP)('pi RPC smoke — shared skills (M3)', () => {
       expect(found).toBeDefined()
       expect(found?.source).toBe('skill')
     }
+  )
+})
+
+/**
+ * H4: the bridge extension must NOT be inert without its credentials. A pi started with it and no
+ * CLAUDEUI_PI_BRIDGE_URL/TOKEN refuses to start: it reports "Failed to load extension" on stderr
+ * and exits non-zero, rather than running every tool call with no approval gate. NO model call:
+ * pi never gets as far as a session.
+ */
+describe.skipIf(SKIP)('pi RPC smoke — bridge extension without credentials (H4)', () => {
+  let tmpDir: string
+
+  beforeAll(() => {
+    if (BINARY_MISSING) return
+    tmpDir = mkdtempSync(join(tmpdir(), 'pi-rpc-nocreds-integration-'))
+  })
+
+  afterAll(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  })
+
+  /** Spawn pi with the bridge extension and the given bridge env; resolve with its exit and stderr. */
+  function runPi(
+    bridgeEnv: Record<string, string>,
+    stdinClose: boolean
+  ): Promise<{ code: number | null; stderr: string }> {
+    const extensionPath = join(tmpDir, 'claudeui-bridge.ts')
+    writeFileSync(extensionPath, PI_BRIDGE_EXTENSION_SOURCE, 'utf-8')
+    const env: NodeJS.ProcessEnv = { ...process.env }
+    delete env.CLAUDEUI_PI_BRIDGE_URL
+    delete env.CLAUDEUI_PI_BRIDGE_TOKEN
+    Object.assign(env, bridgeEnv)
+    return new Promise((resolve, reject) => {
+      const p = spawn(locatePiBinary()!, ['--mode', 'rpc', '--no-session', '-e', extensionPath], {
+        cwd: tmpDir,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env
+      })
+      let stderr = ''
+      p.stderr?.setEncoding('utf-8')
+      p.stderr?.on('data', (c: string) => (stderr += c))
+      const timer = setTimeout(() => {
+        p.kill('SIGKILL')
+        reject(new Error('pi did not exit within 20s; stderr=' + stderr))
+      }, 20_000)
+      p.once('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+      p.once('exit', (code) => {
+        clearTimeout(timer)
+        resolve({ code, stderr })
+      })
+      // A healthy rpc-mode pi waits on stdin forever: closing it lets the credentialed control
+      // case exit by itself instead of hanging.
+      if (stdinClose) p.stdin?.end()
+    })
+  }
+
+  it.skipIf(BINARY_MISSING)(
+    'exits non-zero naming the bridge when CLAUDEUI_PI_BRIDGE_URL/TOKEN are absent',
+    async () => {
+      const { code, stderr } = await runPi({}, false)
+      expect(code).not.toBe(0)
+      expect(code).not.toBeNull()
+      expect(stderr).toContain('Failed to load extension')
+      expect(stderr).toContain('ClaudeUI approval bridge is not configured')
+    },
+    30_000
+  )
+
+  it.skipIf(BINARY_MISSING)(
+    'also refuses with only one of the two set (and never echoes the credential)',
+    async () => {
+      const { code, stderr } = await runPi(
+        { CLAUDEUI_PI_BRIDGE_TOKEN: 'only-the-token-xyz' },
+        false
+      )
+      expect(code).not.toBe(0)
+      expect(stderr).toContain('ClaudeUI approval bridge is not configured')
+      expect(stderr).not.toContain('only-the-token-xyz')
+    },
+    30_000
+  )
+
+  it.skipIf(BINARY_MISSING)(
+    'control: with both set the same extension loads (no load failure on stderr)',
+    async () => {
+      const { stderr } = await runPi(
+        {
+          CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9',
+          CLAUDEUI_PI_BRIDGE_TOKEN: 'placeholder-not-a-credential'
+        },
+        true
+      )
+      expect(stderr).not.toContain('Failed to load extension')
+      expect(stderr).not.toContain('approval bridge is not configured')
+    },
+    30_000
   )
 })
