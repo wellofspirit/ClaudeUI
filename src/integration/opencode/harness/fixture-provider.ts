@@ -19,6 +19,7 @@
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
  *   [subread]   `subagent` tool call whose child prompt is `[read]`
+ *   [submodel:<provider/id>]  `subagent` call (agent `general`) passing that `model`; prompt `child says hi`
  *   [subresume] `subagent` call RESUMING the last child named in the conversation
  *               (`sessionID="ses_…"` of an earlier result); its prompt is `[read]` too
  *   [reason]    `reasoning_content` deltas, then text
@@ -406,6 +407,18 @@ export async function startFixtureProvider(
             args: { path: 'multi.txt', content: 'two calls\n' }
           }
         ])
+      const subModel = /\[submodel:([^\]]+)\]/.exec(text)
+      if (subModel)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract model',
+            prompt: 'child says hi',
+            agent: 'general',
+            model: subModel[1]
+          }
+        )
       if (text.includes('[sub]'))
         return streamToolCall(
           res,

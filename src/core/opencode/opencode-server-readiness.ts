@@ -160,7 +160,7 @@ export async function waitForHostedTools(
 export const GUARD_TIMEOUT_MS = 10_000
 
 export type PermissionGuard =
-  /** The plugin answered: its `permission.evaluate` and MCP hooks are registered. */
+  /** The plugin answered: its `permission.evaluate`, MCP and subagent model-gate hooks are registered. */
   | { state: 'active'; elapsedMs: number }
   /** No plugin, or it never confirmed both hooks: ClaudeUI must not run sessions here. */
   | { state: 'missing'; reason: string; elapsedMs: number }
@@ -168,7 +168,7 @@ export type PermissionGuard =
 /**
  * "Is ClaudeUI's permission hook active for this directory?" — the plugin's
  * `guard` RPC (`POST /api/rpc/claudeui-xeng/guard`) must answer
- * `{permissionHook: true, mcpDirect: true}`. Unlike {@link waitForHostedTools}
+ * `{permissionHook: true, mcpDirect: true, modelGate: true}`. Unlike {@link waitForHostedTools}
  * there is no heuristic fallback: the MCP status says nothing about hooks, and
  * without the hook the user's saved "always" rows answer ClaudeUI's asks. A
  * missing plugin answers `missing` at once; a silent or partial one after the
@@ -195,7 +195,12 @@ export async function waitForPermissionGuard(
     )
     const elapsedMs = now() - start
     const output = (response?.body as { output?: Record<string, unknown> } | null)?.output
-    if (response?.status === 200 && output?.permissionHook === true && output?.mcpDirect === true)
+    if (
+      response?.status === 200 &&
+      output?.permissionHook === true &&
+      output?.mcpDirect === true &&
+      output?.modelGate === true
+    )
       return { state: 'active', elapsedMs }
     last = response
       ? `guard RPC ${response.status} ${JSON.stringify(output ?? response.body).slice(0, 200)}`

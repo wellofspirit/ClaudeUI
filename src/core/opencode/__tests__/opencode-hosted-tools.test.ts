@@ -25,7 +25,9 @@ vi.mock('../../services/ui-config', () => ({
   loadEngineConfig: vi.fn(() => ({}))
 }))
 
-import { createOpencodeHostedToolsServer } from '../opencode-hosted-tools'
+import { createOpencodeHostedToolsServer, LIST_MODELS_DESCRIPTION } from '../opencode-hosted-tools'
+import { OPENCODE_MODEL_LIST_EMPTY } from '../model-list'
+import type { EngineModelGroup } from '../../../shared/types'
 import { resolveCallerIdentity } from '../opencode-hosted-tools'
 import type {
   CallerRootResolver,
@@ -960,5 +962,81 @@ describe('createOpencodeHostedToolsServer — hand_back (ADR-105 §3)', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('could not identify the calling session')
     expect(handBack).not.toHaveBeenCalled()
+  })
+})
+
+describe('createOpencodeHostedToolsServer — list_models (ADR-111)', () => {
+  type Handler = (args: Record<string, unknown>) => Promise<{
+    content: Array<{ type: string; text: string }>
+    isError?: boolean
+  }>
+  const registered = (
+    server: McpServer
+  ): Record<string, { handler: Handler; description?: string }> =>
+    (server as unknown as { _registeredTools: Record<string, { handler: Handler }> })
+      ._registeredTools
+  const groups: EngineModelGroup[] = [
+    {
+      engineId: 'opencode',
+      vendorId: 'openai',
+      vendorName: 'OpenAI',
+      models: [
+        {
+          value: 'openai/gpt-a',
+          displayName: 'GPT A',
+          description: '',
+          engineId: 'opencode',
+          vendorId: 'openai',
+          reasoningVariants: ['low', 'high']
+        }
+      ]
+    }
+  ]
+
+  it('is not registered without a model source (existing hosts and tests are unchanged)', () => {
+    expect(Object.keys(registered(createOpencodeHostedToolsServer(tmp)))).not.toContain(
+      'list_models'
+    )
+  })
+
+  it('is registered with one, described for the subagent tool model parameter', () => {
+    const tool = registered(
+      createOpencodeHostedToolsServer(tmp, { listModels: async () => groups })
+    )['list_models']
+    expect(tool).toBeDefined()
+    expect(LIST_MODELS_DESCRIPTION).toContain("subagent tool's model parameter")
+    expect(LIST_MODELS_DESCRIPTION).toContain('Only pass a model when the user asks')
+  })
+
+  it('lists the discovered (allowlist-filtered) models with their variants; query narrows', async () => {
+    const tool = registered(
+      createOpencodeHostedToolsServer(tmp, { listModels: async () => groups })
+    )['list_models']
+    const all = await tool.handler({})
+    expect(all.isError).toBeUndefined()
+    expect(all.content[0].text).toContain('openai/gpt-a — GPT A · variants: #low #high')
+    expect((await tool.handler({ query: 'zzz' })).content[0].text).toContain('No model matches')
+  })
+
+  it('an empty or failing discovery is a clear text result, not an error', async () => {
+    for (const listModels of [
+      async () => [],
+      async (): Promise<EngineModelGroup[]> => {
+        throw new Error('no server')
+      }
+    ]) {
+      const tool = registered(createOpencodeHostedToolsServer(tmp, { listModels }))['list_models']
+      const result = await tool.handler({})
+      expect(result.isError).toBeUndefined()
+      expect(result.content[0].text).toBe(OPENCODE_MODEL_LIST_EMPTY)
+    }
+  })
+
+  it('a non-string query is refused', async () => {
+    const tool = registered(
+      createOpencodeHostedToolsServer(tmp, { listModels: async () => groups })
+    )['list_models']
+    const result = await tool.handler({ query: 3 })
+    expect(result.isError).toBe(true)
   })
 })

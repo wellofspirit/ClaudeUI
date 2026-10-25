@@ -502,6 +502,8 @@ export class OpencodeServerManager {
     return {
       bridgedMcp,
       pluginDir: locatePluginDir(),
+      // The plugin's subagent model gate reads it as its options (ADR-111).
+      modelAllowlist: loadOpencodeModelAllowlist(),
       agentPermissions: this.agentPermissionsFn(cwd, mcpServers),
       // Only the shim sees the servers the user configured natively (opencode.json), so a
       // `tools` list denies those too; the agent permission provider keeps the bridged list.
@@ -664,6 +666,9 @@ export class OpencodeServerManager {
       createOpencodeHostedToolsServer(resolveCwd, {
         lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
         resolveCallerRoot,
+        // The models a subagent may name (allowlist-filtered). Lazy: model discovery imports
+        // this module's `opencodeServerManager`, so a static import would be a require-cycle.
+        listModels: async () => (await import('./model-discovery')).discoverOpencodeModels(),
         dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
         handBack: this.handBackFn && ((id, report, callId) => this.handBackFn!(id, report, callId)),
         // The session tools (slice 2), when the host wired them (read per MCP session).

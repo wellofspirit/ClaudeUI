@@ -823,6 +823,11 @@ export interface AgentTypeInfo {
    * engine fixes elsewhere. Read-only; Settings shows it beside the type.
    */
   model?: string
+  /**
+   * Why the type will not run as declared (opencode: an `effort` that is not a
+   * variant of the declared model). Only the async catalog read sets it.
+   */
+  warning?: string
 }
 
 export interface OpencodeAgentDetail extends OpencodeAgentSummary {

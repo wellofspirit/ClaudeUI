@@ -38,11 +38,29 @@
 //    The MCP transform (as opencode's own mcp-codemode-defaults plugin does)
 //    edits the resolved entry in place and never reads its headers or env.
 //
+// 5. The model allowlist for subagents (ADR-111). opencode's `subagent` tool
+//    takes a per-call `model` and falls back to the target agent's configured
+//    model; opencode checks neither against ClaudeUI's per-provider allowlist.
+//    `execute.before` on `subagent` resolves the EFFECTIVE model the way the
+//    tool does (subagent.ts: call model > a resumed child's own model when the
+//    agent is unchanged > the agent's model > the parent's, which is already
+//    gated) and throws (a Tool.Error the model reads) when it is off the list.
+//    The allowlist arrives as this plugin's OPTIONS (`ctx.options.modelAllowlist`,
+//    from the `{package, options}` entry in OPENCODE_CONFIG_CONTENT), so it is
+//    stateless: opencode evicts an idle location after an hour and re-runs
+//    `setup`, which re-reads the options (an RPC push would be lost). Options
+//    that are missing or malformed refuse any call with a model to check (fail
+//    closed); an inheriting call passes. `modelAllowed` is a copy of ClaudeUI's
+//    `opencodeModelAllowed` (src/core/opencode/model-allowlist.ts; a parity
+//    test pins them together).
+//
 // Only the opencode process ClaudeUI spawns loads this plugin; the user's own
 // opencode keeps its own behaviour.
 
 const HOSTED_PREFIX = 'claudeui_'
 const DISPATCH_TOOL = 'claudeui_dispatch_agent'
+const SUBAGENT_TOOL = 'subagent'
+const LIST_MODELS_TOOL = 'claudeui_list_models'
 
 /** opencode's `Wildcard.match` (core/src/util/wildcard.ts), verbatim in behaviour. */
 export function wildcardMatch(input, pattern, platform = process.platform) {
@@ -143,11 +161,124 @@ export async function tightenToConfigured(ctx, event) {
   event.effect = stricter(event.effect, verdict)
 }
 
+// ── The model allowlist gate ────────────────────────────────────────────────
+
+/**
+ * Does `allowlist` permit the model value `provider/id[#variant]`? A provider
+ * with no entry is unrestricted; one with an entry allows only the listed ids
+ * (the variant is not part of the id; the id is everything after the FIRST
+ * `/`). Same behaviour as ClaudeUI's `opencodeModelAllowed`.
+ */
+export function modelAllowed(allowlist, value) {
+  const bare = String(value).split('#')[0]
+  const slash = bare.indexOf('/')
+  if (slash < 0) return false
+  const allowed = Object.prototype.hasOwnProperty.call(allowlist, bare.slice(0, slash))
+    ? allowlist[bare.slice(0, slash)]
+    : undefined
+  return !allowed || allowed.includes(bare.slice(slash + 1))
+}
+
+/** The plugin's allowlist option, or null when it is missing or malformed. */
+export function readAllowlist(options) {
+  const list = options && typeof options === 'object' ? options.modelAllowlist : undefined
+  if (!list || typeof list !== 'object' || Array.isArray(list)) return null
+  for (const ids of Object.values(list)) {
+    if (!Array.isArray(ids) || !ids.every((id) => typeof id === 'string')) return null
+  }
+  return list
+}
+
+const nonEmpty = (value) => (typeof value === 'string' && value !== '' ? value : undefined)
+
+/** `provider/id` of an opencode model struct (`{providerID, id, variant?}`), or undefined. */
+const modelRef = (model) =>
+  model && typeof model.providerID === 'string' && typeof model.id === 'string'
+    ? `${model.providerID}/${model.id}`
+    : undefined
+
+const LIST_HINT = `Call ${LIST_MODELS_TOOL} to see the models you may use, or omit the model parameter to use your own model.`
+
+function offListCallMessage(allowlist, value) {
+  const bare = String(value).split('#')[0]
+  const slash = bare.indexOf('/')
+  const provider = slash < 0 ? bare : bare.slice(0, slash)
+  const allowed = Object.prototype.hasOwnProperty.call(allowlist, provider)
+    ? allowlist[provider]
+    : undefined
+  const which = allowed ? ` Allowed for "${provider}": ${allowed.join(', ') || '(none)'}.` : ''
+  return `Model "${bare}" is not allowed by ClaudeUI's model allowlist.${which} ${LIST_HINT}`
+}
+
+const UNAVAILABLE_MESSAGE =
+  "ClaudeUI's model allowlist is unavailable; omit the model parameter to use your own model."
+
+/**
+ * The model a `subagent` call would run on, when it is not the parent's:
+ * `{ kind: 'call' | 'agent' | 'session', value, agent }`; null = inherits.
+ * Mirrors subagent.ts: the call's `model` wins; else a RESUMED child
+ * (`sessionID`) keeps its own model when `agent` is its agent, and takes the
+ * target agent's model when it is a different one; else the target agent's.
+ * `event.agent` is the CALLER, never the target.
+ */
+async function effectiveSubagentModel(ctx, input) {
+  const agent = nonEmpty(input.agent)
+  const call = nonEmpty(input.model)
+  if (call) return { kind: 'call', value: call, agent }
+  const sessionID = nonEmpty(input.sessionID)
+  if (sessionID) {
+    const child = unwrap(await ctx.session.get({ sessionID }))
+    if (child && child.agent === agent) {
+      const value = modelRef(child.model)
+      return value ? { kind: 'session', value, agent } : null
+    }
+  }
+  if (!agent) return null
+  const target = unwrap(await ctx.agent.get({ agentID: agent }))
+  const value = modelRef(target?.model)
+  return value ? { kind: 'agent', value, agent } : null
+}
+
+/**
+ * The `execute.before` gate for `subagent`: throw when the effective model is
+ * off ClaudeUI's allowlist. An empty allowlist restricts nothing, so it is
+ * answered without reading anything from opencode. A failed read of the
+ * session or agent refuses the call (fail closed; opencode would have failed
+ * an unknown agent or session itself anyway).
+ */
+export async function gateSubagentModel(ctx, event, allowlist) {
+  const input = event.input && typeof event.input === 'object' ? event.input : {}
+  if (allowlist && Object.keys(allowlist).length === 0) return
+  let effective
+  try {
+    effective = await effectiveSubagentModel(ctx, input)
+  } catch {
+    const what = nonEmpty(input.sessionID)
+      ? 'the resumed subagent session'
+      : `agent "${nonEmpty(input.agent) ?? ''}"`
+    throw new Error(
+      `ClaudeUI could not read ${what} to check its model against the model allowlist. Check the agent name, or omit the model parameter to use your own model.`
+    )
+  }
+  if (!effective) return
+  if (!allowlist) throw new Error(UNAVAILABLE_MESSAGE)
+  if (modelAllowed(allowlist, effective.value)) return
+  if (effective.kind === 'call') throw new Error(offListCallMessage(allowlist, effective.value))
+  throw new Error(
+    `Agent "${effective.agent ?? ''}" runs on model "${effective.value}", which ClaudeUI's model allowlist does not allow. Pass an allowed model with the model parameter (${LIST_MODELS_TOOL} lists them), or choose another agent.`
+  )
+}
+
 export default {
   id: 'claudeui-xeng',
   setup: async (ctx) => {
+    // Read per `setup`, never cached across a location eviction: the options
+    // belong to the entry opencode re-runs `setup` with.
+    const allowlist = readAllowlist(ctx.options)
     await ctx.tool.hook('execute.before', async (event) => {
-      if (!event || event.tool !== DISPATCH_TOOL) return
+      if (!event) return
+      if (event.tool === SUBAGENT_TOOL) return gateSubagentModel(ctx, event, allowlist)
+      if (event.tool !== DISPATCH_TOOL) return
       const input = event.input && typeof event.input === 'object' ? event.input : {}
       event.input = {
         ...input,
@@ -156,8 +287,10 @@ export default {
       }
     })
     // What the `guard` RPC reports: ClaudeUI refuses to run sessions on a
-    // server where these are not both registered (OpencodeServerManager).
-    const guard = { permissionHook: false, mcpDirect: false }
+    // server where these are not all registered (OpencodeServerManager).
+    const guard = { permissionHook: false, mcpDirect: false, modelGate: false }
+    // The `execute.before` hook above is registered (a failed registration threw).
+    guard.modelGate = true
     await ctx.permission.hook('evaluate', (event) => tightenToConfigured(ctx, event))
     guard.permissionHook = true
     await ctx.mcp.transform((editor) => {
@@ -184,9 +317,10 @@ export default {
               type: 'object',
               properties: {
                 permissionHook: { type: 'boolean' },
-                mcpDirect: { type: 'boolean' }
+                mcpDirect: { type: 'boolean' },
+                modelGate: { type: 'boolean' }
               },
-              required: ['permissionHook', 'mcpDirect']
+              required: ['permissionHook', 'mcpDirect', 'modelGate']
             }
           }
         },

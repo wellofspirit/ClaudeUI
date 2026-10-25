@@ -57,7 +57,7 @@ const AGENT_BUILD = [r('*', 'allow'), r('external_directory', 'ask')]
 interface Fake {
   evaluate: (event: EvaluateEvent) => Promise<void>
   mcpTransform: (editor: { list: () => [string, Record<string, unknown>][] }) => void
-  guard: () => Promise<{ permissionHook: boolean; mcpDirect: boolean }>
+  guard: () => Promise<{ permissionHook: boolean; mcpDirect: boolean; modelGate: boolean }>
   calls: string[]
 }
 
@@ -338,8 +338,12 @@ describe('MCP servers are declared directly (codemode: false)', () => {
 })
 
 describe('the `guard` RPC (ClaudeUI refuses a server without the hooks)', () => {
-  it('reports both hooks once setup registered them', async () => {
+  it('reports every hook once setup registered them', async () => {
     const fake = await setup({})
-    expect(await fake.guard()).toEqual({ permissionHook: true, mcpDirect: true })
+    expect(await fake.guard()).toEqual({
+      permissionHook: true,
+      mcpDirect: true,
+      modelGate: true
+    })
   })
 })

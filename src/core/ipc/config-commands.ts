@@ -111,7 +111,7 @@ import {
 } from '../opencode/opencode-agents'
 import type { OpencodeAgentInput } from '../opencode/opencode-agents'
 import { generateAgent } from '../opencode/agent-generate'
-import { listAgentTypes } from '../services/agent-type-catalog'
+import { listAgentTypesChecked } from '../services/agent-type-catalog'
 import { ENGINE_META } from '../../shared/engine-meta'
 import { refreshPrices } from '../services/opencode-pricing'
 import { socks5Connect } from '../services/socks-bridge'
@@ -695,7 +695,10 @@ export function configCommands(
         if (typeof engine !== 'string' || !Object.hasOwn(ENGINE_META, engine)) {
           throw new Error(`Unknown engine: ${engine}`)
         }
-        return listAgentTypes(engine as EngineId, typeof cwd === 'string' && cwd ? cwd : undefined)
+        return listAgentTypesChecked(
+          engine as EngineId,
+          typeof cwd === 'string' && cwd ? cwd : undefined
+        )
       })
     },
     {

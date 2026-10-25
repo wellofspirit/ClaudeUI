@@ -11,7 +11,8 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as crypto from 'node:crypto'
-import { MAX_DIR_ENTRIES, listAgentTypes } from '../agent-type-catalog'
+import { MAX_DIR_ENTRIES, listAgentTypes, listAgentTypesChecked } from '../agent-type-catalog'
+import type { EngineModelGroup } from '../../../shared/types'
 
 let root: string
 let home: string
@@ -368,5 +369,112 @@ describe('Codex', () => {
       { type: 'explorer', source: 'builtin' },
       { type: 'worker', source: 'builtin' }
     ])
+  })
+})
+
+describe('opencode effort check (listAgentTypesChecked)', () => {
+  const agent = (name: string, fields: string): string =>
+    `---\nname: ${name}\ndescription: d\n${fields}\n---\nBody\n`
+  const onModel = (id: string): string => `harness:\n  opencode:\n    model: ${id}`
+  const group = (models: Array<[string, string[] | undefined]>): EngineModelGroup[] => [
+    {
+      engineId: 'opencode',
+      vendorId: 'openai',
+      vendorName: 'OpenAI',
+      models: models.map(([value, reasoningVariants]) => ({
+        value,
+        displayName: value,
+        description: value,
+        engineId: 'opencode' as const,
+        vendorId: 'openai',
+        vision: false,
+        toolCalling: true,
+        supportsEffort: false,
+        supportsAdaptiveThinking: false,
+        ...(reasoningVariants ? { reasoningVariants } : {})
+      }))
+    }
+  ]
+
+  it('warns when the effort is not a variant of the model; the plain list is unchanged', async () => {
+    write(
+      path.join(home, '.claude', 'agents', 'deep.md'),
+      agent('deep', `effort: ultra\n${onModel('openai/gpt-6-sol')}`)
+    )
+    const discover = async (): Promise<EngineModelGroup[]> =>
+      group([['openai/gpt-6-sol', ['low', 'high']]])
+    const types = await listAgentTypesChecked('opencode', project, discover)
+    expect(types.find((t) => t.type === 'deep')).toEqual({
+      type: 'deep',
+      source: 'user',
+      model: 'openai/gpt-6-sol',
+      warning: 'effort "ultra" is not a variant of openai/gpt-6-sol; the agent will fail to run'
+    })
+    // The sync list never carries a warning and never asks discovery.
+    expect(listAgentTypes('opencode', project).find((t) => t.type === 'deep')).not.toHaveProperty(
+      'warning'
+    )
+  })
+
+  it('a model with no variants at all warns too', async () => {
+    write(
+      path.join(home, '.claude', 'agents', 'deep.md'),
+      agent('deep', `effort: high\n${onModel('openai/plain')}`)
+    )
+    const types = await listAgentTypesChecked('opencode', project, async () =>
+      group([['openai/plain', undefined]])
+    )
+    expect(types.find((t) => t.type === 'deep')?.warning).toContain('"high" is not a variant')
+  })
+
+  it('no warning for a valid variant, an explicit #variant (never mapped), or an unlisted model', async () => {
+    write(
+      path.join(home, '.claude', 'agents', 'ok.md'),
+      agent('ok', `effort: high\n${onModel('openai/gpt-6-sol')}`)
+    )
+    write(
+      path.join(home, '.claude', 'agents', 'explicit.md'),
+      agent('explicit', `effort: ultra\n${onModel('openai/gpt-6-sol#low')}`)
+    )
+    write(
+      path.join(home, '.claude', 'agents', 'unlisted.md'),
+      agent('unlisted', `effort: ultra\n${onModel('openai/gone')}`)
+    )
+    const types = await listAgentTypesChecked('opencode', project, async () =>
+      group([['openai/gpt-6-sol', ['low', 'high']]])
+    )
+    for (const name of ['ok', 'explicit', 'unlisted']) {
+      expect(types.find((t) => t.type === name)).not.toHaveProperty('warning')
+    }
+  })
+
+  it('asks discovery only when an agent has an effort to check, and a discovery failure is no warning', async () => {
+    let asked = 0
+    const discover = async (): Promise<EngineModelGroup[]> => {
+      asked++
+      throw new Error('no server')
+    }
+    write(
+      path.join(home, '.claude', 'agents', 'plain.md'),
+      agent('plain', onModel('openai/gpt-6-sol'))
+    )
+    await listAgentTypesChecked('opencode', project, discover)
+    expect(asked).toBe(0)
+    write(
+      path.join(home, '.claude', 'agents', 'deep.md'),
+      agent('deep', `effort: ultra\n${onModel('openai/gpt-6-sol')}`)
+    )
+    const types = await listAgentTypesChecked('opencode', project, discover)
+    expect(asked).toBe(1)
+    expect(types.find((t) => t.type === 'deep')).not.toHaveProperty('warning')
+  })
+
+  it('other engines are the plain list', async () => {
+    const discover = async (): Promise<EngineModelGroup[]> => {
+      throw new Error('never asked')
+    }
+    expect(await listAgentTypesChecked('claude', project, discover)).toEqual(
+      listAgentTypes('claude', project)
+    )
   })
 })

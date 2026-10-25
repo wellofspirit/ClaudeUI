@@ -129,7 +129,7 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
     const { env } = await spawnOnce()
     const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? '{}') as {
       mcp?: { servers?: Record<string, Record<string, unknown>> }
-      plugins?: string[]
+      plugins?: { package: string; options: unknown }[]
       experimental?: unknown
       autoupdate?: unknown
     }
@@ -139,7 +139,9 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
       headers: { Authorization: 'Bearer hosted-token' },
       codemode: false
     })
-    expect(cfg.plugins).toEqual(['/res/opencode/claudeui-xeng'])
+    expect(cfg.plugins).toEqual([
+      { package: '/res/opencode/claudeui-xeng', options: { modelAllowlist: {} } }
+    ])
     expect(cfg).not.toHaveProperty('experimental')
     expect(cfg).not.toHaveProperty('autoupdate')
   })

@@ -1,6 +1,6 @@
 /**
- * Single McpServer ('claudeui') that exposes all four hosted tools:
- *   render_mermaid, create_mockup, show_mockup, dispatch_agent
+ * Single McpServer ('claudeui') that exposes all hosted tools:
+ *   render_mermaid, create_mockup, show_mockup, dispatch_agent, list_models
  *
  * Reuses the real tool handler logic from mermaid-tool.ts and
  * mockup-tool.ts — no duplication. Tool definitions are extracted from
@@ -18,6 +18,11 @@
  * SDK `extra` (RequestHandlerExtra) adapted into our SdkToolExtra shape, and
  * because it depends on TWO things this module must NOT import directly —
  * see the cycle note on `CallerSessionLookup`/`DispatchAgentFn` below.
+ *
+ * `list_models` (ADR-111) is the model's way to find the ids the `subagent` tool's
+ * `model` parameter accepts, filtered by ClaudeUI's model allowlist; opencode's own
+ * `models` tool is unreachable (a Code Mode tool, and `execute` is hidden). It is
+ * registered only when the host passes `deps.listModels`.
  *
  * The session tools (session tools, slice 2) are registered here too, as
  * `claudeui_session_*`, when the host wired them (`deps.sessionTools`): see
@@ -60,9 +65,10 @@ import {
   type SessionToolName
 } from '../../shared/session-tools-description'
 import { SESSION_TOOL_SHAPES } from '../services/session-tool-specs'
+import { formatOpencodeModelList, OPENCODE_MODEL_LIST_EMPTY } from './model-list'
 import type { SessionToolCaller, SessionToolResult } from '../services/session-tools'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
-import type { ChatMessage, EngineId } from '../../shared/types'
+import type { ChatMessage, EngineId, EngineModelGroup } from '../../shared/types'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 import type { CallerRestriction } from './caller-restriction'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
@@ -145,6 +151,15 @@ export interface HostedSessionTools {
     input: Record<string, unknown>
   ) => Promise<SessionToolResult>
 }
+
+/**
+ * `list_models`' description (pi's, adapted): what the subagent tool's `model` accepts. The
+ * "only when the user asks" rule is the subagent tool's own (opencode's description keeps it).
+ */
+export const LIST_MODELS_DESCRIPTION =
+  "List the models a subagent may run on, for the subagent tool's model parameter (provider/id, " +
+  'or provider/id#variant where a model lists variants). Only pass a model when the user asks ' +
+  'for one. Pass query to filter by a substring of the id or name.'
 
 /** The `claudeui_` prefix opencode puts on this server's tool names. */
 const HOSTED_TOOL_PREFIX = 'claudeui_'
@@ -299,6 +314,12 @@ export function createOpencodeHostedToolsServer(
     sessionTools?: HostedSessionTools
     /** An X-Agent's session as a session-tools caller (`session_message` only, ADR-105 §4). */
     xAgentCaller?: XAgentCallerFn
+    /**
+     * The models a subagent may run on (`discoverOpencodeModels`, allowlist-filtered);
+     * `list_models` is not registered without it. Injected, not imported: model discovery
+     * imports the server manager, which imports this module.
+     */
+    listModels?: () => Promise<readonly EngineModelGroup[]>
     /** Called when `_meta` and the plugin stamp disagree (diagnostics). */
     onIdentityMismatch?: (identity: CallerIdentity) => void
   } = {}
@@ -418,6 +439,37 @@ export function createOpencodeHostedToolsServer(
     allowedModels: codexDispatchCfg?.allowedModels,
     defaultModel: codexDispatchCfg?.defaultModel
   })
+
+  if (deps.listModels) {
+    const listModels = deps.listModels
+    server.registerTool(
+      'list_models',
+      {
+        description: LIST_MODELS_DESCRIPTION,
+        inputSchema: {
+          query: z
+            .string()
+            .optional()
+            .describe('A case-insensitive substring of the model id or display name')
+        }
+      },
+      async (args: { query?: unknown }) => {
+        if (args.query !== undefined && typeof args.query !== 'string') {
+          return {
+            content: [{ type: 'text' as const, text: 'list_models "query" must be a string.' }],
+            isError: true
+          }
+        }
+        // A discovery failure is "no list", never an error: the model can still omit `model`.
+        const groups = await listModels().catch(() => [])
+        const text =
+          groups.length === 0
+            ? OPENCODE_MODEL_LIST_EMPTY
+            : formatOpencodeModelList(groups, args.query)
+        return { content: [{ type: 'text' as const, text }] }
+      }
+    )
+  }
 
   server.registerTool(
     'dispatch_agent',

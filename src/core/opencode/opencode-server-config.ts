@@ -8,8 +8,12 @@
  *   `claudeui`, every entry `codemode: false` so its tools stay direct tools
  *   rather than hiding behind Code Mode's `execute` (which would also make the
  *   tool-call id the `execute` call's id).
- * - `plugins` — the `claudeui-xeng` DIRECTORY plugin (caller identity + the
- *   readiness RPC; `resources/opencode/claudeui-xeng/`).
+ * - `plugins` — the `claudeui-xeng` DIRECTORY plugin (caller identity, the
+ *   readiness RPC, the subagent model gate; `resources/opencode/claudeui-xeng/`),
+ *   as a `{package, options}` entry whose options carry ClaudeUI's model
+ *   allowlist (`options.modelAllowlist`, ADR-111). opencode hands a plugin its
+ *   entry's options in `setup`, so the gate is stateless: a location evicted
+ *   after an idle hour and set up again reads them again.
  * - `agents.<name>.permissions` — the mode-less agent overlay (ADR-097 §3,
  *   `permission-v2.ts` `agentPermissionOverlay`); an empty overlay emits no
  *   `agents` key at all.
@@ -58,6 +62,30 @@ export interface OpencodeConfigInput {
    * its last release).
    */
   readonly claudeAgents?: Readonly<Record<string, Config_AgentEncoded>>
+  /**
+   * ClaudeUI's per-provider opencode model allowlist (`loadOpencodeModelAllowlist`),
+   * handed to the plugin as its options for the subagent model gate. Part of
+   * the config identity: an allowlist change gives new leases a new server (the
+   * old one ends at its last release); an open session keeps the list its
+   * server started with until it reconnects — the freshness of the injected
+   * agents and the parent's spawn gate. `{}` = nothing restricted.
+   */
+  readonly modelAllowlist?: Readonly<Record<string, readonly string[]>>
+}
+
+/**
+ * The allowlist in canonical form: a provider key present means restricted
+ * (an empty list allows none), ids sorted and deduplicated so a reordered list
+ * is not a new server.
+ */
+function canonicalAllowlist(
+  allowlist: Readonly<Record<string, readonly string[]>> | undefined
+): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const [provider, ids] of Object.entries(allowlist ?? {})) {
+    out[provider] = [...new Set(ids)].sort()
+  }
+  return out
 }
 
 /** The per-server hosted MCP endpoint (`mcp-http-host.ts`). */
@@ -109,7 +137,16 @@ export function buildOpencodeConfig(
   for (const [name, permissions] of overlay) agents[name] = { permissions }
   return {
     mcp: { servers },
-    ...(input.pluginDir ? { plugins: [input.pluginDir] } : {}),
+    ...(input.pluginDir
+      ? {
+          plugins: [
+            {
+              package: input.pluginDir,
+              options: { modelAllowlist: canonicalAllowlist(input.modelAllowlist) }
+            }
+          ]
+        }
+      : {}),
     ...(Object.keys(agents).length > 0 ? { agents } : {})
   }
 }
@@ -148,7 +185,8 @@ export function configIdentity(input: OpencodeConfigInput): string {
     agentPermissions: Object.fromEntries(
       Object.entries(input.agentPermissions ?? {}).filter(([, rules]) => rules.length > 0)
     ),
-    claudeAgents: input.claudeAgents ?? {}
+    claudeAgents: input.claudeAgents ?? {},
+    modelAllowlist: canonicalAllowlist(input.modelAllowlist)
   })
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16)
 }
