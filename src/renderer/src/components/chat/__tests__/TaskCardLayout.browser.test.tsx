@@ -106,7 +106,9 @@ function seed(
           engineId: opts.engineId ?? 'pi',
           capabilities: {
             ...EMPTY_SESSION_STATE.status.capabilities,
-            backgroundTasks: !!opts.foreground
+            // pi and claude both run background tasks (and offer Stop on a native task); a
+            // background-launched task has nothing to move, so Send to background stays off.
+            backgroundTasks: true
           }
         },
         activeTasks:

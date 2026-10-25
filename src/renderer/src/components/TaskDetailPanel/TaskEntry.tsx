@@ -114,6 +114,7 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const taskNotifications = useActiveSession((s) => s.taskNotifications)
   const activeTasks = useActiveSession((s) => s.activeTasks)
   const engineId = useActiveSession((s) => s.status.engineId)
+  const backgroundTasksEnabled = useActiveSession((s) => s.status.capabilities.backgroundTasks)
   const turnRunning = useActiveSession((s) => s.status.state === 'running')
   const [expanded, setExpanded] = useState(true)
   // The body is the scroller; the elements inside it are what grow. It only
@@ -277,7 +278,10 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
   const isStopping = stoppingTaskIds.includes(toolUseId)
   // A nested call with no lifecycle record gives the engine nothing to stop:
   // Claude's stopTask would fall back to interrupting the main turn (ADR-073 §7).
-  const canStop = ownerToolUseId === null || hasActiveTask
+  // A native task is stopped through the session, which only engines with background tasks
+  // implement; a dispatch is stopped through the dispatcher.
+  const canStop =
+    (ownerToolUseId === null || hasActiveTask) && (isDispatch || backgroundTasksEnabled)
 
   const handleStopTask = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
