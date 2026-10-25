@@ -380,6 +380,27 @@ Learned verifying the opencode subagent parity arc (ADR-111).
 - **An opencode dispatch target needs a pi (or Claude/Codex) parent**: opencode's dispatch tool cannot target
   opencode. Copy the managed `pi/<version>` into the scratch store, restart, `reloadEngineModels('pi')`, and set
   BOTH engines' `autoMode.judgeModel`.
+- **Backslashes are halved** on their way through the shell tool: a `\d` in a `sed` or `bash -c` argument arrives as
+  `\d`. Put regexes in heredoc files (`<<'EOF'`) or `String.raw` node scripts.
+- **Idle timeout**: `sessionStore.getState().updateSettings({sessionTimeoutMins: 0.5})` (the Settings minimum is
+  5 min); it applies at a live session's next timer reset. The renderer keeps `status.state` `idle` after a
+  disconnect: read the main log's `[OpencodeSession] Idle timeout — auto-disconnecting` and the sidebar dot
+  `SessionItem.statusDot[data-state]` (`inactive`).
+- **"Ready for input"**: stub `document.hasFocus = () => false` and spy on `window.Notification` (a stub class with
+  `permission = 'granted'`); sanity-check with a plain no-subagent turn first.
+- **Selectors**: `SessionItem.statusDot` (`data-state` running | subagents | idle | attention | inactive,
+  `data-subagents`); the roster opens with `AgentTab`, rows are `AgentRow` (`.stop`, `.resumed`, `.metrics`,
+  `.status[data-status]`); its filter defaults to Running and is sticky (`AgentRoster.filter.all` for finished
+  rows); `TaskCard.stop|sendToBackground|background|resumed|openInPanel`; `TaskEntry.stop`; host notes
+  `MessageBubble.hostLabel`; the composer's Stop `InputBox.cancel`. `sessions[id].activeTasks` records carry
+  `runIndex`, `isBackgrounded`, `wakesParent`; ids rekey to `ses_…` after the first turn.
+- **Project config from the session's cwd**: a project `opencode.json` with `"experimental": {"subagent_depth": 2}`
+  and a custom agent (`"agent": {"nest": {"mode": "subagent", "permission": {"subagent": "allow"}}}`) gives depth 2;
+  `"permission": {"subagent": "ask"}` is the only way a default-mode spawn raises a card. Claude-form allow rules go
+  in `<cwd>/.claude/settings.local.json`; skills in `<cwd>/.opencode/skills/<name>/SKILL.md`.
+- **Hash checks**: the owner's running app rewrites the real `opencode.db`; exclude it from before/after hashes.
+- **Reopen**: quit through the driver, relaunch on the same home, click `SessionItem[data-id=…]` (expand its project
+  row when it is not in Recent); the store holds no sessions until one is opened.
 
 ## Isolation, terminals and native modules
 
