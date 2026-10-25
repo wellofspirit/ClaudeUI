@@ -17,6 +17,7 @@ import {
   buildPiPathScope,
   hostPathFs,
   humanOnlyMessage,
+  isPosixNamespacePath,
   isRemoteWindowsPath,
   normalizeWindowsShellPath,
   outsideAllowRules,
@@ -26,10 +27,12 @@ import {
   pinMismatchReason,
   platformForCwd,
   rawSpellingHolds,
+  readBlockMessage,
   readCandidate,
   sameFacts,
   suspiciousWindowsPath,
   withPathGuard,
+  workspaceEditRules,
   type PathScopeFs,
   type PiPathScope
 } from '../pi-path-scope'
@@ -1647,6 +1650,577 @@ describe('R4 helpers — path-scoped "always allow" rules for an outside target'
 // ---------------------------------------------------------------------------
 // Real symlinks / junctions
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Slice F4 (second exit review)
+// ---------------------------------------------------------------------------
+
+/** A recording wrapper around a virtual POSIX fs: every call, with its argument, in order. */
+function recordingPosixFs(nodes: Record<string, VirtualNode>) {
+  const inner = makeVirtualFs('posix', nodes)
+  const calls: string[] = []
+  const fs: PathScopeFs = {
+    realpath: (p) => (calls.push(`realpath ${p}`), inner.realpath(p)),
+    lstat: (p) => (calls.push(`lstat ${p}`), inner.lstat(p)),
+    readlink: (p) => (calls.push(`readlink ${p}`), inner.readlink(p)),
+    exists: (p) => (calls.push(`exists ${p}`), inner.exists(p))
+  }
+  return { fs, calls, inner }
+}
+
+const F4_TOOLS = ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const
+const toolInput = (tool: string, p: string): Record<string, unknown> =>
+  tool === 'write' ? { path: p, content: 'x' } : { path: p }
+/** A call argument that is under one of the namespaces (`recordingPosixFs` prints `<op> <path>`). */
+const NAMESPACE_ARG = /^\w+ \/(?:net|network|\.vol|\.file|\.nofollow|\.resolve)(?:\/|$)/i
+
+describe('F4-1 — automount and kernel-redirect namespaces are placed with no filesystem call (POSIX)', () => {
+  const scopeFor = (
+    platform: NodeJS.Platform,
+    fs: PathScopeFs,
+    roots: string[] = []
+  ): PiPathScope => ({ cwd: '/repo', roots, platform, homeDir: '/home/u', fs })
+
+  // `/net` is every POSIX platform (Linux autofs too)
+  const NET = [
+    '/net/x.example/f',
+    '/net',
+    '/net/h',
+    '/NET/x.example/f',
+    '/Net/h/f',
+    '/repo/../net/h/f',
+    '../net/h/f',
+    '@/net/h/f',
+    'file:///net/x.example/f',
+    '/n\u200cet/h/f',
+    '/net/h/Shot 1.00 PM.png'
+  ]
+  // darwin only
+  const DARWIN = [
+    '/Network/Servers/h/f',
+    '/network/servers/h/f',
+    '/Network',
+    '/.vol/1/2',
+    '/.VOL/1/2',
+    '/.file/id=1.2',
+    '/.nofollow/x',
+    '/.resolve/x',
+    '/.vol'
+  ]
+
+  describe.each(['linux', 'darwin'] as const)('platform %s', (platform) => {
+    it.each(NET)('%s: unresolved + remote, every tool, ZERO filesystem calls', (p) => {
+      const { fs, calls } = recordingPosixFs({ '/repo': 'dir' })
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const f = pathFacts(tool, toolInput(tool, p), scopeFor(platform, fs))!
+        expect(calls, `${tool} ${p}`).toEqual([])
+        expect(f, `${tool} ${p}`).toMatchObject({
+          state: 'unresolved',
+          remote: true,
+          device: false,
+          inScope: false,
+          inFence: false,
+          carriedOut: false
+        })
+        expect(f.landing).toBeUndefined()
+        expect(humanOnlyMessage(f)).toContain('is a network path')
+      }
+    })
+
+    it.each(DARWIN)(
+      platform === 'darwin'
+        ? '%s: unresolved + remote, every tool, ZERO filesystem calls'
+        : '%s: an ordinary path on Linux (the filesystem is consulted, nothing is flagged)',
+      (p) => {
+        const { fs, calls } = recordingPosixFs({ '/repo': 'dir' })
+        for (const tool of F4_TOOLS) {
+          calls.length = 0
+          const f = pathFacts(tool, toolInput(tool, p), scopeFor(platform, fs))!
+          if (platform === 'darwin') {
+            expect(calls, `${tool} ${p}`).toEqual([])
+            expect(f, `${tool} ${p}`).toMatchObject({
+              state: 'unresolved',
+              remote: true,
+              inScope: false
+            })
+          } else {
+            expect(calls.length, `${tool} ${p}`).toBeGreaterThan(0)
+            expect(f.remote, `${tool} ${p}`).toBe(false)
+          }
+        }
+      }
+    )
+
+    it('a path that merely contains the word is ordinary (/netx, /repo/net, /.volume, /internet)', () => {
+      for (const p of ['/netx/f', '/repo/net/x', '/repo/.vol/x', '/.volume/x', '/internet/x']) {
+        const { fs, calls } = recordingPosixFs({ '/repo': 'dir' })
+        const f = pathFacts('read', { path: p }, scopeFor(platform, fs))!
+        expect(f.remote, p).toBe(false)
+        expect(calls.length, p).toBeGreaterThan(0)
+      }
+    })
+
+    it('a namespace additional directory is never probed, and nothing under it is in scope; the cwd still works', () => {
+      const { fs, calls } = recordingPosixFs({
+        '/repo': 'dir',
+        '/repo/src': 'dir',
+        '/repo/src/a.ts': 'file'
+      })
+      const scope = buildPiPathScope({
+        cwd: '/repo',
+        rules: { additionalDirectories: ['/net/h/share', '/Network/Servers/h/s', '/.vol/1/2'] },
+        platform,
+        fs,
+        homeDir: '/home/u'
+      })
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const ok = pathFacts(tool, toolInput(tool, 'src/a.ts'), scope)!
+        expect(ok, tool).toMatchObject({ state: 'resolved', inScope: true, remote: false })
+        expect(
+          calls.filter(
+            (c) => NAMESPACE_ARG.test(c) && (platform === 'darwin' || /\/net\b/i.test(c))
+          ),
+          tool
+        ).toEqual([])
+        calls.length = 0
+        const net = pathFacts(tool, toolInput(tool, '/net/h/share/f'), scope)!
+        expect(net, tool).toMatchObject({ state: 'unresolved', remote: true, inScope: false })
+        expect(calls, tool).toEqual([])
+      }
+    })
+
+    it('a link whose target text is under /net (directly, relative, via a chain, in a link-target ancestor) is unresolved + remote before any realpath', () => {
+      const { fs, calls } = recordingPosixFs({
+        '/repo': 'dir',
+        '/repo/src': 'dir',
+        '/repo/evil': { link: '/net/h/x' },
+        '/repo/hop': { link: '/repo/evil' },
+        '/repo/rel': { link: '../net/h' },
+        '/repo/via': { link: '../other/via' },
+        '/other': 'dir',
+        '/other/via': { link: '/NET/h' },
+        '/repo/ok': { link: '/repo/src' }
+      })
+      for (const rel of ['evil', 'evil/x', 'hop', 'hop/deep/x', 'rel/x', 'via/x']) {
+        for (const tool of F4_TOOLS) {
+          calls.length = 0
+          const f = pathFacts(tool, toolInput(tool, rel), scopeFor(platform, fs, ['/repo']))!
+          expect(f, `${tool} ${rel}`).toMatchObject({ state: 'unresolved', remote: true })
+          expect(f.landing).toBeUndefined()
+          expect(
+            calls.filter((c) => c.startsWith('realpath') && /evil|hop|rel|via/.test(c)),
+            `${tool} ${rel}`
+          ).toEqual([])
+          expect(
+            calls.filter((c) => NAMESPACE_ARG.test(c)),
+            `${tool} ${rel}`
+          ).toEqual([])
+          expect(humanOnlyMessage(f)).toContain('is a network path')
+        }
+      }
+      // control: a link to a local directory is followed as before
+      const ok = pathFacts(
+        'write',
+        toolInput('write', 'ok/n.ts'),
+        scopeFor(platform, fs, ['/repo'])
+      )!
+      expect(ok).toMatchObject({ remote: false, landing: '/repo/src/n.ts', inScope: true })
+    })
+
+    it(`a link whose target is under /Network or /.vol is ${platform === 'darwin' ? 'remote' : 'an ordinary dangling link'}`, () => {
+      const { fs, calls } = recordingPosixFs({
+        '/repo': 'dir',
+        '/repo/nw': { link: '/Network/Servers/h' },
+        '/repo/vol': { link: '/.vol/1/2' },
+        '/repo/rel': { link: '../.nofollow/x' }
+      })
+      for (const rel of ['nw/x', 'vol', 'rel']) {
+        calls.length = 0
+        const f = pathFacts('read', { path: rel }, scopeFor(platform, fs, ['/repo']))!
+        expect(f.state, rel).toBe('unresolved')
+        if (platform === 'darwin') {
+          expect(f.remote, rel).toBe(true)
+          expect(
+            calls.filter((c) => NAMESPACE_ARG.test(c)),
+            rel
+          ).toEqual([])
+          expect(
+            calls.filter((c) => c.startsWith('realpath')),
+            rel
+          ).toEqual([])
+        } else {
+          expect(f.remote, rel).toBe(false)
+        }
+      }
+    })
+  })
+
+  it('isPosixNamespacePath: the first component decides, after `.` / `..` are folded, ignoring case and zero-width characters', () => {
+    const yes: Array<[string, NodeJS.Platform]> = [
+      ['/net', 'linux'],
+      ['/net/h/x', 'linux'],
+      ['/NET/h', 'linux'],
+      ['//net//h', 'linux'],
+      ['/./net/h', 'linux'],
+      ['/n\u200det/h', 'linux'],
+      ['/net/../etc', 'linux'], // conservative, as Claude's: the name was spelled
+      ['/Network/Servers/h', 'darwin'],
+      ['/network', 'darwin'],
+      ['/.vol/1/2', 'darwin'],
+      ['/.FILE/x', 'darwin'],
+      ['/.nofollow/x', 'darwin'],
+      ['/.resolve/x', 'darwin'],
+      ['/.vol/../etc/passwd', 'darwin'],
+      ['/net/h', 'darwin']
+    ]
+    const no: Array<[string, NodeJS.Platform]> = [
+      ['/Network/Servers/h', 'linux'],
+      ['/.vol/1/2', 'linux'],
+      ['/repo/net', 'linux'],
+      ['/repo/.vol', 'darwin'],
+      ['/netx', 'linux'],
+      ['/.volume', 'darwin'],
+      ['/', 'darwin'],
+      ['net/h', 'linux'],
+      ['/net/h', 'win32'],
+      ['\\net\\h', 'win32']
+    ]
+    for (const [p, plat] of yes) expect(isPosixNamespacePath(p, plat), `${plat} ${p}`).toBe(true)
+    for (const [p, plat] of no) expect(isPosixNamespacePath(p, plat), `${plat} ${p}`).toBe(false)
+  })
+
+  it('sameFacts: a link that turned into a /net link while a human sat on the card changes the verdict facts', () => {
+    const { fs, inner } = recordingPosixFs({ '/repo': 'dir', '/repo/l': 'dir' })
+    const scope = scopeFor('linux', fs, ['/repo'])
+    const before = pathFacts('write', toolInput('write', 'l/f.ts'), scope)!
+    inner.set('/repo/l', { link: '/net/h/x' })
+    const after = pathFacts('write', toolInput('write', 'l/f.ts'), scope)!
+    expect(after.remote).toBe(true)
+    expect(sameFacts(before, after, 'linux')).toBe(false)
+  })
+})
+
+describe('F4-3 — a link walk that cannot read an entry makes the path unplaceable, not "end of walk"', () => {
+  const eacces = (code: string): NodeJS.ErrnoException =>
+    Object.assign(new Error(`${code}: fixture`), { code })
+
+  function fsDenying(
+    platform: 'posix' | 'win32',
+    nodes: Record<string, VirtualNode>,
+    deny: { lstat?: string; readlink?: string; code: string }
+  ) {
+    const inner = makeVirtualFs(platform, nodes)
+    const calls: string[] = []
+    const same = (a: string, b: string): boolean =>
+      platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+    const fs: PathScopeFs = {
+      realpath: (p) => (calls.push(`realpath ${p}`), inner.realpath(p)),
+      lstat: (p) => {
+        calls.push(`lstat ${p}`)
+        if (deny.lstat !== undefined && same(p, deny.lstat)) throw eacces(deny.code)
+        return inner.lstat(p)
+      },
+      readlink: (p) => {
+        calls.push(`readlink ${p}`)
+        if (deny.readlink !== undefined && same(p, deny.readlink)) throw eacces(deny.code)
+        return inner.readlink(p)
+      },
+      exists: (p) => inner.exists(p)
+    }
+    return { fs, calls }
+  }
+
+  it.each(['EACCES', 'EPERM', 'ELOOP', 'EIO'])(
+    'POSIX: lstat %s on a component -> unresolved, no realpath, not remote',
+    (code) => {
+      const { fs, calls } = fsDenying(
+        'posix',
+        { '/repo': 'dir', '/repo/src': 'dir', '/repo/src/a.ts': 'file' },
+        { lstat: '/repo/src', code }
+      )
+      const scope: PiPathScope = {
+        cwd: '/repo',
+        roots: [],
+        platform: 'linux',
+        homeDir: '/home/u',
+        fs
+      }
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const f = pathFacts(tool, toolInput(tool, 'src/a.ts'), scope)!
+        expect(f, `${tool}`).toMatchObject({
+          state: 'unresolved',
+          remote: false,
+          device: false,
+          inScope: false,
+          carriedOut: false
+        })
+        expect(
+          calls.filter((c) => c.startsWith('realpath')),
+          tool
+        ).toEqual([])
+        expect(humanOnlyMessage(f)).toContain('could not be determined')
+      }
+    }
+  )
+
+  it('POSIX: a link whose readlink fails -> unresolved, no realpath, not remote', () => {
+    const { fs, calls } = fsDenying(
+      'posix',
+      { '/repo': 'dir', '/repo/src': 'dir', '/repo/lnk': { link: '/repo/src' } },
+      { readlink: '/repo/lnk', code: 'EPERM' }
+    )
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: [],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs
+    }
+    const f = pathFacts('write', toolInput('write', 'lnk/a.ts'), scope)!
+    expect(f).toMatchObject({ state: 'unresolved', remote: false, inScope: false })
+    expect(calls.filter((c) => c.startsWith('realpath'))).toEqual([])
+  })
+
+  it('win32: lstat EACCES / readlink EPERM -> unresolved, no realpath (was: "remote" for readlink, "end of walk" for lstat)', () => {
+    const nodes: Record<string, VirtualNode> = {
+      'D:\\repo': 'dir',
+      'D:\\repo\\src': 'dir',
+      'D:\\repo\\src\\a.ts': 'file',
+      'D:\\repo\\lnk': { link: 'D:\\repo\\src' }
+    }
+    for (const deny of [
+      { lstat: 'D:\\repo\\src', code: 'EACCES' },
+      { readlink: 'D:\\repo\\lnk', code: 'EPERM' }
+    ]) {
+      const { fs, calls } = fsDenying('win32', nodes, deny)
+      const scope: PiPathScope = {
+        cwd: 'D:\\repo',
+        roots: [],
+        platform: 'win32',
+        homeDir: 'C:\\Users\\u',
+        fs
+      }
+      const rel = deny.lstat ? 'src\\a.ts' : 'lnk\\a.ts'
+      const f = pathFacts('write', toolInput('write', rel), scope)!
+      expect(f, rel).toMatchObject({ state: 'unresolved', remote: false, device: false })
+      expect(
+        calls.filter((c) => c.startsWith('realpath')),
+        rel
+      ).toEqual([])
+    }
+  })
+
+  it('a link loop is unresolved with no realpath on either platform family, and is not called a network path', () => {
+    const { fs, calls } = recordingPosixFs({
+      '/repo': 'dir',
+      '/repo/loop-a': { link: '/repo/loop-b' },
+      '/repo/loop-b': { link: '/repo/loop-a' }
+    })
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: [],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs
+    }
+    const f = pathFacts('read', { path: 'loop-a/x' }, scope)!
+    expect(f).toMatchObject({ state: 'unresolved', remote: false })
+    expect(calls.filter((c) => c.startsWith('realpath'))).toEqual([])
+    expect(humanOnlyMessage(f)).not.toContain('network path')
+  })
+
+  it('a missing entry still ends the walk: a new file in a new directory is a missing leaf', () => {
+    const { fs } = recordingPosixFs({ '/repo': 'dir' })
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: ['/repo'],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs
+    }
+    expect(pathFacts('write', toolInput('write', 'new/dir/f.ts'), scope)).toMatchObject({
+      state: 'missing-leaf',
+      inScope: true
+    })
+  })
+
+  it('the read block says why: network, device, or undetermined', () => {
+    const posix = recordingPosixFs({ '/repo': 'dir' })
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: ['/repo'],
+      platform: 'darwin',
+      homeDir: '/home/u',
+      fs: posix.fs,
+      blockOutsideReads: true
+    }
+    const net = pathFacts('read', { path: '/net/h/f' }, scope)!
+    expect(readBlockMessage(net, scope)).toContain('is a network path')
+    expect(readBlockMessage(net, scope)).not.toContain('could not be determined')
+    expect(readBlockMessage(net, scope)).toContain('blockReadsOutsideWorkingDirectories')
+
+    const win = recordingWinFs({ 'D:\\repo': 'dir' })
+    const winScope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: win.fs,
+      blockOutsideReads: true
+    }
+    const dev = pathFacts('read', { path: 'COM1' }, winScope)!
+    expect(readBlockMessage(dev, winScope)).toContain('Windows device')
+    expect(readBlockMessage(dev, winScope)).toContain('blockReadsOutsideWorkingDirectories')
+    const unc = pathFacts('read', { path: '\\\\h\\s\\f' }, winScope)!
+    expect(readBlockMessage(unc, winScope)).toContain('is a network path')
+
+    const { fs } = fsDenying(
+      'posix',
+      { '/repo': 'dir', '/repo/a': 'file' },
+      {
+        lstat: '/repo/a',
+        code: 'EACCES'
+      }
+    )
+    const other: PiPathScope = { ...scope, platform: 'linux', fs }
+    const undetermined = pathFacts('read', { path: 'a' }, other)!
+    expect(readBlockMessage(undetermined, other)).toContain('could not be determined')
+  })
+})
+
+describe('F4-2 — DOS device names: superscript digits and the odd spellings (win32)', () => {
+  const scopeWith = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+  const DEVICES = [
+    'COM\u00B9',
+    'com\u00B2',
+    'COM\u00B3',
+    'LPT\u00B9',
+    'lpt\u00B2',
+    'LPT\u00B3',
+    'COM\u00B9.txt',
+    'lpt\u00B3.log',
+    'src\\COM\u00B2\\x.ts',
+    // the odd spellings Win32 still maps to the device (trailing colon, space, space before the extension)
+    'NUL:',
+    'COM1 ',
+    'CON .txt',
+    'aux :stream'
+  ]
+
+  it.each(DEVICES)('%j: unresolved + device, every tool, ZERO filesystem calls', (p) => {
+    const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir', 'D:\\repo\\src': 'dir' })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, p), scopeWith(fs))!
+      expect(calls, `${tool} ${p}`).toEqual([])
+      expect(f, `${tool} ${p}`).toMatchObject({ state: 'unresolved', device: true, remote: false })
+    }
+    expect(suspiciousWindowsPath(`D:\\repo\\${p}`)).toBe(true)
+  })
+
+  it('the neighbours are ordinary: COM0, COM10, COM\u2074 (superscript four), LPT0, comx', () => {
+    for (const p of ['COM0', 'COM10', 'COM\u2074', 'LPT0', 'lpt\u2075', 'comx', 'COM\u00B9x']) {
+      const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir' })
+      const f = pathFacts('write', { path: p, content: 'x' }, scopeWith(fs))!
+      expect(f.device, p).toBe(false)
+      expect(calls.length, p).toBeGreaterThan(0)
+    }
+  })
+
+  it('a link whose target is a superscript device is unresolved + device', () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      'D:\\repo\\l': { link: 'D:\\repo\\COM\u00B2' }
+    })
+    const f = pathFacts('read', { path: 'l' }, scopeWith(fs))!
+    expect(f).toMatchObject({ state: 'unresolved', device: true })
+    expect(calls.filter((c) => /COM\u00B2/.test(c))).toEqual([])
+  })
+})
+
+describe('F4-4 — workspaceEditRules: the rule an in-workspace edit/write card suggests', () => {
+  it('Edit(//<root>/**) for the root holding the target, for edit and write alike', () => {
+    for (const tool of ['edit', 'write'] as const) {
+      expect(workspaceEditRules(tool, { path: 'src/a.ts' }, posixScope())).toEqual([
+        { toolName: 'Edit', ruleContent: '//repo/**' }
+      ])
+      expect(workspaceEditRules(tool, { path: '/repo/src/new.ts' }, posixScope())).toEqual([
+        { toolName: 'Edit', ruleContent: '//repo/**' }
+      ])
+    }
+  })
+
+  it('an additional directory suggests its own root, not the cwd and not the bare tool', () => {
+    expect(workspaceEditRules('write', { path: '/extra/notes.md' }, posixScope())).toEqual([
+      { toolName: 'Edit', ruleContent: '//extra/**' }
+    ])
+  })
+
+  it('nested roots: the narrowest root that holds the target', () => {
+    const scope = posixScope({ roots: ['/repo', '/repo/src'] })
+    expect(workspaceEditRules('edit', { path: 'src/a.ts' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//repo/src/**' }
+    ])
+    expect(workspaceEditRules('edit', { path: 'file.txt' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//repo/**' }
+    ])
+  })
+
+  it('a cwd reached through a link: the rule is spelled the way the cwd is (the allow tier matches that alias)', () => {
+    const scope: PiPathScope = {
+      cwd: '/logical',
+      roots: ['/logical'],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs: makeVirtualFs('posix', { '/logical': { link: '/physical' }, '/physical': 'dir' })
+    }
+    expect(workspaceEditRules('write', { path: 'a.ts' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//logical/**' }
+    ])
+  })
+
+  it('win32: //<drive>/<dir>/**', () => {
+    const scope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { 'D:\\repo': 'dir' })
+    }
+    expect(workspaceEditRules('edit', { path: 'src\\a.ts' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//d/repo/**' }
+    ])
+  })
+
+  it('nothing to offer: an outside target, an agent-control path, an unplaceable path, a read tool, the scratchpad, a root with a glob character', () => {
+    const scope = posixScope({ scratchpad: '/tmp/claudeui/proj/sess/scratchpad' })
+    expect(workspaceEditRules('write', { path: '/etc/passwd' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('write', { path: '/repo/link-out/x' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('edit', { path: '.git/hooks/pre-commit' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('edit', { path: 'dangling/x' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('edit', { path: '/net/h/f' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('read', { path: 'src/a.ts' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('bash', { command: 'ls' }, scope)).toBeUndefined()
+    expect(
+      workspaceEditRules('write', { path: '/tmp/claudeui/proj/sess/scratchpad/n.md' }, scope)
+    ).toBeUndefined()
+    const globby = posixScope({
+      cwd: '/rep*o',
+      roots: ['/rep*o'],
+      fs: makeVirtualFs('posix', { '/rep*o': 'dir' })
+    })
+    expect(workspaceEditRules('write', { path: 'a.ts' }, globby)).toBeUndefined()
+  })
+})
 
 describe('pathFacts — real links in a temp dir', () => {
   let base: string

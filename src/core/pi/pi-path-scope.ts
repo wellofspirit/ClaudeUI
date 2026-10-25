@@ -26,6 +26,12 @@
  * authentication to a host the model named) before any decision. Such a path is `unresolved` and
  * `remote`, hence a human-only ask. `\\?\C:\…` is a local path in disguise, but the namespace
  * prefixes are refused wholesale: nothing legitimate needs them, and "no call" is the safe side.
+ * The POSIX counterpart is the automount / kernel-redirect namespaces ({@link isPosixNamespacePath}):
+ * `/net/<host>/…` (autofs `-hosts`: a DNS lookup and an NFS mount of a host the model named) on
+ * every POSIX platform and, on darwin, `/Network/…`, `/.vol/…`, `/.file/…`, `/.nofollow/…`,
+ * `/.resolve/…` — placed from the spelling alone, on every spelling (read variants, additional
+ * directories) and through the link walk (`lstat` + `readlink` only, a link whose target text is
+ * one of them is unplaceable before any `realpath`), like Claude Code's `vze`.
  * A win32 path with a DOS device component (`CON`, `NUL`, `COM1`, … with or without an extension)
  * is treated the same way (`device`): opening one touches hardware, so it is placed from its
  * spelling alone and is a human-only ask for a read as well as a write.
@@ -308,27 +314,83 @@ const REMOTE_LINK_TARGET = /^(?:[\\/]{2}|\\\?\?\\)/
 
 const MAX_LINK_HOPS = 40
 
-/** Why a win32 path cannot be placed without risk: it reaches a network path, or a DOS device. */
-type PlacementTrap = 'remote' | 'device'
+/** Zero-width and bidi control characters Claude's `eO` strips before it compares a path component. */
+const INVISIBLE_CHARS = /[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g
+
+/** Darwin's network / kernel-redirect first components (besides `net`, which is every POSIX): see {@link isPosixNamespacePath}. */
+const DARWIN_NAMESPACE_ROOTS: ReadonlySet<string> = new Set([
+  'network',
+  '.vol',
+  '.file',
+  '.nofollow',
+  '.resolve'
+])
 
 /**
- * Does `abs` (a win32 path that is not itself remote) reach a network path or a DOS device
- * through a link — a link component, or a link component of a link's target, whose target is
- * remote, or has a DOS device name as one of its components? The walk uses only `lstat` and
- * `readlink`, each on a path that has just been shown to be local and not a device (a link target
- * is judged on its text BEFORE it is ever looked at), so it makes no network call and touches no
- * device. A link it cannot read, or a chain past {@link MAX_LINK_HOPS}, answers 'remote': the
- * caller treats the path as unplaceable. Anything missing ends the walk with undefined: nothing
- * past it exists to be a link.
+ * A POSIX path (already resolved) under an automount map or a kernel-redirected namespace: merely
+ * naming it can make the OS act. `/net/<host>` is the autofs `-hosts` map (a DNS lookup and an NFS
+ * mount of whatever host the model named; Linux autofs as well as macOS), `/Network/Servers/…` is
+ * macOS's directory-service browse surface, and `/.vol`, `/.file`, `/.nofollow`, `/.resolve` are
+ * paths the macOS kernel redirects (by volume id / file id) and that can land on a network mount.
+ * Judged from the SPELLING alone, so the gate never touches them. Mirrors Claude Code's `vze`
+ * (cli.js 2.1.308: `Mw`/`Pqe` for `/net`, `iD` for `/Network`, `Rb` for the `/.vol` family): the
+ * FIRST component decides, case-insensitively (macOS volumes are case-insensitive by default; on
+ * Linux the extra case folding only over-asks, which is the safe side), with `.` / `..` folded and
+ * zero-width characters ignored. `/net` is every POSIX platform; the others are darwin only.
+ * Always false on win32 (a `/net` there is a drive-relative path).
  */
-function linkTrap(abs: string, fs: PathScopeFs, flavor: Flavor): PlacementTrap | undefined {
+export function isPosixNamespacePath(abs: string, platform: NodeJS.Platform): boolean {
+  if (platform === 'win32' || !abs.startsWith('/')) return false
+  const stack: string[] = []
+  for (const part of abs.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      stack.pop()
+      continue
+    }
+    stack.push(part)
+    if (stack.length === 1) {
+      const name = part.replace(INVISIBLE_CHARS, '').toLowerCase()
+      if (name === 'net' || (platform === 'darwin' && DARWIN_NAMESPACE_ROOTS.has(name))) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Why a path cannot be placed without risk: it reaches a network path or an automount /
+ * kernel-redirect namespace (`remote`), or a DOS device (`device`), or the walk could not read
+ * something on the way (`unreadable`: permission denied, a chain past {@link MAX_LINK_HOPS}, …).
+ */
+type PlacementTrap = 'remote' | 'device' | 'unreadable'
+
+/**
+ * Does `abs` (a resolved path that is not itself remote) reach a network path, an automount
+ * namespace or a DOS device through a link — a link component, or a link component of a link's
+ * target, whose target is remote / in a namespace, or (win32) has a DOS device name as one of its
+ * components? The walk uses only `lstat` and `readlink`, each on a path that has just been shown to
+ * be local and not a device (a link target is judged on its text BEFORE it is ever looked at), so
+ * it makes no network call and touches no device. A link it cannot read, an entry whose `lstat`
+ * fails for any reason but "no such entry" (EACCES, EPERM, …), or a chain past
+ * {@link MAX_LINK_HOPS}, answers 'unreadable': the caller treats the path as unplaceable. Only a
+ * missing entry ends the walk with undefined: nothing past it exists to be a link.
+ */
+function linkTrap(
+  abs: string,
+  fs: PathScopeFs,
+  platform: NodeJS.Platform
+): PlacementTrap | undefined {
+  const flavor = flavorOf(platform)
+  const win = platform === 'win32'
+  // POSIX: a backslash is an ordinary file-name character, not a separator.
+  const separators = win ? /[\\/]+/ : /\/+/
   let p = abs
   let hops = 0
   restart: for (;;) {
     const { root } = flavor.parse(p)
     const parts = p
       .slice(root.length)
-      .split(/[\\/]+/)
+      .split(separators)
       .filter((c) => c.length > 0)
     let current = root
     for (let i = 0; i < parts.length; i++) {
@@ -336,21 +398,23 @@ function linkTrap(abs: string, fs: PathScopeFs, flavor: Flavor): PlacementTrap |
       let isLink: boolean
       try {
         isLink = fs.lstat(current).isSymbolicLink()
-      } catch {
-        return undefined
+      } catch (err) {
+        return isMissing(err) ? undefined : 'unreadable'
       }
       if (!isLink) continue
-      if (++hops > MAX_LINK_HOPS) return 'remote'
+      if (++hops > MAX_LINK_HOPS) return 'unreadable'
       let target: string
       try {
         target = fs.readlink(current)
       } catch {
-        return 'remote'
+        return 'unreadable'
       }
-      if (REMOTE_LINK_TARGET.test(target)) return 'remote'
-      if (hasDosDevicePart(target)) return 'device'
+      if (win) {
+        if (REMOTE_LINK_TARGET.test(target)) return 'remote'
+        if (hasDosDevicePart(target)) return 'device'
+      }
       const dest = flavor.resolve(flavor.dirname(current), target)
-      if (isRemoteWindowsPath(dest)) return 'remote'
+      if (win ? isRemoteWindowsPath(dest) : isPosixNamespacePath(dest, platform)) return 'remote'
       p = flavor.join(dest, ...parts.slice(i + 1))
       continue restart
     }
@@ -358,10 +422,21 @@ function linkTrap(abs: string, fs: PathScopeFs, flavor: Flavor): PlacementTrap |
   }
 }
 
-/** Would placing `abs` touch the network or a device? (win32 only: a remote spelling, or a link that leads to one.) No fs call for a remote spelling. */
-function placementTrap(abs: string, fs: PathScopeFs, flavor: Flavor): PlacementTrap | undefined {
-  if (flavor !== path.win32) return undefined
-  return isRemoteWindowsPath(abs) ? 'remote' : linkTrap(abs, fs, flavor)
+/**
+ * Would placing `abs` touch the network or a device? A remote spelling (UNC / WebDAV / a namespace
+ * on win32; `/net`, and on darwin `/Network` and the `/.vol` family, on POSIX) is answered from the
+ * spelling with no fs call; anything else gets the link walk, which looks for a link that leads to
+ * one.
+ */
+function placementTrap(
+  abs: string,
+  fs: PathScopeFs,
+  platform: NodeJS.Platform
+): PlacementTrap | undefined {
+  if (platform === 'win32' ? isRemoteWindowsPath(abs) : isPosixNamespacePath(abs, platform)) {
+    return 'remote'
+  }
+  return linkTrap(abs, fs, platform)
 }
 
 /**
@@ -370,8 +445,9 @@ function placementTrap(abs: string, fs: PathScopeFs, flavor: Flavor): PlacementT
  * entry that exists but will not resolve (a dangling link, at the leaf or anywhere in the
  * chain) — is `unresolved`: the caller never auto-allows what it cannot place.
  */
-function landingOf(abs: string, fs: PathScopeFs, flavor: Flavor): Landing {
-  if (placementTrap(abs, fs, flavor) !== undefined) return { state: 'unresolved' }
+function landingOf(abs: string, fs: PathScopeFs, platform: NodeJS.Platform): Landing {
+  if (placementTrap(abs, fs, platform) !== undefined) return { state: 'unresolved' }
+  const flavor = flavorOf(platform)
   let current = abs
   const tail: string[] = []
   for (;;) {
@@ -402,7 +478,9 @@ function landingOf(abs: string, fs: PathScopeFs, flavor: Flavor): Landing {
 // Windows path forms
 // ---------------------------------------------------------------------------
 
-const DOS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9]|conin\$|conout\$) *(?:[.:].*)?$/i
+// COM¹ COM² COM³ and LPT¹ LPT² LPT³ (U+00B9, U+00B2, U+00B3) are reserved device names too.
+const DOS_DEVICE =
+  /^(?:con|prn|aux|nul|com[1-9\u00B9\u00B2\u00B3]|lpt[1-9\u00B9\u00B2\u00B3]|conin\$|conout\$) *(?:[.:].*)?$/i
 
 /** Does any component of the (resolved) win32 path `abs` name a DOS device, with or without an extension? */
 function hasDosDevicePart(abs: string): boolean {
@@ -477,7 +555,12 @@ export interface PiPathFacts {
   sensitive: boolean
   /** (win32) a path form that may name another object than it shows — see {@link suspiciousWindowsPath}. */
   suspiciousWindows: boolean
-  /** (win32) a network / namespace path (UNC, WebDAV, the extended-length and device namespaces), or a link to one: placed with no filesystem call, always `unresolved`. */
+  /**
+   * A network / namespace path, or a link to one: placed with no filesystem call, always
+   * `unresolved`. win32: UNC, WebDAV, the extended-length and device namespaces. POSIX: `/net/…`
+   * (the autofs `-hosts` map) and, on darwin, `/Network/…` and `/.vol`, `/.file`, `/.nofollow`,
+   * `/.resolve` ({@link isPosixNamespacePath}).
+   */
   remote: boolean
   /** (win32) a component names a DOS device (`CON`, `NUL`, `COM1`, …): placed with no filesystem call, always `unresolved`. */
   device: boolean
@@ -547,19 +630,23 @@ export function pathFacts(
   let resolved: string
   let remote = false
   let device = false
-  // A network path (or one that goes through a link to one) and a DOS device name are never
-  // handed to the filesystem, not even `exists`: opening `\\server\x` authenticates to a host,
-  // opening `COM1` / `CON` touches hardware. The facts are the human-only "unresolved" ones,
-  // from the spelling alone. The spellings are judged first: the link walk behind
-  // `placementTrap` calls `lstat` on every component, which is a call on the device.
+  let unreadable = false
+  // A network path (or one that goes through a link to one), an automount / kernel-redirect
+  // namespace (`/net/…`; on darwin `/Network/…`, `/.vol/…`) and a DOS device name are never handed
+  // to the filesystem, not even `exists`: opening `\\server\x` authenticates to a host, `/net/h/x`
+  // makes autofs resolve and mount `h`, opening `COM1` / `CON` touches hardware. A path whose
+  // link chain could not be read is not looked at any further either. The facts are the
+  // human-only "unresolved" ones, from the spelling alone. The spellings are judged first: the
+  // link walk behind `placementTrap` calls `lstat` on every component, which is a call on the device.
   const unplaceable = (p: string): boolean => {
     if (platform === 'win32' && !isRemoteWindowsPath(p) && hasDosDevicePart(p)) {
       device = true
       return true
     }
-    const trap = placementTrap(p, fs, flavor)
+    const trap = placementTrap(p, fs, platform)
     if (trap === 'device') device = true
     else if (trap === 'remote') remote = true
+    else if (trap === 'unreadable') unreadable = true
     return trap !== undefined
   }
   try {
@@ -576,7 +663,7 @@ export function pathFacts(
     // pi would throw on this input too (an unusable `file://`): it never reaches a file.
     return { ...blank, raw: typeof arg === 'string' ? arg : '' }
   }
-  if (remote || device) {
+  if (remote || device || unreadable) {
     return {
       ...blank,
       raw: typeof arg === 'string' ? arg : '',
@@ -589,7 +676,7 @@ export function pathFacts(
     }
   }
 
-  const { state, landing } = landingOf(execPath, fs, flavor)
+  const { state, landing } = landingOf(execPath, fs, platform)
   let leafIsSymlink = false
   if (write) {
     try {
@@ -603,7 +690,7 @@ export function pathFacts(
 
   const variantsOf = (root: string): string[] => {
     const abs = flavor.resolve(root)
-    const real = landingOf(abs, fs, flavor).landing
+    const real = landingOf(abs, fs, platform).landing
     return unique(real === undefined ? [abs] : [abs, real], platform)
   }
   const everyInside = (targets: readonly string[], roots: readonly string[]): boolean =>
@@ -615,7 +702,7 @@ export function pathFacts(
   if (landing !== undefined) {
     for (const root of scope.roots) {
       const abs = flavor.resolve(root)
-      const real = landingOf(abs, fs, flavor).landing
+      const real = landingOf(abs, fs, platform).landing
       if (
         real === undefined ||
         samePath(abs, real, platform) ||
@@ -721,7 +808,17 @@ export function symlinkWriteMessage(p: string): string {
 /** The read-block deny (Claude's `Jl`), pointed at ClaudeUI's setting for adding a directory. */
 export function readBlockMessage(facts: PiPathFacts, scope: PiPathScope): string {
   if (facts.state === 'unresolved') {
-    return `The location of ${facts.raw || facts.execPath} could not be determined; the permissions.blockReadsOutsideWorkingDirectories setting blocks reads that cannot be placed inside the working directories.`
+    const fence =
+      'the permissions.blockReadsOutsideWorkingDirectories setting blocks reads that cannot be placed inside the working directories.'
+    // The same wording as the human-only card: a network / namespace path and a device are never
+    // opened to be placed, which is not "could not be determined".
+    if (facts.remote) {
+      return `${facts.execPath} is a network path (or a link to one) and is never opened to check where it lands; ${fence}`
+    }
+    if (facts.device) {
+      return `${facts.execPath} names a Windows device (CON, NUL, COMn, LPTn, …), or is a link to one, and is never opened to check where it lands; ${fence}`
+    }
+    return `The location of ${facts.raw || facts.execPath} could not be determined; ${fence}`
   }
   const roots = (scope.fenceRoots ?? scope.roots).join(', ')
   const where =
@@ -837,6 +934,9 @@ export function rawSpellingHolds(
   } catch {
     return false
   }
+  // Consistency assertion, not a filter: `facts` came from this same `raw`, so pi's resolution of
+  // it is the facts' `resolved` (or the `read` variant `execPath`). It can only fail if a caller
+  // hands in facts that were not taken from this spelling, and then the answer is no.
   if (opened !== facts.execPath && opened !== facts.resolved) return false
   if (platform === 'win32') {
     if (/^[A-Za-z]:(?![\\/])/.test(normalized)) return false
@@ -947,4 +1047,39 @@ export function outsideAllowRules(
   const rules = [{ toolName: claudeTool, ruleContent: `${specifier}/**` }]
   if (SEARCH_TOOLS.has(toolName)) rules.unshift({ toolName: claudeTool, ruleContent: specifier })
   return rules
+}
+
+/**
+ * The allow rule to suggest on the card of an `edit` / `write` that asked INSIDE the workspace
+ * (default mode: edits ask): `Edit(//<root>/**)` for the narrowest workspace root (cwd or an
+ * additional directory, as spelled) that contains where the call lands — never the bare `Edit` /
+ * `Write` rule, which would be a standing allow for every file the tool can reach, the
+ * out-of-workspace ones included. An `Edit` rule governs both tools. Undefined where there is
+ * nothing safe to offer: not a file-changing tool, a target the scope does not place inside a
+ * root, an agent-control path, or a root with no safe rule spelling (a glob character in its name,
+ * a filesystem root). The spellings tried are the ones the allow tier matches: the landing and the
+ * landing re-expressed under a root's lexical spelling.
+ */
+export function workspaceEditRules(
+  toolName: string,
+  input: Record<string, unknown>,
+  scope: PiPathScope
+): Array<{ toolName: string; ruleContent: string }> | undefined {
+  if (toolName !== 'edit' && toolName !== 'write') return undefined
+  const facts = pathFacts(toolName, input, scope)
+  if (!facts || !facts.inScope || facts.sensitive || facts.state === 'unresolved') return undefined
+  const platform = scope.platform ?? process.platform
+  const flavor = flavorOf(platform)
+  const spellings = [facts.landing ?? facts.execPath, ...(facts.landingAliases ?? [])]
+  let best: string | undefined
+  for (const root of scope.roots) {
+    const abs = flavor.resolve(root)
+    if (!spellings.some((s) => insideRoot(s, abs, flavor))) continue
+    if (best === undefined || abs.length > best.length) best = abs
+  }
+  if (best === undefined) return undefined
+  const specifier = absoluteRuleSpecifier(best, platform)
+  return specifier === undefined
+    ? undefined
+    : [{ toolName: 'Edit', ruleContent: `${specifier}/**` }]
 }

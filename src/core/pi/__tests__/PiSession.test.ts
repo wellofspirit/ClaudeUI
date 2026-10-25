@@ -9194,14 +9194,52 @@ describe('PiSession — path containment (H1), real temp project', () => {
       session.dispose()
     })
 
-    it('an in-project ask keeps the bare tool rule (the workspace is not the concern)', async () => {
+    it('F4-4: an in-workspace write or edit suggests Edit(//<root>/**) for the workspace root, never the bare Write / Edit rule', async () => {
       const win = new MockWindow()
       const session = await open('rid-r4-inscope', win, 'default')
       void gate('r4-8', 'write', { path: 'src/new.ts' })
-      await onlyCard(win)
-      for (const s of cardOf(win).suggestions ?? []) {
-        expect(s.rules).toEqual([{ toolName: 'Write' }])
+      const card = await onlyCard(win)
+      const suggestions = cardOf(win).suggestions ?? []
+      expect(suggestions.map((s) => s.destination)).toEqual(DESTINATIONS)
+      for (const s of suggestions) {
+        expect(s.rules).toEqual([{ toolName: 'Edit', ruleContent: `${spec(project)}/**` }])
       }
+      session.resolveApproval(card.requestId, 'deny')
+      void gate('r4-8b', 'edit', { path: 'src/a.ts', oldText: 'a', newText: 'b' })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+      for (const s of (humanCards(win)[1] as { suggestions?: Suggestion[] }).suggestions ?? []) {
+        expect(s.rules).toEqual([{ toolName: 'Edit', ruleContent: `${spec(project)}/**` }])
+      }
+      session.dispose()
+    })
+
+    it('F4-4: the suggested workspace rule, saved, covers the workspace and nothing beyond it', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-inscope-rt', win, 'default')
+      void gate('r4-9', 'write', { path: 'src/new.ts' })
+      const card = await onlyCard(win)
+      const user = (cardOf(win).suggestions ?? []).find((s) => s.destination === 'userSettings')!
+      const saved = user.rules.map((r) => `${r.toolName}(${r.ruleContent})`)
+      mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+        allow: scope === 'user' ? saved : [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }))
+      session.resolveApproval(card.requestId, 'allow', undefined, [user])
+      const before = sentPayloads(win, 'session:approval-request').length
+      // the rule is honoured for another file in the workspace, by either tool...
+      expect((await gate('r4-10', 'write', { path: 'src/other.ts' })).behavior).toBe('allow')
+      expect(
+        (await gate('r4-11', 'edit', { path: 'src/a.ts', oldText: 'a', newText: 'b' })).behavior
+      ).toBe('allow')
+      expect(sentPayloads(win, 'session:approval-request').length).toBe(before)
+      // ...and a write outside the workspace still asks
+      void gate('r4-12', 'write', { path: real.path.join(outside, 'new.txt') })
+      await vi.waitFor(() =>
+        expect(sentPayloads(win, 'session:approval-request').length).toBe(before + 1)
+      )
       session.dispose()
     })
 

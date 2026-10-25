@@ -3434,6 +3434,62 @@ describe('decide — path containment (H1, ctx.scope)', () => {
     )
   })
 
+  describe('F4-1 in the ladder: an automount / kernel-redirect path is a human-only ask in every mode and never touches the fs (POSIX)', () => {
+    const CASES: Array<[NodeJS.Platform, string]> = [
+      ['linux', '/net/attacker.example/f'],
+      ['darwin', '/net/attacker.example/f'],
+      ['darwin', '/Network/Servers/attacker.example/f'],
+      ['darwin', '/.vol/1/2']
+    ]
+    it.each(CASES)(
+      '%s %s: read, write and grep ask a person (path-scope), with zero filesystem calls on it',
+      (platform, p) => {
+        const calls: string[] = []
+        const inner = makeVirtualFs('posix', { '/repo': 'dir' })
+        const fs = {
+          realpath: (x: string) => (calls.push(`realpath ${x}`), inner.realpath(x)),
+          lstat: (x: string) => (calls.push(`lstat ${x}`), inner.lstat(x)),
+          readlink: (x: string) => (calls.push(`readlink ${x}`), inner.readlink(x)),
+          exists: (x: string) => (calls.push(`exists ${x}`), inner.exists(x))
+        }
+        const scope: PiPathScope = {
+          cwd: '/repo',
+          roots: ['/repo'],
+          platform,
+          homeDir: '/home/u',
+          fs
+        }
+        // neither an allow rule nor a session allow can lift it
+        const allowAll = { allow: ['Read(//net/**)', 'Edit(//net/**)', 'Read', 'Edit', 'Write'] }
+        for (const [mode, judge] of [
+          ['default', false],
+          ['acceptEdits', false],
+          ['auto', true],
+          ['auto', false]
+        ] as const) {
+          for (const tool of ['read', 'write', 'grep'] as const) {
+            const input = tool === 'write' ? { path: p, content: 'x' } : { path: p }
+            calls.length = 0
+            const v = decideWithSource(tool, input, {
+              ...ctxOf(mode, judge, scope, allowAll, [allowKey(tool, input, scope)]),
+              cwd: '/repo'
+            })
+            expect(v, `${mode} ${tool} ${p}`).toMatchObject({
+              decision: 'ask',
+              source: 'path-scope'
+            })
+            expect(
+              calls.filter(
+                (c) => c.includes(' /net') || c.includes(' /Network') || c.includes(' /.vol')
+              ),
+              `${mode} ${tool} ${p}`
+            ).toEqual([])
+          }
+        }
+      }
+    )
+  })
+
   describe('mergedClaudeRulesFor: the provenance the fence needs', () => {
     it("lists the additional directories that did NOT come from project settings, and any scope's read block", () => {
       mockLoadClaudePermissions.mockImplementation((scope: string) => {

@@ -90,7 +90,8 @@ export interface PermissionVerdict {
   pathTarget?: string
   /**
    * An 'ask' on an edit/write that touches an agent-control path (inside the workspace or out):
-   * the card offers NO "always allow" suggestion, whatever the tool's bare rule would cover.
+   * the card offers NO "always allow" suggestion: the sensitive check runs before the allow tier,
+   * so a saved allow could never silence this card; it would only widen what other calls may do.
    */
   pathSensitive?: true
 }

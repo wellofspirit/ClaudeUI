@@ -120,6 +120,7 @@ import {
   isPiPathTool,
   outsideAllowRules,
   withPathGuard,
+  workspaceEditRules,
   type PiPathScope
 } from './pi-path-scope'
 import { ensurePiScratchpad, scratchpadPromptArgs, type ScratchpadEnv } from './pi-scratchpad'
@@ -2789,13 +2790,17 @@ export class PiSession extends BaseSession {
    * PREFIX rule (`Bash(<command>:*)` — the whole typed command plus a
    * trailing glob, matching Claude's own suggestion convention and round-
    * tripping through permission-engine.ts's bash prefix matcher); every other
-   * mapped tool gets a bare tool rule — except where the containment rung asked: a
-   * HUMAN-ONLY card (`path-scope`: an unplaceable or network path, a link-carried edit) gets no
-   * suggestion at all (a standing rule must not be one click away from a call the gate
-   * deliberately keeps for a person), nor does any edit/write card on an agent-control path
-   * (`pathSensitive`, in the workspace or out: a bare `Edit` rule would cover it), and a call that asked only because its target is OUTSIDE
-   * the workspace gets rules scoped to where it LANDS (`Read(//<dir>/**)` / `Edit(//<dir>/**)`,
-   * {@link outsideAllowRules}; the symbolic-link landing, not the in-project link's spelling), never the bare tool. Returns undefined for a pi tool with no
+   * mapped tool gets a bare tool rule — except for a path tool, where the containment rung
+   * decides: a HUMAN-ONLY card (`path-scope`: an unplaceable or network path, a link-carried
+   * edit), an edit/write card on an agent-control path (`pathSensitive`, in the workspace or
+   * out) and a card raised by a user ASK rule get no suggestion at all — the ladder asks each of
+   * them before the allow tier, so a saved allow could never silence the card; it would only
+   * widen what other calls may do. A call that asked because its target is OUTSIDE the
+   * workspace gets rules scoped to where it LANDS (`Read(//<dir>/**)` / `Edit(//<dir>/**)`,
+   * {@link outsideAllowRules}; the symbolic-link landing, not the in-project link's spelling),
+   * and an in-workspace edit/write gets `Edit(//<root>/**)` for the workspace root that holds
+   * its target ({@link workspaceEditRules}) — never the bare tool, which would be a standing
+   * allow for every file the tool can reach. Returns undefined for a pi tool with no
    * Claude analog (mcp/custom/unknown) — nothing persistable to suggest.
    */
   private buildApprovalSuggestions(
@@ -2807,7 +2812,8 @@ export class PiSession extends BaseSession {
     if (!claudeTool) return undefined
     if (verdict?.source === 'path-scope' || verdict?.pathSensitive) return undefined
     // A user ASK rule answered a file tool: the ask tier outranks every allow rule, so a saved allow
-    // could never silence this card — it would only widen what other calls may do.
+    // could never silence this card — it would only widen what other calls may do (the same
+    // rationale as the human-only and agent-control cards above).
     if (verdict?.source === 'ask-rule' && isPiPathTool(toolName)) return undefined
 
     let rules: Array<{ toolName: string; ruleContent?: string }>
@@ -2819,6 +2825,13 @@ export class PiSession extends BaseSession {
             this.pathScope().platform ?? process.platform
           )
         : undefined
+      if (!scoped) return undefined
+      rules = scoped
+    } else if (toolName === 'edit' || toolName === 'write') {
+      // An in-workspace edit/write asked (default mode): the rule is scoped to the workspace root
+      // that holds the target, never the bare `Edit` / `Write` (which would cover every file the
+      // tool can reach, the ones outside the workspace included).
+      const scoped = workspaceEditRules(toolName, input, this.pathScope())
       if (!scoped) return undefined
       rules = scoped
     } else {
