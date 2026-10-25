@@ -339,7 +339,7 @@ Learned verifying pi path containment, judge-off and Agent/Task rules.
   the store. A long native task: have the stand-in's child prompt run `sleep N`.
 - **Isolate the OS temp dir too** for pi drives: TEMP/TMP/TMPDIR in the launch env (assert
   `os.tmpdir()` in `app.evaluate` first). The scratchpad is
-  `<TEMP>\claudeui\<cwd key>\<session-id>\scratchpad`; pi's spawn args (`--session-id`,
+  `<TEMP>\claudeui\<cwd key>\<session-id>\scratchpad` (POSIX: `$TMPDIR/claudeui-<uid>/…`); pi's spawn args (`--session-id`,
   `--append-system-prompt`) show in `Get-CimInstance Win32_Process` (`Name -eq 'pi.exe'`;
   filter on your scratch path — the owner's own app has pi children too).
 - **Pin proof**: pi's write/edit result echoes the path it used (`Successfully wrote to <abs>`),
@@ -350,6 +350,19 @@ Learned verifying pi path containment, judge-off and Agent/Task rules.
   engine and model before prompting. Delete: right-click `[data-id]` →
   `SessionItem.delete` → `DeleteConfirmModal.confirm`. A pi dispatch target resumes by
   `session_message` only with `dispatch.defaultModel` set in `engines/pi.json`.
+- **Proving the gate touches no network path or device**: preload an fs-wrapping hook into the
+  main process (`electron.launch` args `-r <hook.cjs>`) that logs calls whose path argument is
+  UNC-shaped, `*.invalid`, `file://<host>` or has a DOS-device component; run a positive control
+  (`app.evaluate` → `fs.existsSync(<scratch>\NUL)`) before trusting a zero, and attribute hits by
+  stack (`GitService.getStatus` polls untracked files — put fixture links in `.git/info/exclude`).
+  Use `.invalid` hostnames only. Write backslash-heavy test paths through the driver
+  (`String.fromCharCode(92)`), not shell heredocs (they halve `\\`). Device-name and UNC links:
+  `fs.symlinkSync(target, p, 'file'|'dir')` with an explicit type so the target is never statted.
+- **Rules and the judge bind at session start**: rewrite the isolated settings, then open a NEW
+  session. A cwd passed as a junction path stays logical (allow rules like `Edit(src/**)` match).
+  A pi dispatch target needs a non-pi parent (opencode `claudeui_dispatch_agent`).
+- **Pre-fix baseline** for a red proof: `git archive <sha> | tar -x -C <scratch>/base`, junction
+  `node_modules`, build, launch with its own home.
 - **Browser test project in a worktree** (the plain run fails with `NetworkError`): a
   scratch `vitest.browser-wt.config.ts` that imports the worktree's `vitest.config.ts` by
   `file:///` URL, maps `test.projects` with `root` set to the worktree, and gives the

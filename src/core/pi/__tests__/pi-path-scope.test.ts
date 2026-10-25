@@ -8,21 +8,42 @@
  * dir (skipped, with the reason, where the platform refuses to create one).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmdirSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   PATH_CHANGED_REASON,
+  absoluteRuleSpecifier,
   buildPiPathScope,
   hostPathFs,
+  humanOnlyMessage,
+  isPosixNamespacePath,
+  isRemoteWindowsPath,
   normalizeWindowsShellPath,
+  outsideAllowRules,
   pathFacts,
   piResolvePath,
+  pinFor,
+  pinMismatchReason,
   platformForCwd,
+  rawSpellingHolds,
+  readBlockMessage,
   readCandidate,
   sameFacts,
   suspiciousWindowsPath,
   withPathGuard,
+  workspaceEditRules,
+  type PathScopeFs,
   type PiPathScope
 } from '../pi-path-scope'
 import { makeVirtualFs, type VirtualNode } from '../../../test/helpers/virtual-path-fs'
@@ -910,8 +931,1306 @@ describe('sameFacts', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Slice F (exit review of PR #144)
+// ---------------------------------------------------------------------------
+
+/** A recording wrapper around a virtual win32 fs: every call, with its argument, in order. */
+function recordingWinFs(nodes: Record<string, VirtualNode>) {
+  const inner = makeVirtualFs('win32', nodes)
+  const calls: string[] = []
+  const fs: PathScopeFs = {
+    realpath: (p) => (calls.push(`realpath ${p}`), inner.realpath(p)),
+    lstat: (p) => (calls.push(`lstat ${p}`), inner.lstat(p)),
+    readlink: (p) => (calls.push(`readlink ${p}`), inner.readlink(p)),
+    exists: (p) => (calls.push(`exists ${p}`), inner.exists(p))
+  }
+  return { fs, calls, inner }
+}
+
+const BS = String.fromCharCode(92)
+const REMOTE_ARG = /^(?:\w+ )(?:[\\/]{2})/
+
+describe('R1 — a network path is never handed to the filesystem (the gate itself must not speak SMB / WebDAV)', () => {
+  const REMOTE_SPELLINGS = [
+    `${BS}${BS}attacker.example${BS}share${BS}x`,
+    '//attacker.example/share/x',
+    `${BS}${BS}attacker.example@SSL${BS}DavWWWRoot${BS}x`,
+    `${BS}${BS}attacker.example@443${BS}DavWWWRoot${BS}x`,
+    'file://attacker.example/share/x',
+    `${BS}${BS}?${BS}UNC${BS}attacker.example${BS}share${BS}x`,
+    `${BS}${BS}?${BS}C:${BS}Windows${BS}win.ini`,
+    `${BS}${BS}.${BS}PhysicalDrive0`,
+    `@${BS}${BS}attacker.example${BS}share${BS}x`
+  ]
+  const LOCAL_NAMESPACE = [
+    `${BS}${BS}?${BS}C:${BS}Windows${BS}win.ini`,
+    `${BS}${BS}.${BS}PhysicalDrive0`
+  ]
+  const TOOLS = ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const
+
+  it.each(REMOTE_SPELLINGS)(
+    '%s: unresolved + remote with no filesystem call at all (no roots to place either)',
+    (p) => {
+      const { fs, calls } = recordingWinFs({})
+      const scope: PiPathScope = {
+        cwd: 'D:\\repo',
+        roots: [],
+        platform: 'win32',
+        homeDir: 'C:\\Users\\u',
+        fs
+      }
+      for (const tool of TOOLS) {
+        calls.length = 0
+        const input = tool === 'write' ? { path: p, content: 'x' } : { path: p }
+        const f = pathFacts(tool, input, scope)!
+        expect(calls, `${tool} ${p}`).toEqual([])
+        expect(f, `${tool} ${p}`).toMatchObject({
+          state: 'unresolved',
+          remote: true,
+          inScope: false,
+          inFence: false,
+          carriedOut: false
+        })
+        expect(f.landing).toBeUndefined()
+        // F3-3: a local namespace spelling (the extended-length and device prefixes on a drive or a
+        // device) is a device / extended-length path, not a network one; a real UNC, WebDAV or
+        // extended-length UNC spelling keeps the network wording
+        if (LOCAL_NAMESPACE.includes(p)) {
+          expect(humanOnlyMessage(f), p).toContain('device or extended-length path')
+          expect(humanOnlyMessage(f), p).not.toMatch(/is a network path/)
+        } else {
+          expect(humanOnlyMessage(f), p).toContain('is a network path')
+          expect(humanOnlyMessage(f), p).not.toContain('device or extended-length')
+        }
+      }
+    }
+  )
+
+  it('a remote path never reaches a root, a scratchpad or the cwd probe either (the roots are placed locally)', () => {
+    const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir' })
+    const scope = buildPiPathScope({
+      cwd: 'D:\\repo',
+      // a project-settings additional directory that is itself UNC must not be probed
+      rules: { additionalDirectories: [`${BS}${BS}attacker.example${BS}share`] },
+      platform: 'win32',
+      fs,
+      homeDir: 'C:\\Users\\u'
+    })
+    for (const tool of TOOLS) {
+      const input = tool === 'write' ? { path: 'src\\a.ts', content: 'x' } : { path: 'src\\a.ts' }
+      calls.length = 0
+      pathFacts(tool, input, scope)
+      expect(
+        calls.filter((c) => REMOTE_ARG.test(c) || /attacker/i.test(c)),
+        tool
+      ).toEqual([])
+    }
+  })
+
+  it('a link whose target is UNC (directly, via a chain, or in an ancestor of a link target) is unresolved before any realpath', () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      'D:\\repo\\evil': { link: `${BS}${BS}attacker.example${BS}share` },
+      'D:\\repo\\hop': { link: 'D:\\repo\\evil' },
+      'D:\\repo\\rel': { link: `sub${BS}via` },
+      'D:\\repo\\sub': 'dir',
+      'D:\\repo\\sub\\via': { link: `${BS}${BS}?${BS}UNC${BS}attacker.example${BS}share` },
+      'D:\\repo\\ok': { link: 'D:\\repo\\src' },
+      'D:\\repo\\src': 'dir'
+    })
+    const scope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs
+    }
+    for (const rel of [
+      'evil',
+      'evil\\x',
+      'hop',
+      'hop\\deep\\x',
+      'rel\\x',
+      'D:\\repo\\evil\\..\\evil\\x'
+    ]) {
+      for (const tool of TOOLS) {
+        calls.length = 0
+        const input = tool === 'write' ? { path: rel, content: 'x' } : { path: rel }
+        const f = pathFacts(tool, input, scope)!
+        expect(f, `${tool} ${rel}`).toMatchObject({ state: 'unresolved', remote: true })
+        // only local lstat / readlink calls on the way; nothing on a UNC spelling, and no realpath on the link
+        expect(
+          calls.filter((c) => REMOTE_ARG.test(c)),
+          `${tool} ${rel}`
+        ).toEqual([])
+        expect(
+          calls.filter((c) => c.startsWith('realpath') && /evil|hop|rel|via/.test(c)),
+          `${tool} ${rel}`
+        ).toEqual([])
+      }
+    }
+    // control: a link to a local directory is followed as before
+    const ok = pathFacts('write', { path: 'ok\\n.ts', content: 'x' }, scope)!
+    expect(ok).toMatchObject({ remote: false, landing: 'D:\\repo\\src\\n.ts', inScope: true })
+  })
+
+  it("read's fallback variants are checked too: a link-to-UNC under the narrow-space variant name is not looked at", () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      [`D:\\repo\\Shot 1.00${'\u202F'}PM.png`]: {
+        link: `${BS}${BS}attacker.example${BS}share${BS}f`
+      }
+    })
+    const scope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs
+    }
+    const f = pathFacts('read', { path: 'Shot 1.00 PM.png' }, scope)!
+    expect(f).toMatchObject({ state: 'unresolved', remote: true })
+    expect(calls.filter((c) => c.startsWith('exists') && /attacker/i.test(c))).toEqual([])
+    expect(calls.filter((c) => c.startsWith('realpath'))).not.toContain(
+      `realpath D:\\repo\\Shot 1.00${'\u202F'}PM.png`
+    )
+  })
+
+  it('POSIX is untouched: a backslash path is a file name there, resolved through the fs as ever', () => {
+    const f = factsOf('read', { path: `${BS}${BS}host${BS}x` })
+    expect(f.remote).toBe(false)
+    expect(f.execPath).toBe(`/repo/${BS}${BS}host${BS}x`)
+  })
+
+  it('isRemoteWindowsPath: two leading separators, nothing else', () => {
+    for (const p of [`${BS}${BS}h${BS}s`, '//h/s', `${BS}${BS}?${BS}C:${BS}x`, `${BS}/h`])
+      expect(isRemoteWindowsPath(p), p).toBe(true)
+    for (const p of ['D:\\x', '/x', 'x\\y', 'D:\\a\\\\b'])
+      expect(isRemoteWindowsPath(p), p).toBe(false)
+  })
+
+  it('sameFacts: remote is part of what decides a verdict', () => {
+    const f = factsOf('read', { path: 'src/a.ts' })
+    expect(sameFacts(f, { ...f, remote: true }, 'linux')).toBe(false)
+  })
+})
+
+describe('R2 — the pin is a spelling pi re-resolves to exactly the gated path', () => {
+  const allow = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
+  const HOME = '/home/u'
+  const opens = (pin: string, cwd: string, platform: NodeJS.Platform, home: string): string =>
+    piResolvePath(pin, cwd, platform, home)
+
+  function scopeAt(cwd: string, home: string, nodes: Record<string, VirtualNode>, over = {}) {
+    return {
+      cwd,
+      roots: [cwd],
+      platform: 'linux' as const,
+      homeDir: home,
+      fs: makeVirtualFs('posix', { [cwd]: 'dir', ...nodes }),
+      ...over
+    } satisfies PiPathScope
+  }
+
+  it.each([
+    ['U+3000 in the cwd', '/home/u/My\u3000Project'],
+    ['U+00A0 in the cwd', '/home/u/My\u00A0Project'],
+    ['U+202F in the cwd', '/home/u/My\u202FProject']
+  ])(
+    '%s: the pin is the cwd-relative spelling, and pi opens exactly the gated file',
+    async (_n, cwd) => {
+      const scope = scopeAt(cwd, HOME, {})
+      for (const [tool, input] of [
+        ['write', { path: 'src/new.txt', content: 'x' }],
+        ['edit', { path: './notes.txt', edits: [] }],
+        ['grep', { pattern: 'x' }],
+        ['ls', { path: '' }]
+      ] as const) {
+        const facts = factsOf(tool, input, scope)
+        // the bug: the absolute spelling is NOT a fixed point (pi folds the cwd's own space)
+        expect(opens(facts.execPath, cwd, 'linux', HOME), tool).not.toBe(facts.execPath)
+        const decision = await withPathGuard(tool, input, scope, allow)
+        expect(decision.behavior, tool).toBe('allow')
+        const pin = (decision as unknown as { updatedInput: { path: string } }).updatedInput.path
+        expect(opens(pin, cwd, 'linux', HOME), `${tool} -> ${pin}`).toBe(facts.execPath)
+        expect(pin.startsWith('/'), `${tool} -> ${pin}`).toBe(false)
+      }
+    }
+  )
+
+  it('a home with a unicode space: `~/x` inside the cwd tree pins relative (step 2); outside the tree no pin survives and `~/x`, absolute after normalisation, passes UNPINNED (step 3) — never pinned to another file', async () => {
+    const home = '/home/u\u3000x'
+    // home under the cwd: the relative spelling carries no unicode space
+    const cwd = '/work　x'
+    const inside = scopeAt(cwd, `${cwd}/h`, {})
+    expect(
+      await withPathGuard('write', { path: '~/f.txt', content: 'x' }, inside, allow)
+    ).toMatchObject({ behavior: 'allow', updatedInput: { path: 'h/f.txt' } })
+    // home elsewhere, with the space in its own name: no rewritten spelling survives pi's folding,
+    // but `~/f.txt` itself opens `${home}/f.txt` (pi expands `~` after folding) — left unpinned
+    const outside = scopeAt(cwd, home, {})
+    const decision = await withPathGuard('write', { path: '~/f.txt', content: 'x' }, outside, allow)
+    expect(decision).toEqual({ behavior: 'allow' })
+    expect(opens('~/f.txt', cwd, 'linux', home)).toBe(`${home}/f.txt`)
+    expect(pinMismatchReason('/p')).toContain('/p')
+  })
+
+  it('a scratchpad path: pinned as is when it is a fixed point, and pinned as its FOLDED fixed point (never the original spelling) when its own name holds a unicode space', async () => {
+    const scratch = '/tmp/claudeui-1000/proj/sess/scratchpad'
+    const cwd = '/home/u/My\u3000Project'
+    const scope = scopeAt(
+      cwd,
+      HOME,
+      {
+        '/tmp': 'dir',
+        '/tmp/claudeui-1000': 'dir',
+        '/tmp/claudeui-1000/proj': 'dir',
+        '/tmp/claudeui-1000/proj/sess': 'dir',
+        [scratch]: 'dir'
+      },
+      { scratchpad: scratch }
+    )
+    const decision = await withPathGuard(
+      'write',
+      { path: `${scratch}/out.txt`, content: 'x' },
+      scope,
+      allow
+    )
+    expect(decision).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { path: `${scratch}/out.txt` }
+    })
+    // a scratchpad whose own path holds the space: the model's spelling is folded by pi (and by us),
+    // so what is gated is the folded path, which is pinned as a fixed point — never the original
+    const odd = '/tmp/My\u00A0Tmp/claudeui-1000/p/s/scratchpad'
+    const oddScope = scopeAt(HOME, HOME, {}, { scratchpad: odd })
+    const d2 = await withPathGuard('write', { path: `${odd}/o.txt`, content: 'x' }, oddScope, allow)
+    const pin = (d2 as unknown as { updatedInput: { path: string } }).updatedInput.path
+    expect(pin).toBe('/tmp/My Tmp/claudeui-1000/p/s/scratchpad/o.txt')
+    expect(opens(pin, HOME, 'linux', HOME)).toBe(pin)
+  })
+
+  it('win32: a cwd with an ideographic space pins the relative spelling', async () => {
+    const cwd = 'C:\\work\\新しい\u3000フォルダー'
+    const scope: PiPathScope = {
+      cwd,
+      roots: [cwd],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { [cwd]: 'dir' })
+    }
+    const decision = await withPathGuard('write', { path: 'src/a.txt', content: 'x' }, scope, allow)
+    const pin = (decision as unknown as { updatedInput: { path: string } }).updatedInput.path
+    expect(pin).toBe('src\\a.txt')
+    expect(opens(pin, cwd, 'win32', 'C:\\Users\\u')).toBe(`${cwd}\\src\\a.txt`)
+  })
+
+  it("read's macOS variant (narrow no-break space): pi folds it, so the resolved (pre-variant) spelling is pinned and pi re-derives the variant", async () => {
+    const variant = `/repo/Screenshot 10.00.00${NNBSP}AM.png`
+    const scope = posixScope()
+    const facts = factsOf('read', { path: 'Screenshot 10.00.00 AM.png' }, scope)
+    expect(facts.execPath).toBe(variant)
+    const decision = await withPathGuard(
+      'read',
+      { path: 'Screenshot 10.00.00 AM.png' },
+      scope,
+      allow
+    )
+    expect(decision).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { path: '/repo/Screenshot 10.00.00 AM.png' }
+    })
+  })
+
+  it('pinFor: the absolute path when it is a fixed point; undefined when nothing round-trips', () => {
+    const scope = scopeAt('/repo', HOME, {})
+    expect(pinFor('/repo/a.ts', '/repo/a.ts', scope)).toBe('/repo/a.ts')
+    expect(pinFor('/etc/x', '/etc/x', scope)).toBe('/etc/x')
+    expect(pinFor('/repo', '/repo', scope)).toBe('/repo')
+    // a path that itself holds a folded character cannot be spelled to pi at all
+    expect(pinFor('/repo/a\u3000b', '/repo/a\u3000b', scope)).toBeUndefined()
+    // the cwd-relative spelling is only a pin while it stays under the cwd (no leading `..`)
+    const tainted = scopeAt('/h/A　B/proj', HOME, {})
+    expect(pinFor('/h/A　B/proj/a.ts', '/h/A　B/proj/a.ts', tainted)).toBe('a.ts')
+    expect(pinFor('/h/A　B/shared/f', '/h/A　B/shared/f', tainted)).toBeUndefined()
+    expect(pinFor('/h/A　B', '/h/A　B', tainted)).toBeUndefined()
+    // an unusable cwd (pi would throw)
+    expect(pinFor('/x', '/x', { ...scope, cwd: 'file://host/x' })).toBeUndefined()
+  })
+})
+
+describe('F2-1 / F2-2 — the pin ladder: absolute, cwd-relative (never climbing), the model spelling (only where trustworthy), else deny', () => {
+  const allow = async (): Promise<{ behavior: 'allow' }> => ({ behavior: 'allow' })
+  const HOME = '/h/u'
+  // pi resolves a relative path against process.cwd(), the PHYSICAL cwd on POSIX; ours is logical
+  const CWD = '/h/A\u3000B/proj'
+  const SHARED = '/h/A\u3000B/shared'
+  const NODES: Record<string, VirtualNode> = {
+    '/h': 'dir',
+    '/h/u': 'dir',
+    '/h/A\u3000B': 'dir',
+    [CWD]: 'dir',
+    [`${CWD}/src`]: 'dir',
+    [SHARED]: 'dir'
+  }
+  const scopeAt = (over: Partial<PiPathScope> = {}): PiPathScope => ({
+    cwd: CWD,
+    roots: [CWD, SHARED],
+    platform: 'linux',
+    homeDir: HOME,
+    fs: makeVirtualFs('posix', NODES),
+    ...over
+  })
+  const pinOf = (d: unknown): string => (d as { updatedInput: { path: string } }).updatedInput.path
+
+  it('step 2, allow: a path under the cwd pins the cwd-relative spelling, even when the model climbed out and back (`../proj/x`)', async () => {
+    const scope = scopeAt()
+    for (const [input, pin] of [
+      [{ path: 'src/new.txt', content: 'x' }, 'src/new.txt'],
+      [{ path: '../proj/x.txt', content: 'x' }, 'x.txt'],
+      [{ path: './src/../y.txt', content: 'x' }, 'y.txt']
+    ] as const) {
+      const decision = await withPathGuard('write', input, scope, allow)
+      expect(pinOf(decision), input.path).toBe(pin)
+      expect(piResolvePath(pin, CWD, 'linux', HOME), input.path).toBe(
+        factsOf('write', input, scope).execPath
+      )
+    }
+  })
+
+  it('step 2, deny: a target that is only reachable by a spelling climbing above the cwd is never pinned relative (reviewer probe)', async () => {
+    const scope = scopeAt()
+    // the facts agree that this is an in-scope additional directory...
+    const facts = factsOf('write', { path: '../shared/f.txt', content: 'x' }, scope)
+    expect(facts).toMatchObject({ execPath: `${SHARED}/f.txt`, inScope: true })
+    // ...but pi would resolve `../shared/f.txt` against its own (physical) cwd, so no pin exists
+    expect(pinFor(facts.execPath, facts.resolved, scope)).toBeUndefined()
+    for (const tool of ['write', 'edit'] as const) {
+      for (const p of ['../shared/f.txt', 'src/../../shared/f.txt', '@../shared/f.txt']) {
+        const decision = await withPathGuard(tool, { path: p, content: 'x' }, scope, allow)
+        expect(decision, `${tool} ${p}`).toEqual({
+          behavior: 'deny',
+          reason: pinMismatchReason(`${SHARED}/f.txt`)
+        })
+      }
+    }
+  })
+
+  it('step 3, allow: a spelling that is absolute after normalisation (`~/`, `file://`) passes through unpinned when it opens the gated path', async () => {
+    const home = '/h/u\u3000x'
+    const scope = scopeAt({ homeDir: home })
+    const viaHome = await withPathGuard('write', { path: '~/f.txt', content: 'x' }, scope, allow)
+    expect(viaHome).toEqual({ behavior: 'allow' })
+    expect(piResolvePath('~/f.txt', CWD, 'linux', home)).toBe(`${home}/f.txt`)
+    // the shared directory by URL: execPath holds the (unfolded) U+3000, which no absolute pin survives
+    const url = 'file:///h/A%E3%80%80B/shared/f.txt'
+    const facts = factsOf('write', { path: url, content: 'x' }, scope)
+    expect(facts.execPath).toBe(`${SHARED}/f.txt`)
+    expect(pinFor(facts.execPath, facts.resolved, scope)).toBeUndefined()
+    expect(await withPathGuard('write', { path: url, content: 'x' }, scope, allow)).toEqual({
+      behavior: 'allow'
+    })
+  })
+
+  it('step 3, deny: win32 drive-relative `D:..\\x` is never passed through (pi uses its per-drive cwd)', async () => {
+    const cwd = 'D:\\a\u3000b\\proj'
+    const shared = 'D:\\a\u3000b\\shared'
+    const scope: PiPathScope = {
+      cwd,
+      roots: [cwd, shared],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { [cwd]: 'dir', [shared]: 'dir' })
+    }
+    const input = { path: 'D:..\\shared\\f.txt', content: 'x' }
+    const facts = factsOf('write', input, scope)
+    expect(facts.execPath).toBe(`${shared}\\f.txt`)
+    // the cwd-relative spelling climbs, so step 2 is out and the raw spelling is all that is left
+    expect(pinFor(facts.execPath, facts.resolved, scope)).toBeUndefined()
+    expect(await withPathGuard('write', input, scope, allow)).toEqual({
+      behavior: 'deny',
+      reason: pinMismatchReason(`${shared}\\f.txt`)
+    })
+    // `D:f.txt` stays under the cwd: step 2 pins it
+    const under = await withPathGuard('write', { path: 'D:f.txt', content: 'x' }, scope, allow)
+    expect(pinOf(under)).toBe('f.txt')
+  })
+
+  describe('rawSpellingHolds', () => {
+    const holds = (raw: string, scope: PiPathScope): boolean => {
+      const f = factsOf('write', { path: raw, content: 'x' }, scope)
+      return rawSpellingHolds(f, scope)
+    }
+    const posix = scopeAt({
+      cwd: '/repo',
+      roots: ['/repo'],
+      fs: makeVirtualFs('posix', { '/repo': 'dir' })
+    })
+    const win: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { 'D:\\repo': 'dir' })
+    }
+
+    it('relative spellings that stay under the cwd, absolute ones and `~` hold', () => {
+      for (const p of [
+        'a.txt',
+        './a.txt',
+        'a/../b.txt',
+        '/etc/x',
+        '~/x',
+        '~',
+        '@a.txt',
+        '..\\x',
+        '~user/x'
+      ])
+        expect(holds(p, posix), p).toBe(true)
+    })
+
+    it('a relative spelling that climbs above the cwd after normalisation does not', () => {
+      for (const p of ['../x', 'a/../../x', '@../x', '..', './../x', '../../etc/passwd'])
+        expect(holds(p, posix), p).toBe(false)
+    })
+
+    it('win32: drive-relative and rooted-driveless spellings do not; a drive path, UNC and a relative path do', () => {
+      for (const p of ['C:x', 'D:..\\x', 'd:x.txt', '\\repo\\x.txt', '/repo/x.txt', '\\x'])
+        expect(holds(p, win), p).toBe(false)
+      for (const p of ['x.txt', '.\\x.txt', 'D:\\repo\\x.txt', 'D:/repo/x.txt', '/c/x', '~/x'])
+        expect(holds(p, win), p).toBe(true)
+      expect(holds('..\\x', win)).toBe(false)
+    })
+
+    it('a spelling that does not open the gated path does not hold (and a throwing one never)', () => {
+      const f = factsOf('write', { path: 'a.txt', content: 'x' }, posix)
+      expect(rawSpellingHolds({ ...f, execPath: '/other', resolved: '/other' }, posix)).toBe(false)
+      expect(rawSpellingHolds({ ...f, raw: 'file://host/x' }, posix)).toBe(false)
+    })
+  })
+})
+
+describe('F2-4 — a DOS device name is placed with no filesystem call (win32)', () => {
+  const TOOLS = ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const
+  const DEVICES = [
+    'NUL',
+    'nul',
+    'CON',
+    'PRN',
+    'AUX',
+    'COM1',
+    'COM9',
+    'LPT1',
+    'lpt9',
+    'CONIN$',
+    'CONOUT$',
+    'NUL.txt',
+    'com1.log',
+    'src\\CON\\x.ts',
+    'src\\sub\\AUX.d\\y',
+    'D:\\repo\\NUL',
+    '/repo/prn.txt',
+    '@COM2'
+  ]
+  const scopeWith = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+
+  it.each(DEVICES)('%s: unresolved + device, every tool, ZERO filesystem calls', (p) => {
+    const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir', 'D:\\repo\\src': 'dir' })
+    const scope = scopeWith(fs)
+    for (const tool of TOOLS) {
+      calls.length = 0
+      const input = tool === 'write' ? { path: p, content: 'x' } : { path: p }
+      const f = pathFacts(tool, input, scope)!
+      expect(calls, `${tool} ${p}`).toEqual([])
+      expect(f, `${tool} ${p}`).toMatchObject({
+        state: 'unresolved',
+        device: true,
+        remote: false,
+        inScope: false,
+        inFence: false,
+        carriedOut: false
+      })
+      expect(f.landing).toBeUndefined()
+      expect(humanOnlyMessage(f)).toContain('Windows device')
+    }
+  })
+
+  it('names that merely contain a device word are ordinary: the filesystem is consulted and nothing is flagged', () => {
+    for (const p of ['console.ts', 'nullable.ts', 'com10', 'src\\communicate\\x', 'auxiliary.md']) {
+      const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir', 'D:\\repo\\src': 'dir' })
+      const f = pathFacts('write', { path: p, content: 'x' }, scopeWith(fs))!
+      expect(f.device, p).toBe(false)
+      expect(calls.length, p).toBeGreaterThan(0)
+    }
+  })
+
+  it('F3-4: a link whose TARGET has a DOS device component (directly, relative, via a chain, or in a link-target ancestor) is unresolved + device, and the device is never looked at', () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      'D:\\repo\\src': 'dir',
+      'D:\\repo\\devlink': { link: 'NUL' },
+      'D:\\repo\\abslink': { link: 'D:\\repo\\sub\\COM1' },
+      'D:\\repo\\rellink': { link: 'sub\\via' },
+      'D:\\repo\\sub': 'dir',
+      'D:\\repo\\sub\\via': { link: 'CON.txt' },
+      'D:\\repo\\hop': { link: 'D:\\repo\\devlink' },
+      'D:\\repo\\dirlink': { link: 'D:\\repo\\AUX' },
+      'D:\\repo\\okay': { link: 'D:\\repo\\src' },
+      'D:\\repo\\conlink': { link: 'D:\\repo\\console.ts' },
+      // the text names a device even though the path collapses to an ordinary directory
+      'D:\\repo\\collapse': { link: 'NUL\\..\\src' }
+    })
+    const scope = scopeWith(fs)
+    // the arguments of every call that names a device component
+    const onDevice = (): string[] =>
+      calls.filter((c) => /[\\/](?:nul|con|aux|com\d|lpt\d)(?:[.:\s]|$)/i.test(c.split(' ')[1]))
+    for (const rel of [
+      'devlink',
+      'devlink\\x',
+      'abslink',
+      'rellink\\x',
+      'hop',
+      'hop\\deep\\x',
+      'dirlink\\x',
+      'collapse\\x'
+    ]) {
+      for (const tool of TOOLS) {
+        calls.length = 0
+        const input = tool === 'write' ? { path: rel, content: 'x' } : { path: rel }
+        const f = pathFacts(tool, input, scope)!
+        expect(f, `${tool} ${rel}`).toMatchObject({
+          state: 'unresolved',
+          device: true,
+          remote: false,
+          inScope: false,
+          carriedOut: false
+        })
+        expect(f.landing).toBeUndefined()
+        expect(onDevice(), `${tool} ${rel}`).toEqual([])
+        expect(
+          calls.filter((c) => c.startsWith('realpath')),
+          `${tool} ${rel}`
+        ).toEqual([])
+        expect(humanOnlyMessage(f)).toContain('Windows device')
+      }
+    }
+    // controls: a link to a local directory, and to a name that merely contains a device word
+    const ok = pathFacts('write', { path: 'okay\\n.ts', content: 'x' }, scope)!
+    expect(ok).toMatchObject({ device: false, remote: false, landing: 'D:\\repo\\src\\n.ts' })
+    const conlink = pathFacts('read', { path: 'conlink' }, scope)!
+    expect(conlink.device).toBe(false)
+  })
+
+  it('sameFacts: the device flag decides a verdict', () => {
+    const { fs } = recordingWinFs({ 'D:\\repo': 'dir' })
+    const f = pathFacts('read', { path: 'NUL' }, scopeWith(fs))!
+    expect(sameFacts(f, { ...f, device: false }, 'win32')).toBe(false)
+  })
+
+  it('POSIX is untouched: a file called `nul` is an ordinary file', () => {
+    const f = factsOf('read', { path: 'nul' })
+    expect(f.device).toBe(false)
+    expect(f.state).toBe('missing-leaf')
+  })
+})
+
+describe('F3-6 — landingAliases: the landing under a root’s logical spelling', () => {
+  const nodes: Record<string, VirtualNode> = {
+    '/physical': 'dir',
+    '/physical/src': 'dir',
+    '/physical/src/a.ts': 'file',
+    '/physical/lnk': { link: '/outside' },
+    '/outside': 'dir',
+    '/outside/f': 'file',
+    '/logical': { link: '/physical' }
+  }
+  const scope = (): PiPathScope => ({
+    cwd: '/logical',
+    roots: ['/logical'],
+    platform: 'linux',
+    homeDir: '/home/u',
+    fs: makeVirtualFs('posix', nodes)
+  })
+
+  it('a root reached through a link: the landing is also spelled under the root, and a missing leaf too', () => {
+    expect(pathFacts('read', { path: 'src/a.ts' }, scope())).toMatchObject({
+      landing: '/physical/src/a.ts',
+      landingAliases: ['/logical/src/a.ts']
+    })
+    expect(pathFacts('write', { path: 'src/new.ts', content: 'x' }, scope())).toMatchObject({
+      landing: '/physical/src/new.ts',
+      landingAliases: ['/logical/src/new.ts']
+    })
+  })
+
+  it('no alias when no root is a link, or the landing is outside the root’s real path', () => {
+    const plain = { ...scope(), cwd: '/physical', roots: ['/physical'] }
+    expect(pathFacts('read', { path: 'src/a.ts' }, plain)!.landingAliases).toBeUndefined()
+    expect(pathFacts('read', { path: 'lnk/f' }, scope())!).toMatchObject({ landing: '/outside/f' })
+    expect(pathFacts('read', { path: 'lnk/f' }, scope())!.landingAliases).toBeUndefined()
+  })
+})
+
+describe('N2 — a missing leaf that appears during the approval is not a changed path', () => {
+  it('sameFacts ignores `state` when both landings are equal and neither side is unresolved', () => {
+    const a = factsOf('write', { path: 'src/new.ts', content: '' })
+    expect(a.state).toBe('missing-leaf')
+    expect(sameFacts(a, { ...a, state: 'resolved' }, 'linux')).toBe(true)
+    // but unresolved on either side still differs
+    expect(sameFacts(a, { ...a, state: 'unresolved', landing: undefined }, 'linux')).toBe(false)
+    expect(sameFacts({ ...a, state: 'unresolved', landing: undefined }, a, 'linux')).toBe(false)
+    // and a different landing still differs
+    expect(sameFacts(a, { ...a, state: 'resolved', landing: '/repo/src/other.ts' }, 'linux')).toBe(
+      false
+    )
+  })
+
+  it('withPathGuard: the file being created while the card is open still allows (and pins)', async () => {
+    const vfs = makeVirtualFs('posix', POSIX_NODES)
+    const scope = posixScope({ fs: vfs })
+    const decision = await withPathGuard(
+      'write',
+      { path: 'src/created-meanwhile.ts', content: 'x' },
+      scope,
+      async () => {
+        vfs.set('/repo/src/created-meanwhile.ts', 'file')
+        return { behavior: 'allow' as const }
+      }
+    )
+    expect(decision).toMatchObject({
+      behavior: 'allow',
+      updatedInput: { path: '/repo/src/created-meanwhile.ts' }
+    })
+  })
+})
+
+describe('R4 helpers — path-scoped "always allow" rules for an outside target', () => {
+  it('absoluteRuleSpecifier: `//` absolute on POSIX, `//c/…` for a drive; refuses roots, relative, UNC and glob characters', () => {
+    expect(absoluteRuleSpecifier('/opt/data', 'linux')).toBe('//opt/data')
+    expect(absoluteRuleSpecifier('/opt/data/', 'linux')).toBe('//opt/data')
+    expect(absoluteRuleSpecifier('C:\\Users\\u\\docs', 'win32')).toBe('//c/Users/u/docs')
+    expect(absoluteRuleSpecifier('D:\\x', 'win32')).toBe('//d/x')
+    for (const [p, platform] of [
+      ['/', 'linux'],
+      ['C:\\', 'win32'],
+      ['relative/dir', 'linux'],
+      [`${BS}${BS}host${BS}share${BS}x`, 'win32'],
+      ['/opt/da*ta', 'linux'],
+      ['/opt/da?ta', 'linux'],
+      ['/opt/(x)', 'linux']
+    ] as const)
+      expect(absoluteRuleSpecifier(p, platform), p).toBeUndefined()
+  })
+
+  it("read -> Read(//<dir>/**), edit/write -> Edit(//<dir>/**) on the target's directory", () => {
+    expect(outsideAllowRules('read', '/opt/data/a.txt', 'linux')).toEqual([
+      { toolName: 'Read', ruleContent: '//opt/data/**' }
+    ])
+    for (const tool of ['edit', 'write'])
+      expect(outsideAllowRules(tool, '/opt/data/new.txt', 'linux')).toEqual([
+        { toolName: 'Edit', ruleContent: '//opt/data/**' }
+      ])
+    expect(outsideAllowRules('read', 'C:\\Users\\u\\n.txt', 'win32')).toEqual([
+      { toolName: 'Read', ruleContent: '//c/Users/u/**' }
+    ])
+  })
+
+  it('a search covers the searched path itself and everything under it (Read, never a bare tool rule)', () => {
+    for (const tool of ['grep', 'find', 'ls'])
+      expect(outsideAllowRules(tool, '/opt/data', 'linux')).toEqual([
+        { toolName: 'Read', ruleContent: '//opt/data' },
+        { toolName: 'Read', ruleContent: '//opt/data/**' }
+      ])
+  })
+
+  it('nothing to offer for a root target, a non-path tool, or a glob-character directory', () => {
+    expect(outsideAllowRules('read', '/etc', 'linux')).toBeUndefined() // dir '/' is a root
+    expect(outsideAllowRules('grep', '/', 'linux')).toBeUndefined()
+    expect(outsideAllowRules('bash', '/opt/x', 'linux')).toBeUndefined()
+    expect(outsideAllowRules('write', '/opt/a*/x', 'linux')).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Real symlinks / junctions
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Slice F4 (second exit review)
+// ---------------------------------------------------------------------------
+
+/** A recording wrapper around a virtual POSIX fs: every call, with its argument, in order. */
+function recordingPosixFs(nodes: Record<string, VirtualNode>) {
+  const inner = makeVirtualFs('posix', nodes)
+  const calls: string[] = []
+  const fs: PathScopeFs = {
+    realpath: (p) => (calls.push(`realpath ${p}`), inner.realpath(p)),
+    lstat: (p) => (calls.push(`lstat ${p}`), inner.lstat(p)),
+    readlink: (p) => (calls.push(`readlink ${p}`), inner.readlink(p)),
+    exists: (p) => (calls.push(`exists ${p}`), inner.exists(p))
+  }
+  return { fs, calls, inner }
+}
+
+const F4_TOOLS = ['read', 'edit', 'write', 'grep', 'find', 'ls'] as const
+const toolInput = (tool: string, p: string): Record<string, unknown> =>
+  tool === 'write' ? { path: p, content: 'x' } : { path: p }
+/** A call argument that is under one of the namespaces (`recordingPosixFs` prints `<op> <path>`). */
+const NAMESPACE_ARG = /^\w+ \/(?:net|network|\.vol|\.file|\.nofollow|\.resolve)(?:\/|$)/i
+
+describe('F4-1 — automount and kernel-redirect namespaces are placed with no filesystem call (POSIX)', () => {
+  const scopeFor = (
+    platform: NodeJS.Platform,
+    fs: PathScopeFs,
+    roots: string[] = []
+  ): PiPathScope => ({ cwd: '/repo', roots, platform, homeDir: '/home/u', fs })
+
+  // `/net` is every POSIX platform (Linux autofs too)
+  const NET = [
+    '/net/x.example/f',
+    '/net',
+    '/net/h',
+    '/NET/x.example/f',
+    '/Net/h/f',
+    '/repo/../net/h/f',
+    '../net/h/f',
+    '@/net/h/f',
+    'file:///net/x.example/f',
+    '/n\u200cet/h/f',
+    '/net/h/Shot 1.00 PM.png'
+  ]
+  // darwin only
+  const DARWIN = [
+    '/Network/Servers/h/f',
+    '/network/servers/h/f',
+    '/Network',
+    '/.vol/1/2',
+    '/.VOL/1/2',
+    '/.file/id=1.2',
+    '/.nofollow/x',
+    '/.resolve/x',
+    '/.vol'
+  ]
+
+  describe.each(['linux', 'darwin'] as const)('platform %s', (platform) => {
+    it.each(NET)('%s: unresolved + remote, every tool, ZERO filesystem calls', (p) => {
+      const { fs, calls } = recordingPosixFs({ '/repo': 'dir' })
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const f = pathFacts(tool, toolInput(tool, p), scopeFor(platform, fs))!
+        expect(calls, `${tool} ${p}`).toEqual([])
+        expect(f, `${tool} ${p}`).toMatchObject({
+          state: 'unresolved',
+          remote: true,
+          device: false,
+          inScope: false,
+          inFence: false,
+          carriedOut: false
+        })
+        expect(f.landing).toBeUndefined()
+        expect(humanOnlyMessage(f)).toContain('is a network or automount path')
+      }
+    })
+
+    it.each(DARWIN)(
+      platform === 'darwin'
+        ? '%s: unresolved + remote, every tool, ZERO filesystem calls'
+        : '%s: an ordinary path on Linux (the filesystem is consulted, nothing is flagged)',
+      (p) => {
+        const { fs, calls } = recordingPosixFs({ '/repo': 'dir' })
+        for (const tool of F4_TOOLS) {
+          calls.length = 0
+          const f = pathFacts(tool, toolInput(tool, p), scopeFor(platform, fs))!
+          if (platform === 'darwin') {
+            expect(calls, `${tool} ${p}`).toEqual([])
+            expect(f, `${tool} ${p}`).toMatchObject({
+              state: 'unresolved',
+              remote: true,
+              inScope: false
+            })
+          } else {
+            expect(calls.length, `${tool} ${p}`).toBeGreaterThan(0)
+            expect(f.remote, `${tool} ${p}`).toBe(false)
+          }
+        }
+      }
+    )
+
+    it('a path that merely contains the word is ordinary (/netx, /repo/net, /.volume, /internet)', () => {
+      for (const p of ['/netx/f', '/repo/net/x', '/repo/.vol/x', '/.volume/x', '/internet/x']) {
+        const { fs, calls } = recordingPosixFs({ '/repo': 'dir' })
+        const f = pathFacts('read', { path: p }, scopeFor(platform, fs))!
+        expect(f.remote, p).toBe(false)
+        expect(calls.length, p).toBeGreaterThan(0)
+      }
+    })
+
+    it('a namespace additional directory is never probed, and nothing under it is in scope; the cwd still works', () => {
+      const { fs, calls } = recordingPosixFs({
+        '/repo': 'dir',
+        '/repo/src': 'dir',
+        '/repo/src/a.ts': 'file'
+      })
+      const scope = buildPiPathScope({
+        cwd: '/repo',
+        rules: { additionalDirectories: ['/net/h/share', '/Network/Servers/h/s', '/.vol/1/2'] },
+        platform,
+        fs,
+        homeDir: '/home/u'
+      })
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const ok = pathFacts(tool, toolInput(tool, 'src/a.ts'), scope)!
+        expect(ok, tool).toMatchObject({ state: 'resolved', inScope: true, remote: false })
+        expect(
+          calls.filter(
+            (c) => NAMESPACE_ARG.test(c) && (platform === 'darwin' || /\/net\b/i.test(c))
+          ),
+          tool
+        ).toEqual([])
+        calls.length = 0
+        const net = pathFacts(tool, toolInput(tool, '/net/h/share/f'), scope)!
+        expect(net, tool).toMatchObject({ state: 'unresolved', remote: true, inScope: false })
+        expect(calls, tool).toEqual([])
+      }
+    })
+
+    it('a link whose target text is under /net (directly, relative, via a chain, in a link-target ancestor) is unresolved + remote before any realpath', () => {
+      const { fs, calls } = recordingPosixFs({
+        '/repo': 'dir',
+        '/repo/src': 'dir',
+        '/repo/evil': { link: '/net/h/x' },
+        '/repo/hop': { link: '/repo/evil' },
+        '/repo/rel': { link: '../net/h' },
+        '/repo/via': { link: '../other/via' },
+        '/other': 'dir',
+        '/other/via': { link: '/NET/h' },
+        '/repo/ok': { link: '/repo/src' }
+      })
+      for (const rel of ['evil', 'evil/x', 'hop', 'hop/deep/x', 'rel/x', 'via/x']) {
+        for (const tool of F4_TOOLS) {
+          calls.length = 0
+          const f = pathFacts(tool, toolInput(tool, rel), scopeFor(platform, fs, ['/repo']))!
+          expect(f, `${tool} ${rel}`).toMatchObject({ state: 'unresolved', remote: true })
+          expect(f.landing).toBeUndefined()
+          expect(
+            calls.filter((c) => c.startsWith('realpath') && /evil|hop|rel|via/.test(c)),
+            `${tool} ${rel}`
+          ).toEqual([])
+          expect(
+            calls.filter((c) => NAMESPACE_ARG.test(c)),
+            `${tool} ${rel}`
+          ).toEqual([])
+          expect(humanOnlyMessage(f)).toContain('is a network or automount path')
+        }
+      }
+      // control: a link to a local directory is followed as before
+      const ok = pathFacts(
+        'write',
+        toolInput('write', 'ok/n.ts'),
+        scopeFor(platform, fs, ['/repo'])
+      )!
+      expect(ok).toMatchObject({ remote: false, landing: '/repo/src/n.ts', inScope: true })
+    })
+
+    it(`a link whose target is under /Network or /.vol is ${platform === 'darwin' ? 'remote' : 'an ordinary dangling link'}`, () => {
+      const { fs, calls } = recordingPosixFs({
+        '/repo': 'dir',
+        '/repo/nw': { link: '/Network/Servers/h' },
+        '/repo/vol': { link: '/.vol/1/2' },
+        '/repo/rel': { link: '../.nofollow/x' }
+      })
+      for (const rel of ['nw/x', 'vol', 'rel']) {
+        calls.length = 0
+        const f = pathFacts('read', { path: rel }, scopeFor(platform, fs, ['/repo']))!
+        expect(f.state, rel).toBe('unresolved')
+        if (platform === 'darwin') {
+          expect(f.remote, rel).toBe(true)
+          expect(
+            calls.filter((c) => NAMESPACE_ARG.test(c)),
+            rel
+          ).toEqual([])
+          expect(
+            calls.filter((c) => c.startsWith('realpath')),
+            rel
+          ).toEqual([])
+        } else {
+          expect(f.remote, rel).toBe(false)
+        }
+      }
+    })
+  })
+
+  it('isPosixNamespacePath: the first component decides, after `.` / `..` are folded, ignoring case and zero-width characters', () => {
+    const yes: Array<[string, NodeJS.Platform]> = [
+      ['/net', 'linux'],
+      ['/net/h/x', 'linux'],
+      ['/NET/h', 'linux'],
+      ['//net//h', 'linux'],
+      ['/./net/h', 'linux'],
+      ['/n\u200det/h', 'linux'],
+      ['/net/../etc', 'linux'], // conservative, as Claude's: the name was spelled
+      ['/Network/Servers/h', 'darwin'],
+      ['/network', 'darwin'],
+      ['/.vol/1/2', 'darwin'],
+      ['/.FILE/x', 'darwin'],
+      ['/.nofollow/x', 'darwin'],
+      ['/.resolve/x', 'darwin'],
+      ['/.vol/../etc/passwd', 'darwin'],
+      ['/net/h', 'darwin']
+    ]
+    const no: Array<[string, NodeJS.Platform]> = [
+      ['/Network/Servers/h', 'linux'],
+      ['/.vol/1/2', 'linux'],
+      ['/repo/net', 'linux'],
+      ['/repo/.vol', 'darwin'],
+      ['/netx', 'linux'],
+      ['/.volume', 'darwin'],
+      ['/', 'darwin'],
+      ['net/h', 'linux'],
+      ['/net/h', 'win32'],
+      ['\\net\\h', 'win32']
+    ]
+    for (const [p, plat] of yes) expect(isPosixNamespacePath(p, plat), `${plat} ${p}`).toBe(true)
+    for (const [p, plat] of no) expect(isPosixNamespacePath(p, plat), `${plat} ${p}`).toBe(false)
+  })
+
+  it('sameFacts: a link that turned into a /net link while a human sat on the card changes the verdict facts', () => {
+    const { fs, inner } = recordingPosixFs({ '/repo': 'dir', '/repo/l': 'dir' })
+    const scope = scopeFor('linux', fs, ['/repo'])
+    const before = pathFacts('write', toolInput('write', 'l/f.ts'), scope)!
+    inner.set('/repo/l', { link: '/net/h/x' })
+    const after = pathFacts('write', toolInput('write', 'l/f.ts'), scope)!
+    expect(after.remote).toBe(true)
+    expect(sameFacts(before, after, 'linux')).toBe(false)
+  })
+})
+
+describe('F4-3 — a link walk that cannot read an entry makes the path unplaceable, not "end of walk"', () => {
+  const eacces = (code: string): NodeJS.ErrnoException =>
+    Object.assign(new Error(`${code}: fixture`), { code })
+
+  function fsDenying(
+    platform: 'posix' | 'win32',
+    nodes: Record<string, VirtualNode>,
+    deny: { lstat?: string; readlink?: string; code: string }
+  ) {
+    const inner = makeVirtualFs(platform, nodes)
+    const calls: string[] = []
+    const same = (a: string, b: string): boolean =>
+      platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+    const fs: PathScopeFs = {
+      realpath: (p) => (calls.push(`realpath ${p}`), inner.realpath(p)),
+      lstat: (p) => {
+        calls.push(`lstat ${p}`)
+        if (deny.lstat !== undefined && same(p, deny.lstat)) throw eacces(deny.code)
+        return inner.lstat(p)
+      },
+      readlink: (p) => {
+        calls.push(`readlink ${p}`)
+        if (deny.readlink !== undefined && same(p, deny.readlink)) throw eacces(deny.code)
+        return inner.readlink(p)
+      },
+      exists: (p) => inner.exists(p)
+    }
+    return { fs, calls }
+  }
+
+  it.each(['EACCES', 'EPERM', 'ELOOP', 'EIO'])(
+    'POSIX: lstat %s on a component -> unresolved, no realpath, not remote',
+    (code) => {
+      const { fs, calls } = fsDenying(
+        'posix',
+        { '/repo': 'dir', '/repo/src': 'dir', '/repo/src/a.ts': 'file' },
+        { lstat: '/repo/src', code }
+      )
+      const scope: PiPathScope = {
+        cwd: '/repo',
+        roots: [],
+        platform: 'linux',
+        homeDir: '/home/u',
+        fs
+      }
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const f = pathFacts(tool, toolInput(tool, 'src/a.ts'), scope)!
+        expect(f, `${tool}`).toMatchObject({
+          state: 'unresolved',
+          remote: false,
+          device: false,
+          inScope: false,
+          carriedOut: false
+        })
+        expect(
+          calls.filter((c) => c.startsWith('realpath')),
+          tool
+        ).toEqual([])
+        expect(humanOnlyMessage(f)).toContain('could not be determined')
+      }
+    }
+  )
+
+  it('POSIX: a link whose readlink fails -> unresolved, no realpath, not remote', () => {
+    const { fs, calls } = fsDenying(
+      'posix',
+      { '/repo': 'dir', '/repo/src': 'dir', '/repo/lnk': { link: '/repo/src' } },
+      { readlink: '/repo/lnk', code: 'EPERM' }
+    )
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: [],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs
+    }
+    const f = pathFacts('write', toolInput('write', 'lnk/a.ts'), scope)!
+    expect(f).toMatchObject({ state: 'unresolved', remote: false, inScope: false })
+    expect(calls.filter((c) => c.startsWith('realpath'))).toEqual([])
+  })
+
+  it('win32: lstat EACCES / readlink EPERM -> unresolved, no realpath (was: "remote" for readlink, "end of walk" for lstat)', () => {
+    const nodes: Record<string, VirtualNode> = {
+      'D:\\repo': 'dir',
+      'D:\\repo\\src': 'dir',
+      'D:\\repo\\src\\a.ts': 'file',
+      'D:\\repo\\lnk': { link: 'D:\\repo\\src' }
+    }
+    for (const deny of [
+      { lstat: 'D:\\repo\\src', code: 'EACCES' },
+      { readlink: 'D:\\repo\\lnk', code: 'EPERM' }
+    ]) {
+      const { fs, calls } = fsDenying('win32', nodes, deny)
+      const scope: PiPathScope = {
+        cwd: 'D:\\repo',
+        roots: [],
+        platform: 'win32',
+        homeDir: 'C:\\Users\\u',
+        fs
+      }
+      const rel = deny.lstat ? 'src\\a.ts' : 'lnk\\a.ts'
+      const f = pathFacts('write', toolInput('write', rel), scope)!
+      expect(f, rel).toMatchObject({ state: 'unresolved', remote: false, device: false })
+      expect(
+        calls.filter((c) => c.startsWith('realpath')),
+        rel
+      ).toEqual([])
+    }
+  })
+
+  it('a link loop is unresolved with no realpath on either platform family, and is not called a network path', () => {
+    const { fs, calls } = recordingPosixFs({
+      '/repo': 'dir',
+      '/repo/loop-a': { link: '/repo/loop-b' },
+      '/repo/loop-b': { link: '/repo/loop-a' }
+    })
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: [],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs
+    }
+    const f = pathFacts('read', { path: 'loop-a/x' }, scope)!
+    expect(f).toMatchObject({ state: 'unresolved', remote: false })
+    expect(calls.filter((c) => c.startsWith('realpath'))).toEqual([])
+    expect(humanOnlyMessage(f)).not.toContain('network path')
+  })
+
+  it('a missing entry still ends the walk: a new file in a new directory is a missing leaf', () => {
+    const { fs } = recordingPosixFs({ '/repo': 'dir' })
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: ['/repo'],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs
+    }
+    expect(pathFacts('write', toolInput('write', 'new/dir/f.ts'), scope)).toMatchObject({
+      state: 'missing-leaf',
+      inScope: true
+    })
+  })
+
+  it('the read block says why: network, device, or undetermined', () => {
+    const posix = recordingPosixFs({ '/repo': 'dir' })
+    const scope: PiPathScope = {
+      cwd: '/repo',
+      roots: ['/repo'],
+      platform: 'darwin',
+      homeDir: '/home/u',
+      fs: posix.fs,
+      blockOutsideReads: true
+    }
+    const net = pathFacts('read', { path: '/net/h/f' }, scope)!
+    expect(readBlockMessage(net, scope)).toContain('is a network or automount path')
+    expect(readBlockMessage(net, scope)).not.toContain('could not be determined')
+    expect(readBlockMessage(net, scope)).toContain('blockReadsOutsideWorkingDirectories')
+
+    const win = recordingWinFs({ 'D:\\repo': 'dir' })
+    const winScope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: win.fs,
+      blockOutsideReads: true
+    }
+    const dev = pathFacts('read', { path: 'COM1' }, winScope)!
+    expect(readBlockMessage(dev, winScope)).toContain('Windows device')
+    expect(readBlockMessage(dev, winScope)).toContain('blockReadsOutsideWorkingDirectories')
+    const unc = pathFacts('read', { path: '\\\\h\\s\\f' }, winScope)!
+    expect(readBlockMessage(unc, winScope)).toContain('is a network path')
+
+    const { fs } = fsDenying(
+      'posix',
+      { '/repo': 'dir', '/repo/a': 'file' },
+      {
+        lstat: '/repo/a',
+        code: 'EACCES'
+      }
+    )
+    const other: PiPathScope = { ...scope, platform: 'linux', fs }
+    const undetermined = pathFacts('read', { path: 'a' }, other)!
+    expect(readBlockMessage(undetermined, other)).toContain('could not be determined')
+  })
+})
+
+describe('F4-2 — DOS device names: superscript digits and the odd spellings (win32)', () => {
+  const scopeWith = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+  const DEVICES = [
+    'COM\u00B9',
+    'com\u00B2',
+    'COM\u00B3',
+    'LPT\u00B9',
+    'lpt\u00B2',
+    'LPT\u00B3',
+    'COM\u00B9.txt',
+    'lpt\u00B3.log',
+    'src\\COM\u00B2\\x.ts',
+    // the odd spellings Win32 still maps to the device (trailing colon, space, space before the extension)
+    'NUL:',
+    'COM1 ',
+    'CON .txt',
+    'aux :stream'
+  ]
+
+  it.each(DEVICES)('%j: unresolved + device, every tool, ZERO filesystem calls', (p) => {
+    const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir', 'D:\\repo\\src': 'dir' })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, p), scopeWith(fs))!
+      expect(calls, `${tool} ${p}`).toEqual([])
+      expect(f, `${tool} ${p}`).toMatchObject({ state: 'unresolved', device: true, remote: false })
+    }
+    expect(suspiciousWindowsPath(`D:\\repo\\${p}`)).toBe(true)
+  })
+
+  it('the neighbours are ordinary: COM0, COM10, COM\u2074 (superscript four), LPT0, comx', () => {
+    for (const p of ['COM0', 'COM10', 'COM\u2074', 'LPT0', 'lpt\u2075', 'comx', 'COM\u00B9x']) {
+      const { fs, calls } = recordingWinFs({ 'D:\\repo': 'dir' })
+      const f = pathFacts('write', { path: p, content: 'x' }, scopeWith(fs))!
+      expect(f.device, p).toBe(false)
+      expect(calls.length, p).toBeGreaterThan(0)
+    }
+  })
+
+  it('a link whose target is a superscript device is unresolved + device', () => {
+    const { fs, calls } = recordingWinFs({
+      'D:\\repo': 'dir',
+      'D:\\repo\\l': { link: 'D:\\repo\\COM\u00B2' }
+    })
+    const f = pathFacts('read', { path: 'l' }, scopeWith(fs))!
+    expect(f).toMatchObject({ state: 'unresolved', device: true })
+    expect(calls.filter((c) => /COM\u00B2/.test(c))).toEqual([])
+  })
+})
+
+describe('F4-4 — workspaceEditRules: the rule an in-workspace edit/write card suggests', () => {
+  it('Edit(//<root>/**) for the root holding the target, for edit and write alike', () => {
+    for (const tool of ['edit', 'write'] as const) {
+      expect(workspaceEditRules(tool, { path: 'src/a.ts' }, posixScope())).toEqual([
+        { toolName: 'Edit', ruleContent: '//repo/**' }
+      ])
+      expect(workspaceEditRules(tool, { path: '/repo/src/new.ts' }, posixScope())).toEqual([
+        { toolName: 'Edit', ruleContent: '//repo/**' }
+      ])
+    }
+  })
+
+  it('an additional directory suggests its own root, not the cwd and not the bare tool', () => {
+    expect(workspaceEditRules('write', { path: '/extra/notes.md' }, posixScope())).toEqual([
+      { toolName: 'Edit', ruleContent: '//extra/**' }
+    ])
+  })
+
+  it('nested roots: the narrowest root that holds the target', () => {
+    const scope = posixScope({ roots: ['/repo', '/repo/src'] })
+    expect(workspaceEditRules('edit', { path: 'src/a.ts' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//repo/src/**' }
+    ])
+    expect(workspaceEditRules('edit', { path: 'file.txt' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//repo/**' }
+    ])
+  })
+
+  it('a cwd reached through a link: the rule is spelled the way the cwd is (the allow tier matches that alias)', () => {
+    const scope: PiPathScope = {
+      cwd: '/logical',
+      roots: ['/logical'],
+      platform: 'linux',
+      homeDir: '/home/u',
+      fs: makeVirtualFs('posix', { '/logical': { link: '/physical' }, '/physical': 'dir' })
+    }
+    expect(workspaceEditRules('write', { path: 'a.ts' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//logical/**' }
+    ])
+  })
+
+  it('win32: //<drive>/<dir>/**', () => {
+    const scope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: makeVirtualFs('win32', { 'D:\\repo': 'dir' })
+    }
+    expect(workspaceEditRules('edit', { path: 'src\\a.ts' }, scope)).toEqual([
+      { toolName: 'Edit', ruleContent: '//d/repo/**' }
+    ])
+  })
+
+  it('nothing to offer: an outside target, an agent-control path, an unplaceable path, a read tool, the scratchpad, a root with a glob character', () => {
+    const scope = posixScope({ scratchpad: '/tmp/claudeui/proj/sess/scratchpad' })
+    expect(workspaceEditRules('write', { path: '/etc/passwd' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('write', { path: '/repo/link-out/x' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('edit', { path: '.git/hooks/pre-commit' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('edit', { path: 'dangling/x' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('edit', { path: '/net/h/f' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('read', { path: 'src/a.ts' }, scope)).toBeUndefined()
+    expect(workspaceEditRules('bash', { command: 'ls' }, scope)).toBeUndefined()
+    expect(
+      workspaceEditRules('write', { path: '/tmp/claudeui/proj/sess/scratchpad/n.md' }, scope)
+    ).toBeUndefined()
+    const globby = posixScope({
+      cwd: '/rep*o',
+      roots: ['/rep*o'],
+      fs: makeVirtualFs('posix', { '/rep*o': 'dir' })
+    })
+    expect(workspaceEditRules('write', { path: 'a.ts' }, globby)).toBeUndefined()
+  })
+})
 
 describe('pathFacts — real links in a temp dir', () => {
   let base: string
@@ -971,5 +2290,752 @@ describe('pathFacts — real links in a temp dir', () => {
       inScope: true
     })
     expect(hostPathFs.exists(path.join(cwd, 'src', 'a.ts'))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice F5 (second exit re-review)
+// ---------------------------------------------------------------------------
+
+/**
+ * A recording fs with the kernel's link semantics for what the walk asks: `lstat` / `readlink`
+ * answer from a table of links (anything else is an ordinary directory), a call on a namespace
+ * (`/net`) or UNC spelling throws (the gate must never touch it), and `realpath` only records and
+ * answers from `real` (or echoes). `makeVirtualFs` folds a link target's `..` by TEXT, so it
+ * cannot stand in for the POSIX kernel here: with `a -> /net/h/q`, `a/../b` is `/net/h/b` to the
+ * kernel and a sibling of `a` to a text fold. The table only answers `lstat` / `readlink`: the
+ * ORDER (follow then climb on POSIX, text fold on win32) is the walk's own, and the real-links
+ * test below pins it against what the OS does.
+ */
+function kernelLikeFs(
+  platform: 'posix' | 'win32',
+  links: Record<string, string>,
+  real: Record<string, string> = {}
+) {
+  const calls: string[] = []
+  const touchesNamespace =
+    platform === 'win32'
+      ? (p: string) => /^[\\/]{2}/.test(p)
+      : (p: string) => /^\/net(?:\/|$)/i.test(p)
+  const guard = (op: string, p: string): void => {
+    calls.push(`${op} ${p}`)
+    if (touchesNamespace(p)) throw new Error(`TOUCHED ${p}`)
+  }
+  const fs: PathScopeFs = {
+    lstat: (p) => (guard('lstat', p), { isSymbolicLink: () => p in links }),
+    readlink: (p) => (guard('readlink', p), links[p]),
+    realpath: (p) => (guard('realpath', p), real[p] ?? p),
+    exists: (p) => (guard('exists', p), true)
+  }
+  return { fs, calls }
+}
+
+describe('F5-1 — the POSIX link walk follows a link before it climbs a `..` (kernel order, never folded by text)', () => {
+  const scopeOf = (fs: PathScopeFs): PiPathScope => ({
+    cwd: '/home/u/proj',
+    roots: ['/home/u/proj'],
+    platform: 'linux',
+    homeDir: '/home/u',
+    fs
+  })
+  const realpaths = (calls: string[]): string[] => calls.filter((c) => c.startsWith('realpath'))
+
+  // Each of these reaches /net for the kernel, and somewhere local for a text fold.
+  const REACHES_NET: Record<string, Record<string, string>> = {
+    'an absolute target whose `..` climbs out of /net/<host> by text': {
+      '/home/u/proj/docs': '/net/attacker.example/../../tmp'
+    },
+    'a relative target that climbs after following a link into /net': {
+      '/home/u/proj/docs': 'a/../b',
+      '/home/u/proj/a': '/net/attacker.example/q'
+    },
+    'a relative target that climbs out of a link to / and then names /net': {
+      '/home/u/proj/docs': 'a/../net/attacker.example',
+      '/home/u/proj/a': '/'
+    },
+    'the same, one hop further along a chain': {
+      '/home/u/proj/docs': 'hop',
+      '/home/u/proj/hop': 'a/../b',
+      '/home/u/proj/a': '/net/attacker.example/q'
+    }
+  }
+
+  it.each(Object.keys(REACHES_NET))('%s is unresolved + remote, with no realpath', (name) => {
+    const { fs, calls } = kernelLikeFs('posix', REACHES_NET[name])
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'docs/readme.md'), scopeOf(fs))!
+      expect(f, tool).toMatchObject({ state: 'unresolved', remote: true, inScope: false })
+      expect(f.landing, tool).toBeUndefined()
+      expect(realpaths(calls), tool).toEqual([])
+      expect(humanOnlyMessage(f), tool).toContain('is a network or automount path')
+    }
+  })
+
+  it('a local link with `..` in its target is followed from the right directory and placed by realpath', () => {
+    // `docs -> a/../b`, `a -> /home/u/other/q`: the kernel lands on /home/u/other/b, not on proj/b
+    const { fs, calls } = kernelLikeFs(
+      'posix',
+      { '/home/u/proj/docs': 'a/../b', '/home/u/proj/a': '/home/u/other/q' },
+      { '/home/u/proj/docs/readme.md': '/home/u/other/b/readme.md' }
+    )
+    const f = pathFacts('read', { path: 'docs/readme.md' }, scopeOf(fs))!
+    expect(f).toMatchObject({
+      state: 'resolved',
+      remote: false,
+      landing: '/home/u/other/b/readme.md',
+      inScope: false,
+      carriedOut: true
+    })
+    // the walk looked at the entry the kernel would, and never at the text-folded sibling
+    expect(calls).toContain('lstat /home/u/other/b')
+    expect(calls).not.toContain('lstat /home/u/proj/b')
+    expect(realpaths(calls)).toContain('realpath /home/u/proj/docs/readme.md')
+  })
+
+  it('a link into the workspace with `.` / `..` stays in scope', () => {
+    const { fs, calls } = kernelLikeFs(
+      'posix',
+      { '/home/u/proj/docs': './sub/../src' },
+      { '/home/u/proj/docs/n.ts': '/home/u/proj/src/n.ts' }
+    )
+    const f = pathFacts('write', toolInput('write', 'docs/n.ts'), scopeOf(fs))!
+    expect(f).toMatchObject({ remote: false, landing: '/home/u/proj/src/n.ts', inScope: true })
+    expect(realpaths(calls)).toContain('realpath /home/u/proj/docs/n.ts')
+  })
+
+  it('a `..` at the root stays at the root, as the kernel does', () => {
+    const { fs } = kernelLikeFs('posix', { '/home/u/proj/docs': '../../../../../../x' })
+    expect(pathFacts('read', { path: 'docs/f' }, scopeOf(fs))!.remote).toBe(false)
+    const { fs: fs2 } = kernelLikeFs('posix', { '/home/u/proj/docs': '../../../../../../net/h' })
+    expect(pathFacts('read', { path: 'docs/f' }, scopeOf(fs2))).toMatchObject({
+      state: 'unresolved',
+      remote: true
+    })
+  })
+
+  it('a chain past the hop limit is still unreadable, not remote', () => {
+    const links: Record<string, string> = {}
+    for (let i = 0; i < 50; i++) links[`/home/u/proj/l${i}`] = `l${i + 1}/../l${i + 1}`
+    const { fs } = kernelLikeFs('posix', links)
+    expect(pathFacts('read', { path: 'l0/f' }, scopeOf(fs))).toMatchObject({
+      state: 'unresolved',
+      remote: false
+    })
+  })
+
+  it('the card names a POSIX namespace a network or automount path, and keeps the UNC wording on win32', () => {
+    const { fs } = kernelLikeFs('posix', { '/home/u/proj/docs': '/net/h/q' })
+    const scope = { ...scopeOf(fs), blockOutsideReads: true }
+    const f = pathFacts('read', { path: 'docs/x' }, scope)!
+    expect(humanOnlyMessage(f)).toContain('is a network or automount path (or a link to one)')
+    expect(readBlockMessage(f, scope)).toContain(
+      'is a network or automount path (or a link to one)'
+    )
+
+    const win = kernelLikeFs('win32', { 'D:\\repo\\docs': `${BS}${BS}h${BS}s` })
+    const winScope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: win.fs,
+      blockOutsideReads: true
+    }
+    const wf = pathFacts('read', { path: 'docs\\x' }, winScope)!
+    expect(wf.remote).toBe(true)
+    expect(humanOnlyMessage(wf)).toContain('is a network path (or a link to one)')
+    expect(readBlockMessage(wf, winScope)).toContain('is a network path (or a link to one)')
+  })
+})
+
+describe('F6-1 / F8 — the win32 link walk folds an absolute link target as text, and refuses a relative one that climbs', () => {
+  const winScope = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+  const touched = (calls: string[]): string[] =>
+    calls.filter((c) => c.startsWith('realpath') || c.startsWith('exists'))
+
+  // F8: these were walked by text in F6 (`docs -> a\..\b` is `D:\repo\b`, whatever `a` is). The text
+  // fold is the symlink reading only; a junction keeps its own spelling, so a relative target that
+  // climbs is unplaceable on win32 (no realpath, nothing looked at past the link itself).
+  it.each([
+    [
+      '`a\\..\\b` with a link `b` to a UNC share',
+      { 'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share` }
+    ],
+    ['`a\\..\\b` with `a` a link to a local directory', { 'D:\\repo\\a': 'D:\\other\\q' }],
+    [
+      '`a\\..\\b` with `a` a link to a UNC share',
+      { 'D:\\repo\\a': `${BS}${BS}attacker.example${BS}share${BS}q` }
+    ]
+  ])('a relative target that climbs is unplaceable, with no realpath: %s', (_name, extra) => {
+    const { fs, calls } = kernelLikeFs('win32', { 'D:\\repo\\docs': `a${BS}..${BS}b`, ...extra })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'docs\\readme.md'), winScope(fs))!
+      expect(f, tool).toMatchObject({ state: 'unresolved', inScope: false, device: false })
+      expect(touched(calls), tool).toEqual([])
+      expect(calls, tool).not.toContain('lstat D:\\repo\\b')
+      expect(calls, tool).not.toContain('lstat D:\\other\\q')
+    }
+  })
+
+  it('a relative target without a `..` is folded against the link’s directory and placed (control)', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\docs': `sub${BS}.${BS}x`, 'D:\\repo\\plain': 'b' },
+      {
+        'D:\\repo\\docs\\n.ts': 'D:\\repo\\sub\\x\\n.ts',
+        'D:\\repo\\plain\\n.ts': 'D:\\repo\\b\\n.ts'
+      }
+    )
+    expect(pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))).toMatchObject({
+      state: 'resolved',
+      landing: 'D:\\repo\\sub\\x\\n.ts',
+      inScope: true
+    })
+    expect(calls).toContain('lstat D:\\repo\\sub\\x')
+    expect(pathFacts('read', { path: 'plain\\n.ts' }, winScope(fs))).toMatchObject({
+      state: 'resolved',
+      landing: 'D:\\repo\\b\\n.ts'
+    })
+  })
+
+  it('an absolute target is folded too: `D:\\other\\q\\..\\r` is `D:\\other\\r`', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\docs': `D:${BS}other${BS}q${BS}..${BS}r`,
+      'D:\\other\\q': `${BS}${BS}attacker.example${BS}share`
+    })
+    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
+    expect(f.remote).toBe(false)
+    expect(calls).toContain('lstat D:\\other\\r')
+    expect(calls).not.toContain('lstat D:\\other\\q')
+  })
+
+  it('a device component in the raw target is still judged before the target is followed', () => {
+    const { fs } = kernelLikeFs('win32', { 'D:\\repo\\docs': `NUL${BS}..${BS}src` })
+    expect(pathFacts('read', { path: 'docs\\f' }, winScope(fs))).toMatchObject({
+      state: 'unresolved',
+      device: true
+    })
+  })
+})
+
+describe('F6-2 — a win32 link target with a root that is not `X:\\` is unplaceable before any further call', () => {
+  const winScope = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+
+  it.each([
+    ['an NT device path to the MUP', `${BS}Device${BS}Mup${BS}h${BS}s`],
+    ['an NT global-namespace UNC', `${BS}GLOBAL??${BS}UNC${BS}h${BS}s`],
+    ['an NT device', `${BS}Device${BS}Serial0`],
+    ['DosDevices', `${BS}DosDevices${BS}UNC${BS}h${BS}s`],
+    ['GLOBALROOT', `${BS}GLOBALROOT${BS}Device${BS}Mup${BS}h`],
+    ['a session path', `${BS}Sessions${BS}1${BS}x`],
+    ['a rooted driveless path', `${BS}Windows`],
+    ['a rooted driveless path with a forward slash', '/Device/Mup/h/s'],
+    ['a drive-relative path', 'D:foo']
+  ])(
+    '%s is unreadable: unresolved, not remote, no realpath / exists / further lstat',
+    (_n, target) => {
+      const { fs, calls } = kernelLikeFs('win32', { 'D:\\repo\\docs': target })
+      for (const tool of F4_TOOLS) {
+        calls.length = 0
+        const f = pathFacts(tool, toolInput(tool, 'docs\\readme.md'), winScope(fs))!
+        expect(f, tool).toMatchObject({ state: 'unresolved', remote: false, inScope: false })
+        expect(f.landing, tool).toBeUndefined()
+        expect(
+          calls.filter((c) => /^(?:realpath|exists)/.test(c)),
+          tool
+        ).toEqual([])
+        // the walk ended at the link: nothing after `lstat D:\repo\docs` / `readlink` was asked
+        expect(
+          calls.filter((c) => c.startsWith('lstat') && !c.startsWith('lstat D:\\repo')),
+          tool
+        ).toEqual([])
+      }
+    }
+  )
+
+  it.each([`${BS}??${BS}UNC${BS}h${BS}s`, `${BS}${BS}h${BS}s`, '//h/s'])(
+    'the target %s stays remote',
+    (target) => {
+      const { fs } = kernelLikeFs('win32', { 'D:\\repo\\docs': target })
+      expect(pathFacts('read', { path: 'docs\\f' }, winScope(fs))).toMatchObject({
+        state: 'unresolved',
+        remote: true
+      })
+    }
+  )
+
+  it.each(['d:\\other', 'D:/other', 'sub\\dir'])(
+    'the target %s (an `X:\\` or a relative one) is walked, not refused',
+    (target) => {
+      const { fs } = kernelLikeFs('win32', { 'D:\\repo\\docs': target })
+      expect(pathFacts('read', { path: 'docs\\f' }, winScope(fs))).toMatchObject({
+        state: 'resolved',
+        remote: false
+      })
+    }
+  )
+})
+
+describe('F6-1 / F8 — the link walk visits the directory the OS really lands in (real links; win32 refuses the climbing one)', () => {
+  let base = ''
+  let cwd = ''
+  let linksWork = true
+  const sep = path.sep
+
+  beforeAll(() => {
+    // the native real path of the temp dir: no 8.3 short names, no /var -> /private/var in the way
+    base = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-path-walk-')))
+    cwd = path.join(base, 'x')
+    mkdirSync(path.join(cwd, 'b'), { recursive: true })
+    mkdirSync(path.join(base, 'deep', 'dir'), { recursive: true })
+    mkdirSync(path.join(base, 'deep', 'b'), { recursive: true })
+    writeFileSync(path.join(cwd, 'b', 'f.txt'), 'x/b')
+    writeFileSync(path.join(base, 'deep', 'b', 'f.txt'), 'deep/b')
+    try {
+      // `a -> ../deep/dir`; `s -> a/../b`: the POSIX kernel follows `a` and climbs from deep/dir
+      // (deep/b), while Windows folds the `..` as text against x (x/b) for a symlink; the walk
+      // refuses it there (F8). `t -> b` descends only: placed everywhere.
+      symlinkSync(['..', 'deep', 'dir'].join(sep), path.join(cwd, 'a'), 'dir')
+      symlinkSync(['a', '..', 'b'].join(sep), path.join(cwd, 's'), 'dir')
+      symlinkSync('b', path.join(cwd, 't'), 'dir')
+    } catch {
+      linksWork = false
+    }
+  })
+
+  afterAll(() => {
+    // unlink the links without following them, then remove only what this test created
+    for (const name of ['t', 's', 'a']) {
+      try {
+        unlinkSync(path.join(cwd, name))
+      } catch {
+        /* never created */
+      }
+    }
+    for (const name of ['t', 's', 'a']) {
+      let stillLink = false
+      try {
+        stillLink = lstatSync(path.join(cwd, name)).isSymbolicLink()
+      } catch {
+        /* gone */
+      }
+      if (stillLink) return // refuse to recurse past a link that could not be removed
+    }
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  it('lstats the directory realpath lands in, and not the other one (win32: the climbing link is unplaceable)', (ctx) => {
+    if (!linksWork) {
+      return ctx.skip() // symlinkSync is refused here (no privilege / Developer Mode)
+    }
+    const landed = realpathSync.native(path.join(cwd, 's'))
+    const candidates = [path.join(cwd, 'b'), path.join(base, 'deep', 'b')]
+    expect(candidates).toContain(landed)
+    const other = candidates.find((c) => c !== landed)!
+
+    const lstats: string[] = []
+    const fs: PathScopeFs = {
+      ...hostPathFs,
+      lstat: (p) => {
+        lstats.push(p)
+        return hostPathFs.lstat(p)
+      }
+    }
+    const f = pathFacts(
+      'read',
+      { path: ['s', 'f.txt'].join(sep) },
+      { cwd, roots: [cwd], platform: process.platform, homeDir: base, fs }
+    )!
+    if (process.platform === 'win32') {
+      expect(f.state).toBe('unresolved')
+      expect(lstats).not.toContain(other)
+      return
+    }
+    expect(f).toMatchObject({ state: 'resolved', remote: false })
+    expect(f.landing).toBe(path.join(landed, 'f.txt'))
+    expect(lstats).toContain(landed)
+    expect(lstats).not.toContain(other)
+  })
+
+  it('control: a relative link without `..` is placed everywhere, from the directory it descends into', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    const lstats: string[] = []
+    const fs: PathScopeFs = {
+      ...hostPathFs,
+      lstat: (p) => {
+        lstats.push(p)
+        return hostPathFs.lstat(p)
+      }
+    }
+    const f = pathFacts(
+      'read',
+      { path: ['t', 'f.txt'].join(sep) },
+      { cwd, roots: [cwd], platform: process.platform, homeDir: base, fs }
+    )!
+    expect(f).toMatchObject({ state: 'resolved', remote: false })
+    expect(f.landing).toBe(path.join(cwd, 'b', 'f.txt'))
+    expect(lstats).toContain(path.join(cwd, 'b'))
+  })
+})
+
+describe('F7-1 / F8 — a relative link target with a `..` is unplaceable on win32 (a junction keeps its own name, a symlink does not; readlink cannot tell)', () => {
+  const winScope = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+  const touched = (calls: string[]): string[] =>
+    calls.filter((c) => c.startsWith('realpath') || c.startsWith('exists'))
+
+  it('`J -> D:\\real`, `real\\s -> ..\\b`, `repo\\b -> \\\\h\\s`: `J\\s\\f` is unplaceable with no realpath (junction J reads `repo\\b`, symlink J reads `D:\\b`; reviewer case A)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\real',
+      'D:\\real\\s': `..${BS}b`,
+      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
+    })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'J\\s\\f'), winScope(fs))!
+      expect(f.state, tool).toBe('unresolved')
+      expect(f.inScope, tool).toBe(false)
+      expect(touched(calls), tool).toEqual([])
+    }
+  })
+
+  it('the same holds when the link above is a chain of absolute links (`w\\J1 => r1`, `r1\\J2 => r2`, `r2\\s -> ..\\..\\b`)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J1': 'D:\\r1',
+      'D:\\r1\\J2': 'D:\\r2',
+      'D:\\r2\\s': `..${BS}..${BS}b`
+    })
+    const f = pathFacts('read', { path: 'J1\\J2\\s\\f' }, winScope(fs))!
+    expect(f.state).toBe('unresolved')
+    expect(touched(calls)).toEqual([])
+  })
+
+  it('control: a relative target that stays inside the absolute link’s target is still walked and placed', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\J': 'D:\\real', 'D:\\real\\s': `sub${BS}x` },
+      { 'D:\\repo\\J\\s\\f': 'D:\\real\\sub\\x\\f' }
+    )
+    const f = pathFacts('read', { path: 'J\\s\\f' }, winScope(fs))!
+    expect(f).toMatchObject({ state: 'resolved', remote: false, landing: 'D:\\real\\sub\\x\\f' })
+    expect(calls).toContain('lstat D:\\real\\sub\\x')
+    expect(calls.some((c) => c.startsWith('realpath'))).toBe(true)
+  })
+
+  it('even a `..` that climbs only within the absolute link\u2019s target is refused (the rule is the `..`, not where it lands)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\real',
+      'D:\\real\\sub\\s': `..${BS}z`
+    })
+    const f = pathFacts('read', { path: 'J\\sub\\s\\f' }, winScope(fs))!
+    expect(f.state).toBe('unresolved')
+    expect(touched(calls)).toEqual([])
+    expect(calls).not.toContain('lstat D:\\real\\z')
+  })
+
+  it('reviewer case H: a junction whose target text runs through another junction, then a `..` link: unplaceable, no realpath (w\\J => r1\\J2\\sub, r1\\J2 => r2, r2\\sub\\s -> ..\\b)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\r1\\J2\\sub',
+      'D:\\r1\\J2': 'D:\\r2',
+      'D:\\r2\\sub\\s': `..${BS}b`,
+      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
+    })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'J\\s\\f'), winScope(fs))!
+      expect(f.state, tool).toBe('unresolved')
+      expect(f.inScope, tool).toBe(false)
+      expect(touched(calls), tool).toEqual([])
+    }
+  })
+
+  it('reviewer case P2: a junction whose target text runs through a relative link, then a `..` link: unplaceable, no realpath (w\\J => r1\\s\\sub, r1\\s -> x, r1\\x\\sub\\s2 -> ..\\b)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\r1\\s\\sub',
+      'D:\\r1\\s': 'x',
+      'D:\\r1\\x\\sub\\s2': `..${BS}b`,
+      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
+    })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'J\\s2\\f'), winScope(fs))!
+      expect(f.state, tool).toBe('unresolved')
+      expect(touched(calls), tool).toEqual([])
+    }
+  })
+
+  it('control: a relative target without a `..` inside a junction\u2019s target keeps walking, through several hops, and is placed', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      {
+        'D:\\repo\\J': 'D:\\r1\\s\\sub',
+        'D:\\r1\\s': 'x',
+        'D:\\r1\\x\\sub\\t': `plain${BS}.${BS}leaf`
+      },
+      { 'D:\\repo\\J\\t\\f': 'D:\\r1\\x\\sub\\plain\\leaf\\f' }
+    )
+    const f = pathFacts('read', { path: 'J\\t\\f' }, winScope(fs))!
+    expect(f).toMatchObject({ state: 'resolved', landing: 'D:\\r1\\x\\sub\\plain\\leaf\\f' })
+    expect(calls).toContain('lstat D:\\r1\\x\\sub\\plain\\leaf')
+  })
+
+  it('control: an absolute target (folded as text) and a plain relative sibling are still placed', () => {
+    const { fs } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\abs': `D:${BS}o${BS}q${BS}..${BS}r`, 'D:\\repo\\rel': 'b' },
+      { 'D:\\repo\\abs\\f': 'D:\\o\\r\\f', 'D:\\repo\\rel\\f': 'D:\\repo\\b\\f' }
+    )
+    expect(pathFacts('read', { path: 'abs\\f' }, winScope(fs))).toMatchObject({
+      landing: 'D:\\o\\r\\f'
+    })
+    expect(pathFacts('read', { path: 'rel\\f' }, winScope(fs))).toMatchObject({
+      landing: 'D:\\repo\\b\\f',
+      inScope: true
+    })
+  })
+
+  it('a climb after an ordinary relative link is still unplaceable', () => {
+    // J -> D:\real; real\s -> sub (walked); real\sub\t -> ..\..\b climbs
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\real',
+      'D:\\real\\s': 'sub',
+      'D:\\real\\sub\\t': `..${BS}..${BS}b`
+    })
+    const f = pathFacts('read', { path: 'J\\s\\t\\f' }, winScope(fs))!
+    expect(f.state).toBe('unresolved')
+    expect(calls.some((c) => c.startsWith('realpath'))).toBe(false)
+  })
+
+  it('a relative `..` that does not sit above an absolute link is refused too (no text fold of a relative target)', () => {
+    const { fs, calls } = kernelLikeFs('win32', { 'D:\\repo\\docs': `a${BS}..${BS}b` })
+    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
+    expect(f.state).toBe('unresolved')
+    expect(touched(calls)).toEqual([])
+  })
+
+  it('POSIX is unchanged: the same shape folds in the kernel’s order and is placed', () => {
+    const { fs, calls } = kernelLikeFs(
+      'posix',
+      { '/home/u/proj/J': '/real', '/real/s': '../b' },
+      { '/home/u/proj/J/s/f': '/b/f' }
+    )
+    const f = pathFacts(
+      'read',
+      { path: 'J/s/f' },
+      { cwd: '/home/u/proj', roots: ['/home/u/proj'], platform: 'linux', homeDir: '/home/u', fs }
+    )!
+    expect(f).toMatchObject({ state: 'resolved', landing: '/b/f' })
+    expect(calls).toContain('lstat /b')
+  })
+})
+
+describe('F7-1 / F8 — the link walk never places a path through a link it did not read (real junctions and symlinks)', () => {
+  let base = ''
+  let linksWork = true
+  const sep = path.sep
+  const links: string[] = []
+  const at = (...p: string[]): string => path.join(base, ...p)
+  const mk = (target: string, p: string, type: 'dir' | 'junction'): void => {
+    symlinkSync(target, p, type)
+    links.push(p)
+  }
+  const tag = (dir: string): void => {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'f'), dir)
+  }
+  /**
+   * Every `b` a `..` could climb to is a link to a sentinel directory (a stand-in for `b -> \\host\share`):
+   * landing inside a sentinel means the OS followed that link, so the walk must have read it.
+   */
+  const sentinels: Array<{ dir: string; link: string }> = []
+  const sentinelLink = (link: string, dir: string): void => {
+    tag(dir)
+    mkdirSync(path.dirname(link), { recursive: true })
+    mk(dir, link, 'dir')
+    sentinels.push({ dir, link })
+  }
+
+  beforeAll(() => {
+    base = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-path-junc-')))
+    try {
+      // A: w\J => real0 (junction); real0\s -> ..\b; w\b -> sentinel (a stand-in for `w\b -> \\host\share`)
+      tag(at('A', 'real0'))
+      tag(at('A', 'b'))
+      mkdirSync(at('A', 'w'), { recursive: true })
+      mk(at('A', 'real0'), at('A', 'w', 'J'), 'junction')
+      mk(['..', 'b'].join(sep), at('A', 'real0', 's'), 'dir')
+      sentinelLink(at('A', 'w', 'b'), at('A', 'sentinel'))
+      // B: w\J => deep\real; deep\real\sub\s -> ..\..\b ; `w\b` and `deep\b` are links
+      sentinelLink(at('B', 'w', 'b'), at('B', 'sent-w'))
+      sentinelLink(at('B', 'deep', 'b'), at('B', 'sent-deep'))
+      mkdirSync(at('B', 'deep', 'real', 'sub'), { recursive: true })
+      mk(at('B', 'deep', 'real'), at('B', 'w', 'J'), 'junction')
+      mk(['..', '..', 'b'].join(sep), at('B', 'deep', 'real', 'sub', 's'), 'dir')
+      // H: w\J => r1\J2\sub (junction, text through another junction); r1\J2 => r2 (junction);
+      // r2\sub\s -> ..\b. A `b` exists beside every directory the `..` could climb to.
+      sentinelLink(at('H', 'w', 'b'), at('H', 'sent-w'))
+      sentinelLink(at('H', 'r1', 'b'), at('H', 'sent-r1'))
+      sentinelLink(at('H', 'r2', 'b'), at('H', 'sent-r2'))
+      mkdirSync(at('H', 'r2', 'sub'), { recursive: true })
+      mk(at('H', 'r2'), at('H', 'r1', 'J2'), 'junction')
+      mk(at('H', 'r1', 'J2', 'sub'), at('H', 'w', 'J'), 'junction')
+      mk(['..', 'b'].join(sep), at('H', 'r2', 'sub', 's'), 'dir')
+      // P2: w\J => r1\s\sub (junction, text through a relative symlink); r1\s -> x;
+      // r1\x\sub\s2 -> ..\b
+      mkdirSync(at('P2', 'r1', 'x', 'sub'), { recursive: true })
+      sentinelLink(at('P2', 'w', 'b'), at('P2', 'sent-w'))
+      sentinelLink(at('P2', 'r1', 'b'), at('P2', 'sent-r1'))
+      sentinelLink(at('P2', 'r1', 'x', 'b'), at('P2', 'sent-x'))
+      mk('x', at('P2', 'r1', 's'), 'dir')
+      mk(at('P2', 'r1', 's', 'sub'), at('P2', 'w', 'J'), 'junction')
+      mk(['..', 'b'].join(sep), at('P2', 'r1', 'x', 'sub', 's2'), 'dir')
+    } catch {
+      linksWork = false
+    }
+  })
+
+  afterAll(() => {
+    // remove the links without following them (a junction needs rmdir on some hosts), newest first
+    for (const l of links.reverse()) {
+      try {
+        unlinkSync(l)
+      } catch {
+        try {
+          rmdirSync(l)
+        } catch {
+          /* never created, or already gone */
+        }
+      }
+    }
+    for (const l of links) {
+      try {
+        lstatSync(l)
+        return // a link that could not be removed: never recurse past it
+      } catch {
+        /* gone */
+      }
+    }
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  /** The walk either places `rel` where the OS does, having read that directory, or refuses to place it. */
+  function expectNeverPlacedThroughAnUnreadLink(cwd: string, rel: string): void {
+    const landed = realpathSync.native(path.resolve(cwd, rel))
+    const lstats: string[] = []
+    const readlinks: string[] = []
+    const fs: PathScopeFs = {
+      ...hostPathFs,
+      lstat: (p) => {
+        lstats.push(p.toLowerCase())
+        return hostPathFs.lstat(p)
+      },
+      readlink: (p) => {
+        readlinks.push(p.toLowerCase())
+        return hostPathFs.readlink(p)
+      }
+    }
+    const f = pathFacts(
+      'read',
+      { path: rel },
+      { cwd, roots: [cwd], platform: process.platform, homeDir: base, fs }
+    )!
+    if (f.state === 'unresolved') return
+    expect(f.landing?.toLowerCase()).toBe(landed.toLowerCase())
+    expect(lstats).toContain(path.dirname(landed).toLowerCase())
+    // landed inside a sentinel: the link that leads there must have been read
+    for (const { dir, link } of sentinels) {
+      if (landed.toLowerCase().startsWith(dir.toLowerCase() + sep)) {
+        expect(readlinks, link).toContain(link.toLowerCase())
+      }
+    }
+  }
+
+  it('A: `w\\J` a junction to `real0`, `real0\\s -> ..\\b`, `w\\b` a link: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip() // a relative symlink cannot be created here (no privilege / Developer Mode)
+    expectNeverPlacedThroughAnUnreadLink(at('A', 'w'), ['J', 's', 'f'].join(sep))
+  })
+
+  it('B: `w\\J` a junction to `deep\\real`, `deep\\real\\sub\\s -> ..\\..\\b`: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    expectNeverPlacedThroughAnUnreadLink(at('B', 'w'), ['J', 'sub', 's', 'f'].join(sep))
+  })
+
+  it('H: a junction whose target text runs through another junction, then `s -> ..\\b`: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    expectNeverPlacedThroughAnUnreadLink(at('H', 'w'), ['J', 's', 'f'].join(sep))
+  })
+
+  it('P2: a junction whose target text runs through a relative symlink, then `s2 -> ..\\b`: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    expectNeverPlacedThroughAnUnreadLink(at('P2', 'w'), ['J', 's2', 'f'].join(sep))
+  })
+
+  it.runIf(process.platform === 'win32')(
+    'on Windows all four are refused (the walk cannot tell the junction from a symlink)',
+    (ctx) => {
+      if (!linksWork) return ctx.skip()
+      for (const [cwd, rel] of [
+        [at('A', 'w'), 'J\\s\\f'],
+        [at('B', 'w'), 'J\\sub\\s\\f'],
+        [at('H', 'w'), 'J\\s\\f'],
+        [at('P2', 'w'), 'J\\s2\\f']
+      ]) {
+        const f = pathFacts(
+          'read',
+          { path: rel },
+          { cwd, roots: [cwd], platform: 'win32', homeDir: base, fs: hostPathFs }
+        )!
+        expect(f.state, rel).toBe('unresolved')
+      }
+    }
+  )
+})
+
+describe('N-2 — isPosixNamespacePath folds `.` and `..` itself (the first component after folding decides)', () => {
+  it.each([
+    '/net',
+    '/net/h',
+    '/./net/h',
+    '/tmp/../net/h',
+    '/a/b/../../net',
+    '/../net/h',
+    '//net//h',
+    '/net/../tmp'
+  ])('%s is a namespace path on linux', (p) => {
+    expect(isPosixNamespacePath(p, 'linux')).toBe(true)
+  })
+
+  it.each(['/tmp/net/h', '/x/..', '/..', '/tmp/../tmpnet', '/netx/h', 'net/h', '/home/u/../u/net'])(
+    '%s is not',
+    (p) => {
+      expect(isPosixNamespacePath(p, 'linux')).toBe(false)
+    }
+  )
+
+  it('the darwin-only roots are folded the same way, and never match on linux or win32', () => {
+    for (const p of ['/tmp/../Network/Servers/h', '/./.vol/1/2', '/a/../.nofollow/x']) {
+      expect(isPosixNamespacePath(p, 'darwin'), p).toBe(true)
+      expect(isPosixNamespacePath(p, 'linux'), p).toBe(false)
+    }
+    expect(isPosixNamespacePath('/tmp/../net/h', 'win32')).toBe(false)
   })
 })

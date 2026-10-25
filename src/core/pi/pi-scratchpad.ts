@@ -3,9 +3,10 @@
  *
  * Claude Code has no whole-OS-temp root. It gives each session ONE directory under the OS temp
  * dir, readable and writable in every mode, and reads the project's temp dir
- * (`<tmp>/claude/<project-key>/`). pi gets the same under `<tmp>/claudeui`:
+ * (`<tmp>/claude/<project-key>/`). pi gets the same under `<tmp>/claudeui`, suffixed with the
+ * uid on POSIX (`claudeui-<uid>`, see {@link scratchBaseName}):
  *
- *   <realpath(os.tmpdir()/claudeui)>/<project-key>/<session-key>/scratchpad
+ *   <realpath(os.tmpdir()/claudeui-<uid>)>/<project-key>/<session-key>/scratchpad
  *
  * The OS temp dir is shared and world-writable, so another local user could pre-plant a link
  * there to make a session write elsewhere, or read its files. Claude Code defends by creating the
@@ -33,7 +34,7 @@ import { logger } from '../services/logger'
 
 const LOG = 'PiScratchpad'
 
-/** Name of the directory under the OS temp dir that holds every project's scratch space. */
+/** Name of the directory under the OS temp dir that holds every project's scratch space (Windows: the whole name). */
 const BASE_NAME = 'claudeui'
 /** The directory a session's scratch files live in, under its session dir. */
 const SCRATCH_NAME = 'scratchpad'
@@ -85,6 +86,15 @@ function hostEnv(): ScratchpadEnv {
 
 function resolveEnv(env: Partial<ScratchpadEnv> | undefined): ScratchpadEnv {
   return { ...hostEnv(), ...env }
+}
+
+/**
+ * The base directory's name. On POSIX the shared temp dir is world-writable and one user's
+ * `claudeui` would lock every other local user out (their ownership check refuses it): the name
+ * carries the uid, as Claude Code's does (`claude-<uid>`). Windows temp dirs are per user already.
+ */
+export function scratchBaseName(uid: number | undefined): string {
+  return uid === undefined ? BASE_NAME : `${BASE_NAME}-${uid}`
 }
 
 /** A session in the scratchpad's eyes: the directory pair its prompt and path scope are built from. */
@@ -176,7 +186,7 @@ export function ensurePiScratchpad(
     env = resolveEnv(envOverride)
     if (!isScratchpadSessionKey(sessionKey))
       throw new Error(`not a usable session key: ${sessionKey}`)
-    const base = join(env.tmpdir(), BASE_NAME)
+    const base = join(env.tmpdir(), scratchBaseName(env.uid))
     ensureLevel(env, base)
     // The base is a real directory now (not a link): its realpath only canonicalises the temp
     // dir's own spelling (symlinked /var on macOS, 8.3 names on Windows).
@@ -228,7 +238,7 @@ export function removePiScratchpad(sessionKey: string, envOverride?: Partial<Scr
   try {
     const env = resolveEnv(envOverride)
     if (!isScratchpadSessionKey(sessionKey)) return
-    const base = join(env.tmpdir(), BASE_NAME)
+    const base = join(env.tmpdir(), scratchBaseName(env.uid))
     try {
       assertOwnDirectory(env, base)
     } catch (err) {

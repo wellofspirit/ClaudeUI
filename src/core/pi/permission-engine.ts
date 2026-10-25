@@ -81,6 +81,19 @@ export interface PermissionVerdict {
   pathReason?: PathVerdictReason
   /** The model-facing deny text, or the card line of a human-only ask, for a `path-scope` verdict. */
   message?: string
+  /**
+   * With `pathReason: 'outside-scope'`: where the call really lands (the symbolic-link landing, else
+   * the canonical path), for the card's "always allow" suggestion (a path-scoped rule): the
+   * rule names the directory the call reaches, never the in-project link's spelling. Absent for an agent-control edit, which is
+   * never offered a standing rule.
+   */
+  pathTarget?: string
+  /**
+   * An 'ask' on an edit/write that touches an agent-control path (inside the workspace or out):
+   * the card offers NO "always allow" suggestion: the sensitive check runs before the allow tier,
+   * so a saved allow could never silence this card; it would only widen what other calls may do.
+   */
+  pathSensitive?: true
 }
 
 /**
@@ -115,11 +128,11 @@ export interface PermissionEngineContext {
   rules: MergedClaudeRules
   /**
    * "Allow for this session" entries. pi: {@link piSessionAllowKey} — `bash:<normalized
-   * command>`, `edit:<abs path>` / `write:<abs path>`, else the bare tool name; set
+   * command>`, `<path tool>:<abs path>` (`read`, `edit`, `write`, `grep`, `find`, `ls`), else the bare tool name; set
    * `sessionAllowsByPath`. Codex keeps the bare {@link sessionAllowKey} for everything but bash.
    */
   sessionAllows: ReadonlySet<string>
-  /** `sessionAllows` holds pi's per-path edit/write keys ({@link piSessionAllowKey}); absent = the bare-name keys (Codex). */
+  /** `sessionAllows` holds pi's per-path keys for the path tools ({@link piSessionAllowKey}); absent = the bare-name keys (Codex). */
   sessionAllowsByPath?: boolean
   /**
    * The workspace the containment rung checks pi's path tools (`read`, `edit`, `write`, `grep`,
@@ -307,7 +320,7 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
 // ---------------------------------------------------------------------------
 
 /**
- * Claude canonical tool name -> pi ToolKind, for matching the user's
+ * Claude canonical tool name -> the pi ToolKinds its rules govern, for matching the user's
  * Tool(specifier) rule strings against a pi tool_call. LS is included
  * alongside Grep/Glob (all three collapse to pi's single 'search' kind,
  * pi's `ls`/`grep`/`find` tools) for parity with opencode's own
@@ -315,15 +328,22 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
  * Grep/LS as siblings. Any Claude tool name NOT in this table (WebFetch,
  * NotebookEdit, MultiEdit, ...) has no pi analog and never matches. `Agent`/
  * `Task` are not in it either: they name ONE pi tool, not a kind (`AGENT_RULE_TOOLS`).
+ *
+ * Claude Code's own semantics for the two path families: an `Edit(...)` rule governs every file
+ * change (pi's `edit` AND `write`: a deny on a path is not sidestepped by writing the whole
+ * file), and a `Read(...)` rule governs every read of the file system (pi's `read` AND the
+ * path of `grep`/`find`/`ls`). `Write`, `Grep`, `Glob` and `LS` stay on their own kinds. (opencode
+ * folds `Write` into `edit` as well, and keeps its search tools apart from `read`:
+ * `opencode/permission-keys.ts`; those engines' rules compile on their own, nothing is shared.)
  */
-const CLAUDE_TOOL_TO_KIND: Record<string, ToolKind> = {
-  Bash: 'command',
-  Edit: 'fileEdit',
-  Write: 'fileWrite',
-  Read: 'fileRead',
-  Grep: 'search',
-  Glob: 'search',
-  LS: 'search'
+const CLAUDE_TOOL_TO_KINDS: Record<string, readonly ToolKind[]> = {
+  Bash: ['command'],
+  Edit: ['fileEdit', 'fileWrite'],
+  Write: ['fileWrite'],
+  Read: ['fileRead', 'search'],
+  Grep: ['search'],
+  Glob: ['search'],
+  LS: ['search']
 }
 
 /** Claude's names for the sub-agent launcher; a rule on either matches pi's `agent` tool only (H5). */
@@ -587,7 +607,7 @@ const MCP_RULE_PREFIX = 'mcp__'
  * `mcp__<server>__*` is the server form too (cli.js reads a `*` tool name as
  * "every tool on the server"), so a trailing `__*` is dropped first. The
  * rule string IS the tool name the engine is asked about, so these are matched
- * against the NAME rather than through {@link CLAUDE_TOOL_TO_KIND} (which lists
+ * against the NAME rather than through {@link CLAUDE_TOOL_TO_KINDS} (which lists
  * only the seven tools with a pi analogue, and so made every `mcp__…` rule a
  * user wrote inert in every tier).
  *
@@ -651,12 +671,12 @@ function ruleMatchesTool(
     if (parsed.specifier === undefined) return true
     return agentTypeGlob(parsed.specifier).test(agentTypeOf(input))
   }
-  const mappedKind = CLAUDE_TOOL_TO_KIND[parsed.tool]
-  if (!mappedKind || mappedKind !== kind) return false
+  if (!CLAUDE_TOOL_TO_KINDS[parsed.tool]?.includes(kind)) return false
 
-  if (parsed.specifier === undefined) return true
+  const specifier = parsed.specifier
+  if (specifier === undefined) return true
 
-  if (PATH_BEARING_KINDS.has(mappedKind)) {
+  if (PATH_BEARING_KINDS.has(kind)) {
     const rawPath = extractToolPath(input)
     // No usable path on the input -> the rule cannot match. Never
     // default-allow on a missing path (hard rule).
@@ -667,13 +687,19 @@ function ruleMatchesTool(
     // `//c/x` is a drive on a Windows session (cwd's own syntax, as in
     // `pathFlavor`; the host platform only when there is no cwd).
     const absoluteGlob = absoluteSpecifierGlob(
-      parsed.specifier,
+      specifier,
       cwd ? looksWindowsAbsolute(cwd) : process.platform === 'win32'
     )
+    // A search's `path` is a directory whose contents are read: `Read(//x/**)` must hold for a
+    // `grep`/`ls` of `/x` itself, which the glob (it wants a `/x/` prefix) would otherwise miss.
+    const asSearchRoot = (p: string): string[] =>
+      kind === 'search' && p !== '' && !p.endsWith('/') ? [p, `${p}/`] : [p]
     if (absoluteGlob !== null) {
-      return claudeGlobMatches(resolveAbsoluteMatchPath(rawPath, cwd), absoluteGlob)
+      return asSearchRoot(resolveAbsoluteMatchPath(rawPath, cwd)).some((p) =>
+        claudeGlobMatches(p, absoluteGlob)
+      )
     }
-    return claudeGlobMatches(resolveMatchPath(rawPath, cwd), parsed.specifier)
+    return asSearchRoot(resolveMatchPath(rawPath, cwd)).some((p) => claudeGlobMatches(p, specifier))
   }
 
   // No other pi kind carries a specifier-matchable argument (plan/task/
@@ -687,13 +713,25 @@ export function sessionAllowKey(toolName: string, input: Record<string, unknown>
   return toolName
 }
 
+const PATH_KEYED_TOOLS: ReadonlySet<string> = new Set([
+  'read',
+  'edit',
+  'write',
+  'grep',
+  'find',
+  'ls'
+])
+const SEARCH_KEYED_TOOLS: ReadonlySet<string> = new Set(['grep', 'find', 'ls'])
+
 /**
- * pi's "allow for this session" key: {@link sessionAllowKey}, except that `edit`/`write` are
- * scoped to ONE canonical absolute path (`edit:<path>` / `write:<path>`) — a bare `edit` key
- * turned one click on a harmless file into a standing allow for every file, sensitive and
- * out-of-tree ones included (H3). Everything else (read/search, mcp, `agent`, …) keeps the bare
- * tool name; whether a standing allow may skip the judge for it is {@link sessionAllowHolds}'s
- * business, not the key's.
+ * pi's "allow for this session" key: {@link sessionAllowKey}, except that the path tools
+ * (`read`, `edit`, `write`, `grep`, `find`, `ls`) are scoped to ONE canonical absolute path
+ * (`edit:<path>`, `read:<path>`, …) — a bare `edit` key turned one click on a harmless file into
+ * a standing allow for every file, sensitive and out-of-tree ones included (H3), and a bare
+ * `read`/`grep` key one click on a file outside the workspace into a standing allow for the whole
+ * disk. A search without a `path` searches the cwd, and is keyed by it. Everything else (mcp,
+ * `agent`, …) keeps the bare tool name; whether a standing allow may skip the judge for it is
+ * {@link sessionAllowHolds}'s business, not the key's.
  *
  * The add side (PiSession.resolveApproval) and the lookup side (the ladder) both build the key
  * here, from the same input, cwd and scope, so they agree by construction. With a `scope` the
@@ -708,10 +746,13 @@ export function piSessionAllowKey(
   cwd: string | undefined,
   scope?: PiPathScope
 ): string {
-  if (toolName !== 'edit' && toolName !== 'write') return sessionAllowKey(toolName, input)
+  if (!PATH_KEYED_TOOLS.has(toolName)) return sessionAllowKey(toolName, input)
+  const search = SEARCH_KEYED_TOOLS.has(toolName)
   if (scope) {
-    // pi reads `path` only (its schema has no alias); a call without one writes nothing.
-    const arg = typeof input.path === 'string' ? input.path : undefined
+    // pi reads `path` only (its schema has no alias); an edit/write/read without one touches
+    // nothing, a search without one (or an empty one) searches the cwd (`searchDir || "."`).
+    let arg = typeof input.path === 'string' ? input.path : undefined
+    if (search && (arg === undefined || arg === '')) arg = '.'
     let canonical = arg ?? ''
     if (arg !== undefined) {
       try {
@@ -724,7 +765,7 @@ export function piSessionAllowKey(
     }
     return `${toolName}:${canonical}`
   }
-  const raw = extractToolPath(input)
+  const raw = extractToolPath(input) ?? (search ? '.' : undefined)
   let canonical = raw ?? ''
   if (raw !== undefined && cwd) {
     // `resolve`, not the rule matcher's `toAbsolutePath`: a posix backslash is a file-name
@@ -1215,8 +1256,9 @@ export function planModeOutranksRules(
  * PATH CONTAINMENT (H1, `ctx.scope`; pi callers only). After the deny tier: an edit through a
  * symbolic link and a read the read block refuses are denied (`path-scope`); after the ask tier a
  * path that cannot be placed, a Windows path trick and a link-carried edit are HUMAN-ONLY asks
- * (`path-scope`, never the judge's); the session allow, the allow tier and the base then follow,
- * the base per {@link scopedBase}'s table. The additional directories reach the ladder as the
+ * (`path-scope`, never the judge's); the session allow follows, then the ask for a sensitive edit
+ * (an agent-control path: Claude's order, so an allow rule never silences it), then the allow tier
+ * and the base, the base per {@link scopedBase}'s table. The additional directories reach the ladder as the
  * scope's roots (`buildPiPathScope`), not through `ctx.rules.additionalDirectories`, which this
  * function still does not read (the auto-mode read-only gate and opencode's `external_directory`
  * consume it elsewhere). A call with no scope has no notion of "outside the workspace".
@@ -1286,23 +1328,39 @@ export function decideWithSource(
       ? denyAskHit(commandOf(input), { deny: ctx.rules.deny, ask: ctx.rules.ask })
       : undefined
 
-  // Deny rules are checked against EVERY spelling of the path (as Claude does): the canonical
-  // path pi opens, the model's own spelling and the symbolic-link landing — a `Read(//secret/**)`
-  // deny holds for an in-project link that lands in /secret. Ask and allow rules stay on the
-  // canonical path (an allow must not widen through a spelling the user did not write).
-  const matchDeny = (): string | undefined => {
-    const hit = match(ctx.rules.deny)
+  // Deny AND ask rules are checked against EVERY spelling of the path (as Claude does): the
+  // canonical path pi opens, the model's own spelling and the symbolic-link landing — a
+  // `Read(//secret/**)` deny holds for an in-project link that lands in /secret, and an ask rule
+  // on either end of a link asks (more asking is the safe side).
+  const matchAnySpelling = (rules: readonly string[]): string | undefined => {
+    const hit = match(rules)
     if (hit !== undefined || !facts || typeof input.path !== 'string') return hit
     const others = [input.path, ...(facts.landing === undefined ? [] : [facts.landing])]
     for (const other of others) {
-      const spelled = ctx.rules.deny.find((r) =>
+      const spelled = rules.find((r) =>
         ruleMatchesTool(r, kind, toolName, { ...input, path: other }, ctx.cwd, ctx.mcpRuleKey)
       )
       if (spelled !== undefined) return spelled
     }
     return undefined
   }
-  const denyRule = kind === 'command' ? tierRule(shell, 'deny') : matchDeny()
+  // An ALLOW rule matches where the call really lands (the landing, else the canonical path), never
+  // the spelling of a link that can be pointed elsewhere: `Read(//repo/lnk/**)` does not allow a
+  // read through `lnk`, `Read(//elsewhere/**)` does when `lnk` lands there. The landing also
+  // counts under the logical spelling of a scope root that is itself reached through a link
+  // (`facts.landingAliases`: the same physical file), so `Edit(src/**)` still matches in a project
+  // directory that is a link.
+  const matchAllow = (rules: readonly string[]): string | undefined =>
+    facts?.landing !== undefined && typeof input.path === 'string'
+      ? [facts.landing, ...(facts.landingAliases ?? [])]
+          .map((p) =>
+            rules.find((r) =>
+              ruleMatchesTool(r, kind, toolName, { ...input, path: p }, ctx.cwd, ctx.mcpRuleKey)
+            )
+          )
+          .find((hit) => hit !== undefined)
+      : match(rules)
+  const denyRule = kind === 'command' ? tierRule(shell, 'deny') : matchAnySpelling(ctx.rules.deny)
   if (denyRule !== undefined) return { decision: 'deny', source: 'deny-rule', rule: denyRule }
   if (scope && facts) {
     // Claude's `_he`: an edit through a symbolic link is refused in every mode (the link's own
@@ -1353,8 +1411,15 @@ export function decideWithSource(
   if (PI_AUTO_ALLOW_HOSTED_TOOLS.has(toolName)) {
     return { decision: 'allow', source: 'hosted-auto-allow' }
   }
-  const askRule = kind === 'command' ? tierRule(shell, 'ask') : match(ctx.rules.ask)
-  if (askRule !== undefined) return { decision: 'ask', source: 'ask-rule', rule: askRule }
+  const askRule = kind === 'command' ? tierRule(shell, 'ask') : matchAnySpelling(ctx.rules.ask)
+  if (askRule !== undefined) {
+    return {
+      decision: 'ask',
+      source: 'ask-rule',
+      rule: askRule,
+      ...(scope && facts?.write && facts.sensitive ? { pathSensitive: true as const } : {})
+    }
+  }
   // HUMAN-ONLY (R4, R8): a path we cannot place, a Windows path form that can name another
   // object, an edit a symbolic link carried out of the workspace. A person decides, in every
   // mode: not the judge (the callers route a `path-scope` ask straight to the human), and not a
@@ -1385,21 +1450,35 @@ export function decideWithSource(
   ) {
     return { decision: 'allow', source: 'session-allow' }
   }
+  // The mode base for a call the containment rung has the facts of (see {@link scopedBase}).
+  const scopedVerdict = (f: PiPathFacts): PermissionVerdict => {
+    const decision = scopedBase(base, judged, f, kind, input, ctx.cwd, planScope)
+    return {
+      decision,
+      source: 'mode-base',
+      ...(decision !== 'allow' && f.write && f.sensitive ? { pathSensitive: true as const } : {}),
+      ...(decision !== 'allow' && !f.inScope
+        ? {
+            pathReason: 'outside-scope' as const,
+            ...(f.write && f.sensitive ? {} : { pathTarget: f.landing ?? f.execPath })
+          }
+        : {})
+    }
+  }
+  // A sensitive edit (an agent-control path, any spelling) is asked BEFORE the allow tier — Claude's
+  // order (cli.js's write-permission check: the sensitive-file check `iV` runs after the session
+  // allows and ask rules, before the acceptEdits allow and before the settings allow rules). An
+  // allow rule never silences it: the judge answers it in a judged auto mode (`mode-base`), a
+  // person everywhere else. Deny rules above still deny; plan mode's base is its own.
+  if (facts?.write && facts.sensitive && base !== 'plan') return scopedVerdict(facts)
   // The allow tier covers a command segment by segment — possibly one rule per segment.
   const allowRule =
     kind === 'command'
       ? allowCovers(commandOf(input), ctx.rules.allow, 'lenient')?.segments[0]?.rule
-      : match(ctx.rules.allow)
+      : matchAllow(ctx.rules.allow)
   if (allowRule !== undefined) return { decision: 'allow', source: 'allow-rule', rule: allowRule }
 
-  if (facts) {
-    const decision = scopedBase(base, judged, facts, kind, input, ctx.cwd, planScope)
-    return {
-      decision,
-      source: 'mode-base',
-      ...(decision !== 'allow' && !facts.inScope ? { pathReason: 'outside-scope' as const } : {})
-    }
-  }
+  if (facts) return scopedVerdict(facts)
   return {
     decision: modeBaseDecision(base, kind, input, ctx.cwd, planScope),
     source: 'mode-base'

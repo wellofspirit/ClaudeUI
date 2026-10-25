@@ -482,6 +482,7 @@ vi.mock('../../services/ui-config', async (importOriginal) => ({
 import { allowRuleActionFor, PiSession } from '../PiSession'
 import { writeFileSync as mockedWriteFileSync } from 'node:fs'
 import {
+  scratchBaseName,
   scratchpadProjectKey,
   scratchpadPrompt,
   type ScratchpadEnv,
@@ -9111,6 +9112,241 @@ describe('PiSession — path containment (H1), real temp project', () => {
     return humanCards(win)[0]
   }
 
+  describe('R4: "always allow" suggestions follow the verdict', () => {
+    type Suggestion = {
+      type: string
+      behavior: string
+      destination: string
+      rules: Array<{ toolName: string; ruleContent?: string }>
+    }
+    const cardOf = (win: MockWindow): { requestId: string; suggestions?: Suggestion[] } =>
+      humanCards(win)[0] as { requestId: string; suggestions?: Suggestion[] }
+    /** The rule specifier for an absolute path, spelled independently of the code under test. */
+    const spec = (abs: string): string =>
+      `/${abs.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_m, d: string) => `/${d.toLowerCase()}`)}`
+    const DESTINATIONS = ['userSettings', 'projectSettings', 'localSettings']
+
+    it('an outside read suggests Read(//<dir>/**) for the file’s directory, never the bare Read rule', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-read', win, 'default')
+      const target = real.path.join(root, 'plain.txt')
+      void gate('r4-1', 'read', { path: target })
+      await onlyCard(win)
+      const { suggestions } = cardOf(win)
+      expect(suggestions?.map((s) => s.destination)).toEqual(DESTINATIONS)
+      for (const s of suggestions ?? []) {
+        expect(s.rules).toEqual([{ toolName: 'Read', ruleContent: `${spec(root)}/**` }])
+      }
+      session.dispose()
+    })
+
+    it('an outside write or edit suggests Edit(//<dir>/**) (an Edit rule governs both)', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-write', win, 'default')
+      void gate('r4-2', 'write', { path: real.path.join(outside, 'new.txt') })
+      await onlyCard(win)
+      for (const s of cardOf(win).suggestions ?? []) {
+        expect(s.rules).toEqual([{ toolName: 'Edit', ruleContent: `${spec(outside)}/**` }])
+      }
+      session.dispose()
+    })
+
+    it('an outside search suggests the directory itself and everything under it, as Read rules', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-grep', win, 'default')
+      void gate('r4-3', 'grep', { pattern: 'x', path: outside })
+      await onlyCard(win)
+      for (const s of cardOf(win).suggestions ?? []) {
+        expect(s.rules).toEqual([
+          { toolName: 'Read', ruleContent: spec(outside) },
+          { toolName: 'Read', ruleContent: `${spec(outside)}/**` }
+        ])
+      }
+      session.dispose()
+    })
+
+    it('the suggested rule, saved, is honoured by the very next call in that directory (the grammar matches the matcher)', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-roundtrip', win, 'default')
+      void gate('r4-4', 'read', { path: real.path.join(outside, 'f.txt') })
+      await onlyCard(win)
+      const card = cardOf(win)
+      const user = (card.suggestions ?? []).find((s) => s.destination === 'userSettings')!
+      const saved = user.rules.map((r) => `${r.toolName}(${r.ruleContent})`)
+      mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+        allow: scope === 'user' ? saved : [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }))
+      session.resolveApproval(card.requestId, 'allow', undefined, [user])
+      const before = sentPayloads(win, 'session:approval-request').length
+      const other = real.path.join(outside, 'f.txt')
+      expect((await gate('r4-5', 'read', { path: other })).behavior).toBe('allow')
+      expect((await gate('r4-6', 'grep', { pattern: 'x', path: outside })).behavior).toBe('allow')
+      expect(sentPayloads(win, 'session:approval-request').length).toBe(before)
+      // ...and it stays where it was written: a sibling directory still asks
+      void gate('r4-7', 'read', { path: real.path.join(root, 'plain.txt') })
+      await vi.waitFor(() =>
+        expect(sentPayloads(win, 'session:approval-request').length).toBe(before + 1)
+      )
+      session.dispose()
+    })
+
+    it('F4-4: an in-workspace write or edit suggests Edit(//<root>/**) for the workspace root, never the bare Write / Edit rule', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-inscope', win, 'default')
+      void gate('r4-8', 'write', { path: 'src/new.ts' })
+      const card = await onlyCard(win)
+      const suggestions = cardOf(win).suggestions ?? []
+      expect(suggestions.map((s) => s.destination)).toEqual(DESTINATIONS)
+      for (const s of suggestions) {
+        expect(s.rules).toEqual([{ toolName: 'Edit', ruleContent: `${spec(project)}/**` }])
+      }
+      session.resolveApproval(card.requestId, 'deny')
+      void gate('r4-8b', 'edit', { path: 'src/a.ts', oldText: 'a', newText: 'b' })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+      for (const s of (humanCards(win)[1] as { suggestions?: Suggestion[] }).suggestions ?? []) {
+        expect(s.rules).toEqual([{ toolName: 'Edit', ruleContent: `${spec(project)}/**` }])
+      }
+      session.dispose()
+    })
+
+    it('F4-4: the suggested workspace rule, saved, covers the workspace and nothing beyond it', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-inscope-rt', win, 'default')
+      void gate('r4-9', 'write', { path: 'src/new.ts' })
+      const card = await onlyCard(win)
+      const user = (cardOf(win).suggestions ?? []).find((s) => s.destination === 'userSettings')!
+      const saved = user.rules.map((r) => `${r.toolName}(${r.ruleContent})`)
+      mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+        allow: scope === 'user' ? saved : [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }))
+      session.resolveApproval(card.requestId, 'allow', undefined, [user])
+      const before = sentPayloads(win, 'session:approval-request').length
+      // the rule is honoured for another file in the workspace, by either tool...
+      expect((await gate('r4-10', 'write', { path: 'src/other.ts' })).behavior).toBe('allow')
+      expect(
+        (await gate('r4-11', 'edit', { path: 'src/a.ts', oldText: 'a', newText: 'b' })).behavior
+      ).toBe('allow')
+      expect(sentPayloads(win, 'session:approval-request').length).toBe(before)
+      // ...and a write outside the workspace still asks
+      void gate('r4-12', 'write', { path: real.path.join(outside, 'new.txt') })
+      await vi.waitFor(() =>
+        expect(sentPayloads(win, 'session:approval-request').length).toBe(before + 1)
+      )
+      session.dispose()
+    })
+
+    it('F2-3: an agent-control edit card offers NO "always allow" suggestion, in the workspace or outside it', async () => {
+      const win = new MockWindow()
+      const session = await open('rid-r4-sensitive', win, 'default')
+      void gate('r4-s1', 'edit', { path: '.git/config' })
+      const inside = await onlyCard(win)
+      expect(inside).not.toHaveProperty('suggestions')
+      session.resolveApproval(inside.requestId, 'deny')
+      void gate('r4-s2', 'write', { path: real.path.join(outside, '.git', 'config') })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+      expect(humanCards(win)[1]).not.toHaveProperty('suggestions')
+      session.dispose()
+    })
+
+    it('a card raised by a user ASK rule on a file tool offers no "always allow" (the ask tier outranks it)', async () => {
+      mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+        allow: [],
+        deny: [],
+        ask: scope === 'user' ? [`Read(${spec(outside)}/**)`] : [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }))
+      const win = new MockWindow()
+      const session = await open('rid-r4-askrule', win, 'default')
+      void gate('r4-a1', 'read', { path: real.path.join(outside, 'f.txt') })
+      expect(await onlyCard(win)).not.toHaveProperty('suggestions')
+      session.dispose()
+    })
+
+    it.skipIf(!canLink)(
+      'F3-2: a read or search through an in-project link that lands outside suggests the LANDING directory, not the link spelling',
+      async () => {
+        const win = new MockWindow()
+        const session = await open('rid-r4-link-landing', win, 'default')
+        void gate('r4-l1', 'read', { path: 'out/f.txt' })
+        const read = await onlyCard(win)
+        for (const s of cardOf(win).suggestions ?? []) {
+          expect(s.rules).toEqual([{ toolName: 'Read', ruleContent: `${spec(outside)}/**` }])
+        }
+        expect(cardOf(win).suggestions?.map((s) => s.destination)).toEqual(DESTINATIONS)
+        session.resolveApproval(read.requestId, 'deny')
+
+        void gate('r4-l2', 'grep', { pattern: 'x', path: 'out' })
+        await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+        const search = humanCards(win)[1] as { suggestions?: Suggestion[] }
+        expect(search.suggestions).toHaveLength(3)
+        for (const s of search.suggestions ?? []) {
+          expect(s.rules).toEqual([
+            { toolName: 'Read', ruleContent: spec(outside) },
+            { toolName: 'Read', ruleContent: `${spec(outside)}/**` }
+          ])
+        }
+        session.dispose()
+      }
+    )
+
+    it.skipIf(!canLink)(
+      'F3-5: the landing-keyed rule a link card suggests, saved, silences the next read through that link; a link-keyed rule does not',
+      async () => {
+        const win = new MockWindow()
+        const session = await open('rid-r4-link-roundtrip', win, 'default')
+        void gate('r4-lr1', 'read', { path: 'out/f.txt' })
+        const card = await onlyCard(win)
+        const user = (cardOf(win).suggestions ?? []).find((s) => s.destination === 'userSettings')!
+        const saved = user.rules.map((r) => `${r.toolName}(${r.ruleContent})`)
+        const allowing = (allow: string[]) =>
+          mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+            allow: scope === 'user' ? allow : [],
+            deny: [],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }))
+        allowing(saved)
+        session.resolveApproval(card.requestId, 'allow', undefined, [user])
+        const before = sentPayloads(win, 'session:approval-request').length
+        // another file under the link (the click above also minted a session allow for f.txt itself)
+        real.fs.writeFileSync(real.path.join(outside, 'g.txt'), 'g')
+        real.fs.writeFileSync(real.path.join(outside, 'h.txt'), 'h')
+        expect((await gate('r4-lr2', 'read', { path: 'out/g.txt' })).behavior).toBe('allow')
+        expect(sentPayloads(win, 'session:approval-request').length).toBe(before)
+        session.dispose()
+        // a rule keyed on the link's own spelling no longer allows it (a fresh session: the rules are cached)
+        allowing([`Read(${spec(at('out'))}/**)`])
+        const win2 = new MockWindow()
+        const session2 = await open('rid-r4-link-roundtrip-2', win2, 'default')
+        void gate('r4-lr3', 'read', { path: 'out/h.txt' })
+        await onlyCard(win2)
+        session2.dispose()
+      }
+    )
+
+    it.skipIf(!canLink)(
+      'a human-only card (an edit carried out of the workspace by a link) carries NO suggestions at all',
+      async () => {
+        const win = new MockWindow()
+        const session = await open('rid-r4-human-only', win, 'default')
+        void gate('r4-9', 'edit', { path: 'out/f.txt' })
+        const card = await onlyCard(win)
+        expect(card).not.toHaveProperty('suggestions')
+        session.dispose()
+      }
+    )
+  })
+
   describe('reads', () => {
     it('default: an in-project read is allowed and PINNED to its absolute path; an outside read asks', async () => {
       const win = new MockWindow()
@@ -9504,7 +9740,8 @@ describe('PiSession — scratchpad (ADR-110)', () => {
     warn: padWarn,
     ...over
   })
-  const padRoot = (): string => real.fs.realpathSync.native(real.path.join(tmpBase, 'claudeui'))
+  const padRoot = (): string =>
+    real.fs.realpathSync.native(real.path.join(tmpBase, scratchBaseName(process.getuid?.())))
   const expectedDir = (key: string): string =>
     real.path.join(padRoot(), scratchpadProjectKey(project), key, 'scratchpad')
   const flagValues = (args: string[], name: string): string[] =>
@@ -9661,7 +9898,7 @@ describe('PiSession — scratchpad (ADR-110)', () => {
     async () => {
       const victim = real.path.join(root, 'victim')
       real.fs.mkdirSync(victim, { recursive: true })
-      const base = real.path.join(tmpBase, 'claudeui')
+      const base = real.path.join(tmpBase, scratchBaseName(process.getuid?.()))
       real.fs.symlinkSync(victim, base, 'junction')
       links.push(base)
       const win = new MockWindow()
