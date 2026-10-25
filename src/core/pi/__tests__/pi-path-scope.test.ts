@@ -13,6 +13,7 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  rmdirSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -2657,6 +2658,215 @@ describe('F6-1 — the link walk visits the directory the OS really lands in (re
     expect(lstats).toContain(landed)
     expect(lstats).not.toContain(other)
   })
+})
+
+describe('F7-1 — a relative `..` above an absolute link is folded against both spellings (win32: a junction keeps its own name)', () => {
+  const winScope = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+  const touched = (calls: string[]): string[] =>
+    calls.filter((c) => c.startsWith('realpath') || c.startsWith('exists'))
+
+  it('`J -> D:\\real`, `real\\s -> ..\\b`, `repo\\b -> \\\\h\\s`: `J\\s\\f` is unplaceable with no realpath (junction J reads `repo\\b`, symlink J reads `D:\\b`)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\real',
+      'D:\\real\\s': `..${BS}b`,
+      'D:\\repo\\b': `${BS}${BS}attacker.example${BS}share`
+    })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'J\\s\\f'), winScope(fs))!
+      expect(f.state, tool).toBe('unresolved')
+      expect(f.inScope, tool).toBe(false)
+      expect(touched(calls), tool).toEqual([])
+    }
+  })
+
+  it('the same holds when the link above is a chain of absolute links (`w\\J1 => r1`, `r1\\J2 => r2`, `r2\\s -> ..\\..\\b`)', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J1': 'D:\\r1',
+      'D:\\r1\\J2': 'D:\\r2',
+      'D:\\r2\\s': `..${BS}..${BS}b`
+    })
+    const f = pathFacts('read', { path: 'J1\\J2\\s\\f' }, winScope(fs))!
+    expect(f.state).toBe('unresolved')
+    expect(touched(calls)).toEqual([])
+  })
+
+  it('control: a relative target that stays inside the absolute link’s target is still walked and placed', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\J': 'D:\\real', 'D:\\real\\s': `sub${BS}x` },
+      { 'D:\\repo\\J\\s\\f': 'D:\\real\\sub\\x\\f' }
+    )
+    const f = pathFacts('read', { path: 'J\\s\\f' }, winScope(fs))!
+    expect(f).toMatchObject({ state: 'resolved', remote: false, landing: 'D:\\real\\sub\\x\\f' })
+    expect(calls).toContain('lstat D:\\real\\sub\\x')
+    expect(calls.some((c) => c.startsWith('realpath'))).toBe(true)
+  })
+
+  it('control: a `..` that climbs only within the absolute link’s target agrees (and is walked)', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\J': 'D:\\real', 'D:\\real\\sub\\s': `..${BS}z` },
+      { 'D:\\repo\\J\\sub\\s\\f': 'D:\\real\\z\\f' }
+    )
+    const f = pathFacts('read', { path: 'J\\sub\\s\\f' }, winScope(fs))!
+    expect(f).toMatchObject({ state: 'resolved', landing: 'D:\\real\\z\\f' })
+    expect(calls).toContain('lstat D:\\real\\z')
+  })
+
+  it('the junction spelling stays in force after an agreeing relative link: a later climb out of the target is still unplaceable', () => {
+    // J -> D:\real; real\s -> sub (agrees); real\sub\t -> ..\..\b climbs out of the target
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\J': 'D:\\real',
+      'D:\\real\\s': 'sub',
+      'D:\\real\\sub\\t': `..${BS}..${BS}b`
+    })
+    const f = pathFacts('read', { path: 'J\\s\\t\\f' }, winScope(fs))!
+    expect(f.state).toBe('unresolved')
+    expect(calls.some((c) => c.startsWith('realpath'))).toBe(false)
+  })
+
+  it('a relative `..` that does not sit above an absolute link keeps the F6 text fold (no extra asks)', () => {
+    const { fs } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\docs': `a${BS}..${BS}b` },
+      { 'D:\\repo\\docs\\n.ts': 'D:\\repo\\b\\n.ts' }
+    )
+    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
+    expect(f).toMatchObject({ state: 'resolved', landing: 'D:\\repo\\b\\n.ts', inScope: true })
+  })
+
+  it('POSIX is unchanged: the same shape folds in the kernel’s order and is placed', () => {
+    const { fs, calls } = kernelLikeFs(
+      'posix',
+      { '/home/u/proj/J': '/real', '/real/s': '../b' },
+      { '/home/u/proj/J/s/f': '/b/f' }
+    )
+    const f = pathFacts(
+      'read',
+      { path: 'J/s/f' },
+      { cwd: '/home/u/proj', roots: ['/home/u/proj'], platform: 'linux', homeDir: '/home/u', fs }
+    )!
+    expect(f).toMatchObject({ state: 'resolved', landing: '/b/f' })
+    expect(calls).toContain('lstat /b')
+  })
+})
+
+describe('F7-1 — the link walk never places a path through a link it did not read (real junctions and symlinks)', () => {
+  let base = ''
+  let linksWork = true
+  const sep = path.sep
+  const links: string[] = []
+  const at = (...p: string[]): string => path.join(base, ...p)
+  const mk = (target: string, p: string, type: 'dir' | 'junction'): void => {
+    symlinkSync(target, p, type)
+    links.push(p)
+  }
+  const tag = (dir: string): void => {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'f'), dir)
+  }
+
+  beforeAll(() => {
+    base = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-path-junc-')))
+    try {
+      // A: w\J => real0 (junction); real0\s -> ..\b; w\b -> sentinel (a stand-in for `w\b -> \\host\share`)
+      tag(at('A', 'real0'))
+      tag(at('A', 'sentinel'))
+      tag(at('A', 'b'))
+      mkdirSync(at('A', 'w'), { recursive: true })
+      mk(at('A', 'real0'), at('A', 'w', 'J'), 'junction')
+      mk(['..', 'b'].join(sep), at('A', 'real0', 's'), 'dir')
+      mk(at('A', 'sentinel'), at('A', 'w', 'b'), 'dir')
+      // B: w\J => deep\real; deep\real\sub\s -> ..\..\b ; both `w\b` and `deep\b` are directories
+      tag(at('B', 'w', 'b'))
+      tag(at('B', 'deep', 'b'))
+      mkdirSync(at('B', 'deep', 'real', 'sub'), { recursive: true })
+      mk(at('B', 'deep', 'real'), at('B', 'w', 'J'), 'junction')
+      mk(['..', '..', 'b'].join(sep), at('B', 'deep', 'real', 'sub', 's'), 'dir')
+    } catch {
+      linksWork = false
+    }
+  })
+
+  afterAll(() => {
+    // remove the links without following them (a junction needs rmdir on some hosts), newest first
+    for (const l of links.reverse()) {
+      try {
+        unlinkSync(l)
+      } catch {
+        try {
+          rmdirSync(l)
+        } catch {
+          /* never created, or already gone */
+        }
+      }
+    }
+    for (const l of links) {
+      try {
+        lstatSync(l)
+        return // a link that could not be removed: never recurse past it
+      } catch {
+        /* gone */
+      }
+    }
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  /** The walk either places `rel` where the OS does, having read that directory, or refuses to place it. */
+  function expectNeverPlacedThroughAnUnreadLink(cwd: string, rel: string): void {
+    const landed = realpathSync.native(path.resolve(cwd, rel))
+    const lstats: string[] = []
+    const fs: PathScopeFs = {
+      ...hostPathFs,
+      lstat: (p) => {
+        lstats.push(p.toLowerCase())
+        return hostPathFs.lstat(p)
+      }
+    }
+    const f = pathFacts(
+      'read',
+      { path: rel },
+      { cwd, roots: [cwd], platform: process.platform, homeDir: base, fs }
+    )!
+    if (f.state === 'unresolved') return
+    expect(f.landing?.toLowerCase()).toBe(landed.toLowerCase())
+    expect(lstats).toContain(path.dirname(landed).toLowerCase())
+  }
+
+  it('A: `w\\J` a junction to `real0`, `real0\\s -> ..\\b`, `w\\b` a link: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip() // a relative symlink cannot be created here (no privilege / Developer Mode)
+    expectNeverPlacedThroughAnUnreadLink(at('A', 'w'), ['J', 's', 'f'].join(sep))
+  })
+
+  it('B: `w\\J` a junction to `deep\\real`, `deep\\real\\sub\\s -> ..\\..\\b`: unplaceable, or the directory the OS lands in was read', (ctx) => {
+    if (!linksWork) return ctx.skip()
+    expectNeverPlacedThroughAnUnreadLink(at('B', 'w'), ['J', 'sub', 's', 'f'].join(sep))
+  })
+
+  it.runIf(process.platform === 'win32')(
+    'on Windows both are refused (the walk cannot tell the junction from a symlink)',
+    (ctx) => {
+      if (!linksWork) return ctx.skip()
+      for (const [cwd, rel] of [
+        [at('A', 'w'), 'J\\s\\f'],
+        [at('B', 'w'), 'J\\sub\\s\\f']
+      ]) {
+        const f = pathFacts(
+          'read',
+          { path: rel },
+          { cwd, roots: [cwd], platform: 'win32', homeDir: base, fs: hostPathFs }
+        )!
+        expect(f.state, rel).toBe('unresolved')
+      }
+    }
+  )
 })
 
 describe('N-2 — isPosixNamespacePath folds `.` and `..` itself (the first component after folding decides)', () => {

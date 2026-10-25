@@ -393,6 +393,17 @@ type PlacementTrap = 'remote' | 'device' | 'unreadable'
  * empty nor `X:\` (an NT object path such as `\Device\Mup\h\s`, or `D:foo`) is 'unreadable', and
  * the rest is folded against the link's directory, checked for a UNC result, and its components
  * are walked from the root of the result.
+ *
+ * Which directory a `..` folds against depends on the link's kind, and Node reports a symlink
+ * and a junction alike (`readlink` gives the same `X:\…` text for both): a symlink replaces the
+ * name with its target, a JUNCTION KEEPS ITS OWN SPELLING (mount-point semantics). With
+ * `w\J => real0` a junction and `real0\s -> ..\b`, the OS reads `w\b`; with `J` a symlink it
+ * reads the folder above `real0`. The walk keeps both spellings (`current`, and a `logical` one
+ * derived from it, see `winSub`) and a relative target is folded against each: where the two
+ * results differ — a relative `..` climbing out of an absolute link's target — the path is
+ * 'unreadable' (unplaceable), because the walk cannot know which directory the OS will read, and
+ * `realpath` could follow a link it never read. Where they agree (no `..` climbs out of the
+ * target: `real0\s -> sub\x`) the walk continues, the junction spelling still in force.
  */
 function linkTrap(
   abs: string,
@@ -409,6 +420,32 @@ function linkTrap(
     win ? isRemoteWindowsPath(p) : isPosixNamespacePath(p, platform)
   const { root } = flavor.parse(abs)
   let current = root
+  /**
+   * win32 only. `current` is the path the walk reads (a link's target replaces the name: symlink
+   * semantics). A JUNCTION keeps its own spelling instead, and a later relative `..` folds against
+   * THAT, so after an absolute link the name the OS holds is the link's own spelling plus whatever
+   * followed it. `logical` is a pure function of `current` and this one substitution: while
+   * `current` is at or under `from` (the last absolute link's target), its logical spelling is
+   * `to` (the link's own logical spelling) plus the rest; anywhere else the two are the same
+   * text. A chain of absolute links keeps only the last substitution, whose `to` was already
+   * computed through the earlier ones (`w\J1 => r1`, `r1\J2 => r2`: `r2` is `w\J1\J2`).
+   */
+  let winSub: { from: string; to: string } | undefined
+  const winSame = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
+  const winUnder = (p: string): boolean => {
+    if (!winSub) return false
+    const from = winSub.from
+    return (
+      p.length >= from.length &&
+      winSame(p.slice(0, from.length), from) &&
+      (p.length === from.length || /[\\/]$/.test(from) || /[\\/]/.test(p[from.length]))
+    )
+  }
+  const winLogical = (p: string): string => {
+    if (!winSub || !winUnder(p)) return p
+    const rest = p.slice(winSub.from.length).replace(/^[\\/]+/, '')
+    return rest === '' ? winSub.to : flavor.join(winSub.to, rest)
+  }
   // The components still to walk, next one LAST (a stack), so a link's target splices in cheaply.
   const todo = componentsOf(abs.slice(root.length)).reverse()
   let hops = 0
@@ -448,9 +485,26 @@ function linkTrap(
       const { root: winRoot } = flavor.parse(target)
       if (winRoot !== '' && !/^[a-z]:[\\/]$/i.test(winRoot)) return 'unreadable'
       // Windows folds a `..` in a link target as TEXT against the link's own directory
-      // (`a\..\b` is `b`, whatever `a` is), so fold first and walk what is left.
+      // (`a\..\b` is `b`, whatever `a` is), so fold first and walk what is left. Against WHICH
+      // directory depends on the link's kind, and `readlink` cannot tell: a symlink replaces the
+      // name with its target, a junction keeps its own spelling (see `winSub`). A relative target
+      // is therefore folded both ways, and where the two disagree the path is unplaceable.
       const dest = flavor.resolve(base, target)
       if (isRemoteWindowsPath(dest)) return 'remote'
+      const own = winLogical(current)
+      if (winRoot === '') {
+        const logicalDest = flavor.resolve(flavor.dirname(own), target)
+        if (isRemoteWindowsPath(logicalDest)) return 'remote'
+        if (!winSame(logicalDest, winLogical(dest))) return 'unreadable'
+        // Agreed. Still inside the last absolute link's target: the junction spelling stays in
+        // force for what follows (`J\s` with `real\s -> sub\x` is still `J\s\sub\x` to the OS);
+        // out of it, the two spellings are the same text and there is nothing left to track.
+        if (!winUnder(dest)) winSub = undefined
+      } else {
+        // An absolute target: `current` jumps to it (the symlink reading), while the name stays
+        // the link's own spelling (the junction reading) for later relative `..`.
+        winSub = winSame(own, dest) ? undefined : { from: dest, to: own }
+      }
       const { root: destRoot } = flavor.parse(dest)
       current = destRoot
       todo.push(...componentsOf(dest.slice(destRoot.length)).reverse())
