@@ -1158,7 +1158,9 @@ describe('session.ipc', () => {
     it('a watcher fault drops the watch from the map instead of crashing the process or blocking a re-watch', async () => {
       const faults: Array<(err: Error) => void> = []
       // fs.watch itself is not spy-able (frozen module namespace); the listeners it is handed are.
-      const probe = fs.watch(root)
+      // The probe uses the production options: on Linux a recursive watch is a different (JS)
+      // watcher class from a plain one, so a plain probe's prototype would miss its listeners.
+      const probe = fs.watch(root, { recursive: true })
       const watcherProto = Object.getPrototypeOf(probe) as { on: () => unknown }
       probe.close()
       const spy = vi.spyOn(watcherProto, 'on').mockImplementation(function (
