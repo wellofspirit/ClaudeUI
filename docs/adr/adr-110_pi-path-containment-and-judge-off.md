@@ -56,6 +56,29 @@ path that reaches one through a link is **never touched**: the gate makes no `ex
 `lstat` call on it (those would open an SMB/WebDAV connection and send the user's NTLM credentials to a host the
 model named, before any decision), walks the local ancestors with `lstat`/`readlink` only, and treats a link whose
 target is a network path as unresolved. A network path listed as an additional directory is not probed either.
+
+The POSIX counterpart is the **automount and kernel-redirect namespaces**: `/net/<host>/…` (the autofs `-hosts`
+map: a DNS lookup and an NFS mount of whatever host the model named — macOS and Linux autofs alike) on every POSIX
+platform and, on darwin, `/Network/…` (the directory-service browse surface) and `/.vol/…`, `/.file/…`,
+`/.nofollow/…`, `/.resolve/…` (paths the macOS kernel redirects by volume or file id, which can land on a network
+mount). They are classified from the **spelling alone** — the first component of the resolved path, case-insensitively
+(macOS volumes are case-insensitive; on Linux the folding only over-asks), `.`/`..` folded, zero-width and bidi
+control characters ignored — so they are `unresolved` and `remote` with no `exists`, `realpath` or `lstat` call, for
+every tool and on every spelling (the `read` fallback variants, an additional directory, a root). The link walk
+(`lstat` and `readlink` only) now runs on POSIX too, and a link whose target text resolves into one of these
+namespaces is unplaceable before any `realpath`. This mirrors Claude Code 2.1.308's `vze` (`cli.js`),
+which asks, as a defence-in-depth check on the path and on every resolved spelling of it, for a path "under the
+/net automount map" (`Mw`, `Pqe`), "under the /Network automount browse surface" (`iD`) and "under /.vol, /.file,
+/.nofollow or /.resolve" (`Rb`: first component, case-insensitive, `.`/`..` folded), and for a UNC path; in that
+bundle the standalone `Ka` and `nM` predicates are compiled to `return false`, so the live checks are the ones named.
+Claude also tests its Glob tool's `pattern`; pi's `grep` `glob` and `find` `pattern` are filters over the searched
+`path`, never roots, so only `path` is gated here. Claude's `trustedNetworkDirectories` exemption has no counterpart:
+the ask is the whole answer. A session whose own directory is under one of these asks on every call.
+
+A link chain the gate cannot read — `lstat` or `readlink` failing with anything but "no such entry" (EACCES, EPERM,
+…), or more than 40 hops — is unresolved too, with no `realpath` and the generic "could not be determined" card; it
+no longer ends the walk as if nothing past it were a link, and it is no longer called a network path.
+
 Every spelling — the resolved path and its landing — must lie inside a
 root (roots are compared by their lexical and real spelling; Windows case-insensitively, UNC never against a
 non-UNC root). grep, find and ls without a `path` search the session directory; their patterns are filters, not
@@ -67,11 +90,15 @@ roots.
   message ("Refusing to write …: it is a symbolic link. Write to the link's target path instead").
 - With `permissions.blockReadsOutsideWorkingDirectories: true` (any settings scope), a read or search outside the
   workspace is **denied** in every mode; additional directories that only project settings list do not count for
-  it (as Claude Code).
+  it (as Claude Code). A path that cannot be placed is denied too, and the text says why in the human-only card's
+  words (a network path, a device) rather than only "could not be determined".
 - After the ask tier: an **unresolved** path (every network path included) asks the human for a read and for a
   write alike. A path with a Windows **DOS device** component (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
-  `LPT1`-`LPT9`, `CONIN$`, `CONOUT$`, with or without an extension) is unresolved too: it is placed from its
+  `LPT1`-`LPT9`, the superscript forms `COM¹ COM² COM³` / `LPT¹ LPT² LPT³`, `CONIN$`, `CONOUT$`, with or without an
+  extension, a trailing colon or spaces) is unresolved too: it is placed from its
   spelling alone, with no filesystem call (opening a device touches hardware), and asks the human for a read as well.
+  Windows 11 opens `aux.ts` or `con.js` as an ordinary file; the extension rule still asks for them (it is
+  older Windows' behaviour and asking is the safe side).
   So is a path through a link whose target text has such a component (`NUL`, `..\CON.txt`, `NUL\..\src`): the link
   walk judges the target before it looks at it.
   A Windows path form that can name another object (trailing dot or space, `:` streams, `...` runs) and an edit
@@ -152,8 +179,13 @@ The "always allow" suggestions on a card follow the verdict. A call that asked o
 the workspace suggests path-scoped rules — `Read(//<dir>/**)` for a read (the file's directory), `Edit(//<dir>/**)`
 for an edit or write, the searched path and its contents for grep/find/ls (`//` marks an absolute path in the rule
 grammar) — never the bare tool rule; none is offered where there is nothing safe to scope (a filesystem root, a
-glob character in the name). An edit or write card on an agent-control path offers none, inside the workspace or
-out: a bare `Edit` rule would cover it. A human-only card offers none.
+glob character in the name). An edit or write card inside the workspace (Ask mode: edits ask) suggests
+`Edit(//<root>/**)` for the narrowest workspace root (the working directory or an additional directory, spelled as
+the user spells it) that holds where the call lands — never the bare `Edit`/`Write`, which would be a standing
+allow for every file the tool can reach, the ones outside the workspace included; a bash card keeps its prefix
+rule. These cards offer **none**: an edit or write on an agent-control path (inside the workspace or out), a
+human-only card, and a card raised by a user ask rule. Each is asked before the allow tier, so a saved allow could
+never silence the card; it would only widen what other calls may do.
 
 ### 5. The bridge refuses to start without credentials
 
