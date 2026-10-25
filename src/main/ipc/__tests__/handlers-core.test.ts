@@ -1489,6 +1489,65 @@ describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
     }
   })
 
+  describe('stopTask tells the model the user stopped the agent (a host-instruction, once)', () => {
+    const NOTE =
+      'The user stopped the subagent "x". Do not restart it or redo its work unless the user asks.'
+    const stoppable = (rid: string, stop: () => Promise<Record<string, unknown>>) =>
+      liveSession(rid, { stopTask: vi.fn(stop) })
+
+    it('sends one note through the host-instruction path (queued behind a running turn), and does not leak it to the caller', async () => {
+      const rid = ridOf()
+      const session = stoppable(rid, async () => ({ success: true, hostNote: NOTE }))
+      session.willQueue = true
+      const res = await stopTask(makeManager(session), rid, 'call_1')
+      expect(res).toEqual({ success: true })
+      expect(session.calls).toEqual([`enqueue:${NOTE}:host-instruction`])
+    })
+
+    it('an idle session starts a turn on it, as a labelled user row', async () => {
+      const rid = ridOf()
+      const session = stoppable(rid, async () => ({ success: true, hostNote: NOTE }))
+      const events: unknown[] = []
+      const off = addSyncSubscriber((_seq: number, channel: string, args: unknown[]) => {
+        if (channel === 'session:user-message') events.push(args[1])
+      })
+      try {
+        await stopTask(makeManager(session), rid, 'call_1')
+        expect(session.calls).toEqual([`run:${NOTE}`])
+        expect(events).toEqual([
+          expect.objectContaining({ prompt: NOTE, origin: 'host-instruction' })
+        ])
+      } finally {
+        off()
+      }
+    })
+
+    it('a stop that interrupted nothing (error result) or came without a note sends nothing', async () => {
+      const rid = ridOf()
+      const failing = stoppable(rid, async () => ({
+        success: false,
+        error: 'No running agent for that card'
+      }))
+      expect(await stopTask(makeManager(failing), rid, 'call_1')).toEqual({
+        success: false,
+        error: 'No running agent for that card'
+      })
+      const plain = stoppable(rid, async () => ({ success: true }))
+      expect(await stopTask(makeManager(plain), rid, 'call_1')).toEqual({ success: true })
+      expect(failing.calls).toEqual([])
+      expect(plain.calls).toEqual([])
+    })
+
+    it('a note that cannot be sent does not fail the stop', async () => {
+      const rid = ridOf()
+      const session = stoppable(rid, async () => ({ success: true, hostNote: NOTE }))
+      session.run = vi.fn(() => {
+        throw new Error('engine gone')
+      })
+      expect(await stopTask(makeManager(session), rid, 'call_1')).toEqual({ success: true })
+    })
+  })
+
   it('the brief a session tool sends keeps the session "started by an agent"; a client prompt clears it (slice 1c)', () => {
     const rid = ridOf()
     const session = liveSession(rid, { engineId: 'claude' })

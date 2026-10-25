@@ -3398,3 +3398,228 @@ describe('a reopened chat resumes a stored child', () => {
     expect(user.indexOf('OLD-MARK')).toBeLessThan(user.indexOf('NEW-ASK'))
   })
 })
+
+describe('a per-subagent Stop (stopTask)', () => {
+  const MODEL = { providerID: 'openai', id: 'gpt-x' }
+  const GRAND = 'ses_grand'
+  const OTHER = 'ses_other'
+  const CMSG = 'msg_c1'
+
+  /** A `subagent` call made in `session` (own session unless a child's step message is given). */
+  const spawn = (
+    callId: string,
+    child: string,
+    input: Record<string, unknown> = {},
+    session = SID,
+    msg = MSG
+  ) => [
+    ...(session === SID
+      ? []
+      : [
+          event('session.step.started', {
+            sessionID: session,
+            assistantMessageID: msg,
+            agent: 'explore',
+            model: MODEL,
+            started: clock + 1
+          })
+        ]),
+    event('session.created', {
+      sessionID: child,
+      parentID: session,
+      agent: 'explore',
+      projectID: 'prj',
+      location: { directory: CWD },
+      slug: child,
+      version: '2'
+    }),
+    event('session.tool.input.started', {
+      sessionID: session,
+      assistantMessageID: msg,
+      id: callId,
+      name: 'subagent'
+    }),
+    event('session.tool.called', {
+      sessionID: session,
+      assistantMessageID: msg,
+      id: callId,
+      input: { agent: 'explore', description: `task ${callId}`, prompt: 'go', ...input },
+      executed: false
+    }),
+    event('session.tool.progress', {
+      sessionID: session,
+      assistantMessageID: msg,
+      id: callId,
+      metadata: { sessionID: child, status: 'running' }
+    })
+  ]
+  const running = (sessionID: string) => event('session.execution.started', { sessionID })
+  const interrupted = (sessionID: string) =>
+    event('session.execution.interrupted', { sessionID, reason: 'user' })
+  const ownTurn = () => [
+    running(SID),
+    event('session.step.started', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      agent: 'build',
+      model: MODEL,
+      started: clock + 1
+    })
+  ]
+  const cancelled = (callId: string) =>
+    event('session.tool.failed', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callId,
+      error: { type: 'unknown', message: 'Subagent cancelled (sessionID: ses_child)' },
+      executed: false
+    })
+  const interrupts = () => h.client.interrupt.mock.calls.map(([id]) => id)
+
+  /** Live: own turn running, C (call_c) with a background grandchild G, and a sibling O. */
+  async function liveTree(): Promise<void> {
+    session = makeSession()
+    await startTurn()
+    h.feed.push(
+      ...ownTurn(),
+      ...spawn('call_c', CHILD),
+      running(CHILD),
+      ...spawn('call_o', OTHER),
+      running(OTHER),
+      ...spawn('call_g', GRAND, { background: true }, CHILD, CMSG),
+      running(GRAND)
+    )
+    await flush()
+    h.client.interrupt.mockClear()
+  }
+
+  it('interrupts the child and its live descendants (deepest first), never a sibling or the parent', async () => {
+    await liveTree()
+    const result = await session.stopTask('call_c')
+    expect(result).toEqual({ success: true, hostNote: expect.any(String) })
+    expect(interrupts()).toEqual([GRAND, CHILD])
+    // …and the sibling's own card stops only the sibling.
+    h.client.interrupt.mockClear()
+    await session.stopTask('call_o')
+    expect(interrupts()).toEqual([OTHER])
+  })
+
+  it('answers an unknown or finished card with an error and interrupts nothing', async () => {
+    await liveTree()
+    expect(await session.stopTask('call_nope')).toEqual({
+      success: false,
+      error: 'No running agent for that card'
+    })
+    h.feed.push(
+      event('session.execution.succeeded', { sessionID: OTHER }),
+      event('session.tool.success', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        id: 'call_o',
+        content: [
+          {
+            type: 'text',
+            text: `<subagent sessionID="${OTHER}" state="completed">\nok\n</subagent>`
+          }
+        ],
+        metadata: { sessionID: OTHER, status: 'completed' },
+        executed: false
+      })
+    )
+    await flush()
+    expect(await session.stopTask('call_o')).toEqual({
+      success: false,
+      error: 'No running agent for that card'
+    })
+    expect(interrupts()).toEqual([])
+  })
+
+  it('the note names the agent by a sanitised label and says what not to do', async () => {
+    session = makeSession()
+    await startTurn()
+    h.feed.push(
+      ...ownTurn(),
+      ...spawn('call_c', CHILD, { description: 'evil" <b>x</b>\nline two' }),
+      running(CHILD)
+    )
+    await flush()
+    const { hostNote } = await session.stopTask('call_c')
+    expect(hostNote).toMatch(/^The user stopped the subagent "[^"<>\n]+"\. Do not restart it/)
+    expect(hostNote).toContain('unless the user asks')
+    // The note is the caller's to send: stopTask itself never posts into the chat.
+    expect(h.client.prompt).toHaveBeenCalledTimes(1)
+  })
+
+  it('the call’s notification reads `stopped`, once', async () => {
+    await liveTree()
+    await session.stopTask('call_c')
+    h.feed.push(interrupted(GRAND), interrupted(CHILD), cancelled('call_c'))
+    await flush()
+    const notes = payloads('session:task-notification')
+    expect(notes.filter((n) => n.toolUseId === 'call_c')).toMatchObject([
+      { status: 'stopped', taskId: CHILD }
+    ])
+    expect(notes.filter((n) => n.toolUseId === 'call_g')).toMatchObject([
+      { status: 'stopped', isBackgrounded: true }
+    ])
+  })
+
+  it('a stopped child that wakes again (a cancelled grandchild’s completion) is interrupted again', async () => {
+    await liveTree()
+    await session.stopTask('call_c')
+    h.client.interrupt.mockClear()
+    h.feed.push(interrupted(GRAND), interrupted(CHILD), running(CHILD))
+    await flush()
+    expect(interrupts()).toEqual([CHILD])
+    // The sibling and the own session starting never trigger one.
+    h.feed.push(running(OTHER), running(SID))
+    await flush()
+    expect(interrupts()).toEqual([CHILD])
+  })
+
+  it('an interrupt that cannot be sent is an error, and the Stop is not remembered', async () => {
+    await liveTree()
+    h.client.interrupt.mockRejectedValue(new Error('unreachable'))
+    const result = await session.stopTask('call_o')
+    expect(result).toMatchObject({ success: false, error: expect.stringContaining('unreachable') })
+    expect(result).not.toHaveProperty('hostNote')
+    // Not latched: it starting again is nobody's Stop.
+    h.client.interrupt.mockClear()
+    h.feed.push(interrupted(OTHER), running(OTHER))
+    await flush()
+    expect(interrupts()).toEqual([])
+  })
+
+  it('an unreachable descendant does not keep the child from being stopped', async () => {
+    await liveTree()
+    h.client.interrupt.mockImplementation(async (id: string) => {
+      if (id === GRAND) throw new Error('gone')
+      return true
+    })
+    expect(await session.stopTask('call_c')).toMatchObject({ success: true })
+    expect(interrupts()).toEqual([GRAND, CHILD])
+  })
+
+  it('a session with no connection has nothing to stop', async () => {
+    session = makeSession()
+    expect(await session.stopTask('call_c')).toEqual({
+      success: false,
+      error: 'No running agent for that card'
+    })
+  })
+
+  it('teardown and a parent interrupt stop things, but never tell the model anything', async () => {
+    await liveTree()
+    const prompts = h.client.prompt.mock.calls.length
+    await session.interrupt()
+    session.cancel()
+    await flush()
+    expect(h.client.prompt.mock.calls.length).toBe(prompts)
+  })
+
+  it('the capability gate is on, without a `backgroundTask` (R1: no Send to background)', () => {
+    session = makeSession()
+    expect(session.capabilities.backgroundTasks).toBe(true)
+    expect((session as unknown as { backgroundTask?: unknown }).backgroundTask).toBeUndefined()
+  })
+})

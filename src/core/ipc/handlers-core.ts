@@ -754,12 +754,19 @@ export async function stopTask(
   if (!session) return { success: false, error: 'No active session' }
   if (!session.capabilities.backgroundTasks)
     return { success: false, error: 'Provider does not support background tasks' }
-  return (
-    (await session.stopTask?.(toolUseId)) ?? {
-      success: false,
-      error: 'Provider does not support background tasks'
+  const stopped = await session.stopTask?.(toolUseId)
+  if (!stopped) return { success: false, error: 'Provider does not support background tasks' }
+  const { hostNote, ...result } = stopped
+  // The model otherwise reads only a bare "cancelled" and may redo the work: tell it,
+  // through the same `host-instruction` path context pressure uses (one note per Stop).
+  if (result.success && hostNote) {
+    try {
+      await sendPrompt(manager, routingId, hostNote, undefined, { origin: 'host-instruction' })
+    } catch (err) {
+      logger.warn('IPC', `stop-task: could not tell the model about the stop: ${String(err)}`)
     }
-  )
+  }
+  return result
 }
 
 export async function backgroundTask(

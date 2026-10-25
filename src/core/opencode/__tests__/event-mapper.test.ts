@@ -2108,3 +2108,292 @@ describe('the model a step ran on', () => {
     expect(open.open.message).not.toHaveProperty('model')
   })
 })
+
+describe('a user Stop on one subagent (stopRun)', () => {
+  const GRAND = 'ses_grand'
+  const OTHER = 'ses_other'
+  const CMSG = 'msg_c1'
+  const announce = (child: string, parent: string) =>
+    ev('session.created', {
+      sessionID: child,
+      parentID: parent,
+      projectID: 'p',
+      location: { directory: '/ws' },
+      slug: 's',
+      version: '2.1.2'
+    })
+  /** A subagent call made in `session` (whose step message is `msg`) that runs `child`. */
+  const spawn = (
+    callID: string,
+    child: string,
+    input: Record<string, unknown> = {},
+    session = SID,
+    msg = MSG
+  ) => [
+    ...(session === SID ? [] : [step(msg, session)]),
+    ...tool(
+      callID,
+      'subagent',
+      { agent: 'general', description: `d ${callID}`, ...input },
+      session,
+      msg
+    ),
+    announce(child, session),
+    ev('session.tool.progress', {
+      sessionID: session,
+      assistantMessageID: msg,
+      id: callID,
+      metadata: { sessionID: child, status: 'running' }
+    })
+  ]
+  const running = (session: string) => ev('session.execution.started', { sessionID: session })
+  const interrupted = (session: string) =>
+    ev('session.execution.interrupted', { sessionID: session, reason: 'user' })
+  const callFailed = (callID: string, message = 'Subagent cancelled (sessionID: ses_child)') =>
+    ev('session.tool.failed', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callID,
+      error: { type: 'unknown', message },
+      executed: false
+    })
+  const callOk = (callID: string, child = CHILD) =>
+    ev('session.tool.success', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callID,
+      content: [
+        { type: 'text', text: `<subagent sessionID="${child}" state="completed">\nhi\n</subagent>` }
+      ],
+      metadata: { sessionID: child, status: 'completed' },
+      executed: false
+    })
+  /** The call came back `running`: the child is a background run. */
+  const background = (callID: string, child: string, session = SID) =>
+    ev('session.tool.success', {
+      sessionID: session,
+      assistantMessageID: session === SID ? MSG : CMSG,
+      id: callID,
+      content: [{ type: 'text', text: 'running' }],
+      metadata: { sessionID: child, status: 'running' },
+      executed: false
+    })
+  const notes = (out: readonly OpencodeMapperOutput[], callID?: string) =>
+    of(out, 'task-notification')
+      .map((o) => o.notification)
+      .filter((n) => callID === undefined || n.toolUseId === callID)
+  const relink = (callID: string, child: string) => [
+    ...tool(callID, 'subagent', { agent: 'general', sessionID: child }),
+    ev('session.tool.progress', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callID,
+      metadata: { sessionID: child, status: 'running' }
+    })
+  ]
+
+  it('has nothing to stop for an unknown call, a finished run, or a run a later call took over', () => {
+    map(step(), running(SID), ...spawn('call_a', CHILD), running(CHILD))
+    expect(mapper.stopRun('call_nope')).toBeNull()
+    map(callOk('call_a'))
+    expect(mapper.stopRun('call_a')).toBeNull()
+    // Steered: the earlier call's run is settled by the later one.
+    mapper = new OpencodeEventMapper({ sessionID: SID })
+    map(step(), ...spawn('call_a', CHILD, { background: true }), running(CHILD))
+    map(...relink('call_b', CHILD))
+    expect(mapper.stopRun('call_a')).toBeNull()
+    expect(mapper.stopRun('call_b')?.sessions).toEqual([CHILD])
+  })
+
+  it('a foreground call the user stopped is notified `stopped`, not `failed`', () => {
+    const control = map(step(), ...spawn('call_a', CHILD), running(CHILD), callFailed('call_a'))
+    expect(notes(control, 'call_a')).toMatchObject([{ status: 'failed' }])
+
+    mapper = new OpencodeEventMapper({ sessionID: SID })
+    map(step(), running(SID), ...spawn('call_a', CHILD), running(CHILD))
+    expect(mapper.stopRun('call_a')?.sessions).toEqual([CHILD])
+    const out = map(interrupted(CHILD), callFailed('call_a'))
+    expect(notes(out, 'call_a')).toMatchObject([{ status: 'stopped', taskId: CHILD }])
+    expect(notes(out)).toHaveLength(1)
+  })
+
+  it('a natural completion that beat the Stop stays `completed` (the mark only applies to a non-ok end)', () => {
+    map(step(), ...spawn('call_a', CHILD), running(CHILD))
+    expect(mapper.stopRun('call_a')).not.toBeNull()
+    expect(notes(map(callOk('call_a')), 'call_a')).toMatchObject([{ status: 'completed' }])
+  })
+
+  it('a stopped background child delivers its cancelled end as `stopped`, once', () => {
+    map(
+      step(),
+      running(SID),
+      ...spawn('call_a', CHILD, { background: true }),
+      background('call_a', CHILD),
+      running(CHILD)
+    )
+    expect(mapper.hasLiveBackgroundChild()).toBe(true)
+    expect(mapper.stopRun('call_a')?.sessions).toEqual([CHILD])
+    const out = map(interrupted(CHILD))
+    expect(notes(out)).toMatchObject([
+      { toolUseId: 'call_a', status: 'stopped', isBackgrounded: true }
+    ])
+    expect(mapper.hasLiveBackgroundChild()).toBe(false)
+  })
+
+  it('stops the child and every live descendant, deepest first; never a sibling or the parent', () => {
+    map(
+      step(),
+      running(SID),
+      ...spawn('call_c', CHILD),
+      running(CHILD),
+      ...spawn('call_o', OTHER),
+      running(OTHER),
+      // C's background grandchild G, and G's own child H.
+      ...spawn('call_g', GRAND, { background: true }, CHILD, CMSG),
+      running(GRAND),
+      ...spawn('call_h', 'ses_h', {}, GRAND, 'msg_g1'),
+      running('ses_h')
+    )
+    expect(mapper.stopRun('call_c')?.sessions).toEqual(['ses_h', GRAND, CHILD])
+    // The sibling is untouched: stopping it is its own plan.
+    expect(mapper.stopRun('call_o')?.sessions).toEqual([OTHER])
+    // A grandchild alone does not reach up.
+    mapper = new OpencodeEventMapper({ sessionID: SID })
+    map(
+      step(),
+      ...spawn('call_c', CHILD),
+      running(CHILD),
+      ...spawn('call_g', GRAND, {}, CHILD, CMSG),
+      running(GRAND)
+    )
+    expect(mapper.stopRun('call_g')?.sessions).toEqual([GRAND])
+  })
+
+  it('leaves out a descendant that already ended', () => {
+    map(
+      step(),
+      ...spawn('call_c', CHILD),
+      running(CHILD),
+      ...spawn('call_g', GRAND, {}, CHILD, CMSG),
+      running(GRAND),
+      ev('session.execution.succeeded', { sessionID: GRAND }),
+      ev('session.tool.success', {
+        sessionID: CHILD,
+        assistantMessageID: CMSG,
+        id: 'call_g',
+        content: [
+          {
+            type: 'text',
+            text: `<subagent sessionID="${GRAND}" state="completed">\nx\n</subagent>`
+          }
+        ],
+        metadata: { sessionID: GRAND, status: 'completed' },
+        executed: false
+      })
+    )
+    expect(mapper.stopRun('call_c')?.sessions).toEqual([CHILD])
+  })
+
+  it('a stopped grandchild reads `stopped` in its own notification too', () => {
+    map(
+      step(),
+      ...spawn('call_c', CHILD),
+      running(CHILD),
+      ...spawn('call_g', GRAND, { background: true }, CHILD, CMSG),
+      background('call_g', GRAND, CHILD),
+      running(GRAND)
+    )
+    mapper.stopRun('call_c')
+    const out = map(interrupted(GRAND), interrupted(CHILD), callFailed('call_c'))
+    expect(notes(out, 'call_g')).toMatchObject([{ status: 'stopped' }])
+    expect(notes(out, 'call_c')).toMatchObject([{ status: 'stopped' }])
+  })
+
+  describe('the user-stopped latch', () => {
+    it('a stopped child that starts executing again (a cancelled grandchild woke it) is interrupted again', () => {
+      map(step(), ...spawn('call_c', CHILD), running(CHILD))
+      mapper.stopRun('call_c')
+      map(interrupted(CHILD))
+      // The woken turn: asked to stop again, as often as it wakes.
+      expect(of(map(running(CHILD)), 'reinterrupt')).toEqual([
+        { kind: 'reinterrupt', sessionID: CHILD }
+      ])
+      map(interrupted(CHILD))
+      expect(of(map(running(CHILD)), 'reinterrupt')).toHaveLength(1)
+    })
+
+    it('a child nobody stopped, and the own session, never get one', () => {
+      map(step(), ...spawn('call_c', CHILD), running(CHILD))
+      expect(of(map(interrupted(CHILD), running(CHILD), running(SID)), 'reinterrupt')).toEqual([])
+    })
+
+    it('a new call that links the child clears the latch (a resume is the model asking again)', () => {
+      map(step(), ...spawn('call_c', CHILD), running(CHILD))
+      mapper.stopRun('call_c')
+      map(interrupted(CHILD), callFailed('call_c'))
+      // opencode publishes the call's progress (the link) BEFORE it prompts the child.
+      map(...relink('call_r', CHILD))
+      expect(of(map(running(CHILD)), 'reinterrupt')).toEqual([])
+    })
+
+    it('a descendant is latched with the child', () => {
+      map(
+        step(),
+        ...spawn('call_c', CHILD),
+        running(CHILD),
+        ...spawn('call_g', GRAND, { background: true }, CHILD, CMSG),
+        running(GRAND)
+      )
+      mapper.stopRun('call_c')
+      map(interrupted(GRAND), interrupted(CHILD))
+      expect(of(map(running(GRAND)), 'reinterrupt')).toEqual([
+        { kind: 'reinterrupt', sessionID: GRAND }
+      ])
+    })
+
+    it('a reconnect that finds the stopped child active again asks to stop it again', () => {
+      map(step(), ...spawn('call_c', CHILD), running(CHILD))
+      mapper.stopRun('call_c')
+      map(interrupted(CHILD))
+      const out = mapper.reconcile({
+        sessions: {
+          [SID]: { messages: [], permissions: [], forms: [], inbox: [] },
+          [CHILD]: { messages: [], permissions: [], forms: [] }
+        },
+        active: { [CHILD]: { type: 'running' } }
+      })
+      expect(of(out, 'reinterrupt')).toEqual([{ kind: 'reinterrupt', sessionID: CHILD }])
+    })
+
+    it('undo() takes the mark and the latch back (the interrupt could not be sent)', () => {
+      map(step(), ...spawn('call_c', CHILD), running(CHILD))
+      mapper.stopRun('call_c')?.undo()
+      expect(of(map(interrupted(CHILD), running(CHILD)), 'reinterrupt')).toEqual([])
+      expect(notes(map(callFailed('call_c')), 'call_c')).toMatchObject([{ status: 'failed' }])
+    })
+  })
+
+  it('no approval card of the stopped subtree stays open once its executions end', () => {
+    const ask = (id: string, session: string) =>
+      ev('permission.asked', { id, sessionID: session, action: 'shell', resources: ['x'] })
+    map(
+      step(),
+      running(SID),
+      ...spawn('call_c', CHILD),
+      running(CHILD),
+      ...spawn('call_g', GRAND, { background: true }, CHILD, CMSG),
+      background('call_g', GRAND, CHILD),
+      running(GRAND),
+      ask('per_c', CHILD),
+      ask('per_g', GRAND),
+      ask('per_own', SID)
+    )
+    mapper.stopRun('call_c')
+    const out = map(interrupted(GRAND), interrupted(CHILD))
+    expect(
+      of(out, 'approval-resolved')
+        .map((o) => o.requestId)
+        .sort()
+    ).toEqual(['per_c', 'per_g'])
+  })
+})

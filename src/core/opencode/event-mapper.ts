@@ -177,6 +177,11 @@ export type OpencodeMapperOutput =
       readonly shellID: string
       readonly ownerToolUseId?: string
     }
+  /**
+   * A child the user stopped started executing again (a cancelled background
+   * grandchild's completion woke it): interrupt it once more.
+   */
+  | { readonly kind: 'reinterrupt'; readonly sessionID: string }
   /** A subagent call started (or resumed) its child session; its events now route under `toolUseId`. */
   | {
       readonly kind: 'subagent-started'
@@ -349,6 +354,8 @@ interface RunState {
   /** 1-based position among the calls that ran this child. */
   readonly runIndex: number
   background: boolean
+  /** ClaudeUI stopped this run (user Stop): a non-ok end reads `stopped`, not `failed`. */
+  stopped: boolean
   /** The terminal notification went out (a superseded run's too). */
   notified: boolean
   /** What it said, kept to re-send with fuller usage when a re-read adds steps behind it. */
@@ -364,6 +371,8 @@ interface SessionState {
   readonly id: string
   /** The parent call a child runs under; undefined for the own session. */
   owner?: string
+  /** The session that made that call (a child's parent); undefined for the own session. */
+  parentID?: string
   model?: Model_Ref
   running: boolean
   turnStartedAt?: number
@@ -516,6 +525,12 @@ export class OpencodeEventMapper {
   private readonly childCalls = new Map<string, { toolId: string; start?: number }[]>()
   /** The runs this mapper saw start, by their call: the figures of progress and notification. */
   private readonly runs = new Map<string, RunState>()
+  /**
+   * Children the user stopped (`stopRun`): a cancelled background grandchild's
+   * completion WAKES its parent, so a stopped child that starts executing again
+   * is interrupted again, until a new call links it (`linkChild`).
+   */
+  private readonly latched = new Set<string>()
   /** Epoch ms of the event (or stored row) being applied: the clock of `usage.durationMs`. */
   private at = 0
   /** Open approval cards: request/form id → the asking session and the call it is about. */
@@ -762,6 +777,7 @@ export class OpencodeEventMapper {
         s.armedStop = undefined
         s.endedWithoutIdle = false
         if (own) out.push({ kind: 'turn-start' })
+        else if (this.latched.has(s.id)) out.push({ kind: 'reinterrupt', sessionID: s.id })
         return
       case 'session.execution.succeeded':
         this.endExecution(s, { outcome: 'succeeded' }, event.created, event.id, out)
@@ -1148,6 +1164,9 @@ export class OpencodeEventMapper {
       child = newSession(childID, tool.id)
       this.children.set(childID, child)
     }
+    child.parentID = this.sessionOfCall(tool)
+    // A new call takes the child over: the user's earlier Stop is spent.
+    this.latched.delete(childID)
     // opencode lets a `sessionID` call STEER a child that is still running (it
     // joins the child's job): the earlier call is then never told its child
     // ended — settle its card now, or its task record would hold the parent
@@ -1162,6 +1181,7 @@ export class OpencodeEventMapper {
       runIndex: calls.findIndex((call) => call.toolId === tool.id) + 1,
       // `tool.called` carries the model's own input (before opencode's repair hook).
       background: tool.input.background === true,
+      stopped: false,
       notified: false,
       refresh: false,
       tokens: 0,
@@ -1232,6 +1252,68 @@ export class OpencodeEventMapper {
   hasLiveBackgroundChild(): boolean {
     for (const run of this.runs.values()) if (run.background && !run.notified) return true
     return false
+  }
+
+  /** The session a call was made in (its tool state lives there). */
+  private sessionOfCall(tool: ToolState): string {
+    for (const s of [this.own, ...this.children.values()])
+      if (s.tools.get(tool.id) === tool) return s.id
+    return this.sessionID
+  }
+
+  /**
+   * The user's Stop on one subagent card: what to interrupt, and the marks that
+   * make it read as the user's. Null when the call has no live run (never ran,
+   * ended, or a later call took its child over). The plan lists the child and
+   * every live descendant, deepest first (a background grandchild survives its
+   * parent's interrupt, so each is stopped itself); nothing else is touched.
+   * The runs are marked user-stopped and the children latched BEFORE the
+   * interrupts go out: a non-ok end then reads `stopped`, a completion that won
+   * the race stays `completed`, and a stopped child a cancelled grandchild wakes
+   * is interrupted again (`reinterrupt`). `undo()` takes the marks back when the
+   * interrupt could not be sent.
+   */
+  stopRun(toolUseId: string): {
+    sessions: string[]
+    undo: () => void
+  } | null {
+    const run = this.runs.get(toolUseId)
+    if (!run || run.notified) return null
+    const child = this.children.get(run.childID)
+    if (!child || child.owner !== toolUseId) return null
+    // Levels below `child` (0 = not below it); bounded against a malformed cycle.
+    const levelBelow = (s: SessionState): number => {
+      let at: SessionState | undefined = s
+      for (let n = 0; at && n < 64; n++) {
+        if (at.parentID === child.id) return n + 1
+        at = at.parentID ? this.children.get(at.parentID) : undefined
+      }
+      return 0
+    }
+    const descendants = [...this.children.values()]
+      .filter((s) => s !== child && levelBelow(s) > 0 && (s.running || !s.notified))
+      .sort((a, b) => levelBelow(b) - levelBelow(a))
+    const stopping = [...descendants, child]
+    const marked: RunState[] = []
+    const latchedNow: string[] = []
+    for (const s of stopping) {
+      const r = s.owner ? this.runs.get(s.owner) : undefined
+      if (r && !r.stopped) {
+        r.stopped = true
+        marked.push(r)
+      }
+      if (!this.latched.has(s.id)) {
+        this.latched.add(s.id)
+        latchedNow.push(s.id)
+      }
+    }
+    return {
+      sessions: stopping.map((s) => s.id),
+      undo: () => {
+        for (const r of marked) r.stopped = false
+        for (const id of latchedNow) this.latched.delete(id)
+      }
+    }
   }
 
   private settleTool(
@@ -1347,7 +1429,8 @@ export class OpencodeEventMapper {
     const notification: TaskNotification = {
       taskId: childID,
       toolUseId,
-      status,
+      // The user stopped it: a failure that is the Stop's own reads `stopped`.
+      status: run?.stopped && status !== 'completed' ? 'stopped' : status,
       outputFile: '',
       summary: taskSummary(text),
       ...(run
@@ -2004,6 +2087,7 @@ export class OpencodeEventMapper {
         s.armedStop = undefined
         s.turnStartedAt = Date.now()
         if (s === this.own) out.push({ kind: 'turn-start' })
+        else if (this.latched.has(s.id)) out.push({ kind: 'reinterrupt', sessionID: s.id })
       }
       return
     }

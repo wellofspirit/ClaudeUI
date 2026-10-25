@@ -28,6 +28,15 @@
  *               prompt is `child works [slow]` (the child streams for SLOW_CHUNKS × `slowChunkMs`)
  *   [substeer]  BACKGROUND `subagent` call STEERING the last child named in the conversation
  *               (`sessionID: ses_…` of a background result) while it still runs; prompt `steer [read]`
+ *   [subslow]   FOREGROUND `subagent` call (agent `general`) whose child prompt is `child works [slow]`
+ *   [subnest]   FOREGROUND `subagent` call whose child prompt is `[subbg] [afterslow] nested`: that
+ *               child launches a BACKGROUND grandchild, then streams slowly (needs
+ *               `experimental.subagent_depth` ≥ 2)
+ *   [afterslow] after a tool result, stream slowly instead of answering at once (keeps the turn
+ *               running while a background child works)
+ *               The same turn flavour answers a woken child (a background grandchild's `state="cancelled"`
+ *               completion message) slowly when an earlier prompt of the session carried `[afterslow]`,
+ *               so a test can stop it again before it finishes
  *   [reason]    `reasoning_content` deltas, then text
  *   [read]      `read` of `notes.txt`
  *   [readabs:<path>]  `read` of the ABSOLUTE path (no `]` in it) — outside-the-workspace reads
@@ -241,6 +250,16 @@ export async function startFixtureProvider(
       const last = messages.at(-1)
       if (tools.length === 0) return streamText(res, 'Fixture title')
       if (text.includes('summarize the conversation')) return streamText(res, COMPACTION_SUMMARY)
+      if (last?.role === 'tool' && text.includes('[afterslow]'))
+        return streamText(res, 'after', SLOW_CHUNKS)
+      if (
+        text.includes('state="cancelled"') &&
+        messages.some(
+          (message) =>
+            message.role === 'user' && messageText(message.content).includes('[afterslow]')
+        )
+      )
+        return streamText(res, 'woken', SLOW_CHUNKS)
       if (last?.role === 'tool')
         return streamText(res, `TOOL_RESULT_SEEN: ${messageText(last.content).slice(0, 600)}`)
       if (text.includes('[tool]'))
@@ -348,6 +367,26 @@ export async function startFixtureProvider(
             prompt: 'child works [slow]',
             agent: 'general',
             background: true
+          }
+        )
+      if (text.includes('[subslow]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract slow',
+            prompt: 'child works [slow]',
+            agent: 'general'
+          }
+        )
+      if (text.includes('[subnest]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract nest',
+            prompt: '[subbg] [afterslow] nested',
+            agent: 'general'
           }
         )
       if (text.includes('[substeer]')) {

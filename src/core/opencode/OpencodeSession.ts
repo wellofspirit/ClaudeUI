@@ -1260,6 +1260,12 @@ export class OpencodeSession extends BaseSession {
       case 'task-progress':
         this.send('session:task-progress', o.progress)
         return
+      case 'reinterrupt':
+        // A child the user stopped woke again (a cancelled grandchild's completion): stop it again.
+        void this.client?.interrupt(o.sessionID).catch((err) => {
+          logger.warn('OpencodeSession', `re-interrupt of a stopped agent failed: ${errText(err)}`)
+        })
+        return
       case 'task-notification':
         this.send('session:task-notification', o.notification)
         if (o.notification.isBackgrounded) this.backgroundWorkChanged()
@@ -1632,6 +1638,42 @@ export class OpencodeSession extends BaseSession {
       await this.client.interrupt(this.openSessionId, { resume: true })
     } catch (err) {
       logger.warn('OpencodeSession', `interrupt failed: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * ISession.stopTask — the per-agent Stop on a subagent card, row or detail panel
+   * (`handlers-core.stopTask`, gated on `capabilities.backgroundTasks`). Interrupts
+   * the call's child and every live descendant (deepest first; opencode cancels only
+   * FOREGROUND children with their parent, so a background grandchild is stopped
+   * itself), never a sibling or the parent. A foreground call then fails with
+   * "Subagent cancelled" and its parent's turn goes on; a background child's
+   * cancellation reaches the parent as a `<subagent state="cancelled">` message.
+   * The result carries `hostNote` for the model — the caller sends it once, only
+   * after something was interrupted (never from a teardown).
+   */
+  async stopTask(
+    toolUseId: string
+  ): Promise<{ success: boolean; error?: string; hostNote?: string }> {
+    const client = this.client
+    const stop = client && !this.disconnected ? this.mapper?.stopRun(toolUseId) : null
+    if (!client || !stop) return { success: false, error: 'No running agent for that card' }
+    for (const [i, id] of stop.sessions.entries()) {
+      try {
+        await client.interrupt(id)
+      } catch (err) {
+        logger.warn('OpencodeSession', `stop of agent session ${id} failed: ${errText(err)}`)
+        // The child itself (last) was not reached: the Stop did not happen.
+        if (i === stop.sessions.length - 1) {
+          stop.undo()
+          return { success: false, error: `Could not stop the agent: ${errText(err)}` }
+        }
+      }
+    }
+    const label = this.childAgentLabel(this.subagentTask({ parentToolUseId: toolUseId }))
+    return {
+      success: true,
+      hostNote: `The user stopped the subagent "${label}". Do not restart it or redo its work unless the user asks.`
     }
   }
 
