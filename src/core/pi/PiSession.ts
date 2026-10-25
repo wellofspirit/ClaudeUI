@@ -107,8 +107,7 @@ import {
   decideWithSource,
   piToolKind,
   mergedClaudeRulesFor,
-  withoutAllowRules,
-  sessionAllowKey,
+  piSessionAllowKey,
   normalizeWhitespace,
   PI_TOOL_TO_CLAUDE_TOOL,
   PI_HOSTED_TOOL_NAMES,
@@ -473,7 +472,7 @@ export class PiSession extends BaseSession {
       hold?: { reason: string; denials: AutoModeDenialTracker; cancel: () => void }
     }
   >()
-  /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
+  /** "Allow for this session" entries — `bash:<normalized command>`, `edit:<abs path>` / `write:<abs path>`, else the bare pi tool name (see permission-engine.ts's piSessionAllowKey). */
   private sessionAllows = new Set<string>()
   /**
    * The MCP catalog this session's pi registers (ADR-096): read at each spawn,
@@ -2187,26 +2186,27 @@ export class PiSession extends BaseSession {
    * inner fn only decides; it never mints a hosted-tool grant itself.
    *
    * AUTO MODE'S BASE (phase 4, mirrors OpencodeSession.applyPermissionMode's
-   * `const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode`): with the
-   * classifier active, the mode BASE fed to the engine is `acceptEdits`, not
-   * `auto`. Without this the wiring would be dead code — `modeBaseDecision`
-   * answers 'allow' for every kind under `auto`/`full`, so nothing except a
-   * user-authored ask rule could ever reach the branch below, and those go
-   * straight to the human by G9. The downgrade is what routes bash/dispatch/
-   * unknown-kind calls into the judge while reads and edits stay auto-allowed
-   * (cli.js's fast-path-A equivalence). With auto mode DISABLED, `auto` keeps
-   * its historical allow-everything base — there would be no classifier to
-   * compensate for a tightening.
+   * `const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode`): the ladder is
+   * handed the user's effective mode and `judge: isAutoMode(mode)` and picks the base
+   * itself (permission-engine.ts `ladderBase`). With the classifier active the base is
+   * `acceptEdits`, not `auto`: without that the wiring would be dead code, because an
+   * allow-everything base leaves nothing but a user ask rule to reach the branch below
+   * (and those go straight to the human by G9). The downgrade is what routes bash/
+   * dispatch/unknown-kind calls into the judge while reads and edits stay auto-allowed
+   * (cli.js's fast-path-A equivalence). With auto mode DISABLED (`autoMode.enabled:
+   * false`) there is no judge, so `auto`/`full` read the `default` base with the full
+   * rule set: a human is asked exactly as in `default` and the user's allow rules are
+   * their way to stop being asked — never the old allow-everything base (H2).
    *
-   * AUTO MODE'S RULES (cli.js §3 step 2 parity): the user's ALLOW rules are
-   * filtered out of what the engine decides on, so the actions they would have
-   * silently auto-allowed fall through to the `acceptEdits` base's 'ask' and
-   * reach the classifier instead of bypassing it. Applied HERE, at the
-   * composition seam, rather than inside the pure ladder — see
-   * `withoutAllowRules` for the full reasoning, the live evasion that motivated
-   * it, and why this leaves G9's `source: 'ask-rule'` provenance exact (deny and
-   * ask are both evaluated before the allow tier, so filtering the allow tier
-   * cannot change which of them answers).
+   * AUTO MODE'S RULES (cli.js §3 step 2 parity): under a judged auto mode the user's
+   * ALLOW rules are filtered out of what the ladder decides on, so the actions they would
+   * have silently auto-allowed fall through to the `acceptEdits` base's 'ask' and reach the
+   * classifier instead of bypassing it. The strip lives inside the ladder (one place that
+   * knows "judged auto") — see `withoutAllowRules` for the full reasoning, the live evasion
+   * that motivated it, and why this leaves G9's `source: 'ask-rule'` provenance exact (deny
+   * and ask are both evaluated before the allow tier). A session allow is not stripped, but
+   * it no longer silences the judge for agents, messages, unclassified tools or
+   * agent-control edits (`sessionAllowHolds`, H3).
    */
   private gateToolCallInner = (payload: PiToolCallPayload): Promise<GateDecision> =>
     this.decideToolCall(payload, null)
@@ -2239,9 +2239,13 @@ export class PiSession extends BaseSession {
     const rules = this.currentRules()
     const autoMode = this.isAutoMode(mode)
     const verdict = decideWithSource(toolName, input, {
-      mode: autoMode ? 'acceptEdits' : mode,
-      rules: autoMode ? withoutAllowRules(rules) : rules,
+      // The user's effective mode and whether the judge is on: the ladder derives its base (and
+      // strips the allow tier for a judged auto mode) from the pair — see `ladderBase`.
+      mode,
+      judge: autoMode,
+      rules,
       sessionAllows: this.sessionAllows,
+      sessionAllowsByPath: true,
       cwd: this.cwd,
       // pi's MCP tool names are sanitized (ADR-096): spell rules the same way.
       mcpRuleKey: piMcpRuleKey
@@ -2252,16 +2256,17 @@ export class PiSession extends BaseSession {
     // child takes is gated by this same live mode anyway. After the deny-rule
     // check, before the mode base. In auto mode it falls through: the `task`
     // kind under the `acceptEdits` base asks, and the judge decides.
-    // (The deny-rule guard cannot fire yet: no rule row maps Agent/Task to a
-    // pi kind — permission-engine.ts CLAUDE_TOOL_TO_KIND.)
+    // A user `Agent`/`Task` rule is not bypassed: a deny rule refuses the launch and an ask rule
+    // puts the human card in front of it, in every mode (in auto, G9 sends it to the human).
     // `send_message` takes the same rung (ADR-089 S3b, Q6): a message that
     // resumes or redirects an agent is delegation, judged like a spawn in auto.
-    // (As above, the deny-rule guard cannot fire yet: no rule row maps a
-    // Claude tool to the `detail`/`note` kinds these two tools carry.)
+    // (No rule row maps a Claude tool to the `detail`/`note` kinds it and
+    // `task_stop` carry, so the two source checks cannot fire for them.)
     if (
       (toolName === 'agent' || toolName === 'send_message') &&
       !autoMode &&
-      verdict.source !== 'deny-rule'
+      verdict.source !== 'deny-rule' &&
+      verdict.source !== 'ask-rule'
     ) {
       return { behavior: 'allow' }
     }
@@ -2758,7 +2763,7 @@ export class PiSession extends BaseSession {
     // (either would skip the gate's scope and mode-parity checks next time).
     const standing = !isSessionToolName(pending.toolName)
     if (decision === 'allowForSession' && standing) {
-      this.sessionAllows.add(sessionAllowKey(pending.toolName, pending.input))
+      this.sessionAllows.add(piSessionAllowKey(pending.toolName, pending.input, this.cwd))
     }
     pending.resolve({ behavior: 'allow' })
 

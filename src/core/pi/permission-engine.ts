@@ -60,11 +60,34 @@ export interface PermissionVerdict {
 export type MergedClaudeRules = ClaudePermissions
 
 export interface PermissionEngineContext {
-  /** Claude-style permission-mode string, as arrives at PiSession.setPermissionMode: 'default' | 'acceptEdits' | 'plan' | 'auto' | ... */
+  /**
+   * The user's EFFECTIVE Claude-style permission mode, as arrives at
+   * PiSession.setPermissionMode: 'default' | 'acceptEdits' | 'plan' | 'auto' | 'full' | ...
+   * pi callers pass it as the user has it (a child's: narrowed) — NOT a downgraded stand-in:
+   * the ladder picks its own base from `(mode, judge)` (see {@link ladderBase}), so no pi caller
+   * can get `auto` -> allow-everything by accident.
+   */
   mode: string
+  /**
+   * Is a judge (auto mode's LLM gatekeeper) in the loop for this call? Only meaningful for
+   * `auto`/`full`, and ALWAYS passed by the pi callers (PiSession, its children, the pi dispatch
+   * target): judged -> the `acceptEdits` base with the allow tier stripped (the judge decides
+   * what the base asks); `false` (the user turned the judge off) -> the `default` base with the
+   * caller's full rule set, because without a judge an `auto` mode must not widen anything beyond
+   * what a human would have been asked. ABSENT is the legacy contract, kept for Codex, which
+   * maps `auto` to `default` itself and passes everything else through: the raw mode's own base
+   * (`auto`/`full` -> allow-everything), no stripping.
+   */
+  judge?: boolean
   rules: MergedClaudeRules
-  /** "Allow for this session" entries: bare pi tool name (e.g. 'edit'), or `bash:<normalized command>` for bash. */
+  /**
+   * "Allow for this session" entries. pi: {@link piSessionAllowKey} — `bash:<normalized
+   * command>`, `edit:<abs path>` / `write:<abs path>`, else the bare tool name; set
+   * `sessionAllowsByPath`. Codex keeps the bare {@link sessionAllowKey} for everything but bash.
+   */
   sessionAllows: ReadonlySet<string>
+  /** `sessionAllows` holds pi's per-path edit/write keys ({@link piSessionAllowKey}); absent = the bare-name keys (Codex). */
+  sessionAllowsByPath?: boolean
   /**
    * The session's working directory — lets `ruleMatchesTool` resolve a
    * path-bearing tool call's `path`/`file_path` argument (pi's own tool
@@ -246,7 +269,8 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
  * pi's `ls`/`grep`/`find` tools) for parity with opencode's own
  * TOOL_TO_CATEGORY table (permission-compiler.ts), which treats Read/Glob/
  * Grep/LS as siblings. Any Claude tool name NOT in this table (WebFetch,
- * Task, NotebookEdit, MultiEdit, ...) has no pi analog and never matches.
+ * NotebookEdit, MultiEdit, ...) has no pi analog and never matches. `Agent`/
+ * `Task` are not in it either: they name ONE pi tool, not a kind (`AGENT_RULE_TOOLS`).
  */
 const CLAUDE_TOOL_TO_KIND: Record<string, ToolKind> = {
   Bash: 'command',
@@ -256,6 +280,27 @@ const CLAUDE_TOOL_TO_KIND: Record<string, ToolKind> = {
   Grep: 'search',
   Glob: 'search',
   LS: 'search'
+}
+
+/** Claude's names for the sub-agent launcher; a rule on either matches pi's `agent` tool only (H5). */
+const AGENT_RULE_TOOLS: ReadonlySet<string> = new Set(['Agent', 'Task'])
+/** pi's host-run subagent launcher (the bridge's `agent` tool, ADR-089). */
+const PI_AGENT_TOOL = 'agent'
+const DEFAULT_AGENT_TYPE = 'general-purpose'
+
+/** The agent type an `agent` call names — `general-purpose` when omitted, as the launcher resolves it. */
+function agentTypeOf(input: Record<string, unknown>): string {
+  const type = input.subagent_type
+  return typeof type === 'string' && type.trim() !== '' ? type.trim() : DEFAULT_AGENT_TYPE
+}
+
+/** `Agent(Explore*)`-style specifier -> an anchored, case-sensitive matcher (`*` any run, `?` one char). */
+function agentTypeGlob(specifier: string): RegExp {
+  const body = specifier
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')
+  return new RegExp(`^${body}$`, 's')
 }
 
 /** Reverse of the above, for building "always allow" suggestions from a pi tool_call (PiSession). */
@@ -553,6 +598,15 @@ function ruleMatchesTool(
   const parsed = parseClaudeRule(rule)
   if (!parsed) return false
   if (parsed.tool.startsWith(MCP_RULE_PREFIX)) return mcpRuleMatches(parsed, toolName, mcpRuleKey)
+  // `Agent` / `Task` (Claude's two spellings of the sub-agent launcher): pi's own `agent` tool
+  // and nothing else — not `dispatch_agent` (a different, cross-engine tool) and not a legacy
+  // `subagent` call, though all of them share the `task` kind. The specifier is Claude's agent
+  // type, matched as a glob against the call's `subagent_type` (default `general-purpose`).
+  if (AGENT_RULE_TOOLS.has(parsed.tool)) {
+    if (toolName !== PI_AGENT_TOOL) return false
+    if (parsed.specifier === undefined) return true
+    return agentTypeGlob(parsed.specifier).test(agentTypeOf(input))
+  }
   const mappedKind = CLAUDE_TOOL_TO_KIND[parsed.tool]
   if (!mappedKind || mappedKind !== kind) return false
 
@@ -583,10 +637,42 @@ function ruleMatchesTool(
   return false
 }
 
-/** The "allow for this session" dedup key for a tool_call — bash is scoped by its (normalized) command, everything else by bare tool name. */
+/** The "allow for this session" dedup key for a tool_call — bash is scoped by its (normalized) command, everything else by bare tool name. Codex's keys; pi uses {@link piSessionAllowKey}. */
 export function sessionAllowKey(toolName: string, input: Record<string, unknown>): string {
   if (toolName === 'bash') return `bash:${normalizeWhitespace(String(input.command ?? ''))}`
   return toolName
+}
+
+/**
+ * pi's "allow for this session" key: {@link sessionAllowKey}, except that `edit`/`write` are
+ * scoped to ONE canonical absolute path (`edit:<path>` / `write:<path>`) — a bare `edit` key
+ * turned one click on a harmless file into a standing allow for every file, sensitive and
+ * out-of-tree ones included (H3). Everything else (read/search, mcp, `agent`, …) keeps the bare
+ * tool name; whether a standing allow may skip the judge for it is {@link sessionAllowHolds}'s
+ * business, not the key's.
+ *
+ * The add side (PiSession.resolveApproval) and the lookup side (the ladder) both build the key
+ * here, from the same input and cwd, so they agree by construction. The path is the plain
+ * cwd-resolved form of the call's own spelling; a spelling pi would read differently
+ * (`@x`, `~/x`, `file://…`) can only produce a key that is never matched again (an extra ask),
+ * never a broader allow — and the containment slice pins the call to the path it gated.
+ */
+export function piSessionAllowKey(
+  toolName: string,
+  input: Record<string, unknown>,
+  cwd: string | undefined
+): string {
+  if (toolName !== 'edit' && toolName !== 'write') return sessionAllowKey(toolName, input)
+  const raw = extractToolPath(input)
+  let canonical = raw ?? ''
+  if (raw !== undefined && cwd) {
+    // `resolve`, not the rule matcher's `toAbsolutePath`: a posix backslash is a file-name
+    // character and must stay one, or `a\b` and `a/b` would share a key.
+    const flavor = pathFlavor(cwd)
+    canonical = flavor.resolve(cwd, raw)
+    if (flavor === path.win32) canonical = canonical[0].toUpperCase() + canonical.slice(1)
+  }
+  return `${toolName}:${canonical}`
 }
 
 /**
@@ -609,7 +695,7 @@ function editsAgentControlPath(input: Record<string, unknown>, cwd: string | und
 /**
  * Mode-base decision BEFORE user rules / sessionAllows are considered:
  *  - kind 'plan' (exit_plan) OUTSIDE mode 'plan' -> deny in EVERY mode —
- *    including full/auto/bypassPermissions' otherwise allow-everything base.
+ *    including bypassPermissions' otherwise allow-everything base.
  *    This is full mode's ONE carve-out (M5a addendum): pi.registerTool()
  *    auto-activates the tool, so exit_plan is model-visible from spawn in
  *    every mode until the bridge extension's session_start hook hides it,
@@ -624,7 +710,10 @@ function editsAgentControlPath(input: Record<string, unknown>, cwd: string | und
  *    auto mode (whose base is acceptEdits) that ask reaches the judge; in plain
  *    acceptEdits the human. The same list is rendered into opencode's
  *    acceptEdits ruleset, so both engines draw the line in the same place.
- *  - bypassPermissions/full/auto -> allow everything (except the plan-kind carve-out above)
+ *  - bypassPermissions/full/auto -> allow everything (except the plan-kind carve-out above).
+ *    A pi caller never reaches `full`/`auto` here: it passes `judge`, and {@link ladderBase}
+ *    turns them into `acceptEdits` (judged) or `default` (no judge). Only a caller that does
+ *    not (Codex, which passes `full` through) gets the allow-everything base.
  *  - plan (M5a — real autonomy mode now, see planModeBaseDecision) -> read-only:
  *    reads/search allow, exit_plan asks, bash gated by isPlanReadOnlyCommand,
  *    everything else (fileEdit/fileWrite/task/unknown/…) denies outright
@@ -1119,9 +1208,14 @@ export function decide(
 export function decideWithSource(
   toolName: string,
   input: Record<string, unknown>,
-  ctx: PermissionEngineContext
+  rawCtx: PermissionEngineContext
 ): PermissionVerdict {
   const kind = piToolKind(toolName)
+  const { base, judged } = ladderBase(rawCtx.mode, rawCtx.judge)
+  // A judged auto mode decides on the allow-stripped rules (see `withoutAllowRules`).
+  const ctx: PermissionEngineContext = judged
+    ? { ...rawCtx, rules: withoutAllowRules(rawCtx.rules) }
+    : rawCtx
   const match = (rules: readonly string[]): string | undefined =>
     rules.find((r) => ruleMatchesTool(r, kind, toolName, input, ctx.cwd, ctx.mcpRuleKey))
   // Only Bash rules can match the command kind; both of its rule tiers in one call.
@@ -1136,8 +1230,8 @@ export function decideWithSource(
   // no longer surfaces a card for it, and neither a session allow nor an allow rule allows it.
   // The deny rung stays above (a user deny gives the more specific reason). `mode-base` so the
   // callers (PiSession's gate, CodexSession.gate(), the dispatcher's pi/Codex targets) attach
-  // PLAN_MODE_DENY_REASON unchanged. Auto mode never reaches this: PiSession passes `acceptEdits`
-  // and CodexSession `default` in its place.
+  // PLAN_MODE_DENY_REASON unchanged. Auto mode never reaches this (`ctx.mode` is `plan` here):
+  // CodexSession passes `default` for its `auto`.
   // The second read-only oracle needs the session's scope (ADR-085 S3b); without a cwd only
   // pi's plan-safe list decides.
   const planScope: PlanReadOnlyScope | undefined =
@@ -1157,7 +1251,14 @@ export function decideWithSource(
   }
   const askRule = kind === 'command' ? tierRule(shell, 'ask') : match(ctx.rules.ask)
   if (askRule !== undefined) return { decision: 'ask', source: 'ask-rule', rule: askRule }
-  if (ctx.sessionAllows.has(sessionAllowKey(toolName, input))) {
+  if (
+    ctx.sessionAllows.has(
+      ctx.sessionAllowsByPath
+        ? piSessionAllowKey(toolName, input, ctx.cwd)
+        : sessionAllowKey(toolName, input)
+    ) &&
+    sessionAllowHolds(kind, input, ctx, judged)
+  ) {
     return { decision: 'allow', source: 'session-allow' }
   }
   // The allow tier covers a command segment by segment — possibly one rule per segment.
@@ -1168,9 +1269,53 @@ export function decideWithSource(
   if (allowRule !== undefined) return { decision: 'allow', source: 'allow-rule', rule: allowRule }
 
   return {
-    decision: modeBaseDecision(ctx.mode, kind, input, ctx.cwd, planScope),
+    decision: modeBaseDecision(base, kind, input, ctx.cwd, planScope),
     source: 'mode-base'
   }
+}
+
+/**
+ * The mode the ladder's BASE row is read from, and whether a judge is in the loop (R14).
+ *
+ *  - `auto`/`full` + judge  -> `acceptEdits` base, allow tier stripped: reads and ordinary edits
+ *    are the base's, everything it asks (bash, `agent`, sensitive edits, …) goes to the judge.
+ *  - `auto`/`full`, no judge -> `default` base, full rules: with nobody to review, a human is
+ *    asked exactly as in `default` and the user's allow rules are their way to stop being asked.
+ *  - `auto`/`full` with `judge` ABSENT (Codex) and anything else (`bypassPermissions` included)
+ *    -> itself, unchanged from before the judge flag existed.
+ *
+ * The scope rung (path containment) reads `judged` to pick between the judge-on and judge-off
+ * rows of its table.
+ */
+function ladderBase(mode: string, judge: boolean | undefined): { base: string; judged: boolean } {
+  if ((mode !== 'auto' && mode !== 'full') || judge === undefined) {
+    return { base: mode, judged: false }
+  }
+  return judge === true ? { base: 'acceptEdits', judged: true } : { base: 'default', judged: false }
+}
+
+/**
+ * May a standing "allow for this session" answer this call? Always, except under a judged auto
+ * mode, where a session allow stands in for the human, never for the judge, on anything the
+ * judge exists to review (H3): sub-agent / message / unclassified tools, and edits of an
+ * agent-control path (`.git/hooks`, `.claude/`, shell rc files, …). A standing allow whose key
+ * was minted for one innocuous call must not silence the monitor for those. (Containment
+ * adds out-of-scope and unresolved paths to this list: `ctx.scope`.)
+ *
+ * Not judged -> a human is the reviewer, and their click is the consent being replayed.
+ */
+function sessionAllowHolds(
+  kind: ToolKind,
+  input: Record<string, unknown>,
+  ctx: PermissionEngineContext,
+  judged: boolean
+): boolean {
+  if (!judged) return true
+  if (kind === 'task' || kind === 'detail' || kind === 'unknown') return false
+  if ((kind === 'fileEdit' || kind === 'fileWrite') && editsAgentControlPath(input, ctx.cwd)) {
+    return false
+  }
+  return true
 }
 
 function tierRule(hit: DenyAskHit | undefined, tier: 'deny' | 'ask'): string | undefined {
@@ -1223,20 +1368,22 @@ export function sessionToolDenyRule(
  *    so a user ask rule still yields `source: 'ask-rule'` and still routes
  *    straight to the human with zero judge calls.
  *  - A formerly-allowed action now falls through to the mode base
- *    (`acceptEdits` under auto mode) → 'ask' with `source: 'mode-base'` →
+ *    (`acceptEdits` under judged auto mode) → 'ask' with `source: 'mode-base'` →
  *    classifyAutoMode → the JUDGE. That is the intended destination: the human
  *    is not re-interrupted for something they explicitly allowed.
- *  - `ctx.sessionAllows` is deliberately NOT filtered. Those are this session's
+ *  - `ctx.sessionAllows` is NOT filtered wholesale. Those are this session's
  *    "allow for this session" clicks — a live human consent act inside the
- *    current turn's context, not a stored config rule written months ago.
+ *    current turn's context, not a stored config rule written months ago. They
+ *    still never silence the judge for the kinds it exists to review
+ *    (`sessionAllowHolds`): agents/messages/unclassified tools and agent-control edits.
  *  - ALL allow rules go, not just `Bash(…)` ones: under auto mode the base is
  *    already `acceptEdits`, so reads/edits/search are auto-allowed by the base
  *    regardless, and the only allow rules with any remaining effect are exactly
  *    the classifier-bypassing ones cli.js filters.
  *
- * Non-auto modes keep the full set (the caller only applies this under auto
- * mode): with no judge in the loop, an allow rule is the user's only way to say
- * "stop asking me".
+ * Non-auto modes keep the full set, and so does an auto mode with no judge
+ * (`ctx.judge` false): with no judge in the loop, an allow rule is the user's
+ * only way to say "stop asking me".
  *
  * `additionalDirectories`/`defaultMode` ride through untouched — `decide()`
  * doesn't consult them (see its doc comment).

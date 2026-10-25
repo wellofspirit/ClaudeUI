@@ -238,7 +238,9 @@ export class DispatchTargetJudge {
   /**
    * `(mode === 'auto' || mode === 'full') && autoMode.enabled !== false` —
    * the TARGET engine's switch (its judge is the one that would run). With it
-   * off, an auto parent's target keeps the historical no-judge behaviour.
+   * off, an auto parent's target has NO judge: the pi target's ladder reads the `default` base
+   * (`decideWithSource({ mode, judge: false })`), so its asks are forwarded to the human, never
+   * answered by an allow-everything base (the old behaviour).
    */
   autoModeActive(mode: string): boolean {
     return (mode === 'auto' || mode === 'full') && this.autoMode.enabled !== false

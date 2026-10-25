@@ -2832,9 +2832,9 @@ describe('CrossEngineDispatcher — pi direction (M4c): model resolution', () =>
 
 describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage approval gate', () => {
   // ADR-088: an auto parent's pi target is JUDGED (see the ADR-088 block
-  // below); only with pi's own judge switched off does auto keep the
-  // historical allow-all base.
-  it("T8: 'auto' with pi's autoMode.enabled false auto-allows a mutating tool with NO forwarded approval and no judge call", async () => {
+  // below); with pi's own judge switched off auto reads the `default` base over the target's
+  // rules (H2, R13): nobody reviews, so a human is asked.
+  it("T8: 'auto' with pi's autoMode.enabled false FORWARDS a mutating tool as a human ask — no judge call, no silent allow", async () => {
     const target = makeFakePiTarget()
     const makeJudgeTransport = vi.fn()
     const { dispatcher } = makeHarness({
@@ -2849,13 +2849,62 @@ describe('CrossEngineDispatcher — pi direction (M4c): autonomy / two-stage app
     const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
     await tick()
 
-    const decision = await target.gateHandler()({
+    const decisionPromise = target.gateHandler()({
       toolCallId: 'pi-call-1',
       toolName: 'bash',
       input: { command: 'rm -rf x' }
     })
-    expect(decision).toEqual({ behavior: 'allow' })
-    expect(ctx.emit.mock.calls.some((c) => c[0] === 'session:approval-request')).toBe(false)
+    await tick()
+    const call = ctx.emit.mock.calls.find((c) => c[0] === 'session:approval-request')
+    expect(call).toBeTruthy()
+    const approval = call![1] as { requestId: string; toolUseId?: string }
+    expect(approval.requestId.startsWith(XENG_REQUEST_PREFIX)).toBe(true)
+    expect(approval.toolUseId).toBe('pi-call-1')
+    expect(makeJudgeTransport).not.toHaveBeenCalled()
+
+    expect(dispatcher.resolveApproval(approval.requestId, 'deny', { feedback: 'no' })).toBe(true)
+    expect(await decisionPromise).toEqual({ behavior: 'deny', reason: 'no' })
+
+    target.pushEvent(piAssistantMessageEnd({ text: 'done' }))
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+  })
+
+  it("'auto' with pi's judge off: a read in the target's cwd is allowed unasked, an edit is forwarded, a user deny rule still denies, the user's allow tier is not inherited", async () => {
+    const target = makeFakePiTarget()
+    const makeJudgeTransport = vi.fn()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({
+        dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna' },
+        autoMode: { enabled: false }
+      })),
+      spawnPiTarget: target.spawnPiTarget,
+      makeJudgeTransport,
+      loadUserRules: () => userRules({ allow: ['Bash(echo hi)'], deny: ['Bash(rm:*)'] })
+    })
+    const ctx = makeCtx({ fromEngine: 'claude', autonomyMode: 'auto' })
+    const pending = dispatcher.dispatch({ engine: 'pi', prompt: 'x' }, ctx)
+    await tick()
+    const asks = (): number =>
+      ctx.emit.mock.calls.filter((c) => c[0] === 'session:approval-request').length
+
+    expect(
+      await target.gateHandler()({ toolCallId: 'r1', toolName: 'read', input: { path: 'a.txt' } })
+    ).toEqual({ behavior: 'allow' })
+    expect(
+      await target.gateHandler()({
+        toolCallId: 'd1',
+        toolName: 'bash',
+        input: { command: 'rm -rf x' }
+      })
+    ).toEqual({ behavior: 'deny', reason: 'Denied by permission rule: Bash(rm:*)' })
+    expect(asks()).toBe(0)
+    void target.gateHandler()({ toolCallId: 'e1', toolName: 'edit', input: { path: 'a.txt' } })
+    await tick()
+    expect(asks()).toBe(1)
+    void target.gateHandler()({ toolCallId: 'b1', toolName: 'bash', input: { command: 'echo hi' } })
+    await tick()
+    expect(asks()).toBe(2)
     expect(makeJudgeTransport).not.toHaveBeenCalled()
 
     target.pushEvent(piAssistantMessageEnd({ text: 'done' }))

@@ -247,8 +247,9 @@ const {
     MockPiRpcClient,
     // Auto mode reads engines/pi.json — mocked so the gating tests never
     // depend on (or call a judge because of) the dev machine's own config.
-    // Default DISABLED: every pre-phase-4 test asserts the historical
-    // allow-everything `full`/`auto` base; the auto-mode block opts in.
+    // Default DISABLED (no judge): `full`/`auto` then read the `default` base with the
+    // full rules (H2), so a test that needs an allow gives it explicitly (a rule or
+    // `bypassPermissions`); the auto-mode block opts in to the judge.
     mockLoadEngineConfig: vi.fn().mockReturnValue({ autoMode: { enabled: false } }),
     mockLocatePiLaunch: vi.fn().mockReturnValue({ command: '/fake/pi', args: [] }),
     mockGetPiModelCatalog: vi.fn().mockResolvedValue([]),
@@ -2604,7 +2605,18 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     expect(mockBridgeHostDispose).toHaveBeenCalledTimes(1)
   })
 
-  it('an allow decision (mode=full) resolves immediately with no approval-request', async () => {
+  it('an allow decision (mode=full, judge off, matching allow rule) resolves immediately with no approval-request', async () => {
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? {
+            allow: ['Bash(echo hi)'],
+            deny: [],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
     const win = new MockWindow()
     const session = new PiSession('rid-gate-allow', win as never, '/cwd', {})
     await session.setPermissionMode('full')
@@ -2613,6 +2625,16 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
     const decision = await gate('call_1', 'bash', { command: 'echo hi' })
 
     expect(decision).toEqual({ behavior: 'allow' })
+    expect(sentChannels(win)).not.toContain('session:approval-request')
+  })
+
+  it('an allow decision (mode=bypassPermissions) resolves immediately with no approval-request', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-gate-bypass', win as never, '/cwd', {})
+    await session.setPermissionMode('bypassPermissions')
+    await session.run('hi')
+
+    expect(await gate('call_1b', 'bash', { command: 'echo hi' })).toEqual({ behavior: 'allow' })
     expect(sentChannels(win)).not.toContain('session:approval-request')
   })
 
@@ -2791,10 +2813,10 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
   it('caches the merged rules across gate calls, and notifySettingsChanged invalidates that cache', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-hot-reload', win as never, '/cwd', {})
-    await session.setPermissionMode('full') // isolates the rules effect: only an explicit deny overrides full's allow-everything base
+    await session.setPermissionMode('bypassPermissions') // isolates the rules effect: only an explicit deny overrides the allow-everything base
     await session.run('hi')
 
-    // First call — rules are empty; mode base (full) allows. This also
+    // First call — rules are empty; mode base (bypassPermissions) allows. This also
     // populates the rules cache.
     expect(await gate('call_11', 'bash', { command: 'echo hi' })).toEqual({ behavior: 'allow' })
 
@@ -4008,15 +4030,105 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
     session.dispose()
   })
 
-  it("auto mode DISABLED keeps `auto`'s historical allow-everything base (no judge, no prompt)", async () => {
-    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
-    const win = new MockWindow()
-    const session = await autoSession('rid-auto-off', win)
+  // H2 — with the judge off, `auto`/`full` must not be an allow-everything base: nobody reviews.
+  it.each(['auto', 'full'])(
+    'auto mode DISABLED (%s): bash asks the HUMAN like default — no judge call, no silent allow',
+    async (mode) => {
+      mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+      const win = new MockWindow()
+      const session = new PiSession(`rid-auto-off-${mode}`, win as never, '/cwd', {})
+      await session.setPermissionMode(mode)
+      await session.run('hi')
 
-    expect(await gate('call_g1', 'bash', { command: 'rm -rf /tmp/x' })).toEqual({
+      const pending = gate('call_g1', 'bash', { command: 'rm -rf /tmp/x' })
+      await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+      expect(judgeCalls).toHaveLength(0)
+      session.resolveApproval(humanCards(win)[0].requestId, 'deny')
+      await expect(pending).resolves.toEqual({ behavior: 'deny', reason: 'User denied' })
+      session.dispose()
+    }
+  )
+
+  it('auto mode DISABLED: a read in the project is allowed, a user allow rule allows, a deny rule denies', async () => {
+    mockLoadEngineConfig.mockReturnValue({ autoMode: { enabled: false } })
+    mockLoadClaudePermissions.mockImplementation((scope: string) =>
+      scope === 'project'
+        ? {
+            allow: ['Bash(git status)'],
+            deny: ['Bash(rm:*)'],
+            ask: [],
+            additionalDirectories: [],
+            defaultMode: undefined
+          }
+        : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined }
+    )
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-off-rules', win)
+
+    expect(await gate('call_g2', 'read', { path: 'src/x.ts' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_g3', 'bash', { command: 'git status' })).toEqual({ behavior: 'allow' })
+    expect(await gate('call_g4', 'bash', { command: 'rm -rf x' })).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: Bash(rm:*)'
+    })
+    expect(humanCards(win)).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(0)
+    session.dispose()
+  })
+
+  // H3 — a session allow is per path for edit/write, and never stands in for the judge.
+  it('"allow for this session" on an edit covers that path only', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-edit-per-path', win as never, '/cwd', {})
+    await session.run('hi') // default: edit asks
+
+    const first = gate('call_p1', 'edit', { path: 'src/a.ts' })
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+    session.resolveApproval(humanCards(win)[0].requestId, 'allowForSession')
+    await expect(first).resolves.toEqual({ behavior: 'allow' })
+
+    expect(await gate('call_p2', 'edit', { path: '/cwd/src/a.ts' })).toEqual({ behavior: 'allow' })
+    expect(humanCards(win)).toHaveLength(1)
+
+    // another file, and `write` of the same file, are still gated
+    void gate('call_p3', 'edit', { path: 'src/b.ts' })
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+    void gate('call_p4', 'write', { path: 'src/a.ts' })
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(3))
+    session.dispose()
+  })
+
+  it('auto + judge: a session allow on `agent` does not skip the judge', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>', '<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-agent-allow', win)
+
+    const input = { prompt: 'x', description: 'x' }
+    expect(await gate('call_a1', 'agent', input)).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(1)
+    // the human's earlier "allow for this session" on the launcher
+    ;(session as unknown as { sessionAllows: Set<string> }).sessionAllows.add('agent')
+    expect(await gate('call_a2', 'agent', input)).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(2)
+    session.dispose()
+  })
+
+  it('auto + judge: a session allow on an agent-control edit does not skip the judge; an ordinary one does', async () => {
+    enableAutoMode()
+    judgeScript.replies = ['<block>no</block>']
+    const win = new MockWindow()
+    const session = await autoSession('rid-auto-sens-allow', win)
+    const allows = (session as unknown as { sessionAllows: Set<string> }).sessionAllows
+    allows.add('edit:/cwd/.git/hooks/pre-commit')
+    allows.add('edit:/cwd/src/a.ts')
+
+    expect(await gate('call_s1', 'edit', { path: 'src/a.ts' })).toEqual({ behavior: 'allow' })
+    expect(judgeCalls).toHaveLength(0)
+    expect(await gate('call_s2', 'edit', { path: '.git/hooks/pre-commit' })).toEqual({
       behavior: 'allow'
     })
-    expect(judgeCalls).toHaveLength(0)
+    expect(judgeCalls).toHaveLength(1)
     session.dispose()
   })
 
@@ -6338,6 +6450,98 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const { session } = await parent('rid-sub-t13-auto', win, 'auto')
     expect(await gate('call-a', 'agent', AGENT_INPUT)).toEqual({ behavior: 'allow' })
     expect(judgeCalls).toHaveLength(1)
+    session.dispose()
+  })
+
+  /** The user's project-scope rules, everything else empty. */
+  function projectRules(partial: { allow?: string[]; deny?: string[]; ask?: string[] }): void {
+    mockLoadClaudePermissions.mockImplementation((scope: string) => ({
+      allow: scope === 'project' ? (partial.allow ?? []) : [],
+      deny: scope === 'project' ? (partial.deny ?? []) : [],
+      ask: scope === 'project' ? (partial.ask ?? []) : [],
+      additionalDirectories: [],
+      defaultMode: undefined
+    }))
+  }
+
+  // H5 — Agent / Task rules reach pi's agent tool; the spawn shortcut no longer bypasses them.
+  it('H5: an Agent deny rule refuses the parent agent call in every mode, with the rule in the reason', async () => {
+    projectRules({ deny: ['Agent'] })
+    for (const mode of ['default', 'acceptEdits', 'plan']) {
+      const win = new MockWindow()
+      const { session } = await parent(`rid-sub-h5-deny-${mode}`, win, mode)
+      expect(await gate('call-d', 'agent', AGENT_INPUT)).toEqual({
+        behavior: 'deny',
+        reason: 'Denied by permission rule: Agent'
+      })
+      expect(sentChannels(win)).not.toContain('session:approval-request')
+      session.dispose()
+    }
+  })
+
+  it('H5: the deny also holds in auto (no judge call) and for a CHILD call (gateChild)', async () => {
+    enableAutoMode()
+    projectRules({ deny: ['Task'] })
+    const win = new MockWindow()
+    const { session } = await parent('rid-sub-h5-auto', win, 'auto')
+    expect(await gate('call-d', 'agent', AGENT_INPUT)).toEqual({
+      behavior: 'deny',
+      reason: 'Denied by permission rule: Task'
+    })
+    expect(judgeCalls).toHaveLength(0)
+    session.dispose()
+
+    // a child of a parent that may launch (no rule yet), then the rule appears and the child's
+    // own agent call is refused through the same ladder
+    projectRules({})
+    const win2 = new MockWindow()
+    const { session: s2, kids } = await parent('rid-sub-h5-child', win2)
+    const { result, child } = await launch(kids, 'call-agent-h5')
+    await s2.notifySettingsChanged()
+    projectRules({ deny: ['Agent'] })
+    expect(
+      await child.opts.gateHandler({
+        toolCallId: 'grand-h5',
+        toolName: 'agent',
+        input: AGENT_INPUT
+      })
+    ).toEqual({ behavior: 'deny', reason: 'Denied by permission rule: Agent' })
+    child.push({ type: 'agent_settled' })
+    await result
+    s2.dispose()
+  })
+
+  it('H5: an Agent(Explore) ask rule puts a human card in front of an Explore launch outside auto; other types and dispatch_agent are not matched', async () => {
+    projectRules({ ask: ['Agent(Explore)'] })
+    const win = new MockWindow()
+    const { session } = await parent('rid-sub-h5-ask', win)
+
+    const pending = gate('call-x', 'agent', { ...AGENT_INPUT, subagent_type: 'Explore' })
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+    session.resolveApproval(humanCards(win)[0].requestId, 'allow')
+    await expect(pending).resolves.toEqual({ behavior: 'allow' })
+
+    // a different type launches with no card
+    expect(await gate('call-p', 'agent', { ...AGENT_INPUT, subagent_type: 'Plan' })).toEqual({
+      behavior: 'allow'
+    })
+    expect(humanCards(win)).toHaveLength(1)
+    // the cross-engine launcher is a different tool: the Agent rule does not match it, so it is
+    // gated by the mode base alone (default: ask) and never says "ask-rule"
+    void gate('call-disp', 'dispatch_agent', { engine: 'claude', prompt: 'x' })
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(2))
+    expect(humanCards(win)[1].decisionReason).toBeUndefined()
+    session.dispose()
+  })
+
+  it('H5: in auto an Agent ask rule goes straight to the human (G9) — zero judge calls', async () => {
+    enableAutoMode()
+    projectRules({ ask: ['Agent'] })
+    const win = new MockWindow()
+    const { session } = await parent('rid-sub-h5-g9', win, 'auto')
+    void gate('call-g9', 'agent', AGENT_INPUT)
+    await vi.waitFor(() => expect(humanCards(win)).toHaveLength(1))
+    expect(judgeCalls).toHaveLength(0)
     session.dispose()
   })
 

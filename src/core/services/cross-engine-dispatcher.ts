@@ -1513,8 +1513,8 @@ interface PiTargetEntry extends TargetLedgerFields {
    * mode snapshot on this entry: pi's gate is ClaudeUI's own (the bridge
    * asks per call), so nothing native has to agree with it. The mode is
    * passed DIRECTLY (no translation) as `permission-engine.ts`'s
-   * `decideWithSource()` `mode`, except that a judged auto mode decides from
-   * the `acceptEdits` base (see `gatePiTargetToolCall`).
+   * `decideWithSource()` `mode`, with `judge` = whether the target's judge is on
+   * (the ladder derives its base from the pair: see `gatePiTargetToolCall`).
    */
   ctx: RunContext
   /** True while a turn is being driven — same busy-reject rationale as
@@ -8680,7 +8680,8 @@ export class CrossEngineDispatcher {
    * forwarded card (ADR-091 §3: Keep blocked / Approve anyway, Keep blocked on
    * expiry); anything it cannot decide (unavailable, denial cap, the mode left
    * auto meanwhile) goes to the human.
-   * With pi's judge disabled, auto stays the historical allow-all base.
+   * With pi's judge disabled, auto/full read the `default` base over the same rules
+   * (H2): the target's asks are forwarded to the human, not allowed.
    *
    * A 'deny' is either a user deny rule (reported with the rule) or the mode
    * base (plan mode's read-only refusals, `exit_plan` outside plan mode) —
@@ -8737,10 +8738,14 @@ export class CrossEngineDispatcher {
       if (denied) return { behavior: 'deny', reason: `Denied by permission rule: ${denied}` }
       if (!auto) return { behavior: 'allow' }
     }
-    // `targetRules` carries no allow tier, so PiSession's `withoutAllowRules`
-    // step would be a no-op here — not called.
+    // The ladder gets the parent's live mode and whether the target's judge is on, and derives
+    // the base from the pair: judged auto -> `acceptEdits` (its asks go to the judge below);
+    // judge off -> the `default` base over the target's own rules (`allow: []` stays: a
+    // target never inherits what the user pre-approved), so a bash call is a forwarded ask
+    // and not the old allow-everything base (H2).
     const verdict = decideWithSource(payload.toolName, payload.input, {
-      mode: auto ? 'acceptEdits' : mode,
+      mode,
+      judge: auto,
       rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
       sessionAllows: EMPTY_PI_SESSION_ALLOWS,
       // The acceptEdits base matches agent-control paths cwd-relative
