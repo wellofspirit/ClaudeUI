@@ -77,8 +77,14 @@ target is judged first (`\\…` and `\??\…` are remote, a DOS device component
 against the link's directory, a UNC result is remote, and the remaining components are walked from the result's
 root. A target whose root is neither empty (relative) nor `X:\` is unplaceable before any further call: the NT
 object paths libuv returns unchanged (`\Device\…`, `\GLOBAL??\…`, `\DosDevices\…`, `\GLOBALROOT\…`, `\Sessions\…`,
-`\Windows`) and drive-relative `D:foo` are `unreadable`. Claude Code's own walk follows-then-climbs on win32 too,
-which we deliberately do not mirror there. The walk mirrors Claude Code
+`\Windows`) and drive-relative `D:foo` are `unreadable`. A junction keeps its own spelling (mount-point semantics) while
+a symlink replaces the name with its target, and `readlink` returns the same `X:\…` text for both, so the walk cannot tell
+which it holds: it keeps the two spellings (the path it reads, and the name a junction would leave) and folds a relative
+target against each. Where a relative `..` could fold differently under junction and symlink semantics — it climbs out of
+an absolute link's target (`w\J` to `real0` and `real0\s -> ..\b`: `w\b` or the folder above `real0`) — the path is
+`unreadable`, because `realpath` could otherwise follow a link the walk never read. A relative target that stays inside the
+absolute link's target folds the same way under both and is walked normally. Claude Code's own walk follows-then-climbs on
+win32 too, which we deliberately do not mirror there. The walk mirrors Claude Code
 2.1.308 (`cli.js`) on two fronts. Its permission check `vze` asks, as a
 defence-in-depth check on the path and on every resolved spelling of it, for a path "under the /net automount
 map" (`Mw`: bare `/net`), "under /.vol, /.file, /.nofollow or /.resolve" (`Rb`: first component, case-insensitive,
@@ -152,7 +158,9 @@ that decided the verdict changed, it is denied ("the path changed while awaiting
 appeared at the same landing is not a change.
 
 **Boundary.** This is a permission gate, not a filesystem sandbox: a link swapped in between the check and pi's
-open, and a hard link to a file outside the workspace, are outside what it can see. Shell commands are not
+open, and a hard link to a file outside the workspace, are outside what it can see. Mapped network drives (`net use`,
+`subst`, `DefineDosDevice` onto `\??\UNC\…`), and links to them, are not detected: they are the user's own mappings, and
+telling them apart from a local drive would need a call on the drive. Shell commands are not
 contained (as in Claude Code); they go to the judge in auto mode and to the human otherwise.
 
 **Who gets it.** pi sessions, their host-run subagents (the parent's workspace) and pi dispatch targets (the
