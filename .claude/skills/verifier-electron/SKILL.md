@@ -337,6 +337,19 @@ Learned verifying pi path containment, judge-off and Agent/Task rules.
 - **Stop visibility**: `TaskCard.stop`, `AgentRow.stop`, `TaskEntry.stop`; the roster
   opens (toggles) on `AgentPill`/`AgentTab`; `status.capabilities.backgroundTasks` is in
   the store. A long native task: have the stand-in's child prompt run `sleep N`.
+- **Isolate the OS temp dir too** for pi drives: TEMP/TMP/TMPDIR in the launch env (assert
+  `os.tmpdir()` in `app.evaluate` first). The scratchpad is
+  `<TEMP>\claudeui\<cwd key>\<session-id>\scratchpad`; pi's spawn args (`--session-id`,
+  `--append-system-prompt`) show in `Get-CimInstance Win32_Process` (`Name -eq 'pi.exe'`;
+  filter on your scratch path — the owner's own app has pi children too).
+- **Pin proof**: pi's write/edit result echoes the path it used (`Successfully wrote to <abs>`),
+  so write with an odd spelling (`@x`, `file:///…`, `/c/…`) and read the result text.
+- **pi's default tool set** has no `grep`/`find`/`ls`, and plan mode hides `edit`/`write`:
+  those ladder rows are reachable only in unit tests.
+- **Historical pi session after a relaunch**: click its sidebar `[data-id]` first, then set
+  engine and model before prompting. Delete: right-click `[data-id]` →
+  `SessionItem.delete` → `DeleteConfirmModal.confirm`. A pi dispatch target resumes by
+  `session_message` only with `dispatch.defaultModel` set in `engines/pi.json`.
 - **Browser test project in a worktree** (the plain run fails with `NetworkError`): a
   scratch `vitest.browser-wt.config.ts` that imports the worktree's `vitest.config.ts` by
   `file:///` URL, maps `test.projects` with `root` set to the worktree, and gives the
