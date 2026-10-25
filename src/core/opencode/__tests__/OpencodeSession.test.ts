@@ -2598,3 +2598,469 @@ describe('the idle timer holds for a running X-Agent (ADR-105 §3)', () => {
     expect(cancel).toHaveBeenCalledTimes(1)
   })
 })
+
+// ─── Auto mode: the judge's context for subagent children, and spawn/websearch/skill asks ──────
+
+describe('auto mode: subagent children are judged with their own context (ADR-088 D1, ADR-091 §4)', () => {
+  const MODEL = { providerID: 'openai', id: 'gpt-x' }
+  const created = (id: string, parentID: string, agent: string) =>
+    event('session.created', {
+      sessionID: id,
+      parentID,
+      agent,
+      projectID: 'prj',
+      location: { directory: CWD },
+      slug: id,
+      version: '2'
+    })
+  const step = (sessionID: string, msg: string, started: number) =>
+    event('session.step.started', {
+      sessionID,
+      assistantMessageID: msg,
+      agent: 'build',
+      model: MODEL,
+      started
+    })
+  const called = (
+    sessionID: string,
+    msg: string,
+    id: string,
+    name: string,
+    input: Record<string, unknown>
+  ): OpencodeFeedItem[] => [
+    event('session.tool.input.started', { sessionID, assistantMessageID: msg, id, name }),
+    event('session.tool.called', { sessionID, assistantMessageID: msg, id, input, executed: false })
+  ]
+  /** `owner`'s step starts the `subagent` call `callId`, which links `childId` (2.x publishes `sessionID` in the progress). */
+  const spawn = (
+    childId: string,
+    callId: string,
+    agent: string,
+    owner = SID,
+    ownerMsg = MSG,
+    extra: Record<string, unknown> = {}
+  ): OpencodeFeedItem[] => [
+    created(childId, owner, agent),
+    ...called(owner, ownerMsg, callId, 'subagent', {
+      agent,
+      description: `task of ${childId}`,
+      prompt: `do the ${childId} work`,
+      ...extra
+    }),
+    event('session.tool.progress', {
+      sessionID: owner,
+      assistantMessageID: ownerMsg,
+      id: callId,
+      metadata: { sessionID: childId }
+    })
+  ]
+  /** A child step that ran a shell call and settled it (an error, or not). */
+  const ran = (
+    sessionID: string,
+    msg: string,
+    callId: string,
+    command: string,
+    started: number,
+    isError = false
+  ): OpencodeFeedItem[] => [
+    step(sessionID, msg, started),
+    ...called(sessionID, msg, callId, 'shell', { command }),
+    isError
+      ? event('session.tool.failed', {
+          sessionID,
+          assistantMessageID: msg,
+          id: callId,
+          error: { type: 'unknown', message: 'boom' },
+          executed: true
+        })
+      : event('session.tool.success', {
+          sessionID,
+          assistantMessageID: msg,
+          id: callId,
+          content: [{ type: 'text', text: 'ok' }],
+          executed: true
+        })
+  ]
+  /** A shell ask from `sessionID`'s call `callId` (its input known first, as 2.x publishes it). */
+  const shellAsk = (
+    sessionID: string,
+    msg: string,
+    reqId: string,
+    callId: string,
+    command: string,
+    started = Date.now()
+  ): OpencodeFeedItem[] => [
+    ...(sessionID === SID ? [] : [step(sessionID, msg, started)]),
+    ...called(sessionID, msg, callId, 'shell', { command }),
+    event('permission.asked', {
+      id: reqId,
+      sessionID,
+      action: 'shell',
+      resources: [command],
+      save: [command],
+      metadata: {},
+      source: { type: 'tool', messageID: msg, id: callId }
+    })
+  ]
+  const replies = () => h.client.replyPermission.mock.calls.map(([, id, reply]) => [id, reply])
+  const rejected = (id: string) =>
+    replies().some(
+      ([rid, reply]) => rid === id && (reply as { decision: string }).decision === 'reject'
+    )
+  const judgeUser = (n: number): string => h.judge.mock.calls[n][0].user as string
+  /** The judge input of the ask whose command carries `marker`. */
+  const judgeAbout = (marker: string): string | undefined =>
+    h.judge.mock.calls.map(([call]) => call.user as string).find((u) => u.includes(marker))
+  const pause = (ms = 5) => new Promise((resolve) => setTimeout(resolve, ms))
+  const cardFor = (id: string) =>
+    payloads('session:approval-request').find((a) => a.requestId === id)
+
+  beforeEach(() => {
+    h.engineConfig.autoMode = { twoStageMode: 'fast' }
+    h.judge.mockResolvedValue('<block>no</block>')
+  })
+
+  async function autoTurn(text = 'please tidy the repo'): Promise<void> {
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn(text)
+    await pause()
+  }
+
+  it('a child ask is judged on the parent transcript, its queued user turns and ONLY that child’s trajectory, in time order', async () => {
+    await autoTurn()
+    h.feed.push(...spawn('ses_a', 'call_a', 'explore'), ...spawn('ses_b', 'call_b', 'explore'))
+    await flush()
+    h.feed.push(
+      ...ran('ses_a', 'msg_a1', 'call_a1', 'git status A-MARK', Date.now()),
+      ...ran('ses_b', 'msg_b1', 'call_b1', 'git status B-MARK', Date.now())
+    )
+    await flush()
+    await pause()
+    session.enqueuePrompt('also remove dist')
+    await flush()
+    await pause()
+    h.feed.push(...shellAsk('ses_a', 'msg_a2', 'per_a', 'call_a2', 'npm publish A-ASK'))
+    await vi.waitFor(() => expect(h.judge).toHaveBeenCalledTimes(1))
+    const user = judgeUser(0)
+    expect(user).toContain('please tidy the repo')
+    expect(user).toContain('A-MARK')
+    expect(user).not.toContain('B-MARK')
+    expect(user).toContain('also remove dist')
+    // Parent prompt, then the child's step, then the prompt typed after it — by timestamp.
+    expect(user.indexOf('please tidy the repo')).toBeLessThan(user.indexOf('A-MARK'))
+    expect(user.indexOf('A-MARK')).toBeLessThan(user.indexOf('also remove dist'))
+    // The header names the acting child and the call that spawned it.
+    expect(user).toContain('"explore" subagent')
+    expect(user).toContain('do the ses_a work')
+
+    h.feed.push(...shellAsk('ses_b', 'msg_b2', 'per_b', 'call_b2', 'npm publish B-ASK'))
+    await vi.waitFor(() => expect(h.judge).toHaveBeenCalledTimes(2))
+    expect(judgeUser(1)).toContain('B-MARK')
+    expect(judgeUser(1)).not.toContain('A-MARK')
+  })
+
+  it('a grandchild is judged without the intermediate child’s trajectory (D1)', async () => {
+    await autoTurn()
+    h.feed.push(...spawn('ses_a', 'call_a', 'general'))
+    await flush()
+    h.feed.push(...ran('ses_a', 'msg_a1', 'call_a1', 'git status A-MARK', Date.now()))
+    await flush()
+    // The child's own spawn (depth >= 2: the user raised experimental.subagent_depth).
+    h.feed.push(...spawn('ses_g', 'call_g', 'explore', 'ses_a', 'msg_a1'))
+    await flush()
+    h.feed.push(...ran('ses_g', 'msg_g1', 'call_g1', 'git status G-MARK', Date.now()))
+    await flush()
+    h.feed.push(...shellAsk('ses_g', 'msg_g2', 'per_g', 'call_g2', 'npm publish G-ASK'))
+    await vi.waitFor(() => expect(h.judge).toHaveBeenCalledTimes(1))
+    const user = judgeUser(0)
+    expect(user).toContain('please tidy the repo')
+    expect(user).toContain('G-MARK')
+    expect(user).not.toContain('A-MARK')
+    expect(user).toContain('do the ses_g work')
+  })
+
+  it('a resumed child keeps its earlier trajectory: the second run’s ask still sees the first run’s calls', async () => {
+    await autoTurn()
+    h.feed.push(...spawn('ses_a', 'call_a', 'explore'))
+    await flush()
+    h.feed.push(...ran('ses_a', 'msg_a1', 'call_a1', 'git status RUN1-MARK', Date.now()))
+    await flush()
+    // A later call resumes the same child session.
+    h.feed.push(
+      ...called(SID, 'msg_p2', 'call_a_again', 'subagent', {
+        agent: 'explore',
+        description: 'again',
+        prompt: 'continue',
+        sessionID: 'ses_a'
+      }),
+      event('session.tool.progress', {
+        sessionID: SID,
+        assistantMessageID: 'msg_p2',
+        id: 'call_a_again',
+        metadata: { sessionID: 'ses_a' }
+      })
+    )
+    await flush()
+    h.feed.push(...shellAsk('ses_a', 'msg_a2', 'per_a', 'call_a2', 'npm publish RUN2-ASK'))
+    await vi.waitFor(() => expect(h.judge).toHaveBeenCalledTimes(1))
+    expect(judgeUser(0)).toContain('RUN1-MARK')
+  })
+
+  it('outcomes are per child: its tool results and its own blocks ride under its calls, never the parent’s or a sibling’s', async () => {
+    h.shared = { blockHoldSeconds: 0 }
+    h.judge.mockResolvedValue('<block>yes</block><reason>no</reason>')
+    await autoTurn()
+    h.feed.push(...spawn('ses_a', 'call_a', 'explore'), ...spawn('ses_b', 'call_b', 'explore'))
+    await flush()
+    h.feed.push(...ran('ses_a', 'msg_a1', 'call_a1', 'git status A-MARK', Date.now(), true))
+    await flush()
+    h.feed.push(...shellAsk('ses_a', 'msg_a2', 'per_a1', 'call_a2', 'npm publish A-BLOCKED'))
+    await vi.waitFor(() => expect(rejected('per_a1')).toBe(true))
+    h.feed.push(...shellAsk('ses_a', 'msg_a3', 'per_a2', 'call_a3', 'npm publish A-NEXT'))
+    // (a block takes two samples: find the call that judged THIS ask)
+    await vi.waitFor(() => expect(judgeAbout('A-NEXT')).toBeDefined())
+    const second = judgeAbout('A-NEXT') as string
+    // The failed result of call_a1 and the block of call_a2 are the child's outcomes.
+    expect(second).toMatch(/A-MARK[^\n]*\n\{"outcome":"error"\}/)
+    expect(second).toMatch(/A-BLOCKED[^\n]*\n\{"outcome":"automode-blocked"\}/)
+    await vi.waitFor(() => expect(rejected('per_a2')).toBe(true))
+
+    h.feed.push(...shellAsk('ses_b', 'msg_b1', 'per_b', 'call_b1', 'npm publish B-ASK'))
+    await vi.waitFor(() => expect(judgeAbout('B-ASK')).toBeDefined())
+    expect(judgeAbout('B-ASK')).not.toContain('outcome')
+  })
+
+  it('the denial caps are per child: a cap tripped in child A leaves child B and the parent alone', async () => {
+    h.shared = { blockHoldSeconds: 0 }
+    h.judge.mockResolvedValue('<block>yes</block><reason>no</reason>')
+    await autoTurn()
+    h.feed.push(...spawn('ses_a', 'call_a', 'explore'), ...spawn('ses_b', 'call_b', 'explore'))
+    await flush()
+    const ask = async (who: string, msg: string, id: string): Promise<void> => {
+      h.feed.push(...shellAsk(who, msg, id, `call_${id}`, `npm publish ${id}`))
+      await vi.waitFor(() => expect(rejected(id) || cardFor(id) !== undefined).toBe(true))
+    }
+    // 2 blocks in A, 1 in B, 1 in the parent: four in a row across agents, no streak of 3 in any one.
+    await ask('ses_a', 'msg_a1', 'per_a1')
+    await ask('ses_a', 'msg_a2', 'per_a2')
+    await ask('ses_b', 'msg_b1', 'per_b1')
+    await ask(SID, MSG, 'per_p1')
+    for (const id of ['per_a1', 'per_a2', 'per_b1', 'per_p1']) expect(rejected(id)).toBe(true)
+    expect(payloads('session:approval-request')).toHaveLength(0)
+    // A third in A trips A's cap: the human decides.
+    await ask('ses_a', 'msg_a3', 'per_a3')
+    expect(payloads('session:approval-request')).toMatchObject([
+      { requestId: 'per_a3', decisionReason: expect.stringContaining('asking you instead') }
+    ])
+  })
+
+  it('a human override of a held child block resets that child’s streak, not the parent’s', async () => {
+    h.shared = { blockHoldSeconds: 30 }
+    h.judge.mockResolvedValue('<block>yes</block><reason>no</reason>')
+    await autoTurn()
+    h.feed.push(...spawn('ses_a', 'call_a', 'explore'))
+    await flush()
+    const ask = async (who: string, msg: string, id: string): Promise<void> => {
+      h.feed.push(...shellAsk(who, msg, id, `call_${id}`, `npm publish ${id}`))
+      await vi.waitFor(() => expect(cardFor(id)).toBeDefined())
+    }
+    await ask(SID, MSG, 'per_p1')
+    await ask(SID, MSG, 'per_p2')
+    await ask('ses_a', 'msg_a1', 'per_a1')
+    // Each held block offers Approve-anyway; the child's one is approved.
+    expect(cardFor('per_a1')).toMatchObject({ autoModeBlock: expect.any(Object) })
+    session.resolveApproval('per_a1', 'allow')
+    // The parent's third block in a row hits the parent's cap (the child's allow did not clear it).
+    await ask(SID, MSG, 'per_p3')
+    expect(cardFor('per_p3')).toMatchObject({
+      decisionReason: expect.stringContaining('asking you instead')
+    })
+    expect(cardFor('per_p3')).not.toHaveProperty('autoModeBlock')
+  })
+
+  it('a child’s card names the agent (label = sanitized task description), the parent’s carries none', async () => {
+    session = makeSession()
+    await startTurn()
+    h.feed.push(
+      ...spawn('ses_a', 'call_a', 'explore', SID, MSG, {
+        description: 'Say "hi" <b>\nnow'
+      })
+    )
+    await flush()
+    h.feed.push(...shellAsk('ses_a', 'msg_a1', 'per_a', 'call_a1', 'ls'))
+    h.feed.push(...shellAsk(SID, MSG, 'per_p', 'call_p1', 'ls'))
+    await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(2))
+    expect(cardFor('per_a')).toMatchObject({
+      subagent: { sessionId: 'ses_a', parentToolUseId: 'call_a' },
+      agent: { agentId: 'ses_a', label: 'Say  hi   b  now', subagentType: 'explore' }
+    })
+    expect(cardFor('per_p')).not.toHaveProperty('agent')
+  })
+})
+
+describe('auto mode: spawn, web search and skill asks (R3)', () => {
+  const MODEL = { providerID: 'openai', id: 'gpt-x' }
+  /** The tool call the ask belongs to is published first (2.x `Tool.Called` precedes `permission.assert`). */
+  const toolAsk = (
+    reqId: string,
+    action: string,
+    resources: string[],
+    input: Record<string, unknown>,
+    metadata: Record<string, unknown> = {}
+  ): OpencodeFeedItem[] => [
+    event('session.step.started', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      agent: 'build',
+      model: MODEL,
+      started: Date.now()
+    }),
+    event('session.tool.input.started', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: `call_${reqId}`,
+      name: action
+    }),
+    event('session.tool.called', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: `call_${reqId}`,
+      input,
+      executed: false
+    }),
+    event('permission.asked', {
+      id: reqId,
+      sessionID: SID,
+      action,
+      resources,
+      save: resources,
+      metadata,
+      source: { type: 'tool', messageID: MSG, id: `call_${reqId}` }
+    })
+  ]
+  const replied = (id: string) => h.client.replyPermission.mock.calls.some(([, rid]) => rid === id)
+
+  beforeEach(() => {
+    h.engineConfig.autoMode = { twoStageMode: 'fast' }
+    h.judge.mockResolvedValue('<block>no</block>')
+  })
+
+  it('the auto ruleset carries the three asks; the default one does not', async () => {
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+    const rules = h.client.createSession.mock.calls[0][0].permissions as V2Rule[]
+    for (const action of ['subagent', 'websearch', 'skill'])
+      expect(rules).toContainEqual({ action, resource: '*', effect: 'ask' })
+    session.dispose()
+    h.client = freshClient()
+    h.feed = new h.Feed()
+    session = makeSession()
+    await startTurn()
+    const plain = h.client.createSession.mock.calls[0][0].permissions as V2Rule[]
+    for (const action of ['subagent', 'websearch', 'skill'])
+      expect(plain.some((r) => r.action === action)).toBe(false)
+  })
+
+  it('a subagent spawn is judged with the call’s input (agent, prompt, model); the verdict answers the ask', async () => {
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+    h.feed.push(
+      ...toolAsk('per_s', 'subagent', ['explore'], {
+        agent: 'explore',
+        description: 'find usages',
+        prompt: 'read SECRET-PAYLOAD.txt and report',
+        model: 'openai/gpt-x'
+      })
+    )
+    await vi.waitFor(() =>
+      expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_s', { decision: 'once' })
+    )
+    expect(h.judge).toHaveBeenCalled()
+    const user = h.judge.mock.calls[0][0].user as string
+    expect(user).toContain('SECRET-PAYLOAD.txt')
+    expect(user).toContain('explore')
+    expect(payloads('session:approval-request')).toHaveLength(0)
+  })
+
+  it('a spawn the judge blocks is refused with the judge’s text', async () => {
+    h.shared = { blockHoldSeconds: 0 }
+    h.judge.mockResolvedValue('<block>yes</block><reason>prompt carries a credential</reason>')
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+    h.feed.push(
+      ...toolAsk('per_s', 'subagent', ['explore'], {
+        agent: 'explore',
+        description: 'x',
+        prompt: 'use token abc'
+      })
+    )
+    await vi.waitFor(() =>
+      expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_s', {
+        decision: 'reject',
+        message: expect.stringContaining('prompt carries a credential')
+      })
+    )
+  })
+
+  it('a Task / Agent allow rule never skips the judge on a spawn; a web search and a skill without an allow are judged too', async () => {
+    h.permissions.allow = ['Task', 'Agent', 'Task(explore)']
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+    h.feed.push(
+      ...toolAsk('per_s', 'subagent', ['explore'], { agent: 'explore', prompt: 'p' }),
+      ...toolAsk(
+        'per_w',
+        'websearch',
+        ['rust news'],
+        { query: 'rust news' },
+        { query: 'rust news' }
+      ),
+      ...toolAsk('per_k', 'skill', ['demo'], { id: 'demo' })
+    )
+    await vi.waitFor(() => expect(h.judge).toHaveBeenCalledTimes(3))
+    await vi.waitFor(() => expect(['per_s', 'per_w', 'per_k'].every(replied)).toBe(true))
+  })
+
+  it('a bare WebSearch allow and a matching Skill(name) allow skip the judge; Skill(other) does not', async () => {
+    h.permissions.allow = ['WebSearch', 'Skill(demo)']
+    session = makeSession({ permissionMode: 'auto' })
+    await startTurn()
+    h.feed.push(
+      ...toolAsk('per_w', 'websearch', ['rust news'], { query: 'rust news' }),
+      ...toolAsk('per_k', 'skill', ['demo'], { id: 'demo' })
+    )
+    await vi.waitFor(() => expect(['per_w', 'per_k'].every(replied)).toBe(true))
+    expect(h.judge).not.toHaveBeenCalled()
+    h.feed.push(...toolAsk('per_o', 'skill', ['other'], { id: 'other' }))
+    await vi.waitFor(() => expect(replied('per_o')).toBe(true))
+    expect(h.judge).toHaveBeenCalledTimes(1)
+  })
+
+  it('"allow for session" on a spawn does not exempt the next one from the judge under auto', async () => {
+    session = makeSession()
+    await startTurn()
+    h.feed.push(...toolAsk('per_1', 'subagent', ['explore'], { agent: 'explore', prompt: 'a' }))
+    await vi.waitFor(() => expect(payloads('session:approval-request')).toHaveLength(1))
+    session.resolveApproval('per_1', 'allowForSession')
+    // Default mode: the session allow answers the repeat without a card.
+    h.feed.push(...toolAsk('per_2', 'subagent', ['explore'], { agent: 'explore', prompt: 'b' }))
+    await vi.waitFor(() => expect(replied('per_2')).toBe(true))
+    expect(payloads('session:approval-request')).toHaveLength(1)
+    expect(h.judge).not.toHaveBeenCalled()
+    // Auto mode: the same ask goes to the judge.
+    await session.setPermissionMode('auto')
+    h.feed.push(...toolAsk('per_3', 'subagent', ['explore'], { agent: 'explore', prompt: 'c' }))
+    await vi.waitFor(() => expect(h.judge).toHaveBeenCalledTimes(1))
+    expect(h.judge.mock.calls[0][0].user).toContain('"prompt":"c"')
+  })
+
+  it('plan mode still refuses the `general` spawn and gates none of the three', async () => {
+    session = makeSession()
+    await startTurn()
+    await session.setPermissionMode('plan')
+    const patched = h.client.setSessionPermissions.mock.calls.at(-1)?.[1] as V2Rule[]
+    expect(patched).toContainEqual({ action: 'subagent', resource: 'general', effect: 'deny' })
+    expect(patched.some((r) => r.action === 'websearch' || r.action === 'skill')).toBe(false)
+    expect(patched.some((r) => r.action === 'subagent' && r.effect === 'ask')).toBe(false)
+  })
+})

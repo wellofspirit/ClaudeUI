@@ -326,16 +326,26 @@ export function externalDirectoryGates(ownDirAllows: readonly V2Rule[] = []): V2
 }
 
 /**
- * Auto mode (classifier on): shell, webfetch and every edit ask; every MCP
- * tool asks ({@link AUTO_MCP_CATCH_ALL}) except ClaudeUI's hosted `claudeui_*`
- * tools (the dispatch tool keeps its own ask, appended later). The catch-all
- * also covers `external_directory`; it is re-stated as the ordinary ask with
- * opencode's own directories allowed after it ({@link externalDirectoryGates}).
+ * Auto mode (classifier on): shell, webfetch, websearch, skill, every edit and
+ * every subagent spawn ask; every MCP tool asks ({@link AUTO_MCP_CATCH_ALL})
+ * except ClaudeUI's hosted `claudeui_*` tools (the dispatch tool keeps its own
+ * ask, appended later). The catch-all also covers `external_directory`; it is
+ * re-stated as the ordinary ask with opencode's own directories allowed after
+ * it ({@link externalDirectoryGates}).
+ *
+ * `subagent` / `websearch` / `skill` have no gate in the other modes (opencode's
+ * own baseline allows them): in auto mode Claude Code's classifier reads them
+ * too, and a spawn's prompt is a delegation payload (policy rule 7). A `deny`
+ * the user or plan mode adds later still wins — it is checked first and sits
+ * after these in the ruleset.
  */
 export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule[] {
   return [
     rule('shell', 'ask'),
     rule('webfetch', 'ask'),
+    rule('websearch', 'ask'),
+    rule('skill', 'ask'),
+    rule('subagent', 'ask'),
     rule('edit', 'ask'),
     AUTO_MCP_CATCH_ALL,
     rule(`${CLAUDEUI_MCP_SERVER}_*`, 'allow'),

@@ -425,17 +425,31 @@ describe('modeGates', () => {
     ])
   })
 
-  it('auto (classifier on): every edit asks, every MCP tool asks via the `*_*` catch-all, claudeui allowed', () => {
+  it('auto (classifier on): every edit, websearch, skill and subagent spawn asks, every MCP tool asks via the `*_*` catch-all, claudeui allowed', () => {
     const own = [r('external_directory', 'allow', '/data/opencode/tool-output/*')]
     expect(modeGates('auto', { autoMode: true, externalDirAllows: own })).toEqual([
       r('shell', 'ask'),
       r('webfetch', 'ask'),
+      r('websearch', 'ask'),
+      r('skill', 'ask'),
+      r('subagent', 'ask'),
       r('edit', 'ask'),
       AUTO_MCP_CATCH_ALL,
       r('claudeui_*', 'allow'),
       r('external_directory', 'ask'),
       ...own
     ])
+  })
+
+  it('only the judged auto ruleset gates websearch, skill and subagent (R3); every other mode leaves opencode’s own baseline', () => {
+    const gated = (rules: V2Rule[], action: string): boolean =>
+      rules.some((x) => x.action === action && x.effect === 'ask')
+    for (const action of ['websearch', 'skill', 'subagent']) {
+      expect(gated(modeGates('auto', { autoMode: true }), action)).toBe(true)
+      for (const mode of ['default', 'ask', 'acceptEdits', 'plan', 'full'])
+        expect(gated(modeGates(mode), action)).toBe(false)
+      expect(gated(modeGates('auto', { autoMode: false }), action)).toBe(false)
+    }
   })
 
   it('no mode carries a catch-all allow (the agent supplies the baseline; children keep their own narrowing)', () => {
@@ -611,6 +625,36 @@ describe('buildSessionRuleset', () => {
     expect(evaluateV2Call(rules, 'shell', ['git status'], 'linux')).toBe('ask')
     expect(evaluateV2Call(rules, 'jira_create', ['*'], 'linux')).toBe('ask')
     expect(evaluateV2Call(rules, 'shell', ['rm x'], 'linux')).toBe('deny')
+  })
+
+  it('auto: a spawn, a web search and a skill ask; a user deny still wins, a user allow never reaches the server', () => {
+    const { rules } = buildSessionRuleset(
+      input({
+        mode: 'auto',
+        autoMode: true,
+        permissions: perms({ allow: ['Task', 'WebSearch', 'Skill(demo)'], deny: ['Task(general)'] })
+      })
+    )
+    // An explicit ask (no match would also read as ask, but opencode's baseline allow would win then).
+    expect(lastMatchingV2Rule('subagent', 'explore', rules, 'linux')).toEqual(r('subagent', 'ask'))
+    expect(lastMatchingV2Rule('websearch', 'rust news', rules, 'linux')).toEqual(
+      r('websearch', 'ask')
+    )
+    expect(lastMatchingV2Rule('skill', 'demo', rules, 'linux')).toEqual(r('skill', 'ask'))
+    expect(evaluateV2Call(rules, 'subagent', ['general'], 'linux')).toBe('deny')
+    expect(rules.filter((x) => x.effect === 'allow')).toEqual([r('claudeui_*', 'allow')])
+  })
+
+  it('auto: a subagent child keeps the spawn ask unless its agent wholly denies it (explore: hidden websearch/subagent)', () => {
+    const { rules } = buildSessionRuleset(input({ mode: 'auto', autoMode: true }))
+    const explore = [r('*', 'deny'), r('read', 'allow'), r('grep', 'allow'), r('shell', 'allow')]
+    const child = childSessionRuleset(rules, explore, 'linux')
+    expect(v2ToolHidden(child, 'subagent', 'linux')).toBe(true)
+    expect(v2ToolHidden(child, 'websearch', 'linux')).toBe(true)
+    const general = childSessionRuleset(rules, [r('*', 'allow')], 'linux')
+    expect(lastMatchingV2Rule('subagent', 'explore', general, 'linux')).toEqual(
+      r('subagent', 'ask')
+    )
   })
 
   it('auto with the classifier off is gated like default (never allow-all)', () => {

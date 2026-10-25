@@ -427,9 +427,11 @@ export function renderAction(action: ClassifierAction): string {
  * subagent proposed it and the task that spawned it — the task fields
  * JSON-rendered (absent ones omitted; the prompt clipped at
  * {@link MAX_SUBAGENT_PROMPT_CHARS}, then `…`) — and asks the judge to read it
- * as the assistant's own action against the same user intent. Two callers:
- * - an opencode task CHILD (ADR-085 S4): the judge sees only the PARENT
- *   transcript, whose `task` line is the child's mandate;
+ * as the assistant's own action against the same user intent. Callers:
+ * - a pi host-run child and an opencode `subagent` CHILD (ADR-089, ADR-085 S4):
+ *   the judge sees the PARENT transcript, its still-queued user turns and the
+ *   acting child's own assistant trajectory (user-role messages removed),
+ *   merged in time order (ADR-091 §4); the `task` line is the child's mandate;
  * - a dispatch TARGET (ADR-088, type `dispatch:<engine>`, the latest dispatch
  *   prompt as the task): the judge sees the PARENT transcript followed by the
  *   target's own assistant trajectory (its user-role messages removed), so the
@@ -853,8 +855,9 @@ const REMOTE_OR_METADATA =
 
 /**
  * Tools whose input is a payload handed to ANOTHER agent (policy rule 7,
- * DELEGATION PAYLOADS): pi's `agent` / `dispatch_agent` / `send_message` (and
- * the legacy `subagent`), opencode's `task` / `claudeui_dispatch_agent`. What
+ * DELEGATION PAYLOADS): pi's `agent` / `dispatch_agent` / `send_message`,
+ * opencode 2.x's `subagent` (a spawn asks under ClaudeUI's auto ruleset; 1.x
+ * called it `task`) and `claudeui_dispatch_agent`. What
  * makes one safe or not — whose credential the prompt carries, where the
  * delegate sends it — is exactly the provenance call a one-shot harm grade gets
  * wrong (ADR-091: live judge evals showed stage 1 clearing agent-read keys in a

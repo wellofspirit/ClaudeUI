@@ -16,6 +16,8 @@
  *   [handback]  call ClaudeUI's hosted `claudeui_hand_back` (a dispatch target's report); then echo the result
  *   [sessiontool]  call ClaudeUI's hosted `claudeui_session_list`; then echo the result
  *   [subsession]   `subagent` tool call whose child prompt is `[sessiontool]`
+ *   [websearch] `websearch` tool call (query `contract query`)
+ *   [skill]     `skill` tool call loading `SKILL_ID` (a test creates it under `.opencode/skills/`)
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
  *   [subread]   `subagent` tool call whose child prompt is `[read]`
@@ -85,6 +87,10 @@ export const SHELL_COMMAND = 'echo contract-tool-ran'
 /** `[toolwrite]`'s command: a redirect into the workspace, which the read-only gate never vouches for. */
 export const WRITE_COMMAND = 'echo judged > judged.txt'
 export const REASONING_TEXT = 'thinking it over'
+/** What a `[websearch]` prompt searches for. */
+export const WEBSEARCH_QUERY = 'contract query'
+/** The skill a `[skill]` prompt loads. */
+export const SKILL_ID = 'contract-demo'
 /** opencode accepts a summary carrying one of its template headings (core/src/session/compaction.ts). */
 export const COMPACTION_SUMMARY = '## Objective\nContract compaction summary.'
 /** The file the file-tool markers work on (a test creates it with `alpha`). */
@@ -299,6 +305,18 @@ export async function startFixtureProvider(
           res,
           tools.find((tool) => tool === 'claudeui_create_mockup'),
           { html: '<p>contract mockup</p>', title: 'Contract' }
+        )
+      if (text.includes('[websearch]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'websearch'),
+          { query: WEBSEARCH_QUERY }
+        )
+      if (text.includes('[skill]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'skill'),
+          { id: SKILL_ID }
         )
       if (text.includes('[question]'))
         return streamToolCall(

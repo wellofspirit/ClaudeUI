@@ -147,6 +147,9 @@ import {
 import { runJudgePipeline } from '../automode/judge-pipeline'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import { blockGrantKey } from '../automode/blocked-calls'
+import { cleanAgentLabel } from '../automode/agent-label'
+import { inTimeOrder } from '../automode/trajectory'
+import { ChildJudgeStates } from './child-judge-state'
 import { refreshChatgptAccounts } from '../automode/judge-accounts'
 import {
   fallbackJudgeAccountFor,
@@ -409,6 +412,8 @@ export class OpencodeSession extends BaseSession {
   private fallbackRouteUnavailableReported = false
   private staleFallbackJudgeLogged = false
   private toolOutcomes = new Map<string, ToolOutcome>()
+  /** Per-subagent-child judge context (trajectory, outcomes, denial caps) by child session id. */
+  private readonly childJudge = new ChildJudgeStates()
   private sessionRemotes: GitRemote[] | null = null
   private sessionRemotesPromise: Promise<GitRemote[]> | null = null
   private sessionRepoVisibility: RepoVisibility | null = null
@@ -1186,12 +1191,18 @@ export class OpencodeSession extends BaseSession {
             if (open.target.messageId === seal.message.id) this.openItems.delete(key)
         if (!seal.ownerToolUseId && !seal.target?.ownerToolUseId)
           this.rememberOpencodeMessage(seal.message)
+        else
+          this.childJudge.recordMessage(
+            (seal.ownerToolUseId ?? seal.target?.ownerToolUseId) as string,
+            seal.message
+          )
         this.send('session:item-seal', seal)
         return
       }
       case 'message':
         this.noteToolInputs(o.message)
         if (o.ownerToolUseId) {
+          this.childJudge.recordMessage(o.ownerToolUseId, o.message)
           this.send('session:subagent-message', {
             toolUseId: o.ownerToolUseId,
             message: o.message
@@ -1219,6 +1230,7 @@ export class OpencodeSession extends BaseSession {
           this.shellPoller.start(o.toolUseId, o.shellID, this.client)
         return
       case 'subagent-started':
+        this.childJudge.linkCall(o.toolUseId, o.childSessionId)
         // A resumed child re-links under a newer call: re-assert its ruleset.
         if (this.childKeeper.has(o.childSessionId))
           void this.childKeeper.patchChild(o.childSessionId)
@@ -1373,6 +1385,11 @@ export class OpencodeSession extends BaseSession {
       ...(result.images ? { images: result.images } : {})
     }
     if (ownerToolUseId) {
+      this.childJudge.recordOutcomeByOwner(
+        ownerToolUseId,
+        result.toolUseId,
+        result.isError ? 'error' : 'ok'
+      )
       this.send('session:subagent-tool-result', {
         toolUseId: ownerToolUseId,
         toolResultToolUseId: result.toolUseId,
@@ -1746,6 +1763,8 @@ export class OpencodeSession extends BaseSession {
       const { suggestions: _suggestions, always: _always, ...single } = approval
       approval = single
     }
+    // A child's card names the agent whose action it is (ADR-089 F4 parity).
+    if (approval.subagent) approval = { ...approval, agent: this.childAgent(approval.subagent) }
     this.pendingApprovals.set(approval.requestId, {
       toolUseId: approval.toolUseId,
       approval,
@@ -1787,16 +1806,18 @@ export class OpencodeSession extends BaseSession {
     // A held auto-mode block (ADR-091 §3): override this ONE call either way.
     if (pending?.hold) {
       if (allow) {
-        this.autoDenials.recordAllow()
+        // A child's caps are its own (ADR-088 D1); a human's override resets them.
+        this.denialsFor(pending.approval.subagent).recordAllow()
         if (toolUseId) this.blockedCalls.approveHeld(toolUseId)
         this.replyPermission(requestId, { decision: 'once' })
       } else {
-        this.keepBlocked(requestId, toolUseId, pending.hold.reason)
+        this.keepBlocked(requestId, toolUseId, pending.hold.reason, pending.approval.subagent)
       }
       return
     }
     const persist = allow && !!updatedPermissions && updatedPermissions.length > 0
-    if (!allow && toolUseId) this.recordToolOutcome(toolUseId, 'rejected-by-user')
+    if (!allow && toolUseId)
+      this.recordToolOutcome(toolUseId, 'rejected-by-user', pending?.approval.subagent)
     // ADR-085 S2: never `always` (opencode's saved table is shared with the
     // user's own opencode); a session allow is remembered host-side. A reject
     // always carries the model-visible reason (ADR-097 §3).
@@ -2160,8 +2181,14 @@ export class OpencodeSession extends BaseSession {
     return asHostPrecheckRules(this.lastUserRules)
   }
 
-  private recordToolOutcome(toolUseId: string, outcome: ToolOutcome): void {
-    recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
+  /** A child's call outcome goes to ITS judge context, never the parent's. */
+  private recordToolOutcome(
+    toolUseId: string,
+    outcome: ToolOutcome,
+    child?: PendingApproval['subagent']
+  ): void {
+    if (child) this.childJudge.recordOutcome(child.sessionId, toolUseId, outcome)
+    else recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
   }
 
   private async sessionGitRemotes(): Promise<GitRemote[]> {
@@ -2536,10 +2563,39 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  /** An auto-mode edit on an agent-control path always sees the gate/judge (ADR-084 §3). */
+  /** The label a child's card and blocked-call row carry: its task description, else its agent. */
+  private childAgentLabel(task: { type: string; description?: string } | undefined): string {
+    return cleanAgentLabel(task?.description ?? task?.type ?? '')
+  }
+
+  /** WHICH agent proposes a child's action — the card's `agent` (the child's session id is its id). */
+  private childAgent(marker: NonNullable<PendingApproval['subagent']>): {
+    agentId: string
+    label: string
+    subagentType: string
+  } {
+    const task = this.subagentTask(marker)
+    return {
+      agentId: marker.sessionId,
+      label: this.childAgentLabel(task),
+      subagentType: task?.type ?? 'unknown'
+    }
+  }
+
+  /** The denial caps an ask counts against: the acting child's own, else the session's. */
+  private denialsFor(child?: PendingApproval['subagent']): AutoModeDenialTracker {
+    return child ? this.childJudge.state(child.sessionId).denials : this.autoDenials
+  }
+
+  /**
+   * Under auto mode an edit on an agent-control path (ADR-084 §3) and a subagent
+   * spawn (ADR-085: the delegation payload is always the judge's to read) never
+   * ride a session allow.
+   */
   private sessionAllowApplies(approval: PendingApproval): boolean {
+    if (!this.isAutoMode(this.permissionMode)) return true
+    if (approval.toolName === 'subagent') return false
     return !(
-      this.isAutoMode(this.permissionMode) &&
       approval.toolName === 'edit' &&
       !editClearsAgentControl(approval.patterns, approval.input, this.cwd)
     )
@@ -2595,6 +2651,13 @@ export class OpencodeSession extends BaseSession {
       return
     }
     let transport: JudgeTransport | null = null
+    // A subagent child's call (ADR-088 D1, ADR-091 §4, as pi's `childHooks`): the
+    // acting child's own header, outcomes and denial caps, and a transcript that is
+    // this session's (whose human turns are the only real authorisation), its
+    // still-queued user turns and THAT child's assistant trajectory in time order.
+    // An intermediate agent's trajectory is not included for a grandchild: its
+    // prompts to the child are agent-authored.
+    const child = approval.subagent ? this.childJudge.state(approval.subagent.sessionId) : undefined
     const outcome = await runJudgePipeline(
       { toolUseId: approval.toolUseId ?? '', toolName: category, input: approval.input },
       {
@@ -2624,12 +2687,17 @@ export class OpencodeSession extends BaseSession {
         },
         judgeTransport: () => transport!,
         fallbackJudgeTransport: () => this.fallbackJudge(),
-        messages: () => this.messageHistory,
         environment: () => this.classifierEnvironment(),
         captureActionMeta: (name, input) => this.captureActionMeta(name, input),
-        outcomes: () =>
-          this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
-        denials: this.autoDenials,
+        messages: () =>
+          child
+            ? inTimeOrder(this.messageHistory, this.queuedUserTurns(), child.trajectory.values())
+            : this.messageHistory,
+        outcomes: () => {
+          const outcomes = child ? child.outcomes : this.toolOutcomes
+          return outcomes.size ? Object.fromEntries(outcomes) : undefined
+        },
+        denials: child ? child.denials : this.autoDenials,
         twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
         sendReview: (_id, review) => this.sendToolReview(approval.toolUseId, review),
         consumeGrant: (name, input) =>
@@ -2687,8 +2755,7 @@ export class OpencodeSession extends BaseSession {
     const { requestId } = approval
     const ms = blockHoldMs()
     if (review && approval.toolUseId) {
-      const task = approval.subagent ? this.subagentTask(approval.subagent) : undefined
-      const agentLabel = approval.subagent ? (task?.description ?? task?.type) : undefined
+      const agentLabel = approval.agent?.label
       this.blockedCalls.record(
         approval.toolUseId,
         {
@@ -2702,7 +2769,7 @@ export class OpencodeSession extends BaseSession {
       )
     }
     if (ms === 0) {
-      this.keepBlocked(requestId, approval.toolUseId, reason)
+      this.keepBlocked(requestId, approval.toolUseId, reason, approval.subagent)
       return
     }
     const timer = armBlockHold(() => {
@@ -2720,8 +2787,13 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** A judge block that stands: the model reads the judge's text. */
-  private keepBlocked(requestId: string, toolUseId: string | undefined, reason: string): void {
-    if (toolUseId) this.recordToolOutcome(toolUseId, 'automode-blocked')
+  private keepBlocked(
+    requestId: string,
+    toolUseId: string | undefined,
+    reason: string,
+    child?: PendingApproval['subagent']
+  ): void {
+    if (toolUseId) this.recordToolOutcome(toolUseId, 'automode-blocked', child)
     this.autoReply(requestId, { decision: 'reject', message: reason })
   }
 
