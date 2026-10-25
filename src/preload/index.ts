@@ -393,8 +393,12 @@ const api: ClaudeAPI = {
   createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
   getWorktreeStatus: (worktreePath: string, originalHead: string) =>
     unwrap('worktree:status', worktreePath, originalHead),
+  // Declared `withProgress` (the remote client's timeout slides on it), so it always rides the
+  // progress path; the signature has no callback, hence the no-op.
   removeWorktree: (worktreePath: string, branch: string, gitRoot: string) =>
-    unwrap('worktree:remove', worktreePath, branch, gitRoot),
+    invokeWithProgress('worktree:remove', [worktreePath, branch, gitRoot], () => {}).then((r) =>
+      unwrapResult('worktree:remove', r)
+    ),
   inventoryWorktrees: (cwd: string) => unwrap('worktree:inventory', cwd),
   inspectWorktree: (cwd: string, id: string) => unwrap('worktree:inspect', cwd, id),
   // The progress path only when a callback is given (ADR-102); the safeHandler envelope

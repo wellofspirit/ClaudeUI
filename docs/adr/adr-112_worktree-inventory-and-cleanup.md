@@ -69,7 +69,8 @@ The engines differ:
    - Allowed after a confirmation that lists what is lost: dirty worktrees and worktrees with commits found nowhere
      else. "Select safe" excludes them, and also excludes anything modified in the last 10 minutes.
    - A registered worktree whose folder is already gone ("missing") is inspected like any other. Its detached HEAD or
-     branch may hold the only copy of some commits, so it is safe only with none.
+     branch may hold the only copy of some commits, so it is safe only with none. Only a provably absent path
+     (ENOENT/ENOTDIR) counts as gone. A path that cannot be read fails its removal and is never handed to git.
    - "Select safe" replaces the current selection.
    - A row that contains other entries can be selected only together with them.
    - The manager cannot be closed while a removal runs, and the background size and status scan stops for the run.
@@ -80,8 +81,9 @@ The engines differ:
    so it stays listed and can be retried. `git worktree prune` is never run.
 4. **Branches.** A branch is deleted only when every commit on it is reachable from another branch, a remote-tracking
    ref or a tag (`rev-list --count refs/heads/<b> --not --exclude=<b> --branches --remotes --tags`). Otherwise it is
-   kept and reported, as are `main`, `master`, the current and default branch, and a branch checked out elsewhere. This
-   holds for every removal path.
+   kept and reported, as are `main`, `master`, the current and default branch, and a branch checked out elsewhere.
+   A branch is also kept if its tip moved after the count, which is taken before the walk. This holds for every
+   removal path.
 5. **Other removal paths.**
    - The session-delete prompt goes through the same routine, including the holder check.
    - The quit prompt removes the chosen worktrees in the main process after sessions and engines are torn down, so no

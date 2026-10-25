@@ -14,6 +14,8 @@ import {
   effectiveSelection,
   formatBytes,
   holderChip,
+  isInspectable,
+  isMeasurable,
   isSafe,
   recentMinutes,
   sizeText,
@@ -64,6 +66,17 @@ describe('formatBytes', () => {
     expect(formatBytes(2048)).toBe('2 KB')
     expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB')
     expect(formatBytes(3.5 * 1024 * 1024 * 1024)).toBe('3.5 GB')
+  })
+})
+
+describe('isInspectable / isMeasurable (N4)', () => {
+  it('an invalid entry is neither; a missing one is inspected but not measured', () => {
+    expect(isInspectable(entry())).toBe(true)
+    expect(isMeasurable(entry())).toBe(true)
+    expect(isInspectable(entry({ invalidReason: 'x' }))).toBe(false)
+    expect(isMeasurable(entry({ invalidReason: 'x' }))).toBe(false)
+    expect(isInspectable(entry({ kind: 'missing' }))).toBe(true)
+    expect(isMeasurable(entry({ kind: 'missing' }))).toBe(false)
   })
 })
 
@@ -209,11 +222,13 @@ describe('row text', () => {
     expect(statusText(entry(), inspection({ uncommittedFiles: 3, uniqueCommits: 1 }))).toBe(
       '3 uncommitted · 1 commit only here'
     )
-    expect(statusText(entry({ kind: 'missing' }), undefined)).toBe('directory is gone')
-    expect(statusText(entry({ kind: 'missing' }), inspection())).toBe('directory is gone')
+    expect(statusText(entry({ kind: 'missing' }), undefined)).toBe('not found at its path')
+    expect(statusText(entry({ kind: 'missing' }), inspection())).toBe('not found at its path')
     expect(statusText(entry({ kind: 'missing' }), inspection({ uniqueCommits: 2 }))).toBe(
-      'directory is gone · 2 commits only here'
+      'not found at its path · 2 commits only here'
     )
+    // N4: an invalid entry is not scanned, so it never reads "checking…" forever
+    expect(statusText(entry({ invalidReason: 'x' }), undefined)).toBe('not checked')
     expect(statusText(entry({ kind: 'orphan' }), inspection())).toBe('empty shell')
     expect(statusText(entry({ kind: 'orphan' }), inspection({ uncommittedFiles: 2 }))).toBe(
       '2 files left inside'
@@ -225,6 +240,8 @@ describe('row text', () => {
     expect(sizeText(entry(), null)).toBe('?')
     expect(sizeText(entry(), size({ bytes: 2048 }))).toBe('2 KB')
     expect(sizeText(entry({ kind: 'missing' }), undefined)).toBe('—')
+    // N4: an invalid entry is never measured, so it never reads "…" forever
+    expect(sizeText(entry({ invalidReason: 'x' }), undefined)).toBe('—')
   })
 
   it('holder chips', () => {
@@ -341,7 +358,7 @@ describe('confirmItem', () => {
 
     it('with no unique commits its registration goes and its branch is deleted', () => {
       expect(confirmItem(gone, inspection(), undefined, NOW).lines).toEqual([
-        'The directory is already gone; its git registration is removed.',
+        'Not found at its path (an unplugged drive or offline share looks the same); removing it only unregisters it, no files are touched.',
         'Branch feat/a is deleted: every commit on it exists elsewhere.'
       ])
     })

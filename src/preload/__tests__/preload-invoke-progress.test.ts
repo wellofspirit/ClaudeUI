@@ -53,6 +53,7 @@ type Api = {
     onProgress?: (p: unknown) => void
   ) => Promise<unknown>
   measureWorktree: (cwd: string, id: string, onProgress?: (p: unknown) => void) => Promise<unknown>
+  removeWorktree: (worktreePath: string, branch: string, gitRoot: string) => Promise<unknown>
   inventoryWorktrees: (cwd: string) => Promise<unknown>
   confirmQuit: (removeWorktreePaths?: string[]) => Promise<void>
   ackQuitPrompt: () => Promise<void>
@@ -202,6 +203,25 @@ describe('preload — loadSessionHistory progress', () => {
     expect(inner).toBe('worktree:remove-many')
     expect(wire).toEqual(['/repo', ['a']])
     expect(typeof callId).toBe('string')
+  })
+
+  it('the legacy removeWorktree always rides invoke:with-progress (its channel is withProgress) and unwraps the envelope', async () => {
+    electron.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: { id: '/wt', outcome: 'removed' }
+    })
+    await expect(api.removeWorktree('/wt', 'feat', '/repo')).resolves.toEqual({
+      id: '/wt',
+      outcome: 'removed'
+    })
+    const [channel, callId, inner, ...wire] = electron.ipcRenderer.invoke.mock.lastCall!
+    expect(channel).toBe('invoke:with-progress')
+    expect(inner).toBe('worktree:remove')
+    expect(wire).toEqual(['/wt', 'feat', '/repo'])
+    expect(typeof callId).toBe('string')
+
+    electron.ipcRenderer.invoke.mockResolvedValue({ ok: false, error: 'refused' })
+    await expect(api.removeWorktree('/wt', 'feat', '/repo')).rejects.toThrow('refused')
   })
 
   it('measureWorktree with a callback rejects with the handler’s error, not an envelope', async () => {

@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootIpcHarness, type IpcHarness } from '../../../test/helpers/boot-ipc-harness'
+import { dispatchDesktop } from '../../../core/ipc/desktop-transport-binding'
 import * as fs from 'fs'
 import * as os from 'os'
 import { EventEmitter } from 'events'
@@ -1082,6 +1083,35 @@ describe('session.ipc', () => {
         forgetEntries: expect.any(Function),
         beforeWalk: expect.any(Function)
       })
+    })
+
+    it('legacy worktree:remove declares withProgress and threads the reporter to the removal (exit review S1)', async () => {
+      expect(commandRegistry.declaration('worktree:remove')).toMatchObject({
+        capability: 'git',
+        kind: 'command',
+        withProgress: true
+      })
+      const reporter = vi.fn()
+      // The reporter LEADS the handler args, never the wire's (which stay path, branch, root).
+      await dispatchDesktop('worktree:remove', ['/tmp/wt', 'feat', '/tmp/r'], reporter)
+      const [wtPath, branch, root, deps] = vi.mocked(removeWorktree).mock.lastCall! as [
+        string,
+        string,
+        string,
+        { progress: (p: unknown) => void }
+      ]
+      expect([wtPath, branch, root]).toEqual(['/tmp/wt', 'feat', '/tmp/r'])
+      deps.progress({ done: 1, total: 2, phase: 'walking' })
+      expect(reporter).toHaveBeenCalledWith({ done: 1, total: 2, phase: 'walking' })
+    })
+
+    it('legacy worktree:remove takes only a non-empty absolute path (N3)', async () => {
+      vi.mocked(removeWorktree).mockClear()
+      for (const bad of ['', 'relative/wt', '.', null, 5]) {
+        const res = await harness.call<any>('worktree:remove', bad, 'feat', '/tmp/r')
+        expect(res.ok, String(bad)).toBe(false)
+      }
+      expect(removeWorktree).not.toHaveBeenCalled()
     })
 
     it('legacy worktree:remove accepts only a worktree ClaudeUI created (C-S11, server side)', async () => {

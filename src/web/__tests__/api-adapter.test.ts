@@ -157,6 +157,28 @@ describe('web api-adapter — worktree manager (ADR-112)', () => {
     expect(connection.invoke).toHaveBeenLastCalledWith('worktree:inspect', '/repo', 'id-1')
   })
 
+  it('the legacy removeWorktree always rides invokeWithProgress (the channel is withProgress) with a no-op callback, and unwraps the envelope', async () => {
+    connection.invokeWithProgress.mockResolvedValueOnce({
+      ok: true,
+      data: { id: '/wt', outcome: 'removed' }
+    })
+    await expect(api.removeWorktree('/wt', 'feat', '/repo')).resolves.toEqual({
+      id: '/wt',
+      outcome: 'removed'
+    })
+    expect(connection.invoke).not.toHaveBeenCalled()
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'worktree:remove',
+      ['/wt', 'feat', '/repo'],
+      expect.any(Function)
+    )
+    const cb = connection.invokeWithProgress.mock.lastCall![2] as (p: unknown) => void
+    expect(() => cb({ done: 1, total: 2, phase: 'x' })).not.toThrow()
+
+    connection.invokeWithProgress.mockResolvedValueOnce({ ok: false, error: 'nope' })
+    await expect(api.removeWorktree('/wt', 'feat', '/repo')).rejects.toThrow('nope')
+  })
+
   it('removeWorktrees / measureWorktree use invokeWithProgress only when given a callback, and unwrap the envelope', async () => {
     connection.invoke.mockResolvedValueOnce({ ok: true, data: [] })
     await api.removeWorktrees('/repo', ['a'])
@@ -646,11 +668,8 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'worktree:status',
     args: ['/repo/app-feature-x', 'abc1234']
   },
-  {
-    method: 'removeWorktree',
-    channel: 'worktree:remove',
-    args: ['/repo/app-feature-x', 'feature-x', '/repo/app']
-  },
+  // `removeWorktree` rides the progress path (`withProgress` server-side): see the worktree
+  // manager describe, it does not reach `connection.invoke`.
 
   // Automations — one frozen declaration shared by both transports
   // (`core/ipc/automation-commands.ts`, `config`). Plain handlers, so preload
@@ -957,7 +976,7 @@ describe('web api-adapter — the local surface is an explicit list', () => {
       .filter(([, value]) => {
         const source = (value as AnyFn).toString()
         if (source === listenerSource) return false
-        return !/\bconnection\./.test(source) && !/\bunwrap\(/.test(source)
+        return !/\bconnection\./.test(source) && !/\bunwrap(WithProgress)?\(/.test(source)
       })
       .map(([name]) => name)
       .sort()

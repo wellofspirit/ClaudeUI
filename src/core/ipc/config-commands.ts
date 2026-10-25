@@ -501,19 +501,32 @@ export function configCommands(
     {
       // Legacy single-path entry point (session-delete cleanup modal): the same mechanics as
       // `worktree:remove-many`, holders ENFORCED (the modal does not stop the session), and
-      // the per-entry result goes back to the caller (`refused` names the holder).
+      // the per-entry result goes back to the caller (`refused` names the holder). It walks a
+      // whole tree too, so it declares `withProgress` like `remove-many`: the web client's
+      // invoke timeout then slides (C-S5) instead of cutting off a slow removal.
       channel: 'worktree:remove',
       capability: 'git',
       kind: 'command',
-      handler: safeHandler(async (worktreePath: string, branch: string, gitRoot: string) => {
-        return await removeWorktree(worktreePath, branch, gitRoot, {
-          sources: worktreeHolderSources(manager),
-          forgetEntries: forgetEntriesAndEmit,
-          beforeWalk: closeMockupWatchersUnder,
-          // C-S11: this modal only ever offers what ClaudeUI created, so that is all it removes.
-          createdOnly: isCreatedWorktreePath
-        })
-      })
+      withProgress: true,
+      handler: safeHandler(
+        async (
+          progress: ProgressReporter,
+          worktreePath: string,
+          branch: string,
+          gitRoot: string
+        ) => {
+          // N3: a renderer/remote-supplied path: absolute, or nothing resolves against the host's cwd.
+          assertAbsoluteCwd(worktreePath, 'worktree:remove')
+          return await removeWorktree(worktreePath, branch, gitRoot, {
+            progress: (p) => progress(p),
+            sources: worktreeHolderSources(manager),
+            forgetEntries: forgetEntriesAndEmit,
+            beforeWalk: closeMockupWatchersUnder,
+            // C-S11: this modal only ever offers what ClaudeUI created, so that is all it removes.
+            createdOnly: isCreatedWorktreePath
+          })
+        }
+      )
     },
     {
       channel: 'worktree:inventory',

@@ -11,6 +11,7 @@ import {
   confirmItem,
   disabledReason,
   effectiveSelection,
+  isInspectable,
   isMeasurable,
   isSafe,
   recentMinutes,
@@ -70,8 +71,9 @@ export function WorktreesModal({
 
   const scan = useCallback(
     (entries: WorktreeInventoryEntry[], gen: number): void => {
-      // Every entry is inspected (a missing one's branch can hold commits); only a present one has a size.
-      const queue = entries.map((e) => e.id)
+      // Every valid entry is inspected (a missing one's branch can hold commits); only a present one
+      // has a size. An invalid entry is never walked (N4): the server refuses it anyway.
+      const queue = entries.filter(isInspectable).map((e) => e.id)
       const measurable = new Set(entries.filter(isMeasurable).map((e) => e.id))
       let next = 0
       const live = (): boolean => mounted.current && generation.current === gen
@@ -187,8 +189,9 @@ export function WorktreesModal({
     [entries, selection]
   )
   const selectedSize = useMemo(() => totalSize(selectedEntries, sizes), [selectedEntries, sizes])
-  const scanTotal = entries.length
-  const scanDone = entries.filter(
+  const scannable = entries.filter(isInspectable)
+  const scanTotal = scannable.length
+  const scanDone = scannable.filter(
     (e) => inspections[e.id] !== undefined && (!isMeasurable(e) || sizes[e.id] !== undefined)
   ).length
 

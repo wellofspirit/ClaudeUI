@@ -428,6 +428,21 @@ describe('WorktreesModal FC', () => {
     expect(viewProps.total).toEqual({ bytes: 0, atLeast: false })
   })
 
+  it('an invalid entry is neither inspected nor measured, and does not hold the scan open (N4)', async () => {
+    inventory.entries = [
+      entry('bad', { invalidReason: 'not verifiably a worktree of this repo' }),
+      entry('ok')
+    ]
+    await renderFC()
+    await settle()
+
+    expect(inspect.mock.calls.map((c) => c[1])).toEqual([idOf('ok')])
+    expect(measure.mock.calls.map((c) => c[1])).toEqual([idOf('ok')])
+    expect(viewProps.scan).toBeNull()
+    expect(viewProps.total).toEqual({ bytes: 1024, atLeast: false })
+    expect(row('bad').inspection).toBeUndefined()
+  })
+
   it('Select safe skips a missing entry that holds commits, and one not yet inspected (R1)', async () => {
     inventory.entries = [
       entry('gone-clean', { kind: 'missing' }),

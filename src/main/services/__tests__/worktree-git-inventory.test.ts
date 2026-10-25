@@ -504,6 +504,28 @@ describe('inspectWorktree: what removal would lose (D3, C-B5)', () => {
     expect(res.uncommittedSample).not.toContain('main-only.txt')
   })
 
+  it('N4: an invalid entry is not walked: inspect answers empty, measure answers zero', async () => {
+    await createWorktree(repo.path, 'real')
+    const victim = path.join(scratch.base, 'victim-walk')
+    fs.mkdirSync(victim)
+    fs.writeFileSync(path.join(victim, 'important.txt'), 'mine')
+    const admin = path.join(repo.path, '.git', 'worktrees', 'real')
+    const forged = path.join(victim, '.git').replace(/\\/g, '/')
+    fs.writeFileSync(path.join(admin, 'gitdir'), `${forged}\n`)
+    const inv = await inventoryWorktrees(repo.path)
+    expect(inv.entries.find((e) => e.id === idOf(victim))?.invalidReason).toBeTruthy()
+
+    expect(await inspectWorktree(repo.path, idOf(victim))).toEqual({
+      uncommittedFiles: 0,
+      uncommittedSample: [],
+      ignoredEntries: 0,
+      uniqueCommits: 0,
+      uniqueCommitSample: []
+    })
+    expect(await measureWorktree(repo.path, idOf(victim))).toMatchObject({ bytes: 0, files: 0 })
+    expect(fs.readFileSync(path.join(victim, 'important.txt'), 'utf-8')).toBe('mine')
+  })
+
   it('an id that is not in the inventory is an error', async () => {
     await expect(inspectWorktree(repo.path, idOf(path.join(repo.path, '..', 'x')))).rejects.toThrow(
       /not found/

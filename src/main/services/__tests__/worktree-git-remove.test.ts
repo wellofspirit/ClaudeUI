@@ -8,8 +8,10 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'node:fs'
+import fsDefault from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import * as path from 'node:path'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { simpleGit } from 'simple-git'
 import { makeTempGitRepo, type TempGitRepo } from '../../../test/helpers/temp-git-repo'
 import {
@@ -201,6 +203,44 @@ describe('removeWorktrees: branch fate (R2, C-B5)', () => {
     expect(res.branch).toEqual({ name: 'worktree-merged', action: 'deleted', uniqueCommits: 0 })
     expect(await branches()).not.toContain('worktree-merged')
     expect(await branches()).toContain('holder')
+  })
+
+  it('N5: a branch that moved while the worktree was being removed is kept, not deleted with its new commit', async () => {
+    const info = await createWorktree(repo.path, 'moved')
+    // A commit on no branch yet; the hook points the branch at it mid-removal (a commit landing
+    // from another checkout), after the unique-commit count said 0.
+    const tree = (await repo.git.raw(['rev-parse', 'HEAD^{tree}'])).trim()
+    const head = (await repo.git.raw(['rev-parse', 'HEAD'])).trim()
+    const newTip = (await repo.git.raw(['commit-tree', tree, '-p', head, '-m', 'landed'])).trim()
+
+    const [res] = await removeWorktrees(repo.path, [idOf(info.worktreePath)], () => {}, {
+      enforceHolders: false,
+      beforeWalk: () => {
+        const r = spawnSync('git', ['update-ref', 'refs/heads/worktree-moved', newTip], {
+          cwd: repo.path
+        })
+        expect(r.status).toBe(0)
+      }
+    })
+
+    expect(res.outcome).toBe('removed')
+    expect(res.branch).toEqual({
+      name: 'worktree-moved',
+      action: 'kept',
+      uniqueCommits: 0,
+      reason: 'moved since the removal started'
+    })
+    expect(await branches()).toContain('worktree-moved')
+    expect((await repo.git.raw(['rev-parse', 'refs/heads/worktree-moved'])).trim()).toBe(newTip)
+  })
+
+  it('N5: a branch still at the recorded tip is deleted as before (the guard is not a blanket keep)', async () => {
+    const info = await createWorktree(repo.path, 'still')
+
+    const [res] = await removeWorktrees(repo.path, [idOf(info.worktreePath)], () => {}, noHolders)
+
+    expect(res.branch).toMatchObject({ name: 'worktree-still', action: 'deleted' })
+    expect(await branches()).not.toContain('worktree-still')
   })
 
   it('a detached worktree has no branch to decide about', async () => {
@@ -1023,6 +1063,19 @@ describe('removeWorktree (legacy single-path entry point)', () => {
     expect(fs.existsSync(info.worktreePath)).toBe(false)
   })
 
+  it('S1: threads the progress callback down to the removal (per-entry and per-batch phases)', async () => {
+    const info = await createWorktree(repo.path, 'legacy-progress')
+    const progress: WorktreeRemoveProgress[] = []
+
+    await removeWorktree(info.worktreePath, 'main', repo.path, {
+      sources: none,
+      progress: (p) => progress.push(p)
+    })
+
+    expect(progress.at(-1)).toEqual({ done: 1, total: 1, phase: 'done' })
+    expect(progress.some((p) => p.phase === 'legacy-progress: removing files')).toBe(true)
+  })
+
   it('enforces holders when given sources (the session-delete flow does not stop the session)', async () => {
     const info = await createWorktree(repo.path, 'legacy-busy')
     const sources: HolderSources = {
@@ -1089,6 +1142,53 @@ describe('removeWorktree (legacy): holders are not optional (S1) and bare repos 
     expect(fs.existsSync(wt)).toBe(false)
     const listed = await simpleGit(bare).raw(['worktree', 'list', '--porcelain'])
     expect(listed.match(/^worktree /gm)).toHaveLength(1)
+  })
+})
+
+describe('N1: only ENOENT/ENOTDIR mean a path is gone', () => {
+  it('a directory git lists but lstat cannot read is not "missing": it is reported failed with the code and left whole', async () => {
+    const info = await createWorktree(repo.path, 'unreadable')
+    fs.writeFileSync(path.join(info.worktreePath, 'work.txt'), 'x')
+    const real = fsDefault.lstatSync
+    // The service reads `lstatSync` off the `fs` ESM namespace, which only follows the CJS object
+    // after a sync.
+    const spy = vi.spyOn(fsDefault, 'lstatSync').mockImplementation(((
+      p: fs.PathLike,
+      ...rest: unknown[]
+    ) => {
+      if (path.resolve(String(p)) === path.resolve(info.worktreePath)) {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+      }
+      return (real as (...a: unknown[]) => fs.Stats)(p, ...rest)
+    }) as typeof fs.lstatSync)
+    syncBuiltinESMExports()
+
+    try {
+      const inv = await inventoryWorktrees(repo.path)
+      expect(inv.entries.find((e) => e.id === idOf(info.worktreePath))?.kind).toBe('worktree')
+
+      const [res] = await removeWorktrees(repo.path, [idOf(info.worktreePath)], () => {}, noHolders)
+
+      expect(res.outcome).toBe('failed')
+      expect(res.reason).toContain('EACCES')
+    } finally {
+      spy.mockRestore()
+      syncBuiltinESMExports()
+    }
+    // Never handed to git's walker: the files and the registration are untouched.
+    expect(fs.existsSync(path.join(info.worktreePath, 'work.txt'))).toBe(true)
+    expect(await registeredPaths(repo)).toContain(idOf(info.worktreePath))
+    expect(await branches()).toContain('worktree-unreadable')
+  })
+
+  it('ENOENT still means missing: the registration goes', async () => {
+    const info = await createWorktree(repo.path, 'truly-gone')
+    fs.rmSync(info.worktreePath, { recursive: true, force: true })
+
+    const [res] = await removeWorktrees(repo.path, [idOf(info.worktreePath)], () => {}, noHolders)
+
+    expect(res.outcome).toBe('removed')
+    expect(await registeredPaths(repo)).toEqual([idOf(repo.path)])
   })
 })
 

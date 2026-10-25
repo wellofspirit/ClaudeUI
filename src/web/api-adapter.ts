@@ -628,8 +628,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
+    // `withProgress` on the server: the progress path slides the invoke timeout; no caller
+    // listens, so the callback is a no-op.
     removeWorktree: (worktreePath, branch, gitRoot) =>
-      unwrap('worktree:remove', worktreePath, branch, gitRoot),
+      unwrapWithProgress('worktree:remove', [worktreePath, branch, gitRoot], () => {}),
     inventoryWorktrees: (cwd) => unwrap('worktree:inventory', cwd),
     inspectWorktree: (cwd, id) => unwrap('worktree:inspect', cwd, id),
     measureWorktree: (cwd, id, onProgress) =>

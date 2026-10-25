@@ -470,13 +470,24 @@ async function registrationOf(
     .find((b) => !b.bare && samePath(path.resolve(b.path), entryPath))
 }
 
-function lstatExists(p: string): boolean {
+/**
+ * What `lstat` says about `p`: only ENOENT/ENOTDIR prove it absent. Any other error (EACCES, EIO,
+ * a stalled or offline share) proves nothing, so it is reported as an error, never as "gone".
+ */
+function lstatProbe(p: string): 'present' | 'absent' | { code: string } {
   try {
     fs.lstatSync(p)
-    return true
-  } catch {
-    return false
+    return 'present'
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'absent'
+    return { code: code ?? String(err) }
   }
+}
+
+/** False only for a path that is provably absent: an unreadable one still "exists" (N1). */
+function lstatExists(p: string): boolean {
+  return lstatProbe(p) !== 'absent'
 }
 
 interface LoadedInventory {
@@ -617,6 +628,9 @@ export async function inspectWorktree(cwd: string, id: string): Promise<Worktree
     uniqueCommits: 0,
     uniqueCommitSample: []
   }
+  // An entry the remover refuses (a link, a path through one, a `.git` that points elsewhere) is
+  // not walked: nothing it holds can be lost by a removal that will not happen (N4).
+  if (entry.invalidReason) return out
   if (entry.kind === 'missing') {
     // No files to lose, but the branch it was on may hold commits.
     const git = simpleGit(ctx.gitCwd)
@@ -659,7 +673,7 @@ export async function measureWorktree(
   onProgress?: (progress: { files: number; bytes: number }) => void
 ): Promise<WorktreeSize> {
   const { entry } = await findEntry(cwd, id)
-  if (entry.kind === 'missing') {
+  if (entry.kind === 'missing' || entry.invalidReason) {
     return { bytes: 0, files: 0, links: 0, errors: 0, newestMtimeMs: 0 }
   }
   return measureTree(entry.path, { onProgress })
@@ -781,7 +795,19 @@ interface BranchPlan {
   name: string
   /** null = could not be counted: the branch is kept. */
   unique: number | null
+  /** The branch tip when the plan was made; null = could not be read (the branch is kept). */
+  tip: string | null
   protectedBecause?: string
+}
+
+/** The commit `refs/heads/<name>` points at right now, null when it cannot be read. */
+async function branchTip(git: SimpleGit, name: string): Promise<string | null> {
+  try {
+    const out = (await git.raw(['rev-parse', '--verify', '--quiet', `refs/heads/${name}`])).trim()
+    return out === '' ? null : out
+  } catch {
+    return null
+  }
 }
 
 /** Decided BEFORE the removal: afterwards the worktree and its commits' only name may be gone. */
@@ -790,6 +816,9 @@ async function planBranch(
   entry: WorktreeInventoryEntry
 ): Promise<BranchPlan | null> {
   if (!entry.branch) return null
+  // The tip is read BEFORE the count: a commit landing in between then moves the tip past the
+  // recorded one and the branch is kept, instead of the new commit becoming the "unmoved" tip.
+  const tip = await branchTip(git, entry.branch)
   let unique: number | null = null
   try {
     unique = await countUniqueCommits(git, entry.branch, entry.head)
@@ -802,7 +831,7 @@ async function planBranch(
   if (entry.branch === current) protectedBecause = "the repository's current branch"
   else if (entry.branch === 'main' || entry.branch === 'master') protectedBecause = 'main branch'
   else if (entry.branch === remoteDefault) protectedBecause = 'the remote default branch'
-  return { name: entry.branch, unique, protectedBecause }
+  return { name: entry.branch, unique, tip, protectedBecause }
 }
 
 /** R2: delete the branch only when every commit is reachable from somewhere else. */
@@ -825,6 +854,18 @@ async function applyBranchRule(
     }
   }
   if (plan.unique > 0) return { name: plan.name, action: 'kept', uniqueCommits }
+  // The count above was made against the tip recorded at the start: a commit landed on the
+  // branch since (the walk can take minutes) would be lost with it. `rev-parse`, never
+  // `update-ref -d`: only `branch -D` keeps git's "checked out in another worktree" refusal.
+  const tipNow = plan.tip === null ? null : await branchTip(git, plan.name)
+  if (plan.tip === null || tipNow !== plan.tip) {
+    return {
+      name: plan.name,
+      action: 'kept',
+      uniqueCommits,
+      reason: plan.tip === null ? 'its tip could not be read' : 'moved since the removal started'
+    }
+  }
   try {
     await git.raw(['branch', '-D', plan.name])
     return { name: plan.name, action: 'deleted', uniqueCommits }
@@ -867,6 +908,11 @@ async function removeOne(
   if (!entry) return { result: refused(id, 'not-found') }
   if (opts.createdOnly && !opts.createdOnly(entry.path)) {
     return { result: refused(id, NOT_CREATED) }
+  }
+  // A path that cannot be inspected is neither `missing` nor safe to hand to a walker.
+  const probe = lstatProbe(entry.path)
+  if (typeof probe === 'object') {
+    return { result: failed(id, new Error(`cannot inspect ${entry.path}: ${probe.code}`)) }
   }
 
   if (entry.invalidReason) return { result: refused(id, `invalid: ${entry.invalidReason}`) }
@@ -1104,7 +1150,8 @@ export async function removeWorktrees(
 export async function removeWorktreeAtPath(
   worktreePath: string,
   opts: WorktreeRemoveOptions,
-  recordedGitRoot?: string
+  recordedGitRoot?: string,
+  progress: (p: WorktreeRemoveProgress) => void = () => {}
 ): Promise<WorktreeRemoveResult> {
   const find = async (
     start: string
@@ -1134,7 +1181,7 @@ export async function removeWorktreeAtPath(
         : `Refusing to remove worktree outside the managed directory: ${worktreePath}`
     )
   }
-  const [result] = await removeWorktrees(found.cwd, [found.entry.id], () => {}, opts)
+  const [result] = await removeWorktrees(found.cwd, [found.entry.id], progress, opts)
   return result
 }
 
@@ -1156,17 +1203,24 @@ export async function removeWorktree(
     beforeWalk?: (worktreePath: string) => void
     /** C-S11: see {@link WorktreeRemoveOptions.createdOnly}. */
     createdOnly?: (worktreePath: string) => boolean
+    /** Per-entry and per-batch progress, as {@link removeWorktrees} reports it. */
+    progress?: (p: WorktreeRemoveProgress) => void
   }
 ): Promise<WorktreeRemoveResult> {
   // Not optional at runtime either: a wire caller without sources must not silently skip R3.
   if (!deps?.sources) {
     throw new Error('removeWorktree needs the holder sources; use removeWorktrees to opt out')
   }
-  return removeWorktreeAtPath(worktreePath, {
-    enforceHolders: true,
-    sources: deps.sources,
-    forgetEntries: deps.forgetEntries,
-    beforeWalk: deps.beforeWalk,
-    createdOnly: deps.createdOnly
-  })
+  return removeWorktreeAtPath(
+    worktreePath,
+    {
+      enforceHolders: true,
+      sources: deps.sources,
+      forgetEntries: deps.forgetEntries,
+      beforeWalk: deps.beforeWalk,
+      createdOnly: deps.createdOnly
+    },
+    undefined,
+    deps.progress
+  )
 }

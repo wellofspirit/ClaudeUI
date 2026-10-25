@@ -29,11 +29,19 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 }
 
 /**
- * Entries with a directory to measure; a `missing` one has neither files nor a size. Every entry
- * is still inspected: a missing worktree's branch (or detached HEAD) can hold commits (R1).
+ * Entries with a directory to measure; a `missing` one has neither files nor a size, and an
+ * `invalid` one is never walked (its path may lead through a link, N4).
  */
 export function isMeasurable(entry: WorktreeInventoryEntry): boolean {
-  return entry.kind !== 'missing'
+  return entry.kind !== 'missing' && !entry.invalidReason
+}
+
+/**
+ * Entries worth inspecting: every one but an `invalid` entry, which cannot be removed so there is
+ * nothing to report on. A missing worktree's branch (or detached HEAD) can still hold commits (R1).
+ */
+export function isInspectable(entry: WorktreeInventoryEntry): boolean {
+  return !entry.invalidReason
 }
 
 export function recentMinutes(size: Loaded<WorktreeSize>, now: number): number | null {
@@ -142,11 +150,13 @@ export function statusText(
   inspection: Loaded<WorktreeInspection>
 ): string {
   if (entry.kind === 'missing') {
-    if (!inspection) return 'directory is gone'
+    // Not "gone": an unplugged drive or an offline share looks exactly like this.
+    if (!inspection) return 'not found at its path'
     return inspection.uniqueCommits > 0
-      ? `directory is gone · ${plural(inspection.uniqueCommits, 'commit')} only here`
-      : 'directory is gone'
+      ? `not found at its path · ${plural(inspection.uniqueCommits, 'commit')} only here`
+      : 'not found at its path'
   }
+  if (entry.invalidReason) return 'not checked'
   if (inspection === undefined) return 'checking…'
   if (inspection === null) return 'could not check'
   if (entry.kind === 'orphan') {
@@ -163,7 +173,7 @@ export function statusText(
 }
 
 export function sizeText(entry: WorktreeInventoryEntry, size: Loaded<WorktreeSize>): string {
-  if (entry.kind === 'missing') return '—'
+  if (!isMeasurable(entry)) return '—'
   if (size === undefined) return '…'
   if (size === null) return '?'
   return formatBytes(size.bytes)
@@ -251,7 +261,9 @@ export function confirmItem(
   const samples: string[] = []
 
   if (entry.kind === 'missing') {
-    lines.push('The directory is already gone; its git registration is removed.')
+    lines.push(
+      'Not found at its path (an unplugged drive or offline share looks the same); removing it only unregisters it, no files are touched.'
+    )
     if (!inspection) {
       lines.push(
         inspection === null
