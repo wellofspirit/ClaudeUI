@@ -71,20 +71,21 @@ namespaces is unplaceable before any `realpath`. The walk follows a link the way
 unnormalised, a `..` is the parent of the prefix reached so far (every prefix before it is known not to be a link),
 and every new prefix is checked again. Folding the target up front would take `/net/h/../../tmp` for `/tmp`, or
 `a/../b` with `a -> /net/h/q` for a sibling of `a`, and the later `realpath` would then open `/net`. That kernel
-order is POSIX only. On win32 the walk does what Windows does: a `..` in a link target is folded as text against
-the link's own directory (with `x\a -> ..\deep\dir` and `x\s -> a\..\b`, `realpath(x\s)` is `x\b`), so the raw
-target is judged first (`\\…` and `\??\…` are remote, a DOS device component is a device), the target is folded
-against the link's directory, a UNC result is remote, and the remaining components are walked from the result's
-root. A target whose root is neither empty (relative) nor `X:\` is unplaceable before any further call: the NT
-object paths libuv returns unchanged (`\Device\…`, `\GLOBAL??\…`, `\DosDevices\…`, `\GLOBALROOT\…`, `\Sessions\…`,
-`\Windows`) and drive-relative `D:foo` are `unreadable`. A junction keeps its own spelling (mount-point semantics) while
-a symlink replaces the name with its target, and `readlink` returns the same `X:\…` text for both, so the walk cannot tell
-which it holds: it keeps the two spellings (the path it reads, and the name a junction would leave) and folds a relative
-target against each. Where a relative `..` could fold differently under junction and symlink semantics — it climbs out of
-an absolute link's target (`w\J` to `real0` and `real0\s -> ..\b`: `w\b` or the folder above `real0`) — the path is
-`unreadable`, because `realpath` could otherwise follow a link the walk never read. A relative target that stays inside the
-absolute link's target folds the same way under both and is walked normally. Claude Code's own walk follows-then-climbs on
-win32 too, which we deliberately do not mirror there. The walk mirrors Claude Code
+order is POSIX only. On win32 the walk refuses what it cannot place. The target's raw text is judged first (`\\…` and
+`\??\…` are remote, a DOS device component is a device), and a target whose root is neither empty (relative) nor `X:\`
+is unplaceable before any further call: the NT object paths libuv returns unchanged (`\Device\…`, `\GLOBAL??\…`,
+`\DosDevices\…`, `\GLOBALROOT\…`, `\Sessions\…`, `\Windows`) and drive-relative `D:foo` are `unreadable`. A **relative
+target that contains a `..` component** is `unreadable` too. Windows folds a `..` in a symlink target as text against
+the link's directory, but a junction keeps its own spelling (mount-point semantics), and `readlink` returns the same
+`X:\…` text for both, so which directory a `..` climbs to depends on a link kind the walk cannot read. With `w\J` a
+junction to `real0` and `real0\s -> ..\b` the OS reads `w\b`; with `J` a symlink it reads the folder above `real0`; and
+`realpath` could follow a link the walk never read. A relative target without a `..` only descends from the link's
+physical parent directory, and that directory is the same under every junction or symlink reading, so it is folded as
+text against the link's directory, checked for a UNC result and walked from the root of the result. An absolute `X:\…`
+target is folded the same way (`D:\o\q\..\r` is `D:\o\r`): it names its target outright, so there is no link directory
+for the two readings to disagree about. The over-ask is a relative `..` symlink on Windows, which is rare (it needs the
+symlink privilege, or git `core.symlinks`). Claude Code's own walk follows-then-climbs on win32 too, which we
+deliberately do not mirror there. The walk mirrors Claude Code
 2.1.308 (`cli.js`) on two fronts. Its permission check `vze` asks, as a
 defence-in-depth check on the path and on every resolved spelling of it, for a path "under the /net automount
 map" (`Mw`: bare `/net`), "under /.vol, /.file, /.nofollow or /.resolve" (`Rb`: first component, case-insensitive,
