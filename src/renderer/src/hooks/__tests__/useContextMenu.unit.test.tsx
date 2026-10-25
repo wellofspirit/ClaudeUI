@@ -16,6 +16,7 @@ function Harness({ menuSize }: { menuSize: { w: number; h: number } }): React.JS
   return (
     <div>
       <div data-testid="anchor" onContextMenu={menu.open} style={{ width: 10, height: 10 }} />
+      <button data-testid="at" onClick={() => menu.openAt(950, 100)} />
       {menu.isOpen && (
         <div
           data-testid="menu"
@@ -150,6 +151,31 @@ describe('useContextMenu edge-flip', () => {
     })
     const menu = screen.getByTestId('menu')
     expect(Number(menu.style.left.replace('px', ''))).toBeLessThan(450)
+  })
+})
+
+describe('useContextMenu openAt (a button that opens the menu)', () => {
+  it('opens at the given client point and flips at the edge like a right-click', () => {
+    stubMenuSize(200, 150)
+    render(<Harness menuSize={{ w: 200, h: 150 }} />)
+    act(() => {
+      fireEvent.click(screen.getByTestId('at'))
+    })
+    const menu = screen.getByTestId('menu')
+    expect(menu.style.left).toBe('750px')
+    expect(menu.style.top).toBe('100px')
+  })
+
+  it('divides by the UI zoom like open()', () => {
+    useSessionStore.setState({
+      settings: { ...useSessionStore.getState().settings, uiFontScale: 2 }
+    })
+    stubMenuSize(20, 20)
+    render(<Harness menuSize={{ w: 20, h: 20 }} />)
+    act(() => {
+      fireEvent.click(screen.getByTestId('at'))
+    })
+    expect(screen.getByTestId('menu').style.left).toBe('475px')
   })
 })
 

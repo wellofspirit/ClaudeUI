@@ -1767,6 +1767,12 @@ export interface DirectoryGroup {
   projectKey: string
   folderName: string
   sessions: SessionInfo[]
+  /**
+   * Set (main side, filesystem facts only) when `cwd` is a linked git worktree, wherever it
+   * lives (`<repo>/.claude/worktrees`, opencode's data dir, `~/.codex/worktrees`). Every session
+   * row in this group is a worktree session; the sidebar and the pill read it by normalised cwd.
+   */
+  linkedWorktree?: LinkedWorktree
 }
 
 // ---------------------------------------------------------------------------
@@ -2168,9 +2174,20 @@ interface SessionAPI {
   scanCustomCommands(cwd: string): Promise<string[]>
   loadSkillDetails(cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
-  confirmQuit(): Promise<void>
+  /**
+   * Confirm the quit. `removeWorktreePaths`: worktree directories to delete AFTER the
+   * app's sessions, terminals and engines are torn down (their cwd locks released) and
+   * before it exits; the quit may take a moment. Desktop only; a no-op on the web client.
+   */
+  confirmQuit(removeWorktreePaths?: string[]): Promise<void>
   /** Cancel a pending quit prompt: clears the fallback timer, leaves services running. */
   cancelQuit(): Promise<void>
+  /**
+   * The quit modal is on screen: main stops its short fallback timer (which force-quits if the
+   * renderer never answers) so the user can take as long as they need. A renderer that never
+   * calls this still hits the fallback. Desktop only; a no-op on the web client.
+   */
+  ackQuitPrompt(): Promise<void>
   testProxyConnection(
     proxy: ProxySettings
   ): Promise<{ ok: boolean; latencyMs: number; error?: string }>
@@ -2597,8 +2614,35 @@ interface FileAPI {
   ): Promise<{ src: string } | { error: string }>
   createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
   getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
-  removeWorktree(worktreePath: string, branch: string, gitRoot: string): Promise<void>
-  listWorktrees(cwd: string): Promise<WorktreeEntry[]>
+  /**
+   * Legacy single-path removal (session-delete cleanup modal). Same mechanics as
+   * {@link removeWorktrees}, live holders ENFORCED: a held worktree comes back `refused`.
+   * Never throws for a refusal; throws only for a path that is not a worktree of any repo.
+   */
+  removeWorktree(
+    worktreePath: string,
+    branch: string,
+    gitRoot: string
+  ): Promise<WorktreeRemoveResult>
+  /** Every linked worktree of the repo `cwd` belongs to, plus orphan folders (ADR-112). Ids are wire keys. */
+  inventoryWorktrees(cwd: string): Promise<WorktreeInventory>
+  /** Uncommitted files and commits that exist only on this entry's branch. */
+  inspectWorktree(cwd: string, id: string): Promise<WorktreeInspection>
+  /** Size of one entry; `onProgress` reports `{done: files, total: null, phase: 'measuring'}`. */
+  measureWorktree(
+    cwd: string,
+    id: string,
+    onProgress?: (progress: InvokeProgress) => void
+  ): Promise<WorktreeSize>
+  /**
+   * Remove entries by id: one result per id, in order. `onProgress` reports
+   * `{done, total, phase}` per entry and per walked batch. Holders are enforced.
+   */
+  removeWorktrees(
+    cwd: string,
+    ids: string[],
+    onProgress?: (progress: InvokeProgress) => void
+  ): Promise<WorktreeRemoveResult[]>
 }
 
 /**
@@ -4671,19 +4715,116 @@ export interface WorktreeInfo {
   gitRoot: string
   originalHeadCommit: string
   createdAt: number
+  /**
+   * Who made the worktree: `created` = ClaudeUI's own `createWorktree`, `detected` = parsed from
+   * an engine event. Legacy entries carry none: an empty `originalHeadCommit` means detected.
+   * Only `created` worktrees are offered for removal by the session-delete and quit modals.
+   */
+  origin?: 'created' | 'detected'
 }
 
 export interface WorktreeStatus {
   uncommittedFiles: number
   commitsAhead: number
   files: string[]
+  /** Commits found only on this worktree's branch (or detached HEAD): what removing it would lose. */
+  uniqueCommits: number
+  /** The branch checked out in the worktree; null when detached. */
+  branch: string | null
 }
 
-export interface WorktreeEntry {
+/** A directory that is a linked git worktree of some repo (filesystem facts, no git spawn). */
+export interface LinkedWorktree {
+  worktreePath: string
+  repoRoot: string
+  /** Last path segment; `<4hex>/<repo>` for the Codex layout. */
+  name: string
+  /** Branch from the worktree's HEAD; '' when detached. */
+  branch: string
+}
+
+/** Something that keeps a worktree directory in use (a refusal when `live`, a warning otherwise). */
+export interface WorktreeHolder {
+  kind: 'session' | 'x-agent' | 'terminal'
+  id: string
+  label: string
+  live: boolean
+  engine?: EngineId
+}
+
+export interface WorktreeInventoryEntry {
+  /** Stable wire key: the normalised absolute path (names collide across roots). */
+  id: string
+  /** Display name: last path segment (Codex layout: `<4hex>/<repo>`). */
   name: string
   path: string
-  branch: string
-  exists: boolean
+  /** By layout, display only: never a permission input. */
+  location: 'managed' | 'opencode' | 'codex' | 'other'
+  /**
+   * worktree: registered in `git worktree list` and the directory is present.
+   * orphan: a directory directly under the managed root that git does not list.
+   * missing: registered, directory absent.
+   */
+  kind: 'worktree' | 'orphan' | 'missing'
+  /** Branch from the porcelain listing; null when detached or unknown. */
+  branch: string | null
+  head: string | null
+  locked: boolean
+  lockReason?: string
+  /** Set when remove will refuse the entry as `invalid`: the reason, shown as the row's subtext. */
+  invalidReason?: string
+  /** Ids of other entries whose directories sit inside this one; removed inner-first or refused. */
+  contains: string[]
+  holders: WorktreeHolder[]
+}
+
+export interface WorktreeInventory {
+  /**
+   * The repo's main checkout. Display only when `managedRoot` is '': for a bare repo's (or a
+   * submodule's) worktrees the root is unknown and this falls back to the git directory, which is
+   * not a usable cwd. Call the worktree functions with a path inside a worktree instead.
+   */
+  repoRoot: string
+  /** `<repoRoot>/.claude/worktrees`; '' when the repo root cannot be determined. */
+  managedRoot: string
+  entries: WorktreeInventoryEntry[]
+}
+
+export interface WorktreeInspection {
+  /** Changed files (`git status`); for an orphan, the files it still holds that are not links. */
+  uncommittedFiles: number
+  /** At most 20 paths. */
+  uncommittedSample: string[]
+  /** Entries git ignores (`status --ignored`), collapsed per directory; informational. */
+  ignoredEntries: number
+  /** Commits reachable from nowhere else (no other branch, remote-tracking ref or tag). */
+  uniqueCommits: number
+  /** At most 10 commits. */
+  uniqueCommitSample: Array<{ sha: string; subject: string }>
+}
+
+export interface WorktreeSize {
+  bytes: number
+  files: number
+  links: number
+  errors: number
+  /** Newest mtime of anything in the tree; 0 for an empty or missing one. */
+  newestMtimeMs: number
+}
+
+export interface WorktreeRemoveResult {
+  id: string
+  outcome: 'removed' | 'refused' | 'partial' | 'failed'
+  /** refused: `locked` | `in-use: <holder labels>` | `not-found` | `invalid: <why>`; failed: the error. */
+  reason?: string
+  /** partial: what could not be deleted (first 20). */
+  failures?: Array<{ path: string; code: string }>
+  branch?: {
+    name: string
+    action: 'deleted' | 'kept' | 'protected'
+    uniqueCommits: number
+    reason?: string
+  }
 }
 
 // ---------------------------------------------------------------------------

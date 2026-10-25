@@ -25,12 +25,13 @@ vi.mock('../../../core/services/logger', () => ({
 }))
 
 // Import after the mock is registered.
-import {
-  createWorktree,
-  removeWorktree,
-  listWorktrees,
-  getWorktreeStatus
-} from '../../../core/services/worktree'
+import { createWorktree, removeWorktree, getWorktreeStatus } from '../../../core/services/worktree'
+import type { HolderSources } from '../../../core/services/worktree-holders'
+
+/** The legacy entry point needs holder sources; none of these tests has a session. */
+const noHolders: { sources: HolderSources } = {
+  sources: { sessions: () => [], xAgents: () => [], terminals: () => [] }
+}
 
 // ---------------------------------------------------------------------------
 // createWorktree
@@ -111,7 +112,7 @@ describe('removeWorktree', () => {
     const branchesBefore = await simpleGit(repo.path).branch()
     expect(branchesBefore.all).toContain(info.worktreeBranch)
 
-    await removeWorktree(info.worktreePath, info.worktreeBranch, info.gitRoot)
+    await removeWorktree(info.worktreePath, info.worktreeBranch, info.gitRoot, noHolders)
 
     // Both dir and branch are gone
     expect(fs.existsSync(info.worktreePath)).toBe(false)
@@ -129,7 +130,7 @@ describe('removeWorktree', () => {
     await wtGit.add('dirty.txt')
 
     // removeWorktree uses --force internally, so dirty state should not block.
-    await removeWorktree(info.worktreePath, info.worktreeBranch, info.gitRoot)
+    await removeWorktree(info.worktreePath, info.worktreeBranch, info.gitRoot, noHolders)
     expect(fs.existsSync(info.worktreePath)).toBe(false)
   })
 })
@@ -159,7 +160,7 @@ describe('removeWorktree containment', () => {
   })
 
   it('refuses to remove a path outside the managed worktrees directory (and never rm -rf it)', async () => {
-    await expect(removeWorktree(outside, 'main', repo.path)).rejects.toThrow(
+    await expect(removeWorktree(outside, 'main', repo.path, noHolders)).rejects.toThrow(
       /outside the managed directory/
     )
     // The out-of-tree directory and its contents are untouched.
@@ -168,8 +169,8 @@ describe('removeWorktree containment', () => {
   })
 
   it('refuses to remove the repository root itself', async () => {
-    await expect(removeWorktree(repo.path, 'main', repo.path)).rejects.toThrow(
-      /outside the managed directory/
+    await expect(removeWorktree(repo.path, 'main', repo.path, noHolders)).rejects.toThrow(
+      /not a worktree of its repository/
     )
     expect(fs.existsSync(path.join(repo.path, 'README.md'))).toBe(true)
   })
@@ -180,7 +181,10 @@ describe('removeWorktree containment', () => {
     await fs.promises.mkdir(stray, { recursive: true })
     await fs.promises.writeFile(path.join(stray, 'f.txt'), 'x\n', 'utf-8')
 
-    await expect(removeWorktree(stray, 'main', repo.path)).resolves.toBeUndefined()
+    await expect(removeWorktree(stray, 'main', repo.path, noHolders)).resolves.toMatchObject({
+      outcome: 'removed'
+    })
+    expect(fs.existsSync(stray)).toBe(false)
 
     // Nothing outside the repo was affected.
     expect(fs.existsSync(path.join(outside, 'keepme.txt'))).toBe(true)
@@ -193,7 +197,7 @@ describe('removeWorktree containment', () => {
     await simpleGit(repo.path).raw(['branch', 'important-release'])
 
     // Malicious/incorrect renderer-supplied branch.
-    await removeWorktree(info.worktreePath, 'important-release', info.gitRoot)
+    await removeWorktree(info.worktreePath, 'important-release', info.gitRoot, noHolders)
 
     const branches = await simpleGit(repo.path).branch()
     // The targeted branch survives; only the porcelain-derived branch is removed.
@@ -204,7 +208,7 @@ describe('removeWorktree containment', () => {
 
   it('never deletes main/master even when passed as the branch argument', async () => {
     const info = await createWorktree(repo.path, 'safe')
-    await removeWorktree(info.worktreePath, 'main', info.gitRoot)
+    await removeWorktree(info.worktreePath, 'main', info.gitRoot, noHolders)
 
     const branches = await simpleGit(repo.path).branch()
     expect(branches.all).toContain('main')
@@ -245,60 +249,6 @@ describe('createWorktree name validation', () => {
     const info = await createWorktree(repo.path, 'ok_name-1.2')
     expect(info.worktreeName).toBe('ok_name-1.2')
     expect(fs.existsSync(info.worktreePath)).toBe(true)
-  })
-})
-
-// ---------------------------------------------------------------------------
-// listWorktrees
-// ---------------------------------------------------------------------------
-
-describe('listWorktrees', () => {
-  let repo: TempGitRepo
-
-  beforeEach(async () => {
-    repo = await makeTempGitRepo()
-  })
-
-  afterEach(async () => {
-    await repo.cleanup()
-  })
-
-  it('returns an empty array when no worktrees directory exists', async () => {
-    const entries = await listWorktrees(repo.path)
-    expect(entries).toEqual([])
-  })
-
-  it('lists created worktrees with name/path/branch/exists', async () => {
-    const a = await createWorktree(repo.path, 'alpha')
-    const b = await createWorktree(repo.path, 'beta')
-
-    const entries = await listWorktrees(repo.path)
-    expect(entries).toHaveLength(2)
-
-    const names = entries.map((e) => e.name).sort()
-    expect(names).toEqual(['alpha', 'beta'])
-
-    const alpha = entries.find((e) => e.name === 'alpha')!
-    expect(alpha.branch).toBe('worktree-alpha')
-    expect(alpha.exists).toBe(true)
-    expect(alpha.path).toBe(a.worktreePath)
-
-    const beta = entries.find((e) => e.name === 'beta')!
-    expect(beta.path).toBe(b.worktreePath)
-  })
-
-  it('reports exists=false for a worktree dir with no .git marker', async () => {
-    // Create a plain dir under .claude/worktrees without running `git worktree add`.
-    // This simulates the "orphan" case after a manual deletion or corruption.
-    const worktreesBase = path.join(repo.path, '.claude', 'worktrees')
-    await fs.promises.mkdir(path.join(worktreesBase, 'orphan'), { recursive: true })
-
-    const entries = await listWorktrees(repo.path)
-    const orphan = entries.find((e) => e.name === 'orphan')
-    expect(orphan).toBeDefined()
-    expect(orphan!.exists).toBe(false)
-    // Falls back to the naming convention when .git is missing
-    expect(orphan!.branch).toBe('worktree-orphan')
   })
 })
 

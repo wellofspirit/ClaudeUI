@@ -1294,6 +1294,33 @@ describe('CrossEngineDispatcher — Claude direction (ADR-033 M2)', () => {
     })
   })
 
+  describe('liveTargetCwds (the worktree manager’s holder read, ADR-112)', () => {
+    it('lists a live target with its engine and cwd, and drops it once released', async () => {
+      const target = makeFakeClaudeTarget()
+      const { dispatcher } = makeHarness({
+        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        spawnClaudeQuery: target.spawnClaudeQuery
+      })
+      expect(dispatcher.liveTargetCwds()).toEqual([])
+      const pending = dispatcher.dispatch(
+        { engine: 'claude', prompt: 'x' },
+        makeCtx({ fromEngine: 'opencode', fromRoutingId: 'routing-live-owner' })
+      )
+      await tick()
+      target.push({ type: 'system', subtype: 'init', session_id: 'claude-sess-live' } as SDKMessage)
+      await tick()
+
+      expect(dispatcher.liveTargetCwds()).toEqual([
+        expect.objectContaining({ engine: 'claude', cwd: '/tmp/xeng-project' })
+      ])
+
+      dispatcher.disposeFor('routing-live-owner')
+      target.push(resultMsg())
+      await pending
+      expect(dispatcher.liveTargetCwds()).toEqual([])
+    })
+  })
+
   describe('disposeFor', () => {
     it('aborts the Claude target process (no server/session to delete)', async () => {
       const target = makeFakeClaudeTarget()
@@ -8803,6 +8830,25 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
 
   const initOf = (harnessId: string): SDKMessage =>
     ({ type: 'system', subtype: 'init', session_id: harnessId }) as SDKMessage
+
+  it('releaseAllTargets frees a RUNNING background target that disposeFor spares (quit-time worktree removal)', async () => {
+    const t = await launchClaude()
+    t.target.push(initOf('c-bg-quit'))
+    await tick()
+    expect(t.dispatcher.liveTargetCwds()).toHaveLength(1)
+
+    t.dispatcher.disposeFor('routing-1')
+    // The background run belongs to the parent's durable id: its process keeps holding the cwd.
+    expect(t.dispatcher.liveTargetCwds()).toHaveLength(1)
+    expect(t.target.lastAbortController()?.signal.aborted).toBe(false)
+
+    expect(t.dispatcher.releaseAllTargets()).toBe(1)
+
+    expect(t.dispatcher.liveTargetCwds()).toEqual([])
+    expect(t.target.lastAbortController()?.signal.aborted).toBe(true)
+    expect(t.dispatcher.releaseAllTargets()).toBe(0)
+    t.target.push(resultMsg({ session_id: 'c-bg-quit' }))
+  })
 
   it('a background launch returns before the turn finishes; the run then tells the parent id started → progress → notification with the FULL text', async () => {
     const t = await launchClaude()

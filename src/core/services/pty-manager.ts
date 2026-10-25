@@ -479,6 +479,11 @@ export class PtyManager {
     return this.ptys.has(id)
   }
 
+  /** Every live terminal's id and spawn cwd (the worktree manager's "in use" check, ADR-112). */
+  liveCwds(): Array<{ id: string; cwd: string }> {
+    return [...this.ptys].map(([id, entry]) => ({ id, cwd: entry.cwd }))
+  }
+
   /** The cwd a terminal was spawned in, or undefined when it is gone. */
   cwdOf(id: string): string | undefined {
     return this.ptys.get(id)?.cwd

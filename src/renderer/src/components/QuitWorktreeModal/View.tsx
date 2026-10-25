@@ -20,24 +20,36 @@ export function QuitWorktreeModalView({
   onKeepAll,
   onRemoveAll
 }: QuitWorktreeModalViewProps): React.JSX.Element {
+  // Two sessions can share one worktree: it is listed (and counted) once.
+  const worktrees = [
+    ...new Map(
+      quitWorktrees.map(({ worktreeInfo }) => [worktreeInfo.worktreePath, worktreeInfo])
+    ).values()
+  ]
   return (
     <div
       data-testid="QuitWorktreeModal"
       className="fixed inset-0 z-[200] flex items-center justify-center"
     >
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-      <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[420px] p-5 animate-fade-in">
+      <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[420px] max-w-[calc(100%-2rem)] p-5 animate-fade-in">
         <h3 className="text-[15px] font-medium text-text-primary mb-3">Active worktrees</h3>
 
         <p className="text-[13px] text-text-secondary mb-3">
-          You have {quitWorktrees.length} active worktree{quitWorktrees.length !== 1 ? 's' : ''}.
-          Would you like to remove them before quitting?
+          You have {worktrees.length} active worktree{worktrees.length !== 1 ? 's' : ''}. Would you
+          like to remove them before quitting?
+        </p>
+
+        <p data-testid="QuitWorktreeModal.note" className="text-[11px] text-text-muted mb-3">
+          {removing
+            ? 'Closing your sessions, then removing the worktrees. ClaudeUI quits when this is done.'
+            : 'Removal happens after your sessions close, so quitting may take a moment. Branches with commits found nowhere else are kept.'}
         </p>
 
         <div className="mb-4 space-y-1.5">
-          {quitWorktrees.map(({ worktreeInfo }) => (
+          {worktrees.map((worktreeInfo) => (
             <div
-              key={worktreeInfo.worktreeName}
+              key={worktreeInfo.worktreePath}
               data-testid="QuitWorktreeModal.worktreeRow"
               data-id={worktreeInfo.worktreeName}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-bg-tertiary border border-border"
@@ -66,18 +78,20 @@ export function QuitWorktreeModalView({
           ))}
         </div>
 
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <button
             data-testid="QuitWorktreeModal.cancel"
             onClick={onCancel}
-            className="px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+            disabled={removing}
+            className="px-3 py-1.5 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover disabled:opacity-50 transition-colors cursor-default"
           >
             Cancel
           </button>
           <button
             data-testid="QuitWorktreeModal.keepAll"
             onClick={onKeepAll}
-            className="px-3 py-1.5 rounded-md text-[12px] text-text-secondary bg-bg-tertiary hover:bg-bg-hover border border-border transition-colors cursor-default"
+            disabled={removing}
+            className="px-3 py-1.5 rounded-md text-[12px] text-text-secondary bg-bg-tertiary hover:bg-bg-hover border border-border disabled:opacity-50 transition-colors cursor-default"
           >
             Keep all & quit
           </button>
@@ -87,7 +101,7 @@ export function QuitWorktreeModalView({
             disabled={removing}
             className="px-3 py-1.5 rounded-md text-[12px] text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors cursor-default"
           >
-            {removing ? 'Removing...' : 'Remove all & quit'}
+            {removing ? 'Quitting...' : 'Remove all & quit'}
           </button>
         </div>
       </div>

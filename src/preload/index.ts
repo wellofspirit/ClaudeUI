@@ -69,10 +69,14 @@ ipcRenderer.on('sync-port', (event) => {
  * Throws on { ok: false } so callers can .catch() as expected.
  */
 async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
-  const result = await ipcRenderer.invoke(channel, ...args)
+  return unwrapResult<T>(channel, await ipcRenderer.invoke(channel, ...args))
+}
+
+function unwrapResult<T>(channel: string, result: unknown): T {
   if (result && typeof result === 'object' && 'ok' in result) {
-    if (!result.ok) throw new Error(result.error ?? `IPC ${channel} failed`)
-    return result.data as T
+    const envelope = result as { ok: boolean; data?: unknown; error?: string }
+    if (!envelope.ok) throw new Error(envelope.error ?? `IPC ${channel} failed`)
+    return envelope.data as T
   }
   return result as T
 }
@@ -389,13 +393,34 @@ const api: ClaudeAPI = {
   createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
   getWorktreeStatus: (worktreePath: string, originalHead: string) =>
     unwrap('worktree:status', worktreePath, originalHead),
+  // Declared `withProgress` (the remote client's timeout slides on it), so it always rides the
+  // progress path; the signature has no callback, hence the no-op.
   removeWorktree: (worktreePath: string, branch: string, gitRoot: string) =>
-    unwrap('worktree:remove', worktreePath, branch, gitRoot),
-  listWorktrees: (cwd: string) => unwrap('worktree:list', cwd),
+    invokeWithProgress('worktree:remove', [worktreePath, branch, gitRoot], () => {}).then((r) =>
+      unwrapResult('worktree:remove', r)
+    ),
+  inventoryWorktrees: (cwd: string) => unwrap('worktree:inventory', cwd),
+  inspectWorktree: (cwd: string, id: string) => unwrap('worktree:inspect', cwd, id),
+  // The progress path only when a callback is given (ADR-102); the safeHandler envelope
+  // rides back through `invokeWithProgress` unchanged, so it is unwrapped here.
+  measureWorktree: (cwd: string, id: string, onProgress?: (progress: InvokeProgress) => void) =>
+    onProgress
+      ? invokeWithProgress('worktree:measure', [cwd, id], onProgress).then((r) =>
+          unwrapResult('worktree:measure', r)
+        )
+      : unwrap('worktree:measure', cwd, id),
+  removeWorktrees: (cwd: string, ids: string[], onProgress?: (progress: InvokeProgress) => void) =>
+    onProgress
+      ? invokeWithProgress('worktree:remove-many', [cwd, ids], onProgress).then((r) =>
+          unwrapResult('worktree:remove-many', r)
+        )
+      : unwrap('worktree:remove-many', cwd, ids),
 
   // App lifecycle
-  confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+  confirmQuit: (removeWorktreePaths?: string[]) =>
+    ipcRenderer.invoke('app:quit-confirm', removeWorktreePaths ?? []),
   cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
+  ackQuitPrompt: () => ipcRenderer.invoke('app:quit-prompting'),
 
   // Git operations — all handlers use safeHandler, so unwrap the { ok, data } envelope
   gitCheckRepo: (cwd: string) => unwrap<boolean>('git:check-repo', cwd),

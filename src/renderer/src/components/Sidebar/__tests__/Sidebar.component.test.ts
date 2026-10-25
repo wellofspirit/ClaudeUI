@@ -1079,7 +1079,7 @@ describe('Sidebar FC', () => {
     expect(viewProps.cleanupWorktree?.sessionId).toBe('wt-sess')
   })
 
-  it('onWorktreeCleanupRemove clears worktree info and removes from recents', async () => {
+  it('onWorktreeCleanupRemove removes from recents and leaves the worktree map to the server', async () => {
     useSessionStore.setState({
       recentSessionIds: ['wt-sess'],
       worktreeInfoMap: {
@@ -1105,8 +1105,37 @@ describe('Sidebar FC', () => {
     })
 
     expect(useSessionStore.getState().recentSessionIds).not.toContain('wt-sess')
-    expect(useSessionStore.getState().worktreeInfoMap['wt-sess']).toBeUndefined()
+    // The server forgets the entry when it removes the worktree; a client-side save of the whole
+    // map could resurrect entries the server already dropped.
+    expect(useSessionStore.getState().worktreeInfoMap['wt-sess']).toBeDefined()
     expect(viewProps.cleanupWorktree).toBeNull()
+  })
+
+  it('onRemoveRecent does not offer removal for a worktree ClaudeUI only detected (C-S11)', async () => {
+    useSessionStore.setState({
+      recentSessionIds: ['wt-sess'],
+      worktreeInfoMap: {
+        'wt-sess': {
+          worktreeName: 'feat-x',
+          worktreePath: '/p',
+          worktreeBranch: 'b',
+          gitRoot: '/r',
+          originalHeadCommit: '',
+          origin: 'detected'
+        } as any
+      }
+    })
+    mirrorStoreIntoReplica()
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      viewProps.onRemoveRecent(makeSessionInfo('wt-sess'))
+    })
+
+    expect(viewProps.cleanupWorktree).toBeNull()
+    expect(useSessionStore.getState().recentSessionIds).not.toContain('wt-sess')
   })
 
   it('onWorktreeCleanupCancel dismisses the modal without touching recents or worktree info', async () => {

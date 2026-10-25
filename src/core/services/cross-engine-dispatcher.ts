@@ -4605,6 +4605,22 @@ export class CrossEngineDispatcher {
   }
 
   /**
+   * Release EVERY live target, background runs included (the quit-time worktree removal: a
+   * target's process is a cwd holder, and `disposeFor` deliberately spares a running background
+   * run). Idle targets keep their harness session and are resumable; a busy one's row says
+   * `interrupted`. Returns how many were released.
+   */
+  releaseAllTargets(): number {
+    let released = 0
+    for (const [sessionId, entry] of [...this.targets]) {
+      if (entry.released) continue
+      this.releaseEntry(sessionId, entry, entry.busy ? 'interrupted' : 'idle')
+      released++
+    }
+    return released
+  }
+
+  /**
    * Take a live target out of service: out of the table, its approvals dismissed, its
    * row set to `state` (null leaves the row as the last turn wrote it), and its process
    * or connection released per engine. The harness SESSION stays; ending it for good is
@@ -4665,6 +4681,19 @@ export class CrossEngineDispatcher {
       entry.settled = null
       settle?.({ kind: 'error', message: 'the dispatching session was disposed' })
     }
+  }
+
+  /**
+   * The live targets' ledger id, engine and working directory — a narrow read view for the
+   * worktree manager (ADR-112: a live X-Agent holds its `cwd`), without exposing the entries.
+   */
+  liveTargetCwds(): Array<{ ledgerId: string; engine: EngineId; cwd: string }> {
+    const out: Array<{ ledgerId: string; engine: EngineId; cwd: string }> = []
+    for (const entry of this.targets.values()) {
+      if (entry.released || !entry.cwd) continue
+      out.push({ ledgerId: entry.ledgerId, engine: entry.kind, cwd: entry.cwd })
+    }
+    return out
   }
 
   /** The live (not yet released) target a ledger row is, if the dispatcher holds one. */

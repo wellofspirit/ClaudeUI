@@ -142,6 +142,8 @@ export interface DurableEventData {
   'session.agent.selected': Session & { readonly agent: string; readonly previous?: string }
   'session.model.selected': Session & { readonly model: Model_Ref; readonly previous?: Model_Ref }
   'session.renamed': Session & { readonly title: string }
+  /** The session moved to another directory (`session_move`, a TUI move): `MovePayload` fields. */
+  'session.moved': Session & Session_Inbox_MovePayload
   'session.permissions': Session & { readonly permissions: Permission_Ruleset }
   'session.deleted': Session
   'session.inbox.enqueued': Inbox & { readonly item: SessionInboxItem }
@@ -296,6 +298,7 @@ export const EVENT_DURABILITY: { readonly [Type in OpencodeEventType]: 'durable'
   'session.agent.selected': 'durable',
   'session.model.selected': 'durable',
   'session.renamed': 'durable',
+  'session.moved': 'durable',
   'session.permissions': 'durable',
   'session.deleted': 'durable',
   'session.inbox.enqueued': 'durable',

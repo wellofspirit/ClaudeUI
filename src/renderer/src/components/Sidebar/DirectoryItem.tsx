@@ -131,7 +131,7 @@ export const DirectoryItem = memo(function DirectoryItem({
         onDoubleClick={handleDoubleClick}
         onContextMenu={menu.open}
         style={{ padding: '0 5px' }}
-        className={`flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover ${hidden ? 'opacity-45 italic' : ''}`}
+        className={`group flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover ${hidden ? 'opacity-45 italic' : ''}`}
       >
         <span className="shrink-0 text-text-muted">
           <svg
@@ -161,6 +161,40 @@ export const DirectoryItem = memo(function DirectoryItem({
           {group.folderName}
         </span>
         <span className="text-[10px] text-text-muted">{group.sessions.length}</span>
+        {/* The right-click menu, reachable without a right button: touch screens (iOS never
+            fires a context-menu on a tap) and keyboard. Revealed on hover on pointer devices,
+            always shown on touch and narrow screens. */}
+        <button
+          type="button"
+          data-testid="DirectoryItem.menu"
+          aria-label="Project menu"
+          aria-haspopup="menu"
+          aria-expanded={menu.isOpen}
+          // The menu's outside-click handler would close it on this mousedown, and the click
+          // would then reopen it: stop the mousedown so the click toggles.
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            if (menu.isOpen) {
+              menu.close()
+              return
+            }
+            const rect = e.currentTarget.getBoundingClientRect()
+            menu.openAt(rect.left, rect.bottom)
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+          className={`shrink-0 w-5 h-5 max-md:w-8 max-md:h-8 [@media(hover:none)]:w-8 [@media(hover:none)]:h-8 -mr-1 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-opacity cursor-default ${
+            menu.isOpen
+              ? 'opacity-100'
+              : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 [@media(hover:none)]:opacity-100'
+          }`}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.8" />
+            <circle cx="12" cy="12" r="1.8" />
+            <circle cx="19" cy="12" r="1.8" />
+          </svg>
+        </button>
       </div>
       {expanded && (
         <div className="ml-3">
@@ -205,11 +239,13 @@ export const DirectoryItem = memo(function DirectoryItem({
       {menu.isOpen && (
         <div
           ref={menu.ref}
+          role="menu"
           className="fixed z-50 min-w-[160px] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg"
           style={menu.style}
         >
           {onViewWorktrees && (
             <button
+              role="menuitem"
               onClick={() => {
                 menu.close()
                 onViewWorktrees()
@@ -237,6 +273,7 @@ export const DirectoryItem = memo(function DirectoryItem({
             </button>
           )}
           <button
+            role="menuitem"
             onClick={() => {
               menu.close()
               onDoubleClick()
@@ -258,9 +295,12 @@ export const DirectoryItem = memo(function DirectoryItem({
             </svg>
             New session here
           </button>
-          {(onHide || onUnhide || onDelete) && <div className="h-px bg-border my-1" />}
+          {(onHide || onUnhide || onDelete) && (
+            <div role="separator" className="h-px bg-border my-1" />
+          )}
           {onHide && !hidden && (
             <button
+              role="menuitem"
               onClick={() => {
                 menu.close()
                 onHide()
@@ -272,6 +312,7 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           {onUnhide && hidden && (
             <button
+              role="menuitem"
               onClick={() => {
                 menu.close()
                 onUnhide()
@@ -283,6 +324,7 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           {onDelete && (
             <button
+              role="menuitem"
               data-testid="DirectoryItem.delete"
               onClick={() => {
                 menu.close()

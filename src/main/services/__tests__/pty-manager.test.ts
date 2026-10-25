@@ -403,6 +403,23 @@ describe('PtyManager', () => {
     })
   })
 
+  describe('liveCwds() (the worktree manager’s holder check, ADR-112)', () => {
+    it('lists each live terminal with its spawn cwd, and drops killed ones', () => {
+      mockPlatform = 'linux'
+      process.env.SHELL = '/bin/bash'
+
+      const a = manager.create('/repo/.claude/worktrees/a', vi.fn(), vi.fn())
+      const b = manager.create('/repo', vi.fn(), vi.fn())
+      expect(manager.liveCwds()).toEqual([
+        { id: a, cwd: '/repo/.claude/worktrees/a' },
+        { id: b, cwd: '/repo' }
+      ])
+
+      manager.kill(a)
+      expect(manager.liveCwds()).toEqual([{ id: b, cwd: '/repo' }])
+    })
+  })
+
   describe('has()', () => {
     it('returns true before kill and false after', () => {
       mockPlatform = 'linux'

@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
+import { closeMockupWatchersUnder } from '../../../core/services/mockup-watch-registry'
 import { setHostAuth, type HostAuth } from '../../../core/host'
 import * as fs from 'fs'
 import * as os from 'os'
@@ -1185,6 +1186,27 @@ describe('registerRemoteHandlers', () => {
     })
   })
 
+  describe('remote mockup watcher + worktree removal (C-S7, ADR-112)', () => {
+    it('a remote mockup watch is visible to the worktree remover, which closes it and frees the key', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cui-rmockup-'))
+      try {
+        fs.mkdirSync(path.join(root, '.claude', 'ui', 'mockups', 'm1'), { recursive: true })
+        await dispatcher.handle(makeRequest('mockup:watch', root, 'm1'), remoteConn)
+
+        expect(closeMockupWatchersUnder(root)).toBe(1)
+        // Re-armable: the has() guard no longer sees the closed watcher.
+        await dispatcher.handle(makeRequest('mockup:watch', root, 'm1'), remoteConn)
+        expect(closeMockupWatchersUnder(root)).toBe(1)
+        await dispatcher.handle(makeRequest('mockup:watch', root, 'm1'), remoteConn)
+        await dispatcher.handle(makeRequest('mockup:unwatch', root, 'm1'), remoteConn)
+        expect(closeMockupWatchersUnder(root)).toBe(0)
+      } finally {
+        closeMockupWatchersUnder(root)
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
   // R5 — full channel parity (user decision: register every channel the web
   // api-adapter invokes that a remote grant covers). These were missing from the
   // dispatcher, so the web client hit "Channel not available" for git, live
@@ -2330,8 +2352,11 @@ const S1B_SWEEP_CHANNELS = [
   'proxy:test-connection',
   'usage:refresh-prices',
   'worktree:create',
-  'worktree:list',
+  'worktree:inspect',
+  'worktree:inventory',
+  'worktree:measure',
   'worktree:remove',
+  'worktree:remove-many',
   'worktree:status'
 ] as const
 

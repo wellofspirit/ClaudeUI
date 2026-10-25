@@ -271,6 +271,55 @@ describe('reducer — session registry', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Worktree entries survive status events
+//
+// `status.cwd` is the SPAWN cwd for every engine (it never follows an EnterWorktree), so a
+// detected entry — whose `originalCwd` IS the spawn cwd — was dropped by the very next status.
+// An entry now leaves the map only through `config:sessions-changed` (ExitWorktree observed
+// main-side, a worktree removal, a session delete).
+// ---------------------------------------------------------------------------
+
+describe('reducer — worktree entries and session:status', () => {
+  const entry = {
+    worktreePath: '/repo/.claude/worktrees/feat',
+    worktreeBranch: 'worktree-feat',
+    worktreeName: 'feat',
+    originalCwd: '/repo',
+    gitRoot: '/repo',
+    originalHeadCommit: '',
+    createdAt: 1,
+    origin: 'detected'
+  }
+
+  it('a detected entry survives the next status whose cwd is the spawn cwd', () => {
+    const s = fold(
+      [
+        created('rid', '/repo'),
+        ['config:sessions-changed', { worktreeInfoMap: { rid: entry } }],
+        ['session:status', 'rid', status({ state: 'idle', cwd: '/repo' })]
+      ],
+      emptyCanonicalState()
+    )
+    expect(s.worktreeInfoMap['rid']).toEqual(entry)
+  })
+
+  it('an entry leaves the map through config:sessions-changed, not through status', () => {
+    const withEntry = fold([
+      created('rid', '/repo'),
+      ['config:sessions-changed', { worktreeInfoMap: { rid: entry } }]
+    ])
+    const after = fold(
+      [
+        ['session:status', 'rid', status({ state: 'running', cwd: '/repo' })],
+        ['config:sessions-changed', { worktreeInfoMap: {} }]
+      ],
+      withEntry
+    )
+    expect(after.worktreeInfoMap).toEqual({})
+  })
+})
+
+// ---------------------------------------------------------------------------
 // F1 — explicit removal
 // ---------------------------------------------------------------------------
 

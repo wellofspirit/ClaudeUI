@@ -1982,16 +1982,6 @@ describe('setWorktreeInfo', () => {
   })
 })
 
-describe('clearWorktreeInfo', () => {
-  it('removes from worktreeInfoMap and sets session.worktreeInfo to null', () => {
-    store().createNewSession('r1', '/test')
-    store().setWorktreeInfo('r1', makeWorktreeInfo())
-    store().clearWorktreeInfo('r1')
-    expect(store().worktreeInfoMap['r1']).toBeUndefined()
-    expect(store().sessions['r1'].worktreeInfo).toBeNull()
-  })
-})
-
 // ---------------------------------------------------------------------------
 // Settings actions
 // ---------------------------------------------------------------------------

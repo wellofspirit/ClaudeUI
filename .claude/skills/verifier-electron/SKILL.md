@@ -492,6 +492,62 @@ Select-Object -ExpandProperty Modules`, with a terminal open so node-pty is load
   and expect the worker's own `{"type":"fatal","message":"could not load the speech model…"}`.
 - **Log viewer.** `window.api.openLogViewer()` arrives as a Playwright `window` event;
   its rows are `.log-entry`.
+- **Real home leak.** On Windows `app.getPath('home')` returns the REAL home whatever
+  the env says. The app's own `os.homedir()` follows `USERPROFILE`, so isolation
+  holds only while no code reads `app.getPath('home')`. Grep before trusting it.
+
+## Long drives, quit flows and worktree drives
+
+Learned verifying the worktree cleanup (ADR-112).
+
+- **One launch, many steps.** `app-shot.mjs` is one shot per launch. For multi-step
+  drives, quit flows or a remote server, write a small launcher:
+  - It launches `_electron` with the full isolation env.
+  - It serves `POST /eval`, which evaluates a JS body with `app`, `win` and Playwright in
+    scope, plus `/quit`.
+  - Give it `process.on('uncaughtException')` and `child.on('error')` on every spawn. A
+    spawn with a missing cwd otherwise kills the driver and the app.
+  - In Bash heredocs, `\\` collapses inside JS regexes: build backslashes with
+    `String.fromCharCode(92)`.
+- **Quit flows.**
+  - `app.evaluate(({app}) => app.quit())` makes the renderer show `QuitWorktreeModal`
+    (`.removeAll` / `.keepAll`). The driver dies with the app, so run one quit scenario
+    per launch; one scenario can carry several worktrees.
+  - Read the outcome from the log: `Quit: worktree <path>: <outcome>` (debug) after the
+    teardown.
+- **Scratch sidebar groups.** Write `<home>/.claude/projects/<cwd with non-alnum → ->/<uuid>.jsonl`.
+  The first line is a `type:"user", userType:"external"` entry carrying `cwd`, followed
+  by an assistant entry. A cwd inside a linked worktree gets the worktree marker and tint
+  (engine-neutral).
+- **Created worktrees.** Use the Welcome flow `WelcomeState.directory` →
+  `.worktreeToggle` / `.worktreeName`. It records `origin: 'created'`, which the quit and
+  session-delete prompts require.
+- **Worktree matrix.**
+  - Put a sentinel behind every junction and check it after each removal.
+  - Age files with `os.utime` BEFORE making junctions, or the manager's 10-minute
+    "recently modified" rule keeps everything out of Select safe.
+  - Lock a dir on Windows with a child process (`stdio:'ignore'`) whose cwd is inside it;
+    kill that PID only.
+  - Cancel a live holder by the holder id from `inventoryWorktrees(...).entries[].holders[]`,
+    not the routing id: Claude rekeys after its first spawn.
+- **Codex without auth.** Copy `~/.claude/ui/harnesses/codex/<tested>` into the scratch
+  store. The shared host then spawns and logs
+  `app-server spawned: … cwd=<home>`.
+- **Claude turns without a provider.** Use a local `/v1/messages` SSE stand-in (see the
+  judge stand-in section) set via `saveVendorConfig('anthropic', {endpoint: {enabled,
+baseUrl, authToken}})`.
+  - It also needs `count_tokens`.
+  - It must serve each scripted turn once, keyed on the last user text. A matcher bug
+    loops the agent.
+  - Deferred tools such as `EnterWorktree` still run when the stand-in emits their
+    `tool_use`.
+- **Web client.**
+  - Use the worktree's Playwright chromium; log in via `PasswordLogin.input` + Enter.
+  - Phone: `isMobile` + `hasTouch` at 375×812, open the drawer with
+    `TopBar.toggleSidebar`, and use `.tap()`.
+  - Expand one project group at a time (others re-render).
+  - Theme for screenshots: `document.documentElement.dataset.theme = 'light'` (delete
+    it for dark).
 
 ## Caveats — what you can't (safely) drive
 

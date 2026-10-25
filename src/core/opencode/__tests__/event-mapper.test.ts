@@ -1519,6 +1519,22 @@ describe('routing and session events', () => {
     ])
   })
 
+  // session-event.ts `Moved` = `session.moved` + `Session.Inbox.MovePayload` fields
+  // ({location:{directory}, projectID, subpath?}); `session_move` and the TUI both emit it.
+  it('session.moved of the own session reports where it works now; a foreign one is ignored', () => {
+    const moved = {
+      location: { directory: 'C:/data/opencode/worktree/abcdef/brave-fox' },
+      projectID: 'prj_x',
+      subpath: ''
+    }
+    expect(
+      map(
+        ev('session.moved', { sessionID: SID, ...moved }),
+        ev('session.moved', { sessionID: 'ses_foreign', ...moved })
+      )
+    ).toEqual([{ kind: 'session-moved', directory: 'C:/data/opencode/worktree/abcdef/brave-fox' }])
+  })
+
   it('provider.auth names the vendor from the session’s model (constructor, created, or step)', () => {
     mapper = new OpencodeEventMapper({
       sessionID: SID,

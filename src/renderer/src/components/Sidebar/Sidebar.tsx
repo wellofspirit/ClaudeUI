@@ -7,6 +7,7 @@ import { useIsMobile } from '../../hooks/useIsMobile'
 import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
+import { isCreatedWorktree } from '../../../../shared/linked-worktree'
 import { planClaudeProjectDelete } from '../../../../shared/claude-project-delete'
 import {
   beginTranscriptPlaceholder,
@@ -138,7 +139,6 @@ export function Sidebar({
   const customTitles = useSessionStore((s) => s.customTitles)
   const reorderPinnedSessions = useSessionStore((s) => s.reorderPinnedSessions)
   const worktreeInfoMap = useSessionStore((s) => s.worktreeInfoMap)
-  const clearWorktreeInfo = useSessionStore((s) => s.clearWorktreeInfo)
   const hiddenSessionIds = useSessionStore((s) => s.hiddenSessionIds)
   const hiddenProjectKeys = useSessionStore((s) => s.hiddenProjectKeys)
   const hideSession = useSessionStore((s) => s.hideSession)
@@ -404,11 +404,10 @@ export function Sidebar({
 
   const handleRemoveRecent = useCallback(
     (info: SessionInfo) => {
-      if (worktreeInfoMap[info.sessionId]) {
-        setCleanupWorktree({
-          sessionId: info.sessionId,
-          worktreeInfo: worktreeInfoMap[info.sessionId]
-        })
+      const worktreeInfo = worktreeInfoMap[info.sessionId]
+      // Removal is offered only for worktrees ClaudeUI created (C-S11).
+      if (worktreeInfo && isCreatedWorktree(worktreeInfo)) {
+        setCleanupWorktree({ sessionId: info.sessionId, worktreeInfo })
       } else {
         removeRecentSession(info.sessionId)
       }
@@ -709,7 +708,8 @@ export function Sidebar({
         }}
         onWorktreeCleanupRemove={() => {
           if (cleanupWorktree) {
-            clearWorktreeInfo(cleanupWorktree.sessionId)
+            // The server forgets the worktree entry itself (a client-side save of the whole map
+            // could resurrect entries it already dropped).
             removeRecentSession(cleanupWorktree.sessionId)
             setCleanupWorktree(null)
           }

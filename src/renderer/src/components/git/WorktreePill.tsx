@@ -93,15 +93,18 @@ export function WorktreePopover({
             {worktreeInfo.worktreeName}
           </span>
         </div>
-        <div className="flex items-center justify-between">
-          <span className="text-text-muted">Branch</span>
-          <span
-            className="font-mono text-text-primary truncate max-w-[160px]"
-            title={worktreeInfo.worktreeBranch}
-          >
-            {worktreeInfo.worktreeBranch}
-          </span>
-        </div>
+        {/* A detached worktree (opencode, Codex) has no branch to show. */}
+        {worktreeInfo.worktreeBranch && (
+          <div className="flex items-center justify-between" data-testid="WorktreePill.branch">
+            <span className="text-text-muted">Branch</span>
+            <span
+              className="font-mono text-text-primary truncate max-w-[160px]"
+              title={worktreeInfo.worktreeBranch}
+            >
+              {worktreeInfo.worktreeBranch}
+            </span>
+          </div>
+        )}
         <div className="flex items-center gap-1.5 mt-1">
           <span
             className="font-mono text-[11px] text-text-muted truncate max-w-[200px]"

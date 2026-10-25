@@ -65,6 +65,16 @@ import { getCliVersion } from '../core/services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
 import { QuitCoordinator } from './quit-coordinator'
 import {
+  createQuitRemovalDeps,
+  removeWorktreesAfterTeardown,
+  sanitiseQuitPaths
+} from './services/quit-worktree-removal'
+import { removeWorktreeAtPath } from '../core/services/worktree'
+import { createdWorktreeGitRoot, isCreatedWorktreePath } from '../core/services/worktree-detect'
+import { forgetEntriesQuiet } from '../core/ipc/config-commands'
+import { crossEngineDispatcher } from '../core/services/cross-engine-dispatcher'
+import { closeMockupWatchersUnder } from '../core/services/mockup-watch-registry'
+import {
   isAllowedExternalUrl,
   isInAppNavigation,
   isAllowedWebviewNavigation,
@@ -763,7 +773,7 @@ app.whenReady().then(() => {
       // of these hosts, so closing them ends every Codex turn and every Codex
       // child thread this app started. Each attached session is told (ADR-069
       // §5) and settles its own cards on the way out.
-      codexHostRegistry.dispose()
+      codexHostRegistry.shutdown()
       void core?.remoteServer.stop()
       // The usage hub's timers (ADR-072 §7). Nothing waits on the client: a
       // push in flight is idempotent on the hub, so the worst a killed one
@@ -780,6 +790,25 @@ app.whenReady().then(() => {
       void localVoiceServer.stop()
     },
     quit: () => app.quit(),
+    // The quit modal's "Remove all" (ADR-112 C-S1): the worktrees are deleted HERE, after the
+    // teardown above, with the sessions and shells that sat in them stopped first — never from
+    // the renderer while they still run.
+    removeWorktrees: (paths) =>
+      removeWorktreesAfterTeardown(
+        paths,
+        createQuitRemovalDeps({
+          forEachSession: (visit) => core?.sessionManager.forEach(visit),
+          killTerminals: () => terminalService.killAll(),
+          releaseDispatchTargets: () => void crossEngineDispatcher.releaseAllTargets(),
+          removeAtPath: removeWorktreeAtPath,
+          beforeWalk: closeMockupWatchersUnder,
+          forgetEntries: forgetEntriesQuiet,
+          createdOnly: isCreatedWorktreePath,
+          recordedGitRoot: createdWorktreeGitRoot,
+          debug: (message) => logger.debug('main', message),
+          warn: (message) => logger.warn('main', message)
+        })
+      ),
     // opencode 2.x shares its credential table with the user's own opencode:
     // hand the ChatGPT slot back to their credential while a server can still
     // run (ADR-097 §5). Bounded; a crash skips it and the next start re-asserts.
@@ -794,8 +823,11 @@ app.whenReady().then(() => {
   })
   // Renderer confirmed / cancelled the quit prompt; delegates to the single
   // coordinator. Registered here rather than per window for the same reason.
-  ipcMain.handle('app:quit-confirm', () => quitCoordinator?.confirm())
+  ipcMain.handle('app:quit-confirm', (_event, worktreePaths?: unknown) =>
+    quitCoordinator?.confirm(sanitiseQuitPaths(worktreePaths))
+  )
   ipcMain.handle('app:quit-cancel', () => quitCoordinator?.cancel())
+  ipcMain.handle('app:quit-prompting', () => quitCoordinator?.promptShown())
 
   if (noWindowMode) {
     logger.info(

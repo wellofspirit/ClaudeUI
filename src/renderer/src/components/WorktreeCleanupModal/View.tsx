@@ -4,6 +4,8 @@ export interface WorktreeCleanupModalViewProps {
   worktreeInfo: WorktreeInfo
   status: WorktreeStatus | null
   removing: boolean
+  /** A refused / partial / failed removal; the modal stays open. */
+  outcome: { tone: 'warn' | 'error'; text: string; paths: string[] } | null
   onKeep: () => void
   onRemove: () => void
   onCancel: () => void
@@ -13,6 +15,7 @@ export function WorktreeCleanupModalView({
   worktreeInfo,
   status,
   removing,
+  outcome,
   onKeep,
   onRemove,
   onCancel
@@ -23,7 +26,7 @@ export function WorktreeCleanupModalView({
       className="fixed inset-0 z-[100] flex items-center justify-center"
     >
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onCancel} />
-      <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[400px] p-5 animate-fade-in">
+      <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[400px] max-w-[calc(100%-2rem)] p-5 animate-fade-in">
         <h3 className="text-[15px] font-medium text-text-primary mb-3">Worktree cleanup</h3>
 
         <p className="text-[13px] text-text-secondary mb-3">
@@ -33,23 +36,59 @@ export function WorktreeCleanupModalView({
         </p>
 
         {status && (
-          <div className="px-3 py-2 rounded-lg bg-bg-tertiary border border-border mb-4 text-[12px] text-text-muted space-y-1">
-            <div>
+          <div
+            data-testid="WorktreeCleanupModal.status"
+            className="px-3 py-2 rounded-lg bg-bg-tertiary border border-border mb-4 text-[12px] text-text-muted space-y-1"
+          >
+            <div data-testid="WorktreeCleanupModal.uncommitted">
               {status.uncommittedFiles} uncommitted file{status.uncommittedFiles !== 1 ? 's' : ''}
             </div>
-            <div>
-              {status.commitsAhead} commit{status.commitsAhead !== 1 ? 's' : ''} ahead
+            <div data-testid="WorktreeCleanupModal.commits">
+              {status.branch
+                ? `commits only on this branch: ${status.uniqueCommits}${
+                    status.uniqueCommits > 0 ? ' — the branch is kept' : ''
+                  }`
+                : `commits only on this detached HEAD: ${status.uniqueCommits}`}
             </div>
           </div>
         )}
 
-        {(status?.uncommittedFiles ?? 0) > 0 || (status?.commitsAhead ?? 0) > 0 ? (
-          <p className="text-[11px] text-warning mb-3">
-            Warning: removing will permanently delete uncommitted changes and unmerged commits.
+        {status && status.uncommittedFiles > 0 ? (
+          <p data-testid="WorktreeCleanupModal.warning" className="text-[11px] text-warning mb-3">
+            Warning: removing permanently deletes the uncommitted changes.
+          </p>
+        ) : null}
+        {status && !status.branch && status.uniqueCommits > 0 ? (
+          <p
+            data-testid="WorktreeCleanupModal.detachedWarning"
+            className="text-[11px] text-warning mb-3"
+          >
+            Warning: the commits on the detached HEAD are not on any branch and will be lost.
           </p>
         ) : null}
 
-        <div className="flex justify-end gap-2">
+        {outcome && (
+          <div
+            data-testid="WorktreeCleanupModal.outcome"
+            data-tone={outcome.tone}
+            className={`px-3 py-2 rounded-lg border mb-3 text-[12px] break-words ${
+              outcome.tone === 'error'
+                ? 'border-red-500/30 bg-red-500/10 text-red-400'
+                : 'border-warning/30 bg-warning/10 text-warning'
+            }`}
+          >
+            {outcome.text}
+            {outcome.paths.length > 0 && (
+              <ul className="mt-1 font-mono text-[10px] text-text-muted break-all">
+                {outcome.paths.map((p) => (
+                  <li key={p}>{p}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap justify-end gap-2">
           <button
             data-testid="WorktreeCleanupModal.cancel"
             onClick={onCancel}
@@ -70,7 +109,7 @@ export function WorktreeCleanupModalView({
             disabled={removing}
             className="px-3 py-1.5 rounded-md text-[12px] text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors cursor-default"
           >
-            {removing ? 'Removing...' : 'Remove worktree'}
+            {removing ? 'Removing...' : outcome ? 'Retry' : 'Remove worktree'}
           </button>
         </div>
       </div>

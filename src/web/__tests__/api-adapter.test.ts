@@ -146,6 +146,69 @@ describe('web api-adapter — session load channels (ADR-102 Arc 2)', () => {
   })
 })
 
+describe('web api-adapter — worktree manager (ADR-112)', () => {
+  it('inventory / inspect are plain unwrapped invokes', async () => {
+    connection.invoke.mockResolvedValueOnce({ ok: true, data: { entries: [] } })
+    await expect(api.inventoryWorktrees('/repo')).resolves.toEqual({ entries: [] })
+    expect(connection.invoke).toHaveBeenLastCalledWith('worktree:inventory', '/repo')
+
+    connection.invoke.mockResolvedValueOnce({ ok: true, data: { uniqueCommits: 1 } })
+    await api.inspectWorktree('/repo', 'id-1')
+    expect(connection.invoke).toHaveBeenLastCalledWith('worktree:inspect', '/repo', 'id-1')
+  })
+
+  it('the legacy removeWorktree always rides invokeWithProgress (the channel is withProgress) with a no-op callback, and unwraps the envelope', async () => {
+    connection.invokeWithProgress.mockResolvedValueOnce({
+      ok: true,
+      data: { id: '/wt', outcome: 'removed' }
+    })
+    await expect(api.removeWorktree('/wt', 'feat', '/repo')).resolves.toEqual({
+      id: '/wt',
+      outcome: 'removed'
+    })
+    expect(connection.invoke).not.toHaveBeenCalled()
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'worktree:remove',
+      ['/wt', 'feat', '/repo'],
+      expect.any(Function)
+    )
+    const cb = connection.invokeWithProgress.mock.lastCall![2] as (p: unknown) => void
+    expect(() => cb({ done: 1, total: 2, phase: 'x' })).not.toThrow()
+
+    connection.invokeWithProgress.mockResolvedValueOnce({ ok: false, error: 'nope' })
+    await expect(api.removeWorktree('/wt', 'feat', '/repo')).rejects.toThrow('nope')
+  })
+
+  it('removeWorktrees / measureWorktree use invokeWithProgress only when given a callback, and unwrap the envelope', async () => {
+    connection.invoke.mockResolvedValueOnce({ ok: true, data: [] })
+    await api.removeWorktrees('/repo', ['a'])
+    expect(connection.invoke).toHaveBeenLastCalledWith('worktree:remove-many', '/repo', ['a'])
+    expect(connection.invokeWithProgress).not.toHaveBeenCalled()
+
+    const onProgress = vi.fn()
+    connection.invokeWithProgress.mockResolvedValueOnce({
+      ok: true,
+      data: [{ id: 'a', outcome: 'removed' }]
+    })
+    await expect(api.removeWorktrees('/repo', ['a'], onProgress)).resolves.toEqual([
+      { id: 'a', outcome: 'removed' }
+    ])
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'worktree:remove-many',
+      ['/repo', ['a']],
+      onProgress
+    )
+
+    connection.invokeWithProgress.mockResolvedValueOnce({ ok: false, error: 'nope' })
+    await expect(api.measureWorktree('/repo', 'a', onProgress)).rejects.toThrow('nope')
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'worktree:measure',
+      ['/repo', 'a'],
+      onProgress
+    )
+  })
+})
+
 describe('web api-adapter — voice transport', () => {
   // The microphone is the renderer's (lib/voice/voice-controller.ts); the adapter
   // is only the transport, and the capture's audio rides the lane frame rather
@@ -598,20 +661,15 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
   { method: 'vendorAuthOauthCancel', channel: 'vendor-auth:oauth-cancel', args: ['pi'] },
 
   // Worktrees — `capability: 'git'`, the same one the `git:*` mutations ride.
-  // These threw "Worktrees not available in remote mode" (and `listWorktrees`
-  // answered `[]`, which the modal read as "this repo has none").
+  // These threw "Worktrees not available in remote mode".
   { method: 'createWorktree', channel: 'worktree:create', args: ['/repo/app', 'feature-x'] },
   {
     method: 'getWorktreeStatus',
     channel: 'worktree:status',
     args: ['/repo/app-feature-x', 'abc1234']
   },
-  {
-    method: 'removeWorktree',
-    channel: 'worktree:remove',
-    args: ['/repo/app-feature-x', 'feature-x', '/repo/app']
-  },
-  { method: 'listWorktrees', channel: 'worktree:list', args: ['/repo/app'] },
+  // `removeWorktree` rides the progress path (`withProgress` server-side): see the worktree
+  // manager describe, it does not reach `connection.invoke`.
 
   // Automations — one frozen declaration shared by both transports
   // (`core/ipc/automation-commands.ts`, `config`). Plain handlers, so preload
@@ -873,6 +931,7 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   closeWindow: HOST_PHYSICAL,
   confirmQuit: QUIT_HANDSHAKE,
   cancelQuit: QUIT_HANDSHAKE,
+  ackQuitPrompt: QUIT_HANDSHAKE,
   acquireSyncPort:
     'no port to acquire — the connection installed its sync client before `window.api` existed (web/main.tsx)',
   killTerminalsByCwd:
@@ -917,7 +976,7 @@ describe('web api-adapter — the local surface is an explicit list', () => {
       .filter(([, value]) => {
         const source = (value as AnyFn).toString()
         if (source === listenerSource) return false
-        return !/\bconnection\./.test(source) && !/\bunwrap\(/.test(source)
+        return !/\bconnection\./.test(source) && !/\bunwrap(WithProgress)?\(/.test(source)
       })
       .map(([name]) => name)
       .sort()

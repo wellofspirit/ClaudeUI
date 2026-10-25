@@ -37,6 +37,7 @@ import { watchSession, unwatchSession } from '../services/session-watcher'
 import { voiceRefusal } from '../services/voice-gate'
 import { desktopVoiceOwner, desktopVoiceOwnerKey, voiceRelay } from '../services/voice-relay'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
+import { trackMockupWatcher } from '../services/mockup-watch-registry'
 import {
   loadSettings,
   loadSessionConfig,
@@ -397,7 +398,10 @@ const SESSION_IPC_CHANNELS = [
   'worktree:create',
   'worktree:status',
   'worktree:remove',
-  'worktree:list',
+  'worktree:inventory',
+  'worktree:inspect',
+  'worktree:measure',
+  'worktree:remove-many',
   'app:quit-confirm',
   'session:sandbox-violation',
   'voice:start-recording',
@@ -1915,8 +1919,25 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Mockup file watcher — watches a mockup directory for changes
   const mockupWatchers = new Map<
     string,
-    { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }
+    {
+      watcher: fs.FSWatcher
+      debounceTimer: ReturnType<typeof setTimeout> | null
+      untrack: () => void
+    }
   >()
+
+  const closeMockupWatcher = (key: string): void => {
+    const entry = mockupWatchers.get(key)
+    if (!entry) return
+    try {
+      entry.watcher.close()
+    } catch {
+      /* already closed */
+    }
+    if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+    entry.untrack()
+    mockupWatchers.delete(key)
+  }
 
   handleIpc({
     channel: 'mockup:watch',
@@ -1931,7 +1952,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
 
       const entry = {
         watcher: null! as fs.FSWatcher,
-        debounceTimer: null as ReturnType<typeof setTimeout> | null
+        debounceTimer: null as ReturnType<typeof setTimeout> | null,
+        untrack: (): void => {}
       }
 
       // Recursive so edits to sibling subdirs (e.g. `images/hero.png`,
@@ -1950,6 +1972,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
         }, 200)
       })
 
+      // Without an 'error' listener a watcher fault (on Windows, deleting the watched dir —
+      // a worktree removal — raises one asynchronously) becomes a process-level
+      // uncaughtException, and the dead watcher would stay in the map behind the has() guard
+      // above, blocking any re-watch. Drop it (the remote twin does the same).
+      entry.watcher.on('error', () => closeMockupWatcher(key))
+      // Visible to the worktree remover, which closes the watches under a removed path first.
+      entry.untrack = trackMockupWatcher(dirPath, () => closeMockupWatcher(key))
+
       mockupWatchers.set(key, entry)
     }
   })
@@ -1959,13 +1989,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: (cwd: string, directory: string) => {
-      const key = `${cwd}:${directory}`
-      const entry = mockupWatchers.get(key)
-      if (entry) {
-        entry.watcher.close()
-        if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
-        mockupWatchers.delete(key)
-      }
+      closeMockupWatcher(`${cwd}:${directory}`)
     }
   })
 

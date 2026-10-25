@@ -121,6 +121,166 @@ describe('QuitCoordinator', () => {
     expect(quit).toHaveBeenCalledOnce()
   })
 
+  describe('promptShown (S3: the renderer has the quit modal up)', () => {
+    it('stops the fallback timer, so a user who is reading the modal is not force-quit after 5 s', () => {
+      const { deps, quit, teardownServices } = makeDeps()
+      const coord = new QuitCoordinator(deps)
+
+      coord.handleBeforeQuit(vi.fn())
+      coord.promptShown()
+      vi.advanceTimersByTime(60_000)
+
+      expect(quit).not.toHaveBeenCalled()
+      expect(teardownServices).not.toHaveBeenCalled()
+      expect(coord.isConfirmed).toBe(false)
+    })
+
+    it('the user can still decide afterwards: confirm quits, and cancel leaves the app running', () => {
+      const a = makeDeps()
+      const confirmed = new QuitCoordinator(a.deps)
+      confirmed.handleBeforeQuit(vi.fn())
+      confirmed.promptShown()
+      confirmed.confirm()
+      expect(a.quit).toHaveBeenCalledOnce()
+
+      const b = makeDeps()
+      const cancelled = new QuitCoordinator(b.deps)
+      cancelled.handleBeforeQuit(vi.fn())
+      cancelled.promptShown()
+      cancelled.cancel()
+      vi.advanceTimersByTime(60_000)
+      expect(b.quit).not.toHaveBeenCalled()
+      // ...and the next quit asks again, with the fallback armed again.
+      cancelled.handleBeforeQuit(vi.fn())
+      vi.advanceTimersByTime(5000)
+      expect(b.quit).toHaveBeenCalledOnce()
+    })
+
+    it('a renderer that never acks still hits the fallback; a late ack after the fallback changes nothing', () => {
+      const { deps, quit } = makeDeps()
+      const coord = new QuitCoordinator(deps)
+
+      coord.handleBeforeQuit(vi.fn())
+      vi.advanceTimersByTime(5000)
+      expect(quit).toHaveBeenCalledOnce()
+
+      coord.promptShown()
+      expect(coord.isConfirmed).toBe(true)
+      coord.handleBeforeQuit(vi.fn())
+      expect(quit).toHaveBeenCalledOnce()
+    })
+
+    it('a second quit press re-arms the fallback until the renderer acks again', () => {
+      const { deps, quit } = makeDeps()
+      const coord = new QuitCoordinator(deps)
+
+      coord.handleBeforeQuit(vi.fn())
+      coord.promptShown()
+      coord.handleBeforeQuit(vi.fn()) // Cmd+Q again with the modal up
+      coord.promptShown() // the renderer is asked again and acks again
+      vi.advanceTimersByTime(60_000)
+
+      expect(quit).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('worktree removal after teardown (ADR-112 C-S1)', () => {
+    it('removes the confirmed worktrees AFTER the teardown, vetoing the quit once; the re-entered quit then passes', async () => {
+      const order: string[] = []
+      let release!: () => void
+      const removeWorktrees = vi.fn(async (paths: string[]) => {
+        order.push(`remove:${paths.join(',')}`)
+        await new Promise<void>((resolve) => (release = resolve))
+      })
+      const { deps, teardownServices, quit } = makeDeps({ removeWorktrees })
+      teardownServices.mockImplementation(() => order.push('teardown'))
+      quit.mockImplementation(() => order.push('quit'))
+      const coord = new QuitCoordinator(deps)
+
+      coord.handleBeforeQuit(vi.fn())
+      coord.confirm(['/r/.claude/worktrees/a'])
+      expect(order).toEqual(['quit']) // app.quit() -> the confirmed pass follows
+      const veto = vi.fn()
+      coord.handleBeforeQuit(veto)
+
+      expect(order).toEqual(['quit', 'teardown', 'remove:/r/.claude/worktrees/a'])
+      expect(veto).toHaveBeenCalledOnce() // the process must stay alive while the delete runs
+
+      // Cmd+Q again mid-removal: vetoed, nothing torn down twice, no second removal.
+      const again = vi.fn()
+      coord.handleBeforeQuit(again)
+      expect(again).toHaveBeenCalledOnce()
+      expect(removeWorktrees).toHaveBeenCalledOnce()
+
+      release()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(quit).toHaveBeenCalledTimes(2)
+      const last = vi.fn()
+      coord.handleBeforeQuit(last)
+      expect(last).not.toHaveBeenCalled() // now the quit really proceeds
+      expect(teardownServices).toHaveBeenCalledOnce()
+      expect(removeWorktrees).toHaveBeenCalledOnce()
+    })
+
+    it('without paths the quit is exactly the old one (no veto, no removal)', () => {
+      const removeWorktrees = vi.fn(async () => {})
+      const { deps } = makeDeps({ removeWorktrees })
+      const coord = new QuitCoordinator(deps)
+      coord.handleBeforeQuit(vi.fn())
+      coord.confirm()
+      const veto = vi.fn()
+      coord.handleBeforeQuit(veto)
+      expect(veto).not.toHaveBeenCalled()
+      expect(removeWorktrees).not.toHaveBeenCalled()
+    })
+
+    it('the 5 s fallback cannot cut a confirmed removal off: confirm() clears it', async () => {
+      const removeWorktrees = vi.fn(() => new Promise<void>(() => {}))
+      const { deps, quit } = makeDeps({ removeWorktrees, removeTimeoutMs: 60_000 })
+      const coord = new QuitCoordinator(deps)
+      coord.handleBeforeQuit(vi.fn())
+      coord.confirm(['/r/a'])
+      coord.handleBeforeQuit(vi.fn())
+      await vi.advanceTimersByTimeAsync(30_000) // far past the 5 s fallback
+      expect(quit).toHaveBeenCalledTimes(1) // only confirm()'s own quit; removal still running
+    })
+
+    it('a hung removal is bounded, and a failing one still quits', async () => {
+      const hung = vi.fn(() => new Promise<void>(() => {}))
+      const a = makeDeps({ removeWorktrees: hung, removeTimeoutMs: 1000 })
+      const coordA = new QuitCoordinator(a.deps)
+      coordA.handleBeforeQuit(vi.fn())
+      coordA.confirm(['/r/a'])
+      coordA.handleBeforeQuit(vi.fn())
+      await vi.advanceTimersByTimeAsync(999)
+      expect(a.quit).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(a.quit).toHaveBeenCalledTimes(2)
+
+      const failing = vi.fn(async () => {
+        throw new Error('EBUSY')
+      })
+      const b = makeDeps({ removeWorktrees: failing })
+      const coordB = new QuitCoordinator(b.deps)
+      coordB.handleBeforeQuit(vi.fn())
+      coordB.confirm(['/r/a'])
+      coordB.handleBeforeQuit(vi.fn())
+      await vi.advanceTimersByTimeAsync(0)
+      expect(b.quit).toHaveBeenCalledTimes(2)
+    })
+
+    it('a repeated confirm() without paths keeps the earlier paths', () => {
+      const removeWorktrees = vi.fn(async () => {})
+      const { deps } = makeDeps({ removeWorktrees })
+      const coord = new QuitCoordinator(deps)
+      coord.handleBeforeQuit(vi.fn())
+      coord.confirm(['/r/a'])
+      coord.confirm()
+      coord.handleBeforeQuit(vi.fn())
+      expect(removeWorktrees).toHaveBeenCalledWith(['/r/a'])
+    })
+  })
+
   describe('prepareQuit (ADR-097 §5: the opencode slot is handed back while services live)', () => {
     it('runs once after confirm, BEFORE quit and while nothing is torn down', async () => {
       let release!: () => void
