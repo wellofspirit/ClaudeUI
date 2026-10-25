@@ -356,6 +356,31 @@ Learned verifying pi path containment, judge-off and Agent/Task rules.
   browser project `server.fs.allow: [<worktree>, <main>/node_modules]`; run
   `VITE_CONFIG_NATIVE_IGNORE_WARNING=true bunx vitest run --config <scratch> --project browser`.
 
+## Subagent drives (opencode native subagents)
+
+Learned verifying the opencode subagent parity arc (ADR-111).
+
+- **Ports**: concurrent verifiers collide on fixed stand-in and driver ports; pick distinct ones per run.
+- **The stand-in emits the subagent call** from a prompt token (`[spawn:agent|description|prompt|model|sessionID]`),
+  so the user never types the payload. Hide judge markers from the spawn's OWN review by writing `MRK_` in the
+  prompt and having the stand-in expand it to `MARK_` only inside the child's tool call. Key the judge on
+  `body.model` (a dedicated judge model id), not on the prompt. The static read-only path never asks for
+  `echo …`; use a redirect (`echo X > f.txt`) or `touch` to reach the judge. A judge HTTP 500 forces the human
+  fallback card.
+- **Evidence**: `__claudeuiVerifier.canonical().sessions[id].pendingApprovals[].agent.label` (child cards only),
+  `TaskCard.reviewChip` / `ToolCard.reviewChip`, `TaskCard.expand` (instructions and result are collapsed). Save
+  every judge request body: the merged child transcript is only visible there.
+- **Allowlist**: `window.api.setProviderModelAllowlist('opencode', providerId, ids | null)`; it reaches new
+  sessions only (a new pooled server), so open a fresh session after changing it. Effort warnings:
+  `window.api.listAgentTypes('opencode', cwd)` (field `type`), and in Settings the opencode rail's "Agent colours"
+  sub-page (`AgentColours.warning`), not Appearance → Agents.
+- **Nesting**: opencode's built-in `general` and `explore` deny `subagent`, so a grandchild needs a custom agent
+  that allows it plus `experimental.subagent_depth` ≥ 2 (the first child request may still offer `subagent`
+  before ClaudeUI's child ruleset lands).
+- **An opencode dispatch target needs a pi (or Claude/Codex) parent**: opencode's dispatch tool cannot target
+  opencode. Copy the managed `pi/<version>` into the scratch store, restart, `reloadEngineModels('pi')`, and set
+  BOTH engines' `autoMode.judgeModel`.
+
 ## Isolation, terminals and native modules
 
 Learned verifying an Electron patch bump (node-pty + better-sqlite3 under a new build):
