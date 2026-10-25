@@ -92,9 +92,10 @@ export default defineConfig({
   // together, hence `strict: false` — a headless, localhost-only test server.
   server: { fs: { allow: [__dirname, nodeModulesRoot], strict: false } },
   test: {
-    // Avoid oversubscribing high-core hosts while Chromium runs alongside Node
-    // workers; keep low-core CI at Vitest's usual availableParallelism() - 1.
-    maxWorkers: Math.max(1, Math.min(8, availableParallelism() - 1)),
+    // Capped at 16: on a 32-thread host the full suite takes 158 s at 8 workers, 109 s at 16 and
+    // 105 s at 24, where timing-sensitive tests start to flake (Chromium runs alongside the Node
+    // workers). Low-core CI keeps Vitest's usual availableParallelism() - 1.
+    maxWorkers: Math.max(1, Math.min(16, availableParallelism() - 1)),
     // Keep setup project-local: Vitest 5 merges root setupFiles into every project.
     projects: [
       {
