@@ -31,7 +31,7 @@
  * every POSIX platform and, on darwin, `/Network/…`, `/.vol/…`, `/.file/…`, `/.nofollow/…`,
  * `/.resolve/…` — placed from the spelling alone, on every spelling (read variants, additional
  * directories) and through the link walk (`lstat` + `readlink` only, a link whose target text is
- * one of them is unplaceable before any `realpath`), like Claude Code's `vze`.
+ * one of them is unplaceable before any `realpath`), like Claude Code's `vze` / `Iy`.
  * A win32 path with a DOS device component (`CON`, `NUL`, `COM1`, … with or without an extension)
  * is treated the same way (`device`): opening one touches hardware, so it is placed from its
  * spelling alone and is a human-only ask for a read as well as a write.
@@ -332,11 +332,15 @@ const DARWIN_NAMESPACE_ROOTS: ReadonlySet<string> = new Set([
  * mount of whatever host the model named; Linux autofs as well as macOS), `/Network/Servers/…` is
  * macOS's directory-service browse surface, and `/.vol`, `/.file`, `/.nofollow`, `/.resolve` are
  * paths the macOS kernel redirects (by volume id / file id) and that can land on a network mount.
- * Judged from the SPELLING alone, so the gate never touches them. Mirrors Claude Code's `vze`
- * (cli.js 2.1.308: `Mw`/`Pqe` for `/net`, `iD` for `/Network`, `Rb` for the `/.vol` family): the
- * FIRST component decides, case-insensitively (macOS volumes are case-insensitive by default; on
- * Linux the extra case folding only over-asks, which is the safe side), with `.` / `..` folded and
- * zero-width characters ignored. `/net` is every POSIX platform; the others are darwin only.
+ * Judged from the SPELLING alone, so the gate never touches them. Mirrors Claude Code's checks
+ * (cli.js 2.1.308): `vze`'s live ones are `Mw` (bare `/net`) and `Rb` (the `/.vol` family), and `Iy`
+ * (called via `Xv` on each link target inside Claude's link walk) adds `Pqe` (`/net/<host>`,
+ * `/Network/Servers/<host>`) and `iD` (`/Network`). Claude applies `/Network` and the `/.vol` family on
+ * every platform; limiting them to darwin here is a deliberate narrowing (on Linux they are
+ * ordinary names). The FIRST component decides, case-insensitively (macOS volumes are
+ * case-insensitive by default; on Linux the extra case folding only over-asks, which is the safe
+ * side), with `.` / `..` folded and zero-width characters ignored. `/net` is every POSIX platform;
+ * the others are darwin only.
  * Always false on win32 (a `/net` there is a drive-relative path).
  */
 export function isPosixNamespacePath(abs: string, platform: NodeJS.Platform): boolean {
@@ -369,11 +373,18 @@ type PlacementTrap = 'remote' | 'device' | 'unreadable'
  * namespace or a DOS device through a link — a link component, or a link component of a link's
  * target, whose target is remote / in a namespace, or (win32) has a DOS device name as one of its
  * components? The walk uses only `lstat` and `readlink`, each on a path that has just been shown to
- * be local and not a device (a link target is judged on its text BEFORE it is ever looked at), so
- * it makes no network call and touches no device. A link it cannot read, an entry whose `lstat`
- * fails for any reason but "no such entry" (EACCES, EPERM, …), or a chain past
- * {@link MAX_LINK_HOPS}, answers 'unreadable': the caller treats the path as unplaceable. Only a
- * missing entry ends the walk with undefined: nothing past it exists to be a link.
+ * be local and not a device, so it makes no network call and touches no device. A link it cannot
+ * read, an entry whose `lstat` fails for any reason but "no such entry" (EACCES, EPERM, …), or a
+ * chain past {@link MAX_LINK_HOPS}, answers 'unreadable': the caller treats the path as
+ * unplaceable. Only a missing entry ends the walk with undefined: nothing past it exists to be a link.
+ *
+ * It walks the way the kernel (and Claude Code's own link walk) does, never folding a `..` by
+ * text: a link target is first judged on its RAW text, then its components are spliced in front of
+ * the parts still to walk, UNNORMALISED, and a `..` is `dirname(current)`. That is valid because
+ * every prefix in `current` has already been shown not to be a link, so what `..` climbs to is
+ * the textual parent. Folding the target up front (`path.resolve`) would call
+ * `/net/h/../../tmp` (`/tmp`) or `a/../b` with `a -> /net/h/q` local, while the kernel follows
+ * the link and only then climbs. Every new prefix gets the remote / namespace check.
  */
 function linkTrap(
   abs: string,
@@ -384,41 +395,54 @@ function linkTrap(
   const win = platform === 'win32'
   // POSIX: a backslash is an ordinary file-name character, not a separator.
   const separators = win ? /[\\/]+/ : /\/+/
-  let p = abs
+  const componentsOf = (text: string): string[] =>
+    text.split(separators).filter((c) => c.length > 0)
+  const isRemotePrefix = (p: string): boolean =>
+    win ? isRemoteWindowsPath(p) : isPosixNamespacePath(p, platform)
+  const { root } = flavor.parse(abs)
+  let current = root
+  // The components still to walk, next one LAST (a stack), so a link's target splices in cheaply.
+  const todo = componentsOf(abs.slice(root.length)).reverse()
   let hops = 0
-  restart: for (;;) {
-    const { root } = flavor.parse(p)
-    const parts = p
-      .slice(root.length)
-      .split(separators)
-      .filter((c) => c.length > 0)
-    let current = root
-    for (let i = 0; i < parts.length; i++) {
-      current = flavor.join(current, parts[i])
-      let isLink: boolean
-      try {
-        isLink = fs.lstat(current).isSymbolicLink()
-      } catch (err) {
-        return isMissing(err) ? undefined : 'unreadable'
-      }
-      if (!isLink) continue
-      if (++hops > MAX_LINK_HOPS) return 'unreadable'
-      let target: string
-      try {
-        target = fs.readlink(current)
-      } catch {
-        return 'unreadable'
-      }
-      if (win) {
-        if (REMOTE_LINK_TARGET.test(target)) return 'remote'
-        if (hasDosDevicePart(target)) return 'device'
-      }
-      const dest = flavor.resolve(flavor.dirname(current), target)
-      if (win ? isRemoteWindowsPath(dest) : isPosixNamespacePath(dest, platform)) return 'remote'
-      p = flavor.join(dest, ...parts.slice(i + 1))
-      continue restart
+  for (;;) {
+    const part = todo.pop()
+    if (part === undefined) return undefined
+    if (part === '.') continue
+    if (part === '..') {
+      current = flavor.dirname(current)
+      if (isRemotePrefix(current)) return 'remote'
+      continue
     }
-    return undefined
+    current = flavor.join(current, part)
+    if (isRemotePrefix(current)) return 'remote'
+    let isLink: boolean
+    try {
+      isLink = fs.lstat(current).isSymbolicLink()
+    } catch (err) {
+      return isMissing(err) ? undefined : 'unreadable'
+    }
+    if (!isLink) continue
+    if (++hops > MAX_LINK_HOPS) return 'unreadable'
+    let target: string
+    try {
+      target = fs.readlink(current)
+    } catch {
+      return 'unreadable'
+    }
+    const base = flavor.dirname(current)
+    // The target's own text, before any component of it is looked at.
+    if (win) {
+      if (REMOTE_LINK_TARGET.test(target)) return 'remote'
+      if (hasDosDevicePart(target)) return 'device'
+    } else if (
+      isPosixNamespacePath(target.startsWith('/') ? target : `${base}/${target}`, platform)
+    ) {
+      return 'remote'
+    }
+    const { root: targetRoot } = flavor.parse(target)
+    current = targetRoot === '' ? base : flavor.resolve(base, targetRoot)
+    if (isRemotePrefix(current)) return 'remote'
+    todo.push(...componentsOf(target.slice(targetRoot.length)).reverse())
   }
 }
 
@@ -805,6 +829,16 @@ export function symlinkWriteMessage(p: string): string {
   return `Refusing to write ${p}: it is a symbolic link. Write to the link's target path instead`
 }
 
+/**
+ * What a `remote` path is called: on POSIX (a resolved path starting with one slash; a Windows one
+ * always starts with a drive or two separators) it is an automount / kernel-redirect namespace, not
+ * a share, so "a network or automount path"; the Windows UNC wording is kept.
+ */
+function networkWording(facts: PiPathFacts): string {
+  const posix = facts.execPath.startsWith('/') && !facts.execPath.startsWith('//')
+  return posix ? 'a network or automount path' : 'a network path'
+}
+
 /** The read-block deny (Claude's `Jl`), pointed at ClaudeUI's setting for adding a directory. */
 export function readBlockMessage(facts: PiPathFacts, scope: PiPathScope): string {
   if (facts.state === 'unresolved') {
@@ -813,7 +847,7 @@ export function readBlockMessage(facts: PiPathFacts, scope: PiPathScope): string
     // The same wording as the human-only card: a network / namespace path and a device are never
     // opened to be placed, which is not "could not be determined".
     if (facts.remote) {
-      return `${facts.execPath} is a network path (or a link to one) and is never opened to check where it lands; ${fence}`
+      return `${facts.execPath} is ${networkWording(facts)} (or a link to one) and is never opened to check where it lands; ${fence}`
     }
     if (facts.device) {
       return `${facts.execPath} names a Windows device (CON, NUL, COMn, LPTn, …), or is a link to one, and is never opened to check where it lands; ${fence}`
@@ -834,7 +868,7 @@ export function humanOnlyMessage(facts: PiPathFacts): string {
     return `${facts.execPath} is a device or extended-length path (the \\\\?\\ or \\\\.\\ namespace), not a network path. It is never opened to check where it lands, so it needs your approval.`
   }
   if (facts.remote) {
-    return `${facts.execPath} is a network path (or a link to one). It is never opened to check where it lands, so it needs your approval.`
+    return `${facts.execPath} is ${networkWording(facts)} (or a link to one). It is never opened to check where it lands, so it needs your approval.`
   }
   if (facts.device) {
     return `${facts.execPath} names a Windows device (CON, NUL, COMn, LPTn, …), or is a link to one. It is never opened to check where it lands, so it needs your approval.`

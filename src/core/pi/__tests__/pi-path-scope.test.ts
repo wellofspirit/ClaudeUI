@@ -1724,7 +1724,7 @@ describe('F4-1 — automount and kernel-redirect namespaces are placed with no f
           carriedOut: false
         })
         expect(f.landing).toBeUndefined()
-        expect(humanOnlyMessage(f)).toContain('is a network path')
+        expect(humanOnlyMessage(f)).toContain('is a network or automount path')
       }
     })
 
@@ -1817,7 +1817,7 @@ describe('F4-1 — automount and kernel-redirect namespaces are placed with no f
             calls.filter((c) => NAMESPACE_ARG.test(c)),
             `${tool} ${rel}`
           ).toEqual([])
-          expect(humanOnlyMessage(f)).toContain('is a network path')
+          expect(humanOnlyMessage(f)).toContain('is a network or automount path')
         }
       }
       // control: a link to a local directory is followed as before
@@ -2058,7 +2058,7 @@ describe('F4-3 — a link walk that cannot read an entry makes the path unplacea
       blockOutsideReads: true
     }
     const net = pathFacts('read', { path: '/net/h/f' }, scope)!
-    expect(readBlockMessage(net, scope)).toContain('is a network path')
+    expect(readBlockMessage(net, scope)).toContain('is a network or automount path')
     expect(readBlockMessage(net, scope)).not.toContain('could not be determined')
     expect(readBlockMessage(net, scope)).toContain('blockReadsOutsideWorkingDirectories')
 
@@ -2280,5 +2280,235 @@ describe('pathFacts — real links in a temp dir', () => {
       inScope: true
     })
     expect(hostPathFs.exists(path.join(cwd, 'src', 'a.ts'))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slice F5 (second exit re-review)
+// ---------------------------------------------------------------------------
+
+/**
+ * A recording fs with the kernel's link semantics for what the walk asks: `lstat` / `readlink`
+ * answer from a table of links (anything else is an ordinary directory), a call on a namespace
+ * (`/net`) or UNC spelling throws (the gate must never touch it), and `realpath` only records and
+ * answers from `real` (or echoes). `makeVirtualFs` folds a link target's `..` by TEXT, so it
+ * cannot stand in for the kernel here: with `a -> /net/h/q`, `a/../b` is `/net/h/b` to the kernel
+ * and a sibling of `a` to a text fold.
+ */
+function kernelLikeFs(
+  platform: 'posix' | 'win32',
+  links: Record<string, string>,
+  real: Record<string, string> = {}
+) {
+  const calls: string[] = []
+  const touchesNamespace =
+    platform === 'win32'
+      ? (p: string) => /^[\\/]{2}/.test(p)
+      : (p: string) => /^\/net(?:\/|$)/i.test(p)
+  const guard = (op: string, p: string): void => {
+    calls.push(`${op} ${p}`)
+    if (touchesNamespace(p)) throw new Error(`TOUCHED ${p}`)
+  }
+  const fs: PathScopeFs = {
+    lstat: (p) => (guard('lstat', p), { isSymbolicLink: () => p in links }),
+    readlink: (p) => (guard('readlink', p), links[p]),
+    realpath: (p) => (guard('realpath', p), real[p] ?? p),
+    exists: (p) => (guard('exists', p), true)
+  }
+  return { fs, calls }
+}
+
+describe('F5-1 — the POSIX link walk follows a link before it climbs a `..` (kernel order, never folded by text)', () => {
+  const scopeOf = (fs: PathScopeFs): PiPathScope => ({
+    cwd: '/home/u/proj',
+    roots: ['/home/u/proj'],
+    platform: 'linux',
+    homeDir: '/home/u',
+    fs
+  })
+  const realpaths = (calls: string[]): string[] => calls.filter((c) => c.startsWith('realpath'))
+
+  // Each of these reaches /net for the kernel, and somewhere local for a text fold.
+  const REACHES_NET: Record<string, Record<string, string>> = {
+    'an absolute target whose `..` climbs out of /net/<host> by text': {
+      '/home/u/proj/docs': '/net/attacker.example/../../tmp'
+    },
+    'a relative target that climbs after following a link into /net': {
+      '/home/u/proj/docs': 'a/../b',
+      '/home/u/proj/a': '/net/attacker.example/q'
+    },
+    'a relative target that climbs out of a link to / and then names /net': {
+      '/home/u/proj/docs': 'a/../net/attacker.example',
+      '/home/u/proj/a': '/'
+    },
+    'the same, one hop further along a chain': {
+      '/home/u/proj/docs': 'hop',
+      '/home/u/proj/hop': 'a/../b',
+      '/home/u/proj/a': '/net/attacker.example/q'
+    }
+  }
+
+  it.each(Object.keys(REACHES_NET))('%s is unresolved + remote, with no realpath', (name) => {
+    const { fs, calls } = kernelLikeFs('posix', REACHES_NET[name])
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'docs/readme.md'), scopeOf(fs))!
+      expect(f, tool).toMatchObject({ state: 'unresolved', remote: true, inScope: false })
+      expect(f.landing, tool).toBeUndefined()
+      expect(realpaths(calls), tool).toEqual([])
+      expect(humanOnlyMessage(f), tool).toContain('is a network or automount path')
+    }
+  })
+
+  it('a local link with `..` in its target is followed from the right directory and placed by realpath', () => {
+    // `docs -> a/../b`, `a -> /home/u/other/q`: the kernel lands on /home/u/other/b, not on proj/b
+    const { fs, calls } = kernelLikeFs(
+      'posix',
+      { '/home/u/proj/docs': 'a/../b', '/home/u/proj/a': '/home/u/other/q' },
+      { '/home/u/proj/docs/readme.md': '/home/u/other/b/readme.md' }
+    )
+    const f = pathFacts('read', { path: 'docs/readme.md' }, scopeOf(fs))!
+    expect(f).toMatchObject({
+      state: 'resolved',
+      remote: false,
+      landing: '/home/u/other/b/readme.md',
+      inScope: false,
+      carriedOut: true
+    })
+    // the walk looked at the entry the kernel would, and never at the text-folded sibling
+    expect(calls).toContain('lstat /home/u/other/b')
+    expect(calls).not.toContain('lstat /home/u/proj/b')
+    expect(realpaths(calls)).toContain('realpath /home/u/proj/docs/readme.md')
+  })
+
+  it('a link into the workspace with `.` / `..` stays in scope', () => {
+    const { fs, calls } = kernelLikeFs(
+      'posix',
+      { '/home/u/proj/docs': './sub/../src' },
+      { '/home/u/proj/docs/n.ts': '/home/u/proj/src/n.ts' }
+    )
+    const f = pathFacts('write', toolInput('write', 'docs/n.ts'), scopeOf(fs))!
+    expect(f).toMatchObject({ remote: false, landing: '/home/u/proj/src/n.ts', inScope: true })
+    expect(realpaths(calls)).toContain('realpath /home/u/proj/docs/n.ts')
+  })
+
+  it('a `..` at the root stays at the root, as the kernel does', () => {
+    const { fs } = kernelLikeFs('posix', { '/home/u/proj/docs': '../../../../../../x' })
+    expect(pathFacts('read', { path: 'docs/f' }, scopeOf(fs))!.remote).toBe(false)
+    const { fs: fs2 } = kernelLikeFs('posix', { '/home/u/proj/docs': '../../../../../../net/h' })
+    expect(pathFacts('read', { path: 'docs/f' }, scopeOf(fs2))).toMatchObject({
+      state: 'unresolved',
+      remote: true
+    })
+  })
+
+  it('a chain past the hop limit is still unreadable, not remote', () => {
+    const links: Record<string, string> = {}
+    for (let i = 0; i < 50; i++) links[`/home/u/proj/l${i}`] = `l${i + 1}/../l${i + 1}`
+    const { fs } = kernelLikeFs('posix', links)
+    expect(pathFacts('read', { path: 'l0/f' }, scopeOf(fs))).toMatchObject({
+      state: 'unresolved',
+      remote: false
+    })
+  })
+
+  it('the card names a POSIX namespace a network or automount path, and keeps the UNC wording on win32', () => {
+    const { fs } = kernelLikeFs('posix', { '/home/u/proj/docs': '/net/h/q' })
+    const scope = { ...scopeOf(fs), blockOutsideReads: true }
+    const f = pathFacts('read', { path: 'docs/x' }, scope)!
+    expect(humanOnlyMessage(f)).toContain('is a network or automount path (or a link to one)')
+    expect(readBlockMessage(f, scope)).toContain(
+      'is a network or automount path (or a link to one)'
+    )
+
+    const win = kernelLikeFs('win32', { 'D:\\repo\\docs': `${BS}${BS}h${BS}s` })
+    const winScope: PiPathScope = {
+      cwd: 'D:\\repo',
+      roots: ['D:\\repo'],
+      platform: 'win32',
+      homeDir: 'C:\\Users\\u',
+      fs: win.fs,
+      blockOutsideReads: true
+    }
+    const wf = pathFacts('read', { path: 'docs\\x' }, winScope)!
+    expect(wf.remote).toBe(true)
+    expect(humanOnlyMessage(wf)).toContain('is a network path (or a link to one)')
+    expect(readBlockMessage(wf, winScope)).toContain('is a network path (or a link to one)')
+  })
+})
+
+describe('F5-1 — the win32 link walk follows a link before it climbs a `..`', () => {
+  const winScope = (fs: PathScopeFs): PiPathScope => ({
+    cwd: 'D:\\repo',
+    roots: ['D:\\repo'],
+    platform: 'win32',
+    homeDir: 'C:\\Users\\u',
+    fs
+  })
+
+  it('`a\\..\\b` with `a` a link to a UNC share is remote, with no realpath and no call on the share', () => {
+    const { fs, calls } = kernelLikeFs('win32', {
+      'D:\\repo\\docs': `a${BS}..${BS}b`,
+      'D:\\repo\\a': `${BS}${BS}attacker.example${BS}share${BS}q`
+    })
+    for (const tool of F4_TOOLS) {
+      calls.length = 0
+      const f = pathFacts(tool, toolInput(tool, 'docs\\readme.md'), winScope(fs))!
+      expect(f, tool).toMatchObject({ state: 'unresolved', remote: true })
+      expect(
+        calls.filter((c) => c.startsWith('realpath')),
+        tool
+      ).toEqual([])
+    }
+  })
+
+  it('a link whose target climbs out of a link to a local directory is placed from where the kernel lands', () => {
+    const { fs, calls } = kernelLikeFs(
+      'win32',
+      { 'D:\\repo\\docs': `a${BS}..${BS}b`, 'D:\\repo\\a': 'D:\\other\\q' },
+      { 'D:\\repo\\docs\\n.ts': 'D:\\other\\b\\n.ts' }
+    )
+    const f = pathFacts('read', { path: 'docs\\n.ts' }, winScope(fs))!
+    expect(f).toMatchObject({ remote: false, landing: 'D:\\other\\b\\n.ts', inScope: false })
+    expect(calls).toContain('lstat D:\\other\\b')
+    expect(calls).not.toContain('lstat D:\\repo\\b')
+  })
+
+  it('a device component in the raw target is still judged before the target is followed', () => {
+    const { fs } = kernelLikeFs('win32', { 'D:\\repo\\docs': `NUL${BS}..${BS}src` })
+    expect(pathFacts('read', { path: 'docs\\f' }, winScope(fs))).toMatchObject({
+      state: 'unresolved',
+      device: true
+    })
+  })
+})
+
+describe('N-2 — isPosixNamespacePath folds `.` and `..` itself (the first component after folding decides)', () => {
+  it.each([
+    '/net',
+    '/net/h',
+    '/./net/h',
+    '/tmp/../net/h',
+    '/a/b/../../net',
+    '/../net/h',
+    '//net//h',
+    '/net/../tmp'
+  ])('%s is a namespace path on linux', (p) => {
+    expect(isPosixNamespacePath(p, 'linux')).toBe(true)
+  })
+
+  it.each(['/tmp/net/h', '/x/..', '/..', '/tmp/../tmpnet', '/netx/h', 'net/h', '/home/u/../u/net'])(
+    '%s is not',
+    (p) => {
+      expect(isPosixNamespacePath(p, 'linux')).toBe(false)
+    }
+  )
+
+  it('the darwin-only roots are folded the same way, and never match on linux or win32', () => {
+    for (const p of ['/tmp/../Network/Servers/h', '/./.vol/1/2', '/a/../.nofollow/x']) {
+      expect(isPosixNamespacePath(p, 'darwin'), p).toBe(true)
+      expect(isPosixNamespacePath(p, 'linux'), p).toBe(false)
+    }
+    expect(isPosixNamespacePath('/tmp/../net/h', 'win32')).toBe(false)
   })
 })
