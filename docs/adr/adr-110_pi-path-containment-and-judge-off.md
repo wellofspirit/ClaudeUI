@@ -65,12 +65,20 @@ mount). They are classified from the **spelling alone** — the first component 
 (macOS volumes are case-insensitive; on Linux the folding only over-asks), `.`/`..` folded, zero-width and bidi
 control characters ignored — so they are `unresolved` and `remote` with no `exists`, `realpath` or `lstat` call, for
 every tool and on every spelling (the `read` fallback variants, an additional directory, a root). The link walk
-(`lstat` and `readlink` only) now runs on POSIX too, and a link whose target text resolves into one of these
-namespaces is unplaceable before any `realpath`. This mirrors Claude Code 2.1.308's `vze` (`cli.js`),
-which asks, as a defence-in-depth check on the path and on every resolved spelling of it, for a path "under the
-/net automount map" (`Mw`, `Pqe`), "under the /Network automount browse surface" (`iD`) and "under /.vol, /.file,
-/.nofollow or /.resolve" (`Rb`: first component, case-insensitive, `.`/`..` folded), and for a UNC path; in that
-bundle the standalone `Ka` and `nM` predicates are compiled to `return false`, so the live checks are the ones named.
+(`lstat` and `readlink` only) now runs on POSIX too, and a link whose target text reaches one of these
+namespaces is unplaceable before any `realpath`. The walk follows a link the way the kernel does and never folds a
+`..` by text: the target's raw text is judged first, its components are spliced in front of the parts still to walk
+unnormalised, a `..` is the parent of the prefix reached so far (every prefix before it is known not to be a link),
+and every new prefix is checked again. Folding the target up front would take `/net/h/../../tmp` for `/tmp`, or
+`a/../b` with `a -> /net/h/q` for a sibling of `a`, and the later `realpath` would then open `/net`. The same
+walk runs on win32. It mirrors Claude Code 2.1.308 (`cli.js`) on two fronts. Its permission check `vze` asks, as a
+defence-in-depth check on the path and on every resolved spelling of it, for a path "under the /net automount
+map" (`Mw`: bare `/net`), "under /.vol, /.file, /.nofollow or /.resolve" (`Rb`: first component, case-insensitive,
+`.`/`..` folded), and for a UNC path; in that bundle the standalone `Ka` and `nM` predicates are compiled to
+`return false`, so those are its live checks. The rest live in `Iy` (`Pqe`: `/net/<host>` and
+`/Network/Servers/<host>`; `iD`: `/Network`), which `Xv` calls inside Claude's link walk, on the text of each
+link target. We merge the two sets into one spelling check; its scope of `/Network` and the `/.vol` family to darwin
+is a deliberate narrowing (Claude applies them on every platform; on Linux they are ordinary directory names).
 Claude also tests its Glob tool's `pattern`; pi's `grep` `glob` and `find` `pattern` are filters over the searched
 `path`, never roots, so only `path` is gated here. Claude's `trustedNetworkDirectories` exemption has no counterpart:
 the ask is the whole answer. A session whose own directory is under one of these asks on every call.
@@ -254,6 +262,9 @@ to another file. The raw spelling of a link inside the workspace is never a fall
 - Auto mode spends judge calls on edits outside the workspace and on the extended sensitive names, and none on
   outside reads.
 - A pi started without the bridge credentials no longer runs; the case was never a supported launch.
+- A workspace that itself lives under one of these namespaces (a project at `/net/<host>/…` or on a UNC share) asks
+  on every call and has no way out; Claude Code's `trustedNetworkDirectories` is the counterpart, and an exemption
+  for the session directory's own `/net/<host>` or `\\host\share` prefix is tracked in issue #163.
 
 ## Alternatives considered
 
