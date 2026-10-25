@@ -859,6 +859,12 @@ export class OpencodeServerManager {
           elapsedMs: 0
         }))
         .then((result) => {
+          if (result.state === 'active' && result.allowlistLoaded === false) {
+            logger.warn(
+              'OpencodeServerManager',
+              `claudeui-xeng model allowlist NOT loaded on ${handle.baseUrl} for ${directory}: the plugin options did not parse — subagent calls with a model to check are refused`
+            )
+          }
           if (result.state !== 'active') {
             handle.guards.delete(directory)
             logger.error(

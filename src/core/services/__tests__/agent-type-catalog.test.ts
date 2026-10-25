@@ -469,6 +469,62 @@ describe('opencode effort check (listAgentTypesChecked)', () => {
     expect(types.find((t) => t.type === 'deep')).not.toHaveProperty('warning')
   })
 
+  describe('never waits on an opencode server start', () => {
+    const deepAgent = (): void =>
+      write(
+        path.join(home, '.claude', 'agents', 'deep.md'),
+        agent(
+          'deep',
+          `effort: ultra
+${onModel('openai/gpt-6-sol')}`
+        )
+      )
+
+    it('uses the cached discovery when there is one, without asking discovery', async () => {
+      deepAgent()
+      let asked = 0
+      const types = await listAgentTypesChecked(
+        'opencode',
+        project,
+        async () => {
+          asked++
+          return []
+        },
+        { peek: () => group([['openai/gpt-6-sol', ['low', 'high']]]) }
+      )
+      expect(asked).toBe(0)
+      expect(types.find((t) => t.type === 'deep')?.warning).toContain('"ultra" is not a variant')
+    })
+
+    it('a discovery that does not answer in time is no warning, and the read returns at the bound', async () => {
+      deepAgent()
+      const started = Date.now()
+      const types = await listAgentTypesChecked(
+        'opencode',
+        project,
+        () => new Promise<EngineModelGroup[]>(() => {}),
+        { peek: () => null, waitMs: 30 }
+      )
+      expect(Date.now() - started).toBeLessThan(1500)
+      expect(types.find((t) => t.type === 'deep')).toEqual({
+        type: 'deep',
+        source: 'user',
+        model: 'openai/gpt-6-sol'
+      })
+    })
+
+    it('a discovery that answers within the bound still warns', async () => {
+      deepAgent()
+      const types = await listAgentTypesChecked(
+        'opencode',
+        project,
+        async () => group([['openai/gpt-6-sol', ['low']]]),
+        { peek: () => null, waitMs: 5_000 }
+      )
+      expect(types.find((t) => t.type === 'deep')?.warning).toContain('"ultra" is not a variant')
+    })
+  })
+
   it('other engines are the plain list', async () => {
     const discover = async (): Promise<EngineModelGroup[]> => {
       throw new Error('never asked')

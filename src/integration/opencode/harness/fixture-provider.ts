@@ -24,6 +24,7 @@
  *   [submodel:<provider/id>]  `subagent` call (agent `general`) passing that `model`; prompt `child says hi`
  *   [subresume] `subagent` call RESUMING the last child named in the conversation
  *               (`sessionID="ses_…"` of an earlier result); its prompt is `[read]` too
+ *   [subresume:<agent>]  the same, resuming it with `<agent>` (default `general`)
  *   [subbg]     BACKGROUND `subagent` call (`background: true`, agent `general`) whose child
  *               prompt is `child works [slow]` (the child streams for SLOW_CHUNKS × `slowChunkMs`)
  *   [substeer]  BACKGROUND `subagent` call STEERING the last child named in the conversation
@@ -407,7 +408,8 @@ export async function startFixtureProvider(
           }
         )
       }
-      if (text.includes('[subresume]')) {
+      const subResume = /\[subresume(?::([A-Za-z0-9_-]+))?\]/.exec(text)
+      if (subResume) {
         const named = messages
           .map((message) => messageText(message.content))
           .join('\n')
@@ -419,7 +421,7 @@ export async function startFixtureProvider(
           {
             description: 'contract reader again',
             prompt: 'child reads again [read]',
-            agent: 'general',
+            agent: subResume[1] ?? 'general',
             ...(sessionID ? { sessionID } : {})
           }
         )

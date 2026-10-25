@@ -1270,12 +1270,13 @@ export class OpencodeEventMapper {
    * The runs are marked user-stopped and the children latched BEFORE the
    * interrupts go out: a non-ok end then reads `stopped`, a completion that won
    * the race stays `completed`, and a stopped child a cancelled grandchild wakes
-   * is interrupted again (`reinterrupt`). `undo()` takes the marks back when the
-   * interrupt could not be sent.
+   * is interrupted again (`reinterrupt`). `undo(sessions)` takes the marks and
+   * latches of just those sessions back (default: all) when the interrupt could
+   * not be sent: a descendant that WAS interrupted keeps `stopped`.
    */
   stopRun(toolUseId: string): {
     sessions: string[]
-    undo: () => void
+    undo: (sessions?: readonly string[]) => void
   } | null {
     const run = this.runs.get(toolUseId)
     if (!run || run.notified) return null
@@ -1294,13 +1295,13 @@ export class OpencodeEventMapper {
       .filter((s) => s !== child && levelBelow(s) > 0 && (s.running || !s.notified))
       .sort((a, b) => levelBelow(b) - levelBelow(a))
     const stopping = [...descendants, child]
-    const marked: RunState[] = []
+    const marked: { sessionID: string; run: RunState }[] = []
     const latchedNow: string[] = []
     for (const s of stopping) {
       const r = s.owner ? this.runs.get(s.owner) : undefined
       if (r && !r.stopped) {
         r.stopped = true
-        marked.push(r)
+        marked.push({ sessionID: s.id, run: r })
       }
       if (!this.latched.has(s.id)) {
         this.latched.add(s.id)
@@ -1309,9 +1310,11 @@ export class OpencodeEventMapper {
     }
     return {
       sessions: stopping.map((s) => s.id),
-      undo: () => {
-        for (const r of marked) r.stopped = false
-        for (const id of latchedNow) this.latched.delete(id)
+      undo: (sessions) => {
+        const only = sessions ? new Set(sessions) : null
+        for (const { sessionID, run: r } of marked)
+          if (!only || only.has(sessionID)) r.stopped = false
+        for (const id of latchedNow) if (!only || only.has(id)) this.latched.delete(id)
       }
     }
   }

@@ -26,7 +26,9 @@
  * model variant that model discovery does not list, which would fail every run of
  * the agent. The shim cannot check it (its output keys the server, so it must not
  * depend on the model cache); this does, on the catalog read. No discovery answer
- * (no server, an empty catalog, the model not listed) is no warning.
+ * (no server, an empty catalog, the model not listed, or none within
+ * {@link DISCOVERY_WAIT_MS}) is no warning: the read uses the cached discovery
+ * when there is one and otherwise never waits on a server start.
  *
  * `model` is the type's DECLARED model, for the settings column: Claude's file
  * key, pi's definition (`inherit` is none), opencode's native agent and the
@@ -42,7 +44,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { AgentTypeInfo, EngineId, EngineModelGroup } from '../../shared/types'
 import { loadClaudeAgentsForOpencode } from '../opencode/claude-agent-shim'
-import { discoverOpencodeModels } from '../opencode/model-discovery'
+import { discoverOpencodeModels, peekOpencodeModels } from '../opencode/model-discovery'
 import { loadOpencodeModelAllowlist } from '../opencode/model-allowlist'
 import { listAgents } from '../opencode/opencode-agents'
 import { opencodeNativeAgentNames } from '../opencode/opencode-config-sources'
@@ -152,6 +154,27 @@ function claudeTypes(cwd?: string): AgentTypeInfo[] {
   return [...byName.values()]
 }
 
+/** How long the catalog read waits on a model discovery that is not cached (ADR-111). */
+const DISCOVERY_WAIT_MS = 2000
+
+/** The discovery's answer, or null when it takes longer than `waitMs`. */
+async function discoverWithin(
+  discover: () => Promise<EngineModelGroup[]>,
+  waitMs: number
+): Promise<EngineModelGroup[] | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      discover(),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), waitMs)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /** An injected agent whose `effort` the shim appended to its model as a variant. */
 interface EffortCheck {
   type: string
@@ -230,22 +253,26 @@ export function listAgentTypes(engine: EngineId, cwd?: string): AgentTypeInfo[] 
 
 /**
  * {@link listAgentTypes} plus the async checks: an opencode agent whose shim-mapped `effort`
- * is not a variant of its model gets a `warning`. Model discovery is only asked when some
- * agent has an effort to check (it may start the pooled opencode server), and a failure of it
- * is no warning. `discover` is the test seam.
+ * is not a variant of its model gets a `warning`. The cached model discovery is used when
+ * there is one; otherwise discovery (which may start the pooled opencode server) is asked
+ * only when some agent has an effort to check, and only waited on for `waitMs`; a failure
+ * or a timeout is no warning. `discover`, `peek` and `waitMs` are the test seams.
  */
 export async function listAgentTypesChecked(
   engine: EngineId,
   cwd?: string,
-  discover: () => Promise<EngineModelGroup[]> = discoverOpencodeModels
+  discover: () => Promise<EngineModelGroup[]> = discoverOpencodeModels,
+  { peek = peekOpencodeModels, waitMs = DISCOVERY_WAIT_MS } = {}
 ): Promise<AgentTypeInfo[]> {
   if (engine !== 'opencode') return listAgentTypes(engine, cwd)
   const { types, efforts } = opencodeCatalog(cwd)
   if (efforts.length === 0) return types
   let variants: Map<string, readonly string[]>
   try {
+    const groups = peek() ?? (await discoverWithin(discover, waitMs))
+    if (!groups) return types
     variants = new Map(
-      (await discover()).flatMap((group) =>
+      groups.flatMap((group) =>
         group.models.map((model): [string, readonly string[]] => [
           model.value,
           model.reasoningVariants ?? []

@@ -5,7 +5,8 @@
  * The allowlist reaches the plugin as the OPTIONS of its `{package, options}`
  * entry in the injected config (a DIRECTORY entry: the options must be
  * delivered to `ctx.options` in `setup`). Proven against the pinned binary:
- *  (a) the `guard` RPC reports `modelGate: true`;
+ *  (a) the `guard` RPC reports `modelGate: true` and `allowlistLoaded: true`
+ *      (false without options, (e));
  *  (b) a `subagent` call whose `model` is off the allowlist is refused BEFORE a
  *      child session exists, and the message is what the model reads as the
  *      tool failure; an allowed model runs;
@@ -16,6 +17,9 @@
  *      options were read again — nothing was pushed that could be lost);
  *  (e) options that are missing refuse a model-bearing call (fail closed) and
  *      leave an inheriting one alone;
+ *  (g) a RESUMED child switched to an agent WITHOUT a model keeps the model it
+ *      was created with (switchAgent never changes it): an off-list stored
+ *      model is refused, and an agent with an on-list model takes over and runs;
  *  (f) opencode's own `models` tool is a Code Mode tool: with `execute` hidden
  *      (ClaudeUI's rulesets) it is not offered to the model at all, which is why
  *      ClaudeUI hosts `claudeui_list_models`.
@@ -62,7 +66,8 @@ function gateConfig(options: Record<string, unknown> | null) {
       plugins: [options === null ? directory : { package: directory, options }],
       agents: {
         'pinned-off': { description: 'off-list', mode: 'subagent', model: 'fixture/other-model' },
-        'pinned-ok': { description: 'on-list', mode: 'subagent', model: 'fixture/fixture-model' }
+        'pinned-ok': { description: 'on-list', mode: 'subagent', model: 'fixture/fixture-model' },
+        'no-model': { description: 'no model of its own', mode: 'subagent' }
       }
     }
   }
@@ -126,7 +131,12 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
       answer = await guard(r)
       if (!answer) await new Promise((resolve) => setTimeout(resolve, 250))
     }
-    expect(answer).toEqual({ permissionHook: true, mcpDirect: true, modelGate: true })
+    expect(answer).toEqual({
+      permissionHook: true,
+      mcpDirect: true,
+      modelGate: true,
+      allowlistLoaded: true
+    })
   })
 
   it('(b) an off-list call model is refused before any child exists, with the message the model reads; an allowed model runs', async () => {
@@ -183,6 +193,31 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
     expect(ok.children).toHaveLength(1)
   })
 
+  it('(g) a resumed child switched to an agent with no model keeps its stored model, which is checked', async () => {
+    const r = rig()
+    // The parent runs on an off-list model (ClaudeUI gates the parent's own model elsewhere), so an
+    // inheriting `subagent` call passes the gate and creates a child that STORES that model.
+    const parent = await r.createSession({
+      permissions: ALLOW_ALL,
+      model: { providerID: 'fixture', id: 'other-model' }
+    })
+    const firstTag = nonce('g-first')
+    await r.turn(parent, `[sub] ${firstTag}`)
+    expect(toolResultFor(r, firstTag)).toContain('state="completed"')
+
+    // Resume it as `no-model`: no model of its own, so the stored one would run.
+    const offTag = nonce('g-off')
+    await r.turn(parent, `[subresume:no-model] ${offTag}`)
+    expect(toolResultFor(r, offTag)).toContain(
+      'Agent "no-model" runs on model "fixture/other-model", which ClaudeUI\'s model allowlist does not allow.'
+    )
+
+    // An agent with an on-list model takes the child over and runs.
+    const okTag = nonce('g-ok')
+    await r.turn(parent, `[subresume:pinned-ok] ${okTag}`)
+    expect(toolResultFor(r, okTag)).toContain('state="completed"')
+  })
+
   it("(f) opencode's own models tool is not offered to the model (Code Mode, execute hidden)", async () => {
     const r = rig()
     const tag = nonce('f')
@@ -216,5 +251,8 @@ describeV2('opencode 2.x contract: the subagent model gate without options (fail
     const plainTag = nonce('e-plain')
     const plain = await runPrompt(r, `[sub] ${plainTag}`, plainTag)
     expect(plain.children).toHaveLength(1)
+
+    // The plugin tells ClaudeUI its options did not parse (a warning there; no refusal).
+    expect(await guard(r)).toMatchObject({ modelGate: true, allowlistLoaded: false })
   })
 })

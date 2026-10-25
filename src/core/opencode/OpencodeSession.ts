@@ -275,6 +275,9 @@ function tokensOf(t: {
   }
 }
 
+/** A tool-call id safe to quote in a host note (provider-stream data is not trusted). */
+const SAFE_CALL_ID = /^[A-Za-z0-9_.:-]{1,128}$/
+
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 /** The card's explanation when the call's input was not known yet (it could not be scoped). */
@@ -1658,14 +1661,17 @@ export class OpencodeSession extends BaseSession {
     const client = this.client
     const stop = client && !this.disconnected ? this.mapper?.stopRun(toolUseId) : null
     if (!client || !stop) return { success: false, error: 'No running agent for that card' }
+    const interrupted = new Set<string>()
     for (const [i, id] of stop.sessions.entries()) {
       try {
         await client.interrupt(id)
+        interrupted.add(id)
       } catch (err) {
         logger.warn('OpencodeSession', `stop of agent session ${id} failed: ${errText(err)}`)
-        // The child itself (last) was not reached: the Stop did not happen.
+        // The child itself (last) was not reached: the Stop did not happen. A
+        // descendant that was interrupted stays stopped (it did end).
         if (i === stop.sessions.length - 1) {
-          stop.undo()
+          stop.undo(stop.sessions.filter((s) => !interrupted.has(s)))
           return { success: false, error: `Could not stop the agent: ${errText(err)}` }
         }
       }
@@ -1674,12 +1680,15 @@ export class OpencodeSession extends BaseSession {
     // so it carries nothing the model authored: the call's `description` and
     // `prompt` stay out. It names the agent by its TYPE (opencode validates the
     // `agent` id; a safe identifier charset is enforced here regardless) and the
-    // call id the model already knows.
+    // call id. The id is provider-stream data (model/endpoint-authored), so it is
+    // checked too, and the wording is "started by call": a depth-2 call was made
+    // by the child, not by the caller.
     const type = cleanAgentLabel(this.subagentTask({ parentToolUseId: toolUseId })?.type ?? '')
     const agentType = /^[A-Za-z0-9._-]{1,64}$/.test(type) ? type : 'subagent'
+    const callRef = SAFE_CALL_ID.test(toolUseId) ? toolUseId : 'one of your calls'
     return {
       success: true,
-      hostNote: `The user stopped the "${agentType}" subagent started by your call ${toolUseId}. Do not restart it or redo its work unless the user asks.`
+      hostNote: `The user stopped the "${agentType}" subagent started by call ${callRef}. Do not restart it or redo its work unless the user asks.`
     }
   }
 

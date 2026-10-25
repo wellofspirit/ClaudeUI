@@ -1,5 +1,5 @@
 /**
- * L2 — Stop on a running task follows the engine. A NATIVE task (opencode's `task`, Codex's
+ * L2 — Stop on a running task follows the engine. A NATIVE task (opencode's `subagent`, Codex's
  * `spawn_agent`) is stopped through the session (`session:stop-task` -> the session's own
  * `stopTask`), which only engines with `capabilities.backgroundTasks` implement: on the others
  * the click could only ever fail with "Provider does not support background tasks". A DISPATCH
@@ -27,7 +27,9 @@ import { MessageBubble } from '../../chat/MessageBubble'
 
 const ROUTE = 'route-stop-capability'
 
-// opencode's own tools, as its session reports them: the native `task` and the bridge's dispatch.
+// opencode's own tools, as its session reports them: the native `subagent` (`task` on 1.x; both map
+// to the task card) and the bridge's dispatch. opencode 2.x advertises `backgroundTasks` (per-agent
+// Stop, ADR-111), so the `false` cases below pin the gate itself, not what opencode reports today.
 const nativeUse = (toolUseId: string, toolName = 'task'): ContentBlock => ({
   type: 'tool_use',
   toolUseId,
@@ -115,7 +117,7 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
   const cardFor = (index: number): HTMLElement => screen.getAllByTestId('TaskCard')[index]
 
   describe('TaskCard', () => {
-    it('opencode (no background tasks): no Stop on the native task, Stop on the dispatch', async () => {
+    it('opencode with backgroundTasks off: no Stop on the native task, Stop on the dispatch', async () => {
       setSession([assistant(nativeUse('toolu_n'), dispatchUse('toolu_d'))], 'opencode', false)
       render(
         <MessageBubble
@@ -134,6 +136,25 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
       expect(stopCalls).toEqual([{ toolUseId: 'toolu_d', isDispatch: true }])
     })
 
+    it('opencode with backgroundTasks on (2.x): Stop on the native subagent card, through the session', async () => {
+      setSession([assistant(nativeUse('toolu_n', 'subagent'))], 'opencode', true)
+      render(
+        <MessageBubble
+          message={assistant(nativeUse('toolu_n', 'subagent'))}
+          pendingApprovals={[]}
+          isLastAssistant
+        />
+      )
+      const stop = cardFor(0).querySelector('[data-testid="TaskCard.stop"]')
+      expect(stop).not.toBeNull()
+      await act(async () => {
+        fireEvent.click(stop!)
+      })
+      expect(stopCalls).toHaveLength(1)
+      expect(stopCalls[0].toolUseId).toBe('toolu_n')
+      expect(stopCalls[0].isDispatch).toBeFalsy()
+    })
+
     it('an engine WITH background tasks keeps Stop on the native task', () => {
       setSession([assistant(nativeUse('toolu_n', 'Agent'))], 'claude', true)
       render(
@@ -148,7 +169,7 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
   })
 
   describe('TaskEntry (task panel)', () => {
-    it('opencode (no background tasks): no Stop on the native task, Stop on the dispatch', async () => {
+    it('opencode with backgroundTasks off: no Stop on the native task, Stop on the dispatch', async () => {
       setSession([assistant(nativeUse('toolu_n'), dispatchUse('toolu_d'))], 'opencode', false)
       const native = render(<TaskEntry toolUseId="toolu_n" />)
       expect(screen.getByTestId('TaskEntry')).toBeInTheDocument()
@@ -161,6 +182,12 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
       expect(stopCalls).toEqual([{ toolUseId: 'toolu_d', isDispatch: true }])
     })
 
+    it('opencode with backgroundTasks on (2.x): Stop on the native subagent entry', () => {
+      setSession([assistant(nativeUse('toolu_n', 'subagent'))], 'opencode', true)
+      render(<TaskEntry toolUseId="toolu_n" />)
+      expect(screen.getByTestId('TaskEntry.stop')).toBeInTheDocument()
+    })
+
     it('an engine WITH background tasks keeps Stop on the native task', () => {
       setSession([assistant(nativeUse('toolu_n', 'Agent'))], 'claude', true)
       render(<TaskEntry toolUseId="toolu_n" />)
@@ -169,7 +196,7 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
   })
 
   describe('AgentRow (roster)', () => {
-    it('opencode (no background tasks): no Stop on the native row, Stop on the dispatch row', async () => {
+    it('opencode with backgroundTasks off: no Stop on the native row, Stop on the dispatch row', async () => {
       setSession([assistant(nativeUse('toolu_n'), dispatchUse('toolu_d'))], 'opencode', false)
       await renderRoster()
       expect(rowFor('toolu_n')).toBeTruthy()
@@ -180,6 +207,12 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
         fireEvent.click(dispatchStop!)
       })
       expect(stopCalls).toEqual([{ toolUseId: 'toolu_d', isDispatch: true }])
+    })
+
+    it('opencode with backgroundTasks on (2.x): Stop on the native subagent row', async () => {
+      setSession([assistant(nativeUse('toolu_n', 'subagent'))], 'opencode', true)
+      await renderRoster()
+      expect(rowFor('toolu_n').querySelector('[data-testid="AgentRow.stop"]')).not.toBeNull()
     })
 
     it('an engine WITH background tasks keeps Stop on the native row', async () => {

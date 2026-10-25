@@ -870,6 +870,28 @@ describe('ADR-097 §3 (S6) — fail closed without the plugin permission guard',
     manager.dispose()
   })
 
+  it('an active guard whose allowlist did not load logs a warning and still runs the session', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager } = makeRig({
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0, allowlistLoaded: false })
+    })
+    await expect(manager.acquire('/p')).resolves.toMatchObject({ directory: dir('/p') })
+    expect(warn.mock.calls.some((c) => /model allowlist NOT loaded/.test(String(c[1])))).toBe(true)
+    manager.dispose()
+    warn.mockRestore()
+  })
+
+  it('an active guard with a loaded allowlist logs no warning', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager } = makeRig({
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0, allowlistLoaded: true })
+    })
+    await manager.acquire('/p')
+    expect(warn.mock.calls.some((c) => /model allowlist NOT loaded/.test(String(c[1])))).toBe(false)
+    manager.dispose()
+    warn.mockRestore()
+  })
+
   it('a failed probe is not memoized: the next acquire probes again and can succeed', async () => {
     let answer: 'missing' | 'active' = 'missing'
     const probes: string[] = []

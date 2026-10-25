@@ -97,7 +97,11 @@ carrying the run's usage, run index, summary and background flag.
   count against its agent-turn budget, which a Stop click should not do. Teardown and parent interrupts send no
   note. The note is user-role text (the auto-mode judge reads it as a `User:` line), so it carries nothing the
   model authored: it names the agent by its type (a safe identifier, else `subagent`) and the call id, never
-  the call's description or prompt.
+  the call's description or prompt. The call id is provider-stream data, so it is quoted only when it matches
+  `[A-Za-z0-9_.:-]{1,128}` (else "one of your calls"), and the wording is "started by call <id>": a nested call
+  was made by the child, not by the caller.
+- A Stop whose child interrupt cannot be sent is rolled back for the sessions not reached; a descendant that was
+  interrupted keeps its `stopped` end.
 - `backgroundTasks` is true; `backgroundTask` is not implemented.
 - A foreground run omits `isBackgrounded`. The cards offer "Send to background" only for an explicit `false`, and
   opencode's background route would move every blocked job of the turn, not the one card.
@@ -105,8 +109,9 @@ carrying the run's usage, run index, summary and background flag.
 ### 5. ClaudeUI's model allowlist holds for subagents
 
 The plugin gates `subagent` in `execute.before`. It resolves the model the tool would run on: the call's `model`,
-then a resumed same-agent child's own model, then the target agent's model; a call with none inherits the already
-gated parent. An off-list model throws a message that names the allowed models and points at
+then a resumed same-agent child's own model, then the target agent's model, then (a resume that switches to an
+agent with no model) the child's own stored model, which `switchAgent` never changes; a call with none inherits
+the already gated parent. An off-list model throws a message that names the allowed models and points at
 `claudeui_list_models`.
 
 - **Stateless delivery.** The allowlist arrives as the plugin entry's options and joins the server's config
@@ -114,7 +119,10 @@ gated parent. An off-list model throws a message that names the allowed models a
 - **Freshness.** A change gives new leases a new server; an open session keeps its list until it reconnects. This
   is the same freshness as the injected agents and the parent's spawn gate.
 - **Fail closed.** Missing options refuse a model-bearing call.
-- **Guard.** The guard RPC requires `modelGate`.
+- **Guard.** The guard RPC requires `modelGate` and also reports `allowlistLoaded` (the options parsed). ClaudeUI
+  logs a warning when it is false and does not refuse: the gate already fails closed per call.
+- **One validation.** `loadOpencodeModelAllowlist` keeps only providers whose value is an array of strings, and
+  drops the rest with a debug line; every consumer trusts its result.
 
 ClaudeUI hosts `claudeui_list_models`: the allowlisted models with their `#variant` options, built from ClaudeUI's
 own discovery (pi's `list_models`). Its description keeps opencode's rule: pass a model only when the user asks.
@@ -124,7 +132,8 @@ own discovery (pi's `list_models`). Its description keeps opencode's rule: pass 
 The shim turns a file's top-level `effort` into `#<effort>` on `harness.opencode.model` when that model has no
 variant of its own. It is not validated at injection: the shim's output keys the server, so it must be a pure
 function of the files and the allowlist. The agent type catalog checks it against discovery and warns in Settings
-(an unknown variant fails every run of that agent). opencode agents have no `permissionMode` or default
+(an unknown variant fails every run of that agent). The check uses the cached discovery, else waits at most 2 s
+on one; it never waits on a server start, and no answer is no warning. opencode agents have no `permissionMode` or default
 `background` field, so neither is mapped.
 
 ## Consequences
@@ -138,6 +147,12 @@ function of the files and the allowlist. The agent type catalog checks it agains
   the idle timer; a background child whose end is never observed holds it until the connection drops; a child card
   offers no "allow for session"; an opencode dispatch target's own task children are judged on the target's
   trajectory; per-job Send to background needs an upstream route.
+- Known gap (REC2): opencode commands with `subtask: true` (the command's `model`, or its agent's), and a
+  non-subtask command's model switch, do not go through the `subagent` tool, so the model gate does not see them.
+  They are started by the user, not the model.
+- Live treats any earlier run that a later `sessionID` call took over before its notification as superseded; a
+  reopened chat treats only background runs that way. Parallel foreground `sessionID` calls to one child can read
+  differently after a reopen.
 - `experimental.subagent_depth` keeps opencode's default of 1 (Settings exposes it).
 
 ## Alternatives considered

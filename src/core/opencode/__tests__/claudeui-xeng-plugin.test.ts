@@ -303,6 +303,36 @@ describe('claudeui-xeng plugin: subagent model gate', () => {
     )
   })
 
+  it('resume with a DIFFERENT agent that has NO model: the child keeps its own stored model, which is checked', async () => {
+    const { call, reads } = await gate({
+      options: OPTIONS,
+      agents: { plain: {}, good: { model: m('openai', 'gpt-a') } },
+      sessions: {
+        ses_off: { agent: 'general', model: m('openai', 'gpt-z') },
+        ses_ok: { agent: 'general', model: m('openai', 'gpt-b') },
+        ses_none: { agent: 'general' }
+      }
+    })
+    await expect(call({ agent: 'plain', sessionID: 'ses_off' }).run()).rejects.toThrow(
+      'Agent "plain" runs on model "openai/gpt-z"'
+    )
+    await call({ agent: 'plain', sessionID: 'ses_ok' }).run()
+    // A child with no stored model either inherits (nothing to check).
+    await call({ agent: 'plain', sessionID: 'ses_none' }).run()
+    // An agent WITH a model still overrides the stored one.
+    await call({ agent: 'good', sessionID: 'ses_off' }).run()
+    expect(reads).toEqual([
+      'session ses_off',
+      'agent plain',
+      'session ses_ok',
+      'agent plain',
+      'session ses_none',
+      'agent plain',
+      'session ses_off',
+      'agent good'
+    ])
+  })
+
   it('an explicit call model wins over a resumed session (and reads nothing)', async () => {
     const { call, reads } = await gate({
       options: OPTIONS,
@@ -368,5 +398,21 @@ describe('claudeui-xeng plugin: subagent model gate', () => {
     await expect(rpc.handlers.guard({})).resolves.toMatchObject({ modelGate: true })
     const required = (rpc.definition.methods.guard.output as { required: string[] }).required
     expect(required).toContain('modelGate')
+    expect(required).toContain('allowlistLoaded')
+  })
+
+  it('the guard RPC reports whether the allowlist option parsed (never a refusal on its own)', async () => {
+    for (const [options, loaded] of [
+      [OPTIONS, true],
+      [{ modelAllowlist: {} }, true],
+      [undefined, false],
+      [{ modelAllowlist: { openai: 'gpt-a' } }, false]
+    ] as const) {
+      const { rpc } = await gate({ options })
+      await expect(rpc.handlers.guard({})).resolves.toMatchObject({
+        modelGate: true,
+        allowlistLoaded: loaded
+      })
+    }
   })
 })

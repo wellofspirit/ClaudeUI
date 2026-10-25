@@ -272,6 +272,10 @@ function convertChild(
   // Usage keeps what the segment's rows give: the step in flight at the steer
   // may be attributed to the later run here, where live counts it for the run
   // whose step it was at its end. The run's end is the later call's start.
+  // Known difference (ADR-111): live treats ANY earlier run the later call took
+  // over before its notification as superseded; cold only a BACKGROUND one (a
+  // foreground run's segment carries its own result). So parallel foreground
+  // `sessionID` calls to one child can read differently after a reopen.
   const next = index >= 0 ? calls[index + 1] : undefined
   const superseded =
     state.status !== 'error' &&

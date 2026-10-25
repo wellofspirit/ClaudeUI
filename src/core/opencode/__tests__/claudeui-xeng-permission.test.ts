@@ -57,7 +57,12 @@ const AGENT_BUILD = [r('*', 'allow'), r('external_directory', 'ask')]
 interface Fake {
   evaluate: (event: EvaluateEvent) => Promise<void>
   mcpTransform: (editor: { list: () => [string, Record<string, unknown>][] }) => void
-  guard: () => Promise<{ permissionHook: boolean; mcpDirect: boolean; modelGate: boolean }>
+  guard: () => Promise<{
+    permissionHook: boolean
+    mcpDirect: boolean
+    modelGate: boolean
+    allowlistLoaded: boolean
+  }>
   calls: string[]
 }
 
@@ -343,7 +348,9 @@ describe('the `guard` RPC (ClaudeUI refuses a server without the hooks)', () => 
     expect(await fake.guard()).toEqual({
       permissionHook: true,
       mcpDirect: true,
-      modelGate: true
+      modelGate: true,
+      // `setup` ran with no options here
+      allowlistLoaded: false
     })
   })
 })

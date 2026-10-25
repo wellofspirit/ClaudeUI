@@ -7,12 +7,38 @@
  * dependencies (`model-discovery` reaches the server manager, which the shim
  * feeds).
  */
+import { logger } from '../services/logger'
 import { loadEngineConfig } from '../services/ui-config'
 
-/** The allowlist from engine config (a present key restricts); {} on any failure. */
+/**
+ * The allowlist from engine config (a present key restricts); {} on any failure.
+ * The shape is validated HERE, once, for every consumer (the picker, the shim,
+ * the server config and the plugin's options). A present key always restricts,
+ * so a hand-edited value fails CLOSED: a lone string is a one-model list, an
+ * array keeps its string ids, and any other value allows none of that provider.
+ */
 export function loadOpencodeModelAllowlist(): Record<string, string[]> {
   try {
-    return loadEngineConfig('opencode').opencodeConfig?.modelAllowlist ?? {}
+    const raw: unknown = loadEngineConfig('opencode').opencodeConfig?.modelAllowlist
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const out: Record<string, string[]> = {}
+    for (const [provider, ids] of Object.entries(raw)) {
+      if (Array.isArray(ids) && ids.every((id) => typeof id === 'string')) {
+        out[provider] = ids
+        continue
+      }
+      out[provider] =
+        typeof ids === 'string'
+          ? [ids]
+          : Array.isArray(ids)
+            ? ids.filter((id): id is string => typeof id === 'string')
+            : []
+      logger.warn(
+        'ModelAllowlist',
+        `malformed modelAllowlist entry for "${provider}": restricted to ${out[provider].length} model(s)`
+      )
+    }
+    return out
   } catch {
     return {}
   }

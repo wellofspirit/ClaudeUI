@@ -43,8 +43,9 @@
 //    model; opencode checks neither against ClaudeUI's per-provider allowlist.
 //    `execute.before` on `subagent` resolves the EFFECTIVE model the way the
 //    tool does (subagent.ts: call model > a resumed child's own model when the
-//    agent is unchanged > the agent's model > the parent's, which is already
-//    gated) and throws (a Tool.Error the model reads) when it is off the list.
+//    agent is unchanged > the agent's model > a resumed child's own model again
+//    when the new agent has none (switchAgent never changes it) > the parent's,
+//    which is already gated) and throws (a Tool.Error the model reads) when it is off the list.
 //    The allowlist arrives as this plugin's OPTIONS (`ctx.options.modelAllowlist`,
 //    from the `{package, options}` entry in OPENCODE_CONFIG_CONTENT), so it is
 //    stateless: opencode evicts an idle location after an hour and re-runs
@@ -218,7 +219,8 @@ const UNAVAILABLE_MESSAGE =
  * `{ kind: 'call' | 'agent' | 'session', value, agent }`; null = inherits.
  * Mirrors subagent.ts: the call's `model` wins; else a RESUMED child
  * (`sessionID`) keeps its own model when `agent` is its agent, and takes the
- * target agent's model when it is a different one; else the target agent's.
+ * target agent's model when it is a different one — or keeps its own when that
+ * agent has none; else the target agent's.
  * `event.agent` is the CALLER, never the target.
  */
 async function effectiveSubagentModel(ctx, input) {
@@ -226,17 +228,23 @@ async function effectiveSubagentModel(ctx, input) {
   const call = nonEmpty(input.model)
   if (call) return { kind: 'call', value: call, agent }
   const sessionID = nonEmpty(input.sessionID)
+  let child
   if (sessionID) {
-    const child = unwrap(await ctx.session.get({ sessionID }))
+    child = unwrap(await ctx.session.get({ sessionID }))
     if (child && child.agent === agent) {
       const value = modelRef(child.model)
       return value ? { kind: 'session', value, agent } : null
     }
   }
-  if (!agent) return null
-  const target = unwrap(await ctx.agent.get({ agentID: agent }))
-  const value = modelRef(target?.model)
-  return value ? { kind: 'agent', value, agent } : null
+  if (agent) {
+    const target = unwrap(await ctx.agent.get({ agentID: agent }))
+    const value = modelRef(target?.model)
+    if (value) return { kind: 'agent', value, agent }
+  }
+  // A resumed child switched to an agent WITHOUT a model keeps the model it
+  // already has (switchAgent never changes it): that stored model still runs.
+  const stored = child ? modelRef(child.model) : undefined
+  return stored ? { kind: 'session', value: stored, agent } : null
 }
 
 /**
@@ -288,9 +296,17 @@ export default {
     })
     // What the `guard` RPC reports: ClaudeUI refuses to run sessions on a
     // server where these are not all registered (OpencodeServerManager).
-    const guard = { permissionHook: false, mcpDirect: false, modelGate: false }
+    const guard = {
+      permissionHook: false,
+      mcpDirect: false,
+      modelGate: false,
+      allowlistLoaded: false
+    }
     // The `execute.before` hook above is registered (a failed registration threw).
     guard.modelGate = true
+    // Whether the options parsed. Not a refusal on its own (a missing list
+    // already fails closed per call), but ClaudeUI warns when it is false.
+    guard.allowlistLoaded = allowlist !== null
     await ctx.permission.hook('evaluate', (event) => tightenToConfigured(ctx, event))
     guard.permissionHook = true
     await ctx.mcp.transform((editor) => {
@@ -318,9 +334,10 @@ export default {
               properties: {
                 permissionHook: { type: 'boolean' },
                 mcpDirect: { type: 'boolean' },
-                modelGate: { type: 'boolean' }
+                modelGate: { type: 'boolean' },
+                allowlistLoaded: { type: 'boolean' }
               },
-              required: ['permissionHook', 'mcpDirect', 'modelGate']
+              required: ['permissionHook', 'mcpDirect', 'modelGate', 'allowlistLoaded']
             }
           }
         },

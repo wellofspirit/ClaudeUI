@@ -76,7 +76,8 @@ export interface OpencodeConfigInput {
 /**
  * The allowlist in canonical form: a provider key present means restricted
  * (an empty list allows none), ids sorted and deduplicated so a reordered list
- * is not a new server.
+ * is not a new server. The shape is already valid (`loadOpencodeModelAllowlist`
+ * validates it once, at the read).
  */
 function canonicalAllowlist(
   allowlist: Readonly<Record<string, readonly string[]>> | undefined
