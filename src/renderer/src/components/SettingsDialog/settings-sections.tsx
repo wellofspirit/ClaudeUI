@@ -902,9 +902,8 @@ function OpencodeAutoModeSection(): React.JSX.Element {
 /**
  * The pi twin of `OpencodeAutoModeSection`. pi's gatekeeper (PiSession's
  * phase-4 wiring) reads the very same `engines/pi.json#autoMode` block and runs
- * the same engine-neutral classifier — the one behavioral difference worth
- * saying out loud in the copy is that pi's `isAutoMode()` covers BOTH the
- * `auto` and `full` autonomy modes, where opencode's covers Full only.
+ * the same engine-neutral classifier. With the judge off, pi's `auto`/`full`
+ * ask like Ask (ADR-110), as opencode's do.
  */
 export function PiAutoModeSection(): React.JSX.Element {
   return (

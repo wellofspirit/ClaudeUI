@@ -5,6 +5,7 @@
 front of the judge), [ADR-022](adr-022_opencode-permission-mapping.md) (the auto-mode base ruleset
 gains edit asks for agent-control paths).
 **Amended by:** [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md)
+**Amended by:** [ADR-110](adr-110_pi-path-containment-and-judge-off.md) (2026-10-25) — the agent-control list (§3) adds Claude Code's sensitive files and directories, with multi-component entries such as `.config/git`.
 §4 — a second static path, the allow-rule skip, runs right after this one and before the judge, and
 reuses this module's lexer and path rules; §1's Bash deny/ask re-check now goes through ADR-085 §1's
 matcher.

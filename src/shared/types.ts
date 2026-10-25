@@ -1197,7 +1197,7 @@ export interface DispatchConfig {
  *
  * Engine-neutral as of phase 4: read per engine from `engines/<engineId>.json`
  * by BOTH opencode and pi, which share the whole policy core
- * (`src/main/automode/`) and differ only in their permission intercept and
+ * (`src/core/automode/`) and differ only in their permission intercept and
  * judge transport. Claude is the exception — cli.js ships its own classifier,
  * so none of this reaches it.
  */

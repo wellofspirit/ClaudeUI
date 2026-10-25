@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a target's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-23: the target judge also counts the dispatcher's directory and the user's additional directories as local, as context only)
+**Amended by:** [ADR-110](adr-110_pi-path-containment-and-judge-off.md) (2026-10-25: a pi target whose judge is switched off asks like `default` over its target rules instead of allow-all; pi targets get path containment)
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-24 amendment: a target's additional directories, plus the dispatcher's directory when it runs elsewhere, are real scope on every engine; allow rules stay excluded)
 **Amended by:** [ADR-105](adr-105_background-dispatch.md) (2026-10-20: a Codex X-Agent's `hand_back` report and outgoing `session_message` are reviewed by ClaudeUI's judge on the target's own model, since `auto_review` does not review dynamic tools; a message review that cannot run refuses the send).
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) §5 and its "M2 shipped" note (a target's
