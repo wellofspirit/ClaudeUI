@@ -161,7 +161,9 @@ appeared at the same landing is not a change.
 **Boundary.** This is a permission gate, not a filesystem sandbox: a link swapped in between the check and pi's
 open, and a hard link to a file outside the workspace, are outside what it can see. Mapped network drives (`net use`,
 `subst`, `DefineDosDevice` onto `\??\UNC\…`), and links to them, are not detected: they are the user's own mappings, and
-telling them apart from a local drive would need a call on the drive. Shell commands are not
+telling them apart from a local drive would need a call on the drive. The link walk that keeps network and device
+paths untouched is defence in depth behind the judge: it covers direct spellings and ordinary link chains, but exotic
+Windows junction/symlink combinations are best-effort, not a guarantee. Shell commands are not
 contained (as in Claude Code); they go to the judge in auto mode and to the human otherwise.
 
 **Who gets it.** pi sessions, their host-run subagents (the parent's workspace) and pi dispatch targets (the
