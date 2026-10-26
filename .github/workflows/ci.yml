@@ -90,42 +90,55 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux: the whole suite, browser layout tests included, in 3 shards.
-          - { os: ubuntu-latest, label: 'Linux 1/3', script: test:ci, shard: '--shard=1/3' }
-          - { os: ubuntu-latest, label: 'Linux 2/3', script: test:ci, shard: '--shard=2/3' }
-          - { os: ubuntu-latest, label: 'Linux 3/3', script: test:ci, shard: '--shard=3/3' }
-          # macOS and Windows: every project except `browser`, as the release
-          # workflows run it — the layout tests are pinned to Linux's font
-          # (docs/testing-strategy.md, Layer 2b). Two shards each: one job ran
-          # the tests in ~3.5-4 min on these small runners, and every shard
-          # repeats the install (~1 min macOS, ~2.7 min Windows), so a third
-          # would save little.
-          - {
-              os: macos-latest,
-              label: 'macOS 1/2',
-              script: 'test:ci:no-browser',
-              shard: '--shard=1/2'
-            }
-          - {
-              os: macos-latest,
-              label: 'macOS 2/2',
-              script: 'test:ci:no-browser',
-              shard: '--shard=2/2'
-            }
+          # The `browser` project (Layer 2b layout tests, real headless Chromium) runs
+          # once, on Linux, in its own job: only it needs the Chromium install.
+          - os: ubuntu-latest
+            label: 'Browser'
+            script: test:browser
+            shard: ''
+            browser: true
+          # Every other project, split by file: 3 shards per OS. macOS and Windows
+          # skip `browser` as the release workflows do (its layout is pinned to
+          # Linux's font, docs/testing-strategy.md, Layer 2b). Each shard repeats
+          # the install (~1 min Linux/macOS, ~2.5 min Windows).
+          - os: ubuntu-latest
+            label: 'Linux 1/3'
+            script: test:ci:no-browser
+            shard: '--shard=1/3'
+          - os: ubuntu-latest
+            label: 'Linux 2/3'
+            script: test:ci:no-browser
+            shard: '--shard=2/3'
+          - os: ubuntu-latest
+            label: 'Linux 3/3'
+            script: test:ci:no-browser
+            shard: '--shard=3/3'
+          - os: macos-latest
+            label: 'macOS 1/3'
+            script: test:ci:no-browser
+            shard: '--shard=1/3'
+          - os: macos-latest
+            label: 'macOS 2/3'
+            script: test:ci:no-browser
+            shard: '--shard=2/3'
+          - os: macos-latest
+            label: 'macOS 3/3'
+            script: test:ci:no-browser
+            shard: '--shard=3/3'
           # windows-2022, not windows-latest: node-gyp cannot find VS2026 to
           # rebuild node-pty (see pre-release.yml).
-          - {
-              os: windows-2022,
-              label: 'Windows 1/2',
-              script: 'test:ci:no-browser',
-              shard: '--shard=1/2'
-            }
-          - {
-              os: windows-2022,
-              label: 'Windows 2/2',
-              script: 'test:ci:no-browser',
-              shard: '--shard=2/2'
-            }
+          - os: windows-2022
+            label: 'Windows 1/3'
+            script: test:ci:no-browser
+            shard: '--shard=1/3'
+          - os: windows-2022
+            label: 'Windows 2/3'
+            script: test:ci:no-browser
+            shard: '--shard=2/3'
+          - os: windows-2022
+            label: 'Windows 3/3'
+            script: test:ci:no-browser
+            shard: '--shard=3/3'
     steps:
       - uses: actions/checkout@v7
 
@@ -133,29 +146,29 @@ jobs:
 
       # The `browser` vitest project (Layer 2b layout tests) drives real headless
       # Chromium, which `bun install` does not fetch and the runner image does not
-      # ship. Here, not in setup-workspace: only this job runs tests. The headless
+      # ship. Here, not in setup-workspace: only the Browser job needs it. The headless
       # shell is all a headless run uses; the browser build is tied to the
       # playwright version, so that keys the cache. The apt packages `--with-deps`
       # adds are not cached, so the install always runs (no download on a hit).
-      # Linux only: the other OSes do not run the `browser` project.
+      # The Browser job only: no other job runs the `browser` project.
       - name: Read playwright version
-        if: runner.os == 'Linux'
+        if: matrix.browser
         id: playwright-version
         run: echo "version=$(node -p "require('./node_modules/playwright/package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Cache playwright browsers
-        if: runner.os == 'Linux'
+        if: matrix.browser
         uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
 
       - name: Install Chromium for the browser tests
-        if: runner.os == 'Linux'
+        if: matrix.browser
         run: bunx playwright install --with-deps --only-shell chromium
 
-      # unit + unit-node + unit-forks + component + e2e + git (+ browser on Linux),
-      # split by file across the Linux shards.
+      # The Browser job: the `browser` project. Every other job: unit, unit-node,
+      # unit-forks, component, e2e and git, split by file across its OS's shards.
       - name: Tests
         shell: bash
         run: bun run ${{ matrix.script }} ${{ matrix.shard }}

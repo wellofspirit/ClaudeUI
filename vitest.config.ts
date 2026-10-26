@@ -218,8 +218,11 @@ export default defineConfig({
   test: {
     // Capped at 16: on a 32-thread host the full suite takes 158 s at 8 workers, 109 s at 16 and
     // 105 s at 24, where timing-sensitive tests start to flake (Chromium runs alongside the Node
-    // workers). Low-core CI keeps Vitest's usual availableParallelism() - 1.
-    maxWorkers: Math.max(1, Math.min(16, availableParallelism() - 1)),
+    // workers). A developer box keeps a core for everything else; a CI runner (2-4 cores) runs
+    // nothing else, so it uses them all.
+    maxWorkers: process.env.CI
+      ? Math.min(16, availableParallelism())
+      : Math.max(1, Math.min(16, availableParallelism() - 1)),
     // Keep setup project-local: Vitest 5 merges root setupFiles into every project.
     projects: [
       {
