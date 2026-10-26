@@ -327,8 +327,9 @@ So each exchange is now a sequence of BOUNDED requests (`pi-bridge-source.ts`'s 
 Probed for M5a (2026-07-20, same binary):
 
 - **Imports work in `-e` extensions** — node builtins (`node:fs`) AND relative imports
-  (`./helper.ts`) resolve from an arbitrary file path outside any package context. (The ClaudeUI
-  bridge stays import-free by choice, not necessity — its tmp-file tamper surface is smaller that way.)
+  (`./helper.ts`) resolve from an arbitrary file path outside any package context, and pi aliases its
+  own package (`@earendil-works/pi-coding-agent`) to the running binary for every extension. The
+  ClaudeUI bridge imports only Node builtins and that package (ADR-035 › Bridge extension imports).
 - **Action methods throw during extension load** — `getActiveTools()`/`setActiveTools()` at module
   top level fail the whole extension with "Extension runtime not initialized". Top level is for
   registration only (`registerTool`/`registerCommand`/`pi.on`); act inside event/command handlers.
