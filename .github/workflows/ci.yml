@@ -159,7 +159,11 @@ jobs:
         with:
           node-version: 24.15.0
 
-      - uses: oven-sh/setup-bun@v2
+      # Bun from its npm package (Oven's prebuilt binary), not oven-sh/setup-bun:
+      # that action needs `unzip`, which the image does not ship, and adding it
+      # would mean apt again.
+      - name: Install bun
+        run: npm install --global bun
 
       # No postinstall: the browser project loads no native module, Electron
       # or engine binary, so the rebuild and the harness installs are skipped.
