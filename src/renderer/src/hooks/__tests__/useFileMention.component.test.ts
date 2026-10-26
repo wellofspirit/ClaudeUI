@@ -30,7 +30,6 @@ function mockListDir(entries = DEFAULT_ENTRIES, isRoot = false, resolvedPath = '
 }
 
 beforeEach(() => {
-  ;(globalThis as any).window = (globalThis as any).window ?? {}
   ;(globalThis as any).window.api = {
     ...((globalThis as any).window.api ?? {}),
     listDir: mockListDir()

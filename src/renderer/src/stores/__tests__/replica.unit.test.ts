@@ -58,7 +58,7 @@ beforeEach(() => {
     slashCommands: [],
     sdkSkillNames: []
   })
-  ;(globalThis as unknown as { window: { api: unknown } }).window = { api: {} } as never
+  ;(window as unknown as { api: unknown }).api = {}
 })
 
 describe('the fold projects into the store', () => {
@@ -302,14 +302,12 @@ describe('post-apply observers', () => {
  */
 function failingPersist(): ReturnType<typeof vi.fn> {
   const logRelay = vi.fn()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: {
-      logRelay,
-      saveSessionConfig: () => {
-        throw new Error('disk full')
-      }
+  ;(window as unknown as { api: unknown }).api = {
+    logRelay,
+    saveSessionConfig: () => {
+      throw new Error('disk full')
     }
-  } as never
+  }
   return logRelay
 }
 

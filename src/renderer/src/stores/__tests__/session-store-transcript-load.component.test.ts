@@ -34,9 +34,11 @@ const info = (sessionId: string, engineId?: SessionInfo['engineId']): SessionInf
 
 beforeEach(() => {
   resetReplicaSeam()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: { saveSessionConfig: vi.fn(), saveSettings: vi.fn(), logError: vi.fn() }
-  } as never
+  ;(window as unknown as { api: unknown }).api = {
+    saveSessionConfig: vi.fn(),
+    saveSettings: vi.fn(),
+    logError: vi.fn()
+  }
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},

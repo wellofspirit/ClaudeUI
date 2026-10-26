@@ -71,7 +71,6 @@ beforeEach(() => {
   bridge.ipcMain.handle('config:save-sessions', () => {})
 
   // Build window.api backed by the bridge
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     respondApproval: (
       routingId: string,

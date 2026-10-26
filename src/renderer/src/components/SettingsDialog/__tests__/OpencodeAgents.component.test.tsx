@@ -112,7 +112,6 @@ const generateOpencodeAgent = vi.fn(async () => ({
 }))
 
 function installApiStub(overrides: Record<string, unknown> = {}): void {
-  ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     listOpencodeAgents: vi.fn(async () => []),
     readOpencodeAgent: vi.fn(async () => null),

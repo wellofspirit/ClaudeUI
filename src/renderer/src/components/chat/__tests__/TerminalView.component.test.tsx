@@ -22,7 +22,6 @@ import {
 const ESC = String.fromCharCode(27)
 
 beforeEach(() => {
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = { logError: () => {} }
 })
 

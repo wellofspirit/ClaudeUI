@@ -17,7 +17,6 @@ vi.mock('electron', async () => await import('../../../../test/stubs/electron-sh
 beforeEach(() => {
   // Reset relevant store slices
   useSessionStore.setState({ vendorOAuth: null, vendorAuth: null })
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.open = vi.fn()
   ;(globalThis as any).window.api = {
     saveSessionConfig: vi.fn(),

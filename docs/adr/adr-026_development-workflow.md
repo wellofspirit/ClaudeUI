@@ -63,8 +63,7 @@ A slice touching any of these is Critical:
 
 ### Gates
 
-- `scripts/gates.sh`, once per commit-ready tree: the fast gate (typecheck, lint of the changed files, the tests
-  related to them). `scripts/gates.sh --full` runs the whole suite once before the pull request. Never pipe a gate
+- `scripts/gates.sh`, once per commit-ready tree: typecheck, lint and the whole default suite. Never pipe a gate
   into a filter before acting on its result: the pipeline takes the filter's exit code.
 - Add `bun run test:ci` after touching git-service or worktree code, `bun run build` for anything the packaged app
   runs, and `bun run format:check`.

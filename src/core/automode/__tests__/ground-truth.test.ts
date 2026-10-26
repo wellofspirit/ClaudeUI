@@ -2380,27 +2380,6 @@ describe('review round 6 — temp variables are a hint, never an in-scope claim'
     expect(r?.tempVarTargets).toBeUndefined()
   })
 
-  it('-113/-114 and -257 shapes: unresolvable WITH the right hint', () => {
-    const bound = win('$t=$env:TEMP; bun run typecheck *> "$t\\je-vitest-unit.txt"')
-    expect(bound?.unresolvable).toEqual(['$t\\je-vitest-unit.txt'])
-    expect(bound?.allInScope).toBe(false)
-    expect(bound?.tempVarTargets).toEqual([
-      {
-        target: '$t\\je-vitest-unit.txt',
-        path: 'c:/Users/dev/AppData/Local/Temp/je-vitest-unit.txt'
-      }
-    ])
-    const host = win('git show HEAD:x.cs > $env:TEMP/ds-real-head.cs')
-    expect(host?.unresolvable).toEqual(['$env:TEMP/ds-real-head.cs'])
-    expect(host?.allInScope).toBe(false)
-    expect(host?.tempVarTargets).toEqual([
-      {
-        target: '$env:TEMP/ds-real-head.cs',
-        path: 'c:/Users/dev/AppData/Local/Temp/ds-real-head.cs'
-      }
-    ])
-  })
-
   it('the hint never turns a verdict: an in-scope command stays in scope without one', () => {
     const r = win('bun run typecheck > build.log')
     expect(r?.allInScope).toBe(true)

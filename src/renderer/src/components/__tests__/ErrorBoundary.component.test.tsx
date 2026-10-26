@@ -16,7 +16,6 @@ const logError = vi.fn()
 
 beforeEach(() => {
   logError.mockClear()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = { logError }
 })
 

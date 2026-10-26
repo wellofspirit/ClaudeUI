@@ -673,23 +673,30 @@ describe('UsageView — the scope', () => {
 
     // The hub is forgotten in Settings — no click on this screen at all. The
     // status re-read waits out the same debounce the other nudges use, so the
-    // assertion is given longer than it.
-    mockHubStatus.mockResolvedValue(makeHubStatus({ enabled: false, deviceId: null }))
-    syncHandlers.get('usage-hub:changed')!()
+    // debounce is advanced on a fake clock (as the live-nudge tests do) instead
+    // of waited out for real.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mockHubStatus.mockResolvedValue(makeHubStatus({ enabled: false, deviceId: null }))
+      syncHandlers.get('usage-hub:changed')!()
+      await vi.advanceTimersByTimeAsync(2_000)
 
-    // Waited for on the GROUP-BY, not on the pill. The pill unmounts in the
-    // render where the scope flips, while the reset is an effect that runs after
-    // it — so waiting for the pill leaves a window in which the tree is still
-    // rooted on `machine`, and under suite load the next assertion landed in it.
-    await waitFor(
-      () =>
-        expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'provider'),
-      { timeout: 5_000 }
-    )
-    expect(screen.queryByTestId('UsageView.groupBy.machine')).not.toBeInTheDocument()
-    // The breakdown must NOT be left rooted on a dimension the data no longer
-    // has, which drew "Nothing in this range to break down" under a $42 hero.
-    expect(screen.queryByTestId('BreakdownTable.empty')).not.toBeInTheDocument()
+      // Waited for on the GROUP-BY, not on the pill. The pill unmounts in the
+      // render where the scope flips, while the reset is an effect that runs after
+      // it — so waiting for the pill leaves a window in which the tree is still
+      // rooted on `machine`, and under suite load the next assertion landed in it.
+      await waitFor(
+        () =>
+          expect(screen.getByTestId('BreakdownTable')).toHaveAttribute('data-group-by', 'provider'),
+        { timeout: 5_000 }
+      )
+      expect(screen.queryByTestId('UsageView.groupBy.machine')).not.toBeInTheDocument()
+      // The breakdown must NOT be left rooted on a dimension the data no longer
+      // has, which drew "Nothing in this range to break down" under a $42 hero.
+      expect(screen.queryByTestId('BreakdownTable.empty')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('ignores a stored value that is not a scope', async () => {

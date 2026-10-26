@@ -21,23 +21,27 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 
 // vi.hoisted so these exist before the hoisted vi.mock factory dereferences them
-const { loaded, initialize, mermaidRender } = vi.hoisted(() => ({
+const { loaded, initialize, mermaidRender, mermaidFactory } = vi.hoisted(() => {
   // Flipped by the mock factory, which vitest runs on the first import of
   // 'mermaid' — so it doubles as a probe for *when* mermaid enters the graph.
-  loaded: { current: false },
-  initialize: vi.fn(),
+  const loaded = { current: false }
+  const initialize = vi.fn()
   // The `id` mirrors what real mermaid stamps on the root svg (the render id) —
   // the font-weight rule is scoped by it, so without one there is nothing to
   // scope to and the injection is skipped.
-  mermaidRender: vi.fn(async () => ({
+  const mermaidRender = vi.fn(async () => ({
     svg: '<svg id="mermaid-diagram-mock" viewBox="0 0 100 60"><g class="node"><text>NODE</text></g></svg>'
   }))
-}))
-
-vi.mock('mermaid', () => {
-  loaded.current = true
-  return { default: { initialize, render: mermaidRender } }
+  const mermaidFactory = (): {
+    default: { initialize: typeof initialize; render: typeof mermaidRender }
+  } => {
+    loaded.current = true
+    return { default: { initialize, render: mermaidRender } }
+  }
+  return { loaded, initialize, mermaidRender, mermaidFactory }
 })
+
+vi.mock('mermaid', mermaidFactory)
 
 /**
  * The diagram gallery, stubbed at the context hook.
@@ -58,13 +62,40 @@ vi.mock('../DiagramGallery', () => ({
 import { MermaidDiagram } from '../MermaidDiagram'
 import { injectTextWeightRule } from '../mermaid-render'
 import { themeCanvasBackground } from '../../shared/ImageViewer'
-import { buildMermaidInitConfig, resolveThemeConfig, THEME_CONFIGS } from '../mermaid-themes'
-import { useSessionStore } from '../../../stores/session-store'
 
+/**
+ * The lazy-core assertions are about WHEN mermaid enters the module graph, and
+ * the component memoizes its `import('mermaid')` at module level — so they only
+ * hold for whichever test touches mermaid first. This one therefore builds its
+ * own registry (`vi.resetModules()`) and imports the component, React, Testing
+ * Library and the theme/store modules from it together. `vi.doMock` rather than
+ * the hoisted `vi.mock` because a mock factory's result is cached across
+ * resets: the probe would not fire again.
+ */
 describe('MermaidDiagram — lazy mermaid core', () => {
+  let freshRtl: typeof import('@testing-library/react') | null = null
+
+  beforeEach(() => {
+    vi.resetModules()
+    vi.doMock('mermaid', mermaidFactory)
+    loaded.current = false
+    initialize.mockClear()
+    mermaidRender.mockClear()
+  })
+  afterEach(() => {
+    freshRtl?.cleanup()
+    freshRtl = null
+  })
+
   it('mounts before mermaid resolves, then initializes before rendering the SVG', async () => {
+    const { render, screen, waitFor } = (freshRtl = await import('@testing-library/react'))
+    const { MermaidDiagram } = await import('../MermaidDiagram')
+    const { buildMermaidInitConfig, resolveThemeConfig, THEME_CONFIGS } =
+      await import('../mermaid-themes')
+    const { useSessionStore } = await import('../../../stores/session-store')
+
     // Importing the component must not pull mermaid in; a static import would
-    // have run the mock factory during this file's own import phase.
+    // have run the mock factory during its own import phase.
     expect(loaded.current).toBe(false)
 
     const { container } = render(<MermaidDiagram source="graph TD; A-->B" />)

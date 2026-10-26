@@ -82,6 +82,25 @@ describe('inventoryWorktrees', () => {
     expect(inv.entries[0].invalidReason).toBeUndefined()
   })
 
+  it('a repo reached through a link (a symlinked project dir, macOS /tmp, an 8.3 name): its worktrees are still managed and every id is the real spelling', async () => {
+    const viaLink = path.join(scratch.base, 'repo-link')
+    makeLink(repo.path, viaLink)
+    await createWorktree(viaLink, 'feat')
+    fs.mkdirSync(path.join(viaLink, '.claude', 'worktrees', 'shell'), { recursive: true })
+    const realManaged = path.join(repo.path, '.claude', 'worktrees')
+
+    const inv = await inventoryWorktrees(viaLink)
+
+    // git lists a worktree by its real path: the repo root and the managed root must be spelled
+    // the same way or no registered worktree is ever found under the managed root.
+    expect(idOf(inv.repoRoot)).toBe(idOf(repo.path))
+    expect(idOf(inv.managedRoot)).toBe(idOf(realManaged))
+    expect(inv.entries.map((e) => [e.name, e.location, e.kind, e.id]).sort()).toEqual([
+      ['feat', 'managed', 'worktree', idOf(path.join(realManaged, 'feat'))],
+      ['shell', 'managed', 'orphan', idOf(path.join(realManaged, 'shell'))]
+    ])
+  })
+
   it('reports a detached worktree with no branch, a locked one with its reason', async () => {
     const detached = path.join(repo.path, '.claude', 'worktrees', 'det')
     await addWorktreeAt(repo, detached)

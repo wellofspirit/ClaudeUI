@@ -62,7 +62,6 @@ function installApiStub(
   }
 ): void {
   credIdState = opts?.credIds ? structuredClone(opts.credIds) : {}
-  ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     loadOpencodeSettings: vi.fn(async () => structuredClone(initial)),
     saveOpencodeSettings,

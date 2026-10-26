@@ -143,6 +143,30 @@ describe('resolveDispatchWorkdir', () => {
     if (!result.ok) expect(result.text).toMatch(/"workdir" .*not-created does not exist/)
   })
 
+  it('a parent spelled through a link (a symlinked project, macOS /tmp, an 8.3 name): a directory not created yet is inside it', () => {
+    const alias = link(path.join(base, 'project-alias'), parent)
+    // Both spellings of the parent, and a spelling of the missing directory through either.
+    for (const [workdir, cwd] of [
+      [path.join(alias, 'not-yet'), alias],
+      [path.join(alias, 'not-yet'), parent],
+      [path.join(parent, 'not-yet'), alias]
+    ]) {
+      const result = resolveDispatchWorkdir(workdir, cwd)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.text).toMatch(/"workdir" .*not-yet does not exist/)
+    }
+  })
+
+  it('a directory that does not exist under a link leading out of the parent is outside, and does not say whether it exists', () => {
+    const escape = link(path.join(parent, 'escape-missing'), outside)
+    const result = resolveDispatchWorkdir(path.join(escape, 'nope'), parent)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.text).toContain('is not inside your working directory')
+      expect(result.text).not.toContain('does not exist')
+    }
+  })
+
   it('does not tell whether a path outside its reach exists', () => {
     const missing = resolveDispatchWorkdir(path.join(outside, 'nope'), parent)
     const present = resolveDispatchWorkdir(outside, parent)

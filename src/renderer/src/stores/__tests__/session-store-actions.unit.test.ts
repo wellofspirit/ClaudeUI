@@ -37,7 +37,6 @@ beforeEach(() => {
 
   // Minimal window.api stub — some actions persist via saveSessionConfig, which
   // is a fire-and-forget side effect. Use a spy so we can also assert on it.
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: vi.fn(),
     saveSettings: vi.fn(),

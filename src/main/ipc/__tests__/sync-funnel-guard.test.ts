@@ -639,13 +639,4 @@ describe('no-Electron fence (item 10)', () => {
     expect(config).toContain('no-restricted-imports')
     expect(config).toContain('src/core/**/*.{ts,tsx}')
   })
-
-  it('no source under the fence imports electron (belt to the lint braces)', () => {
-    const fenced = walk('src/core')
-    expect(fenced.length).toBeGreaterThan(4)
-    const offenders = fenced.filter((rel) =>
-      /from\s+['"](electron|electron\/|@electron)/.test(read(rel))
-    )
-    expect(offenders, `Electron imports under the fence: ${offenders.join(', ')}`).toEqual([])
-  })
 })

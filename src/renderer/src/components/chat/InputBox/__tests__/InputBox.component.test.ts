@@ -135,12 +135,19 @@ function setupSession(routingId = ROUTE, cwd = '/test'): void {
   useSessionStore.setState({ activeSessionId: routingId })
 }
 
+// The store as it was built, before any test touched it.
+const INITIAL_STATE = useSessionStore.getState()
+
 beforeEach(() => {
+  // Tests write the remembered engine / model / effort picks into the store AND
+  // localStorage (the store mirrors them there and reads them back). Restore the
+  // whole store, not a list of fields, so no pick outlives the test that made it.
+  localStorage.clear()
+  useSessionStore.setState(INITIAL_STATE, true)
   // The replica is a module singleton: without this the previous test's folded
   // transcript (steer- messages included) carries into this one (SyncCore 4c).
   resetReplicaSeam()
   resetFactoryCounter()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: () => {},
     saveSettings: () => {},

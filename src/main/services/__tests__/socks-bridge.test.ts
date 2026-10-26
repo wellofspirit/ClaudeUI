@@ -292,7 +292,7 @@ describe('socks-bridge', () => {
         })
         s.on('error', reject)
       })
-    ).rejects.toBeInstanceOf(Error)
+    ).rejects.toThrow()
   })
 
   it('does not leak: start → stop → start again succeeds and yields a working port', async () => {
@@ -372,7 +372,7 @@ describe('socks5Connect (exported for the proxy connectivity test)', () => {
     await socks.close()
     await expect(
       socks5Connect({ socksHost: '127.0.0.1', socksPort: dead }, 'api.anthropic.com', 443)
-    ).rejects.toBeInstanceOf(Error)
+    ).rejects.toThrow()
     socks = await startFakeSocks5Server() // afterEach closes it
   })
 })

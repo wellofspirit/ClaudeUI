@@ -37,6 +37,9 @@ function fakeChild(): {
     child,
     emitLine: (obj) => stdout.push(JSON.stringify(obj) + '\n'),
     finish: () => {
+      // Real ordering: 'exit', then 'close' once stdout has ended. Without
+      // 'close' query() waits out its 2 s closeFallback timer.
+      stdout.once('end', () => child.emit('close', 0, null))
       stdout.push(null)
       child.emit('exit', 0, null)
     }

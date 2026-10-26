@@ -77,14 +77,20 @@ describe('config:save-shared-automode', () => {
   })
 
   it('accepts the three optional string arrays, in any subset', () => {
-    invoke('config:save-shared-automode', {})
-    invoke('config:save-shared-automode', { trustedDomains: ['files.acme.com'] })
-    invoke('config:save-shared-automode', {
-      trustedDomains: ['files.acme.com'],
-      trustedRegistries: ['https://npm.acme.internal'],
-      protectedPatterns: ['acme-live-*']
-    })
-    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(3)
+    const payloads = [
+      {},
+      { trustedDomains: ['files.acme.com'] },
+      {
+        trustedDomains: ['files.acme.com'],
+        trustedRegistries: ['https://npm.acme.internal'],
+        protectedPatterns: ['acme-live-*']
+      }
+    ]
+    for (const payload of payloads) invoke('config:save-shared-automode', payload)
+    // What reached the service is exactly what the caller sent, in order.
+    expect(uiConfigMocks.saveSharedAutoModeConfig.mock.calls.map(([saved]) => saved)).toEqual(
+      payloads
+    )
   })
 
   it('refuses a non-array list', () => {

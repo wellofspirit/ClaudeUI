@@ -39,14 +39,28 @@ function deliverPort(port: FakePort): void {
 
 describe('startDesktopSync — SyncStats timing relay', () => {
   const logRelay = vi.fn()
+  /** startDesktopSync never removes its window listener (process-lifetime in production). */
+  let messageListeners: EventListenerOrEventListenerObject[] = []
 
   beforeEach(() => {
     logRelay.mockClear()
+    // Track the listeners each test installs so afterEach can remove them: a stale
+    // one from an earlier test would answer the next test's port with its own sync.
+    messageListeners = []
+    const addEventListener = window.addEventListener.bind(window)
+    vi.spyOn(window, 'addEventListener').mockImplementation(
+      (type: string, listener: unknown, options?: unknown) => {
+        if (type === 'message')
+          messageListeners.push(listener as EventListenerOrEventListenerObject)
+        addEventListener(type, listener as EventListener, options as AddEventListenerOptions)
+      }
+    )
     ;(window as unknown as { api: unknown }).api = { acquireSyncPort: vi.fn(), logRelay }
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
+    for (const listener of messageListeners) window.removeEventListener('message', listener)
     setSyncClient(null as never)
     delete (window as unknown as { api?: unknown }).api
   })

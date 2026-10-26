@@ -69,7 +69,6 @@ beforeEach(() => {
 
   // Stub window.api — createNewSession calls saveSessionConfig internally.
   // Only the methods called by the store actions under test need to be present.
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: () => {},
     saveSettings: () => {},

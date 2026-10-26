@@ -51,7 +51,6 @@ const ROUTE = 'r1'
 
 beforeEach(() => {
   resetFactoryCounter()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: () => {},
     saveSettings: () => {}

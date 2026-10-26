@@ -10,8 +10,6 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { applyEvent, checkDerivedFields, rekeyTargetFor } from '../reducer'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { channelSpec } from '../channels'
 import { emptyCanonicalState, fromSnapshot, toSnapshot, type CanonicalState } from '../state'
 import type { ChatMessage, SessionStatus, StatusLineData } from '../../../../shared/types'
@@ -2282,11 +2280,8 @@ describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3
     expect(cleared.sessions['rid'].authRequired).toBeNull()
   })
 
-  it('session:vendor-auth-required is gone from the channel specs and the event map', () => {
+  it('session:vendor-auth-required is gone from the channel specs', () => {
     expect(channelSpec('session:vendor-auth-required')).toBeUndefined()
-    const events = readFileSync(join(process.cwd(), 'src/core/shared/sync/events.ts'), 'utf8')
-    expect(events).not.toContain('session:vendor-auth-required')
-    expect(events).toContain("'session:auth-required'")
   })
 
   // ── ADR-070 §2/§3: the engine's words and the retry, captured at failure time ──

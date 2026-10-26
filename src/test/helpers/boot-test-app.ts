@@ -636,7 +636,6 @@ export async function bootTestApp(): Promise<TestApp> {
   const api = buildTestApi(bridge)
 
   // Assign to globalThis.window.api for hooks/components that read it
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = api
 
   // 4. Install the sync transport seam (SyncCore phase 4c).

@@ -10,13 +10,19 @@
  * import of '@xterm/xterm', so flipping a flag there records when xterm enters
  * the module graph. A static import in View.tsx would flip it during this
  * file's own import phase, failing the first assertion.
+ *
+ * The lazy boundary is module state twice over: `React.lazy` caches its resolved
+ * chunk, and the mock factory runs once per module registry. So every test builds
+ * a fresh registry (`vi.resetModules()`) and imports the View, React, Testing
+ * Library and the harness from it together — otherwise whichever test ran first
+ * would have already pulled xterm in for the rest.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, waitFor, act, cleanup } from '@testing-library/react'
-import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import type * as RTL from '@testing-library/react'
+import type { TestApp } from '@test/helpers/boot-test-app'
 import type { TerminalTab } from '../../../../../../shared/types'
-import { TerminalPanelView, type TerminalPanelViewProps } from '../View'
+import type { TerminalPanelViewProps } from '../View'
 
 // vi.hoisted so the probe exists before the hoisted vi.mock factory closes over it
 const { xtermLoaded } = vi.hoisted(() => ({ xtermLoaded: { current: false } }))
@@ -43,16 +49,21 @@ class MockResizeObserver {
   disconnect(): void {}
 }
 
-vi.mock('@xterm/xterm', () => {
-  xtermLoaded.current = true
-  return {
-    Terminal: class {
-      constructor() {
-        return new MockTerm() as any
-      }
-    } as any
-  }
-})
+// Not a hoisted `vi.mock`: a mock factory's result is cached across
+// `vi.resetModules()`, so the probe would only ever fire for the first test.
+// `vi.doMock` in beforeEach re-registers the factory for each fresh registry.
+const mockXterm = (): void => {
+  vi.doMock('@xterm/xterm', () => {
+    xtermLoaded.current = true
+    return {
+      Terminal: class {
+        constructor() {
+          return new MockTerm() as any
+        }
+      } as any
+    }
+  })
+}
 
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
@@ -81,8 +92,17 @@ function viewProps(tabs: TerminalTab[], activeId: string | null): TerminalPanelV
 
 describe('TerminalPanelView — lazy XTermInstance', () => {
   let app: TestApp
+  let rtl: typeof RTL
+  let TerminalPanelView: typeof import('../View').TerminalPanelView
 
   beforeEach(async () => {
+    vi.resetModules()
+    xtermLoaded.current = false
+    mockXterm()
+    // One registry for everything the test renders with (see the header).
+    rtl = await import('@testing-library/react')
+    const { bootTestApp } = await import('@test/helpers/boot-test-app')
+    ;({ TerminalPanelView } = await import('../View'))
     app = await bootTestApp()
     ;(global as any).ResizeObserver = MockResizeObserver
     // requestAnimationFrame fires synchronously in jsdom
@@ -95,7 +115,7 @@ describe('TerminalPanelView — lazy XTermInstance', () => {
   })
 
   afterEach(() => {
-    cleanup()
+    rtl.cleanup()
     app.teardown()
   })
 
@@ -103,40 +123,40 @@ describe('TerminalPanelView — lazy XTermInstance', () => {
     // A static import in View.tsx would already have run the mock factory.
     expect(xtermLoaded.current).toBe(false)
 
-    render(<TerminalPanelView {...viewProps([], null)} />)
+    rtl.render(<TerminalPanelView {...viewProps([], null)} />)
 
-    expect(screen.getByTestId('TerminalPanel')).toBeInTheDocument()
-    expect(screen.getByText(/to open a terminal/)).toBeInTheDocument()
+    expect(rtl.screen.getByTestId('TerminalPanel')).toBeInTheDocument()
+    expect(rtl.screen.getByText(/to open a terminal/)).toBeInTheDocument()
 
     // Give any in-flight dynamic import a turn to land; nothing should request it.
-    await act(async () => {
+    await rtl.act(async () => {
       await new Promise((r) => setTimeout(r, 0))
     })
     expect(xtermLoaded.current).toBe(false)
-    expect(screen.queryByTestId('XTermInstance')).toBeNull()
+    expect(rtl.screen.queryByTestId('XTermInstance')).toBeNull()
   })
 
   it('suspends then mounts the terminal once the first tab exists', async () => {
     expect(xtermLoaded.current).toBe(false)
 
-    render(<TerminalPanelView {...viewProps([TAB], TAB.id)} />)
+    rtl.render(<TerminalPanelView {...viewProps([TAB], TAB.id)} />)
 
     // First paint is the Suspense fallback: the chunk is still in flight.
-    expect(screen.getByText('Loading terminal…')).toBeInTheDocument()
-    expect(screen.queryByTestId('XTermInstance')).toBeNull()
+    expect(rtl.screen.getByText('Loading terminal…')).toBeInTheDocument()
+    expect(rtl.screen.queryByTestId('XTermInstance')).toBeNull()
 
-    await waitFor(() => expect(screen.getByTestId('XTermInstance')).toBeInTheDocument())
+    await rtl.waitFor(() => expect(rtl.screen.getByTestId('XTermInstance')).toBeInTheDocument())
 
     expect(xtermLoaded.current).toBe(true)
-    expect(screen.queryByText('Loading terminal…')).toBeNull()
+    expect(rtl.screen.queryByText('Loading terminal…')).toBeNull()
   })
 
   it('has NO pan wrapper — the desktop still fits both axes (ADR-060)', async () => {
     // The mirrored-grid regime is the phone's alone. A pan container here would
     // mean the desktop had stopped fitting its width to the panel, which is the
     // behavior every other surface's shell is sized from.
-    render(<TerminalPanelView {...viewProps([TAB], TAB.id)} />)
-    await waitFor(() => expect(screen.getByTestId('XTermInstance')).toBeInTheDocument())
-    expect(screen.queryByTestId('XTermInstance.panWrapper')).toBeNull()
+    rtl.render(<TerminalPanelView {...viewProps([TAB], TAB.id)} />)
+    await rtl.waitFor(() => expect(rtl.screen.getByTestId('XTermInstance')).toBeInTheDocument())
+    expect(rtl.screen.queryByTestId('XTermInstance.panWrapper')).toBeNull()
   })
 })

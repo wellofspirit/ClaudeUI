@@ -75,15 +75,13 @@ beforeEach(() => {
   loadSessionHistory.mockReset()
   loadSubagentHistory.mockReset()
   loadOpencodeHistory.mockReset()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: {
-      loadSessionHistory,
-      loadSubagentHistory,
-      loadOpencodeHistory,
-      saveSessionConfig: vi.fn(),
-      logRelay: vi.fn()
-    }
-  } as never
+  ;(window as unknown as { api: unknown }).api = {
+    loadSessionHistory,
+    loadSubagentHistory,
+    loadOpencodeHistory,
+    saveSessionConfig: vi.fn(),
+    logRelay: vi.fn()
+  }
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BoundedSet, CodexSession, ENDED_TURN_CAP } from '../CodexSession'
@@ -1055,7 +1055,9 @@ describe('Codex first session', () => {
     let base: string
     let extra: string
     beforeEach(() => {
-      base = mkdtempSync(join(tmpdir(), 'codex-addl-'))
+      // Canonical: a path spelled with an 8.3 alias (`RUNNER~1`) is asked about by design (it could
+      // name an agent-control directory), which is not what these tests are about.
+      base = realpathSync.native(mkdtempSync(join(tmpdir(), 'codex-addl-')))
       extra = join(base, 'extra')
       mkdirSync(extra)
     })
@@ -5981,8 +5983,9 @@ describe('Codex imageView bytes reach a LIVE turn (F20)', () => {
       turnId: 'turn',
       item: { type: 'imageView', id: 'iv', path }
     })
-    // The read is fired without awaiting the notification pump; two macrotask
-    // turns is more than the `stat` + `readFile` pair needs on a temp file.
+    // The read is fired without awaiting the notification pump. Wait for its result (a fixed sleep
+    // alone lost the race on a loaded CPU), then stay a moment longer: a SECOND result is the bug.
+    await vi.waitFor(() => expect(results().length).toBeGreaterThan(0))
     await new Promise((done) => setTimeout(done, 50))
   }
 

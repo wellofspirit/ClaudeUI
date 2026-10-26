@@ -78,6 +78,7 @@ import {
   type ResolvedSession
 } from './session-links'
 import { emitEvent, syncCore } from './sync-host'
+import { realOrResolved } from './worktree-root'
 import { createWorktree, validateWorktreeName } from './worktree'
 import { recordWorktreeEntry } from './worktree-detect'
 import { loadSessionConfig, saveSessionConfig } from './ui-config'
@@ -883,22 +884,13 @@ function allowedRoots(caller: SessionToolCaller): string[] {
   return [caller.cwd, ...(worktree ? [worktree] : [])].filter(Boolean)
 }
 
-function realOrResolved(p: string): string {
-  const resolved = path.resolve(p)
-  try {
-    // `.native` canonicalises what the JS walk leaves alone on Windows (8.3 short names, the drive
-    // letter's case, a `subst` drive), so two spellings of one directory compare equal.
-    return fs.realpathSync.native(resolved)
-  } catch {
-    return resolved
-  }
-}
-
 /**
  * Is `candidate` the directory `root` or inside it? Both are compared by their real path, so a
- * symlink or a junction under `root` that leads out of it is outside (a path that does not exist
- * is compared as spelled). Separator and, on Windows, letter case are `path.relative`'s: `D:\Repo`
- * contains `d:/repo/x`.
+ * symlink or a junction under `root` that leads out of it is outside. A path that does not exist
+ * is real up to its nearest existing ancestor (`realOrResolved`): a root reached through a link,
+ * an 8.3 name or `/tmp` still contains a directory not created yet, and a missing one under a
+ * link that leads out is outside. Separator and, on Windows, letter case are `path.relative`'s:
+ * `D:\Repo` contains `d:/repo/x`.
  */
 export function withinOrEqual(root: string, candidate: string): boolean {
   const rel = path.relative(realOrResolved(root), realOrResolved(candidate))

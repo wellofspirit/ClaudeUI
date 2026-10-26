@@ -3656,7 +3656,8 @@ describe('opencode target — workdir', () => {
   })
   /** A parent directory with a `wt` directory inside it, and a `granted` one beside it, under the OS temp dir. */
   function tree(): { parent: string; wt: string; granted: string } {
-    const base = mkdtempSync(join(tmpdir(), 'xeng-oc-wd-'))
+    // Canonical: a path with an 8.3 alias (`RUNNER~1`) is asked about by design, as an agent-control name.
+    const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'xeng-oc-wd-')))
     dirs.push(base)
     const parent = join(base, 'project')
     const wt = join(parent, 'wt')

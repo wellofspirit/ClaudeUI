@@ -119,13 +119,15 @@ export function discardStaging(staging: Staging): Promise<void> {
 const RETRYABLE = new Set(['EPERM', 'EACCES', 'EBUSY'])
 
 /**
- * `rename`, retried briefly on Windows' transient EPERM/EACCES/EBUSY (an
- * antivirus scanning just-written executables holds them for a moment).
+ * `rename`, retried on Windows' transient EPERM/EACCES/EBUSY (an antivirus
+ * scanning just-written executables holds them for a moment). Up to ~15 s in
+ * all: a hold of more than the old ~3 s budget failed a fresh install on a
+ * Windows CI runner.
  */
 export async function renameWithRetry(
   from: string,
   to: string,
-  attempts = process.platform === 'win32' ? 8 : 1
+  attempts = process.platform === 'win32' ? 20 : 1
 ): Promise<void> {
   for (let i = 1; ; i++) {
     try {
@@ -134,7 +136,7 @@ export async function renameWithRetry(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code ?? ''
       if (i >= attempts || !RETRYABLE.has(code)) throw err
-      await new Promise((resolve) => setTimeout(resolve, 100 * i))
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100 * i, 1000)))
     }
   }
 }

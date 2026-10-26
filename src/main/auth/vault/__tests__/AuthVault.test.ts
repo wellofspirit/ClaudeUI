@@ -335,6 +335,9 @@ describe('AuthVault lifecycle compatibility', () => {
     await vault.beginDeviceCodeLogin()
     vault.cancelLogin()
     expect(device.cancel).toHaveBeenCalled()
+    // And the slot is released, so the abandoned flow cannot be completed.
+    await expect(vault.completeLogin()).rejects.toThrow(/no login/)
+    expect(device.waitForCompletion).not.toHaveBeenCalled()
   })
 
   it('a second device-code start CANCELS the live first one and takes the slot', async () => {

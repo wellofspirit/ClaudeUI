@@ -2,10 +2,25 @@ name: Set up workspace
 description: >-
   Node, bun, the install/CLI/Codex/Electron caches, `bun install` (with its
   postinstall) and the native rebuild: everything a CI job needs before it
-  can typecheck, test or build. Shared by every job in ci.yml.
+  can typecheck, test or build. Shared by every job in ci.yml, on Linux, macOS
+  and Windows (the Windows-only steps mirror pre-release.yml's build job).
 runs:
   using: composite
   steps:
+    # The release workflows' Windows exclusions: real-time scanning of every
+    # spawned node/bun and every file the install writes slows a cold runner.
+    - name: Exclude workspace from Windows Defender
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+        Add-MpPreference -ExclusionPath "$env:USERPROFILE\.bun"
+        Add-MpPreference -ExclusionPath "$env:USERPROFILE\.claude\ui\harnesses"
+        Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\electron"
+        Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\electron-builder"
+        Add-MpPreference -ExclusionProcess "bun.exe"
+        Add-MpPreference -ExclusionProcess "node.exe"
+
     - uses: actions/setup-node@v7
       with:
         # Pinned to 24.15.0 to match the release workflows: Node 24.16.0 ships a
@@ -15,7 +30,10 @@ runs:
 
     - uses: oven-sh/setup-bun@v2
 
+    # Not on Windows: extracting the cache took longer than a fresh download
+    # (measured for pre-release.yml, 2026-10-03).
     - name: Cache bun install
+      if: runner.os != 'Windows'
       uses: actions/cache@v6
       with:
         path: ~/.bun/install/cache
@@ -56,6 +74,10 @@ runs:
         path: |
           ~/.cache/electron
           ~/.cache/electron-builder
+          ~/Library/Caches/electron
+          ~/Library/Caches/electron-builder
+          ~/AppData/Local/electron/Cache
+          ~/AppData/Local/electron-builder/Cache
         key: ${{ runner.os }}-electron-${{ hashFiles('bun.lock') }}
         restore-keys: |
           ${{ runner.os }}-electron-

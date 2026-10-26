@@ -47,7 +47,6 @@ const stated = (): string[][] => watchGit.mock.calls.map((c) => c[0] as string[]
 function installWindowApi(isRepo: boolean): void {
   watchGit = vi.fn().mockResolvedValue(undefined)
   gitCheckRepo = vi.fn().mockResolvedValue(isRepo)
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     watchGit,
     gitCheckRepo,

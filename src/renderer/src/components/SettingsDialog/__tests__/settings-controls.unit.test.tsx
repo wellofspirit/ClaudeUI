@@ -182,7 +182,7 @@ describe('SettingRow', () => {
     expect(screen.getByTestId('SettingRow')).toHaveTextContent('Nothing to configure.')
   })
 
-  it('sizes the inline control column to its CONTENT, not to a fixed 240px', () => {
+  it('sizes the inline control column to its CONTENT', () => {
     // The fixed column was wrong in both directions: in the 560px Manage sheet
     // a row whose control is one button wrapped its description at half the
     // card, and in the ~330px quick popover it left ~60px of label and pushed
@@ -194,14 +194,11 @@ describe('SettingRow', () => {
       </SettingRow>
     )
     const column = container.querySelector('[data-testid="SettingRow"] > span:last-of-type')!
-    expect(column.className).not.toContain('w-[240px]')
-    expect(column.className).toContain('shrink-0')
-    expect(column.className).toContain('justify-end')
-    // The phone cap is unchanged, including the two tokens that shrink a
-    // control which declares its own width into it.
-    expect(column.className).toContain('max-md:max-w-[58%]')
-    expect(column.className).toContain('max-md:[&>*]:max-w-full')
-    expect(column.className).toContain('max-md:[&>*]:min-w-0')
+    expect(column).toContainElement(screen.getByRole('button', { name: 'Disconnect' }))
+    // jsdom has no layout engine, so `shrink-0` (size to the content, never the
+    // old fixed width) is the one place the class IS the behaviour. The phone
+    // cap on this column is pinned in SettingsMobileView.component.test.tsx.
+    expect(column).toHaveClass('shrink-0')
   })
 })
 
@@ -279,48 +276,69 @@ describe('the control set', () => {
       />
     )
     const slot = screen.getByText('5,000 chars')
+    // No layout engine in jsdom: the min-width + no-wrap utilities ARE the
+    // behaviour (the slot grows with its content instead of clipping).
     expect(slot).toHaveClass('min-w-9')
     expect(slot).toHaveClass('whitespace-nowrap')
-    expect(slot.className).not.toMatch(/(^|\s)w-9(\s|$)/)
   })
 
   it('the slider DECLARES its 200px track', () => {
     // The content-sized control column can no longer supply a width, so a
     // `flex-1` track would collapse to the value span's width.
     render(<SettingsSlider label="A" value={50} min={0} max={100} onChange={vi.fn()} />)
-    const track = screen.getByTestId('SliderField')
-    expect(track).toHaveClass('w-[200px]')
-    expect(track.className).not.toContain('flex-1')
+    // The declared width IS the behaviour here (jsdom cannot measure a track).
+    expect(screen.getByTestId('SliderField')).toHaveClass('w-[200px]')
   })
 
   it('the slider draws a full-strength accent fill', () => {
     // The whole control used to sit at 40% opacity, which washed the fill out.
     render(<SettingsSlider label="A" value={50} min={0} max={100} onChange={vi.fn()} />)
     const track = screen.getByTestId('SliderField')
-    expect(track.className).not.toMatch(/opacity-40/)
     expect(track.style.background).toContain('var(--color-accent)')
+    // The opacity utility IS the regression (it washed the fill out).
+    expect(track.className).not.toMatch(/opacity-40/)
   })
 
   it('the toggle track is visible when off', () => {
     // text-muted at 40% over bg-secondary all but disappears on the dark theme.
     const { container } = render(<ToggleSwitch checked={false} />)
+    // The fill token IS the behaviour: the off track must be drawn at 60%, not
+    // the 40% that vanished.
     expect(container.querySelector('[data-testid="ToggleSwitch"]')).toHaveClass('bg-text-muted/60')
   })
 
-  it('the radio is an outlined ring, not the UA’s filled circle', () => {
-    render(
+  it('the radio is a native radio in its group, reflects `checked`, and selects on click', () => {
+    // The outlined-ring styling is cosmetic (a screenshot concern, not a class
+    // assertion); what the row guarantees is the native radio contract.
+    const onSelect = vi.fn()
+    const { rerender } = render(
       <RadioRow
         name="autonomyMode"
         value="plan"
         label="Read-only (Plan)"
         checked={false}
-        onSelect={vi.fn()}
+        onSelect={onSelect}
       />
     )
-    const radio = screen.getByDisplayValue('plan')
-    expect(radio).toHaveClass('appearance-none')
-    expect(radio).toHaveClass('border-border-bright')
-    expect(radio).toHaveClass('checked:border-accent')
+    const radio = screen.getByDisplayValue('plan') as HTMLInputElement
+    expect(radio.type).toBe('radio')
+    expect(radio.name).toBe('autonomyMode')
+    expect(radio.checked).toBe(false)
+    expect(screen.getByTestId('RadioRow')).toHaveAttribute('data-id', 'plan')
+
+    fireEvent.click(radio)
+    expect(onSelect).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <RadioRow
+        name="autonomyMode"
+        value="plan"
+        label="Read-only (Plan)"
+        checked
+        onSelect={onSelect}
+      />
+    )
+    expect((screen.getByDisplayValue('plan') as HTMLInputElement).checked).toBe(true)
   })
 })
 
@@ -350,12 +368,28 @@ describe('SettingsSelect', () => {
     const opts = (n: number): { value: string; label: string }[] =>
       Array.from({ length: n }, (_, i) => ({ value: `v${i}`, label: `L${i}` }))
 
-    render(<SettingsSelect label="Five" value="v0" options={opts(5)} onChange={vi.fn()} />)
-    expect(screen.getByTestId('SettingsSelect')).toHaveClass('items-center')
-
-    cleanup()
-    render(<SettingsSelect label="Six" value="v0" options={opts(6)} onChange={vi.fn()} />)
-    expect(screen.getByTestId('SettingsSelect')).toHaveClass('flex-col')
+    // The layout shows in where Reset lands: inline keeps it in the control
+    // column beside the options, stacked moves it onto the label line.
+    const resetOnLabelLine = (n: number): boolean => {
+      render(
+        <SettingsSelect
+          testid="S"
+          label="Pick one"
+          value="v0"
+          options={opts(n)}
+          onChange={vi.fn()}
+          modified
+          onReset={vi.fn()}
+        />
+      )
+      const onLabelLine = screen
+        .getByTestId('S.reset')
+        .parentElement!.textContent!.includes('Pick one')
+      cleanup()
+      return onLabelLine
+    }
+    expect(resetOnLabelLine(5)).toBe(false)
+    expect(resetOnLabelLine(6)).toBe(true)
   })
 })
 

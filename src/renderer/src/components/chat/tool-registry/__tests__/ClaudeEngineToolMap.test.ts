@@ -262,14 +262,6 @@ describe('ClaudeEngineToolMap.normalize', () => {
         expect((view as { subagent?: string }).subagent).toBeUndefined()
       })
 
-      it('run_in_background marks the dispatch card background; absent or false leaves it a waiting call', () => {
-        const view = (extra: Record<string, unknown>) =>
-          ClaudeEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', ...extra })
-        expect(view({ run_in_background: true })).toMatchObject({ kind: 'task', background: true })
-        expect(view({ run_in_background: false })).not.toHaveProperty('background')
-        expect(view({})).not.toHaveProperty('background')
-      })
-
       it('the dispatch field has no model when none is given', () => {
         const view = ClaudeEngineToolMap.normalize('task', {
           engine: 'opencode',

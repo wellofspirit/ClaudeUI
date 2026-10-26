@@ -34,7 +34,7 @@ Architecture, services, persistence, multi-engine design → `docs/architecture/
 - `bun run dev` — development mode with hot reload (main-process changes need an app restart)
 - `bun run build` — Claude Code binary (`ensure-cli`) + electron-vite build, no typecheck (run `bun run typecheck` separately); `build:win` / `build:mac` / `build:linux` add the typecheck (not on linux) and an electron-builder package (`--dir`, unpacked, on win/mac)
 - `bun run typecheck` / `bun run lint` / `bun run format:check` — `bun run format` rewrites the **whole repo**; format only the files you touched (`bunx prettier --write <files>`)
-- `scripts/gates.sh` — the commit gate (fast): typecheck, lint of the changed files, and the tests related to the changed files; `scripts/gates.sh --full` runs the whole suite (before a PR). Both work in a git worktree. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
+- `scripts/gates.sh` — the commit gate: typecheck, lint and the whole default suite (about 40 s); works in a git worktree. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
 - `bun run ensure` — the Claude Code binary and the tested opencode, pi and Codex, together; `postinstall` runs it after the native rebuild
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary and boot-probe it; version pinned by `package.json#claudeCliVersion`, which must equal `src/shared/harness-manifests/claude.json#tested`
 - `bun run ensure-opencode` / `ensure-pi` / `ensure-codex` — install the tested version (`src/shared/harness-manifests/<id>.json#tested`) into the managed store through the app's own installer (`CLAUDEUI_HARNESS_STORE` moves the store); `update-*` reinstalls it
@@ -45,7 +45,7 @@ Architecture, services, persistence, multi-engine design → `docs/architecture/
 
 ## Testing
 
-- `bun run test` — default local run: the unit, unit-node, component, e2e and browser projects (about a minute on a fast Windows box). The browser project needs Playwright's Chromium (`bunx playwright install --only-shell chromium`)
+- `bun run test` — default local run: the unit, unit-node, unit-forks, component, e2e and browser projects (about 35 s on a fast Windows box; the unit, unit-node, component and e2e projects share worker processes, see `docs/testing-strategy.md`, "Test pools and process isolation"). The browser project needs Playwright's Chromium (`bunx playwright install --only-shell chromium`)
 - `bun run test:ci` — adds the slow git project (what the PR workflow runs; `ci.yml` runs on pull requests only, while pushes to `pre-release`/`main` run the release builds, which test with `test:ci:no-browser`)
 - `bun run test:git:changed` — after touching git-service/worktree code
 - `bun run test:integration` — real engine binaries (Claude Code from `vendor/`, the others from the managed store). Each suite is opt-in and skips without its flag: `CLAUDE_INTEGRATION_TESTS=1`, `OPENCODE_V2_INTEGRATION=1`, `PI_INTEGRATION_TESTS=1`, `CODEX_INTEGRATION=1`; it also skips when its engine is not installed. A run that only skipped has not passed
