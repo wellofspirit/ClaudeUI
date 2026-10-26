@@ -1,9 +1,10 @@
 # Bump briefs
 
-Dispatch the owner's role agents (`orch-reader`, `orch-implementer`, `orch-verifier`, `orch-design-reviewer`,
-`orch-pr-reviewer`); each carries its own instructions and constraints. For a bump, the brief adds:
+Dispatch `Explore` for evidence (ask for quotes with `path:line`, not conclusions) and the orchestrate role agents
+`orch-implementer`, `orch-verifier` and `orch-reviewer`, which carry their own instructions and constraints. For a
+bump, the brief adds:
 
-## `orch-reader` — compatibility evidence (one per engine; they can run in parallel)
+## `Explore` — compatibility evidence (one per engine; they can run in parallel)
 
 - Question: what changed between **<old>** and **<new>** of **<engine>** that ClaudeUI depends on.
 - Sources: every changelog / release-note entry in (<old>, <new>]; `git diff <old-tag> <new-tag>` in the main
@@ -30,9 +31,9 @@ Dispatch the owner's role agents (`orch-reader`, `orch-implementer`, `orch-verif
 - Claims: the checklist's real-app items (a tool turn, a subagent, reload/reopen keeping model and effort, plus the
   engine-specific one).
 
-## `orch-design-reviewer` and `orch-pr-reviewer`
+## `orch-reviewer`
 
-- Consult when the bump adopts a behaviour change (a new default, a permission change, a protocol change) rather
+- Design review when the bump adopts a behaviour change (a new default, a permission change, a protocol change) rather
   than a drop-in.
 - Exit review extras: every file the engine checklist says must move with the pin did move; nothing is left at the
   old version; each upstream change in the compatibility report is handled or consciously accepted — and look for
