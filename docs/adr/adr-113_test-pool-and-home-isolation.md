@@ -92,7 +92,7 @@ in a process the test owns.
    test run: a "failed run, zero failed tests" signature also matches an unhandled error, which is how a cross-file
    leak appears under `vmForks`.
 6. **CI.** Pull requests run the tests on Linux, macOS and Windows, 3 shards each, every project except `browser`;
-   the `browser` project runs once, on Linux, in its own job. On Linux and macOS CI the suite uses every core of the runner.
+   the `browser` project runs once, on Linux, in its own job inside Playwright's container image. On Linux and macOS CI the suite uses every core of the runner.
 
 ## Consequences
 
