@@ -577,6 +577,26 @@ describe('sessionToolsGate', () => {
       expect(createSession).not.toHaveBeenCalled()
     })
 
+    it('a caller whose cwd is spelled through a link: a directory not created yet is inside it; one under a link that leads out is not', () => {
+      const real = dir('cap-link-real')
+      const elsewhere = dir('cap-link-elsewhere')
+      const junction = process.platform === 'win32' ? 'junction' : 'dir'
+      const alias = path.join(ROOT, 'cap-link-alias')
+      fs.symlinkSync(real, alias, junction)
+      fs.symlinkSync(elsewhere, path.join(real, 'escape'), junction)
+      const viaAlias = born('cap-link-alias', { cwd: alias })
+      const gate = (caller: SessionToolCaller, cwd: string): GateDecision =>
+        sessionToolsGate(caller, 'session_start', start({ cwd }), {})
+
+      // Inside by either spelling, and merely missing: the gate says so, not "outside".
+      expect(deny(gate(viaAlias.caller, path.join(alias, 'nope')))).toMatch(/not an existing/)
+      expect(deny(gate(viaAlias.caller, path.join(real, 'nope')))).toMatch(/not an existing/)
+      // Missing AND under a link that leads out of the tree: outside (the gate lets the service
+      // turn it into a proposal), not "inside, merely missing".
+      const inReal = born('cap-link-real', { cwd: real })
+      expect(gate(inReal.caller, path.join(real, 'escape', 'nope')).behavior).toBe('allow')
+    })
+
     it('a caller in a worktree may start in the worktree root even from a subfolder', async () => {
       const wt = dir('cap-wt')
       const sub = path.join(wt, 'packages', 'a')

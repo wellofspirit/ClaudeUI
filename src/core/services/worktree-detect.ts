@@ -316,8 +316,10 @@ function createdWorktreeInfo(worktreePath: string): WorktreeInfo | undefined {
 }
 
 /**
- * Drop every recorded worktree entry whose `worktreePath` is one of `worktreePaths` (compared
- * normalised: separators, trailing slash and, on Windows, case). Called by the SERVER after it
+ * Drop every recorded worktree entry whose `worktreePath` is one of `worktreePaths` (the same
+ * directory: separators, trailing slash, case on Windows, and links or short names, as
+ * `isCreatedWorktreePath` matches them — git lists a worktree by its real path, the record keeps
+ * the spelling the repo was reached by). Called by the SERVER after it
  * removes a worktree, so a stale entry cannot outlive the directory: the renderer saves the
  * whole map and would resurrect anything the server forgot only on the client. Saves and emits
  * `config:sessions-changed` once, and only when something was dropped. Returns the routing ids
@@ -328,12 +330,11 @@ export function forgetWorktreeEntries(
   emit: (channel: string, args: unknown[]) => void
 ): string[] {
   if (worktreePaths.length === 0) return []
-  const gone = new Set(worktreePaths.map((p) => normaliseWorktreePath(p)))
   const config = loadSessionConfig()
   const worktreeInfoMap = { ...(config.worktreeInfoMap ?? {}) }
   const dropped: string[] = []
   for (const [routingId, info] of Object.entries(worktreeInfoMap)) {
-    if (gone.has(normaliseWorktreePath(info.worktreePath))) {
+    if (worktreePaths.some((p) => samePath(p, info.worktreePath))) {
       delete worktreeInfoMap[routingId]
       dropped.push(routingId)
     }

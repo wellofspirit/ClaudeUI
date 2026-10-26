@@ -1243,6 +1243,33 @@ describe('removeWorktrees: review hardening', () => {
     expect(fs.existsSync(path.join(inside, '.git'))).toBe(true)
   })
 
+  it('a repo reached through a link: a managed worktree and a .git-less managed shell are both removed, and the records go by their real paths', async () => {
+    const viaLink = path.join(scratch.base, 'repo-link')
+    makeLink(repo.path, viaLink)
+    const wt = await createWorktree(viaLink, 'via-link-wt')
+    const shell = await createWorktree(viaLink, 'via-link-shell')
+    fs.rmSync(path.join(shell.worktreePath, '.git'))
+    const inv = await inventoryWorktrees(viaLink)
+    const forgotten: string[][] = []
+
+    const results = await removeWorktrees(
+      viaLink,
+      inv.entries.map((e) => e.id),
+      () => {},
+      { enforceHolders: false, forgetEntries: (paths) => forgotten.push(paths) }
+    )
+
+    expect(results.map((r) => r.outcome)).toEqual(['removed', 'removed'])
+    expect(fs.existsSync(wt.worktreePath) || fs.existsSync(shell.worktreePath)).toBe(false)
+    // The paths handed to forgetEntries are git's, which is what `forgetWorktreeEntries` has to
+    // match against the spelling the record was made with (the link).
+    expect(forgotten.flat().map(idOf).sort()).toEqual(
+      [wt, shell]
+        .map((i) => idOf(path.join(repo.path, '.claude', 'worktrees', i.worktreeName)))
+        .sort()
+    )
+  })
+
   it('N4: a progress callback that throws neither fails an entry nor loses the other results', async () => {
     const a = await createWorktree(repo.path, 'noisy-a')
     const b = await createWorktree(repo.path, 'noisy-b')

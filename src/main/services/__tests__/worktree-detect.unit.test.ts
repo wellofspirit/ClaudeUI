@@ -12,6 +12,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 const loadSessionConfig = vi.fn()
 const saveSessionConfig = vi.fn()
@@ -231,6 +234,30 @@ describe('forgetWorktreeEntries', () => {
     expect(saved.recentSessions).toEqual(['r1'])
     expect(emit).toHaveBeenCalledTimes(1)
     expect(emit).toHaveBeenCalledWith('config:sessions-changed', [saved])
+  })
+
+  it('matches the directory, not the spelling: a record made through a link goes when git reports the real path of a removed worktree', () => {
+    // git lists a worktree by its real path; the record keeps the spelling the repo was reached by
+    // (a symlinked project, macOS /tmp, a Windows 8.3 name). The worktree is gone by now.
+    const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'forget-link-')))
+    try {
+      const real = path.join(base, 'repo')
+      const alias = path.join(base, 'repo-alias')
+      fs.mkdirSync(real)
+      fs.symlinkSync(real, alias, process.platform === 'win32' ? 'junction' : 'dir')
+      loadSessionConfig.mockReturnValue({
+        worktreeInfoMap: {
+          r1: { ...INFO, worktreePath: path.join(alias, '.claude', 'worktrees', 'a') },
+          r2: { ...INFO, worktreePath: path.join(alias, '.claude', 'worktrees', 'b') }
+        }
+      })
+
+      const dropped = forgetWorktreeEntries([path.join(real, '.claude', 'worktrees', 'a')], vi.fn())
+
+      expect(dropped).toEqual(['r1'])
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
   })
 
   it('saves and emits nothing when no entry matches', () => {

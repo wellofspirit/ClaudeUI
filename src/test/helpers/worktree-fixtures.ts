@@ -19,7 +19,8 @@ export interface Scratch {
 }
 
 export function makeScratch(): Scratch {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeui-wtscratch-'))
+  // Canonical, as in makeTempGitRepo: worktree paths come back from git in their real spelling.
+  const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'claudeui-wtscratch-')))
   const sentinel = path.join(base, 'sentinel')
   fs.mkdirSync(path.join(sentinel, 'sub'), { recursive: true })
   fs.writeFileSync(path.join(sentinel, 'keep.txt'), 'precious')

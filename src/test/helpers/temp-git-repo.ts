@@ -47,7 +47,12 @@ export interface MakeTempRepoOptions {
 const DEFAULT_AUTHOR = { name: 'Test User', email: 'test@example.com' }
 
 export async function makeTempGitRepo(opts: MakeTempRepoOptions = {}): Promise<TempGitRepo> {
-  const repoPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'claudeui-git-test-'))
+  // Canonical: git reports every path by its real spelling (macOS `/var` is `/private/var`, a CI
+  // user dir may be an 8.3 short name), so a repo path kept as `os.tmpdir()` spells it differently
+  // from everything git hands back.
+  const repoPath = fs.realpathSync.native(
+    await fs.promises.mkdtemp(path.join(os.tmpdir(), 'claudeui-git-test-'))
+  )
   const defaultBranch = opts.defaultBranch ?? 'main'
   const author = opts.author ?? DEFAULT_AUTHOR
 

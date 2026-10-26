@@ -14717,7 +14717,8 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
     makeCtx({ fromEngine: 'opencode', fromRoutingId: 'parent-A', cwd: parent, ...over })
 
   beforeAll(() => {
-    base = mkdtempSync(join(tmpdir(), 'xeng-workdir-'))
+    // Canonical: a path with an 8.3 alias (`RUNNER~1`) is asked about by design, as an agent-control name.
+    base = realpathSync.native(mkdtempSync(join(tmpdir(), 'xeng-workdir-')))
     parent = mkdir(base, 'project')
     outside = mkdir(base, 'elsewhere')
   })

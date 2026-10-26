@@ -370,7 +370,9 @@ function isRealDirectory(p: string): boolean {
 function repoContext(cwd: string): RepoContext {
   const loc: GitLocation | null = locateGit(cwd)
   if (!loc) throw new Error(`Not inside a git repository: ${cwd}`)
-  const repoRoot = loc.repoRoot ?? ''
+  // Canonical, because git lists every worktree by its real path: a root spelled through a link,
+  // a short name or `/tmp` would never contain the worktrees under it.
+  const repoRoot = loc.repoRoot ? realOrResolved(loc.repoRoot) : ''
   const managedRoot = repoRoot ? getManagedWorktreesRoot(repoRoot) : ''
   let managedReal = false
   let rootVerified = false
