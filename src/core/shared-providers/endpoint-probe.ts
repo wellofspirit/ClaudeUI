@@ -241,7 +241,10 @@ async function readCapped(response: Response): Promise<string | null> {
  * used: undici's can quote a rejected header value, which is where the key is.
  */
 function transportFailure(err: unknown, shown: string, timeoutMs: number): Failure {
-  if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+  // By name, not `instanceof Error`: a DOMException from AbortSignal.timeout() is not an Error of
+  // the realm that runs this code when it runs inside a vm context (the unit tests' vmForks pool).
+  const name = (err as { name?: unknown } | null)?.name
+  if (name === 'TimeoutError' || name === 'AbortError') {
     return failed(
       'timeout',
       `${shown} did not answer within ${Math.round(timeoutMs / 100) / 10} s.`

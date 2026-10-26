@@ -5,7 +5,7 @@
  * in-process with every process-level thing injected and a fake recognizer.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
 import * as net from 'node:net'
 import type { Recognizer } from '../recognizer'
@@ -35,6 +35,24 @@ function manualClock(): Clock & { fireTimeouts(): void; delays(): number[] } {
     fireTimeouts: () => [...timeouts.keys()].forEach((fn) => fn()),
     delays: () => [...timeouts.values()]
   }
+}
+
+/**
+ * `runVoiceWorker`, with every server it starts stopped after the test, whatever the test did: the
+ * process-reset leak guard fails a file that leaves a listening socket behind. `stop` is made
+ * idempotent, so a test may still stop its own.
+ */
+const started: Array<() => Promise<void>> = []
+afterEach(async () => {
+  await Promise.all(started.splice(0).map((stop) => stop()))
+})
+async function start(options: VoiceWorkerOptions): ReturnType<typeof runVoiceWorker> {
+  const result = await runVoiceWorker(options)
+  if (result.status !== 'listening') return result
+  let stopping: Promise<void> | undefined
+  const stop = (): Promise<void> => (stopping ??= result.stop())
+  started.push(stop)
+  return { ...result, stop }
 }
 
 function harness(overrides: Partial<VoiceWorkerOptions> = {}) {
@@ -77,7 +95,7 @@ describe('defaultThreads', () => {
 describe('runVoiceWorker', () => {
   it('prints exactly one listening line, for a server that is really listening', async () => {
     const h = harness()
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(result.status).toBe('listening')
     if (result.status !== 'listening') return
 
@@ -100,14 +118,14 @@ describe('runVoiceWorker', () => {
 
   it('hands the loader the directories and the thread count', async () => {
     const h = harness({ argv: ['--addon', '/a', '--model', '/m', '--threads', '3'] })
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(h.loadRecognizer).toHaveBeenCalledWith('/a', '/m', 3)
     if (result.status === 'listening') await result.stop()
   })
 
   it('defaults the threads from the core count', async () => {
     const h = harness({ parallelism: 8 })
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(h.loadRecognizer).toHaveBeenCalledWith('/pack/addon', '/pack/model', 4)
     if (result.status === 'listening') await result.stop()
   })
@@ -122,7 +140,7 @@ describe('runVoiceWorker', () => {
     ['--threads many', ['--addon', '/a', '--model', '/m', '--threads', 'many']]
   ])('%s → a fatal line and exit 1, without loading anything', async (_name, argv) => {
     const h = harness({ argv })
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(result.status).toBe('failed')
     expect(h.out).toHaveLength(1)
     expect(JSON.parse(h.out[0])).toMatchObject({ type: 'fatal' })
@@ -132,7 +150,7 @@ describe('runVoiceWorker', () => {
 
   it('a missing token is fatal (it comes from the environment, never argv)', async () => {
     const h = harness({ env: {} })
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(result.status).toBe('failed')
     expect(JSON.parse(h.out[0]).message).toContain(VOICE_TOKEN_ENV)
     expect(h.exit).toHaveBeenCalledWith(1)
@@ -145,7 +163,7 @@ describe('runVoiceWorker', () => {
         throw new Error('onnxruntime.dll is missing')
       }
     })
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(result.status).toBe('failed')
     expect(JSON.parse(h.out[0])).toEqual({
       type: 'fatal',
@@ -162,7 +180,7 @@ describe('runVoiceWorker', () => {
           finishLoad = () => resolve(fakeRecognizer)
         })
     })
-    const running = runVoiceWorker(h.options)
+    const running = start(h.options)
     expect(h.stdin.resume).toHaveBeenCalled()
     h.stdin.emit('end')
     expect(h.exit).toHaveBeenCalledWith(0)
@@ -175,7 +193,7 @@ describe('runVoiceWorker', () => {
   it('exits 0 after ten idle minutes — the default delay is ten minutes', async () => {
     const clock = manualClock()
     const h = harness({ clock })
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(clock.delays()).toEqual([10 * 60_000])
     expect(IDLE_EXIT_MS).toBe(10 * 60_000)
     expect(h.exit).not.toHaveBeenCalled()
@@ -187,7 +205,7 @@ describe('runVoiceWorker', () => {
   it('an explicit idle delay is the one the timer is armed with', async () => {
     const clock = manualClock()
     const h = harness({ clock, idleExitMs: 1234 })
-    const result = await runVoiceWorker(h.options)
+    const result = await start(h.options)
     expect(clock.delays()).toEqual([1234])
     if (result.status === 'listening') await result.stop()
   })
@@ -195,28 +213,28 @@ describe('runVoiceWorker', () => {
   describe('the voice-worker subcommand', () => {
     it('is stripped when it leads argv (bun src/server/main.ts voice-worker …)', async () => {
       const h = harness({ argv: ['voice-worker', '--addon', '/a', '--model', '/m'] })
-      const result = await runVoiceWorker(h.options)
+      const result = await start(h.options)
       expect(h.loadRecognizer).toHaveBeenCalledWith('/a', '/m', 8)
       if (result.status === 'listening') await result.stop()
     })
 
     it('is not needed (the desktop entry passes flags only)', async () => {
       const h = harness({ argv: ['--addon', '/a', '--model', '/m'] })
-      const result = await runVoiceWorker(h.options)
+      const result = await start(h.options)
       expect(result.status).toBe('listening')
       if (result.status === 'listening') await result.stop()
     })
 
     it('is only a subcommand at the front', async () => {
       const h = harness({ argv: ['--addon', 'voice-worker', '--model', '/m'] })
-      const result = await runVoiceWorker(h.options)
+      const result = await start(h.options)
       expect(h.loadRecognizer).toHaveBeenCalledWith('voice-worker', '/m', 8)
       if (result.status === 'listening') await result.stop()
     })
 
     it('alone it is still a missing-argument fatal', async () => {
       const h = harness({ argv: ['voice-worker'] })
-      const result = await runVoiceWorker(h.options)
+      const result = await start(h.options)
       expect(result.status).toBe('failed')
       expect(JSON.parse(h.out[0]).message).toContain('--addon')
     })
@@ -228,7 +246,7 @@ describe('runVoiceWorker', () => {
       async (event) => {
         const events = new EventEmitter()
         const h = harness({ processEvents: events as VoiceWorkerOptions['processEvents'] })
-        const result = await runVoiceWorker(h.options)
+        const result = await start(h.options)
         expect(h.out).toHaveLength(1)
 
         events.emit(event, new Error('kaboom'))
@@ -249,7 +267,7 @@ describe('runVoiceWorker', () => {
             finishLoad = () => resolve(fakeRecognizer)
           })
       })
-      const running = runVoiceWorker(h.options)
+      const running = start(h.options)
       events.emit('uncaughtException', new Error('during load'))
       expect(h.out).toHaveLength(1)
       expect(JSON.parse(h.out[0])).toEqual({ type: 'fatal', message: 'during load' })
@@ -263,7 +281,7 @@ describe('runVoiceWorker', () => {
     it('a non-Error value is reported without its content', async () => {
       const events = new EventEmitter()
       const h = harness({ processEvents: events as VoiceWorkerOptions['processEvents'] })
-      const result = await runVoiceWorker(h.options)
+      const result = await start(h.options)
       events.emit('unhandledRejection', { secret: TOKEN })
       expect(h.err.join('')).not.toContain(TOKEN)
       expect(h.exit).toHaveBeenCalledWith(1)
@@ -273,9 +291,9 @@ describe('runVoiceWorker', () => {
 
   it('never writes the token to stdout or stderr', async () => {
     const bad = harness({ argv: ['--bogus'] })
-    await runVoiceWorker(bad.options)
+    await start(bad.options)
     const ok = harness()
-    const result = await runVoiceWorker(ok.options)
+    const result = await start(ok.options)
     if (result.status === 'listening') await result.stop()
     for (const text of [...bad.out, ...bad.err, ...ok.out, ...ok.err]) {
       expect(text).not.toContain(TOKEN)
@@ -300,7 +318,7 @@ describe('stdout stays the protocol line (ADR-101)', () => {
     const before = [console.log, console.info, console.debug]
     const h = harness()
 
-    await runVoiceWorker(h.options)
+    await start(h.options)
 
     expect([console.log, console.info, console.debug]).toEqual(before)
   })

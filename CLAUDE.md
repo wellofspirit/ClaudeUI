@@ -44,7 +44,7 @@ Architecture, services, persistence, multi-engine design → `docs/architecture/
 
 ## Testing
 
-- `bun run test` — default local run: the unit, unit-node, component, e2e and browser projects (about a minute on a fast Windows box). The browser project needs Playwright's Chromium (`bunx playwright install --only-shell chromium`)
+- `bun run test` — default local run: the unit, unit-node, unit-forks, component, e2e and browser projects (about 35 s on a fast Windows box; the unit, unit-node, component and e2e projects share worker processes, see `docs/testing-strategy.md`, "Test pools and process isolation"). The browser project needs Playwright's Chromium (`bunx playwright install --only-shell chromium`)
 - `bun run test:ci` — adds the slow git project (what the PR workflow runs; `ci.yml` runs on pull requests only, while pushes to `pre-release`/`main` run the release builds, which test with `test:ci:no-browser`)
 - `bun run test:git:changed` — after touching git-service/worktree code
 - `bun run test:integration` — real engine binaries (Claude Code from `vendor/`, the others from the managed store). Each suite is opt-in and skips without its flag: `CLAUDE_INTEGRATION_TESTS=1`, `OPENCODE_V2_INTEGRATION=1`, `PI_INTEGRATION_TESTS=1`, `CODEX_INTEGRATION=1`; it also skips when its engine is not installed. A run that only skipped has not passed

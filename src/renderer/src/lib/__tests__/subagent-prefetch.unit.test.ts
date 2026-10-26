@@ -106,14 +106,12 @@ beforeEach(() => {
   resetBackgroundLoadForTests()
   loadSessionStatusLine.mockReset()
   loadSubagentHistory.mockReset()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: {
-      loadSessionStatusLine,
-      loadSubagentHistory,
-      saveSessionConfig: vi.fn(),
-      logRelay: vi.fn()
-    }
-  } as never
+  ;(window as unknown as { api: unknown }).api = {
+    loadSessionStatusLine,
+    loadSubagentHistory,
+    saveSessionConfig: vi.fn(),
+    logRelay: vi.fn()
+  }
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},

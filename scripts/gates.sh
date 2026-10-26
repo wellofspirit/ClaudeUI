@@ -16,8 +16,10 @@
 # Never pipe this into a filter before acting on its result: `gates.sh | tail && git commit`
 # takes tail's exit code.
 #
-# The vitest fork-pool teardown crash (Windows, rare since vitest 4.1.10) shows as a non-zero exit
-# with ZERO failed tests. Only that signature is retried, once; a real failure is never re-run.
+# A failed test run is never retried. The old "non-zero exit, zero failed tests" retry also matched an
+# unhandled error, which is how a cross-file leak shows up under vmForks, so it would have hidden one
+# once. If the fork-pool teardown crash (Windows) recurs it fails loudly: narrow a retry to its
+# actual text then.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -33,7 +35,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-PROJECTS=(--project unit --project unit-node --project component --project e2e --project browser)
+PROJECTS=(--project unit --project unit-node --project unit-forks --project component --project e2e --project browser)
 REPORT=.cache/gates/vitest.json
 mkdir -p .cache/gates
 
@@ -91,22 +93,11 @@ run_tests() {
   fi
 }
 
-# Exit 0 when the report shows the teardown-crash signature (failed run, zero failed tests).
-teardown_signature() {
-  [ -f "$REPORT" ] || return 1
-  bun -e "const r = JSON.parse(require('fs').readFileSync('$REPORT', 'utf8')); process.exit(r.numFailedTests === 0 && r.numTotalTests > 0 ? 0 : 1)"
-}
-
 echo "== test ($MODE)"
 if [ "$MODE" = fast ] && [ ${#CHANGED[@]} -eq 0 ]; then
   echo "   nothing changed: no tests to run"
-elif ! run_tests; then
-  if teardown_signature; then
-    echo "== zero failed tests but a failed run: the teardown-crash signature — retrying once"
-    run_tests || exit 1
-  else
-    exit 1
-  fi
+else
+  run_tests || exit 1
 fi
 
 echo "== ALL GATES GREEN ($MODE, $(elapsed))"

@@ -142,6 +142,8 @@ type AutomationManagerT = InstanceType<
   typeof import('../../../core/services/automation-manager').AutomationManager
 >
 
+const managers: Array<{ stopAll(): void }> = []
+
 async function freshManager(): Promise<{
   mgr: AutomationManagerT
   win: any
@@ -157,6 +159,7 @@ async function freshManager(): Promise<{
     webContents: { send: vi.fn() }
   }
   const mgr = new AutomationManager()
+  managers.push(mgr)
   const automationDir = () => nodePath.join(TEMP_HOME, '.claude', 'ui', 'automation')
   const runsIndexFile = (id: string) => nodePath.join(automationDir(), 'runs', id, 'runs.json')
   return { mgr, win, automationDir, runsIndexFile }
@@ -197,6 +200,9 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // `load()` leaves an fs.watch on the automation directory until `stopAll()`; the process-reset leak
+  // guard fails a file that leaves one behind.
+  for (const mgr of managers.splice(0)) mgr.stopAll()
   if (TEMP_HOME && fs.existsSync(TEMP_HOME)) {
     fs.rmSync(TEMP_HOME, { recursive: true, force: true })
   }

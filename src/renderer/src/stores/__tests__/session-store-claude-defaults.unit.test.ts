@@ -49,7 +49,6 @@ const defaults = (patch: Partial<EngineDefaultModels> = {}): EngineDefaultModels
 
 beforeEach(() => {
   resetReplicaSeam()
-  ;(globalThis as unknown as { window: Window }).window = globalThis.window || ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     saveSessionConfig: vi.fn(),
     saveSettings: vi.fn(),

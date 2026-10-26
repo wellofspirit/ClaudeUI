@@ -46,7 +46,6 @@ function stubWindowApi(
   savedSettings: Record<string, unknown> = {}
 ): void {
   saveSettings.mockClear()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     loadSettings: vi.fn().mockResolvedValue(savedSettings),
     loadSessionConfig: vi.fn().mockResolvedValue({}),

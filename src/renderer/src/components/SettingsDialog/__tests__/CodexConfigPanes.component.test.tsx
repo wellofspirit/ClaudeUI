@@ -152,7 +152,6 @@ const getEngineModels = vi.fn(async () => [
 ])
 
 function installApiStub(platform = 'linux'): void {
-  ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     platform,
     readCodexConfig,

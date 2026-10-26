@@ -32,9 +32,11 @@ beforeEach(() => {
   resetReplicaSeam()
   createSession.mockClear()
   sendPrompt.mockClear()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: { createSession, sendPrompt, saveSessionConfig: vi.fn() }
-  } as never
+  ;(window as unknown as { api: unknown }).api = {
+    createSession,
+    sendPrompt,
+    saveSessionConfig: vi.fn()
+  }
   useSessionStore.setState({ activeSessionId: null, sessions: {}, availableModels: [] })
 })
 

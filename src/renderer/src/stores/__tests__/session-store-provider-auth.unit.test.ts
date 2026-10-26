@@ -34,7 +34,6 @@ const snapshot = (...entries: ProviderEntry[]): ProviderRegistrySnapshot => ({
 
 /** Exactly what `hydrateConfigFromDisk` + `refreshProviderAuth` read. */
 function stubWindowApi(listProviderRegistry: () => Promise<ProviderRegistrySnapshot>): void {
-  ;(globalThis as unknown as { window: Window }).window = globalThis.window || ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     loadSettings: vi.fn().mockResolvedValue({}),
     loadSessionConfig: vi.fn().mockResolvedValue({}),

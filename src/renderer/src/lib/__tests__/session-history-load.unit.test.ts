@@ -75,15 +75,13 @@ beforeEach(() => {
   resetReplicaSeam()
   loadSessionHistory.mockReset()
   logRelay.mockReset()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: {
-      loadSessionHistory,
-      loadSubagentHistory: vi.fn(async () => []),
-      loadOpencodeHistory: vi.fn(),
-      saveSessionConfig: vi.fn(),
-      logRelay
-    }
-  } as never
+  ;(window as unknown as { api: unknown }).api = {
+    loadSessionHistory,
+    loadSubagentHistory: vi.fn(async () => []),
+    loadOpencodeHistory: vi.fn(),
+    saveSessionConfig: vi.fn(),
+    logRelay
+  }
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},

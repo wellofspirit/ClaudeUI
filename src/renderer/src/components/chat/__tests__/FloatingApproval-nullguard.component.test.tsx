@@ -18,7 +18,6 @@ beforeEach(() => {
   // store would leave the two disagreeing and the next projection would resurrect
   // the previous test's sessions (SyncCore phase 4c).
   resetReplicaSeam()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     respondApproval: () => Promise.resolve(),
     saveSessionConfig: () => {},
