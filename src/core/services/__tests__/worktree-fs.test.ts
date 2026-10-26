@@ -213,23 +213,31 @@ describe('removeTreeLinkSafe', () => {
       write(path.join(tree, 'free.txt'))
       let child: ChildProcess | undefined
       try {
-        child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-          cwd: held,
-          stdio: 'ignore'
-        })
+        // The child says it is running before the removal starts, and must still be running
+        // after it: the hold on `held` is the precondition, so a child that died early must
+        // fail as that, not as a removal that "wrongly" succeeded.
+        child = spawn(
+          process.execPath,
+          ['-e', "process.stdout.write('ready'); setInterval(() => {}, 1000)"],
+          { cwd: held, stdio: ['ignore', 'pipe', 'pipe'] }
+        )
+        let stderr = ''
+        child.stderr!.on('data', (d) => (stderr += String(d)))
         await new Promise<void>((resolve, reject) => {
-          child!.once('spawn', () => resolve())
+          child!.stdout!.once('data', () => resolve())
           child!.once('error', reject)
+          child!.once('exit', (code) => reject(new Error(`holder exited (${code}): ${stderr}`)))
         })
 
         const first = await removeTreeLinkSafe(tree)
 
+        expect(child.exitCode, `the holder died during the removal: ${stderr}`).toBeNull()
         expect(first.removed).toBe(false)
         expect(first.failures.map((f) => f.path)).toContain(held)
         expect(fs.existsSync(path.join(tree, 'free.txt'))).toBe(false)
         expect(fs.existsSync(path.join(held, 'inner.txt'))).toBe(false)
       } finally {
-        if (child) {
+        if (child && child.exitCode === null && child.signalCode === null) {
           // Wait for the exit itself: under load a fixed pause was shorter than the teardown.
           const exited = new Promise<void>((resolve) => child!.once('exit', () => resolve()))
           child.kill()
