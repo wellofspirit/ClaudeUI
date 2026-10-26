@@ -130,6 +130,9 @@ try {
   await Promise.all(
     servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))
   )
-  // Cached dispatchers are private to production; exiting releases their pools.
-  process.exit(process.exitCode ?? 0)
+  // No process.exit(): the process ends on its own once the servers are closed
+  // (undici's idle pools do not hold the loop). A forced exit here caught a
+  // socket mid-close and aborted Node 24 on Windows (libuv src\win\async.c:76,
+  // !(handle->flags & UV_HANDLE_CLOSING)); the test's execFile timeout still
+  // bounds a hang.
 }
