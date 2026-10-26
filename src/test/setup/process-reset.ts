@@ -31,6 +31,9 @@ import { stat } from 'node:fs/promises'
 import { types } from 'node:util'
 import { afterAll } from 'vitest'
 
+/** The real clock, captured before the test file can install fake timers (they fake `performance`). */
+const realNow = performance.now.bind(performance)
+
 const KEY = Symbol.for('claudeui.processReset')
 
 const ERROR_EVENTS = ['uncaughtException', 'unhandledRejection'] as const
@@ -204,9 +207,11 @@ if (isVmPool) {
     // A handle that `close()`/`kill()` was just called on stays listed until the loop has turned
     // once. Each threadpool round trip below is at least one turn. It is NOT a timer: some files
     // leave fake timers installed, and awaiting one would hang here. Bounded by wall time, so a
-    // slow runner gets the same second as a fast one.
-    const settleUntil = performance.now() + 1000
-    while (leakedResources().length > 0 && performance.now() < settleUntil) {
+    // slow runner gets the same second as a fast one: `realNow` was taken before the file ran,
+    // because fake timers also freeze `performance.now()`. The turn cap is the backstop.
+    const settleUntil = realNow() + 1000
+    for (let turn = 0; turn < 5000 && leakedResources().length > 0; turn++) {
+      if (realNow() >= settleUntil) break
       await stat(testHome)
     }
     problems.push(...leakedResources())

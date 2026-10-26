@@ -71,7 +71,7 @@ copied from working files into this repository unscrubbed.
 
 ### This repository's gates
 
-- `scripts/gates.sh` — typecheck, lint and the whole default suite (CI runs the same; about 45 s since
+- `scripts/gates.sh` — typecheck, lint and the whole default suite (CI runs the same; about 40 s since
   ADR-113, so there is no change-scoped mode). It runs in a git worktree. A failed test run is never
   retried (ADR-113: a zero-failed-tests retry also matched a cross-file leak). It exists because `bun run test 2>&1 | grep … && git commit` takes grep's
   exit code: **never pipe a gate into a filter before acting on its result.** The orchestrator runs it

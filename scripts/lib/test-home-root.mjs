@@ -5,7 +5,7 @@
 // shared (Linux /tmp), another local user can pre-create the root as a link to a directory of the
 // victim's. The prune would then follow it and remove every old directory it holds.
 
-import { lstatSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -24,9 +24,22 @@ export function isOwnRealDirectory(root, uid = process.getuid?.()) {
   }
 }
 
-/** Create the root, readable by this user only. */
-export function createTestHomeRoot(/** @type {string} */ root) {
+/**
+ * Create the root, readable by this user only, and refuse a root that is a link or someone else's:
+ * the run's homes would otherwise be created wherever it points. The message names no path (it
+ * would carry the profile name).
+ * @param {string} root
+ * @param {number | undefined} [uid] see isOwnRealDirectory
+ */
+export function createTestHomeRoot(root, uid = process.getuid?.()) {
   mkdirSync(root, { recursive: true, mode: 0o700 })
+  if (!isOwnRealDirectory(root, uid)) {
+    throw new Error(
+      '<tmpdir>/claudeui-test-home is a link or belongs to another user: remove it, then rerun the tests'
+    )
+  }
+  // A root left by an earlier run may predate the 0700 mode.
+  if (process.platform !== 'win32') chmodSync(root, 0o700)
 }
 
 /**

@@ -97,7 +97,7 @@ in a process the test owns.
 
 ## Consequences
 
-- **Speed.** The default suite takes about 33 s and `scripts/gates.sh` about 42 s on the reference host, down
+- **Speed.** The default suite takes about 30 s and `scripts/gates.sh` about 40 s on the reference host, down
   from 112 s and 147 s.
 - **Isolation.** A test file still gets fresh module state and globals. Process-level state is shared within a
   worker; the guards above make a leak fail the file that caused it, not a later one.

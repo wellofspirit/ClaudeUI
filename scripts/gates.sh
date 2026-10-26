@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The commit gate, with exit codes that cannot be masked by pipes: typecheck, lint and the whole
-# default test suite (CI runs the same set). About 45 s on a fast machine, so there is no partial
+# default test suite (CI runs the same set). About 40 s on a fast machine, so there is no partial
 # "fast" mode: a change-scoped run saved little and needed its own rules for what counts as changed.
 #
 #   scripts/gates.sh            (`--full` is accepted and means the same, for older callers)

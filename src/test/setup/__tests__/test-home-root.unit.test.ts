@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -98,5 +99,21 @@ describe('createTestHomeRoot', () => {
     const root = join(tempDir(), 'nested', 'claudeui-test-home')
     createTestHomeRoot(root)
     expect(lstatSync(root).mode & 0o077).toBe(0)
+  })
+
+  it('refuses a root that is a link, without creating anything in its target', () => {
+    const base = tempDir()
+    const target = join(base, 'target')
+    mkdirSync(target)
+    const root = join(base, 'claudeui-test-home')
+    symlinkSync(target, root, process.platform === 'win32' ? 'junction' : 'dir')
+    expect(() => createTestHomeRoot(root)).toThrow(/is a link or belongs to another user/)
+    expect(readdirSync(target)).toEqual([])
+  })
+
+  it.runIf(process.platform !== 'win32')('refuses a root owned by another user', () => {
+    const root = join(tempDir(), 'claudeui-test-home')
+    const otherUid = (process.getuid?.() ?? 0) + 1
+    expect(() => createTestHomeRoot(root, otherUid)).toThrow(/belongs to another user/)
   })
 })
