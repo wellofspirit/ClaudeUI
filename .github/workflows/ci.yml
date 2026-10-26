@@ -52,6 +52,18 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      # Prettier's cache compares file CONTENT (format:check passes
+      # --cache-strategy content), so a cache from an earlier run is safe on a
+      # fresh checkout whose mtimes are all new: 58 s cold, a few seconds warm.
+      # Saved under this commit's key, restored from the newest earlier one.
+      - name: Cache prettier
+        uses: actions/cache@v6
+        with:
+          path: node_modules/.cache/prettier
+          key: ${{ runner.os }}-prettier-${{ hashFiles('bun.lock', '.prettierrc.yaml', '.prettierignore') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-prettier-${{ hashFiles('bun.lock', '.prettierrc.yaml', '.prettierignore') }}-
+
       - name: Format check
         run: bun run format:check
 
@@ -84,12 +96,36 @@ jobs:
           - { os: ubuntu-latest, label: 'Linux 3/3', script: test:ci, shard: '--shard=3/3' }
           # macOS and Windows: every project except `browser`, as the release
           # workflows run it — the layout tests are pinned to Linux's font
-          # (docs/testing-strategy.md, Layer 2b). One job each: the install is
-          # the slow part on these runners, so shards would mostly repeat it.
-          - { os: macos-latest, label: macOS, script: 'test:ci:no-browser', shard: '' }
+          # (docs/testing-strategy.md, Layer 2b). Two shards each: one job ran
+          # the tests in ~3.5-4 min on these small runners, and every shard
+          # repeats the install (~1 min macOS, ~2.7 min Windows), so a third
+          # would save little.
+          - {
+              os: macos-latest,
+              label: 'macOS 1/2',
+              script: 'test:ci:no-browser',
+              shard: '--shard=1/2'
+            }
+          - {
+              os: macos-latest,
+              label: 'macOS 2/2',
+              script: 'test:ci:no-browser',
+              shard: '--shard=2/2'
+            }
           # windows-2022, not windows-latest: node-gyp cannot find VS2026 to
           # rebuild node-pty (see pre-release.yml).
-          - { os: windows-2022, label: Windows, script: 'test:ci:no-browser', shard: '' }
+          - {
+              os: windows-2022,
+              label: 'Windows 1/2',
+              script: 'test:ci:no-browser',
+              shard: '--shard=1/2'
+            }
+          - {
+              os: windows-2022,
+              label: 'Windows 2/2',
+              script: 'test:ci:no-browser',
+              shard: '--shard=2/2'
+            }
     steps:
       - uses: actions/checkout@v7
 

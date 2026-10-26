@@ -15,7 +15,7 @@
   },
   "scripts": {
     "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format:check": "prettier --check --cache --cache-strategy content .",
     "lint": "eslint --cache .",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false --incremental --tsBuildInfoFile .cache/tsc/node.tsbuildinfo",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false --incremental --tsBuildInfoFile .cache/tsc/web.tsbuildinfo",

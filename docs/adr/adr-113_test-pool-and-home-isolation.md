@@ -91,7 +91,7 @@ in a process the test owns.
 5. **The gate.** `scripts/gates.sh` runs typecheck, lint and the whole default suite, and never retries a failed
    test run: a "failed run, zero failed tests" signature also matches an unhandled error, which is how a cross-file
    leak appears under `vmForks`.
-6. **CI.** Pull requests run the tests on Linux (3 shards, browser project included), macOS and Windows (one job
+6. **CI.** Pull requests run the tests on Linux (3 shards, browser project included), macOS and Windows (2 shards
    each, every project except `browser`).
 
 ## Consequences
