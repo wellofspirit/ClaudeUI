@@ -187,13 +187,14 @@ vi.mock('../../../core/services/socks-bridge', () => ({
 
 const claudeSettingsSpies = vi.hoisted(() => ({
   saveClaudePermissions: vi.fn(),
+  saveCleanupPeriodDays: vi.fn(),
   isWorkspaceTrusted: vi.fn(() => true)
 }))
 
 vi.mock('../../../core/services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   loadCleanupPeriodDays: vi.fn(() => 30),
-  saveCleanupPeriodDays: vi.fn(),
+  saveCleanupPeriodDays: claudeSettingsSpies.saveCleanupPeriodDays,
   saveClaudePermissions: claudeSettingsSpies.saveClaudePermissions,
   isWorkspaceTrusted: claudeSettingsSpies.isWorkspaceTrusted
 }))
@@ -909,7 +910,11 @@ describe('registerRemoteHandlers', () => {
   describe('ISession optional-member safety (Item 3)', () => {
     it('claude:set-cleanup-period triggers notifySettingsChanged via the neutral forEach', async () => {
       await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30), remoteConn)
-      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+      // The value is persisted AND the running session is told to re-read it —
+      // notifySettingsChanged is the ISession hot-reload seam, so the call is the
+      // contract; the persisted value is what it would re-read.
+      expect(claudeSettingsSpies.saveCleanupPeriodDays).toHaveBeenCalledWith(30)
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
     })
 
     it('mcp:status returns [] without throwing for a capability-true session lacking mcpServerStatus', async () => {
@@ -957,7 +962,13 @@ describe('registerRemoteHandlers', () => {
         makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'),
         remoteConn
       )
-      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+      // sessionStub has no cwd, so only the user-scope rule can reach it.
+      expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
+        'user',
+        PERMS,
+        '/other/repo'
+      )
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
     })
 
     it('scopes a project-scope write to sessions on that cwd', async () => {
@@ -1668,11 +1679,22 @@ describe('registerRemoteHandlers', () => {
         sandbox: { enabled: true, DIFFERENT: true }
       } as unknown as ReturnType<typeof uiConfigMocks.loadSettings>)
 
-      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'), remoteConn)
+      try {
+        await dispatcher.handle(
+          makeRequest('session:create', 'rid-sandbox', '/tmp/proj'),
+          remoteConn
+        )
 
-      expect(sessionManagerStub.create).toHaveBeenCalled()
-      // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
-      expect(sessionManagerStub.create.mock.calls[0][3].sandboxConfig).toEqual(SENTINEL)
+        expect(sessionManagerStub.create).toHaveBeenCalled()
+        // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
+        expect(sessionManagerStub.create.mock.calls[0][3].sandboxConfig).toEqual(SENTINEL)
+      } finally {
+        // The decoy is never consumed when the code sources sandbox correctly, and
+        // vi.clearAllMocks() leaves queued once-values alone — so it would answer the
+        // next test that calls loadSettings (config:load-settings). Reset restores
+        // the vi.fn(impl) default.
+        uiConfigMocks.loadSettings.mockReset()
+      }
     })
 
     it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {

@@ -7,7 +7,7 @@
  * cap), which redirect `os.homedir()` at a temp dir so LOG_DIR never points at
  * the developer's real `~/.claude/ui/logs`.
  */
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import * as realFs from 'node:fs'
 import * as nodePath from 'node:path'
 import * as nodeOs from 'node:os'
@@ -293,7 +293,11 @@ describe('logger — buffered file writes, subscribers, pruning', () => {
   let home = ''
   let savedLogDirEnv: string | undefined
 
-  beforeAll(async () => {
+  // A fresh home and a fresh module per test: the tests read the day's file the
+  // module writes, so a shared home makes the result depend on which test ran
+  // first ("never reaches the file" needs the file to exist; "not on disk before
+  // flushSync" needs it not to).
+  beforeEach(async () => {
     home = freshHome('logger-buffered-')
     TEMP_HOME = home
     // These tests want LOG_DIR derived from the mocked os.homedir() above —
@@ -306,8 +310,8 @@ describe('logger — buffered file writes, subscribers, pruning', () => {
     mod.logger.globalLevel = 'debug'
   })
 
-  afterAll(() => {
-    TEMP_HOME = home
+  afterEach(() => {
+    mod.flushSync()
     if (savedLogDirEnv !== undefined) process.env.CLAUDE_UI_LOG_DIR = savedLogDirEnv
     realFs.rmSync(home, { recursive: true, force: true })
   })
@@ -335,11 +339,16 @@ describe('logger — buffered file writes, subscribers, pruning', () => {
       mod.logger.globalLevel = 'debug'
       unsub()
     }
+    // A control line makes sure the day's file exists, so the assertion below
+    // reads what the writer produced rather than failing on a missing file.
+    mod.logger.info('BufTest', 'control-line-marker')
     mod.flushSync()
 
     expect(seen).toContain('suppressed-line-marker')
     expect(mod.logRing.toArray().some((e) => e.message === 'suppressed-line-marker')).toBe(true)
-    expect(realFs.readFileSync(file, 'utf-8')).not.toContain('suppressed-line-marker')
+    const onDisk = realFs.readFileSync(file, 'utf-8')
+    expect(onDisk).toContain('control-line-marker')
+    expect(onDisk).not.toContain('suppressed-line-marker')
   })
 
   it('pruneOldLogs deletes daily files past the retention window and keeps everything else', async () => {

@@ -36,7 +36,7 @@
  *   bunx vitest run --project e2e src/e2e/flows/windowless-boot.e2e.test.ts
  */
 
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { connectRemoteClient, ephemeralPort, type RemoteClient } from '@test/helpers/ws-test-client'
 import type { WsServerMessage, WsEvent, FullStateSnapshot } from '../../shared/remote-protocol'
 import type { ItemStreamFrame } from '../../core/shared/sync/item-stream'
@@ -337,10 +337,15 @@ const delta = (index: number, d: Record<string, unknown>): Record<string, unknow
   streamEvent({ type: 'content_block_delta', index, delta: d })
 
 // ---------------------------------------------------------------------------
-// Boot + one client, shared by the whole flow (it IS one flow).
+// Boot + one client, shared by the whole file. The BOOT is shared (it is the
+// expensive part); everything a test creates on top of it is not — each test gets
+// its own routing id and builds the session / turn it needs, so the tests pass in
+// any order.
 // ---------------------------------------------------------------------------
 
-const ROUTING_ID = 'rid-windowless'
+/** Fresh per test (see beforeEach): a session one test made must not be another's. */
+let ROUTING_ID = 'rid-windowless'
+let routingSeq = 0
 const CWD = '/tmp/proj'
 
 let core: CoreBoot
@@ -351,14 +356,19 @@ let ipcBridge: TestIpcBridge
 /** Every server→client frame, in arrival order. */
 const frames: WsServerMessage[] = []
 
-/** Domain-event frames for one channel, oldest first. */
+/** Domain-event frames for one channel about this test's session, oldest first. */
 function eventsOn(channel: string): WsEvent[] {
-  return frames.filter((f): f is WsEvent => f.type === 'event' && f.channel === channel)
+  return frames.filter(
+    (f): f is WsEvent => f.type === 'event' && f.channel === channel && f.args[0] === ROUTING_ID
+  )
 }
 
 /** Volatile-lane frames, oldest first (phase 5 S1). */
 function itemStreamFrames(): ItemStreamFrame[] {
-  return frames.filter((f): f is WsServerMessage & ItemStreamFrame => f.type === 'item-stream')
+  return frames.filter(
+    (f): f is WsServerMessage & ItemStreamFrame =>
+      f.type === 'item-stream' && (f as ItemStreamFrame).routingId === ROUTING_ID
+  )
 }
 
 function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
@@ -411,7 +421,51 @@ afterAll(async () => {
   else process.env.USERPROFILE = priorHome.USERPROFILE
 })
 
+/**
+ * `session:create` as a WS client sends it. Positional args: (routingId, cwd,
+ * effort, resumeSessionId, permissionMode, model, thinkingMode, resumeSessionAt,
+ * forkSession, engineId). The mode/model/engine are supplied so the birth-config
+ * assertions are about a REQUESTED config, not about the defaults agreeing by
+ * accident.
+ */
+async function createSession(): Promise<void> {
+  await client.invoke(
+    'session:create',
+    ROUTING_ID,
+    CWD,
+    undefined,
+    undefined,
+    'acceptEdits',
+    'sonnet',
+    undefined,
+    undefined,
+    undefined,
+    'claude'
+  )
+}
+
+/** Create the session, send a first prompt, and hand back the engine run it spawned. */
+async function startTurn(): Promise<EngineHandle> {
+  const before = engines.length
+  await createSession()
+  await client.invoke('session:send', ROUTING_ID, 'first turn')
+  // The engine is live: run() reached `this.activeQuery = q`.
+  await waitFor(() => engines.length > before)
+  return engines[engines.length - 1]
+}
+
 describe('E2E: windowless boot (SyncCore phase 4d)', () => {
+  beforeEach(() => {
+    ROUTING_ID = `rid-windowless-${++routingSeq}`
+  })
+
+  // Every test, not just the last: a window built lazily by any path a test
+  // touched (session spawn, dialogs, the funnel's host-local lane) lands here.
+  afterEach(() => {
+    expect(windowsConstructed).toEqual([])
+    expect(getHostWindow()).toBeNull()
+  })
+
   it('boots and serves with NO BrowserWindow in existence', () => {
     // The criterion itself. Not "no window was shown" — no window was CONSTRUCTED,
     // anywhere in the boot path, and nothing published a host handle.
@@ -461,23 +515,7 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
   })
 
   it('a WS client creates a session that spawns with no window handle', async () => {
-    // Positional `session:create` args: (routingId, cwd, effort, resumeSessionId,
-    // permissionMode, model, thinkingMode, resumeSessionAt, forkSession, engineId).
-    // The mode/model/engine are supplied so the birth-config assertion below is
-    // about a REQUESTED config, not about the defaults agreeing by accident.
-    await client.invoke(
-      'session:create',
-      ROUTING_ID,
-      CWD,
-      undefined,
-      undefined,
-      'acceptEdits',
-      'sonnet',
-      undefined,
-      undefined,
-      undefined,
-      'claude'
-    )
+    await createSession()
 
     // The real SessionManager holds a real ClaudeSession…
     const session = getSessionManager()?.get(ROUTING_ID)
@@ -514,6 +552,8 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
   })
 
   it('a prompt streams engine output back over the WebSocket with ring seqs', async () => {
+    await createSession()
+    const before = engines.length
     await client.invoke('session:send', ROUTING_ID, 'first turn')
 
     // sendPrompt mints the user message into the event (phase 4b), so the client
@@ -524,8 +564,8 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     )
 
     // The engine is live: run() reached `this.activeQuery = q`.
-    await waitFor(() => engines.length === 1)
-    const engine = engines[0]
+    await waitFor(() => engines.length > before)
+    const engine = engines[engines.length - 1]
 
     engine.emit(streamEvent({ type: 'message_start', message: { id: 'msg-windowless' } }))
     engine.emit(
@@ -597,6 +637,7 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     // The turn is still open (the engine handle is parked), so this send queues
     // rather than starting a second run — the CC-parity behavior, driven here
     // entirely from a remote client with no desktop in the process.
+    const engine = await startTurn()
     const before = eventsOn('session:queue-changed').length
     await client.invoke('session:send', ROUTING_ID, 'also update the tests')
 
@@ -614,9 +655,7 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
       ROUTING_ID
     )
     expect(result).toEqual({ recalled: ['also update the tests'], notRecalled: 0 })
-    expect(engines[0].cancelAsyncMessage.mock.calls.map((c) => c[0])).toEqual([
-      queued.items[0].itemId
-    ])
+    expect(engine.cancelAsyncMessage.mock.calls.map((c) => c[0])).toEqual([queued.items[0].itemId])
 
     // Every client converges on the same queue, including the taken-back item's
     // terminal state.
@@ -627,18 +666,13 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     expect(syncCore.getCanonicalState().sessions[ROUTING_ID].queue).toEqual([])
   })
 
-  it('still no BrowserWindow after the whole flow', () => {
-    // Non-vacuity for the criterion: a window constructed lazily by any of the
-    // paths the flow above touched (session spawn, dialogs, the funnel's
-    // host-local lane) would land here.
-    expect(windowsConstructed).toEqual([])
-    expect(getHostWindow()).toBeNull()
+  it('ran against the hermetic temp home', () => {
+    // The no-window invariant is re-checked after EVERY test (afterEach above).
     expect(tempHome).toContain('claudeui-windowless-')
   })
 
-  // LAST TEST ON PURPOSE — it disconnects the shared client. It reconnects one
-  // before returning anyway, so a future test appended below still works; the
-  // placement is belt, the reconnect is braces.
+  // It disconnects the shared client and reconnects one before returning, so the
+  // tests that run after it (in any order) still have a live socket.
   it('an auth-surface change audits AND drops every live client (ADR-052)', async () => {
     // The one piece of the passkey round that unit tests could only cover in
     // halves: `authSurfaceChanged` and `disconnectAuthSurfaceClients` are each
