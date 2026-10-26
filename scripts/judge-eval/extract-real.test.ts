@@ -481,6 +481,9 @@ describe('real replay extraction on synthetic histories', () => {
     const ledgerDir = join(f.home, '.claude/ui')
     mkdirSync(ledgerDir, { recursive: true })
     const ledger = new DatabaseSync(join(ledgerDir, 'operational.db'))
+    // The redirected home is per worker PROCESS, so an earlier test file in the same worker may
+    // have left this database (with the app's own schema) behind.
+    ledger.exec('DROP TABLE IF EXISTS dispatch_target')
     ledger.exec(
       'CREATE TABLE dispatch_target (id TEXT, engine TEXT, parent_session_id TEXT, parent_engine TEXT, parent_tool_use_id TEXT, harness_ref TEXT, model TEXT, caller_restriction TEXT)'
     )
