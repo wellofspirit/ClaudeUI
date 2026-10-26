@@ -430,6 +430,13 @@ extraEnv})` shims `os.homedir()` and strips credential-shaped env names; pass th
   scratch `.claude/ui` exists and the sidebar has no real sessions. In a clean home
   the log's `[SessionHistory] Failed to read projects directory` (ENOENT) and a
   missing optional engine are expected, not failures.
+- **Never a second app on the real profile.** It feeds ClaudeUI's credentials into the engines at boot
+  (`[CredentialSync] feedAll`) and its quit removes ClaudeUI's opencode OAuth credential
+  (`[OpencodeCredentials] quit: removed …`) from the store the user's own running app shares, even when the drive
+  opens no opencode session. If it happened, say so: restarting the user's ClaudeUI re-feeds it.
+- **Block outbound before any engine spawns**, not only for judge drives: proxy variables to a dead port (above)
+  and a local stand-in model pinned first, then check the session's model before every prompt. An opencode session
+  with no usable model falls back to opencode's own hosted free model and sends the prompt out.
 - **Engines in isolation.** Copy the needed versions from
   `~/.claude/ui/harnesses/<engine>/<version>` into a scratch store and point
   `CLAUDEUI_HARNESS_STORE` at it; never write to the real store.
