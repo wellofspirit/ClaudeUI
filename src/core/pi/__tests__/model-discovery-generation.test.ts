@@ -73,8 +73,8 @@ const OLD = [model('gpt-6-sol')]
 const NEW = [model('gpt-6-sol'), model('gpt-6.1-sol')]
 const ids = (models: Array<{ id: string }>): string[] => models.map((m) => m.id)
 
-/** Let every queued microtask (probe bodies, `.finally`s) run. */
-const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+/** Let every queued microtask (probe bodies, `.finally`s) run: a macrotask turn, but not a timer (15.6 ms on Windows). */
+const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
 
 let previous: { cancelPiRecoveryProbeForTests: () => void } | null = null
 

@@ -818,12 +818,12 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
       connectRemoteClient({
         url: `ws://127.0.0.1:${port}/`,
         pwProof: PROOF,
-        handshakeTimeoutMs: 2000
+        handshakeTimeoutMs: 300
       }).then((c) => {
         clients.push(c)
         return c.ready
       })
-    ).rejects.toThrow()
+    ).rejects.toThrow(/Handshake timeout after 300ms/)
   })
 
   // -------------------------------------------------------------------------
@@ -868,12 +868,12 @@ describe('remote terminal — gates, step-up, decay, audit', () => {
         url: `ws://127.0.0.1:${port}/`,
         pwProof: PROOF,
         e2eKey,
-        handshakeTimeoutMs: 2000
+        handshakeTimeoutMs: 300
       }).then((c) => {
         clients.push(c)
         return c.ready
       })
-    ).rejects.toThrow()
+    ).rejects.toThrow(/Handshake timeout after 300ms/)
   })
 
   it('arms an expiry on success', async () => {
