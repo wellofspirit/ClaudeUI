@@ -13,7 +13,10 @@
  *   - the home directory: a fresh throwaway home per FILE, with a tripwire
  *   - `exit` listeners:   removed (logger.ts adds one per file)
  *   - error listeners and handles a file leaves behind: the file fails (vm pools only)
- *   - native addons:      `process.dlopen` throws (vm pools only; they cannot be loaded twice)
+ *   - native addons:      `process.dlopen` throws, and the file fails even if it swallows the throw
+ *     (vm pools only; they cannot be loaded twice)
+ *   - `instanceof Error`: Node's own errors (fs, fetch, AbortSignal) are accepted by the context's
+ *     `Error` again (vm pools only; see below)
  *   - built-in module state (e.g. a patched `fs`) and the filesystem outside the per-file home:
  *     not guarded; a file that needs real isolation from those is a FORKS_ONLY candidate
  *
@@ -25,6 +28,7 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, join, relative } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
+import { types } from 'node:util'
 import { afterAll } from 'vitest'
 
 const KEY = Symbol.for('claudeui.processReset')
@@ -43,6 +47,8 @@ interface ProcessResetState {
   /** The test file being set up; read by the `dlopen` guard, which outlives the file's realm. */
   file: string
   dlopenGuarded: boolean
+  /** Addons the current file tried to load; a swallowed throw must still fail the file. */
+  dlopenAttempts: string[]
 }
 
 const holder = process as unknown as Record<symbol, ProcessResetState | undefined>
@@ -53,7 +59,8 @@ const state: ProcessResetState = (holder[KEY] ??= {
   runId: process.env.CLAUDEUI_TEST_RUN_ID ?? `${process.pid}-${Date.now()}`,
   seq: 0,
   file: 'the test file',
-  dlopenGuarded: false
+  dlopenGuarded: false,
+  dlopenAttempts: []
 })
 
 // Vitest's own per-worker variables (VITEST_POOL_ID, VITEST_VM_POOL, ...) are set after the snapshot
@@ -116,8 +123,30 @@ const isVmPool = process.env.VITEST_VM_POOL === '1'
 if (isVmPool) {
   const filepath = (globalThis as { __vitest_worker__?: { filepath?: string } }).__vitest_worker__
     ?.filepath
-  // Repo-relative with forward slashes: the form FORKS_ONLY uses.
-  if (filepath) state.file = relative(state.cwd, filepath).replaceAll('\\', '/')
+  // Repo-relative with forward slashes: the form FORKS_ONLY uses. Relative to the config's `root`
+  // (not the cwd, which `vitest --root` from elsewhere leaves somewhere else).
+  const root = (globalThis as { __vitest_worker__?: { config?: { root?: string } } })
+    .__vitest_worker__?.config?.root
+  if (filepath) state.file = relative(root ?? state.cwd, filepath).replaceAll('\\', '/')
+  state.dlopenAttempts = []
+
+  // Built-in modules are the worker's, not the context's, so an error that `fs` or `fetch` throws
+  // is an instance of the HOST realm's `Error` and fails the context's own `instanceof Error`. That
+  // would send production code down a branch it never takes in the app. Accept Node's own errors
+  // again. Only the base class: `this === ContextError` keeps `RangeError` from matching a
+  // `TypeError` check, which means subclass checks (`instanceof TypeError`) still differ from
+  // production for host-realm errors.
+  const ContextError = Error
+  Object.defineProperty(ContextError, Symbol.hasInstance, {
+    configurable: true,
+    writable: true,
+    value(this: unknown, value: unknown): boolean {
+      return (
+        Function.prototype[Symbol.hasInstance].call(this, value) ||
+        (this === ContextError && types.isNativeError(value))
+      )
+    }
+  })
 
   // A native addon is loaded once per process and cannot be loaded into a second vm context, so
   // it fails in confusing ways (or crashes) for the second file that needs it. Fail loudly instead.
@@ -125,6 +154,7 @@ if (isVmPool) {
     state.dlopenGuarded = true
     process.dlopen = (_module: unknown, filename?: unknown): never => {
       const message = `native addon ${basename(String(filename))} loaded under vmForks: add ${state.file} to FORKS_ONLY in vitest.config.ts`
+      state.dlopenAttempts.push(message)
       // Also printed: a loader that tries several paths (node-pty) keeps only the last error.
       console.error(message)
       throw new Error(message)
@@ -157,18 +187,26 @@ if (isVmPool) {
 
   afterAll(async () => {
     const problems: string[] = []
+    // A file that try/catches a native `require` (to skip when the addon will not load) would
+    // otherwise turn the guard above into a silent skip.
+    if (state.dlopenAttempts.length > 0) {
+      problems.push(`${state.dlopenAttempts[0]} (the file caught the error)`)
+    }
     const now = countListeners()
     ERROR_EVENTS.forEach((event, i) => {
-      if (now[i] > listenersAtStart[i]) {
+      // Any change: removing Vitest's own listener silences error reporting just as a leak does.
+      if (now[i] !== listenersAtStart[i]) {
         problems.push(
-          `${now[i] - listenersAtStart[i]} '${event}' listener(s) left on process: remove them in afterEach/afterAll`
+          `'${event}' listeners changed on process (${listenersAtStart[i]} -> ${now[i]}): restore them in afterEach/afterAll`
         )
       }
     })
     // A handle that `close()`/`kill()` was just called on stays listed until the loop has turned
     // once. Each threadpool round trip below is at least one turn. It is NOT a timer: some files
-    // leave fake timers installed, and awaiting one would hang here.
-    for (let turn = 0; turn < 500 && leakedResources().length > 0; turn++) {
+    // leave fake timers installed, and awaiting one would hang here. Bounded by wall time, so a
+    // slow runner gets the same second as a fast one.
+    const settleUntil = performance.now() + 1000
+    while (leakedResources().length > 0 && performance.now() < settleUntil) {
       await stat(testHome)
     }
     problems.push(...leakedResources())

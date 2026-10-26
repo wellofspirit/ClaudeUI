@@ -52,8 +52,9 @@ in a process the test owns.
 2. **Opt-out.**
    - A `unit-forks` project runs the files listed in `FORKS_ONLY` (`vitest.config.ts`) on plain `forks`, one process
      per file.
-   - Only these reasons qualify: a native addon (node-pty), a process-global module hook (`module.registerHooks`), or
-     a wall-clock CPU-budget assertion. A file is never listed because it is slow or flaky.
+   - Only these reasons qualify: a native addon (node-pty; the real better-sqlite3 in `sqlite-driver.test.ts`), a
+     process-global module hook (`module.registerHooks`), or a wall-clock CPU-budget assertion. A file is never listed
+     because it is slow or flaky.
    - The config throws at load if an entry is not an existing unit-node test file.
 3. **HOME in two layers.**
    - **Main process.** `vitest.config.ts` moves the process home to `<tmpdir>/claudeui-test-home/<runId>/main` before
@@ -64,16 +65,29 @@ in a process the test owns.
    - **Per file.** `src/test/setup/process-reset.ts`, the first import of both setup files, gives every test file its
      own home at `<runId>/<pid>-<seq>`.
    - **Tripwire.** That file refuses to run unless `os.homedir()` is that path.
+   - **Path overrides.** The same step deletes the variables that move a directory the code would derive from the
+     home (`CODEX_HOME`, the `XDG_*_HOME` four, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `OPENCODE_TEST_HOME`,
+     `PI_CODING_AGENT_DIR`, `CLAUDE_CONFIG_DIR`, `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDE_UI_LOG_DIR`,
+     `CLAUDEUI_HARNESS_STORE`); workers inherit the cleaned environment. The `integration` project re-adds the store.
+     `os.userInfo().homedir` is not redirected.
    - **Retention.** Run directories older than 7 days are pruned at config load. Nothing is cleaned per file, so a
-     write after teardown stays visible.
+     write after teardown stays visible. The root is created `0700`, and the prune is skipped when the root is a
+     symlink or junction or, on POSIX, owned by another user (a shared `/tmp`).
 4. **Process reset and guards** (`process-reset.ts`). A vm context does not isolate the process, so:
    - **Restore.** The environment, the cwd and `exit` listeners are restored at the start of every file, from a
      snapshot kept on `process` (a module-scope snapshot would be retaken in every context). `VITEST*` keys are left
      alone.
-   - **Leak guard.** Under the vm pools, a file fails when it leaves more `uncaughtException` or `unhandledRejection`
-     listeners, or more `FSEventWrap`, `StatWatcher`, `TCPServerWrap` or `ProcessWrap` handles, than it started with.
-     A leaked error listener would otherwise silence Vitest's unhandled-error reporting for the rest of the worker.
-   - **Native addons.** Under the vm pools, `process.dlopen` throws and names the file to add to `FORKS_ONLY`.
+   - **Leak guard.** Under the vm pools, a file fails when its `uncaughtException` or `unhandledRejection` listener
+     count differs from the start (a leaked listener, or Vitest's own removed), or it leaves more `FSEventWrap`,
+     `StatWatcher`, `TCPServerWrap` or `ProcessWrap` handles than it started with (the wait for a closing handle is
+     bounded by 1 s of wall time). A missing error listener would otherwise silence Vitest's unhandled-error
+     reporting for the rest of the worker.
+   - **Native addons.** Under the vm pools, `process.dlopen` throws and names the file to add to `FORKS_ONLY`. The
+     attempt is also recorded, so a file that catches the throw (to skip when an addon will not load) still fails in
+     the setup's `afterAll`.
+   - **`instanceof Error`.** Under the vm pools, the context's `Error[Symbol.hasInstance]` also accepts
+     `util.types.isNativeError(v)`, so errors thrown by Node's own modules (`fs`, `fetch`, `AbortSignal`) are
+     `instanceof Error` as in production. Only the base class: see the consequence below.
    - **Not guarded:** built-in module state, and the filesystem outside the per-file home.
 5. **The gate.** `scripts/gates.sh` no longer retries a failed test run. Its "failed run, zero failed tests"
    signature also matches an unhandled error, which is how a cross-file leak appears under `vmForks`.
@@ -86,9 +100,15 @@ in a process the test owns.
   from 112 s and 147 s.
 - **Isolation.** A test file still gets fresh module state and globals. Process-level state is shared within a
   worker; the guards above make a leak fail the file that caused it, not a later one.
-- **No `instanceof` across realms.** Code that tests `instanceof Error` on an error created by Node itself (e.g.
-  `AbortSignal.timeout()`) fails under a vm context; compare `name` instead.
-- **Native addons.** A test that loads one must be listed in `FORKS_ONLY`; the `dlopen` guard says so.
+- **Realm fidelity.** Objects created by Node itself come from the host realm, which a vm context does not share.
+  The `Error` base class is patched back (decision 4), so production's `instanceof Error` branches run as in the app.
+  Subclass checks (`instanceof TypeError` on an `fs` or `fetch` error) and other host-realm objects still differ. This
+  is a fidelity cost of `vmForks`, not a rule for production code: a test that depends on such a check belongs in
+  `FORKS_ONLY`.
+- **Native addons.** A test that loads one must be listed in `FORKS_ONLY`; the `dlopen` guard says so, even when the
+  test swallows the error.
+- **Developer git config.** The moved HOME hides the developer's global git config from every `git` a test spawns and
+  from `vitest --changed`.
 - **Shared-state tests in one file.** Tests that depend on the order within their file were fixed alongside this
   change (fresh state per test). Pinning an order is not an acceptable fix.
 - **Temp space.** Test homes collect under `<tmpdir>/claudeui-test-home/` for a week. The flat

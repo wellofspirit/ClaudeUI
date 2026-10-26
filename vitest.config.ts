@@ -1,12 +1,13 @@
 import { defineConfig } from 'vitest/config'
 import { availableParallelism, homedir, tmpdir } from 'os'
 import { getHeapStatistics } from 'v8'
-import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { playwright } from '@vitest/browser-playwright'
 import { MOBILE_PROFILES } from './scripts/lib/mobile-profiles.mjs'
+import { createTestHomeRoot, pruneTestHomes } from './scripts/lib/test-home-root.mjs'
 
 /**
  * The developer's real home, captured ONCE. Vitest re-resolves this config in the same process
@@ -19,10 +20,11 @@ const realHome = (process.env.CLAUDEUI_REAL_HOME ??= homedir())
  * ClaudeUI's real managed harness store (ADR-082 §8: opencode, pi and Codex
  * install there, only Claude Code is vendored). The test home is a throwaway
  * directory, so the store is named here, from the developer's real home. An
- * explicit CLAUDEUI_HARNESS_STORE wins.
+ * explicit CLAUDEUI_HARNESS_STORE wins. Kept in the environment like the real home:
+ * CLAUDEUI_HARNESS_STORE itself is dropped below, and a re-evaluation must find the answer.
  */
-const realHarnessStore =
-  process.env.CLAUDEUI_HARNESS_STORE ?? resolve(realHome, '.claude', 'ui', 'harnesses')
+const realHarnessStore = (process.env.CLAUDEUI_REAL_HARNESS_STORE ??=
+  process.env.CLAUDEUI_HARNESS_STORE ?? resolve(realHome, '.claude', 'ui', 'harnesses'))
 
 /**
  * The main process's home, moved BEFORE Vitest starts a single worker. The setup files give every
@@ -47,34 +49,44 @@ if (process.platform === 'darwin') {
 }
 const testRunId = (process.env.CLAUDEUI_TEST_RUN_ID ??= `${process.pid}-${Date.now()}`)
 const mainTestHome = join(TEST_HOME_ROOT, testRunId, 'main')
+createTestHomeRoot(TEST_HOME_ROOT)
 mkdirSync(mainTestHome, { recursive: true })
 process.env.USERPROFILE = mainTestHome
 process.env.HOME = mainTestHome
 
 /**
+ * Variables that move a directory the code would otherwise derive from the home. Left in place,
+ * a developer's `CODEX_HOME` (or `XDG_CONFIG_HOME`, ...) sends services and spawned engines to
+ * their REAL directories, home redirect or not. Dropped for the whole run: every worker inherits
+ * this process's environment, and process-reset.ts snapshots it. A test that wants one sets it
+ * itself; the integration project re-adds CLAUDEUI_HARNESS_STORE below. `os.userInfo().homedir`
+ * still reports the real home and is not redirected.
+ */
+for (const name of [
+  'CODEX_HOME',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_STATE_HOME',
+  'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG',
+  'OPENCODE_CONFIG_DIR',
+  'OPENCODE_TEST_HOME',
+  'PI_CODING_AGENT_DIR',
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDE_SECURESTORAGE_CONFIG_DIR',
+  'CLAUDE_UI_LOG_DIR',
+  'CLAUDEUI_HARNESS_STORE'
+]) {
+  delete process.env[name]
+}
+
+/**
  * Test homes are never cleaned up by the run that made them (a write after teardown is what they
  * exist to expose), so each run drops the run directories older than a week. Best effort: a run
- * directory another process holds open, or any other error, is simply left for next time.
+ * directory another process holds open, or any other error, is simply left for next time. Nothing
+ * is removed when the root itself is a link or another user's (scripts/lib/test-home-root.mjs).
  */
-if (ownsRun) {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000
-  try {
-    for (const name of readdirSync(TEST_HOME_ROOT)) {
-      try {
-        const dir = join(TEST_HOME_ROOT, name)
-        const info = lstatSync(dir)
-        // A link is never followed, and never removed on this path.
-        if (info.isDirectory() && info.mtimeMs < cutoff) {
-          rmSync(dir, { recursive: true, force: true })
-        }
-      } catch {
-        /* best effort */
-      }
-    }
-  } catch {
-    /* best effort */
-  }
-}
+if (ownsRun) pruneTestHomes(TEST_HOME_ROOT, Date.now() - 7 * 24 * 60 * 60 * 1000)
 
 /** The node_modules Node resolves from here: this checkout's, or (in a worktree) the main checkout's. */
 const nodeModulesRoot = (() => {
@@ -127,7 +139,10 @@ const FORKS_ONLY: Record<string, string> = {
   // Asserts wall-clock CPU budgets (performance.now() around a parse); a worker shared with other
   // files' GC and vm-context overhead makes those measurements noisy.
   'src/core/automode/__tests__/ground-truth.test.ts': 'wall-clock CPU budget assertion',
-  'src/core/permissions/__tests__/shell-rules.test.ts': 'wall-clock CPU budget assertion'
+  'src/core/permissions/__tests__/shell-rules.test.ts': 'wall-clock CPU budget assertion',
+  // Loads the real better-sqlite3 addon (N-API prebuilts load under plain Node); under vmForks the
+  // guard refuses it and the suite's native arm would be skipped.
+  'src/core/services/__tests__/sqlite-driver.test.ts': 'better-sqlite3 native addon'
 }
 const FORKS_ONLY_FILES = Object.keys(FORKS_ONLY)
 

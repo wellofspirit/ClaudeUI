@@ -347,6 +347,8 @@ export function parseWorktreePorcelain(text: string): PorcelainBlock[] {
 interface RepoContext {
   /** '' when unknown (a worktree of a bare repo). */
   repoRoot: string
+  /** The root as `git`/the caller spelled it (through a link, a short name): still protected. */
+  spelledRoot: string
   /** '' when the repo root is unknown. */
   managedRoot: string
   commonDir: string
@@ -396,6 +398,7 @@ function repoContext(cwd: string): RepoContext {
   }
   return {
     repoRoot,
+    spelledRoot: loc.repoRoot ?? '',
     managedRoot,
     commonDir: loc.commonDir,
     gitCwd: repoRoot || loc.commonDir,
@@ -745,7 +748,7 @@ function runExclusive<T>(key: string, task: () => Promise<T>): Promise<T> {
 /** C-S3: never a target, however it got into the inventory. */
 function forbiddenTarget(target: string, ctx: RepoContext): string | null {
   const home = os.homedir()
-  const protectedPaths = [ctx.repoRoot, ctx.commonDir, home].filter(Boolean)
+  const protectedPaths = [ctx.repoRoot, ctx.spelledRoot, ctx.commonDir, home].filter(Boolean)
   for (const t of new Set([target, realOrResolved(target)])) {
     if (isFilesystemRootPath(t)) return 'a filesystem root'
     for (const keep of protectedPaths) {
