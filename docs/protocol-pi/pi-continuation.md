@@ -186,10 +186,11 @@ planned.
   failed-discovery rung.
 - `db.ts` clamps unknown engine ids to `'claude'` — any new engine must be added to the
   `rowToMeta`/`importSessionEnginesOnce` allowlists.
-- Bridge extension MUST stay **import-free** and **fail-closed**. Product code writes only
-  `os.tmpdir()` (the bridge file) + `PiAuthProvider`'s documented `~/.pi/agent/auth.json` api_key
-  merge + user-initiated session delete under `~/.pi/agent/sessions` (`deletePiSession`) — never
-  else under `~/.pi/**`.
+- Bridge extension MUST stay **fail-closed** and import nothing but Node builtins and pi's own package
+  (ADR-035 › Bridge extension imports). The bridge file lives under `~/.claude/ui/pi-ext`.
+  Product code writes under `~/.pi/agent/` only through its documented writers: `PiAuthProvider`'s
+  `auth.json` api_key merge, the native settings editor's `settings.json`, the shared provider
+  adapter's `models.json`, and user-initiated session delete under `sessions/` (`deletePiSession`).
 - pi honors the same `~/.claude` permission FILES as Claude/opencode (same loader/parser/persist
   helpers), but its evaluator honors a **subset of rule shapes**: bare-tool + Bash exact/prefix
   rules only. Non-Bash specifier rules (`Edit(src/**)` etc.) are skipped (fall through to the mode

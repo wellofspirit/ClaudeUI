@@ -1,9 +1,8 @@
 # ADR-113: The test suite runs on `vmForks`, with a per-file home and process guards
 
 **Status:** Accepted (2026-10-26). Implemented on branch `test/suite-audit`.
-**Amends:** [ADR-026](adr-026_development-workflow.md) (the commit gate no longer retries a failed test run).
-**Relates to:** [ADR-027](adr-027_test-data-attributes.md) (structural assertions), ADR-082 §8 (the managed harness store
-the real-binary tests read).
+**Relates to:** [ADR-026](adr-026_development-workflow.md) (the commit gate), [ADR-027](adr-027_test-data-attributes.md)
+(structural assertions), ADR-082 §8 (the managed harness store the real-binary tests read).
 
 ## Context
 
@@ -89,9 +88,9 @@ in a process the test owns.
      `util.types.isNativeError(v)`, so errors thrown by Node's own modules (`fs`, `fetch`, `AbortSignal`) are
      `instanceof Error` as in production. Only the base class: see the consequence below.
    - **Not guarded:** built-in module state, and the filesystem outside the per-file home.
-5. **The gate.** `scripts/gates.sh` always runs the whole default suite (its change-scoped mode saved too little at
-   this speed to keep), and no longer retries a failed test run. Its "failed run, zero failed tests"
-   signature also matches an unhandled error, which is how a cross-file leak appears under `vmForks`.
+5. **The gate.** `scripts/gates.sh` runs typecheck, lint and the whole default suite, and never retries a failed
+   test run: a "failed run, zero failed tests" signature also matches an unhandled error, which is how a cross-file
+   leak appears under `vmForks`.
 6. **CI.** Pull requests run the tests on Linux (3 shards, browser project included), macOS and Windows (one job
    each, every project except `browser`).
 

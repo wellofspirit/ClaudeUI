@@ -131,7 +131,7 @@ export const DirectoryItem = memo(function DirectoryItem({
         onDoubleClick={handleDoubleClick}
         onContextMenu={menu.open}
         style={{ padding: '0 5px' }}
-        className={`group flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover ${hidden ? 'opacity-45 italic' : ''}`}
+        className={`flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors text-text-secondary hover:text-text-primary hover:bg-bg-hover ${hidden ? 'opacity-45 italic' : ''}`}
       >
         <span className="shrink-0 text-text-muted">
           <svg
@@ -161,9 +161,9 @@ export const DirectoryItem = memo(function DirectoryItem({
           {group.folderName}
         </span>
         <span className="text-[10px] text-text-muted">{group.sessions.length}</span>
-        {/* The right-click menu, reachable without a right button: touch screens (iOS never
-            fires a context-menu on a tap) and keyboard. Revealed on hover on pointer devices,
-            always shown on touch and narrow screens. */}
+        {/* The right-click menu for touch screens, where iOS never fires a context-menu.
+            Not rendered on pointer devices: right-click covers them and the button would
+            take row width from every project. */}
         <button
           type="button"
           data-testid="DirectoryItem.menu"
@@ -183,11 +183,7 @@ export const DirectoryItem = memo(function DirectoryItem({
             menu.openAt(rect.left, rect.bottom)
           }}
           onDoubleClick={(e) => e.stopPropagation()}
-          className={`shrink-0 w-5 h-5 max-md:w-8 max-md:h-8 [@media(hover:none)]:w-8 [@media(hover:none)]:h-8 -mr-1 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-opacity cursor-default ${
-            menu.isOpen
-              ? 'opacity-100'
-              : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100 [@media(hover:none)]:opacity-100'
-          }`}
+          className="shrink-0 w-8 h-8 -mr-1 hidden [@media(hover:none)]:flex items-center justify-center rounded text-text-muted cursor-default"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <circle cx="5" cy="12" r="1.8" />
