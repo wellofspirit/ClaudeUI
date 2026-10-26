@@ -8,11 +8,10 @@ name: CI
 # of the release path (it publishes nothing and does not gate the release
 # workflows, which keep their own build+test step before the release job).
 #
-# Deliberately scoped to ubuntu-latest: it is the fast/cheap safety net that
-# catches typecheck/lint/format/logic regressions BEFORE merge. Cross-OS coverage
-# (windows-2022 + macos) still runs in release.yml / pre-release.yml before any
-# tag is published, so a Windows-only regression is caught at push-to-pre-release
-# time. Add an os matrix here if PR-time Windows coverage becomes worth the cost.
+# The gates job runs on ubuntu-latest. The tests run on Linux, macOS and
+# Windows, so an OS-specific regression is caught BEFORE merge rather than at
+# push-to-pre-release time (release.yml / pre-release.yml keep their own test
+# step before any tag is published).
 #
 # The build steps at the end are gates, not artifacts: the electron-vite build
 # (one renderer build, desktop + web) catches vite-config regressions that
@@ -71,14 +70,26 @@ jobs:
           ./dist/server-bin/claudeui-server --help > /dev/null
 
   tests:
-    name: Tests (shard ${{ matrix.shard }}/3)
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
     strategy:
-      # Every shard reports: a failure in one must not cancel the others and
+      # Every job reports: a failure in one must not cancel the others and
       # hide their results.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        include:
+          # Linux: the whole suite, browser layout tests included, in 3 shards.
+          - { os: ubuntu-latest, label: 'Linux 1/3', script: test:ci, shard: '--shard=1/3' }
+          - { os: ubuntu-latest, label: 'Linux 2/3', script: test:ci, shard: '--shard=2/3' }
+          - { os: ubuntu-latest, label: 'Linux 3/3', script: test:ci, shard: '--shard=3/3' }
+          # macOS and Windows: every project except `browser`, as the release
+          # workflows run it — the layout tests are pinned to Linux's font
+          # (docs/testing-strategy.md, Layer 2b). One job each: the install is
+          # the slow part on these runners, so shards would mostly repeat it.
+          - { os: macos-latest, label: macOS, script: 'test:ci:no-browser', shard: '' }
+          # windows-2022, not windows-latest: node-gyp cannot find VS2026 to
+          # rebuild node-pty (see pre-release.yml).
+          - { os: windows-2022, label: Windows, script: 'test:ci:no-browser', shard: '' }
     steps:
       - uses: actions/checkout@v7
 
@@ -90,19 +101,25 @@ jobs:
       # shell is all a headless run uses; the browser build is tied to the
       # playwright version, so that keys the cache. The apt packages `--with-deps`
       # adds are not cached, so the install always runs (no download on a hit).
+      # Linux only: the other OSes do not run the `browser` project.
       - name: Read playwright version
+        if: runner.os == 'Linux'
         id: playwright-version
         run: echo "version=$(node -p "require('./node_modules/playwright/package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Cache playwright browsers
+        if: runner.os == 'Linux'
         uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
 
       - name: Install Chromium for the browser tests
+        if: runner.os == 'Linux'
         run: bunx playwright install --with-deps --only-shell chromium
 
-      # unit + unit-node + component + e2e + browser + git, split by file across shards.
-      - name: Tests (unit + component + e2e + browser + git)
-        run: bun run test:ci --shard=${{ matrix.shard }}/3
+      # unit + unit-node + unit-forks + component + e2e + git (+ browser on Linux),
+      # split by file across the Linux shards.
+      - name: Tests
+        shell: bash
+        run: bun run ${{ matrix.script }} ${{ matrix.shard }}
