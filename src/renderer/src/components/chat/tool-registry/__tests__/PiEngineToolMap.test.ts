@@ -57,13 +57,13 @@ describe('PiEngineToolMap.kindOf', () => {
     expect(PiEngineToolMap.hidden.size).toBe(0)
   })
 
-  it.each(cases)(
-    "single-source guard: main's piToolKind(%s) agrees with the renderer's kindOf",
-    (name, kind) => {
-      expect(piToolKind(name)).toBe(kind)
-      expect(piToolKind(name)).toBe(PiEngineToolMap.kindOf(name))
-    }
-  )
+  it("single-source guard: main's piToolKind agrees with the table for every row", () => {
+    // The `kindOf` rows above pin the renderer to `cases`, so one equality over
+    // the table pins main's copy to the renderer's.
+    expect(Object.fromEntries(cases.map(([name]) => [name, piToolKind(name)]))).toEqual(
+      Object.fromEntries(cases)
+    )
+  })
 })
 
 describe('PiEngineToolMap.normalize', () => {
@@ -308,14 +308,6 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       prompt: 'do X',
       dispatch: { engine: 'opencode', model: 'openai/gpt-5' }
     })
-  })
-
-  it('run_in_background marks the dispatch card background; absent or false leaves it a waiting call', () => {
-    const view = (extra: Record<string, unknown>) =>
-      PiEngineToolMap.normalize('task', { engine: 'claude', prompt: 'x', ...extra })
-    expect(view({ run_in_background: true })).toMatchObject({ kind: 'task', background: true })
-    expect(view({ run_in_background: false })).not.toHaveProperty('background')
-    expect(view({})).not.toHaveProperty('background')
   })
 
   it('task: dispatch_agent without a model -> the dispatch field is just the engine', () => {

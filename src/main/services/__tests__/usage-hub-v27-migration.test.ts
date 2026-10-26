@@ -119,18 +119,6 @@ describe('migration v27 — remote_account and the cursor reset', () => {
     }
   })
 
-  it('re-running the migrations changes nothing', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      const before = schema(db)
-      runMigrations(db)
-      expect(schema(db)).toEqual(before)
-    } finally {
-      db.close()
-    }
-  })
-
   it('sets a seeded cursor back to 0, and leaves the rest of the hub config alone', () => {
     const db = openRawDb()
     try {

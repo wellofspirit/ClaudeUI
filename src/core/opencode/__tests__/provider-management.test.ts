@@ -297,9 +297,14 @@ describe('removeOpencodeProvider — model allowlist cleanup', () => {
 })
 
 describe('removeOpencodeProvider — cache invalidation', () => {
-  it('invalidates the discovery cache so the row disappears on next read', async () => {
+  it('invalidates the discovery cache AFTER the credential delete and config write, so the next read sees the removal', async () => {
     await removeOpencodeProvider('openai', 'credential')
-    expect(invalidate).toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    // Invalidating first would let a concurrent read re-fill the cache with the
+    // row that is about to disappear.
+    const invalidated = invalidate.mock.invocationCallOrder[0]
+    expect(invalidated).toBeGreaterThan(removeVendorAuth.mock.invocationCallOrder[0])
+    expect(invalidated).toBeGreaterThan(writeNative.mock.invocationCallOrder[0])
   })
 
   it('propagates a credential-delete failure instead of half-removing', async () => {

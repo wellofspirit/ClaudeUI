@@ -522,9 +522,12 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('session lifecycle channels', () => {
-    it('session:create is registered and calls manager.create', async () => {
+    it('session:create is registered and creates the session under the caller routing id and cwd', async () => {
       await harness.call('session:create', 'rid-1', '/tmp/cwd')
-      expect(sessionManagerSpies.create).toHaveBeenCalled()
+      expect(sessionManagerSpies.create).toHaveBeenCalledTimes(1)
+      const [routingId, , cwd] = sessionManagerSpies.create.mock.calls[0]
+      expect(routingId).toBe('rid-1')
+      expect(cwd).toBe('/tmp/cwd')
     })
 
     it('session:send is registered and calls session.run', async () => {

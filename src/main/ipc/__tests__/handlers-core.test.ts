@@ -1160,10 +1160,21 @@ describe('handlers-core', () => {
      * `recallQueued` is the honest primitive: the items come back as `recalled`.
      */
     it('empties the engine queue of record before replicating the reset', async () => {
-      const recallQueued = vi.fn(async () => ({ recalled: ['later'], notRecalled: 0 }))
+      const order: string[] = []
+      const recallQueued = vi.fn(async () => {
+        order.push('recall')
+        return { recalled: ['later'], notRecalled: 0 }
+      })
       const manager = makeManager(makeSessionStub({ recallQueued }))
-      await clearConversation(manager, 'rid-clear', 'default')
-      expect(recallQueued).toHaveBeenCalled()
+      const off = addSyncSubscriber((_seq, channel) => void order.push(channel))
+      try {
+        await clearConversation(manager, 'rid-clear', 'default')
+      } finally {
+        off()
+      }
+      // The recall lands BEFORE the fold: replicating first would let a queued
+      // item survive into the next turn behind an already-emptied queue card.
+      expect(order).toEqual(['recall', 'session:conversation-cleared'])
     })
 
     it('still replicates the reset when the queue recall throws', async () => {
