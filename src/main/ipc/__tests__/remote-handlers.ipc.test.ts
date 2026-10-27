@@ -2614,6 +2614,18 @@ const USAGE_HUB_CHANNELS = [
 ] as const
 
 /**
+ * The OpenRouter tab's four reads. Restated rather than imported from
+ * `openrouter-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. All
+ * `config` queries: the key they are read with never appears in an answer.
+ */
+const OPENROUTER_CHANNELS = [
+  'openrouter:status',
+  'openrouter:overview',
+  'openrouter:models',
+  'openrouter:model-endpoints'
+] as const
+
+/**
  * The harness manager (ADR-082 arc 2). Restated rather than imported from
  * `harness-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. The two
  * reads are `config`; the eight writes `admin` (§7), which a base connection
@@ -2753,6 +2765,10 @@ describe('remote surface parity (phase 1 port)', () => {
         // not desktop-only — and no shape among them can return the device
         // secret, which is why a write-only `set-secret` command is safe here.
         ...USAGE_HUB_CHANNELS,
+        // The OpenRouter tab (Usage Analytics): four `config` queries, declared
+        // once in `openrouter-commands.ts`. Remote because the dashboard is not
+        // desktop-only; the vault key is read per call and never returned.
+        ...OPENROUTER_CHANNELS,
         // ADR-082 arc 2: the Installed page is on every device (reads are
         // `config`); installing, re-sourcing and detecting are `admin`.
         ...HARNESS_CHANNELS,

@@ -323,6 +323,13 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     fedTokens: fedTokenHistory()
   })
 
+  // An API key stored in or removed from the vault -> a payload-free nudge, so
+  // the Usage Analytics tab learns whether it has an OpenRouter tab (the service
+  // stays free of the sync layer, like the CredentialSync hooks above).
+  sharedProviderService.configure({
+    onApiKeyChanged: () => emitEvent('provider:credentials-changed', [])
+  })
+
   // opencode 2.x credentials (ADR-097 §5). ClaudeUI's record of the slots it
   // holds in opencode's credential table — the file, here, for both hosts (the
   // store defaults to memory so its tests touch no home). Then the session's

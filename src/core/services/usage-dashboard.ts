@@ -501,7 +501,7 @@ interface SelfMachine {
  * whole scope rests on. Either missing and the query answers `local` — an honest
  * downgrade rather than a combined view with an anonymous machine in it.
  */
-function selfMachine(): SelfMachine | null {
+export function selfMachine(): SelfMachine | null {
   const config = getHubConfig()
   if (!config.enabled) return null
   const id = storedDeviceId()

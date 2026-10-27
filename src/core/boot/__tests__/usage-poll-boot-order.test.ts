@@ -82,7 +82,7 @@ vi.mock('../../auth/vault/CredentialSync', () => ({
   }
 }))
 vi.mock('../../shared-providers', () => ({
-  sharedProviderService: { syncAll: vi.fn(async () => {}) }
+  sharedProviderService: { syncAll: vi.fn(async () => {}), configure: vi.fn() }
 }))
 vi.mock('../host-anchor', () => ({
   createHostAnchor: vi.fn(() => ({ reconcileAndAutostart: vi.fn(async () => {}) }))

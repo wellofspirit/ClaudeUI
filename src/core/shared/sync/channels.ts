@@ -478,6 +478,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: false,
     why: "An engine's model catalog filled after main answered some client a DEGRADED empty one (pi: a failed probe, its backoff, or invalidations overtaking it — `pi/model-discovery.ts`). A nudge carrying only `{ engineId }`; clients re-read that engine's `session:get-engine-models(engineId)`, the one shape. Replicated because the degraded answer may have gone to any client, desktop or remote, and none of them asks again on its own. Rings like `harness:changed`: a replay costs one warm-cache reload. No snapshot field."
   },
+  'provider:credentials-changed': {
+    cls: 'replicated',
+    ring: true,
+    canonical: false,
+    why: 'An API key was stored or removed in the vault (setApiKey, adoptNativeKey, removeDefinition, disconnectProvider). A payload-free nudge: no provider id and no key, so there is nothing to leak to a remote client; the Usage Analytics tab re-reads `openrouter:status` (a boolean) to show or hide its OpenRouter tab. Replicated because the tab is on every device, and a key saved on the desktop must appear on the phone. Rings like `harness:changed`: a replay costs one status read. No snapshot field.'
+  },
   'provider:auth-resolved': {
     cls: 'replicated',
     ring: true,

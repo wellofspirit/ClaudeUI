@@ -37,6 +37,14 @@ describe('AuthVault', () => {
     })
     if (process.platform !== 'win32') expect(statSync(vaultPath()).mode & 0o777).toBe(0o600)
   })
+  it('hasApiKey answers presence of an API key', async () => {
+    const vault = new AuthVault()
+    await expect(vault.hasApiKey('openrouter')).resolves.toBe(false)
+    await vault.saveCredential('openrouter', { type: 'api_key', key: 'test-key' })
+    await expect(vault.hasApiKey('openrouter')).resolves.toBe(true)
+    await vault.removeCredential('openrouter')
+    await expect(vault.hasApiKey('openrouter')).resolves.toBe(false)
+  })
   it('keeps legacy load/save compatibility under chatgpt', async () => {
     const vault = new AuthVault()
     const credential: VaultCredential = {
