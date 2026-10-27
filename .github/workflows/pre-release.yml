@@ -478,9 +478,12 @@ jobs:
           merge-multiple: true
 
       - name: Create pre-release
-        uses: softprops/action-gh-release@v3
+        # Pinned by commit: tags are movable. Re-vet before bumping.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
+          # Tag the commit that was built; the default is the repo's default branch (main)
+          target_commitish: ${{ github.sha }}
           name: ClaudeUI ${{ needs.version.outputs.tag }} (Pre-release)
           prerelease: true
           body: |
