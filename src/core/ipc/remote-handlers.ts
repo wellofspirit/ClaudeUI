@@ -109,6 +109,7 @@ import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
 import { usageHubCommands } from './usage-hub-commands'
+import { openrouterCommands } from './openrouter-commands'
 import { harnessCommands } from './harness-commands'
 import { voicePackCommands } from './voice-pack-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
@@ -1689,6 +1690,17 @@ export function registerRemoteHandlers(
   // settings group that configures it. `capability: 'config'`, like the rest of
   // the metering surface — and no shape here can return the device secret.
   for (const cmd of usageHubCommands()) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The OpenRouter tab (Usage Analytics)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop transport spreads. `config` queries:
+  // the figures are the dashboard's, and the vault key they are read with never
+  // appears in an answer (see `openrouter-commands.ts`).
+  for (const cmd of openrouterCommands()) {
     handleRemote(cmd)
   }
 

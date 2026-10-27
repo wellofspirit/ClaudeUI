@@ -807,6 +807,16 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
   },
   { method: 'refreshPrices', channel: 'usage:refresh-prices', args: [] },
 
+  // The OpenRouter tab: safeHandler-wrapped `config` queries, so `unwrap`.
+  { method: 'openrouterStatus', channel: 'openrouter:status', args: [] },
+  { method: 'openrouterOverview', channel: 'openrouter:overview', args: [] },
+  { method: 'openrouterModels', channel: 'openrouter:models', args: ['user'] },
+  {
+    method: 'openrouterModelEndpoints',
+    channel: 'openrouter:model-endpoints',
+    args: ['deepseek/deepseek-v4.1-flash']
+  },
+
   // The REDACTED remote status (owner ruling, 2026-08-28). A `config` query,
   // declared for both transports in `core/ipc/remote-view-commands.ts`. Its
   // full-fat sibling `getRemoteStatus` stays a stub below, and must: the object

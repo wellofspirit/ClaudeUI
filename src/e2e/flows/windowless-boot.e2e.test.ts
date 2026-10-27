@@ -173,6 +173,7 @@ vi.mock('../../core/auth/vault/CredentialSync', () => ({
 }))
 vi.mock('../../core/shared-providers', () => ({
   sharedProviderService: {
+    configure: vi.fn(),
     syncAll: vi.fn(async () => {}),
     listDefinitions: vi.fn(() => []),
     listStatuses: vi.fn(async () => []),

@@ -77,11 +77,17 @@ const arrivalMocks = vi.hoisted(() => {
     sharedProviderService: {
       syncAll: vi.fn(async () => void order.push('sync')),
       adoptNativeKeys: vi.fn(async () => void order.push('adopt')),
-      harnessArrived: vi.fn(async (id: string) => void order.push(`providers:${id}`))
+      harnessArrived: vi.fn(async (id: string) => void order.push(`providers:${id}`)),
+      configure: vi.fn()
     },
     watch: { ids: [] as string[], onArrival: null as ((id: string) => void) | null }
   }
 })
+const syncHostMocks = vi.hoisted(() => ({ emitEvent: vi.fn() }))
+vi.mock('../../services/sync-host', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/sync-host')>()),
+  emitEvent: syncHostMocks.emitEvent
+}))
 vi.mock('../../auth/vault/CredentialSync', () => ({ credentialSync: arrivalMocks.credentialSync }))
 vi.mock('../../shared-providers', () => ({
   sharedProviderService: arrivalMocks.sharedProviderService
@@ -167,6 +173,17 @@ describe('a harness arriving, at the boot seam', () => {
       ([options]) => typeof (options as { harnessRuns?: unknown }).harnessRuns === 'function'
     )
     expect(wired).toBeDefined()
+  })
+
+  it('turns a vault API-key change into the payload-free provider:credentials-changed', async () => {
+    const { startCoreServices } = await import('../core-services')
+    startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })
+    const hooks = arrivalMocks.sharedProviderService.configure.mock.calls.at(-1)?.[0] as
+      { onApiKeyChanged?: () => void } | undefined
+    expect(hooks?.onApiKeyChanged).toBeTypeOf('function')
+    syncHostMocks.emitEvent.mockClear()
+    hooks!.onApiKeyChanged!()
+    expect(syncHostMocks.emitEvent).toHaveBeenCalledWith('provider:credentials-changed', [])
   })
 })
 

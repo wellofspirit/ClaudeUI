@@ -119,6 +119,7 @@ import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
+import { openrouterCommands, OPENROUTER_CHANNELS } from './openrouter-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
 import type { ProgressReporter } from '../../shared/remote-protocol'
@@ -444,6 +445,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     ...SESSION_IPC_CHANNELS,
     ...CODEX_CHANNELS,
     ...USAGE_HUB_CHANNELS,
+    ...OPENROUTER_CHANNELS,
     ...HARNESS_CHANNELS,
     ...VOICE_PACK_CHANNELS
   ])
@@ -1884,6 +1886,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // one of them a credential write, and one declaration is what keeps the
   // capability and the sanitiser identical on both transports.
   for (const cmd of usageHubCommands()) {
+    handleIpc(cmd)
+  }
+
+  // The OpenRouter tab's reads, from the same declarations the remote transport
+  // spreads: `config` queries, key read from the vault per call (never returned).
+  for (const cmd of openrouterCommands()) {
     handleIpc(cmd)
   }
 

@@ -129,7 +129,9 @@ beforeEach(() => {
     fetchUsageWindows: mockFetchWindows,
     refreshPrices: mockRefreshPrices,
     usageHubStatus: mockHubStatus,
-    syncUsageHubNow: mockSyncHub
+    syncUsageHubNow: mockSyncHub,
+    // No OpenRouter key by default: the tab is covered in UsageView.openrouter.
+    openrouterStatus: vi.fn().mockResolvedValue({ configured: false })
   }
 
   useSessionStore.setState({ blockUsage: null, accountUsage: null } as any)

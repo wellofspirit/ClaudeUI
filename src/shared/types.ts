@@ -21,6 +21,12 @@ import type {
 } from './shared-provider'
 import type { ProviderRegistrySnapshot } from './provider-registry'
 import type {
+  OpenRouterEndpointRow,
+  OpenRouterModelRow,
+  OpenRouterModelScope,
+  OpenRouterOverview
+} from './openrouter'
+import type {
   HarnessId,
   HarnessInstallCancelResult,
   HarnessInstallResult,
@@ -2778,6 +2784,15 @@ interface AccountAPI {
    * comes from the last persisted reading and costs nothing.
    */
   fetchAccountLimits(refresh?: boolean): Promise<AccountLimits[]>
+  // --- OpenRouter tab (Usage Analytics) ---
+  /** Whether the vault holds an OpenRouter API key. Reads nothing from the network. */
+  openrouterStatus(): Promise<{ configured: boolean }>
+  /** The key's budget and spend, the account's credits and the ledger's figure for the key. */
+  openrouterOverview(): Promise<OpenRouterOverview>
+  /** The model catalog: the account's allowed models, or all of them, with benchmark indices. */
+  openrouterModels(scope: OpenRouterModelScope): Promise<OpenRouterModelRow[]>
+  /** The providers serving one model, with their live health figures. */
+  openrouterModelEndpoints(modelId: string): Promise<OpenRouterEndpointRow[]>
   /**
    * The window-value ledger (ADR-071 §7): one row per limit window with its
    * peak percent, what the ledger saw inside it, and the two derived figures.

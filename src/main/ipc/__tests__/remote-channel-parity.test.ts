@@ -146,6 +146,9 @@ const SHARED_DECLARATION_SOURCES = [
   // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
   'src/core/ipc/usage-hub-commands.ts',
+  // The OpenRouter tab's four reads (`config` queries), one declaration spread
+  // by both transports.
+  'src/core/ipc/openrouter-commands.ts',
   // ADR-082 arc 2 — the harness manager, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
   'src/core/ipc/harness-commands.ts',

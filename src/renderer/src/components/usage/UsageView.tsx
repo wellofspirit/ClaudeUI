@@ -41,6 +41,13 @@
  * feeds both the chip beside the title and the machines card at the bottom of
  * the Spend tab. A stored `all` on a machine whose hub has since been forgotten
  * falls back to `local` rather than asking for a scope the query would refuse.
+ *
+ * THE OPENROUTER TAB exists only while the vault holds an OpenRouter key, so the
+ * shell reads `openrouterStatus` on mount and whenever a credential changes. It
+ * is the one tab that answers a different question from the rest: every figure
+ * is OpenRouter's own window, so the range, scope and group-by controls and the
+ * two refresh buttons are not drawn on it, and `OpenRouterPanel` does its own
+ * reading.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -59,6 +66,7 @@ import { WindowValue } from './WindowValue'
 import { SpendChart } from './SpendChart'
 import { BreakdownTable } from './BreakdownTable'
 import { MachinesPanel, MACHINES_PANEL_ANCHOR } from './MachinesPanel'
+import { OpenRouterPanel } from './OpenRouterPanel'
 import {
   buildProviderColorMap,
   combinedMachineCount,
@@ -156,12 +164,15 @@ function storeScope(scope: DashboardScope): void {
 }
 
 /** Which half of the dashboard is on screen (S4c). */
-type DashboardTab = 'spend' | 'plans'
+type DashboardTab = 'spend' | 'plans' | 'openrouter'
 
 const TABS: ReadonlyArray<{ id: DashboardTab; label: string }> = [
   { id: 'spend', label: 'Spend' },
   { id: 'plans', label: 'Plan value' }
 ]
+
+/** Offered only while an OpenRouter key is stored. */
+const OPENROUTER_TAB = { id: 'openrouter', label: 'OpenRouter' } as const
 
 const DEFAULT_TAB: DashboardTab = 'spend'
 
@@ -171,7 +182,7 @@ const TAB_STORAGE_KEY = 'claudeui.usage.tab'
 function readStoredTab(): DashboardTab {
   try {
     const raw = window.localStorage.getItem(TAB_STORAGE_KEY)
-    if (TABS.some((t) => t.id === raw)) return raw as DashboardTab
+    if (TABS.some((t) => t.id === raw) || raw === OPENROUTER_TAB.id) return raw as DashboardTab
   } catch {
     // As above.
   }
@@ -235,6 +246,17 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   const [ledgerNudge, setLedgerNudge] = useState(0)
   const [limitsNudge, setLimitsNudge] = useState(0)
   const [hubNudge, setHubNudge] = useState(0)
+  const [openrouterConfigured, setOpenrouterConfigured] = useState(false)
+  const [credentialsNudge, setCredentialsNudge] = useState(0)
+
+  /**
+   * A stored `openrouter` outlives the key that justified it, the same way a
+   * stored `all` outlives its hub: the tab is shown as `spend` for as long as
+   * there is no key, and the stored value is left alone so a key added later
+   * brings the tab back where the viewer left it.
+   */
+  const activeTab: DashboardTab = tab === 'openrouter' && !openrouterConfigured ? 'spend' : tab
+  const onOpenRouter = activeTab === 'openrouter'
 
   /**
    * What the CONTROLS say, which is not always what was asked for.
@@ -304,6 +326,23 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
     }
   }, [hubNudge])
 
+  // Whether the vault holds an OpenRouter key: a local read, so it is asked on
+  // mount and on every credential change with no debounce.
+  useEffect(() => {
+    let cancelled = false
+    window.api
+      .openrouterStatus()
+      .then((status) => {
+        if (!cancelled) setOpenrouterConfigured(status.configured)
+      })
+      .catch(() => {
+        if (!cancelled) setOpenrouterConfigured(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [credentialsNudge])
+
   // The limits read. `false` ALWAYS: nothing that happens on its own may spend a
   // refresh grant (ADR-071 §6).
   useEffect(() => {
@@ -357,6 +396,9 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
       scheduleLedger()
       scheduleLimits()
     })
+    const offCredentials = onSyncEvent('provider:credentials-changed', () =>
+      setCredentialsNudge((n) => n + 1)
+    )
     return () => {
       clearTimeout(ledgerTimer)
       clearTimeout(limitsTimer)
@@ -364,6 +406,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
       offBlock()
       offLimits()
       offHub()
+      offCredentials()
     }
   }, [])
 
@@ -446,12 +489,16 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           {hub !== null && hub.enabled && <HubChip status={hub} />}
         </Header>
         <div className="flex flex-wrap items-center gap-2 px-4 pb-2">
-          <TabStrip tab={tab} onSelect={handleTab} />
+          <TabStrip
+            tab={activeTab}
+            tabs={openrouterConfigured ? [...TABS, OPENROUTER_TAB] : TABS}
+            onSelect={handleTab}
+          />
 
           {/* Only drawn when there is more than one machine to choose between:
               without a hub the answer is always `local`, and a control with one
               real option reads as a broken filter. */}
-          {hubEnabled && (
+          {hubEnabled && !onOpenRouter && (
             <PillGroup testid="UsageView.scope" label="Scope" value={effectiveScope}>
               {SCOPES.map((s) => (
                 <Pill
@@ -468,22 +515,24 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
             </PillGroup>
           )}
 
-          <PillGroup testid="UsageView.range" label="Range">
-            {RANGES.map((r) => (
-              <Pill
-                key={r}
-                testid={`UsageView.range.${r}`}
-                active={r === range}
-                onClick={() => handleRange(r)}
-              >
-                {RANGE_LABELS[r] ?? r}
-              </Pill>
-            ))}
-          </PillGroup>
+          {!onOpenRouter && (
+            <PillGroup testid="UsageView.range" label="Range">
+              {RANGES.map((r) => (
+                <Pill
+                  key={r}
+                  testid={`UsageView.range.${r}`}
+                  active={r === range}
+                  onClick={() => handleRange(r)}
+                >
+                  {RANGE_LABELS[r] ?? r}
+                </Pill>
+              ))}
+            </PillGroup>
+          )}
 
           {/* Nothing on the plans tab is grouped, so the control that would say
               so is not offered there. */}
-          {tab === 'spend' && (
+          {activeTab === 'spend' && (
             <PillGroup testid="UsageView.groupBy" label="Group by" value={groupBy}>
               {[...GROUP_BY, ...(effectiveScope === 'all' ? COMBINED_GROUP_BY : [])].map((g) => (
                 <Pill
@@ -499,60 +548,66 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
             </PillGroup>
           )}
 
-          <div className="ml-auto flex items-center gap-2">
-            {/* Prices are the ledger's other input, and the only one a user can
+          {!onOpenRouter && (
+            <div className="ml-auto flex items-center gap-2">
+              {/* Prices are the ledger's other input, and the only one a user can
                 do anything about: an unpriced model stays unpriced until the
                 catalog is refetched. It left with the opencode card in S4b-2
                 and comes back here, beside the other manual read. */}
-            <button
-              data-testid="UsageView.refreshPrices"
-              onClick={() => void handleRefreshPrices()}
-              disabled={pricesRefreshing}
-              title={
-                prices
-                  ? `Fetch the latest model prices from models.dev (${prices.count} models · refreshed ${formatDuration(Date.now() - prices.refreshedAt)} ago)`
-                  : 'Fetch the latest model prices from models.dev'
-              }
-              className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
-            >
-              {pricesRefreshing ? (
-                <>
-                  <span
-                    data-testid="UsageView.refreshPrices.spinner"
-                    className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin"
-                  />
-                  Refreshing…
-                </>
-              ) : (
-                '↻ refresh prices'
-              )}
-            </button>
+              <button
+                data-testid="UsageView.refreshPrices"
+                onClick={() => void handleRefreshPrices()}
+                disabled={pricesRefreshing}
+                title={
+                  prices
+                    ? `Fetch the latest model prices from models.dev (${prices.count} models · refreshed ${formatDuration(Date.now() - prices.refreshedAt)} ago)`
+                    : 'Fetch the latest model prices from models.dev'
+                }
+                className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
+              >
+                {pricesRefreshing ? (
+                  <>
+                    <span
+                      data-testid="UsageView.refreshPrices.spinner"
+                      className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin"
+                    />
+                    Refreshing…
+                  </>
+                ) : (
+                  '↻ refresh prices'
+                )}
+              </button>
 
-            <button
-              data-testid="UsageView.refreshLimits"
-              onClick={() => void handleRefreshLimits()}
-              disabled={refreshing}
-              title="Ask each provider for a fresh limits reading. Uses one refresh per signed-in account."
-              className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
-            >
-              {refreshing ? (
-                <>
-                  <span
-                    data-testid="UsageView.refreshLimits.spinner"
-                    className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin"
-                  />
-                  Refreshing…
-                </>
-              ) : (
-                '↻ refresh limits'
-              )}
-            </button>
-          </div>
+              <button
+                data-testid="UsageView.refreshLimits"
+                onClick={() => void handleRefreshLimits()}
+                disabled={refreshing}
+                title="Ask each provider for a fresh limits reading. Uses one refresh per signed-in account."
+                className="[-webkit-app-region:no-drag] text-[10px] text-text-secondary hover:text-text-primary border border-border/50 rounded px-2 py-0.5 flex items-center gap-1 disabled:opacity-50 transition-colors cursor-default"
+              >
+                {refreshing ? (
+                  <>
+                    <span
+                      data-testid="UsageView.refreshLimits.spinner"
+                      className="inline-block w-2.5 h-2.5 rounded-full border border-current border-t-transparent animate-spin"
+                    />
+                    Refreshing…
+                  </>
+                ) : (
+                  '↻ refresh limits'
+                )}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
-      <div data-testid="UsageView.panel" data-tab={tab} className="p-4 space-y-4">
-        {error !== null && (
+      <div data-testid="UsageView.panel" data-tab={activeTab} className="p-4 space-y-4">
+        {/* The OpenRouter tab reads none of the ledger, so neither its error nor
+            its loading card belongs there. */}
+        {onOpenRouter && <OpenRouterPanel onOpenSpend={() => handleTab('spend')} />}
+
+        {!onOpenRouter && error !== null && (
           <div
             data-testid="UsageView.error"
             className="bg-bg-secondary rounded-xl border border-danger/40 p-3 text-[11px] text-danger"
@@ -561,7 +616,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           </div>
         )}
 
-        {dashboard === null && error === null && (
+        {!onOpenRouter && dashboard === null && error === null && (
           <div
             data-testid="UsageView.loading"
             className="bg-bg-secondary rounded-xl border border-border/50 p-6 text-center text-[11px] text-text-muted"
@@ -570,7 +625,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           </div>
         )}
 
-        {dashboard !== null && tab === 'spend' && (
+        {dashboard !== null && activeTab === 'spend' && (
           <>
             <Summary data={dashboard} compact={isMobile} providerColors={providerColors} />
 
@@ -593,7 +648,7 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
           </>
         )}
 
-        {dashboard !== null && tab === 'plans' && (
+        {dashboard !== null && activeTab === 'plans' && (
           <WindowValue
             data={dashboard}
             limits={limits}
@@ -621,9 +676,11 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
  */
 function TabStrip({
   tab,
+  tabs,
   onSelect
 }: {
   tab: DashboardTab
+  tabs: ReadonlyArray<{ id: DashboardTab; label: string }>
   onSelect: (next: DashboardTab) => void
 }): React.JSX.Element {
   return (
@@ -632,7 +689,7 @@ function TabStrip({
       data-value={tab}
       className="flex items-center gap-3 pr-3 mr-1 border-r border-border/50"
     >
-      {TABS.map(({ id, label }) => {
+      {tabs.map(({ id, label }) => {
         const active = id === tab
         return (
           <button

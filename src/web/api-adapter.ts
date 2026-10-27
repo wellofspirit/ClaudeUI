@@ -771,6 +771,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('usage-hub:resync') as ReturnType<ClaudeAPI['resyncUsageHub']>,
     forgetUsageHub: () =>
       connection.invoke('usage-hub:forget') as ReturnType<ClaudeAPI['forgetUsageHub']>,
+    // The OpenRouter tab — `config` queries, safeHandler envelopes (hence `unwrap`).
+    openrouterStatus: () => unwrap('openrouter:status'),
+    openrouterOverview: () => unwrap('openrouter:overview'),
+    openrouterModels: (scope) => unwrap('openrouter:models', scope),
+    openrouterModelEndpoints: (modelId) => unwrap('openrouter:model-endpoints', modelId),
 
     // Native OAuth (ADR-014) — remote since ADR-057/S4. The host does NOT open
     // its own browser for these calls: it returns `manualUrl` on the state and

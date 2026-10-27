@@ -401,6 +401,13 @@ export interface SyncEventMap {
    */
   'engine:models-changed': (data: { engineId: EngineId }) => void
   /**
+   * An API key was stored or removed in the vault (a key typed in, an engine's
+   * own key adopted, a provider removed or disconnected). A nudge carrying
+   * neither the provider nor the key: the Usage Analytics tab re-reads
+   * `openrouter:status` to learn whether its OpenRouter tab exists.
+   */
+  'provider:credentials-changed': () => void
+  /**
    * A credential for `providerId` was successfully stored — the ONE resolution
    * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's
    * credential is good now", so every auth surface invented its own clear

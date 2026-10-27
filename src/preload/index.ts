@@ -496,6 +496,12 @@ const api: ClaudeAPI = {
   resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
   forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
 
+  // The OpenRouter tab (Usage Analytics): safeHandler envelopes, hence `unwrap`.
+  openrouterStatus: () => unwrap('openrouter:status'),
+  openrouterOverview: () => unwrap('openrouter:overview'),
+  openrouterModels: (scope) => unwrap('openrouter:models', scope),
+  openrouterModelEndpoints: (modelId) => unwrap('openrouter:model-endpoints', modelId),
+
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),
   submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),

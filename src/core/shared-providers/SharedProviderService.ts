@@ -103,6 +103,12 @@ export interface SharedProviderServiceDeps {
   deliveredKeys?: DeliveredKeyFingerprints
   /** Detect's network half (`endpoint-probe.ts`). Injected for tests. */
   probeEndpoint?: (request: Parameters<typeof probeEndpoint>[0]) => Promise<EndpointProbeResult>
+  /**
+   * An API key was written to or removed from the vault. Carries nothing: no
+   * provider id, no key. The composition root turns it into the replicated
+   * `provider:credentials-changed`, so this service stays free of the sync layer.
+   */
+  onApiKeyChanged?: () => void
 }
 
 /** Serializes shared-provider RMW across definitions, vault credentials, and native routes. */
@@ -119,6 +125,7 @@ export class SharedProviderService {
   private mutation = Promise.resolve()
   private readonly harnessRuns: (route: Route) => boolean
   private readonly deliveredKeys: DeliveredKeyFingerprints
+  private onApiKeyChanged: (() => void) | undefined
 
   constructor(private readonly deps: SharedProviderServiceDeps) {
     this.repository = deps.repository ?? new SharedProviderRepository()
@@ -127,6 +134,7 @@ export class SharedProviderService {
     this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
     this.deliveredKeys = deps.deliveredKeys ?? memoryDeliveredKeyFingerprints()
     this.probe = deps.probeEndpoint ?? ((request) => probeEndpoint(request))
+    this.onApiKeyChanged = deps.onApiKeyChanged
   }
 
   listDefinitions(): SharedProviderDefinition[] {
@@ -238,6 +246,26 @@ export class SharedProviderService {
     })
   }
 
+  /**
+   * Late wiring for the module singleton (built in `index.ts`, which cannot
+   * import the sync layer): the hooks `core-services.ts` provides at boot.
+   */
+  configure(hooks: Pick<SharedProviderServiceDeps, 'onApiKeyChanged'>): void {
+    this.onApiKeyChanged = hooks.onApiKeyChanged
+  }
+
+  /** A failing hook must not undo or fail the vault write it reports. */
+  private notifyApiKeyChanged(): void {
+    try {
+      this.onApiKeyChanged?.()
+    } catch (error) {
+      logger.warn(
+        'SharedProviders',
+        `onApiKeyChanged failed: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+  }
+
   async removeDefinition(id: string): Promise<void> {
     await this.enqueue(async () => {
       const definition = this.requireDefinition(id)
@@ -255,6 +283,7 @@ export class SharedProviderService {
       await this.reclaimStrandedKeys(definition)
       for (const route of this.credentialRoutes(live)) await this.removeRouteCredential(live, route)
       await this.deps.vault.removeCredential(id)
+      this.notifyApiKeyChanged()
       for (const route of routes) this.clearOwnedDefault(live, route)
       await this.clearModelLists(definition)
       this.repository.remove(id)
@@ -448,6 +477,7 @@ export class SharedProviderService {
         (route) => !replaceOwn.includes(route)
       )
       await this.deps.vault.saveCredential(id, { type: 'api_key', key })
+      this.notifyApiKeyChanged()
       await this.reconcileCustomCredentials(live, live, kept)
     })
   }
@@ -606,6 +636,7 @@ export class SharedProviderService {
       const central = await Promise.allSettled([this.deps.vault.removeCredential(id)])
       const failures: unknown[] = []
       const centralFailure = central[0].status === 'rejected' ? central[0].reason : undefined
+      if (!centralFailure) this.notifyApiKeyChanged()
       if (centralFailure) failures.push(centralFailure)
       for (const [route, result] of [
         ['pi', results[0]],
@@ -1352,6 +1383,7 @@ export class SharedProviderService {
         await this.deps.vault.removeCredential(id).catch(() => undefined)
         throw error
       }
+      this.notifyApiKeyChanged()
       logger.info(
         'SharedProviders',
         `adopted the ${id} API key into the vault (${keep ? `kept ${keep}'s` : 'identical in both engines'})`
