@@ -75,6 +75,62 @@ describe('McpBody', () => {
     expect(document.body.textContent).toContain('**bold**')
   })
 
+  describe('a session_message to an X-Agent (ADR-105 §4)', () => {
+    const view = {
+      kind: 'mcp',
+      input: {},
+      server: 'claude-ui-sessions',
+      tool: 'session_message'
+    } as const
+    const delivered = (text: string) =>
+      ({ type: 'tool_result', toolUseId: 'tu', toolResult: text }) as never
+
+    it('names the X-Agent it reached, from the call’s own result', () => {
+      renderBody(
+        view,
+        delivered(
+          'delivered to X-Agent worker (it is running: it takes the message into its current turn) (message m-1)'
+        )
+      )
+      expect(screen.getByTestId('McpBody.xAgent').textContent).toBe('To X-Agent worker')
+    })
+
+    it('a run it started names it too', () => {
+      renderBody(
+        view,
+        delivered(
+          'delivered to X-Agent impl-e1 (it was not running: a new run started on your message) (message m-2)'
+        )
+      )
+      expect(screen.getByTestId('McpBody.xAgent').textContent).toBe('To X-Agent impl-e1')
+    })
+
+    it('says nothing for a message to a session, a refusal, no result yet, or another tool', () => {
+      for (const [v, r] of [
+        [view, delivered('delivered (it started a turn on your message) (message m-3)')],
+        [view, delivered('Refused: the cost cap is reached')],
+        [view, undefined],
+        [{ ...view, tool: 'session_get' }, delivered('delivered to X-Agent worker (it is running')],
+        [{ ...view, server: 'other' }, delivered('delivered to X-Agent worker (it is running')]
+      ] as const) {
+        const { unmount } = render(
+          <McpBody
+            {...({
+              view: v,
+              block: { type: 'tool_use', toolUseId: 'tu', toolName: 'x', toolInput: {} },
+              result: r,
+              expanded: true,
+              hideToolInput: false,
+              isError: false
+            } as unknown as KindBodyProps)}
+          />
+        )
+        expect(screen.queryByTestId('McpBody.xAgent')).toBeNull()
+        unmount()
+      }
+    })
+  })
+
   it('renders a failed call through the error branch', () => {
     renderBody(
       { kind: 'mcp', input: {}, server: 'github', tool: 'create_issue' },

@@ -55,9 +55,14 @@
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
 import type { ContentBlock } from '../../../../../shared/types'
 import { isPiAsyncLaunchResult, piAgentResultModel } from '../../../../../shared/pi-agent-result'
 import { DEFAULT_SUBAGENT_TYPE } from '../../../../../shared/agent-type-colors'
+import {
+  isSessionToolName,
+  sessionToolMcpFields
+} from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -124,7 +129,9 @@ function piKindOf(toolName: string): ToolKind {
     case 'list_models':
       return 'note'
     default:
-      return 'unknown'
+      // The bridge's session tools (v15): the generic MCP row. Mirrors
+      // permission-engine.ts's piToolKind.
+      return isSessionToolName(toolName) ? 'mcp' : 'unknown'
   }
 }
 
@@ -136,7 +143,8 @@ interface PiEditEntry {
 function piNormalize(
   kind: ToolKind,
   input: Record<string, unknown> | undefined,
-  result?: ToolResultBlock
+  result?: ToolResultBlock,
+  toolName?: string
 ): ToolView {
   const inp = input ?? {}
 
@@ -224,7 +232,14 @@ function piNormalize(
       // dispatch branch verbatim. Checked FIRST since dispatch_agent's input
       // shape never overlaps with subagent's (below).
       if (typeof inp.engine === 'string')
-        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
+        return dispatchTaskView({
+          engine: inp.engine,
+          prompt: inp.prompt,
+          model: inp.model,
+          name: inp.name,
+          description: inp.description,
+          runInBackground: inp.run_in_background
+        })
       // Host-run subagents (ADR-089) — the `agent` tool: { description,
       // prompt, subagent_type?, name?, model?, run_in_background? }. Keyed on the shape (prompt +
       // description, none of engine/agent/tasks): piNormalize never sees the
@@ -350,7 +365,7 @@ function piNormalize(
     }
 
     case 'mcp':
-      return { kind: 'mcp', input: inp }
+      return { kind: 'mcp', input: inp, ...(toolName ? sessionToolMcpFields(toolName) : null) }
 
     case 'unknown':
     default:
@@ -374,17 +389,14 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
   grep: 'Grep',
   find: 'Find',
   ls: 'Ls',
-  render_mermaid: 'Mermaid',
-  create_mockup: 'Mockup',
-  show_mockup: 'Mockup',
-  dispatch_agent: 'Dispatch',
   agent: 'Agent',
   subagent: 'Subagent',
   list_models: 'Models'
 }
 
 function piDisplayName(toolName: string): string {
-  return PI_DISPLAY_NAMES[toolName] ?? toolName
+  // ClaudeUI's own tools are registered under their bare names (first-party-tool-names.ts).
+  return firstPartyDisplayName(toolName, 'bare') ?? PI_DISPLAY_NAMES[toolName] ?? toolName
 }
 
 export const PiEngineToolMap: EngineToolMap = {

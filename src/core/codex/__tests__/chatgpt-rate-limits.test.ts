@@ -398,7 +398,7 @@ describe('credits-based plans', () => {
 
   it('records credits when the backend says the account has them', () => {
     const { store: limits } = store()
-    limits.record('acct-a', withCredits(), { email: 'biz@example.test' })
+    limits.record('acct-a', withCredits(), { email: 'biz@example.test' }, 1_700_000_000_000)
 
     expect(limits.snapshot()['acct-a']).toMatchObject({
       primary: null,
@@ -409,7 +409,8 @@ describe('credits-based plans', () => {
 
   it('ignores a credits object that says the account has none', () => {
     const { store: limits } = store()
-    limits.record('acct-a', withCredits({ hasCredits: false }))
+    limits.record('acct-a', withCredits(), {}, 1_700_000_000_000)
+    limits.record('acct-a', withCredits({ hasCredits: false }), {}, 1_700_000_000_001)
 
     expect(limits.snapshot()['acct-a'].credits).toBeUndefined()
   })
@@ -418,7 +419,7 @@ describe('credits-based plans', () => {
     // Same rule the windows follow: a rolling update's absent field "does not
     // clear a previously observed value".
     const { store: limits } = store()
-    limits.record('acct-a', withCredits())
+    limits.record('acct-a', withCredits(), {}, 1_700_000_000_000)
     limits.record('acct-a', noWindows())
 
     expect(limits.snapshot()['acct-a'].credits).toEqual({ unlimited: false, balance: '42.50' })
@@ -426,7 +427,7 @@ describe('credits-based plans', () => {
 
   it('carries an unlimited balance through', () => {
     const { store: limits } = store()
-    limits.record('acct-a', withCredits({ unlimited: true, balance: null }))
+    limits.record('acct-a', withCredits({ unlimited: true, balance: null }), {}, 1_700_000_000_000)
 
     expect(limits.snapshot()['acct-a'].credits).toEqual({ unlimited: true, balance: null })
   })
@@ -547,7 +548,9 @@ describe('member credit allowance (individualLimit)', () => {
       noWindows({
         credits: { hasCredits: true, unlimited: false, balance: null },
         individualLimit: allowance()
-      })
+      }),
+      {},
+      1_700_000_000_000
     )
     expect(limits.snapshot()['acct-biz']).toMatchObject({
       credits: { unlimited: false, balance: null },
@@ -557,17 +560,19 @@ describe('member credit allowance (individualLimit)', () => {
 
   it('a sparse update keeps the allowance the last full read established', () => {
     const { store: limits } = store()
-    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }), {}, 1_700_000_000_000)
     limits.record('acct-biz', noWindows())
     expect(limits.snapshot()['acct-biz'].creditLimit).toMatchObject({ used: 8000 })
   })
 
   it('a newer allowance replaces the old one', () => {
     const { store: limits } = store()
-    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }), {}, 1_700_000_000_000)
     limits.record(
       'acct-biz',
-      noWindows({ individualLimit: allowance({ used: '9000', remainingPercent: 64 }) })
+      noWindows({ individualLimit: allowance({ used: '9000', remainingPercent: 64 }) }),
+      {},
+      1_700_000_000_001
     )
     expect(limits.snapshot()['acct-biz'].creditLimit).toMatchObject({
       used: 9000,
@@ -577,7 +582,8 @@ describe('member credit allowance (individualLimit)', () => {
 
   it('is never sampled - it is a monthly allowance, not a rolling window', () => {
     const { store: limits, persist } = store()
-    limits.record('acct-biz', noWindows({ individualLimit: allowance() }))
+    limits.record('acct-biz', noWindows({ individualLimit: allowance() }), {}, 1_700_000_000_000)
+    expect(limits.snapshot()['acct-biz'].creditLimit).toBeDefined()
     expect(persist).not.toHaveBeenCalled()
   })
 
@@ -634,10 +640,90 @@ describe('relaying credits', () => {
     for (const call of publishCredits.mock.calls) expect(call[2]).toBe(READ_AT)
   })
 
-  it('relays nothing from pushes alone — nothing here could date them', () => {
+  it('pushes cannot seed or replace credit facts, even with plausible cached metadata', () => {
     const { store: limits, publishCredits } = store()
-    limits.record('acct-biz', noWindows({ individualLimit: allowance }))
+    const stale = noWindows({
+      credits: { hasCredits: true, unlimited: false, balance: '999' },
+      individualLimit: allowance
+    })
+    limits.record('acct-biz', stale)
+    expect(limits.snapshot()['acct-biz'].credits).toBeUndefined()
+    expect(limits.snapshot()['acct-biz'].creditLimit).toBeUndefined()
     expect(publishCredits).not.toHaveBeenCalled()
+    limits.record(
+      'acct-biz',
+      noWindows({ individualLimit: { ...allowance, used: '25' } }),
+      {},
+      READ_AT
+    )
+    publishCredits.mockClear()
+    limits.record('acct-biz', stale)
+    expect(limits.snapshot()['acct-biz'].creditLimit?.used).toBe(25)
+    expect(limits.snapshot()['acct-biz'].credits).toBeUndefined()
+    expect(publishCredits).toHaveBeenCalledWith(
+      'acct-biz',
+      expect.objectContaining({ creditLimit: expect.anything() }),
+      READ_AT
+    )
+    expect(publishCredits.mock.calls[0][1].credits).toBeUndefined()
+  })
+
+  it.each([
+    ['absent', noWindows()],
+    [
+      'negative credit flag and malformed allowance',
+      noWindows({
+        credits: { hasCredits: false, unlimited: false, balance: null },
+        individualLimit: { ...allowance, used: 'bad' }
+      })
+    ]
+  ])('full reads clear %s credit facts and relay date; pushes cannot republish', (_, cleared) => {
+    const { store: limits, publishCredits } = store()
+    const stale = noWindows({
+      credits: { hasCredits: true, unlimited: false, balance: '9' },
+      individualLimit: allowance
+    })
+    limits.record('acct-biz', stale, {}, READ_AT)
+    publishCredits.mockClear()
+    limits.record('acct-biz', cleared, {}, READ_AT + 1)
+    limits.record('acct-biz', stale)
+    expect(limits.snapshot()['acct-biz'].credits).toBeUndefined()
+    expect(limits.snapshot()['acct-biz'].creditLimit).toBeUndefined()
+    expect(publishCredits).not.toHaveBeenCalled()
+  })
+
+  it('keeps company monthly credits isolated from personal prolite weekly windows', () => {
+    const { store: limits } = store()
+    const company = noWindows({
+      credits: { hasCredits: true, unlimited: false, balance: '5' },
+      individualLimit: allowance
+    })
+    const personal = snapshot({
+      primary: { usedPercent: 1, windowDurationMins: 10_080, resetsAt: 1_736_000_000 },
+      secondary: null
+    })
+    limits.record(
+      'company',
+      company,
+      { email: 'company@example.test', planType: 'business' },
+      READ_AT
+    )
+    limits.record('personal', company)
+    limits.record(
+      'personal',
+      personal,
+      { email: 'personal@example.test', planType: 'prolite' },
+      READ_AT + 1
+    )
+    limits.record('personal', company)
+    expect(limits.snapshot().company.creditLimit?.limit).toBe(8000)
+    expect(limits.snapshot().personal.primary).toEqual({
+      usedPercent: 1,
+      windowMinutes: 10_080,
+      resetsAt: '2025-01-04T14:13:20.000Z'
+    })
+    expect(limits.snapshot().personal.creditLimit).toBeUndefined()
+    expect(limits.snapshot().personal.credits).toBeUndefined()
   })
 
   it('a full read sweep dates the credits with its own instant', async () => {

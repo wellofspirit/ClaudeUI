@@ -2,6 +2,10 @@
 
 **Status:** Accepted (2026-10-01). Built on branch `pi-subagents-dispatch-judge`.
 **Amended by:** [ADR-091](adr-091_judge-blocks-hold-and-session-local-targets.md) (a target's judge reads parent, queued user turns and trajectory in time order; a block holds for the user).
+**Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-23: the target judge also counts the dispatcher's directory and the user's additional directories as local, as context only)
+**Amended by:** [ADR-110](adr-110_pi-path-containment-and-judge-off.md) (2026-10-25: a pi target whose judge is switched off asks like `default` over its target rules instead of allow-all; pi targets get path containment)
+**Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-24 amendment: a target's additional directories, plus the dispatcher's directory when it runs elsewhere, are real scope on every engine; allow rules stay excluded)
+**Amended by:** [ADR-105](adr-105_background-dispatch.md) (2026-10-20: a Codex X-Agent's `hand_back` report and outgoing `session_message` are reviewed by ClaudeUI's judge on the target's own model, since `auto_review` does not review dynamic tools; a message review that cannot run refuses the send).
 **Amends:** [ADR-033](adr-033_cross-engine-dispatch.md) §5 and its "M2 shipped" note (a target's
 auto mode is no longer allow-all, and its mode is no longer fixed at creation).
 **Relates to:** [ADR-081](adr-081_claudeui-owned-judge-transport.md) (the judge transport),
@@ -158,7 +162,10 @@ test pins either):
 - **Usage:** every judge call is a `judge` ledger row with `parentRoutingId` = the dispatching
   session's routing id, `sessionId` = the target's engine session.
 - **Environment:** the user's deny/ask rules (allow empty — exactly what binds a target), the shared
-  trust lists, session-start git remotes per target.
+  trust lists, session-start git remotes per target. _Amended by ADR-108: the deny/ask rules are the union of the
+  dispatcher's and the target's directories, and the environment and redirect scope also count the dispatcher's
+  directory and the user's additional directories as local (never the static gates). Amended again 2026-10-24: those
+  directories are the target's real scope, read from its ruleset, and reach the static gates too._
 - **Per target:** denial caps, the outcome map (keyed by the target's own tool ids, so a blocked call
   is annotated on the trajectory), the banners.
 - **Verdicts** are emitted as `session:tool-review` under the dispatching routing with the TARGET's
@@ -190,6 +197,14 @@ gate is what it ESCALATED, and escalations belong to the human. (Before this ADR
 
 The dispatcher reads the live mode through one helper that normalises the legacy `full` to `auto`
 (`CODEX_TURN_POLICY` has no `full` row, and `full` is not a cli.js mode).
+
+_Amended 2026-10-20 by [ADR-105](adr-105_background-dispatch.md):_ the thread's `auto_review` does not
+review dynamic-tool calls (`vendor/codex-src/codex-rs/core/src/tools/handlers/dynamic.rs` asks for no
+approval), and a Codex X-Agent's `hand_back` and `session_message` are dynamic tools. While the thread
+runs `auto`, ClaudeUI's judge on the target's own model (pi's ChatGPT route) therefore reviews the
+report, which it flags and always delivers, and the outgoing `session_message`, which it refuses on a
+block and, when the review cannot run, refuses to send (ADR-105 §3, §4). Native `auto_review` of the
+target's own actions is unchanged.
 
 ### Residuals, accepted
 

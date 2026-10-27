@@ -30,7 +30,6 @@ beforeEach(() => {
   // the previous test's sessions (SyncCore phase 4c).
   resetReplicaSeam()
   resetFactoryCounter()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: mockSaveSessionConfig,
     saveSettings: vi.fn(),

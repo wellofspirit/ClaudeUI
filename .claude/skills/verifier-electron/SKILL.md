@@ -184,13 +184,383 @@ node scripts/app-shot.mjs --click '[title="Settings"]' --click 'text=All Setting
 ```
 
 Known selectors: settings gear = `[title="Settings"]`; quick-panel → full dialog =
-`text=All Settings`. For new selectors, run with `--keep` and inspect, or grep the
+`text=All Settings`; a settings page = `[data-testid="SettingsDialog.railSub"]:has-text("<page>")`
+(its group may already be expanded — clicking the group header collapses it, so check first). For new selectors, run with `--keep` and inspect, or grep the
 renderer source for `title=`/`aria-label`/button text.
+
+## Driving a full session turn (only with the owner's OK for a live turn)
+
+`app-shot.mjs` is single-shot: one screenshot after a fixed wait. A judged turn
+takes 5–15 s and needs evidence per prompt, so write a small purpose-built
+driver that reuses its launch contract (`CLAUDEUI_DISABLE_REMOTE=1`,
+`CLAUDEUI_HEADLESS=1`, `CLAUDEUI_VERIFIER_HOOKS=1`). Learned on a live auto-mode
+judge run:
+
+- **New session without the folder picker.** The welcome dropdown ends in
+  `useSessionStore.createNewSession(routingId, cwd)`; call it through
+  `window.__claudeuiVerifier.sessionStore`, then the composer pickers' own store
+  actions `setSelectedEngine`, `setSelectedModel` and
+  `changePermissionMode(id, 'auto')`. Type into `InputBox.textarea`, send with Enter.
+- **pi rekeys the session id on its first spawn.** The id you passed becomes pi's
+  own (`01a1…`) after the first turn; poll `getState().activeSessionId` after each
+  send, and after a relaunch read the sidebar row's `SessionItem[data-id]`.
+- **Verdict lines.** `CLAUDE_UI_LOG_DIR` (read at module load) redirects the
+  main-process daily log (`YYYYMMDD.log`) into your report folder; the judge
+  writes `auto-mode allow (stage=…[, sev=…][, overturned=block]) <tool>` /
+  `auto-mode block …` under `[PiSession]` / `[OpencodeSession]`.
+- **Review chips are ephemeral.** `ToolCard.reviewChip` / `ToolCard.review`
+  (expand with `ToolCard.expand`) render in the launch that judged the call and
+  are gone after a relaunch — capture them in the same launch.
+- **The agent may refuse before calling a tool**, which yields no verdict at all:
+  check for a `tool_use` block before calling a missing verdict a failure.
+- **A command the user types verbatim is consent** (Requested Exact Action): it
+  cannot test a should-block path. A block check needs an action the user did not
+  name.
+- **pi's model picker lists only authenticated pi providers**
+  (`availableModels` filtered by `engineId === 'pi'`); the judge model is
+  `window.api.loadEngineConfig('pi').autoMode.judgeModel`.
+- `[harness] detection (boot): … pi none` reports PATH detection only; the managed
+  store's pi still spawns.
+- **autoMode is read at session start and cached**: `judgeModel` / `twoStageMode`
+  changes bind only a NEW session — create one per mode.
+
+## Judge drives without a real provider (local stand-in)
+
+Learned verifying judge-reply capture: a local OpenAI-compatible stand-in serves
+both the agent and the judge, so a judge scenario (over-budget stage 1, stop cut
+with trailing text, reasoning fields, 429/500, a hang) is scripted exactly and no
+call leaves the machine.
+
+- **Network first.** Before any engine spawns: `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
+  to a dead local port and `NO_PROXY=127.0.0.1,localhost` — the judge transport
+  honours `NO_PROXY`, so without it the stand-in is unreachable too.
+- **Register the stand-in** from the renderer:
+  `window.api.saveSharedProvider({id, name, kind: 'custom', protocol:
+'openai-completions' | 'openai-responses', baseUrl: 'http://127.0.0.1:<port>/v1',
+models: [{id}], routes: {pi: {enabled: true}, opencode: {enabled: true}},
+managed: true})`, then `window.api.setSharedProviderApiKey(id, key)`, then
+  `sessionStore.getState().reloadEngineModels('opencode')` + `reloadModels()` and
+  wait ~7 s (opencode's models arrive after pi's). The model value is
+  `<providerId>/<modelId>`; point the judge at it through
+  `loadEngineConfig(engine)` → `autoMode: {judgeModel, twoStageMode}` →
+  `saveEngineConfig`. An `openai-responses` provider gives the Responses wire (the
+  ChatGPT-like shape: client-side stop and budget).
+- **Steer the agent without consent.** Map a token in the prompt (`[job:NAME]`) to a
+  tool call the stand-in emits (`shell` / pi `bash`: `echo MARK_NAME > cap_NAME.txt`);
+  a command typed verbatim would be consent. Pick the judge scenario from the LAST
+  marker in the judge's user message — the transcript repeats earlier actions.
+- **Check the session's model before every prompt** (`standin/<model>`); abort on a
+  mismatch rather than let an engine fall back to a hosted model.
+- **Tell the stages apart by the user message**: stage 1's instruction ("Grade HARM
+  ONLY … `<severity>`") travels in the judge's user message, stage 2's asks for
+  `<block>`. A stage-2 BLOCK is sampled twice (the confirmation sample), so a block
+  scenario sees two stage-2 requests. `routes` needs both the `pi` and `opencode`
+  keys, or `saveSharedProvider` throws.
+- **Verdict lines need `CLAUDE_UI_LOG=info`** (with `CLAUDE_UI_LOG_DIR` on the scratch
+  home): the `auto-mode allow|BLOCK (stage=…, s1=…, sev=…)` lines are info-level; the
+  default `warn` log shows only the `stage=error` warnings. Slice the log as a Buffer
+  when polling by byte offset (the lines carry em-dashes).
+- **A Claude turn without credentials** (the "don't break Claude" check): point
+  `CLAUDEUI_CLAUDE_CLI` at the main checkout's `vendor/claude-cli/bun-claude.exe` (a
+  worktree has no `vendor/`), set `loadVendorConfig('anthropic')` → `endpoint:
+{enabled, baseUrl, authToken}` → `saveVendorConfig` to a local `/v1/messages` SSE
+  stand-in (answer `count_tokens` too; one short turn makes about six requests).
+- **A worktree installed with `--ignore-scripts`** has `node_modules/electron` without
+  `dist/`: launch the main checkout's `electron.exe` with the worktree as the app
+  path, and check `process.versions.electron` matches the worktree's pin.
+- **Baseline for "same as before" claims:** `git archive <base> | tar -x -C
+<scratch>/base`, junction `node_modules`, build and launch it with its own home;
+  unlink the junction afterwards (PowerShell `(Get-Item p -Force).Delete()`).
+  A base extracted under the main checkout needs no junction: it resolves
+  `node_modules` upward. Two instances (change and base) can share one stand-in on
+  separate control ports; scope each run by the stand-in log's line offset.
+
+## Multi-client and approval-card drives
+
+Learned verifying cross-client approval dismiss and dispatch-target scope.
+
+- **A second client** needs the remote server, but `scripts/lib/scroll-bench/launch.mjs`
+  forces `CLAUDEUI_DISABLE_REMOTE=1`: write a launcher without it, and only with a
+  FRESH isolated home (its empty remote config has no serve record, so Tailscale is
+  never touched; hash `tailscale serve status` before and after). Then
+  `window.api.setRemoteConfig({bindHost: '127.0.0.1'})`,
+  `startRemoteServer({host: '127.0.0.1'})`, `setRemotePassword('<throwaway>')`, open
+  `status.lanUrl` (`http://127.0.0.1:<port>/remote`) in Playwright Chromium and log in
+  through `[data-testid="PasswordLogin.input"]` + Enter (policy `off` still wants a
+  `#k=` token). The web client has no `__claudeuiVerifier`: assert by `data-testid`
+  (`ApprovalButtons.allow|deny`, `ApprovalCardView.*`, `FloatingApproval`).
+- **Tell a dismiss from a tool-result removal**: the reducer also drops a card when its
+  tool result arrives, so gate a `sleep 10` command and read about 1.5 s after the
+  click while the session is still `running`; read the desktop replica
+  (`__claudeuiVerifier.canonical.sessions[id].pendingApprovals`, an object) as well as
+  the DOM. An answered `AskUserQuestionBlock` stays in the transcript as a summary:
+  count `pendingApprovals`, not the block.
+- **Card flow**: new sessions start in `auto` (`changePermissionMode(id, 'default')`
+  for cards); pi and Claude raise one card at a time, so two pending cards need two
+  sessions; an opencode parent in `default` first shows its own dispatch card, and the
+  target's `xeng:` card follows on the parent's routing id.
+- **Dispatch-target evidence**: an opencode target's ruleset is in
+  `<home>/.local/share/opencode/opencode.db` (copy with `-wal`/`-shm`), table
+  `session_v2`, column `permission`, `title = 'xeng-dispatch'`; a Claude target's flags
+  (`--add-dir`, `--settings`) from `Get-CimInstance Win32_Process` while its card is
+  pending (filter on `vendor\claude-cli\bun-claude`, which excludes a packaged app).
+  Name each fixture file uniquely (`VERIFY_<x>.txt`) to attribute judge calls; the
+  action under review is the last command after the judge text's final "Proposed next
+  action" block.
+- **Codex without a provider**: copy the managed store's `codex/<version>` into the
+  scratch store and RESTART the app (Codex is detected at boot), point it at a localhost
+  fixture provider with a fixture key, and use a catalog model id (`gpt-5.5`). The
+  sandbox the binary actually ran is in the rollout's `turn_context.sandbox_policy`
+  (`<CODEX_HOME>/sessions/**/rollout-*.jsonl`); approval decisions in
+  `<CODEX_HOME>/logs_2.sqlite` (`FileChangeRequestApproval … Accept|Decline`).
+  `request_user_input` fires only in plan mode and Codex forces `isOther`, so only the
+  missing-answer rejections are reachable live. An accepted `apply_patch` may stall
+  against a fixture provider on Windows: interrupt the session after the decision.
+- **pi's bash strips backslashes** (`cat D:\x` becomes `D:x`): use forward slashes in
+  pi commands.
+
+## Permission-ladder drives (pi, opencode)
+
+Learned verifying pi path containment, judge-off and Agent/Task rules.
+
+- **Session cwd in Windows form.** Pass `cygpath -m <dir>` to `createNewSession`: an MSYS
+  path (`/c/Users/…`) fails as "Cannot use simple-git on a directory that does not exist"
+  and then a misleading `spawn …\pi.exe ENOENT`.
+- **Forcing a judge call.** Read-only commands (`echo`, `cat`) take the read-only fast
+  path and an exact allow rule takes the ADR-085 allow-rule gate, so neither reaches the
+  judge: use a mutating command (`touch VERIFY_x.txt`, a redirect) to count judge calls.
+- **Judge on/off and rule files are read at session start**: `loadEngineConfig('pi')` →
+  `autoMode.enabled` → `saveEngineConfig`, or the isolated home's `.claude/settings.json`;
+  create a new session after each change.
+- **pi re-keys its session id after the first turn**: re-read `activeSessionId` before an
+  IPC call (`respondApproval` with the old id silently does nothing).
+- **Stop visibility**: `TaskCard.stop`, `AgentRow.stop`, `TaskEntry.stop`; the roster
+  opens (toggles) on `AgentPill`/`AgentTab`; `status.capabilities.backgroundTasks` is in
+  the store. A long native task: have the stand-in's child prompt run `sleep N`.
+- **Isolate the OS temp dir too** for pi drives: TEMP/TMP/TMPDIR in the launch env (assert
+  `os.tmpdir()` in `app.evaluate` first). The scratchpad is
+  `<TEMP>\claudeui\<cwd key>\<session-id>\scratchpad` (POSIX: `$TMPDIR/claudeui-<uid>/…`); pi's spawn args (`--session-id`,
+  `--append-system-prompt`) show in `Get-CimInstance Win32_Process` (`Name -eq 'pi.exe'`;
+  filter on your scratch path — the owner's own app has pi children too).
+- **Pin proof**: pi's write/edit result echoes the path it used (`Successfully wrote to <abs>`),
+  so write with an odd spelling (`@x`, `file:///…`, `/c/…`) and read the result text.
+- **pi's default tool set** has no `grep`/`find`/`ls`, and plan mode hides `edit`/`write`:
+  those ladder rows are reachable only in unit tests.
+- **Historical pi session after a relaunch**: click its sidebar `[data-id]` first, then set
+  engine and model before prompting. Delete: right-click `[data-id]` →
+  `SessionItem.delete` → `DeleteConfirmModal.confirm`. A pi dispatch target resumes by
+  `session_message` only with `dispatch.defaultModel` set in `engines/pi.json`.
+- **Proving the gate touches no network path or device**: preload an fs-wrapping hook into the
+  main process (`electron.launch` args `-r <hook.cjs>`) that logs calls whose path argument is
+  UNC-shaped, `*.invalid`, `file://<host>` or has a DOS-device component; run a positive control
+  (`app.evaluate` → `fs.existsSync(<scratch>\NUL)`) before trusting a zero, and attribute hits by
+  stack (`GitService.getStatus` polls untracked files — put fixture links in `.git/info/exclude`).
+  Use `.invalid` hostnames only. Write backslash-heavy test paths through the driver
+  (`String.fromCharCode(92)`), not shell heredocs (they halve `\\`). Device-name and UNC links:
+  `fs.symlinkSync(target, p, 'file'|'dir')` with an explicit type so the target is never statted.
+- **Rules and the judge bind at session start**: rewrite the isolated settings, then open a NEW
+  session. A cwd passed as a junction path stays logical (allow rules like `Edit(src/**)` match).
+  A pi dispatch target needs a non-pi parent (opencode `claudeui_dispatch_agent`).
+- **Pre-fix baseline** for a red proof: `git archive <sha> | tar -x -C <scratch>/base`, junction
+  `node_modules`, build, launch with its own home.
+- **Browser test project in a worktree** (the plain run fails with `NetworkError`): a
+  scratch `vitest.browser-wt.config.ts` that imports the worktree's `vitest.config.ts` by
+  `file:///` URL, maps `test.projects` with `root` set to the worktree, and gives the
+  browser project `server.fs.allow: [<worktree>, <main>/node_modules]`; run
+  `VITE_CONFIG_NATIVE_IGNORE_WARNING=true bunx vitest run --config <scratch> --project browser`.
+
+## Subagent drives (opencode native subagents)
+
+Learned verifying the opencode subagent parity arc (ADR-111).
+
+- **Ports**: concurrent verifiers collide on fixed stand-in and driver ports; pick distinct ones per run.
+- **The stand-in emits the subagent call** from a prompt token (`[spawn:agent|description|prompt|model|sessionID]`),
+  so the user never types the payload. Hide judge markers from the spawn's OWN review by writing `MRK_` in the
+  prompt and having the stand-in expand it to `MARK_` only inside the child's tool call. Key the judge on
+  `body.model` (a dedicated judge model id), not on the prompt. The static read-only path never asks for
+  `echo …`; use a redirect (`echo X > f.txt`) or `touch` to reach the judge. A judge HTTP 500 forces the human
+  fallback card.
+- **Evidence**: `__claudeuiVerifier.canonical().sessions[id].pendingApprovals[].agent.label` (child cards only),
+  `TaskCard.reviewChip` / `ToolCard.reviewChip`, `TaskCard.expand` (instructions and result are collapsed). Save
+  every judge request body: the merged child transcript is only visible there.
+- **Allowlist**: `window.api.setProviderModelAllowlist('opencode', providerId, ids | null)`; it reaches new
+  sessions only (a new pooled server), so open a fresh session after changing it. Effort warnings:
+  `window.api.listAgentTypes('opencode', cwd)` (field `type`), and in Settings the opencode rail's "Agent colours"
+  sub-page (`AgentColours.warning`), not Appearance → Agents.
+- **Nesting**: opencode's built-in `general` and `explore` deny `subagent`, so a grandchild needs a custom agent
+  that allows it plus `experimental.subagent_depth` ≥ 2 (the first child request may still offer `subagent`
+  before ClaudeUI's child ruleset lands).
+- **An opencode dispatch target needs a pi (or Claude/Codex) parent**: opencode's dispatch tool cannot target
+  opencode. Copy the managed `pi/<version>` into the scratch store, restart, `reloadEngineModels('pi')`, and set
+  BOTH engines' `autoMode.judgeModel`.
+- **Backslashes are halved** on their way through the shell tool: a `\d` in a `sed` or `bash -c` argument arrives as
+  `\d`. Put regexes in heredoc files (`<<'EOF'`) or `String.raw` node scripts.
+- **Idle timeout**: `sessionStore.getState().updateSettings({sessionTimeoutMins: 0.5})` (the Settings minimum is
+  5 min); it applies at a live session's next timer reset. The renderer keeps `status.state` `idle` after a
+  disconnect: read the main log's `[OpencodeSession] Idle timeout — auto-disconnecting` and the sidebar dot
+  `SessionItem.statusDot[data-state]` (`inactive`).
+- **"Ready for input"**: stub `document.hasFocus = () => false` and spy on `window.Notification` (a stub class with
+  `permission = 'granted'`); sanity-check with a plain no-subagent turn first.
+- **Selectors**: `SessionItem.statusDot` (`data-state` running | subagents | idle | attention | inactive,
+  `data-subagents`); the roster opens with `AgentTab`, rows are `AgentRow` (`.stop`, `.resumed`, `.metrics`,
+  `.status[data-status]`); its filter defaults to Running and is sticky (`AgentRoster.filter.all` for finished
+  rows); `TaskCard.stop|sendToBackground|background|resumed|openInPanel`; `TaskEntry.stop`; host notes
+  `MessageBubble.hostLabel`; the composer's Stop `InputBox.cancel`. `sessions[id].activeTasks` records carry
+  `runIndex`, `isBackgrounded`, `wakesParent`; ids rekey to `ses_…` after the first turn.
+- **Project config from the session's cwd**: a project `opencode.json` with `"experimental": {"subagent_depth": 2}`
+  and a custom agent (`"agent": {"nest": {"mode": "subagent", "permission": {"subagent": "allow"}}}`) gives depth 2;
+  `"permission": {"subagent": "ask"}` is the only way a default-mode spawn raises a card. Claude-form allow rules go
+  in `<cwd>/.claude/settings.local.json`; skills in `<cwd>/.opencode/skills/<name>/SKILL.md`.
+- **Hash checks**: the owner's running app rewrites the real `opencode.db`; exclude it from before/after hashes.
+- **Reopen**: quit through the driver, relaunch on the same home, click `SessionItem[data-id=…]` (expand its project
+  row when it is not in Recent); the store holds no sessions until one is opened.
+
+## Isolation, terminals and native modules
+
+Learned verifying an Electron patch bump (node-pty + better-sqlite3 under a new build):
+
+- **Isolated home.** `app-shot.mjs` passes `process.env` through and has no
+  isolation flag. `scripts/lib/scroll-bench/launch.mjs` `launchApp({app, home,
+extraEnv})` shims `os.homedir()` and strips credential-shaped env names; pass the
+  rest in `extraEnv`: `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`,
+  `XDG_DATA_HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME`/`XDG_CACHE_HOME`,
+  `CLAUDE_CONFIG_DIR` and `CLAUDEUI_HARNESS_STORE`, all on the throwaway folder, plus
+  `--user-data-dir=<folder>/electron`. HOME alone is not isolation on Windows (the
+  app resolves the profile from `USERPROFILE`). Prove it after the first launch: the
+  scratch `.claude/ui` exists and the sidebar has no real sessions. In a clean home
+  the log's `[SessionHistory] Failed to read projects directory` (ENOENT) and a
+  missing optional engine are expected, not failures.
+- **Never a second app on the real profile.** It feeds ClaudeUI's credentials into the engines at boot
+  (`[CredentialSync] feedAll`) and its quit removes ClaudeUI's opencode OAuth credential
+  (`[OpencodeCredentials] quit: removed …`) from the store the user's own running app shares, even when the drive
+  opens no opencode session. If it happened, say so: restarting the user's ClaudeUI re-feeds it.
+- **Block outbound before any engine spawns**, not only for judge drives: proxy variables to a dead port (above)
+  and a local stand-in model pinned first, then check the session's model before every prompt. An opencode session
+  with no usable model falls back to opencode's own hosted free model and sends the prompt out.
+- **Engines in isolation.** Copy the needed versions from
+  `~/.claude/ui/harnesses/<engine>/<version>` into a scratch store and point
+  `CLAUDEUI_HARNESS_STORE` at it; never write to the real store.
+- **Building without postinstall** (a worktree installed with `--ignore-scripts`):
+  `bunx electron-vite build --logLevel warn` writes `out/`; the only symptom of the
+  missing Claude Code binary is `[harness] bundled Claude Code not found`, harmless
+  for opencode and pi drives.
+- **The first screen is `WelcomeState`** (not `WelcomeScreen`, which also exists in
+  the source).
+- **Terminal.** The panel is closed by default: `TerminalPanel.newTab` is in the DOM
+  but hidden. Create a session first (store recipe above), then click
+  `TopBar.terminal`, which opens slot 0 in the session's cwd. With no session the `+`
+  button spawns a shell at `'.'` that the panel never shows (0×0 xterm). Type into
+  xterm's own textarea; read output from `.xterm-rows` of the instance whose
+  `getBoundingClientRect().height > 0` (every tab keeps a hidden instance).
+- **Main-process output.** `app-shot.mjs` reports renderer `consoleErrors` only; for
+  crash evidence attach to `app.process().stdout/stderr` in a custom driver.
+- **Native modules from the running app.** Inside `app.evaluate`, load the module with
+  `createRequire(root + '/package.json')(root + '/node_modules/better-sqlite3')` and
+  open the app's own `~/.claude/ui/operational.db` (created at boot in the isolated
+  home) read-only: `PRAGMA integrity_check` and `user_version` prove the ABI and the
+  migration chain. node-pty's `conpty_console_list_agent` may print `AttachConsole
+failed` at teardown with a terminal open; that is shutdown noise.
+- **Pin the Electron you launch.** A driver script outside the worktree (e.g. under
+  `.work/`) resolves `playwright`, and Playwright then launches the MAIN checkout's
+  `electron`: a bump verifier once got a green boot on the old major. Resolve Playwright
+  with `createRequire(<worktree>/package.json)`, pass
+  `executablePath: <worktree>/node_modules/electron/dist/electron.exe`, and assert
+  `process.versions.electron` / `modules` from the main process before anything else.
+- **`app.evaluate` has no `require`.** Use `process.mainModule.require(...)` (and
+  `process.mainModule.require('node:module').createRequire(...)`); dynamic `import()`
+  fails there too.
+- **Which native binary loaded.** node-pty loads `build/Release/*.node` (the
+  `rebuild:native` output) before its prebuilds; better-sqlite3 loads
+  `prebuilds/<platform>.node`. `require.cache` shows the asar virtual path in a
+  packaged app; the main process's module list (`Get-Process -Id <pid> |
+Select-Object -ExpandProperty Modules`, with a terminal open so node-pty is loaded)
+  shows the real `app.asar.unpacked` path.
+- **Terminal needle.** The typed line echoes too, so `echo e45-ok` matches before the
+  command runs; type a split literal: `echo ('e45-' + 'ok')` in PowerShell (the
+  terminal's shell when pwsh is installed), `echo e45-^ok` in the cmd.exe fallback.
+- **Packaged app.** `executablePath: dist/win-unpacked/claudui.exe`, `args: []`, the
+  isolated-home variables plus `CLAUDEUI_ALLOW_MULTIPLE_INSTANCES=1` (the packaged build
+  enforces the single-instance lock) and `CLAUDE_UI_LOG_DIR=<report folder>`.
+- **ASAR reads.** Run the packaged `claudui.exe` with `ELECTRON_RUN_AS_NODE=1` on a
+  script outside the asar that `fs.createReadStream`s (`highWaterMark: 1024`) every file
+  under `resources/app.asar/out/renderer/assets/` and compares sha256 with
+  `out/renderer/assets/`.
+- **Plugin view.** A fixture plugin goes in `<home>/.claude/ui/plugins/<id>/`
+  (`docs/plugin-development.md`). Reach the guest from the main process with
+  `webContents.getAllWebContents().find((w) => w.getType() === 'webview')`;
+  `getLastWebPreferences().sandbox` is true for the guest. `pluginApi.invoke` round
+  trips; `ctx.emit` events reach only the main window, not the guest (a known gap).
+- **Mockup preview.** Put `index.html` in
+  `<session cwd>/.claude/ui/mockups/<8-hex-id>/`, call the store's
+  `openMockupPanel(activeSessionId, '<id>', title)`, assert
+  `iframe[src^="mockup-asset://"]` and read it through Playwright's `win.frames()`.
+- **Voice worker.** `ready` needs the ~700 MB speech pack. Without it, run the launcher's
+  command shape (`ELECTRON_RUN_AS_NODE=1`, `CLAUDEUI_VOICE_TOKEN` set, stdin kept open)
+  and expect the worker's own `{"type":"fatal","message":"could not load the speech model…"}`.
+- **Log viewer.** `window.api.openLogViewer()` arrives as a Playwright `window` event;
+  its rows are `.log-entry`.
+- **Real home leak.** On Windows `app.getPath('home')` returns the REAL home whatever
+  the env says. The app's own `os.homedir()` follows `USERPROFILE`, so isolation
+  holds only while no code reads `app.getPath('home')`. Grep before trusting it.
+
+## Long drives, quit flows and worktree drives
+
+Learned verifying the worktree cleanup (ADR-112).
+
+- **One launch, many steps.** `app-shot.mjs` is one shot per launch. For multi-step
+  drives, quit flows or a remote server, write a small launcher:
+  - It launches `_electron` with the full isolation env.
+  - It serves `POST /eval`, which evaluates a JS body with `app`, `win` and Playwright in
+    scope, plus `/quit`.
+  - Give it `process.on('uncaughtException')` and `child.on('error')` on every spawn. A
+    spawn with a missing cwd otherwise kills the driver and the app.
+  - In Bash heredocs, `\\` collapses inside JS regexes: build backslashes with
+    `String.fromCharCode(92)`.
+- **Quit flows.**
+  - `app.evaluate(({app}) => app.quit())` makes the renderer show `QuitWorktreeModal`
+    (`.removeAll` / `.keepAll`). The driver dies with the app, so run one quit scenario
+    per launch; one scenario can carry several worktrees.
+  - Read the outcome from the log: `Quit: worktree <path>: <outcome>` (debug) after the
+    teardown.
+- **Scratch sidebar groups.** Write `<home>/.claude/projects/<cwd with non-alnum → ->/<uuid>.jsonl`.
+  The first line is a `type:"user", userType:"external"` entry carrying `cwd`, followed
+  by an assistant entry. A cwd inside a linked worktree gets the worktree marker and tint
+  (engine-neutral).
+- **Created worktrees.** Use the Welcome flow `WelcomeState.directory` →
+  `.worktreeToggle` / `.worktreeName`. It records `origin: 'created'`, which the quit and
+  session-delete prompts require.
+- **Worktree matrix.**
+  - Put a sentinel behind every junction and check it after each removal.
+  - Age files with `os.utime` BEFORE making junctions, or the manager's 10-minute
+    "recently modified" rule keeps everything out of Select safe.
+  - Lock a dir on Windows with a child process (`stdio:'ignore'`) whose cwd is inside it;
+    kill that PID only.
+  - Cancel a live holder by the holder id from `inventoryWorktrees(...).entries[].holders[]`,
+    not the routing id: Claude rekeys after its first spawn.
+- **Codex without auth.** Copy `~/.claude/ui/harnesses/codex/<tested>` into the scratch
+  store. The shared host then spawns and logs
+  `app-server spawned: … cwd=<home>`.
+- **Claude turns without a provider.** Use a local `/v1/messages` SSE stand-in (see the
+  judge stand-in section) set via `saveVendorConfig('anthropic', {endpoint: {enabled,
+baseUrl, authToken}})`.
+  - It also needs `count_tokens`.
+  - It must serve each scripted turn once, keyed on the last user text. A matcher bug
+    loops the agent.
+  - Deferred tools such as `EnterWorktree` still run when the stand-in emits their
+    `tool_use`.
+- **Web client.**
+  - Use the worktree's Playwright chromium; log in via `PasswordLogin.input` + Enter.
+  - Phone: `isMobile` + `hasTouch` at 375×812, open the drawer with
+    `TopBar.toggleSidebar`, and use `.tap()`.
+  - Expand one project group at a time (others re-render).
+  - Theme for screenshots: `document.documentElement.dataset.theme = 'light'` (delete
+    it for dark).
 
 ## Caveats — what you can't (safely) drive
 
-- **New session** needs the native OS folder picker (`dialog.showOpenDialog`),
-  which Playwright can't drive. Reach existing sessions via the sidebar instead.
+- **New session** through the UI needs the native OS folder picker
+  (`dialog.showOpenDialog`), which Playwright can't drive — reach existing sessions via
+  the sidebar, or create one through the store (see "Driving a full session turn").
 - **A live Claude turn** (prompt → response → approval → thinking → MCP) spends the
   user's API quota **and writes to real `~/.claude` transcripts**. Don't drive it
   live without explicit OK, or first isolate config (point the app at a throwaway

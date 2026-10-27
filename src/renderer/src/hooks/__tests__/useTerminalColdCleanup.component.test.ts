@@ -28,7 +28,6 @@ let killTerminalsByCwd: ReturnType<typeof vi.fn>
 
 function installWindowApi(): void {
   killTerminalsByCwd = vi.fn().mockResolvedValue(undefined)
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     killTerminalsByCwd,
     saveSessionConfig: () => {},

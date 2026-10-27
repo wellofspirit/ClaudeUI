@@ -7,9 +7,13 @@ import { useIsMobile } from '../../hooks/useIsMobile'
 import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
+import { isCreatedWorktree } from '../../../../shared/linked-worktree'
 import { planClaudeProjectDelete } from '../../../../shared/claude-project-delete'
 import {
+  beginTranscriptPlaceholder,
   ensureTranscriptLoaded,
+  isTranscriptLoadInFlight,
+  loadClickedSession,
   loadSessionIntoStore,
   opensResident,
   replaceOnClick
@@ -20,6 +24,8 @@ type SidebarSessionData = {
   cwd: string
   isWatching: boolean
   firstUserText?: string
+  /** The engine the session was born with (the replicated birth event's). */
+  selectedEngineId: EngineId
 }
 
 function isCodexSession(sessionId: string): boolean {
@@ -39,6 +45,10 @@ function isCodexSession(sessionId: string): boolean {
  * `sessionEngines`, the record `createNewSession` writes: without it the row
  * reads as Claude (`SessionItem`'s fallback), which is how a pi session whose
  * first spawn failed showed Claude's logo in Recent (ADR-082 S7b).
+ *
+ * A session another client or the host created has no `sessionEngines` entry until
+ * a model-bearing status arrives (Codex sends none before its first prompt); its
+ * birth engine, replicated on `session:created`, stands in until then.
  */
 function inMemorySessionInfo(
   sessionId: string,
@@ -54,7 +64,7 @@ function inMemorySessionInfo(
     title: data.firstUserText || 'New session',
     timestamp: now,
     lastActivityAt: now,
-    engineId: engineId ?? 'claude'
+    engineId: engineId ?? data.selectedEngineId ?? 'claude'
   }
 }
 
@@ -73,7 +83,8 @@ function sidebarSessionsEqual(
     if (
       av.cwd !== bv.cwd ||
       av.isWatching !== bv.isWatching ||
-      av.firstUserText !== bv.firstUserText
+      av.firstUserText !== bv.firstUserText ||
+      av.selectedEngineId !== bv.selectedEngineId
     )
       return false
   }
@@ -103,6 +114,7 @@ export function Sidebar({
       result[id] = {
         cwd: sess.cwd,
         isWatching: !!sess.isWatching,
+        selectedEngineId: sess.selectedEngineId,
         firstUserText: firstUser?.content
           .find((b) => b.type === 'text')
           ?.text?.slice(0, 80)
@@ -127,7 +139,6 @@ export function Sidebar({
   const customTitles = useSessionStore((s) => s.customTitles)
   const reorderPinnedSessions = useSessionStore((s) => s.reorderPinnedSessions)
   const worktreeInfoMap = useSessionStore((s) => s.worktreeInfoMap)
-  const clearWorktreeInfo = useSessionStore((s) => s.clearWorktreeInfo)
   const hiddenSessionIds = useSessionStore((s) => s.hiddenSessionIds)
   const hiddenProjectKeys = useSessionStore((s) => s.hiddenProjectKeys)
   const hideSession = useSessionStore((s) => s.hideSession)
@@ -149,7 +160,7 @@ export function Sidebar({
   // Monotonic token guarding async session selection: clicking slow-loading A
   // then fast-loading B must land on B. Each click bumps the token; a load only
   // commits if it's still the latest (gpt#18 / xhigh#14).
-  const selectionSeq = useRef(0)
+  const selectionTarget = useRef<string | null>(null)
   const [expandedDir, setExpandedDir] = useState<string | null>(null)
   const [worktreesModalCwd, setWorktreesModalCwd] = useState<string | null>(null)
   const [cleanupWorktree, setCleanupWorktree] = useState<{
@@ -322,33 +333,39 @@ export function Sidebar({
 
   const handleClickSession = async (info: SessionInfo): Promise<void> => {
     const routingId = info.sessionId
-    // Bump the selection token first, so any in-flight slower load for a prior
-    // click sees a newer token after its awaits and bails before committing.
-    const seq = ++selectionSeq.current
+    // Name the selection first, so any in-flight slower load for a prior click sees
+    // it moved on after its awaits and bails before committing. A target (not a
+    // counter): clicking back to a session whose load is still running re-adopts
+    // that load instead of restarting it.
+    selectionTarget.current = routingId
     // Already loaded and still resident? An evicted entry that is idle is
     // re-hydrated from disk below, exactly like a never-loaded session. An evicted
     // one that is LIVE is resident: the live fold and `loadResumedTranscript` own it,
-    // and a load here would stamp it historical.
+    // and a load here would stamp it historical. One whose load is already running
+    // counts as resident too: it opens on its loading view and the load lands in it.
     const inMemory = useSessionStore.getState().sessions[routingId]
-    if (opensResident(inMemory)) {
+    if (opensResident(inMemory) || isTranscriptLoadInFlight(routingId)) {
       switchSession(routingId)
       if (isMobile && onToggleCollapse) onToggleCollapse()
       return
     }
 
-    // The per-engine load (opencode / pi / codex / Claude + subagent files) is
-    // shared with the post-hydrate reload of the active session.
-    const result = await loadSessionIntoStore(info, {
-      isCurrent: () => seq === selectionSeq.current,
-      onCodexError: setHistoryError,
-      replace: replaceOnClick(inMemory)
-    })
-    // `declined` kept the held transcript (the read failed or came back empty):
-    // the click still opens it, and the entry stays evicted so the next click retries.
-    if (result === 'skipped') return
+    // Navigate first (ADR-102): a placeholder entry renders the loading view while
+    // the transcript is read, instead of the sidebar sitting dead for seconds. The
+    // per-engine load (opencode / pi / codex / Claude + subagent files) is shared
+    // with the post-hydrate reload of the active session.
+    const replace = replaceOnClick(inMemory)
+    beginTranscriptPlaceholder(info)
     switchSession(routingId)
     // Close drawer on mobile after selecting a session
     if (isMobile && onToggleCollapse) onToggleCollapse()
+    // `declined` kept the held transcript (the read failed or came back empty): the
+    // entry stays evicted so the next click retries. A failure shows Retry.
+    await loadClickedSession(info, {
+      isCurrent: () => selectionTarget.current === routingId,
+      onCodexError: setHistoryError,
+      replace
+    })
   }
 
   const handleDirClick = (projectKey: string): void => {
@@ -387,11 +404,10 @@ export function Sidebar({
 
   const handleRemoveRecent = useCallback(
     (info: SessionInfo) => {
-      if (worktreeInfoMap[info.sessionId]) {
-        setCleanupWorktree({
-          sessionId: info.sessionId,
-          worktreeInfo: worktreeInfoMap[info.sessionId]
-        })
+      const worktreeInfo = worktreeInfoMap[info.sessionId]
+      // Removal is offered only for worktrees ClaudeUI created (C-S11).
+      if (worktreeInfo && isCreatedWorktree(worktreeInfo)) {
+        setCleanupWorktree({ sessionId: info.sessionId, worktreeInfo })
       } else {
         removeRecentSession(info.sessionId)
       }
@@ -692,7 +708,8 @@ export function Sidebar({
         }}
         onWorktreeCleanupRemove={() => {
           if (cleanupWorktree) {
-            clearWorktreeInfo(cleanupWorktree.sessionId)
+            // The server forgets the worktree entry itself (a client-side save of the whole map
+            // could resurrect entries it already dropped).
             removeRecentSession(cleanupWorktree.sessionId)
             setCleanupWorktree(null)
           }

@@ -12,6 +12,41 @@ import type {
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { HostWindowHandle } from '../host'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
+import type { TurnOriginLedger } from './turn-origin-ledger'
+
+/**
+ * Where a non-user item comes from: another session's message, an agent's note, or the
+ * result of an X-Agent the session launched (`dispatch-result`, ADR-105 §3: it wakes the
+ * session, has its own wake cap and is not counted in the agent-turn budget).
+ */
+export type NonUserOrigin = 'session-message' | 'agent-note' | 'dispatch-result'
+
+/**
+ * One item another session or an agent puts into a session (slice 1a). Never
+ * the user's words: every engine delivers it marked as such and the transcript
+ * shows it as a note.
+ */
+export interface NonUserItem {
+  origin: NonUserOrigin
+  /** The body the model reads, unwrapped — each engine wraps it its own way. */
+  text: string
+  /** Who sent it: a stable key (a routing id) and a display name. */
+  from: { key: string; title: string }
+  /** Start a turn if the session is idle (a `session-message` always does). */
+  wake: boolean
+  /** The sender's permission class where known (recorded with a held item). */
+  senderModeClass?: 'bypass' | 'prompting'
+  /** An X-Agent result: the `dispatch_report` run it stands for, stamped delivered when it goes out. */
+  reportRun?: number
+}
+
+/**
+ * What an engine did with a {@link NonUserItem}. `started`: the session was idle
+ * and a turn began. `queued`: it was busy and the item went into the running
+ * turn's queue. `unavailable`: the engine could not take it now (no process,
+ * a refused steer) — nothing was delivered, so the caller holds it.
+ */
+export type NonUserOutcome = 'started' | 'queued' | 'unavailable'
 
 /**
  * Engine-neutral session interface. All methods here are implemented by
@@ -31,6 +66,17 @@ export interface ISession {
 
   /** Whether a prompt sent now will be queued (session actively processing a turn) */
   readonly willQueue: boolean
+
+  /**
+   * The in-flight seed of a RESUMED session's own totals (tokens, cost, context)
+   * from its transcript, or `undefined` when there is nothing to wait for (a fresh
+   * session, a fork, or a seed that has landed). Never rejects. A prompt delivered
+   * before it starts the turn on zero accumulators, and a seed landing mid-turn
+   * double-counts the new turn's lines, so `sendPrompt` waits on it; returning
+   * `undefined` once settled keeps the send synchronous. Optional: only an engine
+   * that seeds from a transcript at spawn has anything to wait for (Claude).
+   */
+  resumeSeedReady?(): Promise<void> | undefined
 
   /** Get the backend session UUID (available after first message exchange). */
   getSessionId(): string | null
@@ -82,7 +128,43 @@ export interface ISession {
    * item carries (ADR-087). `sendPrompt` interns once and passes both; a caller
    * that omits `refs` gets the uploads interned here.
    */
-  enqueuePrompt(text: string, attachments?: AttachmentUpload[], refs?: AttachmentRef[]): void
+  enqueuePrompt(
+    text: string,
+    attachments?: AttachmentUpload[],
+    refs?: AttachmentRef[],
+    origin?: 'host-instruction' | 'agent-brief'
+  ): void
+
+  /**
+   * Deliver an item from another session or an agent (slice 1a): the model must
+   * read it as theirs, never the user's, ClaudeUI's judge and the engine's own
+   * classifier must not take it for consent, and it renders as a note. One
+   * adapter method per engine; the delivery rule (busy → queue, idle → wake or
+   * hold, budget) is `session-delivery`'s, not the engine's. Optional so a
+   * minimal test double need not carry it.
+   */
+  deliverNonUser?(item: NonUserItem): Promise<NonUserOutcome>
+
+  /**
+   * Stop holding peer messages from other Claude Code processes on this session
+   * (Claude only; absent elsewhere).
+   */
+  allowPeerMessages?(): Promise<{ success: boolean; error?: string }>
+
+  /**
+   * Is the engine process (or its connection) up right now? `session-delivery`
+   * holds a message for an idle session whose engine is gone instead of
+   * respawning it: only the user's own prompt brings a closed session back.
+   * Optional so a minimal test double need not carry it (absent = live).
+   */
+  isEngineLive?(): boolean
+
+  /**
+   * Taint and agent-turn budget (slice 1a) — read-only for the session tools
+   * (slice 1c); written by `session-delivery` and the prompt path. Implemented in
+   * BaseSession; optional so a minimal test double need not carry it.
+   */
+  readonly originLedger?: TurnOriginLedger
 
   /**
    * Take back every still-recallable queued item, oldest first. `recalled`
@@ -131,7 +213,12 @@ export interface ISession {
   watchBackground?(toolUseId: string): void
   unwatchBackground?(toolUseId: string): void
   readBackgroundRange?(toolUseId: string, offset: number, length: number): string
-  stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
+  /**
+   * Stop one agent. `hostNote`: text the caller sends the session's model as a
+   * `host-instruction` prompt once the stop took effect (opencode: its upstream
+   * only says "Subagent cancelled"); the caller never forwards it to the UI.
+   */
+  stopTask?(toolUseId: string): Promise<{ success: boolean; error?: string; hostNote?: string }>
   backgroundTask?(toolUseId: string): Promise<{ success: boolean; error?: string }>
 
   /**
@@ -186,6 +273,13 @@ export interface ISession {
   setInactivityTimeout(ms: number): void
 
   /**
+   * Arm the idle timer again after something that held it ended: the dispatcher calls it
+   * when an X-Agent of this session ends (ADR-105 §3). A no-op for a busy session or one
+   * whose engine is down. Optional so a minimal test double need not carry it.
+   */
+  rearmIdleTimer?(): void
+
+  /**
    * Re-broadcast an IPC event under this session's routing (same wire shape
    * as the session's own internal `send()`). Used by cross-engine dispatch
    * (ADR-033 M2) to forward a dispatched Claude target's approval requests
@@ -209,9 +303,10 @@ export interface ISession {
   /**
    * Current permission-mode string (Claude-style — 'default'|'plan'|
    * 'acceptEdits'|'auto'|...). Optional: only engines whose sessions are a
-   * cross-engine dispatch CALLER need it (opencode, for ADR-033 M2 autonomy
-   * inheritance). Claude sessions build the dispatch context inline instead
-   * (see collab-tool.ts) and don't implement this.
+   * cross-engine dispatch CALLER need it (ADR-033 M2 autonomy inheritance). Since
+   * ADR-105 every caller engine implements it: a dispatch run reads its parent's
+   * mode through the session manager at each decision, not through the closure the
+   * launching call carried.
    */
   getAutonomyMode?(): string
 

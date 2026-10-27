@@ -124,6 +124,8 @@ export type JudgeRouteUnavailableCode =
   | 'provider-disabled'
   /** No token / no workspace id. */
   | 'chatgpt-unavailable'
+  /** A 429 told ClaudeUI when the route recovers, and that time has not come (`judge-cooldown.ts`). */
+  | 'rate-limited'
 
 /** The per-call reader output, shared by both wires. */
 export interface JudgeStreamResult {
@@ -136,6 +138,12 @@ export interface JudgeStreamResult {
 export interface JudgeStreamOptions {
   /** Cut the text at the first occurrence of any of these (exclusive), client-side. */
   stopSequences?: string[]
+  /**
+   * The reply must open with one of these (case-insensitive, leading whitespace ignored); a
+   * mismatch aborts the call as soon as the kept text can no longer become one of them. Absent =
+   * no check.
+   */
+  allowedPrefixes?: readonly string[]
   /** Hard budget on accumulated text; exceeding it aborts the call. */
   maxChars: number
   /**
@@ -144,7 +152,73 @@ export interface JudgeStreamOptions {
    * AFTER usage arrived — the return value is lost on a throw.
    */
   onUsageSeen?: (usage: JudgeUsageSample) => void
+  /**
+   * Diagnostics tap (judge-reply capture): every visible text delta, in arrival order, before the
+   * stop cut and the budget check — so the overflowing delta and every post-stop delta are seen.
+   * Never affects the verdict; it must not throw.
+   */
+  onDelta?: (text: string) => void
+  /**
+   * Diagnostics tap: plain-text reasoning deltas the stream already carries (chat
+   * `delta.reasoning` / `delta.reasoning_content`, Responses `reasoning_*_text.delta`). Never
+   * requested, never part of the verdict; it must not throw.
+   */
+  onReasoningDelta?: (text: string) => void
 }
+
+/**
+ * What one judge call that reached `fetch` looked like — the transport's report to
+ * `HttpJudgeTransportOptions.onCall` when capture is on. Credential-free: `route` is the route's
+ * label. `system` and `user` are the full prompts (the judged transcript excerpts).
+ */
+export interface JudgeCallCapture {
+  /** ISO time the call started. */
+  ts: string
+  durationMs: number
+  route: string
+  model: string
+  wire: JudgeWire
+  stage: 'fast' | 'thinking' | null
+  /** The request's own `maxTokens` (null when it named none). */
+  maxTokens: number | null
+  /** The client-side character budget actually enforced. */
+  maxChars: number
+  stopSequences: string[]
+  /** `judgeCacheKey(system)`. */
+  systemHash: string
+  system: string
+  user: string
+  outcome: 'ok' | 'error' | 'aborted'
+  /** The thrown message, when the outcome is not `ok`. */
+  error?: string
+  /** The HTTP status of a non-2xx response (the final attempt's). */
+  status?: number
+  /** `ok` only. */
+  finish?: 'stop' | 'length'
+  usage?: JudgeUsageSample
+  /** The kept text handed back to the classifier; `ok` only. */
+  text?: string
+  /** Every visible delta concatenated in arrival order, post-stop and overflowing deltas included. */
+  raw: string
+  /** Plain-text reasoning deltas, when the wire carried any (capped at {@link JUDGE_CAPTURE_REASONING_MAX_CHARS}). */
+  reasoning?: string
+  reasoningTruncated?: true
+}
+
+/** Longest `reasoning` a capture keeps, in characters (≈256 KiB of ASCII). */
+export const JUDGE_CAPTURE_REASONING_MAX_CHARS = 256 * 1024
+
+/**
+ * {@link JudgeWireError.code}s the reader sets when the model ANSWERED, but unusably: the reply
+ * was empty, ran past its character budget, or opened with something other than the request's
+ * `allowedPrefixes`. Not route trouble — `both` mode's stage 1 escalates on them. Off-format and
+ * over-budget never raise the "can't judge here" banner; an empty reply raises it outside that
+ * stage-1 request (see `SessionJudgeOptions.onUnavailable`). Namespaced to stay clear of real
+ * provider codes.
+ */
+export const JUDGE_OVER_BUDGET_CODE = 'judge:over-budget'
+export const JUDGE_OFF_FORMAT_CODE = 'judge:off-format'
+export const JUDGE_EMPTY_REPLY_CODE = 'judge:empty'
 
 /**
  * A judge call failed on the wire: a non-2xx status, an error event, a stream
@@ -156,12 +230,24 @@ export interface JudgeStreamOptions {
 export class JudgeWireError extends Error {
   readonly status?: number
   readonly code?: string
+  /**
+   * A 429's recovery time, epoch ms: the body's `resets_at` or the `retry-after` header. Lets the
+   * caller rest the route until then (`judge-cooldown.ts`) instead of failing every call into it.
+   */
+  readonly retryAtMs?: number
+  /** `judgeRouteKey(route)` of the route the call used — set by the transport, never by a wire reader. */
+  readonly routeKey?: string
   readonly retryable = false as const
 
-  constructor(message: string, opts: { status?: number; code?: string } = {}) {
+  constructor(
+    message: string,
+    opts: { status?: number; code?: string; retryAtMs?: number; routeKey?: string } = {}
+  ) {
     super(message)
     this.name = 'JudgeWireError'
     if (opts.status !== undefined) this.status = opts.status
     if (opts.code !== undefined) this.code = opts.code
+    if (opts.retryAtMs !== undefined) this.retryAtMs = opts.retryAtMs
+    if (opts.routeKey !== undefined) this.routeKey = opts.routeKey
   }
 }

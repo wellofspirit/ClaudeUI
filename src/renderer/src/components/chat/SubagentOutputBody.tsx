@@ -1,5 +1,16 @@
-import type { ChatMessage } from '../../../../shared/types'
+import type { ChatMessage, EngineId } from '../../../../shared/types'
+import { ENGINE_META } from '../../../../shared/engine-meta'
 import { SubagentMessages } from './SubagentMessages'
+
+/**
+ * The engine a dispatch card's child runs on — `view.dispatch.engine`, when it
+ * names one of ours. `undefined` for a native (same-engine) subagent and for an
+ * engine this build doesn't know, so the child falls back to the session's map.
+ */
+export function dispatchChildEngine(view: { dispatch?: { engine: string } }): EngineId | undefined {
+  const engine = view.dispatch?.engine
+  return engine && Object.hasOwn(ENGINE_META, engine) ? (engine as EngineId) : undefined
+}
 
 interface Props {
   msgs: ChatMessage[]
@@ -11,6 +22,8 @@ interface Props {
   /** Visual density: 'sm' for the compact inline TaskCard, 'md' for the
    *  full-height TaskDetailPanel entry. Purely cosmetic (text/spinner size). */
   size?: 'sm' | 'md'
+  /** The engine the child's messages come from (a dispatch's target); see SubagentMessages. */
+  engineId?: EngineId
 }
 
 /**
@@ -24,7 +37,8 @@ export function SubagentOutputBody({
   isRunning,
   isBackground,
   elapsedLabel,
-  size = 'sm'
+  size = 'sm',
+  engineId
 }: Props): React.JSX.Element {
   const isCompact = size === 'sm'
 
@@ -43,7 +57,7 @@ export function SubagentOutputBody({
           {elapsedLabel && <span className="font-mono text-[11px]">{elapsedLabel}</span>}
         </div>
       )}
-      {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" />}
+      {msgs.length > 0 && <SubagentMessages messages={msgs} maxHeight="none" engineId={engineId} />}
     </>
   )
 }

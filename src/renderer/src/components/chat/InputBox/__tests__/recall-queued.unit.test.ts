@@ -25,7 +25,6 @@ beforeEach(() => {
   // the previous test's sessions (SyncCore phase 4c).
   resetReplicaSeam()
   recallQueued.mockReset()
-  ;(globalThis as unknown as { window: unknown }).window = globalThis.window || {}
   ;(globalThis.window as unknown as { api: unknown }).api = {
     saveSessionConfig: vi.fn(),
     saveSettings: vi.fn(),

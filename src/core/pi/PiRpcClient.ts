@@ -35,6 +35,18 @@ interface PendingRequest {
 
 const DEFAULT_TIMEOUT_MS = 30_000
 
+/** How much of pi's stderr tail is kept for the "exited before responding" diagnostic. */
+const STDERR_TAIL_CHARS = 4_000
+/** The diagnostic quotes at most this many of the last stderr lines, capped at DIAGNOSTIC_MAX_CHARS. */
+const DIAGNOSTIC_LINES = 3
+const DIAGNOSTIC_MAX_CHARS = 500
+/**
+ * 'exit' can fire before the stderr pipe has delivered its last chunk. A pending request is
+ * rejected only once stderr has ended (or after this grace), so the rejection carries what pi
+ * said as it died. onExit listeners are NOT delayed.
+ */
+const STDERR_FLUSH_GRACE_MS = 250
+
 /**
  * How long dispose() waits for pi to exit on its own after stdin EOF before
  * tree-killing it. pi answers EOF with its normal shutdown (aborting the agent
@@ -57,6 +69,11 @@ export class PiRpcClient {
   private disposed = false
   /** dispose()'s tree-kill fallback, armed while pi shuts down on stdin EOF; cleared on exit. */
   private killTimer: ReturnType<typeof setTimeout> | null = null
+  /** The last STDERR_TAIL_CHARS of pi's stderr (raw), for the exit diagnostic. */
+  private stderrTail = ''
+  private stderrEnded = false
+  /** Set while a rejection waits for stderr to finish (see STDERR_FLUSH_GRACE_MS). */
+  private stderrWaiter: (() => void) | null = null
   private readonly launch: HarnessLaunch
 
   /**
@@ -96,8 +113,18 @@ export class PiRpcClient {
       proc.stderr?.setEncoding('utf-8')
       proc.stderr?.on('data', (chunk: string) => {
         const text = chunk.toString().trimEnd()
-        if (text) logger.debug('PiRpcClient', `stderr: ${text}`)
+        if (!text) return
+        this.stderrTail = (this.stderrTail + '\n' + text).slice(-STDERR_TAIL_CHARS)
+        logger.debug('PiRpcClient', `stderr: ${text}`)
       })
+      const stderrDone = (): void => {
+        this.stderrEnded = true
+        const waiter = this.stderrWaiter
+        this.stderrWaiter = null
+        waiter?.()
+      }
+      proc.stderr?.once('end', stderrDone)
+      proc.stderr?.once('close', stderrDone)
 
       // A half-open stdin can emit an async 'error' (EPIPE) after the child
       // dies while a request write is in flight. With no listener that becomes
@@ -315,9 +342,29 @@ export class PiRpcClient {
       clearTimeout(this.killTimer)
       this.killTimer = null
     }
-    this.rejectPending(
-      new Error(`pi process exited (code=${code}, signal=${signal}) before responding`)
-    )
+    // Rejected once stderr has delivered what pi said as it died (a failed extension load, a bad
+    // flag): the diagnostic line names the cause instead of just "exited code=1".
+    const rejectWithDiagnostic = (): void => {
+      const diagnostic = this.stderrDiagnostic()
+      this.rejectPending(
+        new Error(
+          `pi process exited (code=${code}, signal=${signal}) before responding` +
+            (diagnostic ? `: ${diagnostic}` : '')
+        )
+      )
+    }
+    if (this.pending.size === 0 || this.stderrEnded || code === 0) {
+      rejectWithDiagnostic()
+    } else {
+      const timer = setTimeout(() => {
+        this.stderrWaiter = null
+        rejectWithDiagnostic()
+      }, STDERR_FLUSH_GRACE_MS)
+      this.stderrWaiter = () => {
+        clearTimeout(timer)
+        rejectWithDiagnostic()
+      }
+    }
     for (const cb of this.exitHandlers) {
       try {
         cb(code, signal)
@@ -325,6 +372,17 @@ export class PiRpcClient {
         logger.error('PiRpcClient', 'onExit handler threw', handlerErr)
       }
     }
+  }
+
+  /** The last few meaningful stderr lines (ANSI stripped, pi's own "Hint:" boilerplate dropped), one line. */
+  private stderrDiagnostic(): string {
+    const lines = this.stderrTail
+      // eslint-disable-next-line no-control-regex -- ANSI colour escapes pi's chalk adds
+      .replace(/\u001b\[[0-9;]*m/g, '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('Hint:'))
+    return lines.slice(-DIAGNOSTIC_LINES).join(' | ').slice(-DIAGNOSTIC_MAX_CHARS)
   }
 
   private rejectPending(err: Error): void {

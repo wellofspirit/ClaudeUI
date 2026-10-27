@@ -45,7 +45,7 @@ If the user is on a model without effort support, the dropdown is hidden entirel
 
 ### Default effort per model
 
-From the catalog's `default_effort` (cli.js 2.1.293). A picker alias is judged by
+From the catalog's `default_effort` (cli.js 2.1.306). A picker alias is judged by
 the model it resolves to, so `opus` and `default` start at `medium` while they
 point at Opus 5.5.
 

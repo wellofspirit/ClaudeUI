@@ -115,7 +115,7 @@ export async function waitForHostedTools(
   const graceMs = options.pluginGraceMs ?? PLUGIN_RPC_GRACE_MS
   const start = now()
   let connectedAt: number | null = null
-  let last = 'no answer yet'
+  let last: string
   for (;;) {
     const [rpc, mcp] = await Promise.all([
       options.pluginExpected
@@ -160,15 +160,25 @@ export async function waitForHostedTools(
 export const GUARD_TIMEOUT_MS = 10_000
 
 export type PermissionGuard =
-  /** The plugin answered: its `permission.evaluate` and MCP hooks are registered. */
-  | { state: 'active'; elapsedMs: number }
+  /** The plugin answered: its `permission.evaluate`, MCP and subagent model-gate hooks are registered. */
+  | {
+      state: 'active'
+      elapsedMs: number
+      /**
+       * The plugin parsed its `modelAllowlist` option. False does not refuse the
+       * session (an unparsed list already fails every subagent call with a model
+       * to check closed); the manager logs a warning.
+       */
+      allowlistLoaded?: boolean
+    }
   /** No plugin, or it never confirmed both hooks: ClaudeUI must not run sessions here. */
   | { state: 'missing'; reason: string; elapsedMs: number }
 
 /**
  * "Is ClaudeUI's permission hook active for this directory?" — the plugin's
  * `guard` RPC (`POST /api/rpc/claudeui-xeng/guard`) must answer
- * `{permissionHook: true, mcpDirect: true}`. Unlike {@link waitForHostedTools}
+ * `{permissionHook: true, mcpDirect: true, modelGate: true}` (plus `allowlistLoaded`,
+ * reported, never required). Unlike {@link waitForHostedTools}
  * there is no heuristic fallback: the MCP status says nothing about hooks, and
  * without the hook the user's saved "always" rows answer ClaudeUI's asks. A
  * missing plugin answers `missing` at once; a silent or partial one after the
@@ -188,15 +198,20 @@ export async function waitForPermissionGuard(
       elapsedMs: 0
     }
   const timeoutMs = options.timeoutMs ?? GUARD_TIMEOUT_MS
-  let last = 'no answer'
+  let last: string
   for (;;) {
     const response = await settle(
       deps.request('POST', `/api/rpc/${PLUGIN_RPC_ID}/guard`, { input: {} })
     )
     const elapsedMs = now() - start
     const output = (response?.body as { output?: Record<string, unknown> } | null)?.output
-    if (response?.status === 200 && output?.permissionHook === true && output?.mcpDirect === true)
-      return { state: 'active', elapsedMs }
+    if (
+      response?.status === 200 &&
+      output?.permissionHook === true &&
+      output?.mcpDirect === true &&
+      output?.modelGate === true
+    )
+      return { state: 'active', elapsedMs, allowlistLoaded: output.allowlistLoaded === true }
     last = response
       ? `guard RPC ${response.status} ${JSON.stringify(output ?? response.body).slice(0, 200)}`
       : 'guard RPC unreachable'

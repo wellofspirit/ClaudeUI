@@ -135,12 +135,19 @@ function setupSession(routingId = ROUTE, cwd = '/test'): void {
   useSessionStore.setState({ activeSessionId: routingId })
 }
 
+// The store as it was built, before any test touched it.
+const INITIAL_STATE = useSessionStore.getState()
+
 beforeEach(() => {
+  // Tests write the remembered engine / model / effort picks into the store AND
+  // localStorage (the store mirrors them there and reads them back). Restore the
+  // whole store, not a list of fields, so no pick outlives the test that made it.
+  localStorage.clear()
+  useSessionStore.setState(INITIAL_STATE, true)
   // The replica is a module singleton: without this the previous test's folded
   // transcript (steer- messages included) carries into this one (SyncCore 4c).
   resetReplicaSeam()
   resetFactoryCounter()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: () => {},
     saveSettings: () => {},
@@ -3800,6 +3807,52 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
     setWindowlessCapabilities()
     renderFC()
     expect(viewProps.showContextMeter).toBe(false)
+  })
+
+  // ADR-102 Arc 2: the content-first load defers the status line.
+  function setBackgroundLoad(statusPending: boolean, statusLine: unknown): void {
+    const state = useSessionStore.getState()
+    const session = state.sessions[BT_ROUTE]
+    useSessionStore.setState({
+      sessions: {
+        ...state.sessions,
+        [BT_ROUTE]: {
+          ...session,
+          statusLine: statusLine as never,
+          backgroundLoad: { fraction: 0, label: 'Loading usage', statusPending, statusBytes: 1 }
+        }
+      }
+    })
+    mirrorStoreIntoReplica()
+  }
+
+  it('tells the footer the status line is pending only while there is none and one is on its way', () => {
+    setBackgroundLoad(true, null)
+    renderFC()
+    expect(viewProps.statusLinePending).toBe(true)
+  })
+
+  it('a status line the entry already holds stays on screen while the fresh one loads (R3)', () => {
+    setBackgroundLoad(true, {
+      totalCostUsd: 1,
+      totalDurationMs: 0,
+      totalApiDurationMs: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      cachedTokens: 0,
+      totalTokens: 0,
+      contextWindow: { used: 0, size: 0 },
+      usedPercentage: null,
+      remainingPercentage: null
+    })
+    renderFC()
+    expect(viewProps.statusLinePending).toBe(false)
+  })
+
+  it('is not pending once the load says the status line has landed', () => {
+    setBackgroundLoad(false, null)
+    renderFC()
+    expect(viewProps.statusLinePending).toBe(false)
   })
 })
 

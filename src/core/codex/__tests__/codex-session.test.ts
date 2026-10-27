@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BoundedSet, CodexSession, ENDED_TURN_CAP } from '../CodexSession'
 import { CodexHostRegistry, type CodexHostClient } from '../CodexHost'
@@ -9,6 +9,7 @@ import { CodexTransportError, type CodexClientOptions } from '../CodexAppServerC
 import { followCodexActiveAccount } from '../codex-account-switch'
 import { CLAUDEUI_DISABLED_FEATURES } from '../codex-features'
 import { logger } from '../../services/logger'
+import { ApprovalAnswerRejected } from '../../services/approval-errors'
 import type { EngineSpawnOptions } from '../../providers/ISession'
 import type { QueuedItem } from '../../../shared/types'
 import { applyEvent } from '../../shared/sync/reducer'
@@ -18,6 +19,20 @@ import { codexItemId } from '../event-mapper'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import { blobRefOf } from '../../../test/helpers/blob-refs'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
+import {
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix
+} from '../../../shared/dispatch-agent-description'
+import { slimTranscript } from '../../automode/classifier'
+import { watchDispatchResultFlush } from '../../services/dispatch-result-flush'
+import { deliver } from '../../services/session-delivery'
+import type { SessionManager } from '../../services/session-manager'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolDescriptions,
+  sessionToolsGuidance
+} from '../../../shared/session-tools-description'
 
 const events = vi.hoisted(() => vi.fn())
 const overrides = vi.hoisted(() => new Map<string, unknown>())
@@ -27,10 +42,28 @@ const forks = vi.hoisted(() => new Map<string, string>())
 const rules = vi.hoisted(() => ({
   allow: [] as string[],
   deny: [] as string[],
-  ask: [] as string[]
+  ask: [] as string[],
+  additionalDirectories: [] as string[]
 }))
 const savedRules = vi.hoisted(() => vi.fn())
 vi.mock('../../services/sync-host', () => ({ emitEvent: events }))
+/**
+ * The session tools' service and gate (slice 2) — both have their own suites; the module is
+ * doubled here (it pulls in the whole canonical-state graph, which this file's `sync-host`
+ * double does not carry). `available` is what the host wiring reports.
+ */
+const sessionTools = vi.hoisted(() => ({
+  available: false,
+  gate: vi.fn(),
+  run: vi.fn(),
+  audit: vi.fn()
+}))
+vi.mock('../../services/session-tools', () => ({
+  sessionToolsAvailable: () => sessionTools.available,
+  sessionToolsGate: (...args: unknown[]) => sessionTools.gate(...args),
+  runSessionTool: (...args: unknown[]) => sessionTools.run(...args),
+  auditSessionToolDenial: (...args: unknown[]) => sessionTools.audit(...args)
+}))
 /**
  * The per-account ChatGPT rate-limit map (ADR-068 §2). Its real singleton builds
  * a `CodexService` against the vault; here only the CALL matters — which account
@@ -45,7 +78,7 @@ vi.mock('../../services/claude-settings', () => ({
     allow: scope === 'user' ? [...rules.allow] : [],
     deny: scope === 'user' ? [...rules.deny] : [],
     ask: scope === 'user' ? [...rules.ask] : [],
-    additionalDirectories: [],
+    additionalDirectories: scope === 'user' ? [...rules.additionalDirectories] : [],
     defaultMode: undefined
   }),
   saveClaudePermissions: savedRules
@@ -137,7 +170,38 @@ const usageRows = vi.hoisted(() => vi.fn())
 /** `session_meta` writes, so the persisted context reading (db v24) is observable. */
 const sessionMetaWrites = vi.hoisted(() => vi.fn())
 vi.mock('../../services/usage-recorder', () => ({ recordUsageEvent: usageRows }))
+/** The held inbox (`session_inbox`) the delivery rule writes, in memory. */
+const inbox = vi.hoisted(
+  () =>
+    [] as Array<{
+      id: number
+      target: string
+      origin: string
+      fromKey: string
+      fromTitle: string
+      senderModeClass: string | null
+      body: string
+      deliveredAt: number | null
+    }>
+)
+const heldCount = vi.hoisted(
+  () =>
+    (target: string): number =>
+      inbox.filter((r) => r.target === target && r.deliveredAt === null).length
+)
 vi.mock('../../services/db', () => ({
+  addInboxItem: (item: Record<string, unknown>) => {
+    inbox.push({ id: inbox.length + 1, deliveredAt: null, ...item } as (typeof inbox)[number])
+    return inbox.length
+  },
+  heldInboxItems: (target: string) =>
+    inbox.filter((r) => r.target === target && r.deliveredAt === null),
+  heldInboxCount: heldCount,
+  markInboxDelivered: (id: number) => {
+    const row = inbox.find((r) => r.id === id)
+    if (row) row.deliveredAt = 1
+  },
+  markOldestDispatchReportDelivered: () => {},
   dispatchedCostsByRouting: () => [],
   setSessionMeta: sessionMetaWrites,
   registerCodexFork: (threadId: string, forkedFromId: string) =>
@@ -176,6 +240,7 @@ afterEach(() => {
   rules.allow = []
   rules.deny = []
   rules.ask = []
+  rules.additionalDirectories = []
   mcp.servers = {}
   mcp.skipped = []
   userConfig.extra = {}
@@ -832,6 +897,27 @@ describe('Codex first session', () => {
     expect(events.mock.calls.some(([channel]) => channel === 'session:stream')).toBe(false)
   })
 
+  it('raises session:result once per ROOT turn end, ahead of the idle status', async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    const channels = (): string[] => events.mock.calls.map(([channel]) => channel as string)
+    expect(channels()).not.toContain('session:result')
+    const done = { threadId: 'root', turn: { id: 'turn', status: 'completed', items: [] } }
+    notify('turn/completed', { ...done, turn: { ...done.turn, durationMs: 1234 } })
+    const results = events.mock.calls.filter(([channel]) => channel === 'session:result')
+    expect(results).toHaveLength(1)
+    expect(results[0][1][1]).toMatchObject({ durationMs: 1234, result: '', sessionId: 'root' })
+    // The same order every other engine uses: result first, then the idle status.
+    const idleAt = events.mock.calls.findLastIndex(
+      ([channel, args]) =>
+        channel === 'session:status' && (args as [string, { state: string }])[1].state === 'idle'
+    )
+    expect(channels().indexOf('session:result')).toBeLessThan(idleAt)
+    // A replayed `turn/completed` for the same turn is the latch's no-op, not a second result.
+    notify('turn/completed', done)
+    expect(channels().filter((channel) => channel === 'session:result')).toHaveLength(1)
+  })
+
   it('rejects a concurrent direct send after coalesced startup and holds a queued one', async () => {
     const { session, request } = fixture()
     const results = await Promise.allSettled([session.run('one'), session.run('two')])
@@ -918,9 +1004,9 @@ describe('Codex first session', () => {
 
   const MODES = [
     ['plan', 'untrusted', { type: 'readOnly', networkAccess: false }, 'user'],
-    ['default', 'untrusted', { type: 'workspaceWrite' }, 'user'],
-    ['acceptEdits', 'untrusted', { type: 'workspaceWrite' }, 'user'],
-    ['auto', 'on-request', { type: 'workspaceWrite' }, 'auto_review']
+    ['default', 'untrusted', { type: 'workspaceWrite', writableRoots: [] }, 'user'],
+    ['acceptEdits', 'untrusted', { type: 'workspaceWrite', writableRoots: [] }, 'user'],
+    ['auto', 'on-request', { type: 'workspaceWrite', writableRoots: [] }, 'auto_review']
   ] as const
 
   it.each(MODES)(
@@ -958,9 +1044,149 @@ describe('Codex first session', () => {
       expect.objectContaining({
         approvalPolicy: 'on-request',
         approvalsReviewer: 'auto_review',
-        sandboxPolicy: expect.objectContaining({ type: 'workspaceWrite' })
+        sandboxPolicy: expect.objectContaining({ type: 'workspaceWrite', writableRoots: [] })
       })
     )
+  })
+
+  // The user's additional directories (PermissionsDialog) are the session's workspace: the
+  // sandbox's writable roots and ClaudeUI's own outside-workspace downgrade both honour them.
+  describe('additional directories', () => {
+    let base: string
+    let extra: string
+    beforeEach(() => {
+      // Canonical: a path spelled with an 8.3 alias (`RUNNER~1`) is asked about by design (it could
+      // name an agent-control directory), which is not what these tests are about.
+      base = realpathSync.native(mkdtempSync(join(tmpdir(), 'codex-addl-')))
+      extra = join(base, 'extra')
+      mkdirSync(extra)
+    })
+    afterEach(() => rmSync(base, { recursive: true, force: true }))
+    const turnStartPolicy = (request: ReturnType<typeof fixture>['request']) =>
+      (
+        request.mock.calls.findLast(([method]) => method === 'turn/start')![1] as {
+          sandboxPolicy: Record<string, unknown>
+        }
+      ).sandboxPolicy
+
+    it.each(['default', 'acceptEdits', 'auto'] as const)(
+      'B4: %s sends the resolved, existing directories as writableRoots',
+      async (mode) => {
+        rules.additionalDirectories = [
+          extra,
+          // Dropped before the engine sees them: a missing directory and a relative entry that
+          // resolves (against the session cwd) to one.
+          join(base, 'missing'),
+          'relative-entry',
+          // The same directory twice (a trailing slash).
+          `${extra}/`
+        ]
+        const { session, request } = fixture({ permissionMode: mode })
+        await session.run('hello')
+        expect(turnStartPolicy(request)).toMatchObject({
+          type: 'workspaceWrite',
+          writableRoots: [extra]
+        })
+      }
+    )
+
+    it('B4: ~ is the user’s home', async () => {
+      rules.additionalDirectories = ['~']
+      const { session, request } = fixture({ permissionMode: 'default' })
+      await session.run('hello')
+      expect(turnStartPolicy(request)).toMatchObject({ writableRoots: [homedir()] })
+    })
+
+    it('B4: plan mode sends readOnly, no roots', async () => {
+      rules.additionalDirectories = [extra]
+      const { session, request } = fixture({ permissionMode: 'plan' })
+      await session.run('hello')
+      expect(turnStartPolicy(request)).toEqual({ type: 'readOnly', networkAccess: false })
+    })
+
+    it('B4: no additional directories keeps the roots empty; an edit applies from the next turn', async () => {
+      const { session, request, notify } = fixture()
+      await session.run('hello')
+      expect(turnStartPolicy(request)).toMatchObject({ writableRoots: [] })
+      notify('turn/completed', {
+        threadId: 'root',
+        turn: { id: 'turn', status: 'completed', items: [] }
+      })
+      rules.additionalDirectories = [extra]
+      await session.run('again')
+      expect(turnStartPolicy(request)).toMatchObject({ writableRoots: [extra] })
+    })
+
+    it('B4: an acceptEdits file change inside an additional directory is allowed, outside every root it asks', async () => {
+      rules.additionalDirectories = [extra]
+      const { session, fileChange } = fixture({ permissionMode: 'acceptEdits' })
+      await session.run('hello')
+      const inside = fileChange([join(extra, 'a.txt')], 'add', 'patch-in')
+      expect(inside.card).toBeUndefined()
+      expect(await inside.result).toEqual({ decision: 'accept' })
+      const outside = fileChange([join(base, 'elsewhere', 'b.txt')], 'add', 'patch-out')
+      expect(outside.card).toBeDefined()
+    })
+
+    it('B4: without the directory the same change asks (the downgrade the fix lifts)', async () => {
+      const { session, fileChange } = fixture({ permissionMode: 'acceptEdits' })
+      await session.run('hello')
+      expect(fileChange([join(extra, 'a.txt')], 'add', 'patch-in').card).toBeDefined()
+    })
+  })
+
+  // A3b — a malformed answer to a parked question is not an answer: the request stays parked and
+  // the answer seam keeps its card (`ApprovalAnswerRejected`).
+  describe('a question card answered badly', () => {
+    const questions = [
+      {
+        id: 'q1',
+        header: 'Pick',
+        question: 'Which one?',
+        isOther: false,
+        isSecret: false,
+        options: [{ label: 'A', description: '' }]
+      }
+    ]
+    const park = async () => {
+      const f = fixture({ permissionMode: 'default' })
+      await f.session.run('hello')
+      const asked = f.approval({ questions }, 'item/tool/requestUserInput')
+      return { ...f, asked, requestId: (asked.card as { requestId: string }).requestId }
+    }
+
+    it.each([
+      ['no answers at all', 'allow' as const, undefined],
+      ['an answer that is missing', 'allow' as const, {}],
+      ['an answer that is not an offered choice', 'allow' as const, { q1: 'Z' }],
+      ['a decision that is not allow', 'deny' as const, { q1: 'A' }]
+    ])(
+      '%s throws ApprovalAnswerRejected and the request stays answerable',
+      async (_n, decision, answers) => {
+        const { session, asked, requestId } = await park()
+        expect(() => session.resolveApproval(requestId, decision, answers)).toThrow(
+          ApprovalAnswerRejected
+        )
+        // Still parked: a good answer settles it.
+        session.resolveApproval(requestId, 'allow', { q1: 'A' })
+        expect(await asked.result).toEqual({ answers: { q1: { answers: ['A'] } } })
+      }
+    )
+
+    it('a stale id is a plain error, not a rejected answer (its card must go)', async () => {
+      const { session, asked, requestId } = await park()
+      session.resolveApproval(requestId, 'allow', { q1: 'A' })
+      await asked.result
+      let thrown: unknown
+      try {
+        session.resolveApproval(requestId, 'allow', { q1: 'A' })
+      } catch (err) {
+        thrown = err
+      }
+      expect(thrown).toBeInstanceOf(Error)
+      expect(thrown).not.toBeInstanceOf(ApprovalAnswerRejected)
+      expect((thrown as Error).message).toContain('Stale or unknown')
+    })
   })
 
   it('answers plan mode read-only without a card and declines every mutation', async () => {
@@ -1092,6 +1318,26 @@ describe('Codex first session', () => {
     expect(await inside.result).toEqual({ decision: 'accept' })
     const outside = fileChange(['/elsewhere/new.txt'], 'add', 'outside')
     expect(outside.card).toMatchObject({ toolName: 'fileChange' })
+  })
+
+  // The shared ladder's judge flag is opt-in (pi passes it, Codex does not): a Codex session in
+  // `full` keeps the allow-everything mode base — a command runs with no card — while `auto`
+  // is mapped to `default` by the session itself. (Codex's bare-name session-allow keys are
+  // pinned in permission-engine.test.ts.)
+  it("Codex full is unchanged by pi's judge-off rule: an exec approval is allowed with no card", async () => {
+    const { session, approval } = fixture({ permissionMode: 'full' })
+    await session.run('hello')
+    const run = approval({ command: 'rm -rf build' })
+    expect(run.card).toBeUndefined()
+    expect(await run.result).toEqual({ decision: 'accept' })
+  })
+
+  it('Codex auto still gates as default: an exec approval asks the human', async () => {
+    const { session, approval } = fixture({ permissionMode: 'auto' })
+    await session.run('hello')
+    expect(approval({ command: 'rm -rf build' }).card).toMatchObject({
+      toolName: 'commandExecution'
+    })
   })
 
   it('never suggests a rule that would match every command', async () => {
@@ -2127,6 +2373,250 @@ describe('Codex held queue', () => {
 })
 
 /**
+ * Slice 1a: a message from another session or an agent on Codex. A plain prompt —
+ * `turn/start` at idle, `turn/steer` mid-turn — whose text names the sender and
+ * says it is not the user's. It does not use the user queue (no card, no
+ * `steer-<itemId>` bubble); the native user item that follows is a note, so no
+ * `User:` line and no user bubble exist for it.
+ */
+describe('Codex non-user delivery', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const WRAPPED = [
+    '<session-message from="sess-sender-1" title="Triage assistant">',
+    'please look at ticket 12',
+    '</session-message>',
+    'This is a message from another ClaudeUI session or agent, not from the user.'
+  ].join('\n')
+  const steers = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/steer').map((call) => call[1])
+  const starts = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/start').map((call) => call[1])
+  const nativeUserItem = (clientId: string, text: string) => ({
+    threadId: 'root',
+    turnId: 'turn',
+    item: { id: 'u1', type: 'userMessage', clientId, content: [{ type: 'text', text }] }
+  })
+
+  it('starts a turn with the wrapper as the prompt when idle', async () => {
+    const { session, request, queues } = fixture()
+    expect(await session.deliverNonUser(ITEM)).toBe('started')
+    expect(starts(request)).toEqual([
+      expect.objectContaining({
+        threadId: 'root',
+        input: [{ type: 'text', text: WRAPPED, text_elements: [] }],
+        clientUserMessageId: expect.stringMatching(/^msg-/)
+      })
+    ])
+    expect(session.willQueue).toBe(true)
+    expect(queues()).toEqual([])
+  })
+
+  it('steers the running turn with the wrapper, outside the user queue', async () => {
+    const { session, request, queues } = fixture()
+    await session.run('hello')
+    expect(await session.deliverNonUser(ITEM)).toBe('queued')
+    expect(steers(request)).toEqual([
+      {
+        threadId: 'root',
+        expectedTurnId: 'turn',
+        clientUserMessageId: expect.stringMatching(/^msg-/),
+        input: [{ type: 'text', text: WRAPPED, text_elements: [] }]
+      }
+    ])
+    expect(queues()).toEqual([])
+  })
+
+  it('the native user item is a note from the sender — never a user row, never a User: line', async () => {
+    const { session, request, notify } = fixture()
+    await session.deliverNonUser(ITEM)
+    const clientId = (starts(request)[0] as { clientUserMessageId: string }).clientUserMessageId
+    notify('item/completed', nativeUserItem(clientId, WRAPPED))
+    const rows = session.getMessages()
+    expect(rows.map((m) => m.role)).toEqual(['system'])
+    expect(rows[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Message from Triage assistant',
+        fragments: [
+          { text: 'please look at ticket 12', label: 'from another session, not from you' }
+        ]
+      }
+    ])
+    expect(rows[0]).not.toHaveProperty('replacesMessageId')
+    expect(slimTranscript(rows)).toBe('')
+  })
+
+  it("an X-Agent's result (dispatch-result) is worded as its own X-Agent's and its native user item is a 'Report from X-Agent' note", async () => {
+    const { session, request, notify } = fixture()
+    const result = {
+      origin: 'dispatch-result' as const,
+      text: 'X-Agent impl-e1 finished: done',
+      from: { key: 's-abc234', title: 'impl-e1' },
+      wake: true
+    }
+    expect(await session.deliverNonUser(result)).toBe('started')
+    const sent = starts(request)[0] as {
+      clientUserMessageId: string
+      input: Array<{ text: string }>
+    }
+    expect(sent.input[0].text).toBe(
+      [
+        '<session-message from="x-agent:s-abc234" title="impl-e1">',
+        'X-Agent impl-e1 finished: done',
+        '</session-message>',
+        'This is the result of an X-Agent you launched with dispatch_agent, not a message from the user.'
+      ].join('\n')
+    )
+    notify('item/completed', nativeUserItem(sent.clientUserMessageId, sent.input[0].text))
+    const rows = session.getMessages()
+    expect(rows.map((m) => m.role)).toEqual(['system'])
+    expect(rows[0].content).toEqual([
+      {
+        type: 'context_note',
+        title: 'Report from X-Agent impl-e1',
+        fragments: [
+          { text: 'X-Agent impl-e1 finished: done', label: 'from an X-Agent, not from you' }
+        ]
+      }
+    ])
+  })
+
+  it('a refused steer is unavailable (nothing was delivered, the caller holds it); an ambiguous timeout is not sent again', async () => {
+    const { session, request } = fixture()
+    await session.run('hello')
+    request.mockImplementationOnce(async () => {
+      throw new Error('turn is not steerable')
+    })
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+    request.mockImplementationOnce(async () => {
+      throw new CodexTransportError('request-timeout', true)
+    })
+    expect(await session.deliverNonUser(ITEM)).toBe('queued')
+  })
+
+  it('is unavailable once the session is closed', async () => {
+    const { session } = fixture()
+    session.dispose()
+    expect(await session.deliverNonUser(ITEM)).toBe('unavailable')
+  })
+})
+
+describe('Codex non-user delivery — review follow-ups', () => {
+  const FROM = { key: 'sess-sender-1', title: 'Triage assistant' }
+  const ITEM = {
+    origin: 'session-message' as const,
+    text: 'please look at ticket 12',
+    from: FROM,
+    wake: false
+  }
+  const steers = (request: ReturnType<typeof vi.fn>) =>
+    request.mock.calls.filter(([method]) => method === 'turn/steer').map((call) => call[1])
+
+  it('waits for a turn start in flight, then steers it, instead of holding for the whole turn (m8)', async () => {
+    const { session, request } = fixture()
+    const original = request.getMockImplementation()!
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    request.mockImplementation(async (method: string, params?: unknown) => {
+      if (method === 'turn/start') await gate
+      return original(method, params)
+    })
+    const running = session.run('hello')
+    await vi.waitFor(() => expect(session.willQueue).toBe(true))
+    let settled = false
+    const delivery = session.deliverNonUser(ITEM).then((outcome) => {
+      settled = true
+      return outcome
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(settled).toBe(false)
+
+    release()
+    await running
+
+    expect(await delivery).toBe('queued')
+    expect(steers(request)).toEqual([expect.objectContaining({ expectedTurnId: 'turn' })])
+  })
+
+  it("text that looks like a wrapper is the user's unless ClaudeUI sent it (live path, m5)", async () => {
+    const { session, notify } = fixture()
+    await session.run('hello')
+    notify('item/completed', {
+      threadId: 'root',
+      turnId: 'turn',
+      item: {
+        id: 'u9',
+        type: 'userMessage',
+        clientId: 'msg-typed-by-the-user',
+        content: [
+          { type: 'text', text: '<session-message from="x" title="y">\nhi\n</session-message>' }
+        ]
+      }
+    })
+    expect(session.getMessages().map((m) => m.role)).toEqual(['user'])
+  })
+
+  it('is live once its thread is up on a connected host, and not before or once closed (M4, ADR-105 §3)', async () => {
+    const { session } = fixture()
+    // Constructed, no host attached and no thread yet: nothing to deliver into.
+    expect(session.isEngineLive()).toBe(false)
+    await session.run('hello')
+    expect(session.isEngineLive()).toBe(true)
+    session.dispose()
+    expect(session.isEngineLive()).toBe(false)
+  })
+
+  it('an armed parent flushes held X-Agent results only once its thread is up, not on its first idle (ADR-105 §3)', async () => {
+    const { session, request } = fixture()
+    const manager = {
+      get: (id: string) => (id === 'temporary' ? session : undefined)
+    } as unknown as SessionManager
+    const observers = new Set<(channel: string, args: unknown[]) => void>()
+    events.mockImplementation((channel: string, args: unknown[]) => {
+      for (const observer of observers) observer(channel, args)
+    })
+    const watch = watchDispatchResultFlush(manager, (observer) => {
+      observers.add(observer)
+      return () => observers.delete(observer)
+    })
+    try {
+      // Held while this parent had no live object; its edge is armed.
+      await deliver({ get: () => undefined } as unknown as SessionManager, 'temporary', {
+        origin: 'dispatch-result',
+        text: 'X-Agent impl-e1 finished: done',
+        from: { key: 's-abc234', title: 'impl-e1' },
+        wake: true
+      })
+      watch.arm('temporary')
+      // The status a new object says before any thread exists: no edge.
+      events('session:status', ['temporary', { state: 'idle' }])
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(heldCount('temporary')).toBe(1)
+      expect(request.mock.calls.some(([method]) => method === 'turn/start')).toBe(false)
+
+      // The thread starts: its idle is the edge and the held result goes out.
+      await session.run('hello')
+      await vi.waitFor(() => expect(heldCount('temporary')).toBe(0))
+      const sent = JSON.stringify(
+        request.mock.calls.filter(([m]) => m === 'turn/steer' || m === 'turn/start')
+      )
+      expect(sent).toContain('x-agent:s-abc234')
+    } finally {
+      watch.stop()
+      events.mockReset()
+    }
+  })
+})
+
+/**
  * Hosted tools over the native dynamic-tool channel (`thread/start`'s
  * `dynamicTools` + the `item/tool/call` server request). Every refusal below is
  * fail-closed: the handler must not run at all, because running it is the
@@ -2477,11 +2967,15 @@ describe('Codex cross-engine dispatch', () => {
         engine: { type: 'string', enum: ['claude', 'opencode', 'pi'] },
         prompt: { type: 'string' },
         model: { type: 'string' },
-        session_id: { type: 'string' }
+        workdir: { type: 'string' }
       },
-      required: ['engine', 'prompt'],
+      required: ['engine', 'prompt', 'description'],
       additionalProperties: false
     })
+    // session_id left the tool (ADR-105 §4): a follow-up is a session_message.
+    expect(spec.inputSchema.properties).not.toHaveProperty('session_id')
+    expect(spec.description).not.toContain('session_id')
+    expect(spec.description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
   })
 
   it('voice follows the host: on where the speech pack has a runtime, off where it has none (ADR-101 §8)', () => {
@@ -2508,8 +3002,7 @@ describe('Codex cross-engine dispatch', () => {
     const { result } = dispatchCall(f, {
       engine: 'claude',
       prompt: 'summarise the repo',
-      model: 'haiku',
-      session_id: 'prior'
+      model: 'haiku'
     })
     const card = f.cards().at(-1)!
     expect(card).toMatchObject({
@@ -2518,8 +3011,7 @@ describe('Codex cross-engine dispatch', () => {
       input: {
         engine: 'claude',
         prompt: 'summarise the repo',
-        model: 'haiku',
-        session_id: 'prior'
+        model: 'haiku'
       }
     })
     expect(dispatcher.dispatch).not.toHaveBeenCalled()
@@ -2528,14 +3020,38 @@ describe('Codex cross-engine dispatch', () => {
     expect(dispatcher.dispatch).toHaveBeenCalledOnce()
   })
 
+  it('answers its CURRENT permission mode, for a dispatch run launched earlier to read (ADR-105)', async () => {
+    const f = fixture({ permissionMode: 'acceptEdits' })
+    await f.session.run('hello')
+    expect(f.session.getAutonomyMode()).toBe('acceptEdits')
+  })
+
+  it.each([
+    ['run_in_background:true', { run_in_background: true }, true, true],
+    // The Codex tool call is always the top-level agent's: unspecified is background too.
+    ['unspecified (the default)', {}, true, true],
+    ['run_in_background:false (waits for the report)', { run_in_background: false }, false, false]
+  ])('dispatches with %s (ADR-105 §2)', async (_label, extra, background, cardShowsIt) => {
+    const f = fixture()
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, { engine: 'pi', prompt: 'run the tests', ...extra })
+    const card = f.cards().at(-1)!
+    if (cardShowsIt) expect(card.input).toMatchObject({ run_in_background: true })
+    else expect(card.input).not.toHaveProperty('run_in_background')
+    f.session.resolveApproval(card.requestId, 'allow')
+    await result
+    const sent = dispatcher.dispatch.mock.calls.at(-1)![0]
+    if (background) expect(sent).toMatchObject({ runInBackground: true })
+    else expect(sent).not.toHaveProperty('runInBackground')
+  })
+
   it('hands the dispatcher the exact request and a context bound to the call id', async () => {
     const f = fixture({ permissionMode: 'acceptEdits' })
     await f.session.run('hello')
     const { result } = dispatchCall(f, {
       engine: 'pi',
       prompt: 'run the tests',
-      model: 'anthropic/claude-haiku',
-      session_id: 'earlier'
+      model: 'anthropic/claude-haiku'
     })
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await result
@@ -2544,7 +3060,7 @@ describe('Codex cross-engine dispatch', () => {
         engine: 'pi',
         prompt: 'run the tests',
         model: 'anthropic/claude-haiku',
-        sessionId: 'earlier'
+        runInBackground: true
       },
       expect.objectContaining({
         fromEngine: 'codex',
@@ -2558,22 +3074,106 @@ describe('Codex cross-engine dispatch', () => {
     )
   })
 
-  it('maps the dispatch result onto the tool response, session_id suffix included', async () => {
+  it('hands the dispatcher the name and description the model gave (ADR-105)', async () => {
+    const f = fixture({ permissionMode: 'acceptEdits' })
+    await f.session.run('hello')
+    const { result } = dispatchCall(f, {
+      engine: 'pi',
+      prompt: 'run the tests',
+      name: 'impl-e1',
+      description: 'Review auth diff'
+    })
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await result
+    expect(dispatcher.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
+      expect.anything()
+    )
+  })
+
+  it.each([
+    ['a directory', { workdir: '/isolated/wt' }, '/isolated/wt'],
+    ['a padded one, trimmed', { workdir: '  ../wt  ' }, '../wt'],
+    ['an empty one, absent', { workdir: '' }, undefined],
+    ['a blank one, absent', { workdir: '   ' }, undefined],
+    ['null, absent', { workdir: null }, undefined],
+    ['none, absent', {}, undefined]
+  ])(
+    'hands the dispatcher the workdir, and the approval card shows it: %s',
+    async (_label, extra, expected) => {
+      const f = fixture()
+      await f.session.run('hello')
+      const { result } = dispatchCall(f, { engine: 'pi', prompt: 'run the tests', ...extra })
+      const card = f.cards().at(-1)!
+      if (expected === undefined) expect(card.input).not.toHaveProperty('workdir')
+      else expect(card.input).toMatchObject({ workdir: expected })
+      f.session.resolveApproval(card.requestId, 'allow')
+      await result
+      const sent = dispatcher.dispatch.mock.calls.at(-1)![0]
+      if (expected === undefined) expect(sent).not.toHaveProperty('workdir')
+      else expect(sent).toMatchObject({ workdir: expected })
+    }
+  )
+
+  it('refuses a workdir that is not a string: nothing is launched and no card is raised', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const cardsBefore = f.cards().length
+    const { result } = dispatchCall(f, { engine: 'pi', prompt: 'go', workdir: 7 })
+    await expect(result).resolves.toEqual({
+      contentItems: [
+        { type: 'inputText', text: 'dispatch_agent "workdir" must be a string (a directory path).' }
+      ],
+      success: false
+    })
+    expect(f.cards()).toHaveLength(cardsBefore)
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
+  })
+
+  it('maps the dispatch result onto the tool response, agent ref suffix included', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    dispatcher.dispatch.mockResolvedValueOnce({
+      text: 'target answer',
+      sessionId: 'target-session',
+      agentRef: 's-abc123'
+    } as never)
+    const { result } = dispatchCall(f)
+    f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+    await expect(result).resolves.toEqual({
+      contentItems: [
+        { type: 'inputText', text: `target answer${dispatchResultSuffix('s-abc123')}` }
+      ],
+      success: true
+    })
+  })
+
+  it('a result without an agent ref gets no suffix', async () => {
     const f = fixture()
     await f.session.run('hello')
     const { result } = dispatchCall(f)
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await expect(result).resolves.toEqual({
-      contentItems: [
-        {
-          type: 'inputText',
-          text:
-            'target answer\n\n[dispatch session_id: target-session — pass it as session_id to ' +
-            'continue this agent]'
-        }
-      ],
+      contentItems: [{ type: 'inputText', text: 'target answer' }],
       success: true
     })
+  })
+
+  it('a call from a thread started before the removal that still sends session_id gets the guiding error, no card and no dispatch', async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    const before = f.cards().length
+    const { result } = dispatchCall(f, {
+      engine: 'claude',
+      prompt: 'continue',
+      session_id: 'prior'
+    })
+    await expect(result).resolves.toEqual({
+      contentItems: [{ type: 'inputText', text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+      success: false
+    })
+    expect(f.cards()).toHaveLength(before)
+    expect(dispatcher.dispatch).not.toHaveBeenCalled()
   })
 
   it('reports a failed dispatch as an unsuccessful call carrying the dispatcher text', async () => {
@@ -2723,9 +3323,11 @@ describe('Codex cross-engine dispatch', () => {
     f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
     await vi.waitFor(() => expect(dispatcher.dispatch).toHaveBeenCalled())
     await f.session.interrupt()
+    // The parent's own interrupt ends the calls it awaits, never a background run (ADR-105).
     expect(dispatcher.stopDispatch).toHaveBeenCalledWith(
       'codex:["root","turn","dispatch-1"]',
-      'temporary'
+      'temporary',
+      { blockingOnly: true }
     )
     f.session.dispose()
     expect(dispatcher.disposeFor).toHaveBeenCalledWith('temporary')
@@ -2804,6 +3406,24 @@ describe('Codex native children', () => {
     expect(sent('session:item-open')).toHaveLength(1)
   })
 
+  it("raises no session:result for a child thread's turn end", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+    f.notify('turn/completed', {
+      threadId: 'child',
+      turn: { id: 'child-turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:result')).toEqual([])
+    // The parent's own turn end still raises exactly one.
+    f.notify('turn/completed', {
+      threadId: 'root',
+      turn: { id: 'turn', status: 'completed', items: [] }
+    })
+    expect(sent('session:result')).toHaveLength(1)
+  })
+
   it('routes a child message into the subagent transcript under the spawning card', async () => {
     const f = fixture()
     await f.session.run('hello')
@@ -2864,6 +3484,61 @@ describe('Codex native children', () => {
         toolUseId: PARENT_CARD,
         toolResultToolUseId: 'codex:["child","child-turn","c1"]',
         result: '/isolated',
+        isError: false
+      }
+    ])
+  })
+
+  it("forwards a child's imageView as ONE subagent-tool-result carrying the bytes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codex-child-image-view-'))
+    try {
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+        'base64'
+      )
+      const path = join(directory, 'shot.png')
+      writeFileSync(path, png)
+      const f = fixture()
+      await f.session.run('hello')
+      spawn(f)
+      f.notify('item/completed', {
+        threadId: 'child',
+        turnId: 'child-turn',
+        item: { type: 'imageView', id: 'iv', path }
+      })
+      // The read is not awaited by the notification pump.
+      await new Promise((done) => setTimeout(done, 50))
+      // Exactly one: the reducer appends subagent results, so a second (the
+      // mapper's empty one) would sit next to the one with the bytes.
+      expect(sent('session:subagent-tool-result')).toEqual([
+        {
+          toolUseId: PARENT_CARD,
+          toolResultToolUseId: codexItemId('child', 'child-turn', 'iv'),
+          result: '',
+          isError: false,
+          images: [{ mediaType: 'image/png', ...blobRefOf(png.toString('base64')) }]
+        }
+      ])
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it("still resolves a child's imageView, without images, when the file cannot be read", async () => {
+    const f = fixture()
+    await f.session.run('hello')
+    spawn(f)
+    f.notify('item/completed', {
+      threadId: 'child',
+      turnId: 'child-turn',
+      item: { type: 'imageView', id: 'iv', path: join(tmpdir(), 'codex-child-absent.png') }
+    })
+    await new Promise((done) => setTimeout(done, 50))
+    expect(sent('session:subagent-tool-result')).toEqual([
+      {
+        toolUseId: PARENT_CARD,
+        toolResultToolUseId: codexItemId('child', 'child-turn', 'iv'),
+        result: '',
         isError: false
       }
     ])
@@ -5308,8 +5983,9 @@ describe('Codex imageView bytes reach a LIVE turn (F20)', () => {
       turnId: 'turn',
       item: { type: 'imageView', id: 'iv', path }
     })
-    // The read is fired without awaiting the notification pump; two macrotask
-    // turns is more than the `stat` + `readFile` pair needs on a temp file.
+    // The read is fired without awaiting the notification pump. Wait for its result (a fixed sleep
+    // alone lost the race on a loaded CPU), then stay a moment longer: a SECOND result is the bug.
+    await vi.waitFor(() => expect(results().length).toBeGreaterThan(0))
     await new Promise((done) => setTimeout(done, 50))
   }
 
@@ -5841,5 +6517,330 @@ describe('a Codex user stop is not an error (ADR-090)', () => {
       turn: { id: 'turn-1', status: 'interrupted', items: [], error: null }
     })
     expect(banners()).toEqual([])
+  })
+})
+
+/**
+ * The session tools over the same dynamic-tool channel (slice 2). The service behind
+ * them (and its gate) has its own suite; `session-tools` is a double here, so what is
+ * asserted is the wiring: the specs and instructions on `thread/start`, the caller
+ * handed to the gate and the service, and what each verdict does to the request.
+ */
+describe('Codex session tools', () => {
+  const startParams = (request: ReturnType<typeof fixture>['request']) =>
+    request.mock.calls.find(([method]) => method === 'thread/start')![1] as Record<string, unknown>
+  const CARD = 'codex:["root","turn","st-1"]'
+
+  beforeEach(() => {
+    sessionTools.available = true
+    sessionTools.gate.mockReset().mockReturnValue({ behavior: 'allow' })
+    sessionTools.run.mockReset().mockResolvedValue({ text: 'the answer' })
+    sessionTools.audit.mockReset()
+  })
+  afterEach(() => {
+    sessionTools.available = false
+  })
+
+  /** Drive one session tool call over the dynamic-tool channel. */
+  const stCall = (
+    f: ReturnType<typeof fixture>,
+    tool: string,
+    args: Record<string, unknown> = {},
+    over: Record<string, unknown> = {}
+  ) => f.dynamicCall({ tool, callId: 'st-1', arguments: args, ...over })
+
+  describe('thread/start', () => {
+    it('declares the nine tools after the hosted ones: bare names, shared descriptions, closed schemas', async () => {
+      const { session, request } = fixture()
+      await session.run(null)
+      const specs = startParams(request).dynamicTools as Array<{
+        type: string
+        name: string
+        description: string
+        inputSchema: Record<string, unknown>
+      }>
+      expect(specs.map((spec) => spec.name)).toEqual([
+        'render_mermaid',
+        'create_mockup',
+        'show_mockup',
+        'dispatch_agent',
+        ...SESSION_TOOL_NAMES
+      ])
+      const descriptions = sessionToolDescriptions({})
+      for (const name of SESSION_TOOL_NAMES) {
+        const spec = specs.find((entry) => entry.name === name)!
+        expect(spec.type).toBe('function')
+        expect(spec.description).toBe(descriptions[name])
+        expect(spec.inputSchema).toMatchObject({ type: 'object', additionalProperties: false })
+        // Codex's rules for a dynamic tool's name.
+        expect(name).toMatch(/^[a-zA-Z0-9_-]+$/)
+        expect(name.startsWith('mcp')).toBe(false)
+      }
+      expect(specs.find((entry) => entry.name === 'session_message')!.inputSchema).toMatchObject({
+        required: ['session', 'message']
+      })
+    })
+
+    it('carries the guidance as developerInstructions on start only', async () => {
+      const { session, request } = fixture()
+      await session.run(null)
+      expect(startParams(request).developerInstructions).toBe(
+        sessionToolsGuidance({ toolPrefix: '' })
+      )
+      const resumed = fixture({ resumeSessionId: 'root' })
+      await resumed.session.run(null)
+      const resumeParams = resumed.request.mock.calls.find(
+        ([method]) => method === 'thread/resume'
+      )![1] as Record<string, unknown>
+      expect(resumeParams).not.toHaveProperty('developerInstructions')
+      expect(resumeParams).not.toHaveProperty('dynamicTools')
+    })
+
+    it('offers neither the tools nor instructions when the host wired no session tools', async () => {
+      sessionTools.available = false
+      const { session, request } = fixture()
+      await session.run(null)
+      const params = startParams(request)
+      expect((params.dynamicTools as Array<{ name: string }>).map((spec) => spec.name)).toEqual([
+        'render_mermaid',
+        'create_mockup',
+        'show_mockup',
+        'dispatch_agent'
+      ])
+      expect(params).not.toHaveProperty('developerInstructions')
+    })
+  })
+
+  describe('a call from the root thread', () => {
+    it("runs the service as this session's root agent and answers with its text", async () => {
+      const f = fixture({ permissionMode: 'acceptEdits' })
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_list', { scope: 'project' }).result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'the answer' }],
+        success: true
+      })
+      expect(f.cards()).toHaveLength(0)
+      const [caller, tool, input] = sessionTools.run.mock.calls[0]
+      expect(caller).toMatchObject({
+        routingId: 'temporary',
+        engine: 'codex',
+        cwd: '/isolated',
+        permissionMode: 'acceptEdits',
+        toolUseId: CARD
+      })
+      expect(await caller.callOwner!(CARD)).toBe('root')
+      expect(tool).toBe('session_list')
+      expect(input).toEqual({ scope: 'project' })
+      // The gate was asked as the same caller, with no agent id (the root agent).
+      const [gateCaller, gateTool, gateInput, ctx] = sessionTools.gate.mock.calls[0]
+      expect(gateCaller).toMatchObject({ routingId: 'temporary', engine: 'codex' })
+      expect(gateTool).toBe('session_list')
+      expect(gateInput).toEqual({ scope: 'project' })
+      expect(ctx).toEqual({})
+    })
+
+    it('reports a service error as an unsuccessful call, not a rejected request', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      sessionTools.run.mockResolvedValueOnce({ text: 'Refused: no', isError: true })
+      await expect(stCall(f, 'session_stop', { session: 's-a' }).result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'Refused: no' }],
+        success: false
+      })
+    })
+
+    it('a gate deny refuses with its reason, runs nothing, raises no card, and audits an acting tool', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'deny', message: 'Refused: plan mode' })
+      const f = fixture({ permissionMode: 'plan' })
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_start', { prompt: 'x' }).result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'Refused: plan mode' }],
+        success: false
+      })
+      expect(f.cards()).toHaveLength(0)
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.audit).toHaveBeenCalledTimes(1)
+      const [auditCaller, auditTool, auditInput, message] = sessionTools.audit.mock.calls[0]
+      expect(auditCaller).toMatchObject({ routingId: 'temporary', engine: 'codex' })
+      expect(auditTool).toBe('session_start')
+      expect(auditInput).toEqual({ prompt: 'x' })
+      expect(message).toBe('Refused: plan mode')
+    })
+
+    it('a gate ask parks a card and runs nothing until allow; the card offers no session allow or saved rule', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'ask' })
+      const f = fixture()
+      await f.session.run('hello')
+      const { result } = stCall(f, 'session_read', { session: 's-other' })
+      const card = f.cards().at(-1)!
+      expect(card).toMatchObject({
+        toolUseId: CARD,
+        toolName: 'session_read',
+        input: { session: 's-other' }
+      })
+      expect(card).not.toHaveProperty('suggestions')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      f.session.resolveApproval(card.requestId, 'allowForSession', undefined, [
+        {
+          type: 'addRules',
+          behavior: 'allow',
+          destination: 'localSettings',
+          rules: [{ toolName: 'session_read' }]
+        }
+      ])
+      await expect(result).resolves.toMatchObject({ success: true })
+      expect(sessionTools.run).toHaveBeenCalledOnce()
+      // Neither the click's session allow nor its persisted rule stuck.
+      expect(savedRules).not.toHaveBeenCalled()
+      const before = f.cards().length
+      const again = f.dynamicCall({
+        tool: 'session_read',
+        callId: 'st-2',
+        arguments: { session: 's-other' }
+      })
+      expect(f.cards()).toHaveLength(before + 1)
+      f.session.resolveApproval(f.cards().at(-1)!.requestId, 'allow')
+      await again.result
+      expect(sessionTools.run).toHaveBeenCalledTimes(2)
+    })
+
+    it('a declined card refuses without running or auditing a service refusal', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'ask' })
+      const f = fixture()
+      await f.session.run('hello')
+      const { result } = stCall(f, 'session_stop', { session: 's-other' })
+      f.session.resolveApproval(f.cards().at(-1)!.requestId, 'deny')
+      await expect(result).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'session_stop was declined by the user.' }],
+        success: false
+      })
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('asks under auto too: the native reviewer never sees a dynamic tool call', async () => {
+      sessionTools.gate.mockReturnValue({ behavior: 'ask' })
+      const f = fixture({ permissionMode: 'auto' })
+      await f.session.run('hello')
+      stCall(f, 'session_get', { session: 's-other' })
+      expect(f.cards().at(-1)).toMatchObject({ toolName: 'session_get' })
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('a user deny rule in the Claude spelling holds before the gate, with the rule named', async () => {
+      rules.deny = ['mcp__claude-ui-sessions__session_start']
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_start', { prompt: 'x' }).result).resolves.toEqual({
+        contentItems: [
+          {
+            type: 'inputText',
+            text: 'Denied by permission rule: mcp__claude-ui-sessions__session_start'
+          }
+        ],
+        success: false
+      })
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.audit).toHaveBeenCalledTimes(1)
+    })
+
+    it('refuses arguments that are not an object, before any rule or gate', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(
+        stCall(f, 'session_list', undefined as never, { arguments: 'x' }).result
+      ).resolves.toEqual({
+        contentItems: [{ type: 'inputText', text: 'session_list arguments must be an object.' }],
+        success: false
+      })
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('a replayed call id is refused, never run twice', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await stCall(f, 'session_list').result
+      await expect(stCall(f, 'session_list').result).rejects.toThrow(
+        'Duplicate Codex hosted tool call'
+      )
+      expect(sessionTools.run).toHaveBeenCalledOnce()
+    })
+  })
+
+  describe("a call that is not the root thread's", () => {
+    const spawnChild = (f: ReturnType<typeof fixture>): void => {
+      const collab = (status: string, states: Record<string, unknown>) =>
+        f.notify(status === 'inProgress' ? 'item/started' : 'item/completed', {
+          threadId: 'root',
+          turnId: 'turn',
+          item: {
+            id: 'collab-1',
+            type: 'collabAgentToolCall',
+            tool: 'spawnAgent',
+            status,
+            senderThreadId: 'root',
+            receiverThreadIds: status === 'inProgress' ? [] : ['child'],
+            prompt: 'go',
+            model: 'native',
+            reasoningEffort: 'ultra',
+            agentsStates: states
+          }
+        })
+      collab('inProgress', {})
+      collab('completed', { child: { status: 'running', message: null } })
+    }
+
+    it('a native child thread is refused (nothing runs) and the refusal is audited', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      spawnChild(f)
+      const { result } = stCall(
+        f,
+        'session_message',
+        { session: 's-a', message: 'hi' },
+        {
+          threadId: 'child',
+          callId: 'child-call'
+        }
+      )
+      await expect(result).rejects.toThrow('no live owning root turn')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+      expect(sessionTools.audit).toHaveBeenCalledTimes(1)
+      const [auditCaller, auditTool, auditInput, message] = sessionTools.audit.mock.calls[0]
+      expect(auditCaller).toMatchObject({ routingId: 'temporary', engine: 'codex' })
+      expect(auditTool).toBe('session_message')
+      expect(auditInput).toEqual({ session: 's-a', message: 'hi' })
+      expect(message).toContain('not by a native subagent thread')
+      // The row is the root session's, so the detail names which child it was.
+      expect(message).toContain('(child)')
+    })
+
+    it('a call from a thread no session claimed never reaches this session (the host refuses it)', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(
+        stCall(f, 'session_stop', { session: 's-a' }, { threadId: 'stranger' }).result
+      ).rejects.toThrow('Method not found')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+      expect(sessionTools.gate).not.toHaveBeenCalled()
+    })
+
+    it('a session tool called on a stale turn is refused and runs nothing', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_list', {}, { turnId: 'old-turn' }).result).rejects.toThrow(
+        'no live owning root turn'
+      )
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
+
+    it('a tool that is not on the hosted list is still refused (the list is the boundary)', async () => {
+      const f = fixture()
+      await f.session.run('hello')
+      await expect(stCall(f, 'session_nope', {}).result).rejects.toThrow('no live owning root turn')
+      expect(sessionTools.run).not.toHaveBeenCalled()
+    })
   })
 })

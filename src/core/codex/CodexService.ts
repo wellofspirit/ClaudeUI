@@ -331,9 +331,11 @@ export class CodexService {
         const injected = handle.injectedAccountId
         // No token, no numbers: a host the vault could not inject is running as
         // somebody else, and its figures are not this account's.
-        if (!injected) continue
+        if (!injected || (accountId !== null && injected !== accountId)) continue
         const result = await handle.request('account/rateLimits/read', {}).catch(() => null)
-        if (result) out.set(injected, result)
+        // Credential refresh can switch the injected account while this awaits;
+        // an ambiguous answer belongs to neither identity.
+        if (result && handle.injectedAccountId === injected) out.set(injected, result)
       } finally {
         this.forget(handle)
       }

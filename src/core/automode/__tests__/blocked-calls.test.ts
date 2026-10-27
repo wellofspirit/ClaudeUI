@@ -176,9 +176,11 @@ describe('nudge texts', () => {
       'I approve the bash call auto mode blocked for the "Fix \'it\'" subagent: git push origin main. ' +
         'Run it again exactly as it was — yourself, or by sending it back to that subagent.'
     )
-    expect(blockedCallNudge(call({ agentLabel: 'gpt', dispatchSessionId: 'ses_1' }))).toContain(
-      'by dispatching it back to that agent (session_id "ses_1").'
+    const toXAgent = blockedCallNudge(call({ agentLabel: 'gpt', xAgentRef: 's-abc123' }))
+    expect(toXAgent).toContain(
+      'by messaging that X-Agent with session_message (session: "s-abc123").'
     )
+    expect(toXAgent).not.toContain('session_id')
   })
 
   it('a delivery is marked as ClaudeUI on behalf of the user', () => {

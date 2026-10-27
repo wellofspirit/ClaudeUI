@@ -18,6 +18,7 @@ import {
   adoptedSigninLabel,
   fileSlotMemory,
   memorySlotMemory,
+  SHARED_ROUTE_CLAIM_MESSAGE,
   SIGNIN_PENDING_TTL_MS,
   type SlotMemory
 } from '../credential-store'
@@ -31,6 +32,7 @@ function setup(
     available?: () => boolean
     memory?: SlotMemory
     isClaudeuiToken?: (refresh: string) => boolean
+    claimedBySharedRoute?: (integrationID: string) => boolean | Promise<boolean>
   } = {}
 ) {
   const table = fakeCredentialTable()
@@ -40,7 +42,8 @@ function setup(
     available: options.available,
     memory,
     now: () => NOW,
-    isClaudeuiToken: options.isClaudeuiToken
+    isClaudeuiToken: options.isClaudeuiToken,
+    claimedBySharedRoute: options.claimedBySharedRoute
   })
   const changes = vi.fn()
   store.onChange(changes)
@@ -76,6 +79,15 @@ const foreignCalls = (calls: readonly string[]) =>
     const [op, id] = call.split(' ')
     return op !== 'list' && !isClaudeuiCredentialId(id)
   })
+
+/** The integrations ClaudeUI's record holds a key or sign-in slot for (pending removals excluded). */
+const recorded = (store: OpencodeCredentialStore): Set<string> =>
+  new Set(
+    store
+      .recordedSlots()
+      .filter((slot) => slot.kind === 'key' || slot.kind === 'signin')
+      .map((slot) => slot.integrationID)
+  )
 
 describe('helpers', () => {
   it('derives a readable stem and the real expiry from the JWT, never the row', () => {
@@ -403,7 +415,7 @@ describe('snapshot', () => {
     })
     // The cross-engine kinds are 'api' | 'oauth' only: the external row is left out, not called a key.
     expect(credentialTypes(snapshot)).toEqual({ anthropic: 'api' })
-    expect(store.recordedRemovableIntegrations().has('azure')).toBe(false)
+    expect(recorded(store).has('azure')).toBe(false)
   })
 
   it('reads the active key on demand only', async () => {
@@ -565,7 +577,7 @@ describe('L2b: a rebuilt record skips a row that fills no slot', () => {
   })
 })
 
-describe('M3b: Remove-ability is answered from ClaudeUI’s record (no server)', () => {
+describe('M3b: ClaudeUI’s record of its slots is answered with no server', () => {
   it('recorded key slots, pending removals excluded', async () => {
     let installed = true
     const { table, store } = setup({ available: () => installed })
@@ -574,7 +586,7 @@ describe('M3b: Remove-ability is answered from ClaudeUI’s record (no server)',
     installed = false
     await store.removeSlot('anthropic', 'key', 'route off')
     const opened = table.leases.opened
-    expect([...store.recordedRemovableIntegrations()]).toEqual(['openrouter'])
+    expect([...recorded(store)]).toEqual(['openrouter'])
     expect(table.leases.opened).toBe(opened)
   })
 })
@@ -703,7 +715,7 @@ describe('a sign-in started from ClaudeUI is ClaudeUI’s', () => {
     expect(table.rows().find((row) => row.id === 'ghc_opencode_id_1')?.label).toBe(
       `ClaudeUI sign-in · ${signin.label.slice('claudeui:signin:'.length)}`
     )
-    expect([...store.recordedRemovableIntegrations()]).toEqual(['github-copilot'])
+    expect([...recorded(store)]).toEqual(['github-copilot'])
 
     table.calls.length = 0
     expect(await store.removeSlot('github-copilot', 'signin', 'remove github-copilot')).toBe(true)
@@ -717,7 +729,7 @@ describe('a sign-in started from ClaudeUI is ClaudeUI’s', () => {
         .map((row) => row.id)
         .sort()
     ).toEqual(['cred_user_before', 'cred_user_concurrent'])
-    expect(store.recordedRemovableIntegrations().size).toBe(0)
+    expect(recorded(store).size).toBe(0)
   })
 
   it('claims nothing when no row carries the label, and a ClaudeUI sign-in is never taken for a copy', async () => {
@@ -784,17 +796,14 @@ describe('s7b-3: a sign-in that completes after its hold is adopted later', () =
     table.seed({ ...userKey('ghc_late', 'github-copilot', 'tok'), label: late.label })
     now += SIGNIN_PENDING_TTL_MS / 2
     await store.vendKey('openrouter', 'k') // any later operation
-    expect([...store.recordedRemovableIntegrations()].sort()).toEqual([
-      'github-copilot',
-      'openrouter'
-    ])
+    expect([...recorded(store)].sort()).toEqual(['github-copilot', 'openrouter'])
     expect(table.rows().find((row) => row.id === 'ghc_late')?.label).toBe(
       adoptedSigninLabel(late.label.slice('claudeui:signin:'.length))
     )
     now += SIGNIN_PENDING_TTL_MS
     table.seed({ ...userKey('ant_too_late', 'anthropic', 'tok'), label: stale.label })
     await store.vendKey('openrouter', 'k2')
-    expect(store.recordedRemovableIntegrations().has('anthropic')).toBe(false)
+    expect(recorded(store).has('anthropic')).toBe(false)
   })
 })
 
@@ -821,7 +830,7 @@ describe('s7b-4: sign-in ownership survives a quarantined slot file — only fro
         now: () => NOW
       })
       await fresh.vendKey('openrouter', 'k')
-      expect(fresh.recordedRemovableIntegrations().has('github-copilot')).toBe(true)
+      expect(recorded(fresh).has('github-copilot')).toBe(true)
       await fresh.removeSlot('github-copilot', 'signin', 'remove')
       expect(table.rows().map((row) => row.id)).toContain('ghc_lookalike')
       expect(table.rows().map((row) => row.id)).not.toContain('ghc_ours')
@@ -838,6 +847,439 @@ describe('s7b-4: sign-in ownership survives a quarantined slot file — only fro
     })
     table.seed({ ...userKey('ghc_x', 'github-copilot', 'tok'), label: adoptedSigninLabel('aaaa') })
     await store.vendKey('openrouter', 'k')
-    expect(store.recordedRemovableIntegrations().has('github-copilot')).toBe(false)
+    expect(recorded(store).has('github-copilot')).toBe(false)
+  })
+})
+
+describe('removeIntegration: an explicit user Remove deletes EVERY row of the integration', () => {
+  const ids = (table: ReturnType<typeof fakeCredentialTable>) => table.rows().map((row) => row.id)
+
+  it('deletes the user’s rows and ClaudeUI’s, re-activating nothing', async () => {
+    const { table, store, memory, changes } = setup()
+    table.seed(userKey('cred_user_a', 'openrouter', 'sk-a'))
+    // "Replace" was used: ClaudeUI's key took the slot, the user's row is `previousActive`.
+    await store.vendKey('openrouter', 'sk-ours')
+    expect(memory.read()['openrouter:key']).toEqual({ previousActive: 'cred_user_a' })
+    table.seed(userKey('cred_user_b', 'openrouter', 'sk-b', false))
+    // A neighbour integration is not touched.
+    table.seed(userKey('cred_other', 'anthropic', 'sk-other'))
+    table.calls.length = 0
+    changes.mockClear()
+
+    expect(await store.removeIntegration('openrouter', 'remove openrouter (test)')).toEqual([
+      'cred_user_a',
+      'cred_user_b',
+      'cred_claudeui_openrouter_v1'
+    ])
+    expect(table.calls).toEqual([
+      'list',
+      'remove cred_user_a',
+      'remove cred_user_b',
+      'remove cred_claudeui_openrouter_v1',
+      'list'
+    ])
+    expect(ids(table)).toEqual(['cred_other'])
+    expect(memory.read()).toEqual({})
+    expect(changes).toHaveBeenCalledTimes(1)
+    expect(table.leases.opened).toBe(table.leases.released)
+  })
+
+  it('deletes the inactive rows first and the active one last, whatever order the list returns them in', async () => {
+    // The fake lists (active, created) ascending, as opencode does, so on its own it would hand
+    // the active row last whether or not the store sorts. This lease lists the active row FIRST.
+    const table = fakeCredentialTable()
+    let activeFirst = false
+    const store = new OpencodeCredentialStore({
+      connect: async () => {
+        const lease = await table.connect()
+        return {
+          ...lease,
+          api: {
+            ...lease.api,
+            list: async () => {
+              const rows = await lease.api.list()
+              return activeFirst ? [...rows].reverse() : rows
+            }
+          }
+        }
+      },
+      memory: memorySlotMemory(),
+      now: () => NOW
+    })
+    table.seed(userKey('cred_user_a', 'openrouter', 'sk-a'))
+    await store.vendKey('openrouter', 'sk-ours') // active; the user's row is inactive now
+    table.seed(userKey('cred_user_b', 'openrouter', 'sk-b', false))
+    expect(table.active('openrouter')?.id).toBe('cred_claudeui_openrouter_v1')
+    table.calls.length = 0
+    activeFirst = true
+
+    await store.removeIntegration('openrouter', 'remove openrouter (test)')
+
+    const removes = table.calls.filter((call) => call.startsWith('remove '))
+    expect(removes.slice(0, 2).sort()).toEqual(['remove cred_user_a', 'remove cred_user_b'])
+    expect(removes[2]).toBe('remove cred_claudeui_openrouter_v1')
+    expect(removes).toHaveLength(3)
+    expect(ids(table)).toEqual([])
+  })
+
+  it('deletes an external reference and a sign-in made in opencode, whoever owns them', async () => {
+    const { table, store } = setup()
+    table.seed({
+      id: 'cred_azure_cli',
+      integrationID: 'azure',
+      label: 'Azure CLI',
+      activate: true,
+      value: { type: 'external', methodID: 'azure-cli' }
+    })
+    table.seed(userOauth('cred_user_oauth', 'rt-users-own', false))
+    await store.removeIntegration('azure', 'remove azure')
+    expect(ids(table)).toEqual(['cred_user_oauth'])
+    await store.removeIntegration('openai', 'remove openai')
+    expect(ids(table)).toEqual([])
+  })
+
+  it('forgets every ClaudeUI record of the integration (key, sign-in, pending) and the sign-in ledger of the deleted ids — and no other integration’s', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const { table, store, memory } = setup()
+      await store.vendKey('github-copilot', 'sk-ours')
+      const signin = await store.prepareSignin('github-copilot')
+      table.seed({ ...userKey('ghc_ours', 'github-copilot', 'tok'), label: signin.label })
+      await store.adoptSignin('github-copilot', signin.label, signin.previousActive)
+      // Another integration's adopted sign-in must come through the trim untouched.
+      const other = await store.prepareSignin('anthropic')
+      table.seed({ ...userKey('ant_ours', 'anthropic', 'tok-ant'), label: other.label })
+      await store.adoptSignin('anthropic', other.label, other.previousActive)
+      // A flow still out for the same integration keeps its pending label.
+      const pending = await store.prepareSignin('github-copilot')
+      await store.vendKey('openrouter', 'sk-keep')
+      memory.write({ ...memory.read(), 'github-copilot:oauth': { pendingRemoval: true } })
+      expect(Object.keys(memory.read()).sort()).toEqual([
+        'anthropic:signin',
+        'github-copilot:key',
+        'github-copilot:oauth',
+        'github-copilot:signin',
+        'openrouter:key'
+      ])
+      const ledger = (): string[] =>
+        (memory.readSigninLabels?.() ?? [])
+          .map((entry) => `${entry.integrationID}:${entry.id ?? 'pending'}`)
+          .sort()
+      expect(ledger()).toEqual([
+        'anthropic:ant_ours',
+        'github-copilot:ghc_ours',
+        'github-copilot:pending'
+      ])
+
+      // The first list of the lease belongs to the pending-label adoption; the second is the
+      // pending removal's, and it fails (caught) — so the `github-copilot:oauth` pending record
+      // is still there when the removal runs, and only the removal can clear it.
+      table.failNext('list', 1)
+      await store.removeIntegration('github-copilot', 'remove github-copilot')
+      expect(
+        warn.mock.calls.some((call) =>
+          String(call[1]).includes('pending removal of github-copilot:oauth failed')
+        )
+      ).toBe(true)
+
+      expect(Object.keys(memory.read()).sort()).toEqual(['anthropic:signin', 'openrouter:key'])
+      expect(ledger()).toEqual(['anthropic:ant_ours', 'github-copilot:pending'])
+      expect(memory.readSigninLabels?.().find((entry) => !entry.id)).toMatchObject({
+        hex: pending.label.slice('claudeui:signin:'.length)
+      })
+      expect(table.rows().map((row) => row.id)).toEqual(
+        expect.arrayContaining(['ant_ours', 'cred_claudeui_openrouter_v1'])
+      )
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('rings onChange and refreshes the cached snapshot (the integration leaves it)', async () => {
+    const { table, store, changes } = setup()
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    expect((await store.snapshot())?.integrations.has('openrouter')).toBe(true)
+    await store.removeIntegration('openrouter', 'remove')
+    expect(store.cachedSnapshot()?.integrations.has('openrouter')).toBe(false)
+    expect(changes).toHaveBeenCalledTimes(1)
+  })
+
+  it('a DELETE that fails mid-way surfaces, keeps the earlier deletions and ClaudeUI’s records, and still refreshes + rings onChange', async () => {
+    const { table, store, memory, changes } = setup()
+    table.seed(userKey('cred_user_a', 'openrouter', 'sk-a'))
+    await store.vendKey('openrouter', 'sk-ours')
+    table.seed(userKey('cred_user_b', 'openrouter', 'sk-b', false))
+    table.calls.length = 0
+    changes.mockClear()
+    table.failNext('remove', 1) // cred_user_a goes, cred_user_b fails
+
+    await expect(store.removeIntegration('openrouter', 'remove')).rejects.toThrow(
+      'fake remove failed'
+    )
+
+    expect(ids(table).sort()).toEqual(['cred_claudeui_openrouter_v1', 'cred_user_b'])
+    // The failure path re-lists (the cache must not keep the deleted row) …
+    expect(table.calls.at(-1)).toBe('list')
+    expect(changes).toHaveBeenCalledTimes(1)
+    // … and nothing recorded is forgotten: a later removeSlot still finds its rows.
+    expect(memory.read()['openrouter:key']).toEqual({ previousActive: 'cred_user_a' })
+    expect(table.leases.opened).toBe(table.leases.released)
+  })
+
+  describe('after a DELETE that fails part-way, the cached snapshot holds what is left', () => {
+    /**
+     * ClaudeUI's key is vended, then the user's own row takes the slot: ClaudeUI's row is the
+     * INACTIVE one, so it is deleted first, and the second DELETE (the user's) is the one that fails.
+     */
+    async function ourKeyGoneThenFailure() {
+      const rig = setup()
+      await rig.store.vendKey('openrouter', 'sk-ours')
+      rig.table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+      expect((await rig.store.snapshot())?.integrations.get('openrouter')?.ownKey).toBe(true)
+      rig.table.calls.length = 0
+      rig.changes.mockClear()
+      return rig
+    }
+
+    it('re-listed: ClaudeUI’s deleted key is no longer in it', async () => {
+      const { table, store, changes } = await ourKeyGoneThenFailure()
+      table.failNext('remove', 1) // cred_claudeui_openrouter_v1 goes, cred_user fails
+
+      await expect(store.removeIntegration('openrouter', 'remove')).rejects.toThrow(
+        'fake remove failed'
+      )
+
+      expect(table.rows().map((row) => row.id)).toEqual(['cred_user'])
+      expect(table.calls).toEqual([
+        'list',
+        'remove cred_claudeui_openrouter_v1',
+        'remove cred_user',
+        'list'
+      ])
+      expect(store.cachedSnapshot()?.integrations.get('openrouter')).toMatchObject({
+        ownKey: false,
+        activeOwned: false
+      })
+      expect(changes).toHaveBeenCalledTimes(1)
+    })
+
+    it('with the re-list failing too, falls back to the rows it had minus the deleted — and the error stays the remove’s', async () => {
+      const { table, store, changes } = await ourKeyGoneThenFailure()
+      table.failNext('remove', 1)
+      table.failNext('list', 1) // the lease's own list answers, the re-list after the failure does not
+
+      await expect(store.removeIntegration('openrouter', 'remove')).rejects.toThrow(
+        'fake remove failed'
+      )
+
+      expect(table.calls).toEqual([
+        'list',
+        'remove cred_claudeui_openrouter_v1',
+        'remove cred_user',
+        'list'
+      ])
+      expect(store.cachedSnapshot()?.integrations.get('openrouter')).toMatchObject({
+        ownKey: false,
+        activeOwned: false
+      })
+      expect(changes).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('a failure before anything was deleted rings nothing', async () => {
+    const { table, store, changes } = setup()
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    table.failNext('remove')
+    await expect(store.removeIntegration('openrouter', 'remove')).rejects.toThrow()
+    expect(changes).not.toHaveBeenCalled()
+    expect(ids(table)).toEqual(['cred_user'])
+  })
+
+  it('a later removeSlot whose previousActive row is gone does not throw (the user’s row was deleted by someone else)', async () => {
+    const { table, store, memory } = setup()
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    await store.vendKey('openrouter', 'sk-ours')
+    expect(memory.read()['openrouter:key']).toEqual({ previousActive: 'cred_user' })
+    await table.api.remove('cred_user')
+    expect(await store.removeSlot('openrouter', 'key', 'route off')).toBe(true)
+    expect(ids(table)).toEqual([])
+    expect(memory.read()).toEqual({})
+  })
+
+  it('nulls the ChatGPT token it remembers vending when the openai rows go', async () => {
+    const { table, store } = setup()
+    table.seed(userKey('cred_user_openai', 'openai', 'sk-user', false))
+    await store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
+    expect(store.vendedChatgpt()).not.toBeNull()
+    await store.removeIntegration('openai', 'remove openai')
+    expect(ids(table)).toEqual([])
+    expect(store.vendedChatgpt()).toBeNull()
+  })
+
+  it('keeps the remembered ChatGPT token for any other integration', async () => {
+    const { table, store } = setup()
+    await store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    await store.removeIntegration('openrouter', 'remove')
+    expect(store.vendedChatgpt()).not.toBeNull()
+  })
+
+  it('zero rows is a no-op that returns [], still forgets stale records and rings onChange', async () => {
+    const { table, store, memory, changes } = setup()
+    await store.vendKey('openrouter', 'sk-ours')
+    await table.api.remove('cred_claudeui_openrouter_v1') // gone behind ClaudeUI’s back
+    expect(Object.keys(memory.read())).toEqual(['openrouter:key'])
+    table.calls.length = 0
+    changes.mockClear()
+    expect(await store.removeIntegration('openrouter', 'remove openrouter')).toEqual([])
+    expect(table.calls).toEqual(['list'])
+    expect(memory.read()).toEqual({})
+    // The surface that offered this Remove saw rows that went elsewhere: its
+    // listeners (vendor map, discovery) must re-read.
+    expect(changes).toHaveBeenCalledTimes(1)
+  })
+
+  it('with opencode not installed it says so and queues nothing', async () => {
+    const { table, store, memory } = setup({ available: () => false })
+    await expect(store.removeIntegration('openrouter', 'remove')).rejects.toThrow(
+      'opencode is not installed — nothing to remove.'
+    )
+    expect(table.leases.opened).toBe(0)
+    expect(memory.read()).toEqual({})
+  })
+
+  it('refuses while an enabled shared route claims the integration — nothing deleted, asked inside the lease after the pending removals', async () => {
+    let installed = true
+    const asked: { openLeases: number; removesSoFar: number }[] = []
+    const harness: { table?: ReturnType<typeof fakeCredentialTable> } = {}
+    const { table, store, changes } = setup({
+      available: () => installed,
+      claimedBySharedRoute: async (integrationID) => {
+        asked.push({
+          openLeases: harness.table!.leases.opened - harness.table!.leases.released,
+          removesSoFar: harness.table!.calls.filter((call) => call.startsWith('remove')).length
+        })
+        return integrationID === 'openai'
+      }
+    })
+    harness.table = table
+    table.seed(userKey('cred_user_openai', 'openai', 'sk-user'))
+    table.seed(userKey('cred_user_or', 'openrouter', 'sk-or'))
+    await store.vendKey('openrouter', 'sk-ours')
+    // A removal that waited for opencode runs BEFORE the guard is asked.
+    installed = false
+    await store.removeSlot('openrouter', 'key', 'route off')
+    installed = true
+    table.calls.length = 0
+    changes.mockClear()
+
+    await expect(store.removeIntegration('openai', 'remove openai')).rejects.toThrow(
+      SHARED_ROUTE_CLAIM_MESSAGE
+    )
+    expect(asked).toEqual([{ openLeases: 1, removesSoFar: 1 }])
+    expect(table.calls.filter((call) => call.startsWith('remove'))).toEqual([
+      'remove cred_claudeui_openrouter_v1'
+    ])
+    expect(ids(table)).toContain('cred_user_openai')
+    expect(changes).toHaveBeenCalledTimes(1) // the pending removal's, not the refused one's
+    // An unclaimed integration goes through the same guard.
+    expect(await store.removeIntegration('openrouter', 'remove openrouter')).toEqual([
+      'cred_user_or'
+    ])
+  })
+
+  it('fails closed: a claim guard that throws rejects the Remove — nothing deleted, nothing rung, the lease released', async () => {
+    const { table, store, memory, changes } = setup({
+      claimedBySharedRoute: () => {
+        throw new Error('shared definitions unreadable')
+      }
+    })
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    await store.vendKey('openrouter', 'sk-ours')
+    table.calls.length = 0
+    changes.mockClear()
+    const recordsBefore = structuredClone(memory.read())
+
+    await expect(store.removeIntegration('openrouter', 'remove openrouter')).rejects.toThrow(
+      'shared definitions unreadable'
+    )
+
+    expect(table.calls.filter((call) => call.startsWith('remove'))).toEqual([])
+    expect(ids(table)).toEqual(['cred_user', 'cred_claudeui_openrouter_v1'])
+    expect(memory.read()).toEqual(recordsBefore)
+    expect(changes).not.toHaveBeenCalled()
+    expect(table.leases.opened).toBe(table.leases.released)
+  })
+
+  it('logs every deleted row at WARN (on disk at the default level) by id, value type and owner — never a value or a label', async () => {
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const { table, store } = setup()
+      table.seed({
+        ...userKey('cred_user_a', 'openrouter', 'sk-SECRET-user'),
+        label: 'my-LABEL-secret'
+      })
+      await store.vendKey('openrouter', 'sk-SECRET-ours')
+      await store.removeIntegration('openrouter', 'remove openrouter (test)')
+      const deletions = warn.mock.calls
+        .map((call) => String(call[1]))
+        .filter((line) => line.includes('deleted '))
+      const lines = [...info.mock.calls, ...warn.mock.calls].map((call) => String(call[1]))
+      expect(deletions).toHaveLength(2)
+      expect(deletions[0]).toMatch(
+        /remove openrouter \(test\): deleted cred_user_a .*openrouter key row, owner user/
+      )
+      expect(deletions[1]).toMatch(
+        /deleted cred_claudeui_openrouter_v1 .*openrouter key row, owner claudeui/
+      )
+      expect(lines.join('\n')).not.toMatch(/SECRET|LABEL/)
+    } finally {
+      info.mockRestore()
+      warn.mockRestore()
+    }
+  })
+
+  it('removeSlot and the other automatic paths still never delete a row of the user’s', async () => {
+    const { table, store } = setup()
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    await store.vendKey('openrouter', 'sk-ours')
+    await store.removeSlot('openrouter', 'key', 'route off')
+    expect(ids(table)).toEqual(['cred_user'])
+    expect(table.calls.filter((call) => call.startsWith('remove cred_user'))).toEqual([])
+  })
+})
+
+describe('integrationsWithRows', () => {
+  it('lists every integration holding ANY row (anyone’s, any type) from a fresh read', async () => {
+    const { table, store } = setup()
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    await store.vendKey('anthropic', 'sk-ours')
+    table.seed({
+      id: 'cred_azure_cli',
+      integrationID: 'azure',
+      label: 'Azure CLI',
+      activate: true,
+      value: { type: 'external', methodID: 'azure-cli' }
+    })
+    expect([...(await store.integrationsWithRows())].sort()).toEqual([
+      'anthropic',
+      'azure',
+      'openrouter'
+    ])
+    // A row written outside ClaudeUI is seen by the very next call (no stale cache).
+    table.seed(userKey('cred_user_2', 'groq', 'sk-groq'))
+    expect((await store.integrationsWithRows()).has('groq')).toBe(true)
+  })
+
+  it('answers from the last snapshot (then empty) while opencode cannot run', async () => {
+    let installed = true
+    const { table, store } = setup({ available: () => installed })
+    table.seed(userKey('cred_user', 'openrouter', 'sk-user'))
+    await store.snapshot()
+    installed = false
+    expect([...(await store.integrationsWithRows())]).toEqual(['openrouter'])
+    const cold = setup({ available: () => false })
+    expect((await cold.store.integrationsWithRows()).size).toBe(0)
   })
 })

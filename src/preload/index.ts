@@ -3,11 +3,14 @@ import type {
   ApprovalDecision,
   AttachmentUpload,
   ClaudeAPI,
+  LoadSessionHistoryOptions,
   PermissionSuggestion,
   ProxySettings
 } from '../shared/types'
 import { buildMockupUrl } from '../shared/mockup-url'
 import { verifierHooksEnabled } from '../shared/verifier-hooks'
+import { INVOKE_PROGRESS_EVENT, INVOKE_WITH_PROGRESS_CHANNEL } from '../shared/progress-throttle'
+import type { InvokeProgress } from '../shared/remote-protocol'
 
 /**
  * Factory for IPC event handler registration.
@@ -66,12 +69,52 @@ ipcRenderer.on('sync-port', (event) => {
  * Throws on { ok: false } so callers can .catch() as expected.
  */
 async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
-  const result = await ipcRenderer.invoke(channel, ...args)
+  return unwrapResult<T>(channel, await ipcRenderer.invoke(channel, ...args))
+}
+
+function unwrapResult<T>(channel: string, result: unknown): T {
   if (result && typeof result === 'object' && 'ok' in result) {
-    if (!result.ok) throw new Error(result.error ?? `IPC ${channel} failed`)
-    return result.data as T
+    const envelope = result as { ok: boolean; data?: unknown; error?: string }
+    if (!envelope.ok) throw new Error(envelope.error ?? `IPC ${channel} failed`)
+    return envelope.data as T
   }
   return result as T
+}
+
+// ---------------------------------------------------------------------------
+// Invoke with progress (ADR-102)
+// ---------------------------------------------------------------------------
+//
+// `ipcRenderer.invoke` resolves once, so a call that reports progress rides the
+// `invoke:with-progress` channel and gets `invoke:progress (callId, p)` messages
+// from main, routed here to the call's own callback. INTERNAL: deliberately NOT a
+// member of `api` / not exposed on contextBridge — only the named wrappers below
+// (`loadSessionHistory`) are, so the main world cannot pick the channel.
+
+const progressListeners = new Map<string, (progress: InvokeProgress) => void>()
+let progressCallSeq = 0
+
+ipcRenderer.on(INVOKE_PROGRESS_EVENT, (_event, callId: unknown, progress: InvokeProgress) => {
+  if (typeof callId !== 'string') return
+  try {
+    progressListeners.get(callId)?.(progress)
+  } catch {
+    // A throwing listener must not break the router for every other call.
+  }
+})
+
+async function invokeWithProgress<T>(
+  channel: string,
+  args: unknown[],
+  onProgress: (progress: InvokeProgress) => void
+): Promise<T> {
+  const callId = `${++progressCallSeq}`
+  progressListeners.set(callId, onProgress)
+  try {
+    return (await ipcRenderer.invoke(INVOKE_WITH_PROGRESS_CHANNEL, callId, channel, ...args)) as T
+  } finally {
+    progressListeners.delete(callId)
+  }
 }
 
 const api: ClaudeAPI = {
@@ -164,8 +207,30 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:load-opencode-history', sessionId),
   listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
   loadPiHistory: (sessionId: string) => ipcRenderer.invoke('session:load-pi-history', sessionId),
-  loadSessionHistory: (sessionId: string, projectKey: string, resumeSessionAt?: string) =>
-    ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
+  loadSessionHistory: (
+    sessionId: string,
+    projectKey: string,
+    resumeSessionAt?: string,
+    onProgress?: (progress: InvokeProgress) => void,
+    options?: LoadSessionHistoryOptions
+  ) => {
+    // The options ride as a 4th wire arg only when given: a call without them is
+    // the exact 3-arg invoke an older host understands.
+    const wireArgs = options
+      ? [sessionId, projectKey, resumeSessionAt, options]
+      : [sessionId, projectKey, resumeSessionAt]
+    return onProgress
+      ? invokeWithProgress('session:load-history', wireArgs, onProgress)
+      : ipcRenderer.invoke('session:load-history', ...wireArgs)
+  },
+  loadSessionStatusLine: (
+    sessionId: string,
+    projectKey: string,
+    onProgress?: (progress: InvokeProgress) => void
+  ) =>
+    onProgress
+      ? invokeWithProgress('session:load-status-line', [sessionId, projectKey], onProgress)
+      : ipcRenderer.invoke('session:load-status-line', sessionId, projectKey),
   loadSubagentHistory: (sessionId: string, projectKey: string, agentId: string) =>
     ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
   getBlob: (blobId: string) => ipcRenderer.invoke('blob:get', blobId),
@@ -210,6 +275,16 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:background-task', routingId, toolUseId),
   dequeueMessage: (routingId: string, value: string) =>
     ipcRenderer.invoke('session:dequeue-message', routingId, value),
+  allowPeerMessages: (routingId: string) =>
+    ipcRenderer.invoke('session:allow-peer-messages', routingId),
+  setSessionGrouped: (routingId: string, grouped: boolean) =>
+    ipcRenderer.invoke('session:link:set-grouped', routingId, grouped),
+  startSessionProposal: (proposalId: string, grouped?: boolean) =>
+    ipcRenderer.invoke('session:proposal:start', proposalId, grouped),
+  dismissSessionProposal: (proposalId: string) =>
+    ipcRenderer.invoke('session:proposal:dismiss', proposalId),
+  respondContextPressure: (routingId: string, answer: 'handoff' | 'dismiss') =>
+    ipcRenderer.invoke('session:context-pressure:respond', routingId, answer),
   recallQueued: (routingId: string) => ipcRenderer.invoke('session:recall-queued', routingId),
   askSideQuestion: (routingId: string, question: string) =>
     ipcRenderer.invoke('session:ask-side-question', routingId, question),
@@ -229,6 +304,8 @@ const api: ClaudeAPI = {
   getEngineModels: (engineId) => ipcRenderer.invoke('session:get-engine-models', engineId),
   judgeModelSupport: (engineId, values) =>
     ipcRenderer.invoke('automode:judge-model-support', engineId, values),
+  judgeRouteResting: (engineId, model, accountId) =>
+    ipcRenderer.invoke('automode:judge-route-resting', engineId, model, accountId),
   getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
   setOpencodeProviderDisabled: (providerId: string, disabled: boolean) =>
     ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),
@@ -316,13 +393,34 @@ const api: ClaudeAPI = {
   createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
   getWorktreeStatus: (worktreePath: string, originalHead: string) =>
     unwrap('worktree:status', worktreePath, originalHead),
+  // Declared `withProgress` (the remote client's timeout slides on it), so it always rides the
+  // progress path; the signature has no callback, hence the no-op.
   removeWorktree: (worktreePath: string, branch: string, gitRoot: string) =>
-    unwrap('worktree:remove', worktreePath, branch, gitRoot),
-  listWorktrees: (cwd: string) => unwrap('worktree:list', cwd),
+    invokeWithProgress('worktree:remove', [worktreePath, branch, gitRoot], () => {}).then((r) =>
+      unwrapResult('worktree:remove', r)
+    ),
+  inventoryWorktrees: (cwd: string) => unwrap('worktree:inventory', cwd),
+  inspectWorktree: (cwd: string, id: string) => unwrap('worktree:inspect', cwd, id),
+  // The progress path only when a callback is given (ADR-102); the safeHandler envelope
+  // rides back through `invokeWithProgress` unchanged, so it is unwrapped here.
+  measureWorktree: (cwd: string, id: string, onProgress?: (progress: InvokeProgress) => void) =>
+    onProgress
+      ? invokeWithProgress('worktree:measure', [cwd, id], onProgress).then((r) =>
+          unwrapResult('worktree:measure', r)
+        )
+      : unwrap('worktree:measure', cwd, id),
+  removeWorktrees: (cwd: string, ids: string[], onProgress?: (progress: InvokeProgress) => void) =>
+    onProgress
+      ? invokeWithProgress('worktree:remove-many', [cwd, ids], onProgress).then((r) =>
+          unwrapResult('worktree:remove-many', r)
+        )
+      : unwrap('worktree:remove-many', cwd, ids),
 
   // App lifecycle
-  confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+  confirmQuit: (removeWorktreePaths?: string[]) =>
+    ipcRenderer.invoke('app:quit-confirm', removeWorktreePaths ?? []),
   cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
+  ackQuitPrompt: () => ipcRenderer.invoke('app:quit-prompting'),
 
   // Git operations — all handlers use safeHandler, so unwrap the { ok, data } envelope
   gitCheckRepo: (cwd: string) => unwrap<boolean>('git:check-repo', cwd),
@@ -397,6 +495,12 @@ const api: ClaudeAPI = {
   syncUsageHubNow: () => ipcRenderer.invoke('usage-hub:sync-now'),
   resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
   forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
+
+  // The OpenRouter tab (Usage Analytics): safeHandler envelopes, hence `unwrap`.
+  openrouterStatus: () => unwrap('openrouter:status'),
+  openrouterOverview: () => unwrap('openrouter:overview'),
+  openrouterModels: (scope) => unwrap('openrouter:models', scope),
+  openrouterModelEndpoints: (modelId) => unwrap('openrouter:model-endpoints', modelId),
 
   // Native Anthropic OAuth (ADR-014)
   signIn: () => ipcRenderer.invoke('auth:sign-in'),

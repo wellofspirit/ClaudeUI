@@ -1539,6 +1539,8 @@ describe('mapPiEvent — custom messages (ADR-089 S3)', () => {
     expect(out).toEqual([
       {
         kind: 'message',
+        // The message says which delivery it is, so a host that shows its own row can skip the echo.
+        deliveryId: 'd-1',
         message: {
           id: expect.any(String),
           role: 'system',

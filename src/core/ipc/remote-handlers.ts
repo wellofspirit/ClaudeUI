@@ -2,18 +2,26 @@ import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
 import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../services/remote-dispatcher'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
 import { SessionManager } from '../services/session-manager'
+import { respondContextPressure } from '../services/context-pressure'
+import { setSessionGrouped } from '../services/session-links'
+import { dismissProposalFromClient, startProposalFromClient } from '../services/session-tools'
 import {
+  loadSessionStatusLine,
   loadSubagentHistory,
   buildSubagentFileMap,
   loadBackgroundOutput
 } from '../services/session-history'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
+import { trackMockupWatcher } from '../services/mockup-watch-registry'
+import { syncTimingReports } from '../services/sync-timing-report'
+import { SYNC_REPORT_TIMING_CHANNEL } from '../shared/sync/sync-timing'
 import { gitServiceManager } from '../services/git-service'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { accountState, hostAppVersion } from '../host'
@@ -22,6 +30,7 @@ import {
   loadOpencodeSessionHistory
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
+import { withDispatchTasks } from '../services/dispatch-task-history'
 import {
   discoverOpencodeProviderCatalog,
   getOpencodeProviderModels
@@ -35,7 +44,12 @@ import { getPiModelCatalogGroups } from '../pi/model-discovery'
 import { listEngineModels } from './engine-models'
 import { locatePiDisplayPath } from '../pi/pi-locate'
 import { credentialSync } from '../auth/vault/CredentialSync'
-import type { EngineModelGroup, ModelInfo, ProviderRemoveKind } from '../../shared/types'
+import type {
+  EngineModelGroup,
+  LoadSessionHistoryOptions,
+  ModelInfo,
+  ProviderRemoveKind
+} from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import {
@@ -64,7 +78,8 @@ import type {
   ClaudePermissions
 } from '../../shared/types'
 import { getSdkExecutableOpts } from '../services/claude-session'
-import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
+import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { answerApproval } from './approval-response'
 import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { getCliVersion } from '../sdk/harness'
@@ -77,6 +92,7 @@ import { generateCommitMessage } from '../services/commit-message'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { logger } from '../services/logger'
 import { sharedProviderService } from '../shared-providers'
+import { decorateSharedProviderClaims } from '../shared-providers/opencode-claims'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { terminalService } from '../services/terminal-service'
 import { remoteVoiceOwner, voiceRelay } from '../services/voice-relay'
@@ -93,6 +109,7 @@ import { opt } from './wire-args'
 import { configCommands } from './config-commands'
 import { ideCommands, type IdeCommandHost } from './ide-commands'
 import { usageHubCommands } from './usage-hub-commands'
+import { openrouterCommands } from './openrouter-commands'
 import { harnessCommands } from './harness-commands'
 import { voicePackCommands } from './voice-pack-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
@@ -127,6 +144,7 @@ import {
   readBackgroundRange,
   stopTask,
   backgroundTask,
+  allowPeerMessages,
   dequeueMessage,
   recallQueued,
   askSideQuestion,
@@ -152,6 +170,7 @@ import {
   codexDeletePlanFor,
   clearConversation,
   judgeModelSupport,
+  judgeRouteResting,
   approveBlocked
 } from './handlers-core'
 
@@ -440,14 +459,8 @@ export function registerRemoteHandlers(
       answers?: Record<string, string>,
       updatedPermissions?: PermissionSuggestion[]
     ) => {
-      // Reserved `xeng:` prefix → forwarded cross-engine dispatch approval (ADR-033).
-      if (
-        requestId.startsWith(XENG_REQUEST_PREFIX) &&
-        crossEngineDispatcher.resolveApproval(requestId, decision, answers, updatedPermissions)
-      ) {
-        return
-      }
-      manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
+      // Routing (`xeng:` dispatch cards vs the session) and the cross-client dismiss: approval-response.ts.
+      answerApproval(manager, routingId, requestId, decision, answers, updatedPermissions)
     }
   })
 
@@ -527,6 +540,56 @@ export function registerRemoteHandlers(
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => recallQueued(manager, routingId)
+  })
+
+  handleRemote({
+    channel: 'session:allow-peer-messages',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => allowPeerMessages(manager, routingId)
+  })
+
+  // "Detach from group" / "Add to group" in the sidebar (slice 1b, reworked in slice 5).
+  // `routingId` is the row's own session, so the audit row names the session the user
+  // acted on.
+  handleRemote({
+    channel: 'session:link:set-grouped',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, grouped: boolean) => setSessionGrouped(routingId, grouped)
+  })
+
+  // The user's click on a proposal card (session tools, slice 1c-b). The argument is
+  // the proposal's id, not a session id; the audit row for the click is the registry's.
+  // `grouped` is which Start button was clicked; anything but a boolean (an older client) falls back
+  // to the proposal's own relation.
+  handleRemote({
+    channel: 'session:proposal:start',
+    capability: 'chat',
+    kind: 'command',
+    // The click's audit row carries the calling connection, so it needs it first.
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string, grouped?: boolean) =>
+      startProposalFromClient(proposalId, grouped, connection)
+  })
+  handleRemote({
+    channel: 'session:proposal:dismiss',
+    capability: 'chat',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string) =>
+      dismissProposalFromClient(proposalId, connection)
+  })
+
+  // The user's answer to the context-pressure banner (slice 4): Hand off or Not now.
+  handleRemote({
+    channel: 'session:context-pressure:respond',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, answer: string) => respondContextPressure(routingId, answer)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.
@@ -624,6 +687,15 @@ export function registerRemoteHandlers(
     handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
   })
 
+  // The judge route's rate-limit cooldown (see session.ipc.ts): a time, never a token.
+  handleRemote({
+    channel: 'automode:judge-route-resting',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, model: unknown, accountId?: unknown) =>
+      judgeRouteResting(engineId, model, accountId)
+  })
+
   // Full opencode provider catalog / per-provider models for the allowlist UI.
   handleRemote({
     channel: 'session:get-opencode-providers',
@@ -631,7 +703,10 @@ export function registerRemoteHandlers(
     kind: 'query',
     handler: async () => {
       if (!opencodeServerManager.isBinaryAvailable()) return []
-      return await discoverOpencodeProviderCatalog()
+      // Claims decorated exactly as the desktop handler does: a browser/phone
+      // must see the same "vended by a shared provider" warning (and the same
+      // refused Remove) as the desktop.
+      return decorateSharedProviderClaims(await discoverOpencodeProviderCatalog())
     }
   })
   handleRemote({
@@ -717,7 +792,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-opencode-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string) => loadOpencodeSessionHistory(sessionId)
+    handler: async (sessionId: string) =>
+      withDispatchTasks(sessionId, await loadOpencodeSessionHistory(sessionId))
   })
   handleRemote({
     channel: 'session:list-pi',
@@ -729,7 +805,8 @@ export function registerRemoteHandlers(
     channel: 'session:load-pi-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string) => loadPiSessionHistory(sessionId)
+    handler: async (sessionId: string) =>
+      withDispatchTasks(sessionId, await loadPiSessionHistory(sessionId))
   })
 
   // Live transcript watching (drives the remote client's live history view).
@@ -801,8 +878,38 @@ export function registerRemoteHandlers(
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string | null) => {
-      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt))
+    // ADR-102: the reporter leads the args; the wire frames come from remote-server.
+    withProgress: true,
+    handler: async (
+      progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      resumeSessionAt?: string | null,
+      options?: LoadSessionHistoryOptions | null
+    ) => {
+      // Both identifiers are caller-supplied and joined into a ~/.claude/projects path
+      // by the Claude reader. Every engine's real id and projectKey is a single
+      // segment (uuid / `ses_…` ids; `cwdToProjectKey` is `[A-Za-z0-9-]*`), so one
+      // check serves the engine dispatch too.
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionHistory(sessionId, projectKey, opt(resumeSessionAt), undefined, {
+        onProgress: progress,
+        // Strictly a literal `true`: any other shape of the (client-supplied) options is ignored.
+        deferStatusLine: options?.deferStatusLine === true
+      })
+    }
+  })
+
+  handleRemote({
+    channel: 'session:load-status-line',
+    capability: 'fs-read',
+    kind: 'query',
+    withProgress: true,
+    handler: async (progress: ProgressReporter, sessionId: string, projectKey: string) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionStatusLine(sessionId, projectKey, progress)
     }
   })
 
@@ -810,7 +917,18 @@ export function registerRemoteHandlers(
     channel: 'session:load-subagent-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, agentId: string) => {
+    // Declared so the transport sends its `sending` frame before the (large)
+    // response and the web client's 30 s timeout slides; reports nothing itself.
+    withProgress: true,
+    handler: async (
+      _progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      agentId: string
+    ) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      assertSafePathSegment(agentId, 'agentId')
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
   })
@@ -824,6 +942,22 @@ export function registerRemoteHandlers(
     capability: 'chat',
     kind: 'query',
     handler: async (blobId: string) => getBlob(blobId)
+  })
+
+  // The web client's cost of one full sync, into the host log (`SyncStats`). The
+  // desktop renderer relays its own through `log:relay`; a browser has no such
+  // channel, so this is the one narrow door: ONE object of numbers, validated and
+  // formatted by the host, rate-limited per connection (hence `withConnection`).
+  // `chat` because every connection that can sync holds it — the snapshot this
+  // reports on is chat-class data — and a `query`, so it is neither audited nor
+  // behind step-up. Remote-only on purpose: nothing on the desktop calls it.
+  handleRemote({
+    channel: SYNC_REPORT_TIMING_CHANNEL,
+    capability: 'chat',
+    kind: 'query',
+    withConnection: true,
+    handler: async (connection: CommandConnection, report: unknown) =>
+      syncTimingReports.report(connection.connectionId, report)
   })
 
   handleRemote({
@@ -1300,7 +1434,11 @@ export function registerRemoteHandlers(
 
   const mockupWatchers = new Map<
     string,
-    { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }
+    {
+      watcher: fs.FSWatcher
+      debounceTimer: ReturnType<typeof setTimeout> | null
+      untrack: () => void
+    }
   >()
 
   const closeMockupWatcher = (key: string): void => {
@@ -1312,6 +1450,7 @@ export function registerRemoteHandlers(
       /* already closed */
     }
     if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+    entry.untrack()
     mockupWatchers.delete(key)
   }
 
@@ -1334,7 +1473,8 @@ export function registerRemoteHandlers(
 
       const entry = {
         watcher: null! as fs.FSWatcher,
-        debounceTimer: null as ReturnType<typeof setTimeout> | null
+        debounceTimer: null as ReturnType<typeof setTimeout> | null,
+        untrack: (): void => {}
       }
 
       // Recursive + debounced, matching the desktop IPC watcher in session.ipc.ts.
@@ -1353,6 +1493,8 @@ export function registerRemoteHandlers(
       // uncaughtException, and the dead watcher would otherwise stay in the map
       // behind the has() guard above — permanently blocking re-watch. Drop it.
       entry.watcher.on('error', () => closeMockupWatcher(key))
+      // Visible to the worktree remover, which closes the watches under a removed path first.
+      entry.untrack = trackMockupWatcher(dirPath, () => closeMockupWatcher(key))
 
       mockupWatchers.set(key, entry)
     }
@@ -1548,6 +1690,17 @@ export function registerRemoteHandlers(
   // settings group that configures it. `capability: 'config'`, like the rest of
   // the metering surface — and no shape here can return the device secret.
   for (const cmd of usageHubCommands()) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // The OpenRouter tab (Usage Analytics)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop transport spreads. `config` queries:
+  // the figures are the dashboard's, and the vault key they are read with never
+  // appears in an answer (see `openrouter-commands.ts`).
+  for (const cmd of openrouterCommands()) {
     handleRemote(cmd)
   }
 

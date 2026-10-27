@@ -1,5 +1,5 @@
 /**
- * The voice worker's entry point — ADR-101 §3–4, local-voice-spec C3.
+ * The voice worker's entry point — ADR-101 §3–4, docs/architecture/local-voice.md C3.
  *
  * One process per host loads the speech model once and serves every capture
  * (the desktop window's and remote browsers') through `server.ts`. Keeping it out

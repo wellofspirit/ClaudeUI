@@ -50,6 +50,7 @@ import { getSecurestorageEnv } from '../../../core/sdk/securestorage-env'
 import { serviceSession } from '../../../core/services/service-session'
 import { authManager } from '../auth-manager'
 import { logger } from '../../../core/services/logger'
+import { getAllAccounts, deleteAccountRow } from '../../../core/services/db'
 
 const ACCOUNTS_DIR = path.join(hoisted.TEST_HOME, '.claude', 'ui', 'accounts')
 
@@ -70,6 +71,9 @@ describe('AccountManager', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     fs.rmSync(ACCOUNTS_DIR, { recursive: true, force: true })
+    // Accounts live in the (process-wide, in-memory) DB, not under ACCOUNTS_DIR:
+    // wiping only the dir leaves every earlier test's rows behind for init() to reload.
+    for (const a of getAllAccounts()) deleteAccountRow(a.id)
     const w = makeWindow()
     sent = w.sent
     accountManager.init(w.win) // reloads (now-empty) state from disk
@@ -159,10 +163,16 @@ describe('AccountManager', () => {
       new Error('service session down')
     )
     await accountManager.setEnabled(true)
-    await accountManager.addAccount()
+    const state = await accountManager.addAccount()
     // Flush the fire-and-forget catch.
     await new Promise((r) => setTimeout(r, 0))
-    expect(logger.error).toHaveBeenCalled()
+    // The account was still created and made active; only its login failed to
+    // start, and the failure is reported with its cause.
+    expect(state.accounts.some((a) => a.id === state.activeId)).toBe(true)
+    expect(logger.error).toHaveBeenCalledWith(
+      'AccountManager',
+      expect.stringContaining('service session down')
+    )
   })
 
   it('switchAccount changes active + env + requests session respawn', async () => {

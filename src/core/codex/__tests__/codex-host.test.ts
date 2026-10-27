@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { readFileSync, readdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -185,6 +186,18 @@ describe('one host per home and account', () => {
     expect(FakeClient.instances[0].options.label).toBe('host')
     a.release()
     b.release()
+  })
+
+  it('always spawns the app-server with the home directory as its cwd, never the acquirer’s (C-S12)', async () => {
+    // The process outlives every session; a project/worktree cwd would keep that directory
+    // locked on Windows for as long as the host lives.
+    const registry = build()
+    const handle = await registry.acquire({
+      cwd: join('/projects', 'repo', '.claude', 'worktrees', 'w')
+    })
+    expect(FakeClient.instances).toHaveLength(1)
+    expect(FakeClient.instances[0].options.cwd).toBe(homedir())
+    handle.release()
   })
 
   it('gives two accounts two hosts, each injected once, with no cross-injection', async () => {
@@ -390,6 +403,43 @@ describe('quit', () => {
       code: 'host-disposed'
     })
     b.release()
+  })
+
+  it('shutdown also refuses every later acquire: no app-server is spawned after the teardown', async () => {
+    const registry = build()
+    await registry.acquire({ cwd: '/isolated' })
+    registry.shutdown()
+    const spawned = FakeClient.instances.length
+
+    await expect(registry.acquire({ cwd: '/isolated' })).rejects.toThrow(/shut down/)
+    await expect(
+      registry.acquire({ cwd: '/isolated', identity: { accountId: 'acct-z' } })
+    ).rejects.toThrow(/shut down/)
+
+    expect(FakeClient.instances).toHaveLength(spawned)
+    expect(registry.size).toBe(0)
+  })
+
+  it('a shutdown that lands while the account resolves does not spawn either', async () => {
+    let finish: (id: string | null) => void = () => {}
+    const registry = build({ activeAccountId: () => new Promise((resolve) => (finish = resolve)) })
+    const pending = registry.acquire({ cwd: '/isolated', identity: { accountId: null } })
+    registry.shutdown()
+    finish('acct-late')
+
+    await expect(pending).rejects.toThrow(/shut down/)
+    expect(FakeClient.instances).toHaveLength(0)
+  })
+
+  it('dispose alone stays reusable (a later acquire starts a new host)', async () => {
+    const registry = build()
+    await registry.acquire({ cwd: '/isolated' })
+    registry.dispose()
+
+    const again = await registry.acquire({ cwd: '/isolated' })
+
+    expect(registry.size).toBe(1)
+    again.release()
   })
 })
 

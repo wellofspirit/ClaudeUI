@@ -12,7 +12,8 @@
  * It implements exactly the slice of the WebAuthn data model the ClaudeUI server
  * uses (ADR-052): ES256 (`alg: -7`) credentials, `attestationType: 'none'`,
  * `userVerification: 'required'`. It is NOT a general authenticator emulator —
- * no RSA, no attestation statements, no extensions.
+ * no RSA, no attestation statements, no extensions. (The COSE `alg` LABEL can be
+ * overridden for algorithm-admission tests; the key material stays P-256.)
  *
  * Layout references (W3C WebAuthn L2 §6.1 authenticator data):
  *   rpIdHash (32) | flags (1) | signCount (4 BE) | [attestedCredentialData]
@@ -57,6 +58,13 @@ export interface VirtualAuthenticatorOptions {
   skipUserVerification?: boolean
   /** 16-byte AAGUID. Defaults to all zeros, which is what platform authenticators send. */
   aaguid?: Buffer
+  /**
+   * COSE `alg` label written into the registration public key. Defaults to -7
+   * (ES256). The key material stays P-256 regardless: this exists to test the
+   * server's ALGORITHM ADMISSION check, which runs before any crypto (and
+   * `fmt: 'none'` never verifies an attestation signature).
+   */
+  alg?: number
 }
 
 /**
@@ -86,12 +94,13 @@ export class VirtualAuthenticator {
     const x = Buffer.from(jwk.x, 'base64url')
     const y = Buffer.from(jwk.y, 'base64url')
 
-    // COSE_Key for ES256 (RFC 8152 §13.1.1): kty=EC2(2), alg=ES256(-7),
-    // crv=P-256(1), x, y. A Map (not an object) because CBOR label keys are
-    // negative integers, which a JS object cannot express.
+    // COSE_Key for ES256 (RFC 8152 §13.1.1): kty=EC2(2), alg=ES256(-7) by
+    // default (overridable for algorithm-admission tests), crv=P-256(1), x, y.
+    // A Map (not an object) because CBOR label keys are negative integers, which
+    // a JS object cannot express.
     const cose = new Map<number, number | Uint8Array>([
       [1, 2],
-      [3, -7],
+      [3, opts.alg ?? -7],
       [-1, 1],
       [-2, new Uint8Array(x)],
       [-3, new Uint8Array(y)]

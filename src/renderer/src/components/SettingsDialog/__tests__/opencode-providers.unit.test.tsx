@@ -16,7 +16,7 @@
  *  - Renaming a provider id moves its models to the new key and drops the old.
  *  - An unmodelled field (npm) survives editing a modelled one (ADR-031 leaf
  *    merge — the projection is lossy, so a round-trip must not clobber).
- *  - API keys go to opencode's own auth.json via vendor-auth:set-key and NEVER
+ *  - API keys go to opencode's own credential store via vendor-auth:set-key and NEVER
  *    into the opencode.json settings payload (ADR-028).
  *  - A shared-provider-managed declaration is read-only, because the shared
  *    provider compiles it and would overwrite edits on its next sync.
@@ -62,7 +62,6 @@ function installApiStub(
   }
 ): void {
   credIdState = opts?.credIds ? structuredClone(opts.credIds) : {}
-  ;(globalThis as { window: Window }).window = globalThis.window ?? ({} as Window)
   ;(window as unknown as { api: Record<string, unknown> }).api = {
     loadOpencodeSettings: vi.fn(async () => structuredClone(initial)),
     saveOpencodeSettings,
@@ -315,8 +314,11 @@ describe('opencode provider configuration dialog', () => {
         expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
       )
 
-      // Reopening via Remove key must show a blank field — the transient input
-      // state was cleared on save, not retained.
+      // Reopening via Remove key (confirmed by a second press) must show a blank
+      // field — the transient input state was cleared on save, not retained.
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.removeKey'))
+      })
       await act(async () => {
         fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.removeKey'))
       })
@@ -328,7 +330,42 @@ describe('opencode provider configuration dialog', () => {
       })
     })
 
-    it('remove-key calls vendorAuthRemove and returns to the API key input', async () => {
+    /** Click the Remove key / Disconnect button once. */
+    async function pressRemove(): Promise<void> {
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.removeKey'))
+      })
+    }
+
+    const REMOVE_NOTE =
+      'Removing deletes every credential opencode holds for this provider. opencode outside ClaudeUI uses the same store, so it loses them too.'
+
+    it('remove-key is a two-press confirm: the first press arms it and calls nothing', async () => {
+      installApiStub(
+        { providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } },
+        { credIds: { 'my-ollama': 'api' } }
+      )
+      await renderModal('my-ollama')
+      const button = await screen.findByTestId('OpencodeProviderConfigModal.removeKey')
+      expect(button).toHaveTextContent('Remove key')
+      expect(button).not.toHaveTextContent('Remove key?')
+      expect(screen.queryByTestId('OpencodeProviderConfigModal.removeKeyNote')).toBeNull()
+
+      await pressRemove()
+
+      expect(vendorAuthRemove).not.toHaveBeenCalled()
+      expect(screen.getByTestId('OpencodeProviderConfigModal.removeKey')).toHaveTextContent(
+        'Remove key?'
+      )
+      expect(screen.getByTestId('OpencodeProviderConfigModal.removeKeyNote')).toHaveTextContent(
+        REMOVE_NOTE
+      )
+      // Still holding the key: nothing was deleted by arming.
+      expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+      expect(screen.queryByTestId('OpencodeProviderConfigModal.apiKey')).toBeNull()
+    })
+
+    it('remove-key calls vendorAuthRemove on the second press and returns to the API key input', async () => {
       await createWithId()
       await act(async () => {
         fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.apiKey'), {
@@ -342,14 +379,108 @@ describe('opencode provider configuration dialog', () => {
         expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
       )
 
-      await act(async () => {
-        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.removeKey'))
-      })
+      await pressRemove()
+      expect(vendorAuthRemove).not.toHaveBeenCalled()
+      await pressRemove()
 
       await waitFor(() => expect(vendorAuthRemove).toHaveBeenCalledWith('opencode', 'my-ollama'))
+      expect(vendorAuthRemove).toHaveBeenCalledTimes(1)
       await waitFor(() =>
         expect(screen.getByTestId('OpencodeProviderConfigModal.apiKey')).toBeInTheDocument()
       )
+      // The armed state does not leak into the next key.
+      expect(screen.queryByTestId('OpencodeProviderConfigModal.removeKeyNote')).toBeNull()
+    })
+
+    it('a refused remove-key says why (the refusal’s own text), not a generic failure', async () => {
+      await createWithId()
+      await act(async () => {
+        fireEvent.change(screen.getByTestId('OpencodeProviderConfigModal.apiKey'), {
+          target: { value: 'sk-test-123' }
+        })
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('OpencodeProviderConfigModal.saveKey'))
+      })
+      await waitFor(() =>
+        expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+      )
+      const refusal =
+        'ClaudeUI’s own provider delivers this one now. Refresh Settings before removing it.'
+      vendorAuthRemove.mockRejectedValueOnce(new Error(refusal))
+
+      await pressRemove()
+      await pressRemove()
+
+      await waitFor(() => expect(screen.getByText(refusal)).toBeInTheDocument())
+      expect(screen.queryByText('Failed to remove key.')).toBeNull()
+      // Nothing was removed: the key is still shown as set.
+      expect(screen.getByTestId('OpencodeProviderConfigModal.keyStatus')).toBeInTheDocument()
+    })
+
+    it('an OAuth credential reads Disconnect, then Disconnect?, and deletes on the second press', async () => {
+      installApiStub(
+        { providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } },
+        { credIds: { 'my-ollama': 'oauth' } }
+      )
+      await renderModal('my-ollama')
+      const button = await screen.findByTestId('OpencodeProviderConfigModal.removeKey')
+      expect(button).toHaveTextContent('Disconnect')
+      expect(button).not.toHaveTextContent('Disconnect?')
+
+      await pressRemove()
+      expect(screen.getByTestId('OpencodeProviderConfigModal.removeKey')).toHaveTextContent(
+        'Disconnect?'
+      )
+      expect(screen.getByTestId('OpencodeProviderConfigModal.removeKeyNote')).toHaveTextContent(
+        REMOVE_NOTE
+      )
+      expect(vendorAuthRemove).not.toHaveBeenCalled()
+
+      await pressRemove()
+      await waitFor(() => expect(vendorAuthRemove).toHaveBeenCalledWith('opencode', 'my-ollama'))
+    })
+
+    it('editing the provider id disarms an armed Remove', async () => {
+      installApiStub(
+        {
+          providers: {
+            'my-ollama': { baseURL: 'http://localhost:11434/v1' },
+            other: { baseURL: 'http://localhost:11435/v1' }
+          }
+        },
+        { credIds: { 'my-ollama': 'api', other: 'api' } }
+      )
+      await renderModal('my-ollama')
+      await screen.findByTestId('OpencodeProviderConfigModal.removeKey')
+      await pressRemove()
+      expect(screen.getByTestId('OpencodeProviderConfigModal.removeKey')).toHaveTextContent(
+        'Remove key?'
+      )
+
+      // Retarget the id at a different credentialed provider.
+      await act(async () => {
+        fireEvent.change(idInput(), { target: { value: 'other' } })
+      })
+
+      expect(screen.getByTestId('OpencodeProviderConfigModal.removeKey')).toHaveTextContent(
+        'Remove key'
+      )
+      expect(screen.getByTestId('OpencodeProviderConfigModal.removeKey')).not.toHaveTextContent(
+        'Remove key?'
+      )
+      expect(vendorAuthRemove).not.toHaveBeenCalled()
+    })
+
+    it('names opencode’s credential store, not an auth.json', async () => {
+      installApiStub(
+        { providers: { 'my-ollama': { baseURL: 'http://localhost:11434/v1' } } },
+        { credIds: { 'my-ollama': 'api' } }
+      )
+      await renderModal('my-ollama')
+      await screen.findByTestId('OpencodeProviderConfigModal.keyStatus')
+      expect(document.body).toHaveTextContent('credential store')
+      expect(document.body).not.toHaveTextContent('auth.json')
     })
 
     it('shows a "Key set" indicator on load for a provider that already has credentials', async () => {

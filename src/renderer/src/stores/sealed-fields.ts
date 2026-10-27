@@ -60,6 +60,8 @@ export const SEALED_SESSION_FIELDS = [
   'todos',
   'sentFiles',
   'queuedItems',
+  'heldCount',
+  'contextPressure',
   'taskNotifications',
   'activeTasks',
   'taskProgressMap',
@@ -76,9 +78,11 @@ export const SEALED_SESSION_FIELDS = [
   'authRequired',
   /**
    * Not a snapshot field of its own: the per-session mirror of the app-level
-   * `worktreeInfoMap`, projected from it. Sealed with the map so the two cannot
-   * disagree — which they did, since `setWorktreeInfo` wrote both and
-   * `session:status`'s worktree-exit rule only cleared one path.
+   * `worktreeInfoMap`, projected from it (an explicit entry wins), else synthesised from the
+   * directory listing's `linkedWorktree` marker for the session's cwd. Sealed so the mirror and
+   * the map cannot disagree. `session:status` no longer drops an entry on its cwd (slice 3: the
+   * status cwd is always the spawn cwd, so that rule erased every detected entry); an
+   * `ExitWorktree` result or an opencode `session.moved` forgets it in main instead.
    */
   'worktreeInfo'
 ] as const
@@ -96,6 +100,8 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   todos: 'todos',
   sentFiles: 'sentFiles',
   queuedItems: 'queue',
+  heldCount: 'heldCount',
+  contextPressure: 'contextPressure',
   taskNotifications: 'taskNotifications',
   activeTasks: 'activeTasks',
   taskProgressMap: 'taskProgressMap',
@@ -130,6 +136,8 @@ export const SEALED_APP_FIELDS = [
   'customTitles',
   'worktreeInfoMap',
   'sessionEngines',
+  'sessionLinks',
+  'sessionRefs',
   'hiddenSessionIds',
   'hiddenProjectKeys',
   'slashCommands',
@@ -146,6 +154,8 @@ export const SEALED_APP_FIELD_SOURCE: Readonly<Record<string, keyof FullStateSna
   customTitles: 'customTitles',
   worktreeInfoMap: 'worktreeInfoMap',
   sessionEngines: 'sessionEngines',
+  sessionLinks: 'sessionLinks',
+  sessionRefs: 'sessionRefs',
   hiddenSessionIds: 'hiddenSessions',
   hiddenProjectKeys: 'hiddenProjects',
   // Per-session on the wire, app-level in canonical AND in this store.

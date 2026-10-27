@@ -150,6 +150,15 @@ export class AuthVault {
     return activeAccount(state.accounts[providerId])?.credential ?? null
   }
   /**
+   * Whether `providerId` holds a non-empty API key. Presence only, for callers
+   * that must not hold the key itself (the OpenRouter tab's status read).
+   */
+  async hasApiKey(providerId: string): Promise<boolean> {
+    validateSharedProviderId(providerId)
+    const credential = this.readAll().credentials[providerId]
+    return credential?.type === 'api_key' && credential.key.length > 0
+  }
+  /**
    * An OAuth record NEVER lands in the single `credentials` slot again: it routes
    * to {@link upsertAccount}, so no caller can silently write the pre-v3 shape
    * and strand the account list (ADR-068 §2).

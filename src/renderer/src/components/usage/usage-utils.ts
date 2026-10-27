@@ -396,3 +396,36 @@ export function buildSeriesColorMap(ids: readonly string[]): Map<string, string>
   ordered.forEach((id, i) => map.set(id, PROVIDER_SERIES_COLORS[i] ?? PROVIDER_OVERFLOW_COLOR))
   return map
 }
+
+/** USD with thousands grouped — `$1,019.75`; the OpenRouter tab's balances run to four digits. */
+export function formatMoney(usd: number, decimals = 2): string {
+  return `$${usd.toFixed(decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`
+}
+
+/** `Nov 1` for an ISO instant, read in UTC: OpenRouter's windows turn over at UTC midnight. */
+export function formatUtcMonthDay(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  return `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}`
+}
+
+/** A context window the way model pages print it — `1M`, `262K`. */
+export function formatContextLength(n: number | null): string {
+  if (n === null) return '—'
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`
+  return String(n)
+}
+
+/**
+ * USD per million tokens. Prices span four orders of magnitude (`0.0039` cache
+ * reads, `15.00` output), so the precision follows the magnitude; `0` is a free
+ * model and reads as plain `0`.
+ */
+export function formatPricePerM(n: number | null): string {
+  if (n === null) return '—'
+  if (n === 0) return '0'
+  if (n < 0.01) return n.toFixed(4)
+  if (n < 1) return n.toFixed(3).replace(/0$/, '')
+  return n.toFixed(2)
+}

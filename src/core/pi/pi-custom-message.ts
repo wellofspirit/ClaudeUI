@@ -14,14 +14,23 @@
 import type { ChatMessage } from '../../shared/types'
 import type { PiImageContent, PiTextContent } from './pi-protocol'
 import { piAgentDeliveryDetails } from './pi-delivery'
-import { AGENT_NOTE_FRAGMENT_LABEL, agentNoteMessage } from '../services/agent-note'
+import {
+  AGENT_NOTE_FRAGMENT_LABEL,
+  agentNoteMessage,
+  sessionMessageNote
+} from '../services/agent-note'
+import {
+  SESSION_MESSAGE_TAG,
+  parseSessionMessageWrapper
+} from '../../shared/session-message-wrapper'
 
 /** The shared agent-note label (services/agent-note.ts), under pi's historical name. */
 export const PI_AGENT_MESSAGE_FRAGMENT_LABEL = AGENT_NOTE_FRAGMENT_LABEL
 
 const FALLBACK_TITLE = {
   'task-notification': 'Agent notification',
-  'agent-message': 'Message from an agent'
+  'agent-message': 'Message from an agent',
+  'session-message': 'Message from another session'
 } as const
 
 export interface PiCustomMessageInput {
@@ -49,6 +58,17 @@ export function piCustomMessageToChat(input: PiCustomMessageInput): ChatMessage 
   const text = piCustomMessageText(input.content)
   if (!text) return null
   const ours = piAgentDeliveryDetails(input.customType, input.details)
+  if (ours?.kind === 'session-message') {
+    // The stored text is the model-facing wrapper; the row shows the body.
+    const parsed = parseSessionMessageWrapper(text, SESSION_MESSAGE_TAG)
+    return sessionMessageNote({
+      id: input.id,
+      fromTitle: parsed?.fromTitle || (typeof ours.from === 'string' ? ours.from : ''),
+      fromKey: parsed?.fromKey || (typeof ours.fromId === 'string' ? ours.fromId : ''),
+      text: parsed ? parsed.body : text,
+      timestamp: input.timestamp
+    })
+  }
   if (ours) {
     return agentNoteMessage({
       id: input.id,

@@ -1,0 +1,182 @@
+/**
+ * What a live session has read from non-user sources, and how many turns those
+ * sources have started (slice 1a, spec §5.1). Two counters, both reset by the
+ * user speaking:
+ *
+ *  - `userOriginClean` — true until a message from another session or an agent
+ *    is delivered, back to true on the next `user` / `host-instruction` prompt.
+ *    Slice 1c's start gate reads it: a session that has taken in agent text since
+ *    the user last spoke cannot start another session on its own say-so.
+ *  - `agentTurnStartsSinceUser` — turns a non-user item started since the user
+ *    last spoke. Past {@link AGENT_TURN_BUDGET}, an idle session is not woken
+ *    again: the item is held until the user (or a busy turn) takes it.
+ *
+ * A third counter belongs to X-Agent results (`dispatch-result`, ADR-105 §3):
+ *  - `dispatchWakesSinceUser` — turns an X-Agent's result started since the user last spoke,
+ *    with its own cap ({@link DISPATCH_WAKE_CAP}) and outside the agent-turn budget above. A
+ *    result is the parent's own work coming back, not another session speaking; the cap only
+ *    stops a parent that dispatches again on every result. It still taints.
+ *
+ * Slice 1c adds what the start gate reads beside them: whether the current turn is
+ * the host's own (`host-instruction`), whether a session another session started
+ * has heard from a client yet (`agentCreated`), and how many sessions this turn
+ * has started.
+ *
+ * Lives on the session object, so it follows a rekey for free and dies with the
+ * session. Memory only, like the other per-process guards (`BlockedCallLedger`).
+ */
+
+/** Default cap on agent-started turns between two user prompts. */
+export const AGENT_TURN_BUDGET = 10
+
+/** Most turns X-Agent results may start between two user prompts. */
+export const DISPATCH_WAKE_CAP = 25
+
+/** Most sessions one user turn may start (session tools, spec §7.1). */
+export const STARTS_PER_USER_TURN = 10
+
+/** Most proposals one user turn may make (session tools, slice 1c-b): proposing is free of every gate, so it is bounded here. */
+export const PROPOSALS_PER_USER_TURN = STARTS_PER_USER_TURN
+
+/** What a prompt that reaches {@link TurnOriginLedger.userPrompt} speaks for. */
+export interface UserPromptKind {
+  /** The host acting on the user's standing setting or click (context pressure). */
+  hostInstruction?: boolean
+  /** The brief a session tool gave a session it just started: the user did not type it. */
+  agentBrief?: boolean
+}
+
+export class TurnOriginLedger {
+  private clean = true
+  private starts = 0
+  private budgetLogged = false
+  private dispatchWakes = 0
+  private dispatchCapLogged = false
+  private hostTurn = false
+  private createdByAgent = false
+  private sessionStarts = 0
+  private proposalCount = 0
+
+  constructor(readonly cap: number = AGENT_TURN_BUDGET) {}
+
+  get userOriginClean(): boolean {
+    return this.clean
+  }
+
+  get agentTurnStartsSinceUser(): number {
+    return this.starts
+  }
+
+  /** May another non-user item start a turn? */
+  get budgetLeft(): boolean {
+    return this.starts < this.cap
+  }
+
+  /** Turns X-Agent results have started since the user last spoke. */
+  get dispatchWakesSinceUser(): number {
+    return this.dispatchWakes
+  }
+
+  /** May another X-Agent result start a turn? */
+  get dispatchWakesLeft(): boolean {
+    return this.dispatchWakes < DISPATCH_WAKE_CAP
+  }
+
+  /** Is the current turn the host's own instruction rather than something the user typed? */
+  get hostInstructionTurn(): boolean {
+    return this.hostTurn
+  }
+
+  /**
+   * Was this session started by another session and no client has prompted it
+   * since? Set at birth by the start flow; cleared only by a client prompt.
+   */
+  get agentCreated(): boolean {
+    return this.createdByAgent
+  }
+
+  /** Sessions this user turn has started so far. */
+  get sessionStartsSinceUser(): number {
+    return this.sessionStarts
+  }
+
+  get startsLeft(): boolean {
+    return this.sessionStarts < STARTS_PER_USER_TURN
+  }
+
+  /** Proposals this user turn has made (a converted start counts). */
+  get proposalsSinceUser(): number {
+    return this.proposalCount
+  }
+
+  get proposalsLeft(): boolean {
+    return this.proposalCount < PROPOSALS_PER_USER_TURN
+  }
+
+  /**
+   * A `user` or `host-instruction` prompt: the user spoke. The brief a session
+   * tool sends a new session resets taint and budgets like any prompt but is not a
+   * client typing, so it leaves `agentCreated` alone; so does the host's own
+   * instruction (a standing setting is not the user typing into this session).
+   */
+  userPrompt(kind: UserPromptKind = {}): void {
+    this.clean = true
+    this.starts = 0
+    this.budgetLogged = false
+    this.dispatchWakes = 0
+    this.dispatchCapLogged = false
+    this.sessionStarts = 0
+    this.proposalCount = 0
+    this.hostTurn = kind.hostInstruction === true
+    if (!kind.hostInstruction && !kind.agentBrief) this.createdByAgent = false
+  }
+
+  /** This session was started by another session's tool: no client has spoken to it yet. */
+  markAgentCreated(): void {
+    this.createdByAgent = true
+  }
+
+  /** This turn started a session. */
+  sessionStarted(): void {
+    this.sessionStarts++
+  }
+
+  /** A start that was counted ahead of time made no session (it failed before one existed): give it back. */
+  sessionStartReleased(): void {
+    this.sessionStarts = Math.max(0, this.sessionStarts - 1)
+  }
+
+  /** This turn made a proposal. */
+  proposed(): void {
+    this.proposalCount++
+  }
+
+  /** True the first time the budget runs out since the user last spoke (log once, not per held item). */
+  noteBudgetExhausted(): boolean {
+    const first = !this.budgetLogged
+    this.budgetLogged = true
+    return first
+  }
+
+  /** True the first time the dispatch-wake cap is hit since the user last spoke. */
+  noteDispatchCapReached(): boolean {
+    const first = !this.dispatchCapLogged
+    this.dispatchCapLogged = true
+    return first
+  }
+
+  /** An X-Agent result started a turn on an idle session. */
+  dispatchWakeStarted(): void {
+    this.dispatchWakes++
+  }
+
+  /** A non-user item reached (or was queued into) the session's context. */
+  nonUserDelivered(): void {
+    this.clean = false
+  }
+
+  /** A non-user item started a turn on an idle session. */
+  agentTurnStarted(): void {
+    this.starts++
+  }
+}

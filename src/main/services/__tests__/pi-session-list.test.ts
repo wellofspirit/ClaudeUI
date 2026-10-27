@@ -15,6 +15,7 @@ import {
   existsSync,
   readdirSync
 } from 'node:fs'
+import { promises as fsPromises } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -38,6 +39,9 @@ const { mockProbe, mockBuildPiAccountRef } = vi.hoisted(() => ({
 vi.mock('../../../core/auth/PiAuthProvider', () => ({
   piAuthProvider: { probe: mockProbe, buildPiAccountRef: mockBuildPiAccountRef }
 }))
+// A session delete also removes its scratchpad (ADR-110) from the OS temp dir: never the real one here.
+const { mockRemoveScratchpad } = vi.hoisted(() => ({ mockRemoveScratchpad: vi.fn() }))
+vi.mock('../../../core/pi/pi-scratchpad', () => ({ removePiScratchpad: mockRemoveScratchpad }))
 
 import {
   convertPiEntryMessage,
@@ -821,8 +825,72 @@ describe('deletePiSession', () => {
     expect(readdirSync(projectDir)).toEqual(['a_keep-me.jsonl'])
   })
 
-  it('resolves without throwing when the session does not exist (best-effort)', async () => {
-    await expect(deletePiSession('never-existed')).resolves.toBeUndefined()
+  it('resolves without throwing when the session does not exist (best-effort), and that counts as deleted', async () => {
+    await expect(deletePiSession('never-existed')).resolves.toBe(true)
+  })
+
+  it('removes the session’s scratchpad (ADR-110) by the session id — also when no file was ever written', async () => {
+    mockRemoveScratchpad.mockClear()
+    writeSessionFile('--proj-pad--', '2024-01-01T00-00-00_pad-me.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'pad-me',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/pad'
+      }
+    ])
+    await deletePiSession('pad-me')
+    expect(mockRemoveScratchpad).toHaveBeenCalledTimes(1)
+    expect(mockRemoveScratchpad).toHaveBeenCalledWith('pad-me')
+    // a session deleted before its first turn has no file, but its scratchpad exists
+    await deletePiSession('never-had-a-turn')
+    expect(mockRemoveScratchpad).toHaveBeenLastCalledWith('never-had-a-turn')
+  })
+
+  it('keeps the scratchpad when the session itself could not be deleted', async () => {
+    mockRemoveScratchpad.mockClear()
+    writeSessionFile('--proj-pad2--', '2024-01-01T00-00-00_pad-stuck.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'pad-stuck',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/pad2'
+      }
+    ])
+    const unlink = vi
+      .spyOn(fsPromises, 'unlink')
+      .mockRejectedValueOnce(Object.assign(new Error('EBUSY: file in use'), { code: 'EBUSY' }))
+    try {
+      await expect(deletePiSession('pad-stuck')).resolves.toBe(false)
+    } finally {
+      unlink.mockRestore()
+    }
+    expect(mockRemoveScratchpad).not.toHaveBeenCalled()
+  })
+
+  it('says whether the session is gone: true when it was deleted, false when the file could not be unlinked (the session survives)', async () => {
+    const file = writeSessionFile('--proj-stuck--', '2024-01-01T00-00-00_stuck-me.jsonl', [
+      {
+        type: 'session',
+        version: 3,
+        id: 'stuck-me',
+        timestamp: '2024-01-01T00:00:00.000Z',
+        cwd: '/proj/stuck'
+      }
+    ])
+    const unlink = vi
+      .spyOn(fsPromises, 'unlink')
+      .mockRejectedValueOnce(Object.assign(new Error('EBUSY: file in use'), { code: 'EBUSY' }))
+    try {
+      await expect(deletePiSession('stuck-me')).resolves.toBe(false)
+      expect(existsSync(file)).toBe(true)
+    } finally {
+      unlink.mockRestore()
+    }
+    await expect(deletePiSession('stuck-me')).resolves.toBe(true)
+    expect(existsSync(file)).toBe(false)
   })
 })
 

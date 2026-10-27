@@ -11,7 +11,9 @@ import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
 import type {
   CallerRootResolver,
   CallerSessionLookup,
-  DispatchAgentFn
+  DispatchAgentFn,
+  HandBackFn,
+  XAgentCallerFn
 } from './opencode-hosted-tools'
 import {
   callerRestrictionFromAgent,
@@ -46,6 +48,7 @@ import { opencodeMcpServerNames, opencodeNativeAgentNames } from './opencode-con
 import { harnessAvailable, harnessUnavailableMessage, resolveHarness } from '../harness/resolve'
 import { toLaunch, type HarnessLaunch } from '../harness/launch'
 import { logger } from '../services/logger'
+import { runSessionTool, sessionToolsAvailable } from '../services/session-tools'
 import { OpencodeClient } from './OpencodeClient'
 
 export type { SpawnResult, SpawnServerFn }
@@ -424,6 +427,8 @@ export class OpencodeServerManager {
    */
   private callerSessionLookup: CallerSessionLookup = () => undefined
   private dispatchAgentFn: DispatchAgentFn | undefined
+  private handBackFn: HandBackFn | undefined
+  private xAgentCallerFn: XAgentCallerFn | undefined
   private serverStartedHook: ((endpoint: Endpoint) => Promise<void>) | undefined
   /**
    * `agents.<name>.permissions` per cwd (ADR-097 §3). Default: the mode-less
@@ -470,6 +475,16 @@ export class OpencodeServerManager {
     this.dispatchAgentFn = fn
   }
 
+  /** Wire the dispatch targets' report channel behind the hosted `hand_back` (ADR-105 §3). */
+  setHandBack(fn: HandBackFn): void {
+    this.handBackFn = fn
+  }
+
+  /** Wire the dispatch targets' caller identity behind their hosted `session_message` (ADR-105 §4). */
+  setXAgentCaller(fn: XAgentCallerFn): void {
+    this.xAgentCallerFn = fn
+  }
+
   /**
    * Per-agent permission rules injected as `agents.<name>.permissions`
    * (ADR-097 §3; replaces the default overlay). A changed answer changes the
@@ -487,6 +502,8 @@ export class OpencodeServerManager {
     return {
       bridgedMcp,
       pluginDir: locatePluginDir(),
+      // The plugin's subagent model gate reads it as its options (ADR-111).
+      modelAllowlist: loadOpencodeModelAllowlist(),
       agentPermissions: this.agentPermissionsFn(cwd, mcpServers),
       // Only the shim sees the servers the user configured natively (opencode.json), so a
       // `tools` list denies those too; the agent permission provider keeps the bridged list.
@@ -649,7 +666,20 @@ export class OpencodeServerManager {
       createOpencodeHostedToolsServer(resolveCwd, {
         lookupCallerSession: (sessionId) => this.callerSessionLookup(sessionId),
         resolveCallerRoot,
+        // The models a subagent may name (allowlist-filtered). Lazy: model discovery imports
+        // this module's `opencodeServerManager`, so a static import would be a require-cycle.
+        listModels: async () => (await import('./model-discovery')).discoverOpencodeModels(),
         dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
+        handBack: this.handBackFn && ((id, report, callId) => this.handBackFn!(id, report, callId)),
+        // The session tools (slice 2), when the host wired them (read per MCP session).
+        ...(sessionToolsAvailable()
+          ? {
+              sessionTools: { run: runSessionTool },
+              ...(this.xAgentCallerFn
+                ? { xAgentCaller: (id: string) => this.xAgentCallerFn!(id) }
+                : {})
+            }
+          : {}),
         onIdentityMismatch: (identity) =>
           logger.warn(
             'OpencodeServerManager',
@@ -829,6 +859,12 @@ export class OpencodeServerManager {
           elapsedMs: 0
         }))
         .then((result) => {
+          if (result.state === 'active' && result.allowlistLoaded === false) {
+            logger.warn(
+              'OpencodeServerManager',
+              `claudeui-xeng model allowlist NOT loaded on ${handle.baseUrl} for ${directory}: the plugin options did not parse — subagent calls with a model to check are refused`
+            )
+          }
           if (result.state !== 'active') {
             handle.guards.delete(directory)
             logger.error(

@@ -295,6 +295,7 @@ describe('ClaudeSession — task_started relays is_backgrounded', () => {
         taskType: 'local_bash',
         runIndex: 1,
         isBackgrounded: false,
+        wakesParent: true,
         startedAt: expect.any(Number)
       },
       {
@@ -303,6 +304,7 @@ describe('ClaudeSession — task_started relays is_backgrounded', () => {
         taskType: 'local_bash',
         runIndex: 1,
         isBackgrounded: true,
+        wakesParent: true,
         startedAt: expect.any(Number)
       }
     ])
@@ -312,6 +314,41 @@ describe('ClaudeSession — task_started relays is_backgrounded', () => {
     const { sent, handle } = await startSession('routing-bg-silent')
     await feed(handle, taskStarted(AGENT, AGENT_TASK, 'local_agent'))
     expect(startedEvents(sent)[0]).not.toHaveProperty('isBackgrounded')
+  })
+})
+
+describe('ClaudeSession — task_started stamps wakesParent', () => {
+  // One row per cli.js task_type (2.1.293). A background shell and a monitor wake
+  // the main agent when they end exactly like an agent does; the housekeeping
+  // types and an unknown one do not.
+  it.each([
+    ['local_agent', true],
+    ['remote_agent', true],
+    ['in_process_teammate', true],
+    ['local_workflow', true],
+    ['local_bash', true],
+    ['monitor_mcp', true],
+    ['monitor_ws', true],
+    ['mcp_task', true],
+    ['dream', false],
+    ['auto_mode_scan', false],
+    ['local_memory_import', false],
+    ['something_new', false],
+    ['', false]
+  ])('%s -> wakesParent %s', async (taskType, wakes) => {
+    const { sent, handle } = await startSession(`routing-wakes-${taskType || 'none'}`)
+    await feed(handle, taskStarted('toolu_wakes', 'w1', taskType))
+    expect(startedEvents(sent)[0].wakesParent).toBe(wakes)
+  })
+
+  it('keeps the stamp on a re-armed start (the background flip)', async () => {
+    const { sent, handle } = await startSession('routing-wakes-flip')
+    await feed(
+      handle,
+      taskStarted(BASH, BASH_TASK, 'local_bash', false),
+      taskUpdated(BASH_TASK, { is_backgrounded: true })
+    )
+    expect(startedEvents(sent).map((d) => d.wakesParent)).toEqual([true, true])
   })
 })
 
@@ -331,6 +368,7 @@ describe('ClaudeSession — the task_updated flip', () => {
       taskType: 'local_bash',
       runIndex: 1,
       isBackgrounded: true,
+      wakesParent: true,
       startedAt: expect.any(Number)
     })
   })
@@ -374,6 +412,7 @@ describe('ClaudeSession — the task_updated flip', () => {
       taskType: 'local_agent',
       runIndex: 2,
       isBackgrounded: true,
+      wakesParent: true,
       startedAt: expect.any(Number)
     })
   })

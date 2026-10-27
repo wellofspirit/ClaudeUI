@@ -1,4 +1,4 @@
-// The bench scenarios (docs/chat-scroll-spec.md, step 1). Each takes a context
+// The bench scenarios (the measurement step of PR #71, chat-scroll). Each takes a context
 //   { win, cdp, refreshMs, trace: boolean, fresh: () => Promise<void>, touch: boolean, findTerm }
 // and returns plain JSON, or THROWS: a failed measurement window is an error row, never data.
 // `fresh()` re-mounts the target transcript (switch away and back), so every

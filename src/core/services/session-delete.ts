@@ -16,11 +16,15 @@ import type { EngineId } from '../../shared/types'
  *  - claude / undefined → remove the JSONL + subagent dir (deleteSessionFiles)
  * The lossy projectKey is only used for the Claude filesystem path; opencode
  * and pi delete by their own engine-owned sessionId.
+ *
+ * Resolves `false` when the engine did not delete the session (opencode's server down, pi's
+ * file stuck): the session survives, and whoever ends things WITH it must not.
  */
 export async function deleteSessionByEngine(
   sessionId: string,
   projectKey: string,
   engineId?: EngineId
-): Promise<void> {
-  await historyFor(engineId).delete(sessionId, projectKey)
+): Promise<boolean> {
+  // opencode and pi swallow their own failures and say so with `false`; a refusal throws.
+  return (await historyFor(engineId).delete(sessionId, projectKey)) !== false
 }

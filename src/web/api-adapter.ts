@@ -13,7 +13,7 @@ import type {
   PermissionSuggestion,
   TerminalAvailability
 } from '../shared/types'
-import type { IdeAvailability, IdeEntry } from '../shared/remote-protocol'
+import type { IdeAvailability, IdeEntry, InvokeProgress } from '../shared/remote-protocol'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
 import { derivePasswordProof } from './password-proof'
@@ -39,15 +39,30 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
   // (SyncCore phase 0 ack discipline).
   const on = (channel: string): ReturnType<RemoteConnection['on']> => connection.on(channel)
 
-  // Helper: invoke that mirrors preload's unwrap() for safeHandler envelopes
-  async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
-    const result = await connection.invoke(channel, ...args)
+  // Mirrors preload's unwrap() for safeHandler envelopes: `{ ok: false, error }` throws.
+  function unwrapEnvelope<T>(channel: string, result: unknown): T {
     if (result && typeof result === 'object' && 'ok' in result) {
       const envelope = result as { ok: boolean; data?: unknown; error?: string }
       if (!envelope.ok) throw new Error(envelope.error ?? `Remote ${channel} failed`)
       return envelope.data as T
     }
     return result as T
+  }
+
+  async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
+    return unwrapEnvelope<T>(channel, await connection.invoke(channel, ...args))
+  }
+
+  // The progress twin of `unwrap` (ADR-102): same envelope, reported through `onProgress`.
+  async function unwrapWithProgress<T>(
+    channel: string,
+    args: unknown[],
+    onProgress: (progress: InvokeProgress) => void
+  ): Promise<T> {
+    return unwrapEnvelope<T>(
+      channel,
+      await connection.invokeWithProgress(channel, args, onProgress)
+    )
   }
 
   const api: ClaudeAPI = {
@@ -157,13 +172,30 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         ClaudeAPI['loadPiHistory']
       >,
 
-    loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
-      connection.invoke(
-        'session:load-history',
-        sessionId,
-        projectKey,
-        resumeSessionAt
-      ) as ReturnType<ClaudeAPI['loadSessionHistory']>,
+    // The progress path only when a callback is given (ADR-102); otherwise the
+    // plain invoke, so every other caller is unchanged. The options ride as a
+    // 4th wire arg only when given: no options is the exact 3-arg call.
+    loadSessionHistory: (sessionId, projectKey, resumeSessionAt, onProgress, options) => {
+      const wireArgs = options
+        ? [sessionId, projectKey, resumeSessionAt, options]
+        : [sessionId, projectKey, resumeSessionAt]
+      return (
+        onProgress
+          ? connection.invokeWithProgress('session:load-history', wireArgs, onProgress)
+          : connection.invoke('session:load-history', ...wireArgs)
+      ) as ReturnType<ClaudeAPI['loadSessionHistory']>
+    },
+
+    loadSessionStatusLine: (sessionId, projectKey, onProgress) =>
+      (onProgress
+        ? connection.invokeWithProgress(
+            'session:load-status-line',
+            [sessionId, projectKey],
+            onProgress
+          )
+        : connection.invoke('session:load-status-line', sessionId, projectKey)) as ReturnType<
+        ClaudeAPI['loadSessionStatusLine']
+      >,
 
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       connection.invoke(
@@ -258,6 +290,32 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:dequeue-message', routingId, value) as Promise<{
         removed: number
       }>,
+    allowPeerMessages: (routingId) =>
+      connection.invoke('session:allow-peer-messages', routingId) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    setSessionGrouped: (routingId, grouped) =>
+      connection.invoke('session:link:set-grouped', routingId, grouped) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    startSessionProposal: (proposalId, grouped) =>
+      connection.invoke('session:proposal:start', proposalId, grouped) as Promise<{
+        success: boolean
+        error?: string
+        startedRef?: string
+      }>,
+    dismissSessionProposal: (proposalId) =>
+      connection.invoke('session:proposal:dismiss', proposalId) as Promise<{
+        success: boolean
+        error?: string
+      }>,
+    respondContextPressure: (routingId, answer) =>
+      connection.invoke('session:context-pressure:respond', routingId, answer) as Promise<{
+        success: boolean
+        error?: string
+      }>,
     recallQueued: (routingId) =>
       connection.invoke('session:recall-queued', routingId) as Promise<{
         recalled: string[]
@@ -285,6 +343,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     judgeModelSupport: (engineId, values) =>
       connection.invoke('automode:judge-model-support', engineId, values) as ReturnType<
         ClaudeAPI['judgeModelSupport']
+      >,
+    judgeRouteResting: (engineId, model, accountId) =>
+      connection.invoke('automode:judge-route-resting', engineId, model, accountId) as ReturnType<
+        ClaudeAPI['judgeRouteResting']
       >,
     getOpencodeProviders: () =>
       connection.invoke('session:get-opencode-providers') as ReturnType<
@@ -560,19 +622,31 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // capability the `git:*` mutations below already ride, and the gate is
     // SERVER-side. Creating or removing a worktree is git work on the host's
     // repos: no dialog, no window, nothing host-physical. Every handler is
-    // safeHandler-wrapped, so `unwrap` carries the real reason back — where
-    // `listWorktrees` used to answer `[]`, which the modal read as "this repo has
-    // no worktrees" rather than "this client cannot ask".
+    // safeHandler-wrapped, so `unwrap` carries the real reason back (an empty
+    // answer would read as "this repo has no worktrees" rather than "this client
+    // cannot ask").
     createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
+    // `withProgress` on the server: the progress path slides the invoke timeout; no caller
+    // listens, so the callback is a no-op.
     removeWorktree: (worktreePath, branch, gitRoot) =>
-      unwrap('worktree:remove', worktreePath, branch, gitRoot),
-    listWorktrees: (cwd) => unwrap('worktree:list', cwd),
+      unwrapWithProgress('worktree:remove', [worktreePath, branch, gitRoot], () => {}),
+    inventoryWorktrees: (cwd) => unwrap('worktree:inventory', cwd),
+    inspectWorktree: (cwd, id) => unwrap('worktree:inspect', cwd, id),
+    measureWorktree: (cwd, id, onProgress) =>
+      onProgress
+        ? unwrapWithProgress('worktree:measure', [cwd, id], onProgress)
+        : unwrap('worktree:measure', cwd, id),
+    removeWorktrees: (cwd, ids, onProgress) =>
+      onProgress
+        ? unwrapWithProgress('worktree:remove-many', [cwd, ids], onProgress)
+        : unwrap('worktree:remove-many', cwd, ids),
 
     // App lifecycle — quit is desktop-only; no-ops that resolve on web.
     confirmQuit: async () => {}, // No-op on web
     cancelQuit: async () => {}, // No-op on web
+    ackQuitPrompt: async () => {}, // No-op on web
 
     // Git — route through remote server
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),
@@ -697,6 +771,11 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('usage-hub:resync') as ReturnType<ClaudeAPI['resyncUsageHub']>,
     forgetUsageHub: () =>
       connection.invoke('usage-hub:forget') as ReturnType<ClaudeAPI['forgetUsageHub']>,
+    // The OpenRouter tab — `config` queries, safeHandler envelopes (hence `unwrap`).
+    openrouterStatus: () => unwrap('openrouter:status'),
+    openrouterOverview: () => unwrap('openrouter:overview'),
+    openrouterModels: (scope) => unwrap('openrouter:models', scope),
+    openrouterModelEndpoints: (modelId) => unwrap('openrouter:model-endpoints', modelId),
 
     // Native OAuth (ADR-014) — remote since ADR-057/S4. The host does NOT open
     // its own browser for these calls: it returns `manualUrl` on the state and

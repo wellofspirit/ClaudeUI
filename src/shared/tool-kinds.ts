@@ -7,6 +7,7 @@
  * renderer/src/components/chat/tool-registry/{Claude,Opencode}EngineToolMap.ts.
  */
 
+import { DISPATCH_LABEL } from './first-party-tool-names'
 import type { AskUserQuestion, ContentBlock, FileDiff } from './types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -185,26 +186,53 @@ export interface EngineToolMap {
 
 /**
  * A cross-engine dispatch (ADR-033) as a 'task' view. All four engine tool maps
- * build it the same way from `dispatch_agent`'s `{ engine, prompt, model? }`
- * input, so the structured `dispatch` field (what the type tile and the roster
- * read, ADR-094) is set in one place.
+ * build it the same way from `dispatch_agent`'s `{ engine, prompt, model?, name?,
+ * description? }` input, so the structured `dispatch` field (what the type tile and
+ * the roster read, ADR-094) is set in one place.
  *
- * It carries no `name` (a dispatch has no agent identity) and no `subagent`
- * (that field is an agent TYPE, and a dispatch has none): the card's chip and
- * the roster's label are {@link dispatchLabel} of `dispatch`.
+ * `name` and `description` are the optional handle and short summary the caller
+ * gave (as Claude Code's Agent tool takes them): a named dispatch is listed under
+ * its name, and the card shows the description, else "Dispatch: <engine>". With no
+ * `name` there is no agent identity, and no `subagent` either (that field is an
+ * agent TYPE, and a dispatch has none): the card's chip and the roster's label are
+ * {@link dispatchLabel} of `dispatch`.
  */
 export function dispatchTaskView(input: {
   engine: string
   prompt?: unknown
   model?: unknown
+  name?: unknown
+  description?: unknown
+  /** `run_in_background` (ADR-105): the card reads a background X-Agent like a background agent. */
+  runInBackground?: unknown
 }): Extract<ToolView, { kind: 'task' }> {
   const model = input.model != null ? String(input.model) : undefined
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  const description = typeof input.description === 'string' ? input.description.trim() : ''
   return {
     kind: 'task',
-    description: `Dispatch: ${input.engine}`,
+    description: description || dispatchPlaceholderDescription(input.engine),
     prompt: input.prompt != null ? String(input.prompt) : '',
+    ...(name ? { name } : {}),
+    ...(input.runInBackground === true ? { background: true } : {}),
     dispatch: { engine: input.engine, ...(model ? { model } : {}) }
   }
+}
+
+/**
+ * The description {@link dispatchTaskView} fills in when the caller gave none. The
+ * roster tells it from a description the caller wrote, so it never shows as a label.
+ */
+export function dispatchPlaceholderDescription(engine: string): string {
+  return `Dispatch: ${engine}`
+}
+
+/**
+ * The word in a task card's header: a dispatch is the product's "X-Agent"
+ * (matching the X engine tile), a native subagent "Task".
+ */
+export function taskHeaderLabel(view: { dispatch?: unknown }): string {
+  return view.dispatch ? DISPATCH_LABEL : 'Task'
 }
 
 /** "<engine> · <model>", or the bare engine: how a dispatch is named in a list and on its card. */

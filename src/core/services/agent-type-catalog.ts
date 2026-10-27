@@ -21,6 +21,15 @@
  *    config.toml) are NOT listed: reading them means starting an app-server
  *    child, which is not a cheap read for a settings list.
  *
+ * A type can carry a `warning` (opencode only, and only from the async
+ * {@link listAgentTypesChecked}): an injected agent whose `effort` the shim mapped to a
+ * model variant that model discovery does not list, which would fail every run of
+ * the agent. The shim cannot check it (its output keys the server, so it must not
+ * depend on the model cache); this does, on the catalog read. No discovery answer
+ * (no server, an empty catalog, the model not listed, or none within
+ * {@link DISCOVERY_WAIT_MS}) is no warning: the read uses the cached discovery
+ * when there is one and otherwise never waits on a server start.
+ *
  * `model` is the type's DECLARED model, for the settings column: Claude's file
  * key, pi's definition (`inherit` is none), opencode's native agent and the
  * injected agents' `harness.opencode.model` (variant dropped). Codex roles list none.
@@ -33,8 +42,9 @@
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { AgentTypeInfo, EngineId } from '../../shared/types'
+import type { AgentTypeInfo, EngineId, EngineModelGroup } from '../../shared/types'
 import { loadClaudeAgentsForOpencode } from '../opencode/claude-agent-shim'
+import { discoverOpencodeModels, peekOpencodeModels } from '../opencode/model-discovery'
 import { loadOpencodeModelAllowlist } from '../opencode/model-allowlist'
 import { listAgents } from '../opencode/opencode-agents'
 import { opencodeNativeAgentNames } from '../opencode/opencode-config-sources'
@@ -144,7 +154,41 @@ function claudeTypes(cwd?: string): AgentTypeInfo[] {
   return [...byName.values()]
 }
 
-function opencodeTypes(cwd?: string): AgentTypeInfo[] {
+/** How long the catalog read waits on a model discovery that is not cached (ADR-111). */
+const DISCOVERY_WAIT_MS = 2000
+
+/** The discovery's answer, or null when it takes longer than `waitMs`. */
+async function discoverWithin(
+  discover: () => Promise<EngineModelGroup[]>,
+  waitMs: number
+): Promise<EngineModelGroup[] | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      discover(),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), waitMs)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** An injected agent whose `effort` the shim appended to its model as a variant. */
+interface EffortCheck {
+  type: string
+  /** `provider/id` (no variant). */
+  model: string
+  effort: string
+}
+
+interface OpencodeCatalog {
+  types: AgentTypeInfo[]
+  efforts: EffortCheck[]
+}
+
+function opencodeCatalog(cwd?: string): OpencodeCatalog {
   const all = listAgents(cwd)
   const native: AgentTypeInfo[] = all
     .filter((agent) => agent.mode !== 'primary' && !agent.hidden)
@@ -163,17 +207,24 @@ function opencodeTypes(cwd?: string): AgentTypeInfo[] {
       nativeAgentNames: opencodeNativeAgentNames(cwd ?? os.homedir()),
       modelAllowlist: loadOpencodeModelAllowlist()
     })
-    return [
-      ...native,
-      ...shim.injected.map((agent): AgentTypeInfo => ({
-        type: agent.name,
-        source: agent.scope,
-        ...(agent.color ? { nativeColor: agent.color } : {}),
-        ...(agent.model ? { model: agent.model.split('#')[0] } : {})
-      }))
-    ]
+    return {
+      types: [
+        ...native,
+        ...shim.injected.map((agent): AgentTypeInfo => ({
+          type: agent.name,
+          source: agent.scope,
+          ...(agent.color ? { nativeColor: agent.color } : {}),
+          ...(agent.model ? { model: agent.model.split('#')[0] } : {})
+        }))
+      ],
+      efforts: shim.injected.flatMap((agent) =>
+        agent.model && agent.effort
+          ? [{ type: agent.name, model: agent.model.split('#')[0], effort: agent.effort }]
+          : []
+      )
+    }
   } catch {
-    return native
+    return { types: native, efforts: [] }
   }
 }
 
@@ -192,10 +243,57 @@ export function listAgentTypes(engine: EngineId, cwd?: string): AgentTypeInfo[] 
     case 'claude':
       return claudeTypes(cwd)
     case 'opencode':
-      return opencodeTypes(cwd)
+      return opencodeCatalog(cwd).types
     case 'pi':
       return piTypes(cwd)
     case 'codex':
       return CODEX_BUILTIN_ROLES.map((type) => ({ type, source: 'builtin' as const }))
   }
+}
+
+/**
+ * {@link listAgentTypes} plus the async checks: an opencode agent whose shim-mapped `effort`
+ * is not a variant of its model gets a `warning`. The cached model discovery is used when
+ * there is one; otherwise discovery (which may start the pooled opencode server) is asked
+ * only when some agent has an effort to check, and only waited on for `waitMs`; a failure
+ * or a timeout is no warning. `discover`, `peek` and `waitMs` are the test seams.
+ */
+export async function listAgentTypesChecked(
+  engine: EngineId,
+  cwd?: string,
+  discover: () => Promise<EngineModelGroup[]> = discoverOpencodeModels,
+  { peek = peekOpencodeModels, waitMs = DISCOVERY_WAIT_MS } = {}
+): Promise<AgentTypeInfo[]> {
+  if (engine !== 'opencode') return listAgentTypes(engine, cwd)
+  const { types, efforts } = opencodeCatalog(cwd)
+  if (efforts.length === 0) return types
+  let variants: Map<string, readonly string[]>
+  try {
+    const groups = peek() ?? (await discoverWithin(discover, waitMs))
+    if (!groups) return types
+    variants = new Map(
+      groups.flatMap((group) =>
+        group.models.map((model): [string, readonly string[]] => [
+          model.value,
+          model.reasoningVariants ?? []
+        ])
+      )
+    )
+  } catch {
+    return types
+  }
+  const warnings = new Map<string, string>()
+  for (const { type, model, effort } of efforts) {
+    const known = variants.get(model)
+    if (known && !known.includes(effort)) {
+      warnings.set(
+        type,
+        `effort "${effort}" is not a variant of ${model}; the agent will fail to run`
+      )
+    }
+  }
+  return types.map((info) => {
+    const warning = warnings.get(info.type)
+    return warning && info.source !== 'builtin' ? { ...info, warning } : info
+  })
 }

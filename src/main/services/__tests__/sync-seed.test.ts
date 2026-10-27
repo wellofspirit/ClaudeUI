@@ -14,10 +14,18 @@
  * pre-4b empty value instead of taking app boot down with it.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import {
+  fabricateRepo,
+  fabricateWorktree,
+  makeScratchDir
+} from '../../../test/helpers/fabricated-worktree'
 
 const {
   pruneOrphanClaudeSessionMeta,
+  claudeSessionsWithNoRecord,
   loadSettings,
   loadSessionConfig,
   loadSlashCommands,
@@ -28,6 +36,7 @@ const {
   listCodexSessions
 } = vi.hoisted(() => ({
   pruneOrphanClaudeSessionMeta: vi.fn(),
+  claudeSessionsWithNoRecord: vi.fn((_ids: readonly string[]): string[] => []),
   loadSettings: vi.fn(),
   loadSessionConfig: vi.fn(),
   loadSlashCommands: vi.fn(),
@@ -43,7 +52,10 @@ vi.mock('../../../core/services/ui-config', () => ({
   loadSessionConfig,
   loadSlashCommands
 }))
-vi.mock('../../../core/services/session-meta-prune', () => ({ pruneOrphanClaudeSessionMeta }))
+vi.mock('../../../core/services/session-meta-prune', () => ({
+  pruneOrphanClaudeSessionMeta,
+  claudeSessionsWithNoRecord
+}))
 vi.mock('../../../core/services/claude-settings', () => ({ loadClaudePermissions }))
 vi.mock('../../../core/services/session-history', () => ({ listDirectories }))
 // F6 moved the per-client three-query merge into this module, so both other
@@ -63,6 +75,9 @@ import {
   resetDirectoryRefreshStateForTests
 } from '../../../core/services/sync-seed'
 import { syncCore } from '../../../core/services/sync-host'
+import { forgetLinkedWorktrees } from '../../../core/services/worktree-root'
+import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
+import { updateDispatchTarget } from '../../../core/services/db'
 
 const CLAUDE_SESSION = {
   sessionId: 'cl-1',
@@ -158,6 +173,104 @@ describe('seedCanonicalAppState', () => {
     // seed that is also replicated state clients must see change live. Every
     // other field here is still a plain `setAppState`, so exactly ONE event.
     expect(ringedSince().map((e) => e.channel)).toEqual(['session:directories-changed'])
+  })
+
+  // ADR-105 §5: App quit ends the processes, so a row still `running` at the next start
+  // belongs to one that no longer exists. Nothing resumes by itself.
+  it('turns X-Agent rows a quit left running into interrupted, and touches no other state', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentSessionId: 'parent-1',
+      parentEngine: 'opencode' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      parentCwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const running = dispatchLedger.create({ ...input, harnessRef: 'boot-running' })
+    const idle = dispatchLedger.create({ ...input, harnessRef: 'boot-idle' })
+    dispatchLedger.update(idle.id, { state: 'idle' })
+    // The row a quit left behind names an owner that is gone: this pid under an earlier boot id
+    // (a pid is reused; the boot id tells the process that wrote the row from this one).
+    updateDispatchTarget(running.id, { owner: { pid: process.pid, boot: 'a-previous-boot' } })
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(running.id)?.state).toBe('interrupted')
+    expect(dispatchLedger.get(idle.id)?.state).toBe('idle')
+  })
+
+  // The same DB can be shared by a second instance (a dev build beside the packaged app): its
+  // boot must not cut off the first one's runs (ADR-105 §5).
+  it('leaves a running X-Agent row alone while its owner instance is alive', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentSessionId: 'parent-1',
+      parentEngine: 'opencode' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      parentCwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const running = dispatchLedger.create({ ...input, harnessRef: 'boot-owned' })
+    // Another live process owns it: the test runner's parent stands in (alive, a different boot id).
+    updateDispatchTarget(running.id, { owner: { pid: process.ppid, boot: 'another-boot' } })
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(running.id)?.state).toBe('running')
+  })
+
+  // ADR-105 §5: an X-Agent ends with its parent session. A deletion that happened while the
+  // app was closed (or before this rule) is caught at boot — for a parent that is PROVEN gone.
+  it('ends the X-Agents of a Claude parent that no longer exists, and only those', async () => {
+    const input = {
+      engine: 'claude' as const,
+      parentEngine: 'claude' as const,
+      parentToolUseId: null,
+      cwd: '/repo',
+      parentCwd: '/repo',
+      model: 'haiku',
+      launchMode: 'default',
+      accountKey: null,
+      codexAccountId: null,
+      callerRestriction: null,
+      name: null,
+      description: null
+    }
+    const orphan = dispatchLedger.create({
+      ...input,
+      parentSessionId: 'deleted-parent',
+      harnessRef: 'boot-orphan'
+    })
+    const kept = dispatchLedger.create({
+      ...input,
+      parentSessionId: 'live-parent',
+      harnessRef: 'boot-kept'
+    })
+    dispatchLedger.update(orphan.id, { state: 'idle' })
+    dispatchLedger.update(kept.id, { state: 'idle' })
+    claudeSessionsWithNoRecord.mockImplementation((ids) =>
+      ids.filter((id) => id === 'deleted-parent')
+    )
+
+    await seedCanonicalAppState()
+
+    expect(dispatchLedger.get(orphan.id)?.state).toBe('stopped')
+    expect(dispatchLedger.get(kept.id)?.state).toBe('idle')
+    claudeSessionsWithNoRecord.mockImplementation(() => [])
   })
 
   it('leaves sdkSkillNames alone — the renderer does not seed it either', async () => {
@@ -437,5 +550,99 @@ describe('listAllDirectories', () => {
     listDirectories.mockResolvedValue(EMPTY_GROUP)
     listCodexSessions.mockResolvedValue([])
     expect(await listAllDirectories()).toEqual(EMPTY_GROUP)
+  })
+})
+
+/**
+ * C-S10. The sidebar's worktree tint reads `DirectoryGroup.linkedWorktree`, computed here from the
+ * filesystem for EVERY engine's group (opencode and Codex worktrees live outside the repo, so a
+ * lexical `.claude/worktrees` check would miss them).
+ */
+describe('listAllDirectories: linked worktree marker', () => {
+  let base: string
+  let repo: string
+  let wt: string
+
+  beforeEach(() => {
+    forgetLinkedWorktrees()
+    base = makeScratchDir('claudeui-seed-')
+    repo = fabricateRepo(path.join(base, 'repo'))
+    wt = fabricateWorktree(repo, path.join(repo, '.claude', 'worktrees', 'foo'), 'foo')
+  })
+  afterEach(() => {
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  const group = (cwd: string, engineId: 'claude' | 'opencode' | 'pi' = 'claude') => ({
+    cwd,
+    projectKey: cwd.replace(/[^a-zA-Z0-9]/g, '-'),
+    folderName: path.basename(cwd),
+    sessions: [
+      {
+        sessionId: `${engineId}-${path.basename(cwd)}`,
+        cwd,
+        projectKey: cwd.replace(/[^a-zA-Z0-9]/g, '-'),
+        title: 't',
+        timestamp: 1,
+        lastActivityAt: 1,
+        engineId
+      }
+    ]
+  })
+
+  it('marks a group whose cwd is a linked worktree, and only that group', async () => {
+    listDirectories.mockResolvedValue([group(repo), group(wt)])
+    const merged = await listAllDirectories()
+    expect(merged.find((g) => g.cwd === wt)?.linkedWorktree).toEqual({
+      worktreePath: wt,
+      repoRoot: repo,
+      name: 'foo',
+      branch: 'worktree-feat'
+    })
+    expect(merged.find((g) => g.cwd === repo)?.linkedWorktree).toBeUndefined()
+  })
+
+  it('marks groups that only a non-Claude engine contributes (outside the managed root)', async () => {
+    const outside = fabricateWorktree(
+      repo,
+      path.join(base, 'share', 'worktree', 'abcdef', 'brave-fox'),
+      'fox'
+    )
+    listDirectories.mockResolvedValue([])
+    listOpencodeSessionsGlobal.mockResolvedValue(group(outside, 'opencode').sessions)
+    const merged = await listAllDirectories()
+    expect(merged.find((g) => g.cwd === outside)?.linkedWorktree).toMatchObject({
+      worktreePath: outside,
+      name: 'brave-fox'
+    })
+  })
+
+  it('a group whose directory is gone is simply unmarked', async () => {
+    listDirectories.mockResolvedValue([group(path.join(base, 'deleted-worktree'))])
+    const merged = await listAllDirectories()
+    expect(merged[0].linkedWorktree).toBeUndefined()
+  })
+
+  it('a worktree appearing beats the emit throttle (it is part of the membership key)', async () => {
+    vi.useFakeTimers()
+    try {
+      const plain = path.join(base, 'plain')
+      fs.mkdirSync(plain)
+      listDirectories.mockResolvedValue([group(plain)])
+      await refreshCanonicalDirectories()
+      const afterFirst = syncCore.currentSeq()
+
+      // The same directory becomes a linked worktree (`git worktree` adopted it): same sessions,
+      // same titles, only the marker differs.
+      fabricateWorktree(repo, plain, 'adopted')
+      forgetLinkedWorktrees()
+      await refreshCanonicalDirectories()
+      expect(syncCore.currentSeq()).toBe(afterFirst) // throttled…
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(syncCore.currentSeq()).toBeGreaterThan(afterFirst) // …but booked, not dropped
+      expect(syncCore.getSnapshot().directories[0].linkedWorktree?.worktreePath).toBe(plain)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

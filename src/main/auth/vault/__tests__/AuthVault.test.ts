@@ -37,6 +37,14 @@ describe('AuthVault', () => {
     })
     if (process.platform !== 'win32') expect(statSync(vaultPath()).mode & 0o777).toBe(0o600)
   })
+  it('hasApiKey answers presence of an API key', async () => {
+    const vault = new AuthVault()
+    await expect(vault.hasApiKey('openrouter')).resolves.toBe(false)
+    await vault.saveCredential('openrouter', { type: 'api_key', key: 'test-key' })
+    await expect(vault.hasApiKey('openrouter')).resolves.toBe(true)
+    await vault.removeCredential('openrouter')
+    await expect(vault.hasApiKey('openrouter')).resolves.toBe(false)
+  })
   it('keeps legacy load/save compatibility under chatgpt', async () => {
     const vault = new AuthVault()
     const credential: VaultCredential = {
@@ -335,6 +343,9 @@ describe('AuthVault lifecycle compatibility', () => {
     await vault.beginDeviceCodeLogin()
     vault.cancelLogin()
     expect(device.cancel).toHaveBeenCalled()
+    // And the slot is released, so the abandoned flow cannot be completed.
+    await expect(vault.completeLogin()).rejects.toThrow(/no login/)
+    expect(device.waitForCompletion).not.toHaveBeenCalled()
   })
 
   it('a second device-code start CANCELS the live first one and takes the slot', async () => {

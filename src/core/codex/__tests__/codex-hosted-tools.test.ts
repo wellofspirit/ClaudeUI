@@ -13,7 +13,18 @@ vi.mock('../../services/logger', () => ({
 }))
 vi.mock('../../services/ui-config', () => ({ loadEngineConfig: vi.fn(() => ({})) }))
 
-import { codexDynamicToolSpecs } from '../codex-hosted-tools'
+import { CODEX_HOSTED_TOOL_NAMES, codexDynamicToolSpecs } from '../codex-hosted-tools'
+import {
+  DISPATCH_BACKGROUND_PARAM,
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_NAME_PARAM,
+  DISPATCH_WORKDIR_PARAM
+} from '../../../shared/dispatch-agent-description'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolDescriptions
+} from '../../../shared/session-tools-description'
 
 describe('codexDynamicToolSpecs — dispatch_agent (S4)', () => {
   it('steers Codex to spawn_agent first, names claude, opencode and pi as targets, keeps the per-target hints', () => {
@@ -29,5 +40,111 @@ describe('codexDynamicToolSpecs — dispatch_agent (S4)', () => {
     expect(spec.description).toContain('For opencode:')
     expect(spec.description).toContain('For pi:')
     expect(codexDynamicToolSpecs(false).some((s) => s.name === 'dispatch_agent')).toBe(false)
+  })
+})
+
+describe('codexDynamicToolSpecs — dispatch_agent has no session_id (ADR-105 §4)', () => {
+  it('neither the schema nor the description offers it; a follow-up is a session_message', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+    }
+    expect(schema.properties).not.toHaveProperty('session_id')
+    expect(JSON.stringify(spec)).not.toContain('session_id')
+    expect(spec.description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
+  })
+})
+
+describe('codexDynamicToolSpecs — dispatch_agent name and description', () => {
+  it('takes an optional name and a required description, worded by the shared description module', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.properties.name).toEqual({ type: 'string', description: DISPATCH_NAME_PARAM })
+    expect(schema.properties.description).toEqual({
+      type: 'string',
+      description: DISPATCH_DESCRIPTION_PARAM
+    })
+    expect(schema.required).toEqual(['engine', 'prompt', 'description'])
+  })
+
+  it('takes workdir as an optional string, worded by the shared description module', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+      required: string[]
+      additionalProperties: boolean
+    }
+    expect(schema.properties.workdir).toEqual({
+      type: 'string',
+      description: DISPATCH_WORKDIR_PARAM
+    })
+    expect(schema.required).not.toContain('workdir')
+    expect(schema.additionalProperties).toBe(false)
+  })
+
+  it('takes run_in_background as an optional boolean, worded by the shared description module', () => {
+    const spec = codexDynamicToolSpecs(true).find((s) => s.name === 'dispatch_agent')!
+    const schema = (spec as unknown as { inputSchema: unknown }).inputSchema as {
+      properties: Record<string, unknown>
+      required: string[]
+    }
+    expect(schema.properties.run_in_background).toEqual({
+      type: 'boolean',
+      description: DISPATCH_BACKGROUND_PARAM
+    })
+    expect(schema.required).not.toContain('run_in_background')
+  })
+})
+
+describe('codexDynamicToolSpecs — the session tools (slice 2)', () => {
+  const sessionSpecs = codexDynamicToolSpecs(true, true).filter((spec) =>
+    (SESSION_TOOL_NAMES as readonly string[]).includes(spec.name)
+  )
+
+  it('adds the nine, after the others, only when asked', () => {
+    expect(sessionSpecs.map((spec) => spec.name)).toEqual([...SESSION_TOOL_NAMES])
+    expect(codexDynamicToolSpecs(true, true).map((spec) => spec.name)).toEqual([
+      'render_mermaid',
+      'create_mockup',
+      'show_mockup',
+      'dispatch_agent',
+      ...SESSION_TOOL_NAMES
+    ])
+    for (const flags of [
+      [true, false],
+      [false, false]
+    ] as const) {
+      expect(
+        codexDynamicToolSpecs(flags[0], flags[1]).some((spec) => spec.name.startsWith('session_'))
+      ).toBe(false)
+    }
+    // The one-argument form every older caller uses is unchanged.
+    expect(codexDynamicToolSpecs(false).map((spec) => spec.name)).toEqual([
+      'render_mermaid',
+      'create_mockup',
+      'show_mockup'
+    ])
+  })
+
+  it('are canonical tagged functions with the shared descriptions and closed schemas', () => {
+    const descriptions = sessionToolDescriptions({})
+    for (const spec of sessionSpecs) {
+      expect(spec).toMatchObject({
+        type: 'function',
+        description: descriptions[spec.name as keyof typeof descriptions],
+        inputSchema: { type: 'object', additionalProperties: false }
+      })
+    }
+  })
+
+  it('every name is on the hosted list (the security boundary) and valid for a dynamic tool', () => {
+    for (const name of SESSION_TOOL_NAMES) {
+      expect(CODEX_HOSTED_TOOL_NAMES.has(name)).toBe(true)
+      expect(name).toMatch(/^[a-zA-Z0-9_-]+$/)
+      expect(name.startsWith('mcp')).toBe(false)
+    }
   })
 })

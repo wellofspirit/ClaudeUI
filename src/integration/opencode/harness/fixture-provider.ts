@@ -13,11 +13,31 @@
  *   [dispatch]  call ClaudeUI's hosted `claudeui_dispatch_agent`; then echo the result
  *   [subdispatch] `subagent` tool call whose child prompt is `[dispatch]`
  *   [mockup]    call ClaudeUI's hosted `claudeui_create_mockup`; then echo the result
+ *   [handback]  call ClaudeUI's hosted `claudeui_hand_back` (a dispatch target's report); then echo the result
+ *   [sessiontool]  call ClaudeUI's hosted `claudeui_session_list`; then echo the result
+ *   [subsession]   `subagent` tool call whose child prompt is `[sessiontool]`
+ *   [websearch] `websearch` tool call (query `contract query`)
+ *   [skill]     `skill` tool call loading `SKILL_ID` (a test creates it under `.opencode/skills/`)
  *   [question]  `question` tool call (one single-choice question)
  *   [sub]       `subagent` tool call
  *   [subread]   `subagent` tool call whose child prompt is `[read]`
+ *   [submodel:<provider/id>]  `subagent` call (agent `general`) passing that `model`; prompt `child says hi`
  *   [subresume] `subagent` call RESUMING the last child named in the conversation
  *               (`sessionID="ses_…"` of an earlier result); its prompt is `[read]` too
+ *   [subresume:<agent>]  the same, resuming it with `<agent>` (default `general`)
+ *   [subbg]     BACKGROUND `subagent` call (`background: true`, agent `general`) whose child
+ *               prompt is `child works [slow]` (the child streams for SLOW_CHUNKS × `slowChunkMs`)
+ *   [substeer]  BACKGROUND `subagent` call STEERING the last child named in the conversation
+ *               (`sessionID: ses_…` of a background result) while it still runs; prompt `steer [read]`
+ *   [subslow]   FOREGROUND `subagent` call (agent `general`) whose child prompt is `child works [slow]`
+ *   [subnest]   FOREGROUND `subagent` call whose child prompt is `[subbg] [afterslow] nested`: that
+ *               child launches a BACKGROUND grandchild, then streams slowly (needs
+ *               `experimental.subagent_depth` ≥ 2)
+ *   [afterslow] after a tool result, stream slowly instead of answering at once (keeps the turn
+ *               running while a background child works)
+ *               The same turn flavour answers a woken child (a background grandchild's `state="cancelled"`
+ *               completion message) slowly when an earlier prompt of the session carried `[afterslow]`,
+ *               so a test can stop it again before it finishes
  *   [reason]    `reasoning_content` deltas, then text
  *   [read]      `read` of `notes.txt`
  *   [readabs:<path>]  `read` of the ABSOLUTE path (no `]` in it) — outside-the-workspace reads
@@ -75,10 +95,16 @@ export interface FixtureProvider {
 }
 
 export const SLOW_CHUNKS = 30
+/** What a `[handback]` prompt reports. */
+export const HAND_BACK_REPORT = 'contract report from the target'
 export const SHELL_COMMAND = 'echo contract-tool-ran'
 /** `[toolwrite]`'s command: a redirect into the workspace, which the read-only gate never vouches for. */
 export const WRITE_COMMAND = 'echo judged > judged.txt'
 export const REASONING_TEXT = 'thinking it over'
+/** What a `[websearch]` prompt searches for. */
+export const WEBSEARCH_QUERY = 'contract query'
+/** The skill a `[skill]` prompt loads. */
+export const SKILL_ID = 'contract-demo'
 /** opencode accepts a summary carrying one of its template headings (core/src/session/compaction.ts). */
 export const COMPACTION_SUMMARY = '## Objective\nContract compaction summary.'
 /** The file the file-tool markers work on (a test creates it with `alpha`). */
@@ -225,6 +251,16 @@ export async function startFixtureProvider(
       const last = messages.at(-1)
       if (tools.length === 0) return streamText(res, 'Fixture title')
       if (text.includes('summarize the conversation')) return streamText(res, COMPACTION_SUMMARY)
+      if (last?.role === 'tool' && text.includes('[afterslow]'))
+        return streamText(res, 'after', SLOW_CHUNKS)
+      if (
+        text.includes('state="cancelled"') &&
+        messages.some(
+          (message) =>
+            message.role === 'user' && messageText(message.content).includes('[afterslow]')
+        )
+      )
+        return streamText(res, 'woken', SLOW_CHUNKS)
       if (last?.role === 'tool')
         return streamText(res, `TOOL_RESULT_SEEN: ${messageText(last.content).slice(0, 600)}`)
       if (text.includes('[tool]'))
@@ -252,6 +288,22 @@ export async function startFixtureProvider(
             agent: 'general'
           }
         )
+      if (text.includes('[subsession]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract session reader',
+            prompt: 'child lists sessions [sessiontool]',
+            agent: 'general'
+          }
+        )
+      if (text.includes('[sessiontool]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_session_list'),
+          { scope: 'linked' }
+        )
       if (text.includes('[mcp]'))
         return streamToolCall(
           res,
@@ -264,13 +316,31 @@ export async function startFixtureProvider(
         return streamToolCall(
           res,
           tools.find((tool) => tool === 'claudeui_dispatch_agent'),
-          { engine: 'claude', prompt: 'contract dispatch' }
+          { engine: 'claude', prompt: 'contract dispatch', description: 'Contract dispatch' }
+        )
+      if (text.includes('[handback]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_hand_back'),
+          { report: HAND_BACK_REPORT }
         )
       if (text.includes('[mockup]'))
         return streamToolCall(
           res,
           tools.find((tool) => tool === 'claudeui_create_mockup'),
           { html: '<p>contract mockup</p>', title: 'Contract' }
+        )
+      if (text.includes('[websearch]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'websearch'),
+          { query: WEBSEARCH_QUERY }
+        )
+      if (text.includes('[skill]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'skill'),
+          { id: SKILL_ID }
         )
       if (text.includes('[question]'))
         return streamToolCall(
@@ -289,7 +359,57 @@ export async function startFixtureProvider(
             ]
           }
         )
-      if (text.includes('[subresume]')) {
+      if (text.includes('[subbg]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract background',
+            prompt: 'child works [slow]',
+            agent: 'general',
+            background: true
+          }
+        )
+      if (text.includes('[subslow]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract slow',
+            prompt: 'child works [slow]',
+            agent: 'general'
+          }
+        )
+      if (text.includes('[subnest]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract nest',
+            prompt: '[subbg] [afterslow] nested',
+            agent: 'general'
+          }
+        )
+      if (text.includes('[substeer]')) {
+        const named = messages
+          .map((message) => messageText(message.content))
+          .join('\n')
+          .match(/sessionID[=:] ?"?(ses_[A-Za-z0-9]+)/g)
+        const sessionID = named?.at(-1)?.match(/ses_[A-Za-z0-9]+/)?.[0]
+        return streamToolCall(
+          res,
+          sessionID ? tools.find((tool) => tool === 'subagent') : undefined,
+          {
+            description: 'contract steer',
+            prompt: 'steer [read]',
+            agent: 'general',
+            background: true,
+            ...(sessionID ? { sessionID } : {})
+          }
+        )
+      }
+      const subResume = /\[subresume(?::([A-Za-z0-9_-]+))?\]/.exec(text)
+      if (subResume) {
         const named = messages
           .map((message) => messageText(message.content))
           .join('\n')
@@ -301,7 +421,7 @@ export async function startFixtureProvider(
           {
             description: 'contract reader again',
             prompt: 'child reads again [read]',
-            agent: 'general',
+            agent: subResume[1] ?? 'general',
             ...(sessionID ? { sessionID } : {})
           }
         )
@@ -379,6 +499,18 @@ export async function startFixtureProvider(
             args: { path: 'multi.txt', content: 'two calls\n' }
           }
         ])
+      const subModel = /\[submodel:([^\]]+)\]/.exec(text)
+      if (subModel)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'subagent'),
+          {
+            description: 'contract model',
+            prompt: 'child says hi',
+            agent: 'general',
+            model: subModel[1]
+          }
+        )
       if (text.includes('[sub]'))
         return streamToolCall(
           res,

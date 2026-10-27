@@ -19,19 +19,21 @@ import type {
  * only when a credential actually changed — so the adapter adds no
  * invalidation of its own after a vend or a removal: re-vending an unchanged
  * key, or removing one that is not there, at boot must not kill the model probe
- * in flight (`OpencodeAuthProvider.setVendorApiKey` / `removeVendorAuth`).
+ * in flight (`OpencodeAuthProvider.setVendorApiKey` / `removeVendorKey`).
  *
  * opencode 2.x (ADR-097 §5): a key is ClaudeUI's own `cred_claudeui_*` row, a
  * removal deletes only those rows (and, while opencode is not installed, waits
- * for it in ClaudeUI's own record — there is no file to edit).
+ * for it in ClaudeUI's own record — there is no file to edit). The target has
+ * no wide removal on purpose: `OpencodeAuthProvider.removeVendorAuth` deletes
+ * every row opencode holds for a provider, which only an explicit user Remove
+ * may do, so no automatic path can reach it from here.
  */
 export interface OpencodeSharedProviderAuthTarget {
   setVendorApiKey(vendorId: string, key: string): Promise<void>
   /** The ChatGPT vend (CredentialSync's path); absent, an OAuth vend is refused. */
   vendChatgpt?(credential: CodexCredentialInput): Promise<void>
-  removeVendorAuth(vendorId: string): Promise<void>
-  /** ClaudeUI's API key only (sign-ins started from the provider screen stay); absent → removeVendorAuth. */
-  removeVendorKey?(vendorId: string): Promise<void>
+  /** ClaudeUI's API key only (sign-ins started from the provider screen stay, and so do the user's rows). */
+  removeVendorKey(vendorId: string): Promise<void>
   listVendorCredentialIds?(): Promise<Record<string, 'api' | 'oauth'>>
 }
 
@@ -198,9 +200,7 @@ export class OpencodeSharedProviderAdapter {
    * is (ADR-082 §8, S7d's "at once" as far as opencode allows).
    */
   async removeCredential(definition: SharedProviderDefinition, _running = true): Promise<void> {
-    const vendorId = opencodeProviderId(definition)
-    if (this.authTarget.removeVendorKey) await this.authTarget.removeVendorKey(vendorId)
-    else await this.authTarget.removeVendorAuth(vendorId)
+    await this.authTarget.removeVendorKey(opencodeProviderId(definition))
   }
 
   hasDefinition(definition: SharedProviderDefinition): boolean {
@@ -233,7 +233,7 @@ export class OpencodeSharedProviderAdapter {
  *
  * Exported (rather than re-derived at each call site) because "which native row
  * does this shared definition own" is asked in three places now — this adapter,
- * `decorateSharedProviderClaims` in `session.ipc.ts`, and the provider registry
+ * `decorateSharedProviderClaims` in `opencode-claims.ts`, and the provider registry
  * — and the three must never disagree. `PiSharedProviderAdapter.nativeProviderId`
  * is the pi twin.
  */

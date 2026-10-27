@@ -67,9 +67,9 @@ export function ConfirmModal({
         className="absolute inset-0 bg-black/40 backdrop-blur-sm"
         onClick={busy ? undefined : onCancel}
       />
-      <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[440px] p-5 animate-fade-in">
+      <div className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[440px] max-w-[calc(100%-2rem)] max-h-[90%] overflow-y-auto p-5 animate-fade-in">
         <h3 className="text-[15px] font-medium text-text-primary mb-2">{title}</h3>
-        <p className="text-[13px] text-text-secondary mb-3 leading-relaxed">{body}</p>
+        <div className="text-[13px] text-text-secondary mb-3 leading-relaxed">{body}</div>
         {detail && (
           <div className="text-[11px] text-text-muted font-mono bg-bg-tertiary/60 border border-border rounded px-2 py-1.5 mb-4 break-all">
             {detail}

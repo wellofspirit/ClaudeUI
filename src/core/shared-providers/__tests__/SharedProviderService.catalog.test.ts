@@ -98,6 +98,7 @@ function setup(
     diagnoseZeroModels: vi.fn(() => 'no-models-discovered' as const),
     resolveDefaultModel: vi.fn(() => null)
   } as unknown as OpencodeSharedProviderAdapter
+  const onApiKeyChanged = vi.fn()
   const loadCatalogs = vi.fn(async () => ({
     pi: new Set(['openrouter', 'groq', 'anthropic', 'openai']),
     opencode: new Map([
@@ -138,9 +139,10 @@ function setup(
       loadCatalogs,
       ...native
     },
-    writeModelAllowlist
+    writeModelAllowlist,
+    onApiKeyChanged
   })
-  return { service, records, credentials, vended, pi, opencode, loadCatalogs }
+  return { service, records, credentials, vended, pi, opencode, loadCatalogs, onApiKeyChanged }
 }
 
 describe('catalog definitions', () => {
@@ -512,5 +514,51 @@ describe('setCuration — one list, projected into each engine (ADR-074 §3)', (
     await expect(service.setCuration('local-api', null as never)).rejects.toThrow(
       /Invalid curation/
     )
+  })
+})
+
+describe('onApiKeyChanged (the Usage tab learns a key came or went)', () => {
+  it('fires once per vault write or removal, and never with anything to leak', async () => {
+    const { service, onApiKeyChanged } = setup([chatgpt(), catalog()])
+    await service.setApiKey('openrouter', KEY_A)
+    expect(onApiKeyChanged).toHaveBeenCalledTimes(1)
+    expect(onApiKeyChanged).toHaveBeenCalledWith()
+    await service.disconnectProvider('openrouter')
+    expect(onApiKeyChanged).toHaveBeenCalledTimes(2)
+    await service.removeDefinition('openrouter')
+    expect(onApiKeyChanged).toHaveBeenCalledTimes(3)
+  })
+
+  it('fires for an adopted native key, boot pass included', async () => {
+    writeAuth(piAuth, { openrouter: { type: 'api_key', key: KEY_A } })
+    writeAuth(opencodeAuth, { openrouter: { type: 'api', key: KEY_A } })
+    const { service, onApiKeyChanged } = setup()
+    await service.adoptNativeKeys()
+    expect(onApiKeyChanged).toHaveBeenCalledTimes(1)
+
+    writeAuth(piAuth, { groq: { type: 'api_key', key: KEY_A } })
+    writeAuth(opencodeAuth, { groq: { type: 'api', key: KEY_B } })
+    await service.adoptNativeKey('groq', 'pi')
+    expect(onApiKeyChanged).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not fire when nothing was written, and a throwing hook does not fail the write', async () => {
+    const { service, onApiKeyChanged, credentials } = setup([chatgpt(), catalog()])
+    await expect(service.setApiKey('openrouter', '')).rejects.toThrow('API key is required')
+    expect(onApiKeyChanged).not.toHaveBeenCalled()
+
+    onApiKeyChanged.mockImplementation(() => {
+      throw new Error('hook broke')
+    })
+    await service.setApiKey('openrouter', KEY_A)
+    expect(credentials.get('openrouter')).toEqual({ type: 'api_key', key: KEY_A })
+  })
+
+  it('configure() wires the singleton after construction', async () => {
+    const { service } = setup([chatgpt(), catalog()])
+    const late = vi.fn()
+    service.configure({ onApiKeyChanged: late })
+    await service.setApiKey('openrouter', KEY_A)
+    expect(late).toHaveBeenCalledTimes(1)
   })
 })

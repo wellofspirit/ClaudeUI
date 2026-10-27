@@ -25,7 +25,7 @@ import {
   progressText,
   type HarnessBannerState
 } from '../SettingsDialog/harness-view'
-import { ProgressBar } from '../SettingsDialog/HarnessesInstalled'
+import { ProgressBar } from '../shared/ProgressBar'
 import { isWebClient } from '../SettingsDialog/remote-settings-transport'
 import { Button } from '../SettingsDialog/settings-controls'
 import { EngineLogo } from '../shared/EngineLogo'

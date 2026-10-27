@@ -15,6 +15,8 @@ Rules for any agent working in this repository, whatever its role:
 - Unless you are the orchestrator: never commit, `git add`, branch, stash, checkout, reset or switch, and never run `bun install` / `bun add` / `bun remove` (the orchestrator does that deliberately; `postinstall` then rebuilds natives and installs the engines).
 - Format with `bunx prettier --write <files you touched>`; `bun run format` rewrites the whole repo.
 - `bun-claude.exe` / `bun-claude` also runs the agent sessions themselves: never kill it by process name.
+- A worktree's `node_modules` and `vendor` are usually junctions to the main checkout's: never delete recursively through them; unlink the junction itself.
+- Work notes (ADR-026 "Work notes"): open items (backlog features, housekeeping bugs, an arc's leftover follow-ups) are GitHub issues on this repo, labelled `backlog` or `housekeeping`. An arc's working files (handoff, specs, implementer/reviewer reports, live-drive logs) go in `.work/<arc>/` in the **main checkout** (worktrees are deleted at merge): gitignored, never committed. Research that can't be public (probe captures, reverse-engineering notes, third-party excerpts): follow the `claudeui-notes` skill if it's installed; otherwise keep it in `.work/<arc>/`.
 - Commit gate: `scripts/gates.sh`. Never judge a gate from output piped into `grep`/`tail`.
 
 Engine bumps (Claude Code, opencode, pi, Codex) follow the **`bump-harness`** skill (`.claude/skills/bump-harness/`).
@@ -32,7 +34,7 @@ Architecture, services, persistence, multi-engine design → `docs/architecture/
 - `bun run dev` — development mode with hot reload (main-process changes need an app restart)
 - `bun run build` — Claude Code binary (`ensure-cli`) + electron-vite build, no typecheck (run `bun run typecheck` separately); `build:win` / `build:mac` / `build:linux` add the typecheck (not on linux) and an electron-builder package (`--dir`, unpacked, on win/mac)
 - `bun run typecheck` / `bun run lint` / `bun run format:check` — `bun run format` rewrites the **whole repo**; format only the files you touched (`bunx prettier --write <files>`)
-- `scripts/gates.sh` — the commit gate: typecheck, lint, `bun run test`. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
+- `scripts/gates.sh` — the commit gate: typecheck, lint and the whole default suite (about 40 s); works in a git worktree. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
 - `bun run ensure` — the Claude Code binary and the tested opencode, pi and Codex, together; `postinstall` runs it after the native rebuild
 - `bun run ensure-cli` / `update-cli` — (re)build the patched `bun-claude` binary and boot-probe it; version pinned by `package.json#claudeCliVersion`, which must equal `src/shared/harness-manifests/claude.json#tested`
 - `bun run ensure-opencode` / `ensure-pi` / `ensure-codex` — install the tested version (`src/shared/harness-manifests/<id>.json#tested`) into the managed store through the app's own installer (`CLAUDEUI_HARNESS_STORE` moves the store); `update-*` reinstalls it
@@ -43,7 +45,7 @@ Architecture, services, persistence, multi-engine design → `docs/architecture/
 
 ## Testing
 
-- `bun run test` — default local run: the unit, unit-node, component, e2e and browser projects (about a minute on a fast Windows box). The browser project needs Playwright's Chromium (`bunx playwright install --only-shell chromium`)
+- `bun run test` — default local run: the unit, unit-node, unit-forks, component, e2e and browser projects (about 35 s on a fast Windows box; the unit, unit-node, component and e2e projects share worker processes, see `docs/testing-strategy.md`, "Test pools and process isolation"). The browser project needs Playwright's Chromium (`bunx playwright install --only-shell chromium`)
 - `bun run test:ci` — adds the slow git project (what the PR workflow runs; `ci.yml` runs on pull requests only, while pushes to `pre-release`/`main` run the release builds, which test with `test:ci:no-browser`)
 - `bun run test:git:changed` — after touching git-service/worktree code
 - `bun run test:integration` — real engine binaries (Claude Code from `vendor/`, the others from the managed store). Each suite is opt-in and skips without its flag: `CLAUDE_INTEGRATION_TESTS=1`, `OPENCODE_V2_INTEGRATION=1`, `PI_INTEGRATION_TESTS=1`, `CODEX_INTEGRATION=1`; it also skips when its engine is not installed. A run that only skipped has not passed
@@ -58,4 +60,4 @@ cli.js's working directory uses POSIX format (`/d/WorkPlace/ClaudeUI`) on Window
 
 ## ADRs
 
-When a design or implementation decision is made during a conversation, prompt the user about whether it should be recorded as a new ADR in `docs/adr/`. When adding one, check whether it supersedes or conflicts with an existing ADR — if so, update the old ADR's status and cross-reference both ways. Take the next free number across every remote branch, not just yours: numbers have collided (there are two ADR-037s).
+When a conversation changes or makes a design decision, ask the user whether to record it. First look for the ADR that already covers that area, and edit its decision in place with one dated line saying what changed; no appended amendment sections, no stacked "amended by" headers (git keeps the history). Write a new ADR only for an area no ADR covers, in about a page; design detail and probe facts go to `docs/architecture/` or `docs/protocol-*/`. A new ADR takes the next free number across every remote branch, not just yours (numbers have collided: there are two ADR-037s). The rules are in ADR-026 › Decision records.

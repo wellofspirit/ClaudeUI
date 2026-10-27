@@ -9,8 +9,8 @@
  * against the real installed binary and a real model call. Unit-level coverage
  * for guards/model-resolution/gate/streaming/cost-cap/stop already lives in
  * cross-engine-dispatcher.component.test.ts (a FAKE spawnPiTarget) — this file
- * exists solely to prove the REAL wiring (bridge host transport, `--no-session`
- * spawn args, `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/
+ * exists solely to prove the REAL wiring (bridge host transport, the
+ * `--session-dir`/`--session-id` spawn args, `get_state`/`set_model`/`prompt`/`get_last_assistant_text`/
  * `abort` RPC calls) actually works against the real binary, mirroring
  * pi-hosted-tools.integration.test.ts's identical "unit tests mock the seam,
  * this file proves the seam is real" rationale.
@@ -24,11 +24,11 @@
  *
  * Gated: PI_INTEGRATION_TESTS=1 AND a real openai-codex credential in
  * ~/.pi/agent/auth.json (read-only — never written here). Same
- * shared-refresh-token caveat as pi-hosted-tools.integration.test.ts. Session
- * files land nowhere (`--no-session` — verified during the M4c kickoff
- * investigation: get_state/set_model/prompt/get_last_assistant_text/abort all
- * work normally under it, and no `~/.pi/agent/sessions` entry is created).
- * cwd is an isolated tmpdir, never the real project tree or homedir.
+ * shared-refresh-token caveat as pi-hosted-tools.integration.test.ts. The target's
+ * session is persisted but hidden (ADR-105): `--session-dir
+ * ~/.claude/ui/dispatch/pi/<ledgerId> --session-id <uuid>`, so no
+ * `~/.pi/agent/sessions` entry is created. cwd is an isolated tmpdir, never the
+ * real project tree or homedir.
  *
  * Minimal by design (per the M4c kickoff spec): one dispatch, one short
  * prompt, generously timed. The bidirectional real-app drive (an actual
@@ -48,6 +48,9 @@ import { join } from 'node:path'
 import { locatePiBinary } from '../../core/pi/pi-locate'
 import { CrossEngineDispatcher } from '../../core/services/cross-engine-dispatcher'
 import type { DispatchContext } from '../../core/services/cross-engine-dispatcher'
+import { makeFakeDispatchLedger } from '../../test/helpers/fake-dispatch-ledger'
+import { makeFakeDispatchReports } from '../../test/helpers/fake-dispatch-reports'
+import { withDefaultDescription } from '../../test/helpers/default-dispatch-description'
 
 const SKIP = !process.env.PI_INTEGRATION_TESTS
 const ROUTING_ID = 'routing-pi-dispatch-target-integration'
@@ -77,38 +80,44 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
 
     beforeAll(() => {
       tmpDir = mkdtempSync(join(tmpdir(), 'pi-dispatch-target-integration-'))
-      dispatcher = new CrossEngineDispatcher({
-        // opencode-direction deps are structurally required by DispatcherDeps
-        // but never invoked dispatching engine:'pi' — throwing stubs make that
-        // guarantee loud if it's ever violated by a future change.
-        serverManager: {
-          acquire: async () => {
-            throw new Error('serverManager.acquire should never be called dispatching engine: "pi"')
+      dispatcher = withDefaultDescription(
+        new CrossEngineDispatcher({
+          // opencode-direction deps are structurally required by DispatcherDeps
+          // but never invoked dispatching engine:'pi' — throwing stubs make that
+          // guarantee loud if it's ever violated by a future change.
+          serverManager: {
+            acquire: async () => {
+              throw new Error(
+                'serverManager.acquire should never be called dispatching engine: "pi"'
+              )
+            },
+            releaseIfCurrent: () => {
+              throw new Error(
+                'serverManager.releaseIfCurrent should never be called dispatching engine: "pi"'
+              )
+            },
+            subscribeExit: () => {
+              throw new Error(
+                'serverManager.subscribeExit should never be called dispatching engine: "pi"'
+              )
+            }
           },
-          releaseIfCurrent: () => {
-            throw new Error(
-              'serverManager.releaseIfCurrent should never be called dispatching engine: "pi"'
-            )
+          makeClient: () => {
+            throw new Error('makeClient should never be called dispatching engine: "pi"')
           },
-          subscribeExit: () => {
-            throw new Error(
-              'serverManager.subscribeExit should never be called dispatching engine: "pi"'
-            )
-          }
-        },
-        makeClient: () => {
-          throw new Error('makeClient should never be called dispatching engine: "pi"')
-        },
-        // `turnTimeoutMs` configured deliberately: ADR-033's 2026-09-18
-        // amendment removed the built-in cap, so without one a wedged real
-        // binary would hang this suite instead of failing it.
-        loadEngineConfig: () => ({
-          dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
-        }),
-        recordUsageEvent: () => {}
-        // spawnPiTarget intentionally OMITTED — exercises the REAL
-        // defaultSpawnPiTarget (real PiRpcClient + PiBridgeHost).
-      })
+          // `turnTimeoutMs` configured deliberately: ADR-033's 2026-09-18
+          // amendment removed the built-in cap, so without one a wedged real
+          // binary would hang this suite instead of failing it.
+          loadEngineConfig: () => ({
+            dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+          }),
+          recordUsageEvent: () => {},
+          // The X-Agent ledger (ADR-105) in memory: this test does not exercise the DB.
+          ledger: makeFakeDispatchLedger()
+          // spawnPiTarget intentionally OMITTED — exercises the REAL
+          // defaultSpawnPiTarget (real PiRpcClient + PiBridgeHost).
+        })
+      )
     })
 
     afterAll(async () => {
@@ -141,6 +150,54 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
       expect(result.isError, `dispatch failed: ${result.text}`).toBeFalsy()
       expect(result.text.trim().toLowerCase()).toContain('hello')
       expect(result.sessionId).toBeTruthy()
+    }, 90_000)
+
+    it('hand_back: the real bridge extension registers the tool for a target, and its report ends the run', async () => {
+      const reporter = withDefaultDescription(
+        new CrossEngineDispatcher({
+          serverManager: {
+            acquire: async () => {
+              throw new Error(
+                'serverManager.acquire should never be called dispatching engine: "pi"'
+              )
+            },
+            releaseIfCurrent: () => {},
+            subscribeExit: () => () => {}
+          },
+          makeClient: () => {
+            throw new Error('makeClient should never be called dispatching engine: "pi"')
+          },
+          loadEngineConfig: () => ({
+            dispatch: { defaultModel: 'openai-codex/gpt-5.6-luna', turnTimeoutMs: 60_000 }
+          }),
+          recordUsageEvent: () => {},
+          ledger: makeFakeDispatchLedger(),
+          reports: makeFakeDispatchReports(),
+          requireHandBack: true
+        })
+      )
+      const ctx: DispatchContext = {
+        fromEngine: 'claude',
+        fromRoutingId: ROUTING_ID,
+        cwd: tmpDir,
+        getAutonomyMode: () => 'default',
+        getMessages: () => [],
+        emit: () => {}
+      }
+      try {
+        const result = await reporter.dispatch(
+          {
+            engine: 'pi',
+            prompt: "Call the hand_back tool once with the report 'pi-report-ok'. Do nothing else."
+          },
+          ctx
+        )
+        expect(result.isError, `dispatch failed: ${result.text}`).toBeFalsy()
+        expect(result.text).toContain('[X-Agent report]')
+        expect(result.text).toContain('pi-report-ok')
+      } finally {
+        reporter.disposeFor(ROUTING_ID)
+      }
     }, 90_000)
   }
 )

@@ -102,13 +102,21 @@ function makeWorktreeInfo(overrides?: Partial<WorktreeInfo>): WorktreeInfo {
 // Setup
 // ---------------------------------------------------------------------------
 
+// The store as it was built, before any test touched it.
+const INITIAL_STATE = useSessionStore.getState()
+
 beforeEach(() => {
+  // Tests set engine / model / available-model state directly and through actions
+  // (some of it mirrored into localStorage); the field list below only covers the
+  // collections, so put EVERYTHING back — otherwise the result of a test depends
+  // on which engine the previous one left selected.
+  localStorage.clear()
+  useSessionStore.setState(INITIAL_STATE, true)
   // The replica is a module singleton holding canonical state: resetting only the
   // store would leave the two disagreeing and the next projection would resurrect
   // the previous test's sessions (SyncCore phase 4c).
   resetReplicaSeam()
   resetFactoryCounter()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: vi.fn(),
     saveSlashCommands: vi.fn(),
@@ -135,6 +143,14 @@ beforeEach(() => {
   })
   mirrorStoreIntoReplica()
 })
+
+/**
+ * session-store keeps a per-cwd git-status cache at module level (no reset hook),
+ * and a new session picks up whatever the last session on that cwd reported. The
+ * git tests therefore each take a cwd nobody else uses.
+ */
+let gitCwdSeq = 0
+const uniqueGitCwd = (): string => `/git-cache-isolated/${++gitCwdSeq}`
 
 // ---------------------------------------------------------------------------
 // Session lifecycle
@@ -1797,8 +1813,13 @@ describe('removeTerminalGroup', () => {
 // ---------------------------------------------------------------------------
 
 describe('setGitStatus', () => {
+  let cwd: string
+  beforeEach(() => {
+    cwd = uniqueGitCwd()
+  })
+
   it('updates gitStatus on the session', () => {
-    store().createNewSession('r1', '/test')
+    store().createNewSession('r1', cwd)
     const status = makeGitStatus({ branch: 'feature' })
     store().setGitStatus('r1', status)
     expect(store().sessions['r1'].gitStatus?.branch).toBe('feature')
@@ -1806,21 +1827,26 @@ describe('setGitStatus', () => {
 
   it('caches git status for the session cwd', () => {
     // Create a second session with the same cwd — it should receive cached status
-    store().createNewSession('r1', '/shared-cwd')
+    store().createNewSession('r1', cwd)
     const status = makeGitStatus({
       branch: 'main',
       files: [{ path: 'README.md', index: 'M', working: ' ' }]
     })
     store().setGitStatus('r1', status)
     // New session with same cwd should pick up cached status
-    store().createNewSession('r2', '/shared-cwd')
+    store().createNewSession('r2', cwd)
     expect(store().sessions['r2'].gitStatus?.branch).toBe('main')
   })
 })
 
 describe('selectNextGitFile', () => {
+  let cwd: string
+  beforeEach(() => {
+    cwd = uniqueGitCwd()
+  })
+
   it('selects the first file from gitStatus.files', () => {
-    store().createNewSession('r1', '/test')
+    store().createNewSession('r1', cwd)
     store().setGitStatus(
       'r1',
       makeGitStatus({
@@ -1835,20 +1861,20 @@ describe('selectNextGitFile', () => {
   })
 
   it('sets gitSelectedFile to null when no files in gitStatus', () => {
-    store().createNewSession('r1', '/test')
+    store().createNewSession('r1', cwd)
     store().setGitStatus('r1', makeGitStatus({ files: [] }))
     store().selectNextGitFile('r1')
     expect(store().sessions['r1'].gitSelectedFile).toBeNull()
   })
 
   it('sets gitSelectedFile to null when gitStatus is null', () => {
-    store().createNewSession('r1', '/test')
+    store().createNewSession('r1', cwd)
     store().selectNextGitFile('r1')
     expect(store().sessions['r1'].gitSelectedFile).toBeNull()
   })
 
   it('clears gitFileDiff when selecting next file', () => {
-    store().createNewSession('r1', '/test')
+    store().createNewSession('r1', cwd)
     store().setGitFileDiff('r1', { patch: 'diff --git...' })
     store().setGitStatus(
       'r1',
@@ -1977,16 +2003,6 @@ describe('setWorktreeInfo', () => {
     store().createNewSession('r1', '/test')
     store().setWorktreeInfo('r1', makeWorktreeInfo())
     store().setWorktreeInfo('r1', null)
-    expect(store().worktreeInfoMap['r1']).toBeUndefined()
-    expect(store().sessions['r1'].worktreeInfo).toBeNull()
-  })
-})
-
-describe('clearWorktreeInfo', () => {
-  it('removes from worktreeInfoMap and sets session.worktreeInfo to null', () => {
-    store().createNewSession('r1', '/test')
-    store().setWorktreeInfo('r1', makeWorktreeInfo())
-    store().clearWorktreeInfo('r1')
     expect(store().worktreeInfoMap['r1']).toBeUndefined()
     expect(store().sessions['r1'].worktreeInfo).toBeNull()
   })

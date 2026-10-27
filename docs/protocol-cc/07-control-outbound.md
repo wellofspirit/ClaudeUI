@@ -315,7 +315,7 @@ Full context-window breakdown. Slow (CPU-bound token counting).
   "agents": [...],
   "slashCommands": [...],
   "skills": [...],
-  "autoCompactThreshold": 0.92,
+  "autoCompactThreshold": 167000,   // an absolute token count (maxTokens − 33000), not a fraction; 15 §15.5
   "isAutoCompactEnabled": true,
   "messageBreakdown": [...],
   "apiUsage": {...}
@@ -476,10 +476,14 @@ Kill a running task by ID.
 
 **Response (success):** empty `{}`.
 
-**Side effects:** Calls `yi8(task_id, ...)`:
+**Side effects (2.1.293):** the handler (`Tt`, `cli.js@char34307421`) goes through the shared stop path
+used by the model-side `TaskStop` tool (`fSe`, `@char16445532`), which calls the task type's `kill`
+(`qC`, `@char12454656` for agents): abort the task's controller, mark the record killed, and notify its
+owner ("was stopped by …"). On the wire: `task_updated` (status `killed`) then `task_notification`
+(status `stopped`).
 
-- `local_bash` task → SIGTERM the shell process.
-- `local_agent` task → resolve its stop-signal Promise.
+- `local_bash` task → the shell process is terminated.
+- `local_agent` task → its abort controller fires.
 
 **Timing:** fast.
 
@@ -1420,3 +1424,7 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 | `supportedModels() / Commands() / Agents()` | (reads cached initialize response)    |
 | (no method)                                 | `rename_session` — REPL bridge only   |
 | (no method)                                 | `file_suggestions` — REPL bridge only |
+
+## 2.1.308 bounded schema audit
+
+The bundle adds internal outbound queries `list_cloud_sessions` (optional `user_initiated`), `get_cloud_session` (`session_id`), and `get_cloud_session_transcript` (`session_id`, optional `cursor`). They read cloud sessions using the CLI's sign-in and have host/entrypoint restrictions. ClaudeUI does not issue them; their runtime availability was not tested. This is a schema audit, not a new host capability.

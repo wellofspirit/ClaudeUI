@@ -11,7 +11,7 @@
  * holds end-to-end, not just by inspection of the wrapper code.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as os from 'os'
 import * as path from 'path'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
@@ -42,7 +42,9 @@ const {
   deleteSessionFiles,
   refreshCanonicalDirectories
 } = vi.hoisted(() => ({
-  deleteSessionByEngine: vi.fn(async (_id: string, _key?: string, _engine?: string) => {}),
+  deleteSessionByEngine: vi.fn(
+    async (_id: string, _key?: string, _engine?: string): Promise<boolean | void> => {}
+  ),
   deleteProjectFiles: vi.fn(async () => {}),
   deleteSessionFiles: vi.fn(async (_id: string, _key: string) => {}),
   refreshCanonicalDirectories: vi.fn(async () => {})
@@ -87,17 +89,22 @@ const { scanCodexLineage } = vi.hoisted(() => ({
 }))
 vi.mock('../../../core/codex/history', () => ({ scanCodexLineage }))
 
-// The judge picker's support query (ADR-081 §3). The resolver's describe path is
-// the subject of `core/automode/__tests__/judge-route.test.ts`; what these tests
-// pin is the wire-argument check in front of it.
-const { describeJudgeModels } = vi.hoisted(() => ({
+// The judge picker's support query (ADR-081 §3) and its resting-route query. The resolver is
+// the subject of `core/automode/__tests__/judge-route.test.ts`; what these tests pin is the
+// wire-argument check in front of it and what the resting query makes of a route. The cooldown
+// store (`judge-cooldown.ts`) and the route key are the real ones.
+const { describeJudgeModels, resolveJudgeRoute } = vi.hoisted(() => ({
   describeJudgeModels: vi.fn(async (_engine: string, values: string[]) =>
     Object.fromEntries(values.map((v) => [v, { ok: true }]))
-  )
+  ),
+  resolveJudgeRoute: vi.fn()
 }))
-vi.mock('../../../core/automode/judge-route', () => ({ describeJudgeModels }))
+vi.mock('../../../core/automode/judge-route', () => ({ describeJudgeModels, resolveJudgeRoute }))
 
 // Import AFTER mocks.
+import { clearCooldowns, noteRateLimited } from '../../../core/automode/judge-cooldown'
+import { routeFor } from '../../../core/automode/judge-http/__tests__/helpers'
+import { judgeRouteKey } from '../../../core/automode/judge-http/transport'
 import {
   mcpStatus,
   stopTask,
@@ -113,9 +120,16 @@ import {
   deleteSession,
   deleteProject,
   clearConversation,
-  judgeModelSupport
+  judgeModelSupport,
+  judgeRouteResting,
+  sendPrompt,
+  allowPeerMessages
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
+import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
+import { getSessionMeta, setSessionMeta } from '../../../core/services/db'
+import { deliver } from '../../../core/services/session-delivery'
+import { TurnOriginLedger } from '../../../core/providers/turn-origin-ledger'
 
 function makeSessionStub(overrides: Record<string, unknown> = {}): any {
   return {
@@ -236,6 +250,42 @@ describe('handlers-core', () => {
     expect(snap.recentSessionIds).toEqual(['rid-a'])
     expect(snap.pinnedSessionIds).toEqual(['rid-a'])
     expect(snap.customTitles).toEqual({ 'rid-a': 'Renamed' })
+  })
+
+  it("a client's saveSessions does not drop a session it does not know from canonical sessionEngines", () => {
+    // The host created `host-codex` (birth identity); the saving client's snapshot
+    // predates it. The DB write only upserts, so the echo must too — or every
+    // replica loses the entry while its row stays.
+    syncCore.resetCanonicalForTests()
+    saveSessions({
+      sessionEngines: { 'host-codex': { engineId: 'codex' } }
+    } as any)
+
+    saveSessions({
+      sessionEngines: { 'client-pi': { engineId: 'pi' } }
+    } as any)
+
+    expect(syncCore.getCanonicalState().sessionEngines).toEqual({
+      'host-codex': { engineId: 'codex' },
+      'client-pi': { engineId: 'pi' }
+    })
+    // Every other key of the payload is echoed as the client sent it.
+    const sink = vi.fn()
+    const off = addSyncSubscriber(sink)
+    try {
+      saveSessions({ recentSessions: ['x'], sessionEngines: {} } as any)
+      expect(sink).toHaveBeenCalledWith(expect.any(Number), 'config:sessions-changed', [
+        expect.objectContaining({ recentSessions: ['x'] })
+      ])
+    } finally {
+      off()
+    }
+    // An impoverished save (`{}`) cannot wipe either.
+    saveSessions({ sessionEngines: {} } as any)
+    expect(Object.keys(syncCore.getCanonicalState().sessionEngines).sort()).toEqual([
+      'client-pi',
+      'host-codex'
+    ])
   })
 
   it('listDirEntries returns the default empty shape for a nonexistent path', async () => {
@@ -428,6 +478,58 @@ describe('handlers-core', () => {
       } as any
       await deleteSession(manager, 'oc-1', '-repo', 'opencode')
       expect(refreshCanonicalDirectories).toHaveBeenCalled()
+    })
+
+    // `saveSessionConfig` no longer deletes the rows a client's map lacks, so the
+    // delete is what removes a session's engine/model row — host-side.
+    it("removes the session's engine row once the engine delete succeeded", async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), has: vi.fn(() => false) } as any
+      setSessionMeta('oc-row', { engineId: 'opencode' })
+
+      await deleteSession(manager, 'oc-row', '-repo', 'opencode')
+
+      expect(getSessionMeta('oc-row')).toBeUndefined()
+    })
+
+    it('keeps the engine row when the engine refuses the delete (the session survives)', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), has: vi.fn(() => false) } as any
+      setSessionMeta('oc-keep', { engineId: 'opencode' })
+      deleteSessionByEngine.mockRejectedValueOnce(new Error('opencode server down'))
+
+      await expect(deleteSession(manager, 'oc-keep', '-repo', 'opencode')).rejects.toThrow(
+        /server down/
+      )
+
+      expect(getSessionMeta('oc-keep')?.engineId).toBe('opencode')
+    })
+
+    it('deleteProject removes the engine rows of what it deleted, and keeps the survivors', async () => {
+      const manager = { cancel: vi.fn(), get: vi.fn(), forEach: vi.fn() } as any
+      setSessionMeta('oc-live', { engineId: 'opencode' })
+      setSessionMeta('pi-gone', { engineId: 'pi' })
+      setSessionMeta('elsewhere', { engineId: 'pi' })
+      deleteSessionByEngine.mockImplementation(async (id: string) => {
+        if (id === 'oc-live') throw new Error('opencode server down')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'oc-live', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' },
+            { sessionId: 'pi-gone', cwd: '/repo', projectKey: '-repo', engineId: 'pi' }
+          ]
+        }
+      ] as never)
+
+      await deleteProject(manager, '-repo')
+
+      expect(getSessionMeta('pi-gone')).toBeUndefined()
+      // Survived the delete: it needs its row to reopen on the right engine.
+      expect(getSessionMeta('oc-live')?.engineId).toBe('opencode')
+      // Another project's session is untouched.
+      expect(getSessionMeta('elsewhere')?.engineId).toBe('pi')
     })
 
     it('sweeps every session on the project — on-disk group members AND live sessions', async () => {
@@ -863,6 +965,154 @@ describe('handlers-core', () => {
   })
 
   // -------------------------------------------------------------------------
+  // ADR-105 §5: a deleted session takes its X-Agents with it — but only once the ENGINE has
+  // accepted the delete. `session:removed` goes out before the engine is asked, so it cannot be
+  // the trigger: a refused delete leaves a surviving parent that must keep its X-Agents.
+  // -------------------------------------------------------------------------
+
+  describe('a deleted session’s X-Agents end after the engine accepted the delete', () => {
+    let endParent: ReturnType<typeof vi.spyOn>
+    beforeEach(() => {
+      vi.clearAllMocks()
+      syncCore.resetCanonicalForTests()
+      endParent = vi.spyOn(crossEngineDispatcher, 'endParent').mockImplementation(() => {})
+    })
+    afterEach(() => endParent.mockRestore())
+    const manager = (): any => ({
+      cancel: vi.fn(),
+      get: vi.fn(),
+      has: vi.fn(() => false),
+      forEach: vi.fn()
+    })
+
+    it('Claude/opencode/pi: after the engine delete, not before, and not at all when it refuses', async () => {
+      const order: string[] = []
+      deleteSessionByEngine.mockImplementationOnce(async () => void order.push('engine'))
+      endParent.mockImplementation(() => void order.push('end'))
+      syncCore.emit('session:created', ['rid-ok', { cwd: '/repo' }])
+      await deleteSession(manager(), 'rid-ok', '-repo', 'claude')
+      expect(order).toEqual(['engine', 'end'])
+      expect(endParent).toHaveBeenCalledWith('rid-ok')
+
+      endParent.mockClear()
+      deleteSessionByEngine.mockRejectedValueOnce(new Error('server down'))
+      await expect(deleteSession(manager(), 'rid-no', '-repo', 'opencode')).rejects.toThrow(
+        /server down/
+      )
+      expect(endParent).not.toHaveBeenCalled()
+    })
+
+    it('a best-effort engine that could not delete (`false`: opencode server down, pi file stuck) leaves the parent its X-Agents and its engine row', async () => {
+      for (const engine of ['opencode', 'pi'] as const) {
+        setSessionMeta(`${engine}-stuck`, { engineId: engine })
+        deleteSessionByEngine.mockResolvedValueOnce(false)
+        await deleteSession(manager(), `${engine}-stuck`, '-repo', engine)
+        expect(endParent).not.toHaveBeenCalled()
+        expect(getSessionMeta(`${engine}-stuck`)?.engineId).toBe(engine)
+
+        deleteSessionByEngine.mockResolvedValueOnce(true)
+        await deleteSession(manager(), `${engine}-stuck`, '-repo', engine)
+        expect(endParent).toHaveBeenCalledWith(`${engine}-stuck`)
+        endParent.mockClear()
+      }
+    })
+
+    it('deleteProject: an opencode and a pi session whose delete reported `false` are survivors too', async () => {
+      deleteSessionByEngine.mockImplementation(async (id: string) => id.endsWith('-ok'))
+      for (const id of ['oc-stuck', 'pi-stuck', 'oc-ok']) setSessionMeta(id, { engineId: 'pi' })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'oc-stuck', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' },
+            { sessionId: 'pi-stuck', cwd: '/repo', projectKey: '-repo', engineId: 'pi' },
+            { sessionId: 'oc-ok', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' }
+          ]
+        }
+      ] as never)
+      await deleteProject(manager(), '-repo')
+      expect(endParent.mock.calls.map((c) => c[0])).toEqual(['oc-ok'])
+      expect(getSessionMeta('oc-stuck')).toBeDefined()
+      expect(getSessionMeta('oc-ok')).toBeUndefined()
+    })
+
+    it('deleteProject: when the whole project dir is removed, a Claude transcript that could not be deleted still keeps its X-Agents', async () => {
+      deleteSessionFiles.mockImplementation(async (id: string) => {
+        if (id === 'cl-stuck') throw new Error('EBUSY')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            {
+              // relocated into a worktree's project dir: deleted one by one, dir or no dir
+              sessionId: 'cl-stuck',
+              cwd: '/repo',
+              projectKey: '-repo--claude-worktrees-wt',
+              engineId: 'claude'
+            },
+            { sessionId: 'cl-fine', cwd: '/repo', projectKey: '-repo', engineId: 'claude' }
+          ]
+        }
+      ] as never)
+      await deleteProject(manager(), '-repo')
+      expect(deleteProjectFiles).toHaveBeenCalledWith('-repo') // the dir goes either way
+      expect(endParent.mock.calls.map((c) => c[0])).toEqual(['cl-fine'])
+    })
+
+    it('Codex: each thread ends as the binary deletes it (the walk’s `deleted` hook), a refused one never', async () => {
+      await deleteSession(manager(), 'cx-root', '-repo', 'codex')
+      const hooks = deleteCodexSubtree.mock.calls[0][1] as any
+      // Replicating the removal is announced before the binary is asked: it ends nothing.
+      hooks.removeSession('cx-root')
+      expect(endParent).not.toHaveBeenCalled()
+      hooks.deleted('cx-root')
+      expect(endParent).toHaveBeenCalledWith('cx-root')
+    })
+
+    it('deleteProject: every session the engines deleted ends; a survivor keeps its X-Agents', async () => {
+      deleteSessionByEngine.mockImplementation(async (id: string) => {
+        if (id === 'oc-live') throw new Error('opencode server down')
+      })
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'oc-live', cwd: '/repo', projectKey: '-repo', engineId: 'opencode' },
+            { sessionId: 'pi-gone', cwd: '/repo', projectKey: '-repo', engineId: 'pi' },
+            { sessionId: 'cl-gone', cwd: '/repo', projectKey: '-repo', engineId: 'claude' }
+          ]
+        }
+      ] as never)
+      await deleteProject(manager(), '-repo')
+      expect(endParent.mock.calls.map((c) => c[0]).sort()).toEqual(['cl-gone', 'pi-gone'])
+    })
+
+    it('deleteProject: a refused Codex walk ends nothing after it', async () => {
+      deleteCodexSubtree.mockRejectedValueOnce(new Error('Codex refused to delete "b" (…)'))
+      syncCore.setDirectories([
+        {
+          cwd: '/repo',
+          projectKey: '-repo',
+          folderName: 'repo',
+          sessions: [
+            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' },
+            { sessionId: 'cl-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' }
+          ]
+        }
+      ] as never)
+      await expect(deleteProject(manager(), '-repo')).rejects.toThrow(/Codex refused/)
+      expect(endParent).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // F4 — clear-conversation is an event, and it never touches the engine
   // -------------------------------------------------------------------------
 
@@ -910,10 +1160,21 @@ describe('handlers-core', () => {
      * `recallQueued` is the honest primitive: the items come back as `recalled`.
      */
     it('empties the engine queue of record before replicating the reset', async () => {
-      const recallQueued = vi.fn(async () => ({ recalled: ['later'], notRecalled: 0 }))
+      const order: string[] = []
+      const recallQueued = vi.fn(async () => {
+        order.push('recall')
+        return { recalled: ['later'], notRecalled: 0 }
+      })
       const manager = makeManager(makeSessionStub({ recallQueued }))
-      await clearConversation(manager, 'rid-clear', 'default')
-      expect(recallQueued).toHaveBeenCalled()
+      const off = addSyncSubscriber((_seq, channel) => void order.push(channel))
+      try {
+        await clearConversation(manager, 'rid-clear', 'default')
+      } finally {
+        off()
+      }
+      // The recall lands BEFORE the fold: replicating first would let a queued
+      // item survive into the next turn behind an already-emptied queue card.
+      expect(order).toEqual(['recall', 'session:conversation-cleared'])
     })
 
     it('still replicates the reset when the queue recall throws', async () => {
@@ -1011,5 +1272,492 @@ describe('judgeModelSupport — the automode:judge-model-support body', () => {
     await expect(judgeModelSupport('opencode', 'openai/gpt-5')).rejects.toThrow(/array of strings/)
     await expect(judgeModelSupport('opencode', ['ok', 7])).rejects.toThrow(/array of strings/)
     expect(describeJudgeModels).not.toHaveBeenCalled()
+  })
+})
+
+describe('judgeRouteResting — the automode:judge-route-resting body', () => {
+  const NOW = Date.UTC(2026, 9, 23, 12, 0, 0)
+  const route = routeFor('chatgpt', 'gpt-6-luna')
+  const accountRoute = {
+    ...route,
+    account: { ...route.account, accountId: 'acct-biz', accountKey: 'chatgpt:ws-biz:user-biz' }
+  }
+
+  beforeEach(() => {
+    resolveJudgeRoute.mockReset()
+    clearCooldowns()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    clearCooldowns()
+  })
+
+  it('a cooling route answers when it recovers', async () => {
+    resolveJudgeRoute.mockResolvedValue({ ok: true, route })
+    noteRateLimited(judgeRouteKey(route), NOW + 3_600_000)
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna')).resolves.toEqual({
+      until: NOW + 3_600_000
+    })
+    // No account named → the active one: the resolver is asked the way the primary asks.
+    expect(resolveJudgeRoute).toHaveBeenCalledWith('pi', 'openai-codex/gpt-6-luna')
+  })
+
+  it('a route that is not cooling is null, and so is one whose rest is over', async () => {
+    resolveJudgeRoute.mockResolvedValue({ ok: true, route })
+    await expect(judgeRouteResting('opencode', 'openai/gpt-6-luna')).resolves.toBeNull()
+    noteRateLimited(judgeRouteKey(route), NOW + 1_000)
+    vi.setSystemTime(NOW + 2_000)
+    await expect(judgeRouteResting('opencode', 'openai/gpt-6-luna')).resolves.toBeNull()
+  })
+
+  it('resolves the route for the named account, and each account rests on its own', async () => {
+    resolveJudgeRoute.mockImplementation(async (_e: string, _m: string, _d: object, o?: any) => ({
+      ok: true,
+      route: o?.chatgptAccountId === 'acct-biz' ? accountRoute : route
+    }))
+    noteRateLimited(judgeRouteKey(route), NOW + 60_000)
+
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna')).resolves.toEqual({
+      until: NOW + 60_000
+    })
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna', 'acct-biz')).resolves.toBeNull()
+    expect(resolveJudgeRoute).toHaveBeenLastCalledWith(
+      'pi',
+      'openai-codex/gpt-6-luna',
+      {},
+      { chatgptAccountId: 'acct-biz' }
+    )
+    noteRateLimited(judgeRouteKey(accountRoute), NOW + 120_000)
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna', 'acct-biz')).resolves.toEqual({
+      until: NOW + 120_000
+    })
+  })
+
+  it('a null account (a web client serialises a missing argument as null) is the active one', async () => {
+    resolveJudgeRoute.mockResolvedValue({ ok: true, route })
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna', null)).resolves.toBeNull()
+    expect(resolveJudgeRoute).toHaveBeenCalledWith('pi', 'openai-codex/gpt-6-luna')
+  })
+
+  it('a model or account ClaudeUI cannot route is null, not an error', async () => {
+    resolveJudgeRoute.mockResolvedValue({
+      ok: false,
+      code: 'no-shared-provider',
+      reason: 'Set up inside pi.'
+    })
+    await expect(judgeRouteResting('pi', 'nonsense/model')).resolves.toBeNull()
+    await expect(judgeRouteResting('pi', '')).resolves.toBeNull()
+    await expect(judgeRouteResting('pi', 'openai-codex/x', 'removed-account')).resolves.toBeNull()
+  })
+
+  it('a resolver that fails (an unreadable vault) is null too', async () => {
+    resolveJudgeRoute.mockRejectedValue(new Error('vault unreadable'))
+    await expect(judgeRouteResting('pi', 'openai-codex/gpt-6-luna')).resolves.toBeNull()
+  })
+
+  it('refuses an engine without a ClaudeUI judge and malformed arguments, before resolving', async () => {
+    await expect(judgeRouteResting('claude', 'x')).rejects.toThrow(/unsupported engine/)
+    await expect(judgeRouteResting('pi', 7)).rejects.toThrow(/model must be a string/)
+    await expect(judgeRouteResting('pi', 'x', 7)).rejects.toThrow(/accountId must be a string/)
+    expect(resolveJudgeRoute).not.toHaveBeenCalled()
+  })
+})
+
+describe('sendPrompt — origin and the held inbox (slice 1a)', () => {
+  const CWD = '/tmp/cwd'
+  let n = 0
+
+  /** A live session double that records what the engine was asked, in order. */
+  function liveSession(rid: string, over: Record<string, unknown> = {}): any {
+    const calls: string[] = []
+    const session: any = makeSessionStub({
+      engineId: 'opencode',
+      originLedger: new TurnOriginLedger(),
+      getSessionId: () => null,
+      calls,
+      run: vi.fn((prompt: string) => {
+        calls.push(`run:${prompt}`)
+        session.willQueue = true
+        return Promise.resolve()
+      }),
+      enqueuePrompt: vi.fn((text: string, _a: unknown, _r: unknown, origin?: string) => {
+        calls.push(`enqueue:${text}${origin ? `:${origin}` : ''}`)
+      }),
+      deliverNonUser: vi.fn(async (item: { text: string }) => {
+        calls.push(`deliver:${item.text}`)
+        session.willQueue = true
+        return 'started'
+      }),
+      ...over
+    })
+    syncCore.emit('session:created', [rid, { cwd: CWD }])
+    return session
+  }
+  const ridOf = (): string => `rid-send-${process.pid}-${++n}`
+
+  it('a user prompt resets taint and budget, then runs at once when nothing is held', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    session.originLedger.nonUserDelivered()
+    session.originLedger.agentTurnStarted()
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+    // Still synchronous: an inbox that is empty costs the prompt path nothing.
+    expect(out).toBeUndefined()
+    expect(session.calls).toEqual(['run:hello'])
+    expect(session.originLedger.userOriginClean).toBe(true)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(0)
+  })
+
+  it('held items go out FIRST, in order, and the prompt then queues behind the turn they start', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    // Held while it was idle and nothing woke it.
+    const held = { origin: 'agent-note' as const, from: { key: 'k', title: 'T' }, wake: false }
+    await deliver(manager, rid, { ...held, text: 'held one' })
+    await deliver(manager, rid, { ...held, text: 'held two' })
+    expect(session.calls).toEqual([])
+
+    await sendPrompt(manager, rid, 'user prompt')
+    expect(session.calls).toEqual(['deliver:held one', 'deliver:held two', 'enqueue:user prompt'])
+    expect(session.run).not.toHaveBeenCalled()
+    // The turn now carries agent text: the user speaking did not clean it.
+    expect(session.originLedger.userOriginClean).toBe(false)
+    expect(syncCore.getCanonicalState().sessions[rid].heldCount).toBe(0)
+  })
+
+  it('a busy session keeps its inbox: nothing flushes into a turn that is not starting', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    await deliver(manager, rid, {
+      origin: 'agent-note',
+      from: { key: 'k', title: 'T' },
+      wake: false,
+      text: 'held'
+    })
+    session.willQueue = true
+    sendPrompt(manager, rid, 'while busy')
+    expect(session.calls).toEqual(['enqueue:while busy'])
+    expect(syncCore.getCanonicalState().sessions[rid].heldCount).toBe(1)
+  })
+
+  it('a prompt that only QUEUES behind an agent-started turn leaves taint and budget alone (review M1)', async () => {
+    const rid = ridOf()
+    const session = liveSession(rid)
+    const manager = makeManager(session)
+    // A message woke the session: the turn is running with agent text in it.
+    expect(
+      await deliver(manager, rid, {
+        origin: 'session-message',
+        from: { key: 'k', title: 'T' },
+        wake: false,
+        text: 'wake up'
+      })
+    ).toEqual({ result: 'delivered' })
+    expect(session.willQueue).toBe(true)
+    expect(session.originLedger.userOriginClean).toBe(false)
+
+    sendPrompt(manager, rid, 'ok')
+
+    expect(session.calls.at(-1)).toBe('enqueue:ok')
+    expect(session.originLedger.userOriginClean).toBe(false)
+    expect(session.originLedger.agentTurnStartsSinceUser).toBe(1)
+  })
+
+  it('a host-instruction is still a user row, marked; queued, it keeps the marker', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    const events: Array<[string, unknown]> = []
+    const off = addSyncSubscriber((_seq: number, channel: string, args: unknown[]) => {
+      if (channel === 'session:user-message') events.push([channel, args[1]])
+    })
+    try {
+      sendPrompt(makeManager(session), rid, 'wrap up now', undefined, {
+        origin: 'host-instruction'
+      })
+      expect(events).toEqual([
+        [
+          'session:user-message',
+          expect.objectContaining({ prompt: 'wrap up now', origin: 'host-instruction' })
+        ]
+      ])
+      const rows = syncCore.getCanonicalState().sessions[rid].messages
+      expect(rows).toEqual([expect.objectContaining({ role: 'user', hostInstruction: true })])
+
+      session.willQueue = true
+      sendPrompt(makeManager(session), rid, 'again', undefined, { origin: 'host-instruction' })
+      expect(session.enqueuePrompt).toHaveBeenLastCalledWith(
+        'again',
+        undefined,
+        undefined,
+        'host-instruction'
+      )
+    } finally {
+      off()
+    }
+  })
+
+  describe('stopTask tells the model the user stopped the agent (a host-instruction, once)', () => {
+    const NOTE =
+      'The user stopped the "x" subagent started by call call_1. Do not restart it or redo its work unless the user asks.'
+    const stoppable = (rid: string, stop: () => Promise<Record<string, unknown>>) =>
+      liveSession(rid, { stopTask: vi.fn(stop) })
+
+    it('sends one note through the host-instruction path (queued behind a running turn), and does not leak it to the caller', async () => {
+      const rid = ridOf()
+      const session = stoppable(rid, async () => ({ success: true, hostNote: NOTE }))
+      session.willQueue = true
+      const res = await stopTask(makeManager(session), rid, 'call_1')
+      expect(res).toEqual({ success: true })
+      expect(session.calls).toEqual([`enqueue:${NOTE}:host-instruction`])
+    })
+
+    it('an idle session starts a turn on it, as a labelled user row', async () => {
+      const rid = ridOf()
+      const session = stoppable(rid, async () => ({ success: true, hostNote: NOTE }))
+      const events: unknown[] = []
+      const off = addSyncSubscriber((_seq: number, channel: string, args: unknown[]) => {
+        if (channel === 'session:user-message') events.push(args[1])
+      })
+      try {
+        await stopTask(makeManager(session), rid, 'call_1')
+        expect(session.calls).toEqual([`run:${NOTE}`])
+        expect(events).toEqual([
+          expect.objectContaining({ prompt: NOTE, origin: 'host-instruction' })
+        ])
+      } finally {
+        off()
+      }
+    })
+
+    it('a stop that interrupted nothing (error result) or came without a note sends nothing', async () => {
+      const rid = ridOf()
+      const failing = stoppable(rid, async () => ({
+        success: false,
+        error: 'No running agent for that card'
+      }))
+      expect(await stopTask(makeManager(failing), rid, 'call_1')).toEqual({
+        success: false,
+        error: 'No running agent for that card'
+      })
+      const plain = stoppable(rid, async () => ({ success: true }))
+      expect(await stopTask(makeManager(plain), rid, 'call_1')).toEqual({ success: true })
+      expect(failing.calls).toEqual([])
+      expect(plain.calls).toEqual([])
+    })
+
+    it('a note that cannot be sent does not fail the stop', async () => {
+      const rid = ridOf()
+      const session = stoppable(rid, async () => ({ success: true, hostNote: NOTE }))
+      session.run = vi.fn(() => {
+        throw new Error('engine gone')
+      })
+      expect(await stopTask(makeManager(session), rid, 'call_1')).toEqual({ success: true })
+    })
+  })
+
+  it('the brief a session tool sends keeps the session "started by an agent"; a client prompt clears it (slice 1c)', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    session.originLedger.markAgentCreated()
+    sendPrompt(makeManager(session), rid, 'Background: …', undefined, {
+      origin: 'user',
+      agentBrief: true
+    })
+    expect(session.originLedger.agentCreated).toBe(true)
+    // …and the host's own instruction does not clear it either.
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'wrap up', undefined, { origin: 'host-instruction' })
+    expect(session.originLedger.agentCreated).toBe(true)
+    expect(session.originLedger.hostInstructionTurn).toBe(true)
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'typed by the user')
+    expect(session.originLedger.agentCreated).toBe(false)
+    expect(session.originLedger.hostInstructionTurn).toBe(false)
+  })
+
+  it('only a client prompt is recorded on the session’s link, so the wait survives a restart (slice 1c)', async () => {
+    const { insertSessionRef, upsertSessionLink, getSessionLink } =
+      await import('../../../core/services/db')
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    const ref = `s-hc${process.pid}-${n}`
+    insertSessionRef({ ref, engine: 'claude', sessionId: null, routingId: rid })
+    upsertSessionLink({
+      childRef: ref,
+      parentRef: 's-parent',
+      kind: 'started',
+      createdBy: 'agent',
+      grouped: true,
+      state: 'live'
+    })
+    const prompted = (): number | null | undefined => getSessionLink(ref)?.clientPromptedAt
+    sendPrompt(makeManager(session), rid, 'brief', undefined, { origin: 'user', agentBrief: true })
+    expect(prompted()).toBeNull()
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'wrap up', undefined, { origin: 'host-instruction' })
+    expect(prompted()).toBeNull()
+    session.willQueue = false
+    sendPrompt(makeManager(session), rid, 'typed by the user')
+    expect(prompted()).toEqual(expect.any(Number))
+  })
+
+  it('a brief sent while the child is busy is queued as a brief, not as a typed prompt (slice 1c)', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    session.willQueue = true
+    sendPrompt(makeManager(session), rid, 'Background: …', undefined, {
+      origin: 'user',
+      agentBrief: true
+    })
+    expect(session.enqueuePrompt).toHaveBeenLastCalledWith(
+      'Background: …',
+      undefined,
+      undefined,
+      'agent-brief'
+    )
+    sendPrompt(makeManager(session), rid, 'typed while busy')
+    expect(session.enqueuePrompt).toHaveBeenLastCalledWith('typed while busy', undefined, undefined)
+  })
+
+  it('a typed prompt carries no marker', () => {
+    const rid = ridOf()
+    const session = liveSession(rid, { engineId: 'claude' })
+    sendPrompt(makeManager(session), rid, 'typed')
+    const rows = syncCore.getCanonicalState().sessions[rid].messages
+    expect(rows).toEqual([expect.objectContaining({ role: 'user' })])
+    expect(rows[0]).not.toHaveProperty('hostInstruction')
+  })
+})
+
+describe('sendPrompt — a resumed session waits for its own totals seed', () => {
+  let n = 0
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+
+  /** A Claude-shaped double whose `resumeSeedReady` the test controls. */
+  function resumed(
+    seed: () => Promise<void> | undefined,
+    engineId = 'claude'
+  ): { rid: string; session: any } {
+    const rid = `rid-seedready-${process.pid}-${++n}`
+    const calls: string[] = []
+    const session: any = makeSessionStub({
+      engineId,
+      originLedger: new TurnOriginLedger(),
+      getSessionId: () => null,
+      calls,
+      run: vi.fn((prompt: string) => {
+        calls.push(`run:${prompt}`)
+        session.willQueue = true
+        return Promise.resolve()
+      }),
+      enqueuePrompt: vi.fn((text: string) => calls.push(`enqueue:${text}`)),
+      resumeSeedReady: seed
+    })
+    syncCore.emit('session:created', [rid, { cwd: '/tmp/cwd' }])
+    return { rid, session }
+  }
+
+  it('a seed that never settles holds the prompt back; settling releases it', async () => {
+    let release!: () => void
+    const pending = new Promise<void>((r) => (release = r))
+    const { rid, session } = resumed(() => pending)
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+    expect(out).toBeInstanceOf(Promise)
+    await flush()
+    expect(session.run).not.toHaveBeenCalled() // PRE-FIX: delivered at once, onto zero totals
+
+    release()
+    await out
+    expect(session.calls).toEqual(['run:hello'])
+  })
+
+  it('two sends during the wait go out in the order they arrived', async () => {
+    let release!: () => void
+    const pending = new Promise<void>((r) => (release = r))
+    const { rid, session } = resumed(() => pending)
+    const manager = makeManager(session)
+    const a = sendPrompt(manager, rid, 'one')
+    const b = sendPrompt(manager, rid, 'two')
+    release()
+    await Promise.all([a, b])
+    // The first starts the turn; the second finds it running and queues behind it.
+    expect(session.calls).toEqual(['run:one', 'enqueue:two'])
+  })
+
+  it("also waits for canonical's own read (both gates, not either)", async () => {
+    let releaseSeed!: () => void
+    let releaseRead!: () => void
+    const totals = new Promise<void>((r) => (releaseSeed = r))
+    const { rid, session } = resumed(() => totals)
+    syncCore.trackSeed(rid, new Promise<void>((r) => (releaseRead = r)))
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+
+    releaseSeed()
+    await flush()
+    expect(session.run).not.toHaveBeenCalled() // totals landed, canonical's read has not
+    releaseRead()
+    await out
+    expect(session.calls).toEqual(['run:hello'])
+  })
+
+  it('stays synchronous when the seed has nothing to wait for (undefined)', () => {
+    const { rid, session } = resumed(() => undefined)
+    const out = sendPrompt(makeManager(session), rid, 'hello')
+    expect(out).toBeUndefined()
+    expect(session.calls).toEqual(['run:hello'])
+  })
+
+  it('an engine without the hook (opencode, pi, codex) is unaffected', () => {
+    for (const engineId of ['opencode', 'pi']) {
+      const { rid, session } = resumed(() => new Promise<void>(() => {}), engineId)
+      delete session.resumeSeedReady
+      const out = sendPrompt(makeManager(session), rid, 'hi')
+      expect(out).toBeUndefined()
+      expect(session.calls).toEqual(['run:hi'])
+    }
+  })
+})
+
+describe('allowPeerMessages — the session:allow-peer-messages body', () => {
+  it('hands the request to the session and returns its answer', async () => {
+    const allow = vi.fn(async () => ({ success: true }))
+    const manager = makeManager(makeSessionStub({ allowPeerMessages: allow }))
+    await expect(allowPeerMessages(manager, 'rid-1')).resolves.toEqual({ success: true })
+    expect(allow).toHaveBeenCalledTimes(1)
+  })
+
+  it('says no, rather than failing, for a session that holds no peer messages or none at all', async () => {
+    const refusal = { success: false, error: 'This session does not hold peer messages' }
+    await expect(allowPeerMessages(makeManager(makeSessionStub()), 'rid-1')).resolves.toEqual(
+      refusal
+    )
+    await expect(allowPeerMessages(makeManager(undefined), 'ghost')).resolves.toEqual(refusal)
+  })
+
+  it('is the same call over the remote dispatcher as directly (a chat command on the session)', async () => {
+    const manager = makeManager(
+      makeSessionStub({ allowPeerMessages: vi.fn(async () => ({ success: true })) })
+    )
+    const registry = new CommandRegistry()
+    const dispatcher = new RemoteDispatcher(registry)
+    registry.register({
+      channel: 'session:allow-peer-messages',
+      capability: 'chat',
+      kind: 'command',
+      sessionIdArg: 0,
+      transport: 'remote',
+      handler: (rid: string) => allowPeerMessages(manager, rid)
+    })
+    const viaDispatcher = await dispatcher.handle(
+      { type: 'invoke', id: '1', channel: 'session:allow-peer-messages', args: ['rid-1'] },
+      makeRemoteConnection('password', null)
+    )
+    expect(viaDispatcher).toEqual(await allowPeerMessages(manager, 'rid-1'))
   })
 })

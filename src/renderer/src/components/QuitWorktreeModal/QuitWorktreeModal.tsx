@@ -5,7 +5,6 @@ import { QuitWorktreeModalView } from './View'
 export function QuitWorktreeModal(): React.JSX.Element | null {
   const quitWorktrees = useSessionStore((s) => s.quitWorktrees)
   const setQuitWorktrees = useSessionStore((s) => s.setQuitWorktrees)
-  const clearWorktreeInfo = useSessionStore((s) => s.clearWorktreeInfo)
   const [removing, setRemoving] = useState(false)
 
   if (!quitWorktrees || quitWorktrees.length === 0) return null
@@ -15,25 +14,17 @@ export function QuitWorktreeModal(): React.JSX.Element | null {
     window.api.confirmQuit()
   }
 
-  const handleRemoveAll = async (): Promise<void> => {
+  const handleRemoveAll = (): void => {
+    // Main removes the folders AFTER the sessions, terminals and engines are torn down (no cwd
+    // locks), then exits; the modal stays up with a notice until the window closes. It forgets
+    // the worktree entries itself. `removing` is cleared only if the confirmation itself fails
+    // (below): once main has it the app exits, and no further before-quit reaches this window.
     setRemoving(true)
-    for (const { routingId, worktreeInfo } of quitWorktrees) {
-      try {
-        await window.api.removeWorktree(
-          worktreeInfo.worktreePath,
-          worktreeInfo.worktreeBranch,
-          worktreeInfo.gitRoot
-        )
-        clearWorktreeInfo(routingId)
-      } catch (err) {
-        window.api.logError(
-          'QuitWorktreeModal',
-          `Failed to remove worktree ${worktreeInfo.worktreeName}: ${err}`
-        )
-      }
-    }
-    setQuitWorktrees(null)
-    window.api.confirmQuit()
+    const paths = [...new Set(quitWorktrees.map(({ worktreeInfo }) => worktreeInfo.worktreePath))]
+    window.api.confirmQuit(paths).catch((err: unknown) => {
+      window.api.logError('QuitWorktreeModal', `Quit confirmation failed: ${err}`)
+      setRemoving(false)
+    })
   }
 
   const handleCancel = (): void => {

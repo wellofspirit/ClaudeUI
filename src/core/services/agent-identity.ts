@@ -209,6 +209,12 @@ export interface AgentSidecar {
   parentAgentId?: string
   /** 1 for an agent the main agent spawned, N+1 for one spawned at depth N. */
   spawnDepth?: number
+  /** The `name` the spawn gave the agent (SendMessage's address), when it set one. */
+  name?: string
+  /** The spawn's short `description`. */
+  description?: string
+  /** The `subagent_type` the agent runs as (`general-purpose`, `Explore`, …). */
+  agentType?: string
 }
 
 /** A task id is interpolated into a file name below; anything else is refused. */
@@ -249,10 +255,16 @@ export function readAgentSidecar(transcriptPath: string, agentId: string): Agent
   if (!toolUseId) return null
   const parentAgentId = stringField(raw, 'parentAgentId')
   const spawnDepth = typeof raw.spawnDepth === 'number' ? raw.spawnDepth : undefined
+  const name = stringField(raw, 'name')
+  const description = stringField(raw, 'description')
+  const agentType = stringField(raw, 'agentType')
   return {
     toolUseId,
     ...(parentAgentId ? { parentAgentId } : {}),
-    ...(spawnDepth !== undefined ? { spawnDepth } : {})
+    ...(spawnDepth !== undefined ? { spawnDepth } : {}),
+    ...(name ? { name } : {}),
+    ...(description ? { description } : {}),
+    ...(agentType ? { agentType } : {})
   }
 }
 

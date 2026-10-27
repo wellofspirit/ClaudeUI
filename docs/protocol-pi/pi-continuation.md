@@ -139,8 +139,9 @@ residuals (`a9c4c52`). So these earlier "known residuals" are now CLOSED:
 - ~~Bridge-file TOCTOU~~ → the `-e` files moved from `os.tmpdir()` to per-user `~/.claude/ui/pi-ext/`
   (a9c4c52); the world-writable preplant window is gone.
 - ~~rule evaluator subset~~ → path-glob rules now evaluated via a faithful port of opencode's
-  Wildcard matcher (5e01935); `additionalDirectories`/`defaultMode` remain deliberately inert
-  (opencode leaves them inert too — see the ADR-022 rationale in `decide()`'s doc comment).
+  Wildcard matcher (5e01935); `defaultMode` remains deliberately inert (opencode leaves it inert too —
+  see the ADR-022 rationale in `decide()`'s doc comment); `additionalDirectories` are the roots of pi's path
+  containment since [ADR-110](../adr/adr-110_pi-path-containment-and-judge-off.md) (superseding "inert").
 - ~~Esc-abort not propagating into dispatch~~ → `PiSession.interrupt()` now stopDispatches in-flight
   children (a9c4c52).
 - ~~errored-turn spend~~ → err/timeout dispatch turns reconcile via a bounded `get_session_stats`
@@ -185,15 +186,17 @@ planned.
   failed-discovery rung.
 - `db.ts` clamps unknown engine ids to `'claude'` — any new engine must be added to the
   `rowToMeta`/`importSessionEnginesOnce` allowlists.
-- Bridge extension MUST stay **import-free** and **fail-closed**. Product code writes only
-  `os.tmpdir()` (the bridge file) + `PiAuthProvider`'s documented `~/.pi/agent/auth.json` api_key
-  merge + user-initiated session delete under `~/.pi/agent/sessions` (`deletePiSession`) — never
-  else under `~/.pi/**`.
+- Bridge extension MUST stay **fail-closed** and import nothing but Node builtins and pi's own package
+  (ADR-035 › Bridge extension imports). The bridge file lives under `~/.claude/ui/pi-ext`.
+  Product code writes under `~/.pi/agent/` only through its documented writers: `PiAuthProvider`'s
+  `auth.json` api_key merge, the native settings editor's `settings.json`, the shared provider
+  adapter's `models.json`, and user-initiated session delete under `sessions/` (`deletePiSession`).
 - pi honors the same `~/.claude` permission FILES as Claude/opencode (same loader/parser/persist
   helpers), but its evaluator honors a **subset of rule shapes**: bare-tool + Bash exact/prefix
   rules only. Non-Bash specifier rules (`Edit(src/**)` etc.) are skipped (fall through to the mode
-  base, never default-allow), and `additionalDirectories`/`defaultMode` are merged but inert —
-  path-glob evaluation is an open follow-up, not shipped.
+  base, never default-allow), and `defaultMode` is merged but inert; `additionalDirectories` were inert
+  too when this was written — they are now the workspace roots of path containment (ADR-110), and
+  path-glob rules are evaluated since 5e01935 (this paragraph is historical).
 
 ## 5. Test setup & how to verify (reproduce my environment)
 

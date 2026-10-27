@@ -2,6 +2,8 @@
 
 **Status:** Accepted (2026-09-24). Implemented in `f7c1944b` (grouping, locator, project delete) and `b557d29b` (a resume target with no transcript spawns fresh).
 **Amends:** [ADR-025](adr-025_project-key-identity-and-engine-neutral-delete.md) §1. A Claude group's key and the `projectKey` of each session in it are no longer always the same string.
+**Amended by:** [ADR-112](adr-112_worktree-inventory-and-cleanup.md) (a project group carries its linked-worktree
+identity; detected worktree entries survive status updates).
 **Relates to:** [ADR-026](adr-026_development-workflow.md) (how this was built and verified), [ADR-027](adr-027_test-data-attributes.md) (the testids the verification asserted)
 
 ## Context

@@ -10,8 +10,10 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { bootIpcHarness, type IpcHarness } from '../../../test/helpers/boot-ipc-harness'
+import { dispatchDesktop } from '../../../core/ipc/desktop-transport-binding'
 import * as fs from 'fs'
 import * as os from 'os'
+import { EventEmitter } from 'events'
 import * as path from 'path'
 
 vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
@@ -123,13 +125,49 @@ vi.mock('../../../core/services/git-service', () => {
 vi.mock('../../../core/services/worktree', () => ({
   createWorktree: vi.fn(async () => ({ path: '/tmp/wt', branch: 'feat' })),
   getWorktreeStatus: vi.fn(async () => ({ dirty: false })),
-  removeWorktree: vi.fn(async () => {}),
-  listWorktrees: vi.fn(async () => [{ path: '/tmp/wt', branch: 'feat' }])
+  removeWorktree: vi.fn(async (_p: string, _b: string, _r: string, _d?: unknown) => ({
+    id: '/tmp/wt',
+    outcome: 'removed'
+  })),
+  inventoryWorktrees: vi.fn(async (_cwd: string, _sources?: unknown) => ({
+    repoRoot: '/tmp/r',
+    managedRoot: '/tmp/r/.claude/worktrees',
+    entries: []
+  })),
+  inspectWorktree: vi.fn(async () => ({ uncommittedFiles: 0 })),
+  measureWorktree: vi.fn(
+    async (
+      _cwd: string,
+      _id: string,
+      onProgress?: (p: { files: number; bytes: number }) => void
+    ) => {
+      onProgress?.({ files: 7, bytes: 70 })
+      return { bytes: 70, files: 7, links: 0, errors: 0, newestMtimeMs: 0 }
+    }
+  ),
+  removeWorktrees: vi.fn(
+    async (
+      _cwd: string,
+      ids: string[],
+      progress: (p: { done: number; total: number; phase: string }) => void,
+      _opts: unknown
+    ) => {
+      progress({ done: ids.length, total: ids.length, phase: 'done' })
+      return ids.map((id) => ({ id, outcome: 'removed' }))
+    }
+  )
+}))
+
+// C-S10: a worktree removal re-lists the directories so the linked-worktree markers clear.
+vi.mock('../../../core/services/sync-seed', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/services/sync-seed')>()),
+  refreshCanonicalDirectories: vi.fn(async () => {})
 }))
 
 vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => []),
   loadSessionHistory: vi.fn(async () => []),
+  loadSessionStatusLine: vi.fn(async () => ({ totalCostUsd: 2 })),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
   loadBackgroundOutput: vi.fn(() => '')
@@ -318,6 +356,16 @@ vi.mock('../../../core/services/logger', () => ({
   }
 }))
 
+// The turn-end notes module is dormant (slice 5): the registration must never switch it on.
+const sessionNotesSpies = vi.hoisted(() => ({
+  configureSessionNotes: vi.fn(),
+  enableSessionNotes: vi.fn()
+}))
+vi.mock('../../../core/services/session-notes', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../core/services/session-notes')>()
+  return { ...actual, ...sessionNotesSpies }
+})
+
 // Import AFTER mocks.
 import { registerSessionIpc, resetLoginStatusReportedForTests } from '../../../core/ipc/session.ipc'
 import { setHostAuth } from '../../../core/host'
@@ -326,6 +374,16 @@ import {
   setCachedClaudeModels
 } from '../../../core/services/claude-model-catalog'
 import { gitServiceManager } from '../../../core/services/git-service'
+import { closeMockupWatchersUnder } from '../../../core/services/mockup-watch-registry'
+import { refreshCanonicalDirectories } from '../../../core/services/sync-seed'
+import { loadSessionConfig } from '../../../core/services/ui-config'
+import { forgetEntriesAndEmit, forgetEntriesQuiet } from '../../../core/ipc/config-commands'
+import {
+  inventoryWorktrees,
+  measureWorktree,
+  removeWorktree,
+  removeWorktrees
+} from '../../../core/services/worktree'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { commandRegistry, hostConnection } from '../../../core/ipc/command-registry'
 import { blobStore } from '../../../core/services/blob-store'
@@ -333,6 +391,11 @@ import { addSyncSubscriber } from '../../../core/services/sync-host'
 import { setHostWindow } from '../../../core/services/host-window'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 import { query } from '../../../core/sdk'
+import {
+  loadSessionHistory as loadClaudeHistoryMock,
+  loadSessionStatusLine as loadStatusLineMock,
+  loadSubagentHistory as loadSubagentHistoryMock
+} from '../../../core/services/session-history'
 
 // Fill in the stub's capabilities now that the top-level import is available
 // (it can't be referenced inside the vi.hoisted() factory above).
@@ -459,9 +522,12 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('session lifecycle channels', () => {
-    it('session:create is registered and calls manager.create', async () => {
+    it('session:create is registered and creates the session under the caller routing id and cwd', async () => {
       await harness.call('session:create', 'rid-1', '/tmp/cwd')
-      expect(sessionManagerSpies.create).toHaveBeenCalled()
+      expect(sessionManagerSpies.create).toHaveBeenCalledTimes(1)
+      const [routingId, , cwd] = sessionManagerSpies.create.mock.calls[0]
+      expect(routingId).toBe('rid-1')
+      expect(cwd).toBe('/tmp/cwd')
     })
 
     it('session:send is registered and calls session.run', async () => {
@@ -587,6 +653,29 @@ describe('session.ipc', () => {
         undefined
       )
       expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
+    })
+
+    it('an answer retires the card on every client: emits session:approval-dismiss for the routing id (pi, xeng:)', async () => {
+      const dismissals: unknown[][] = []
+      harness.onEvent('session:approval-dismiss', (...args) => dismissals.push(args))
+      await harness.call('session:approval-response', 'pi-rid', 'req-pi', 'allow')
+      await harness.call('session:approval-response', 'parent-rid', 'xeng:perm-9', 'deny')
+      expect(dismissals).toEqual([
+        ['pi-rid', { requestId: 'req-pi' }],
+        ['parent-rid', { requestId: 'xeng:perm-9' }]
+      ])
+    })
+
+    it('a resolve that throws still dismisses the card and still rejects', async () => {
+      const dismissals: unknown[][] = []
+      harness.onEvent('session:approval-dismiss', (...args) => dismissals.push(args))
+      sessionStub.resolveApproval.mockImplementationOnce(() => {
+        throw new Error('Stale or unknown Codex approval')
+      })
+      await expect(
+        harness.call('session:approval-response', 'codex-rid', 'req-x', 'allow')
+      ).rejects.toThrow('Stale or unknown Codex approval')
+      expect(dismissals).toEqual([['codex-rid', { requestId: 'req-x' }]])
     })
 
     it('falls through to the session when the dispatcher declines to consume', async () => {
@@ -859,10 +948,256 @@ describe('session.ipc', () => {
       expect(res.ok).toBe(true)
     })
 
-    it('worktree:list is registered', async () => {
-      const res = await harness.call<any>('worktree:list', '/tmp/r')
+    // ADR-112 — the worktree manager.
+    it('declares the manager channels: inventory/inspect/measure are git queries, remove-many a git command, both long ones withProgress', () => {
+      expect(commandRegistry.declaration('worktree:inventory')).toMatchObject({
+        capability: 'git',
+        kind: 'query'
+      })
+      expect(commandRegistry.declaration('worktree:inspect')).toMatchObject({
+        capability: 'git',
+        kind: 'query'
+      })
+      expect(commandRegistry.declaration('worktree:measure')).toMatchObject({
+        capability: 'git',
+        kind: 'query',
+        withProgress: true
+      })
+      expect(commandRegistry.declaration('worktree:remove-many')).toMatchObject({
+        capability: 'git',
+        kind: 'command',
+        withProgress: true
+      })
+    })
+
+    it('worktree:inventory passes the real holder sources', async () => {
+      const res = await harness.call<any>('worktree:inventory', '/tmp/r')
       expect(res.ok).toBe(true)
-      expect(res.data).toEqual([{ path: '/tmp/wt', branch: 'feat' }])
+      const sources = vi.mocked(inventoryWorktrees).mock.lastCall![1] as object
+      expect(vi.mocked(inventoryWorktrees).mock.lastCall![0]).toBe('/tmp/r')
+      expect(Object.keys(sources).sort()).toEqual(['sessions', 'terminals', 'xAgents'])
+    })
+
+    it('worktree:remove-many enforces holders, forgets entries, closes watchers, forwards progress and returns the results array (no ok key)', async () => {
+      const res = await harness.call<any>('worktree:remove-many', '/tmp/r', ['a', 'b'])
+
+      expect(res).toEqual({
+        ok: true,
+        data: [
+          { id: 'a', outcome: 'removed' },
+          { id: 'b', outcome: 'removed' }
+        ]
+      })
+      expect(res.data.some((r: object) => 'ok' in r)).toBe(false)
+      const [cwd, ids, progress, opts] = vi.mocked(removeWorktrees).mock.lastCall!
+      expect(cwd).toBe('/tmp/r')
+      expect(ids).toEqual(['a', 'b'])
+      expect(progress).toEqual(expect.any(Function))
+      expect(opts).toMatchObject({
+        enforceHolders: true,
+        sources: expect.any(Object),
+        forgetEntries: expect.any(Function),
+        beforeWalk: expect.any(Function)
+      })
+    })
+
+    it('after a removal both removal channels re-list the directories (forgetEntries is the one hook)', async () => {
+      vi.mocked(refreshCanonicalDirectories).mockClear()
+      await harness.call('worktree:remove-many', '/tmp/r', ['a'])
+      const manyOpts = vi.mocked(removeWorktrees).mock.lastCall![3] as {
+        forgetEntries: (paths: string[]) => void
+      }
+      manyOpts.forgetEntries(['/tmp/r/.claude/worktrees/a'])
+      expect(refreshCanonicalDirectories).toHaveBeenCalledTimes(1)
+
+      await harness.call('worktree:remove', '/tmp/wt', 'feat', '/tmp/r')
+      const legacy = vi.mocked(removeWorktree).mock.lastCall![3] as {
+        forgetEntries: (paths: string[]) => void
+      }
+      legacy.forgetEntries(['/tmp/wt'])
+      expect(refreshCanonicalDirectories).toHaveBeenCalledTimes(2)
+    })
+
+    it('forgetEntriesQuiet (the quit-time hook) forgets and emits but never re-lists the directories', () => {
+      vi.mocked(refreshCanonicalDirectories).mockClear()
+      vi.mocked(loadSessionConfig).mockReturnValueOnce({
+        worktreeInfoMap: { r1: { worktreePath: '/tmp/wt-quiet' } }
+      } as never)
+
+      forgetEntriesQuiet(['/tmp/wt-quiet'])
+
+      expect(refreshCanonicalDirectories).not.toHaveBeenCalled()
+      // ...while the in-session hook does (a Codex app-server must not start after the teardown).
+      forgetEntriesAndEmit(['/tmp/wt-quiet'])
+      expect(refreshCanonicalDirectories).toHaveBeenCalledTimes(1)
+    })
+
+    it('a failing directories refresh never fails the removal hook', async () => {
+      vi.mocked(refreshCanonicalDirectories).mockRejectedValueOnce(new Error('listing failed'))
+      await harness.call('worktree:remove-many', '/tmp/r', ['a'])
+      const opts = vi.mocked(removeWorktrees).mock.lastCall![3] as {
+        forgetEntries: (paths: string[]) => void
+      }
+      expect(() => opts.forgetEntries(['/tmp/r/.claude/worktrees/a'])).not.toThrow()
+      await Promise.resolve()
+    })
+
+    it('worktree:remove-many refuses a non-array or oversized id list before touching git', async () => {
+      vi.mocked(removeWorktrees).mockClear()
+      for (const bad of ['a', null, [1], new Array(501).fill('x')]) {
+        const res = await harness.call<any>('worktree:remove-many', '/tmp/r', bad)
+        expect(res.ok).toBe(false)
+      }
+      expect(removeWorktrees).not.toHaveBeenCalled()
+    })
+
+    it('the manager channels take only a non-empty absolute directory (N2)', async () => {
+      vi.mocked(inventoryWorktrees).mockClear()
+      vi.mocked(removeWorktrees).mockClear()
+      for (const bad of ['', 'relative/repo', '.', null, 5]) {
+        for (const [channel, rest] of [
+          ['worktree:inventory', []],
+          ['worktree:inspect', ['id']],
+          ['worktree:measure', ['id']],
+          ['worktree:remove-many', [['a']]]
+        ] as const) {
+          const res = await harness.call<any>(channel, bad, ...rest)
+          expect(res.ok, `${channel} ${String(bad)}`).toBe(false)
+        }
+      }
+      expect(inventoryWorktrees).not.toHaveBeenCalled()
+      expect(removeWorktrees).not.toHaveBeenCalled()
+    })
+
+    it('worktree:measure forwards the walker’s progress through the reporter', async () => {
+      const res = await harness.call<any>('worktree:measure', '/tmp/r', 'id-1')
+      expect(res).toMatchObject({ ok: true, data: { files: 7, bytes: 70 } })
+      expect(vi.mocked(measureWorktree).mock.lastCall![0]).toBe('/tmp/r')
+      expect(vi.mocked(measureWorktree).mock.lastCall![1]).toBe('id-1')
+    })
+
+    it('legacy worktree:remove ENFORCES holders (passes sources) and RETURNS the result (C-B3)', async () => {
+      const res = await harness.call<any>('worktree:remove', '/tmp/wt', 'feat', '/tmp/r')
+
+      expect(res).toEqual({ ok: true, data: { id: '/tmp/wt', outcome: 'removed' } })
+      const deps = vi.mocked(removeWorktree).mock.lastCall![3] as Record<string, unknown>
+      expect(deps).toMatchObject({
+        sources: expect.any(Object),
+        forgetEntries: expect.any(Function),
+        beforeWalk: expect.any(Function)
+      })
+    })
+
+    it('legacy worktree:remove declares withProgress and threads the reporter to the removal (exit review S1)', async () => {
+      expect(commandRegistry.declaration('worktree:remove')).toMatchObject({
+        capability: 'git',
+        kind: 'command',
+        withProgress: true
+      })
+      const reporter = vi.fn()
+      // The reporter LEADS the handler args, never the wire's (which stay path, branch, root).
+      await dispatchDesktop('worktree:remove', ['/tmp/wt', 'feat', '/tmp/r'], reporter)
+      const [wtPath, branch, root, deps] = vi.mocked(removeWorktree).mock.lastCall! as [
+        string,
+        string,
+        string,
+        { progress: (p: unknown) => void }
+      ]
+      expect([wtPath, branch, root]).toEqual(['/tmp/wt', 'feat', '/tmp/r'])
+      deps.progress({ done: 1, total: 2, phase: 'walking' })
+      expect(reporter).toHaveBeenCalledWith({ done: 1, total: 2, phase: 'walking' })
+    })
+
+    it('legacy worktree:remove takes only a non-empty absolute path (N3)', async () => {
+      vi.mocked(removeWorktree).mockClear()
+      for (const bad of ['', 'relative/wt', '.', null, 5]) {
+        const res = await harness.call<any>('worktree:remove', bad, 'feat', '/tmp/r')
+        expect(res.ok, String(bad)).toBe(false)
+      }
+      expect(removeWorktree).not.toHaveBeenCalled()
+    })
+
+    it('legacy worktree:remove accepts only a worktree ClaudeUI created (C-S11, server side)', async () => {
+      await harness.call('worktree:remove', '/tmp/wt-made', 'feat', '/tmp/r')
+      const { createdOnly } = vi.mocked(removeWorktree).mock.lastCall![3] as {
+        createdOnly: (p: string) => boolean
+      }
+      const info = { worktreeName: 'x', originalHeadCommit: 'abc' }
+      vi.mocked(loadSessionConfig).mockReturnValue({
+        worktreeInfoMap: {
+          made: { ...info, worktreePath: '/tmp/wt-made', origin: 'created' },
+          seen: { ...info, worktreePath: '/tmp/wt-seen', origin: 'detected' }
+        }
+      } as never)
+      try {
+        expect(createdOnly('/tmp/wt-made')).toBe(true)
+        expect(createdOnly('/tmp/wt-seen')).toBe(false)
+        expect(createdOnly('/tmp/wt-unknown')).toBe(false)
+      } finally {
+        vi.mocked(loadSessionConfig).mockReturnValue({} as never)
+      }
+    })
+
+    it('worktree:remove-many does NOT restrict to created worktrees (the manager removes Codex/opencode/orphan ones too)', async () => {
+      await harness.call('worktree:remove-many', '/tmp/r', ['a'])
+      const opts = vi.mocked(removeWorktrees).mock.lastCall![3] as Record<string, unknown>
+      expect(opts.createdOnly).toBeUndefined()
+    })
+  })
+
+  // C-S7 (ADR-112): the desktop mockup watcher gets the `error` listener its remote twin has,
+  // and its watches are closeable by path so a worktree removal is not blocked by them.
+  describe('mockup watcher (desktop registration)', () => {
+    let root: string
+    beforeEach(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'cui-mockup-'))
+      fs.mkdirSync(path.join(root, '.claude', 'ui', 'mockups', 'm1'), { recursive: true })
+    })
+    afterEach(() => {
+      closeMockupWatchersUnder(root)
+      fs.rmSync(root, { recursive: true, force: true })
+    })
+
+    it('a watcher fault drops the watch from the map instead of crashing the process or blocking a re-watch', async () => {
+      const faults: Array<(err: Error) => void> = []
+      // fs.watch itself is not spy-able (frozen module namespace); the listeners it is handed are.
+      // The probe uses the production options: on Linux a recursive watch is a different (JS)
+      // watcher class from a plain one, so a plain probe's prototype would miss its listeners.
+      const probe = fs.watch(root, { recursive: true })
+      const watcherProto = Object.getPrototypeOf(probe) as { on: () => unknown }
+      probe.close()
+      const spy = vi.spyOn(watcherProto, 'on').mockImplementation(function (
+        this: unknown,
+        event: string,
+        fn: (...a: any[]) => void
+      ) {
+        if (event === 'error') faults.push(fn as (err: Error) => void)
+        return EventEmitter.prototype.on.call(this, event, fn)
+      } as never)
+      try {
+        await harness.call('mockup:watch', root, 'm1')
+        expect(faults).toHaveLength(1) // the listener exists
+        faults[0](new Error('EPERM: watched directory deleted'))
+        // Dropped: closing by path now finds nothing, and a fresh watch is accepted again.
+        expect(closeMockupWatchersUnder(root)).toBe(0)
+        await harness.call('mockup:watch', root, 'm1')
+        expect(faults).toHaveLength(2)
+      } finally {
+        spy.mockRestore()
+      }
+    })
+
+    it('closeMockupWatchersUnder closes the watch and frees the map key so the mockup can be watched again', async () => {
+      await harness.call('mockup:watch', root, 'm1')
+      expect(closeMockupWatchersUnder(path.join(root, '.claude'))).toBe(1)
+      await harness.call('mockup:watch', root, 'm1')
+      expect(closeMockupWatchersUnder(root)).toBe(1)
+    })
+
+    it('mockup:unwatch closes the watch and untracks it', async () => {
+      await harness.call('mockup:watch', root, 'm1')
+      await harness.call('mockup:unwatch', root, 'm1')
+      expect(closeMockupWatchersUnder(root)).toBe(0)
     })
   })
 
@@ -950,6 +1285,11 @@ describe('session.ipc', () => {
   // -------------------------------------------------------------------------
 
   describe('misc channels', () => {
+    it('does not wire turn-end notes to the session that started a session (slice 5: nothing reports back)', () => {
+      expect(sessionNotesSpies.configureSessionNotes).not.toHaveBeenCalled()
+      expect(sessionNotesSpies.enableSessionNotes).not.toHaveBeenCalled()
+    })
+
     it('usage:fetch is registered', async () => {
       await expect(harness.call('usage:fetch')).resolves.toBeDefined()
     })
@@ -1279,6 +1619,127 @@ describe('session.ipc', () => {
         path.join(os.homedir(), '.claude', 'projects', '-d-proj', 'sess-1.jsonl')
       )
       expect(String(payload)).toContain('"customTitle":"My title"')
+    })
+  })
+
+  // ADR-102 Arc 2 — the desktop registrations of the session-load channels. The
+  // remote twins are pinned in remote-handlers.ipc.test.ts; the registry asserts
+  // the two agree on every declared attribute.
+  describe('session load channels (ADR-102 Arc 2)', () => {
+    it('session:load-history: the 3-arg call is the full read; options defer only on a literal true', async () => {
+      await harness.call('session:load-history', 'sess-1', 'proj-key', undefined)
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', undefined, {
+        onProgress: expect.any(Function),
+        deferStatusLine: false
+      })
+
+      await harness.call('session:load-history', 'sess-1', 'proj-key', 'anchor-1', {
+        deferStatusLine: true,
+        extra: 'ignored'
+      })
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'anchor-1', {
+        onProgress: expect.any(Function),
+        deferStatusLine: true
+      })
+
+      for (const bad of [null, 'deferStatusLine', 7, { deferStatusLine: 'true' }, ['x']]) {
+        await harness.call('session:load-history', 'sess-1', 'proj-key', undefined, bad)
+        expect(vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3]).toMatchObject({
+          deferStatusLine: false
+        })
+      }
+    })
+
+    it('session:load-status-line is an fs-read query with withProgress and forwards the reporter', async () => {
+      expect(commandRegistry.declaration('session:load-status-line')).toMatchObject({
+        capability: 'fs-read',
+        kind: 'query',
+        withProgress: true
+      })
+      await expect(harness.call('session:load-status-line', 'sess-1', 'proj-key')).resolves.toEqual(
+        {
+          totalCostUsd: 2
+        }
+      )
+      expect(loadStatusLineMock).toHaveBeenLastCalledWith(
+        'sess-1',
+        'proj-key',
+        expect.any(Function)
+      )
+    })
+
+    it('session:load-subagent-history declares withProgress and keeps its wire args', async () => {
+      expect(commandRegistry.declaration('session:load-subagent-history')?.withProgress).toBe(true)
+      await harness.call('session:load-subagent-history', 'sess-1', 'proj-key', 'agent-9')
+      expect(loadSubagentHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'agent-9')
+    })
+
+    // The three Claude history readers join sessionId / projectKey (/ agentId) into a
+    // ~/.claude/projects path, and these channels are reachable by any `fs-read`
+    // caller. A traversal value must be refused before the reader (the filesystem) runs.
+    describe.each([
+      ['session:load-history', () => loadClaudeHistoryMock, []],
+      ['session:load-status-line', () => loadStatusLineMock, []],
+      ['session:load-subagent-history', () => loadSubagentHistoryMock, ['agent-9']]
+    ] as const)('%s path-segment validation', (channel, reader, tail) => {
+      it.each([
+        ['sessionId', ['../x', 'proj-key']],
+        ['sessionId', ['a/b', 'proj-key']],
+        ['sessionId', ['a\\b', 'proj-key']],
+        ['sessionId', ['', 'proj-key']],
+        ['projectKey', ['sess-1', '../x']],
+        ['projectKey', ['sess-1', 'a/b']],
+        ['projectKey', ['sess-1', 'a\\b']],
+        ['projectKey', ['sess-1', '..']],
+        ['projectKey', ['sess-1', '']]
+      ])('refuses a bad %s (%j) before any read (GUARD — fails pre-fix)', async (label, ids) => {
+        vi.mocked(reader()).mockClear()
+        await expect(harness.call(channel, ...ids, ...tail)).rejects.toThrow(
+          new RegExp(`Invalid ${label}`)
+        )
+        expect(reader()).not.toHaveBeenCalled()
+      })
+
+      it('passes a valid call through unchanged', async () => {
+        vi.mocked(reader()).mockClear()
+        await harness.call(channel, 'sess-1', 'proj-key', ...tail)
+        expect(reader()).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(reader()).mock.lastCall?.slice(0, 2 + tail.length)).toEqual([
+          'sess-1',
+          'proj-key',
+          ...tail
+        ])
+      })
+    })
+
+    it('session:load-subagent-history refuses a bad agentId before any read (GUARD — fails pre-fix)', async () => {
+      vi.mocked(loadSubagentHistoryMock).mockClear()
+      for (const agentId of ['../x', 'a/b', 'a\\b', '..', '']) {
+        await expect(
+          harness.call('session:load-subagent-history', 'sess-1', 'proj-key', agentId)
+        ).rejects.toThrow(/Invalid agentId/)
+      }
+      expect(loadSubagentHistoryMock).not.toHaveBeenCalled()
+    })
+
+    it('registers session:load-status-line on the desktop transport', () => {
+      expect(commandRegistry.channels('desktop')).toContain('session:load-status-line')
+    })
+
+    it('session:load-status-line is on the registrar unbind list (R5)', () => {
+      const removed = vi.spyOn(harness.bridge.ipcMain, 'removeHandler')
+      registerSessionIpc({
+        requireEngineAuth: () => {
+          throw new Error('not stubbed')
+        },
+        setAccountEnabled: () => {
+          throw new Error('not stubbed')
+        }
+      })
+      // Twice: once by the registrar's up-front unbind list, once by the binder's
+      // own remove-before-handle. One means the channel fell off the list.
+      expect(removed.mock.calls.filter(([c]) => c === 'session:load-status-line')).toHaveLength(2)
+      removed.mockRestore()
     })
   })
 })

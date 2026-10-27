@@ -14,6 +14,8 @@
  * - The declaration delete and the veto cleanup are ONE config write.
  * - The per-provider model allowlist is cleared, so a later re-add cannot
  *   inherit an empty allowlist and present another "0 models" state.
+ * - A provider an ENABLED shared route delivers is refused for every kind,
+ *   before any credential call or config write (a stale surface asked).
  */
 
 // @vitest-environment node
@@ -22,14 +24,25 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { NativeOpencodeFields } from '../opencode-config'
 import type { EngineConfig } from '../../../shared/types'
 
-const removeVendorAuth = vi.fn(async (_id: string): Promise<void> => {})
-const writeNative = vi.fn<(fields: NativeOpencodeFields) => void>()
+/** Every side effect in the order it happened: the order is part of the contract. */
+const calls: string[] = []
+const removeVendorAuth = vi.fn(
+  async (id: string): Promise<void> => void calls.push(`credential ${id}`)
+)
+const writeNative = vi.fn<(fields: NativeOpencodeFields) => void>(() => void calls.push('config'))
 const invalidate = vi.fn()
 const saveEngine = vi.fn()
 let native: NativeOpencodeFields = {}
 let engineConfig: EngineConfig = {}
 let credentials: Record<string, 'api' | 'oauth'> = {}
 let declaredElsewhere: string[] = []
+let claimed = new Set<string>()
+/** The live read of the credential table; recorded in `calls`, so the ORDER against the claim check is pinned too. */
+const readRows = async (): Promise<Set<string>> => {
+  calls.push('rows')
+  return new Set(Object.keys(credentials))
+}
+let rowsRead: () => Promise<Set<string>> = readRows
 
 vi.mock('../../auth/OpencodeAuthProvider', () => ({
   opencodeAuthProvider: {
@@ -42,11 +55,18 @@ vi.mock('../opencode-config', () => ({
   writeOpencodeNativeConfig: (fields: NativeOpencodeFields) => writeNative(fields)
 }))
 vi.mock('../model-discovery', () => ({ invalidateOpencodeModelCache: () => invalidate() }))
-// opencode 2.x (ADR-097 §5): Remove is offered for ClaudeUI's OWN key rows —
-// ClaudeUI's slot record; `credentials` names those integrations here.
+// opencode 2.x (ADR-097 §5): Remove is offered for ANY row opencode's credential
+// table holds — the user's own included. `credentials` names those integrations.
 vi.mock('../opencode-credentials', () => ({
   opencodeCredentialStore: {
-    recordedRemovableIntegrations: () => new Set(Object.keys(credentials))
+    integrationsWithRows: () => rowsRead()
+  }
+}))
+// The enabled shared routes (`claimed`): a provider they deliver is not Remove-able.
+vi.mock('../../shared-providers/opencode-claims', () => ({
+  claimedOpencodeIds: () => {
+    calls.push('claims')
+    return claimed
   }
 }))
 vi.mock('../../services/ui-config', () => ({
@@ -60,10 +80,13 @@ const { removeOpencodeProvider, setOpencodeProviderDisabled } =
 
 beforeEach(() => {
   vi.clearAllMocks()
+  calls.length = 0
   native = {}
   engineConfig = {}
   credentials = {}
   declaredElsewhere = []
+  claimed = new Set()
+  rowsRead = readRows
 })
 
 describe('setOpencodeProviderDisabled', () => {
@@ -188,6 +211,64 @@ describe('removeOpencodeProvider — honours kind exactly', () => {
   })
 })
 
+describe('removeOpencodeProvider — a provider an enabled shared route delivers', () => {
+  it.each(['credential', 'declaration', 'both', 'settings'] as const)(
+    'refuses a %s removal before any credential call or config write',
+    async (kind) => {
+      claimed = new Set(['openai'])
+      native = { providers: { openai: {} }, disabledProviders: ['openai'] }
+      engineConfig = { opencodeConfig: { modelAllowlist: { openai: ['gpt-5.5'] } } }
+      await expect(removeOpencodeProvider('openai', kind)).rejects.toThrow(
+        'ClaudeUI’s own provider delivers this one now. Refresh Settings before removing it.'
+      )
+      // The claim was the only thing consulted: nothing deleted, written or invalidated.
+      expect(calls).toEqual(['claims'])
+      expect(removeVendorAuth).not.toHaveBeenCalled()
+      expect(writeNative).not.toHaveBeenCalled()
+      expect(saveEngine).not.toHaveBeenCalled()
+      expect(invalidate).not.toHaveBeenCalled()
+    }
+  )
+
+  it('a provider no route claims goes through, claim check first and credential before config', async () => {
+    claimed = new Set(['openai'])
+    await removeOpencodeProvider('mine', 'both')
+    expect(calls).toEqual(['claims', 'credential mine', 'config'])
+  })
+})
+
+describe('removeOpencodeProvider — the live credential read', () => {
+  it('a vetoed provider with a key row is removed as a credential: the key AND the veto go; a settings-only removal is refused', async () => {
+    // The row resolves `credential` (was `settings`): deleting only the veto
+    // would resurrect a provider that still has its key.
+    native = { disabledProviders: ['mine', 'other'] }
+    credentials = { mine: 'api' }
+    await expect(removeOpencodeProvider('mine', 'settings')).rejects.toThrow('no longer a stale')
+    expect(writeNative).not.toHaveBeenCalled()
+    await removeOpencodeProvider('mine', 'credential')
+    expect(removeVendorAuth).toHaveBeenCalledWith('mine')
+    expect(writeNative.mock.calls[0][0].disabledProviders).toEqual(['other'])
+  })
+
+  it('a failed read of the credential table fails the settings removal — never a fallback to a record', async () => {
+    native = { disabledProviders: ['mine'] }
+    rowsRead = async () => {
+      throw new Error('server down')
+    }
+    await expect(removeOpencodeProvider('mine', 'settings')).rejects.toThrow('server down')
+    expect(writeNative).not.toHaveBeenCalled()
+    expect(saveEngine).not.toHaveBeenCalled()
+  })
+
+  it('a credential removal clears the veto and the allowlist together', async () => {
+    native = { disabledProviders: ['mine'] }
+    engineConfig = { opencodeConfig: { modelAllowlist: { mine: ['m'] } } }
+    await removeOpencodeProvider('mine', 'credential')
+    expect(writeNative.mock.calls[0][0].disabledProviders).toEqual([])
+    expect(saveEngine).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('removeOpencodeProvider — model allowlist cleanup', () => {
   it("drops the removed provider's allowlist entry and keeps the others", async () => {
     engineConfig = {
@@ -216,9 +297,14 @@ describe('removeOpencodeProvider — model allowlist cleanup', () => {
 })
 
 describe('removeOpencodeProvider — cache invalidation', () => {
-  it('invalidates the discovery cache so the row disappears on next read', async () => {
+  it('invalidates the discovery cache AFTER the credential delete and config write, so the next read sees the removal', async () => {
     await removeOpencodeProvider('openai', 'credential')
-    expect(invalidate).toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledTimes(1)
+    // Invalidating first would let a concurrent read re-fill the cache with the
+    // row that is about to disappear.
+    const invalidated = invalidate.mock.invocationCallOrder[0]
+    expect(invalidated).toBeGreaterThan(removeVendorAuth.mock.invocationCallOrder[0])
+    expect(invalidated).toBeGreaterThan(writeNative.mock.invocationCallOrder[0])
   })
 
   it('propagates a credential-delete failure instead of half-removing', async () => {

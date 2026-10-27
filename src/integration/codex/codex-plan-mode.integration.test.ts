@@ -241,7 +241,11 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 }
 
 /** Start a thread and run ONE turn under `mode`, returning every notification. */
-async function runTurnInMode(fixture: Fixture, mode: 'plan' | 'default'): Promise<Notification[]> {
+async function runTurnInMode(
+  fixture: Fixture,
+  mode: 'plan' | 'default',
+  writableRoots: string[] = []
+): Promise<Notification[]> {
   const notifications: Notification[] = []
   const client = new CodexClient({
     cwd: fixture.cwd,
@@ -255,7 +259,7 @@ async function runTurnInMode(fixture: Fixture, mode: 'plan' | 'default'): Promis
     clientInfo: { name: 'codex_plan_mode_probe', title: null, version: '1' },
     capabilities: { experimentalApi: true, requestAttestation: false }
   })
-  const policy = codexTurnPolicy(mode)
+  const policy = codexTurnPolicy(mode, writableRoots)
   const started = await client.request('thread/start', {
     cwd: fixture.cwd,
     ...(fixture.model !== null ? { model: fixture.model } : {}),
@@ -312,6 +316,25 @@ it.skipIf(!enabled)(
     // The same scripted text still arrived — as an ordinary agent message.
     expect(plain.some((item) => item.type === 'agentMessage')).toBe(true)
 
+    expect(fixture.errors).toEqual([])
+  },
+  180000
+)
+
+it.skipIf(!enabled)(
+  'turn/start takes the additional directories as writableRoots; a relative root fails the whole request',
+  async () => {
+    // What `CodexSession.turnPolicy` sends for the user's additional directories
+    // (`codexTurnPolicy(mode, roots)`): absolute, existing directories only. The
+    // relative case is why: `AbsolutePathBuf` refuses it and the turn never starts.
+    const fixture = await setupFixture()
+    const extra = join(directory!, 'extra')
+    mkdirSync(extra)
+
+    const accepted = completedItems(await runTurnInMode(fixture, 'default', [extra]))
+    expect(accepted.some((item) => item.type === 'agentMessage')).toBe(true)
+
+    await expect(runTurnInMode(fixture, 'default', ['relative/dir'])).rejects.toThrow()
     expect(fixture.errors).toEqual([])
   },
   180000

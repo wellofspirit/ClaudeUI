@@ -122,13 +122,21 @@ Every feature must express each interaction as exactly one of these. There is no
 - **Ring sizing:** domain events only (streams excluded — **true as of phase 5 S2**: neither the two canonical-backed delta channels nor the three tails take a seq) — 5000 entries ≈ hours of catchup instead of minutes. Memory-only (see Persistence). The bound is by entry COUNT, not bytes, so it only means something while entries are small: images and documents ride as `BlobRef`s (ADR-087), never as inline base64, and a client fetches the bytes on demand through `blob:get`. The same holds for the snapshot — a `sync-full` is all of canonical state, and one screenshot-heavy session used to make it ~273 MB.
 - **Optimistic apply:** opt-in per command via `causedBy` reconcile; the default is round-trip (in-process for desktop, tailnet-RTT for phones — both fine).
 
+### Measuring a full sync
+
+A `sync-full` is all of canonical state in one frame, and what it costs in a real install is measured, not guessed: every line is logged under one source, `SyncStats` (`core/services/sync-stats-log.ts`, `core/shared/sync/snapshot-stats.ts`, `sync-timing.ts`). The host writes one line per full answer on either transport — WS: `sync-full sent: transport=ws reason=… lastSeq=… seq=… ringOldest=… epochMatch=… e2e=… frameBytes=… encodeMs=… bufferedAmount=…` (`frameBytes` is the exact wire size, the base64 length under E2E; `warn` and "large sync-full sent" from 5 MB up), desktop port: `…transport=port … postMs=…` — and nothing for a catchup. Those lines cost nothing, so they are always built; the breakdown (`snapshot breakdown: …` — bytes by directories / settings / per session by messages, subagent transcripts, item streams, the `slashCommands` copy repeated in every entry, the top 5 sessions by routing id) serializes the snapshot a second time and is built only while the source is enabled at `info`, from the send callback after the frame line (so it never precedes the frame, on E2E either). The clients relay one `client sync-full applied: … hydrateMs=… totalMs=…` line each (the desktop's at `warn` past 2 s): the desktop through `window.api.logRelay` into the host log; the web client mirrors its line to the **browser console** (its `api.logRelay` has no host to write to) and reports the same four numbers to the host through the remote-only `sync:report-timing` query (`core/services/sync-timing-report.ts`), where the HOST formats the line (`transport=web`, same `formatSyncTiming` as the desktop's — but always written at `info`, with only the `slow ` prefix marking a total past 2 s, so a client cannot pick the log level) — numbers only, validated, 6 reports a minute per connection, nothing logged for anything malformed or over budget; see [security.md](security.md) §Capability grants.
+
+**A chunked full sync is still ONE line.** When the web client opts in (`sync` with `chunked`; ADR-102 amendment) the host answers with `sync-full-chunk` frames instead of one `sync-full`, and logs a single `sync-full sent: …` line for the whole transfer with ` chunks=N` appended. `frameBytes` is then the SUM of the chunk frames' wire bytes (each chunk's own JSON wrapper and the re-escaping of its `data` included), `encodeMs` is the one stringify plus every chunk's own encode, and the `large` threshold is judged on that total. Under E2E `bufferedAmount` is read after the LAST chunk, so it reads lower than a single frame's did — the socket drains while the earlier chunks are encrypted one after another, not a regression. A transfer whose socket goes away mid-way logs nothing: not every chunk reached `ws.send`. The client's relayed numbers are the same sums (`frameChars` = Σ over the chunk frames, `decodeMs` = Σ decrypt/wrapper-parse + join + final parse). The progress bar under the overlay counts JSON characters (≈ MB), not wire bytes — E2E base64 is ~1.37× the characters.
+
+To read the numbers: info lines reach the log file only when the source is enabled, by either of these. (1) At launch, `CLAUDE_UI_LOG=SyncStats:info` (a bare `SyncStats` means debug, which includes info; `parseFilter`, `core/services/logger.ts`). For the packaged macOS app, quit it first (it holds a single-instance lock), then run the binary from a terminal so it inherits the variable: `CLAUDE_UI_LOG=SyncStats:info /Applications/ClaudeUI.app/Contents/MacOS/ClaudeUI` (`open -a ClaudeUI --env CLAUDE_UI_LOG=SyncStats:info` also passes it, per `man open`). (2) With no restart: Settings → Logging → "Per-source overrides" → `SyncStats:info` (saved settings are applied to the logger immediately and on every boot, merged over the env var). The Log Viewer window cannot set levels — it only displays the in-memory ring, which records every entry whether or not its level is enabled — so it shows the always-built lines but never a breakdown that was not enabled. Lines land in `~/.claude/ui/logs/YYYYMMDD.log` and the terminal; filter them with `grep SyncStats`.
+
 ## State classification
 
-| Class          | Contents                                                                                                                                                                                                                                                                                                                                                                                          | Mechanism                                       |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| **Replicated** | messages (images and documents as blob refs, bytes fetched on demand — ADR-087), coalesced streaming text/thinking, status, approvals, todos, **queue items**, tasks, sentFiles, per-session config (`selectedModel`, `effort`, `thinkingMode`, `reasoningVariant`, `permissionMode`, engine), session registry, pins/titles/hidden, settings, sessionEngines, worktree map, git status summaries | Domain events + snapshot                        |
-| **Per-client** | active session selection, draft text/attachments, panel layout, scroll, gallery state                                                                                                                                                                                                                                                                                                             | View store; never synced (deliberate — ADR-041) |
-| **Host-local** | window controls, native folder picker, voice capture, OAuth browser flows                                                                                                                                                                                                                                                                                                                         | `host`-capability commands, desktop shell only  |
+| Class          | Contents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Mechanism                                       |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| **Replicated** | messages (images and documents as blob refs, bytes fetched on demand — ADR-087), coalesced streaming text/thinking, status, approvals, todos, **queue items**, tasks, sentFiles, per-session config (`selectedModel`, `effort`, `thinkingMode`, `reasoningVariant`, `permissionMode`, engine), session registry, pins/titles/hidden, settings, sessionEngines, worktree map, **session links** (`sessionLinks`/`sessionRefs`, `session:link-changed`), **context-pressure banner** (`contextPressure` per session, `session:context-pressure`), git status summaries | Domain events + snapshot                        |
+| **Per-client** | active session selection, draft text/attachments, panel layout, scroll, gallery state                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | View store; never synced (deliberate — ADR-041) |
+| **Host-local** | window controls, native folder picker, voice capture, OAuth browser flows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | `host`-capability commands, desktop shell only  |
 
 Per-channel classification of every event, with its ring/canonical/delivery
 consequences: [sync-channels.md](sync-channels.md).
@@ -330,9 +338,21 @@ Zustand in one `set()`. Consequences:
 - **The last client-computation violation moved to main.** `worktreeInfoMap` is no
   longer parsed out of a tool result in the renderer: `services/worktree-detect.ts`
   does it once, observed at the funnel's delivery point (where canonical already
-  carries the tool_result attached to its tool_use, so the `EnterWorktree` gate
+  carries the tool_result attached to its tool_use, so the tool-name gate
   checks real state), and persists through the ordinary `config:sessions-changed`
-  save.
+  save. Both directions are observed: a successful `EnterWorktree` records the worktree
+  (only a linked worktree of the session's own repository; an entry for a different one is
+  overwritten) and a successful `ExitWorktree` forgets it; each tool call is acted on once, so
+  a re-delivered result cannot undo a newer one. A `created` entry (the worktree ClaudeUI made)
+  is never overwritten or forgotten by detection, only by the removal path. opencode's
+  `session.moved` records or forgets the same way. `status.cwd` is the spawn cwd and no longer
+  drops an entry.
+- **`DirectoryGroup.linkedWorktree` is a projection of the filesystem, not client state.**
+  `sync-seed.listAllDirectories` marks every group whose cwd is a linked git worktree (any
+  engine, any layout; filesystem facts only), and the marker rides the replicated
+  `directories` listing. The replica synthesises a `worktreeInfo` from it for sessions without
+  an explicit `worktreeInfoMap` entry, and the sidebar tints those rows. Hits are revalidated
+  on every use and misses are trusted for 30 s.
 
 **The projection audits itself at every turn end (F4, 2026-09-15).**
 `renderer/src/utils/projection-audit.ts` registers a post-apply observer (never a
@@ -400,7 +420,8 @@ hydration:
 - **`settings`, the session registry (`recentSessionIds`/`pinnedSessionIds`/
   `customTitles`/`worktreeInfoMap`/`hiddenSessions`/`hiddenProjects`/`sessionEngines`),
   `autoModeDisabledBySettings`, `slashCommands`** — files every client used to read for
-  itself. `services/sync-seed.ts` seeds them from the same readers the renderer store
+  itself, plus the session link tables (origin + `grouped`) (`sessionLinks`/`sessionRefs`, from SQLite via
+  `seedLinkState`, slice 1b). `services/sync-seed.ts` seeds them from the same readers the renderer store
   uses, at the same point in boot. Without it, a phone connecting to a freshly-booted
   desktop got an empty sidebar, default theme and no recents until the first config save
   of the session happened to fire a watcher.
@@ -421,6 +442,12 @@ exits or the watch ends (`evictTranscript`, which clears `seeded` and is equally
 event), and a later resume seeds it again. The in-flight read is tracked per routing id
 (`trackSeed` / `pendingSeed`) and `handlers-core.sendPrompt` waits on it, because a seed
 that loses the race to a prompt is a no-op — it only fills an EMPTY transcript.
+A non-fork Claude resume seeds CONTENT-FIRST (`deferStatusLine`, ADR-102): canonical gets
+the transcript without a status line, and the totals arrive as the resumed `ClaudeSession`'s
+own `session:status-line` once it has re-folded them from the same transcript. `sendPrompt`
+also waits for that fold (`ISession.resumeSeedReady`), so a first turn never starts on zero
+accumulators; the fold is memoized in the main process, so after the ADR-102 background
+status pass it is a hit. A fork keeps the full anchored read: its totals come only from it.
 
 Phase 5 S4 moved a WATCHED session's transcript into that category
 (`SyncCore.seedWatchedSession`, the REPLACE twin of `seedSession` — a watched `.jsonl`

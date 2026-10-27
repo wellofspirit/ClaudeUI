@@ -1,5 +1,5 @@
 /**
- * The host's handle on the voice worker — ADR-101 §3–4, local-voice-spec S2.
+ * The host's handle on the voice worker — ADR-101 §3–4, docs/architecture/local-voice.md C3.
  *
  * ONE worker process per host serves every on-device capture (opencode, pi and
  * Codex sessions; the desktop window and every remote browser). This module owns

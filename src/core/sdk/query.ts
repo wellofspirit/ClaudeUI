@@ -636,6 +636,11 @@ async function handleInbound(line: Record<string, unknown>, ctx: InboundCtx): Pr
     if (rid) ctx.control.cancelInbound(rid)
     return
   }
+  try {
+    ctx.options.onInboundFrame?.(line)
+  } catch {
+    /* an observer of the wire must never break it */
+  }
   // Everything else flows up to the consumer.
   ctx.queue.push(line as SDKMessage)
 }
@@ -790,6 +795,8 @@ async function handleCanUseTool(
     suggestions: request.permission_suggestions as CanUseToolResult['updatedPermissions'],
     blockedPath: request.blocked_path as string | undefined,
     decisionReason: request.decision_reason as string | undefined,
+    decisionReasonType: request.decision_reason_type as string | undefined,
+    decisionReasonCode: request.decision_reason_code as string | undefined,
     title: request.title as string | undefined,
     displayName: request.display_name as string | undefined,
     description: request.description as string | undefined,

@@ -14,7 +14,13 @@ import type { AgentColorId, AgentTypeColorOverrides } from '../../../shared/agen
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
 import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
-import type { CanonicalState } from '../../../core/shared/sync/state'
+import type { TranscriptLoadProgress } from '../lib/transcript-load-progress'
+import type { CanonicalSessionState, CanonicalState } from '../../../core/shared/sync/state'
+import type { SessionLinkInfo } from '../../../shared/session-links'
+import type {
+  ContextPressureBanner,
+  ContextPressureSetting
+} from '../../../shared/context-pressure'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -48,6 +54,7 @@ import type {
   PermissionMode,
   ModelInfo,
   DirectoryGroup,
+  SessionInfo,
   StatusLineData,
   MeteringSnapshot,
   SlashCommandInfo,
@@ -71,7 +78,8 @@ import type {
   ModelRef,
   EngineConfig,
   FileAttachment,
-  ChatgptRateLimits
+  ChatgptRateLimits,
+  SubagentIndexEntry
 } from '../../../shared/types'
 import { HARNESS_IDS } from '../../../shared/harness-types'
 // The harness snapshot (ADR-082 §8): whether a new session's harness runs.
@@ -640,6 +648,18 @@ export interface AppSettings {
   /** The cross-engine dispatch tile's (the letter X) palette colour; unset is orange. */
   dispatchTileColor?: AgentColorId
   /**
+   * What to do when a session's context crosses a threshold (session tools, slice 4). Absent from
+   * {@link DEFAULT_SETTINGS}: unset is `off` with a 70 % threshold, and Reset deletes the key.
+   * `normalizeContextPressure` (shared) owns the rules; the host applies it on save and on read.
+   */
+  contextPressure?: ContextPressureSetting
+  /**
+   * The session tools (the agent-facing `session_*` family and its guidance) on every engine.
+   * Absent from {@link DEFAULT_SETTINGS}: unset is on, and Reset deletes the key. Read when a
+   * session spawns, so turning it off applies to new sessions.
+   */
+  sessionTools?: boolean
+  /**
    * Colour an agent's name in the roster, and the task card's model chip, by the
    * tier of the model it runs on (`shared/model-tier.ts`). On by default.
    */
@@ -1001,6 +1021,12 @@ function cleanupEmptySession(
   const session = sessions[routingId]
   if (!session) return { sessions, recentSessionIds, dropped: null }
   if (!isLocallyCreated(routingId)) return { sessions, recentSessionIds, dropped: null }
+  // An evicted or historical entry is a transcript ON DISK, never an abandoned
+  // scratch session: it is empty only because the read that fills it has not landed
+  // (the sidebar's loading placeholder, ADR-102) or came back empty (a Claude read
+  // error resolves empty, leaving `evicted: false, isHistorical: true`). Dropping it
+  // scrubs the session's recents / pins / hidden / custom-title rows with it.
+  if (session.evicted || session.isHistorical) return { sessions, recentSessionIds, dropped: null }
   // Only clean up sessions with no messages and no active SDK
   if (session.messages.length > 0 || session.sdkActive || session.draftText)
     return { sessions, recentSessionIds, dropped: null }
@@ -1025,6 +1051,95 @@ function forgetDroppedSession(state: PersistedSessionFields, routingId: string):
   if (scrub) applyRegistryPatch(state, scrub)
 }
 
+/**
+ * The identity a session reopens with, for the LOCAL historical-load path: which
+ * engine and model it comes back as (from `sessionEngines`, never from an event),
+ * the permission mode it starts in, and the capabilities that follow from them.
+ * Shared by {@link SessionState.loadHistoricalSession} and
+ * {@link SessionState.beginTranscriptLoad} so the sidebar's loading placeholder
+ * carries exactly what the finished load would have given the entry — a
+ * placeholder built from `emptySession` defaults would show Claude's defaults on a
+ * Codex session until the transcript landed, and a prompt sent meanwhile would
+ * spawn with them.
+ *
+ * `base` is the entry the load starts from (see the comment inside).
+ */
+function historicalIdentity(
+  state: SessionState,
+  routingId: string,
+  cwd: string
+): {
+  base: PerSessionState
+  identity: Partial<CanonicalSessionState>
+} {
+  // Per-session model memory: restore the persisted model when present, so
+  // reopening a session brings back the model you last used in it. The engine
+  // is restored too (an opencode session reopens as opencode). When NO model
+  // was persisted (fresh load), fall back to the session ENGINE's default —
+  // engine-aware, never Claude's "default" on an opencode session (the bug).
+  const persistedEntry = state.sessionEngines[routingId]
+  const persistedEngineId = persistedEntry?.engineId ?? 'claude'
+  // Re-hydrating an evicted entry: start from the resident (lightweight)
+  // entry so draft / effort / thinking / permission mode survive the round
+  // trip. A genuinely FRESH load is a new run of the session, and a new run
+  // starts in the configured default mode — same rule cli.js applies to
+  // `--resume` (`permissions.defaultMode` is read at every bootstrap, not
+  // only for brand-new conversations). Without this, only never-before-seen
+  // sessions got the auto default; every session reopened from the sidebar
+  // silently started in 'default'.
+  const prior = state.sessions[routingId]
+  const base = prior?.evicted
+    ? prior
+    : createEmptySession(cwd, bootstrapPermissionMode(state, persistedEngineId))
+  const persistedModelRef = persistedEntry?.model
+  // For opencode the picker value is "vendorId/modelId"; for claude it's the modelId.
+  const persistedModel: string | undefined = persistedModelRef
+    ? engineMeta(persistedEngineId).encodeModelValue(persistedModelRef)
+    : undefined
+  const selectedModel =
+    persistedModel ??
+    engineMeta(persistedEngineId).defaultModelValue(
+      perEngineDefaultModel(persistedEngineId, engineDefaultModels(state))
+    )
+  // Engine identity for the LOCAL historical-load path (gpt#3): the restored
+  // engine must also drive status.engineId + capabilities, otherwise a pi /
+  // opencode session reopens with Claude defaults and fork/spawn resolution
+  // uses Claude semantics. (The remote-snapshot path seeds these from the
+  // snapshot's own status — untouched here.)
+  const modelInfo = state.availableModels.find(
+    (m) => m.value === selectedModel && isModelForEngine(m, persistedEngineId)
+  )
+  return {
+    base,
+    identity: {
+      cwd,
+      permissionMode: base.permissionMode,
+      selectedEngineId: persistedEngineId,
+      selectedModel,
+      status: {
+        ...base.status,
+        engineId: persistedEngineId,
+        capabilities: engineMeta(persistedEngineId).seedCapabilities(selectedModel, modelInfo)
+      }
+    }
+  }
+}
+
+/**
+ * The background phase of a Claude load (ADR-102 Arc 2): the status line (cost and
+ * tokens) and the subagent transcripts, which load after the conversation paints.
+ */
+export interface BackgroundLoadView {
+  /** 0..1, monotonic within one job. */
+  fraction: number
+  /** "Loading usage and 73 subagents · 42%" — the bar's tooltip. */
+  label: string
+  /** The status line has not landed yet (the footer says "Loading usage…" while it is null). */
+  statusPending: boolean
+  /** Bytes the status pass is planned at (M + the index's S), so the bar's total is known up front. */
+  statusBytes: number
+}
+
 /** Per-session state — everything that varies between sessions */
 export interface PerSessionState {
   cwd: string
@@ -1047,6 +1162,26 @@ export interface PerSessionState {
    *  it), so the chat offers Retry instead of waiting. Per-client view state: set by
    *  the post-hydrate reload, cleared by any load that lands. */
   transcriptLoadFailed: boolean
+  /** Progress of the read that fills this entry (ADR-102), or null when none is running.
+   *  View-only and per client: never replicated, never sealed. */
+  transcriptLoadProgress: TranscriptLoadProgress | null
+  /** Claude only (ADR-102 Arc 2): the subagent transcripts on disk, by origin tool_use
+   *  id, as the content-first history read listed them. What the background job, the
+   *  on-demand fetches and the cards' "loading" state plan from. View-only and per
+   *  client: never replicated, never sealed; null for an engine that returns its
+   *  buckets inline and for an entry that is not loaded. */
+  subagentIndex: Record<string, SubagentIndexEntry> | null
+  /** Where the background phase reads this entry's transcript files from (the commit
+   *  records it, so the load never depends on the sidebar listing still naming the
+   *  session). View-only; null whenever `subagentIndex` is. */
+  transcriptSource: { sessionId: string; projectKey: string } | null
+  /** The background phase of a load (the status line and the subagent buckets), or
+   *  null when none is running. View-only, per client. */
+  backgroundLoad: BackgroundLoadView | null
+  /** Bumped by every commit and every eviction of this entry's transcript: the token
+   *  a background fetch holds, so a result that lands after a reload or an eviction
+   *  (R4) can tell its plan is stale and write nothing. */
+  backgroundGeneration: number
   status: SessionStatus
   pendingApprovals: PendingApproval[]
   errors: string[]
@@ -1100,6 +1235,12 @@ export interface PerSessionState {
   /** Queue of record, replicated from main (ADR-053). Only `queued` items live
    *  here — a consumed item has already become a chat message. */
   queuedItems: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn
+   *  (slice 1a), replicated from main — `0` when none. */
+  heldCount: number
+  /** The context-pressure banner above this session's composer (slice 4), replicated
+   *  from main — `null` when there is none. */
+  contextPressure: ContextPressureBanner | null
   draftText: string
   /** Per-session unsent attachments (mirrors draftText). Scoped so a file added
    *  in session A can never be sent from B, and is restored on return to A. */
@@ -1161,6 +1302,11 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   itemStreamRevision: 0,
   evicted: false,
   transcriptLoadFailed: false,
+  transcriptLoadProgress: null,
+  subagentIndex: null,
+  transcriptSource: null,
+  backgroundLoad: null,
+  backgroundGeneration: 0,
   // Full caps assumed for new sessions before the first status event.
   status: {
     state: 'idle',
@@ -1196,6 +1342,8 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   statusLine: null,
   metering: null,
   queuedItems: [],
+  heldCount: 0,
+  contextPressure: null,
   draftText: '',
   draftAttachments: [],
   selectedModel: 'default',
@@ -1536,13 +1684,20 @@ export function hasResumableTranscript(
  * that stays here, and the part the sidebar's click path reads — it reloads from
  * disk exactly when `evicted` is set (`Sidebar.tsx` `handleClickSession`).
  */
-export function evictedViewPatch(): Partial<PerSessionState> {
+export function evictedViewPatch(session?: PerSessionState): Partial<PerSessionState> {
   return {
     evicted: true,
     isHistorical: true,
     bashOutputs: {},
     backgroundOutputs: {},
-    backgroundWatcherCounts: {}
+    backgroundWatcherCounts: {},
+    // The background phase belongs to the transcript that is leaving (R4): its
+    // index and bar go with it, and the bumped generation tells any fetch still in
+    // flight that its plan is stale.
+    subagentIndex: null,
+    transcriptSource: null,
+    backgroundLoad: null,
+    backgroundGeneration: (session?.backgroundGeneration ?? 0) + 1
   }
 }
 
@@ -1567,6 +1722,80 @@ export function setTranscriptLoadFailed(routingId: string, failed: boolean): voi
     if (!session || session.transcriptLoadFailed === failed) return state
     return {
       sessions: updateSession(state.sessions, routingId, () => ({ transcriptLoadFailed: failed }))
+    }
+  })
+}
+
+/**
+ * Set or clear a session's transcript-load progress. Unknown ids are skipped, so a
+ * late report for a session that was dropped meanwhile cannot resurrect an entry.
+ */
+export function setTranscriptLoadProgress(
+  routingId: string,
+  progress: TranscriptLoadProgress | null
+): void {
+  useSessionStore.setState((state) => {
+    const session = state.sessions[routingId]
+    if (!session) return state
+    if (progress === null && session.transcriptLoadProgress === null) return state
+    return {
+      sessions: updateSession(state.sessions, routingId, () => ({
+        transcriptLoadProgress: progress
+      }))
+    }
+  })
+}
+
+/**
+ * Write the background-phase bar of `routingId` — only while `generation` is still
+ * the entry's current one (R4), so a fetch from before a reload or an eviction
+ * cannot draw on the entry that replaced it. `null` clears the bar. Unknown ids are
+ * skipped, and an unchanged value writes nothing.
+ */
+export function setBackgroundLoad(
+  routingId: string,
+  generation: number,
+  next: BackgroundLoadView | null
+): void {
+  useSessionStore.setState((state) => {
+    const session = state.sessions[routingId]
+    if (!session || session.backgroundGeneration !== generation) return state
+    const prev = session.backgroundLoad
+    if (next === null ? prev === null : prev !== null && sameBackgroundLoad(prev, next))
+      return state
+    return { sessions: updateSession(state.sessions, routingId, () => ({ backgroundLoad: next })) }
+  })
+}
+
+function sameBackgroundLoad(a: BackgroundLoadView, b: BackgroundLoadView): boolean {
+  return (
+    a.fraction === b.fraction &&
+    a.label === b.label &&
+    a.statusPending === b.statusPending &&
+    a.statusBytes === b.statusBytes
+  )
+}
+
+/**
+ * The index lists a transcript for `toolUseId` that could not be loaded (the read
+ * failed twice, or came back empty): zero its size, so "a transcript is on its way"
+ * stops being true for it and the card falls back to the result it already had.
+ * Generation-guarded like {@link setBackgroundLoad}.
+ */
+export function markSubagentUnavailable(
+  routingId: string,
+  generation: number,
+  toolUseId: string
+): void {
+  useSessionStore.setState((state) => {
+    const session = state.sessions[routingId]
+    const entry = session?.subagentIndex?.[toolUseId]
+    if (!session || !entry || session.backgroundGeneration !== generation || entry.bytes === 0)
+      return state
+    return {
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        subagentIndex: { ...s.subagentIndex, [toolUseId]: { ...entry, bytes: 0 } }
+      }))
     }
   })
 }
@@ -1684,6 +1913,10 @@ export interface SessionState {
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
   sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  /** Origin links between sessions, keyed by the started session's ref (slice 1b). Replicated. */
+  sessionLinks: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). Replicated. */
+  sessionRefs: Record<string, string>
 
   /** Remembered engine choice — pre-fills engine for newly created sessions. */
   lastSelectedEngineId: EngineId
@@ -1877,8 +2110,33 @@ export interface SessionState {
     taskNotifications?: TaskNotification[],
     subagentMessages?: Record<string, ChatMessage[]>,
     statusLine?: StatusLineData | null,
-    warnings?: string[]
+    warnings?: string[],
+    /** Claude's content-first load (ADR-102 Arc 2): what is still to load in the background. */
+    background?: {
+      subagentIndex: Record<string, SubagentIndexEntry>
+      /** Where to read the transcript files from (`SessionInfo.sessionId` / `projectKey`). */
+      source: { sessionId: string; projectKey: string }
+      /** The status line was deferred: the footer waits for it. */
+      statusPending: boolean
+      /** The status pass's planned bytes (M + the index's S). */
+      statusBytes: number
+    },
+    /** The X-Agents still running (ADR-105 §5): their records, which no transcript holds. */
+    activeTasks?: Record<string, ActiveTask>
   ) => void
+  /**
+   * The sidebar's click on a session that is not resident (ADR-102): create the
+   * entry NOW, as an evicted placeholder that renders the loading view, so the
+   * click can navigate before the disk read finishes. The entry carries the same
+   * identity (engine / model / permission mode / capabilities) the finished load
+   * will give it, and `loadHistoricalSession` then fills it as it fills any evicted
+   * entry. An entry that already exists (evicted, idle) is only re-marked evicted;
+   * a live entry is never touched.
+   *
+   * Callers seed `sessionEngines` for a non-Claude session first (see
+   * `beginTranscriptPlaceholder` in `lib/session-history-load.ts`).
+   */
+  beginTranscriptLoad: (info: SessionInfo) => void
   /** Fork ("branch off") a new session from an assistant message in `sourceRoutingId`.
    *  Resolves the disk anchor, seeds the new session with messages 1..N, and
    *  switches to it. The branch materializes on cli.js on first prompt send.
@@ -2003,7 +2261,6 @@ export interface SessionState {
   clearConversation: (routingId: string) => Promise<void>
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
-  clearWorktreeInfo: (routingId: string) => void
   setQuitWorktrees: (
     sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
   ) => void
@@ -2164,6 +2421,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   hiddenSessionIds: [],
   hiddenProjectKeys: [],
   sessionEngines: {},
+  sessionLinks: {},
+  sessionRefs: {},
   lastSelectedEngineId:
     ((localStorage.getItem('lastSelectedEngineId') ??
       localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
@@ -2547,7 +2806,9 @@ export const useSessionStore = create<SessionState>((set) => ({
     taskNotifications?,
     subagentMessages?,
     statusLine?,
-    warnings?
+    warnings?,
+    background?,
+    activeTasks?
   ) => {
     const state = useSessionStore.getState()
     // A disk read can finish after this session has resumed. Guard config as
@@ -2558,61 +2819,12 @@ export const useSessionStore = create<SessionState>((set) => ({
     )
       return
     {
-      // Per-session model memory: restore the persisted model when present, so
-      // reopening a session brings back the model you last used in it. The engine
-      // is restored too (an opencode session reopens as opencode). When NO model
-      // was persisted (fresh load), fall back to the session ENGINE's default —
-      // engine-aware, never Claude's "default" on an opencode session (the bug).
-      const persistedEntry = state.sessionEngines[routingId]
-      const persistedEngineId = persistedEntry?.engineId ?? 'claude'
-      // Re-hydrating an evicted entry: start from the resident (lightweight)
-      // entry so draft / effort / thinking / permission mode survive the round
-      // trip. A genuinely FRESH load is a new run of the session, and a new run
-      // starts in the configured default mode — same rule cli.js applies to
-      // `--resume` (`permissions.defaultMode` is read at every bootstrap, not
-      // only for brand-new conversations). Without this, only never-before-seen
-      // sessions got the auto default; every session reopened from the sidebar
-      // silently started in 'default'.
-      const prior = state.sessions[routingId]
-      const base = prior?.evicted
-        ? prior
-        : createEmptySession(cwd, bootstrapPermissionMode(state, persistedEngineId))
-      const persistedModelRef = persistedEntry?.model
-      // For opencode the picker value is "vendorId/modelId"; for claude it's the modelId.
-      const persistedModel: string | undefined = persistedModelRef
-        ? engineMeta(persistedEngineId).encodeModelValue(persistedModelRef)
-        : undefined
-      const selectedModel =
-        persistedModel ??
-        engineMeta(persistedEngineId).defaultModelValue(
-          perEngineDefaultModel(persistedEngineId, engineDefaultModels(state))
-        )
-      // Engine identity for the LOCAL historical-load path (gpt#3): the restored
-      // engine must also drive status.engineId + capabilities, otherwise a pi /
-      // opencode session reopens with Claude defaults and fork/spawn resolution
-      // uses Claude semantics. (The remote-snapshot path seeds these from the
-      // snapshot's own status — untouched here.)
-      const modelInfo = state.availableModels.find(
-        (m) => m.value === selectedModel && isModelForEngine(m, persistedEngineId)
-      )
-      // Session identity + config: a LOCAL decision (which engine/model this
-      // session reopens as comes from `sessionEngines`, not from any event), so it
-      // is applied unconditionally.
-      patchLocalSession(
-        routingId,
-        {
-          cwd,
-          permissionMode: base.permissionMode,
-          selectedEngineId: persistedEngineId,
-          selectedModel,
-          status: {
-            ...base.status,
-            engineId: persistedEngineId,
-            capabilities: engineMeta(persistedEngineId).seedCapabilities(selectedModel, modelInfo)
-          }
-        },
-        { create: true }
-      )
+      // Session identity + config (engine / model / permission mode / capabilities):
+      // the same block the sidebar's loading placeholder applies up front.
+      const { base, identity } = historicalIdentity(state, routingId, cwd)
+      // A LOCAL decision (which engine/model this session reopens as comes from
+      // `sessionEngines`, not from any event), so it is applied unconditionally.
+      patchLocalSession(routingId, identity, { create: true })
       // The transcript: on disk and NOWHERE in the event stream, because browsing
       // an old session spawns nothing for the host to emit. `seedColdSession` is
       // the one sanctioned local write for it, and it refuses to clobber a live
@@ -2622,6 +2834,10 @@ export const useSessionStore = create<SessionState>((set) => ({
         messages,
         taskNotifications: taskNotifications ?? base.taskNotifications,
         subagentMessages: subagentMessages ?? base.subagentMessages,
+        // The read is authoritative for records: only a dispatched X-Agent the ledger still
+        // shows running comes back (ADR-105 §5), so a replace reload over an entry that holds
+        // a stale one (its end missed in a gap) must clear it, not keep it.
+        activeTasks: activeTasks ?? {},
         statusLine: statusLine ?? base.statusLine ?? null,
         // Derived from the transcript, with the same scanners the reducer uses —
         // which is what makes the todo widget and the Files widget survive
@@ -2635,14 +2851,42 @@ export const useSessionStore = create<SessionState>((set) => ({
       // run after the seed has created the entry (a fresh sidebar click reaches
       // here with nothing resident).
       set((s) => ({
-        sessions: updateSession(s.sessions, routingId, () => ({
+        sessions: updateSession(s.sessions, routingId, (cur) => ({
           isHistorical: true,
           evicted: false,
           transcriptLoadFailed: false,
+          transcriptLoadProgress: null,
+          // The background phase restarts with every commit (R4): a new index (or
+          // none, for an engine that returns its buckets inline), a new generation.
+          subagentIndex: background?.subagentIndex ?? null,
+          transcriptSource: background?.source ?? null,
+          backgroundLoad: background
+            ? {
+                fraction: 0,
+                label: 'Loading usage',
+                statusPending: background.statusPending,
+                statusBytes: background.statusBytes
+              }
+            : null,
+          backgroundGeneration: cur.backgroundGeneration + 1,
           warnings: warnings ?? base.warnings
         }))
       }))
     }
+  },
+
+  beginTranscriptLoad: (info) => {
+    const routingId = info.sessionId
+    const state = useSessionStore.getState()
+    const existing = state.sessions[routingId]
+    if (existing && (existing.sdkActive || existing.status.state === 'running')) return
+    if (!existing) {
+      const { identity } = historicalIdentity(state, routingId, info.cwd)
+      patchLocalSession(routingId, identity, { create: true })
+    }
+    // An existing evicted entry keeps everything it holds (draft, effort, mode);
+    // either way the view half is what makes ChatPanel render the loading view.
+    set((s) => ({ sessions: updateSession(s.sessions, routingId, evictedViewPatch) }))
   },
 
   forkFromMessage: async (sourceRoutingId, messageId) => {
@@ -3722,9 +3966,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   },
 
   // Worktree actions. `worktreeInfoMap` is SEALED (`config:sessions-changed`), and
-  // the per-session `worktreeInfo` is projected from it — one map, one writer, so
-  // the reducer's worktree-EXIT rule (drop the entry when cwd returns to
-  // `originalCwd`) can no longer disagree with a second code path.
+  // the per-session `worktreeInfo` is projected from it — one map, one writer. An
+  // entry leaves it main-side (ExitWorktree observed, a worktree removed).
   setWorktreeInfo: (routingId, info) => {
     const state = useSessionStore.getState()
     const worktreeInfoMap = { ...state.worktreeInfoMap }
@@ -3739,14 +3982,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (info?.worktreePath && state.sessions[routingId]?.cwd !== info.worktreePath) {
       patchLocalSession(routingId, { cwd: info.worktreePath })
     }
-    saveSessionConfig(state, { worktreeInfoMap })
-  },
-
-  clearWorktreeInfo: (routingId) => {
-    const state = useSessionStore.getState()
-    const worktreeInfoMap = { ...state.worktreeInfoMap }
-    delete worktreeInfoMap[routingId]
-    patchLocalApp({ worktreeInfoMap })
     saveSessionConfig(state, { worktreeInfoMap })
   },
 

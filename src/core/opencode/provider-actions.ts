@@ -24,7 +24,15 @@
  * (global config is cached at `Duration.infinity`; the provider InstanceState is
  * invalidated only on instance dispose), so with any session holding a server
  * ref the probe returns pre-delete state and we would write a veto we do not
- * need. Every input below is therefore a cheap ClaudeUI-owned local read.
+ * need. Every input below is therefore a cheap local read: the two config files,
+ * and opencode's credential table (2.x applies it live, so a read of ROWS —
+ * never of what the server then lists — is current).
+ *
+ * REMOVE deletes what opencode would otherwise keep deriving the provider from:
+ * every credential row it holds for the id (the user's own keys and sign-ins
+ * included — `hasStoredCredential` is "anyone's row"), and/or the declaration in
+ * the one global file ClaudeUI writes. What remains after a Remove (an env var,
+ * a foreign config declaration, a free gateway) is what `blockedReason` explains.
  *
  * `source` / `envVarNames` come from opencode and are used for MESSAGE WORDING
  * ONLY, never for the decision — an opencode schema change must not be able to
@@ -44,8 +52,8 @@ export interface ProviderActionInput {
   disabled?: boolean
   /** True for credential-free bundled gateways (FREE_OPENCODE_VENDOR_IDS). */
   isFree: boolean
-  /** opencode holds an active credential row for this id (any type). */
-  hasCredential: boolean
+  /** opencode's credential table holds at least one row for this id — anyone's, any type. */
+  hasStoredCredential: boolean
   /** Declared in the `provider` object of the ONE global file ClaudeUI writes. */
   declaredInOurFile: boolean
   /**
@@ -60,6 +68,14 @@ export interface ProviderActionInput {
   envVarNames?: string[]
   /** Wording only — the other global config file's path, when known. */
   elsewhereConfigPath?: string
+  /**
+   * Wording only — the provider's credential rows are stored under this OTHER
+   * integration id (a provider whose catalog id differs from its integration's,
+   * e.g. `google-vertex-anthropic` on `google-vertex`). Remove deletes the rows
+   * of the id it is handed, so such a provider stays not removable; this only
+   * lets the reason say why. It never changes `removeKind`.
+   */
+  credentialIntegrationId?: string
 }
 
 export function resolveProviderActions(input: ProviderActionInput): ProviderActions {
@@ -67,9 +83,9 @@ export function resolveProviderActions(input: ProviderActionInput): ProviderActi
   const canEditDeclaration = input.declaredInOurFile
 
   const removeKind: ProviderRemoveKind | null =
-    input.hasCredential && input.declaredInOurFile
+    input.hasStoredCredential && input.declaredInOurFile
       ? 'both'
-      : input.hasCredential
+      : input.hasStoredCredential
         ? 'credential'
         : input.declaredInOurFile
           ? 'declaration'
@@ -105,8 +121,8 @@ function blockedReason(input: ProviderActionInput): string {
   if (input.isFree) {
     return 'Bundled and needs no credentials, so there is nothing to remove. Disable it to hide it.'
   }
-  if (input.source === 'external') {
-    return 'Connected through an external credential source (such as a CLI login) that opencode reads on its own, so there is nothing stored to remove. Disconnect it there, or disable this provider.'
+  if (input.credentialIntegrationId) {
+    return `Its credential is stored under opencode’s “${input.credentialIntegrationId}” integration, which this provider shares, so it can’t be removed from here. Disable it to hide it.`
   }
   if (input.source === 'config') {
     return 'Declared in an opencode config file ClaudeUI does not write (a project config, .opencode directory, or managed profile). Disable it to hide it.'

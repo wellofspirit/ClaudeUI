@@ -9,6 +9,17 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
+import { piSessionToolsEnv } from '../../services/session-tool-specs'
+import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
+import {
+  DISPATCH_BACKGROUND_PARAM,
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_NAME_PARAM,
+  DISPATCH_WORKDIR_PARAM,
+  HAND_BACK_DESCRIPTION,
+  HAND_BACK_REPORT_PARAM
+} from '../../../shared/dispatch-agent-description'
 
 describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   it('has a non-empty version string', () => {
@@ -16,8 +27,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 13 (ADR-096: registers the shared MCP catalog)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('13')
+  it('is version 25 (the extension throws without bridge credentials)', () => {
+    expect(PI_BRIDGE_VERSION).toBe('25')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -33,8 +44,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('CLAUDEUI_PI_BRIDGE_TOKEN')
   })
 
-  it('is inert (returns early) when the env vars are absent', () => {
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/if \(!bridgeUrl \|\| !bridgeToken\) return/)
+  it('throws (never goes inert) when the env vars are absent', () => {
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(
+      /if \(!bridgeUrl \|\| !bridgeToken\) \{\s+throw new Error\('ClaudeUI approval bridge is not configured/
+    )
+    expect(PI_BRIDGE_EXTENSION_SOURCE).not.toMatch(/if \(!bridgeUrl \|\| !bridgeToken\) return/)
   })
 
   it('fails closed — blocks with a reason on every non-allow path', () => {
@@ -67,19 +81,18 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('CLAUDEUI_PI_SKILL_DIRS')
   })
 
-  it('gates resources_discover independently of the bridge URL/token check', () => {
-    // The skill-dirs env var read + its `if` guard must appear BEFORE the
-    // `if (!bridgeUrl || !bridgeToken) return` line — i.e. resources_discover
-    // can register even when the function returns early right after for the
-    // (separate) bridge gate. This is the actual independence property: the
-    // early return must not be reachable before the skill-dirs block runs.
-    const skillEnvIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('CLAUDEUI_PI_SKILL_DIRS')
-    const earlyReturnIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf(
-      'if (!bridgeUrl || !bridgeToken) return'
-    )
-    expect(skillEnvIdx).toBeGreaterThan(-1)
-    expect(earlyReturnIdx).toBeGreaterThan(-1)
-    expect(skillEnvIdx).toBeLessThan(earlyReturnIdx)
+  it('checks the bridge credentials right after the Electron-as-Node cleanup and before anything registers', () => {
+    // H4: the credential throw must come AFTER `delete process.env.ELECTRON_RUN_AS_NODE`
+    // (that cleanup runs on every path) and BEFORE every registration, so a
+    // failed load leaves no half-registered gate behind.
+    const src = PI_BRIDGE_EXTENSION_SOURCE
+    const cleanupIdx = src.indexOf('delete process.env.ELECTRON_RUN_AS_NODE')
+    const throwIdx = src.indexOf("throw new Error('ClaudeUI approval bridge is not configured")
+    expect(cleanupIdx).toBeGreaterThan(-1)
+    expect(throwIdx).toBeGreaterThan(cleanupIdx)
+    for (const registration of ['pi.on(', 'pi.registerTool(', 'pi.registerCommand(']) {
+      expect(src.indexOf(registration), registration).toBeGreaterThan(throwIdx)
+    }
   })
 
   it('splits skill dirs on a platform-appropriate delimiter without importing node:path', () => {
@@ -131,16 +144,6 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('CLAUDEUI_PI_DISPATCH_ENABLED')
   })
 
-  it('gates hosted tools independently of the bridge URL/token early return (same independence rule as M3 skills)', () => {
-    const hostedEnvIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf('CLAUDEUI_PI_HOSTED_TOOLS')
-    const earlyReturnIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf(
-      'if (!bridgeUrl || !bridgeToken) return'
-    )
-    expect(hostedEnvIdx).toBeGreaterThan(-1)
-    expect(earlyReturnIdx).toBeGreaterThan(-1)
-    expect(hostedEnvIdx).toBeLessThan(earlyReturnIdx)
-  })
-
   it('nests dispatch_agent behind its OWN second gate, inside the hosted-tools block', () => {
     const hostedGateIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf("CLAUDEUI_PI_HOSTED_TOOLS === '1'")
     const dispatchGateIdx = PI_BRIDGE_EXTENSION_SOURCE.indexOf(
@@ -169,6 +172,7 @@ interface FakeToolDef {
   name: string
   label: string
   description: string
+  promptGuidelines?: string[]
   parameters: unknown
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>
 }
@@ -266,6 +270,8 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
   'CLAUDEUI_PI_SEND_MESSAGE',
+  'CLAUDEUI_PI_HAND_BACK',
+  'CLAUDEUI_PI_SESSION_TOOLS',
   'CLAUDEUI_PI_MCP'
 ] as const
 
@@ -291,6 +297,9 @@ function withEnv<T>(vars: Partial<Record<BridgeEnvVar, string | undefined>>, fn:
   const prev: Record<string, string | undefined> = {}
   for (const k of BRIDGE_ENV_VARS) prev[k] = process.env[k]
   for (const k of BRIDGE_ENV_VARS) delete process.env[k]
+  // Since bridge v25 the factory THROWS without both credentials, so the clean baseline carries
+  // them; a test of the missing-credential paths passes them as `undefined` explicitly.
+  Object.assign(process.env, BRIDGE_CREDS)
   for (const [k, v] of Object.entries(vars)) {
     if (v === undefined) delete process.env[k]
     else process.env[k] = v
@@ -331,20 +340,40 @@ const BRIDGE_CREDS = {
 }
 
 describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (executed in-process)', () => {
-  it('registers NEITHER approvals nor hosted tools when bridge creds are absent (existing M2a behavior unaffected)', () => {
-    withEnv(
-      {
-        CLAUDEUI_PI_BRIDGE_URL: undefined,
-        CLAUDEUI_PI_BRIDGE_TOKEN: undefined,
-        CLAUDEUI_PI_HOSTED_TOOLS: '1',
-        CLAUDEUI_PI_DISPATCH_ENABLED: '1'
-      },
-      () => {
-        const { tools, events } = runExtension()
-        expect(tools.size).toBe(0)
-        expect(events.has('tool_call')).toBe(false)
-      }
-    )
+  it('THROWS (H4: never inert) when either bridge credential is absent, whatever else is enabled; the message names the bridge and leaks no credential', () => {
+    const others = { CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' } as const
+    const missing: Array<Partial<Record<BridgeEnvVar, string | undefined>>> = [
+      { CLAUDEUI_PI_BRIDGE_URL: undefined, CLAUDEUI_PI_BRIDGE_TOKEN: undefined },
+      { CLAUDEUI_PI_BRIDGE_URL: undefined, CLAUDEUI_PI_BRIDGE_TOKEN: 'secret-tok' },
+      { CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:1234', CLAUDEUI_PI_BRIDGE_TOKEN: undefined },
+      { CLAUDEUI_PI_BRIDGE_URL: '', CLAUDEUI_PI_BRIDGE_TOKEN: 'secret-tok' },
+      { CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:1234', CLAUDEUI_PI_BRIDGE_TOKEN: '' }
+    ]
+    for (const creds of missing) {
+      withEnv({ ...creds, ...others }, () => {
+        const registered: string[] = []
+        const pi = new Proxy({}, { get: (_t, name) => () => registered.push(String(name)) })
+        let thrown: unknown
+        try {
+          loadExtensionFactory()(pi as unknown as FakePi)
+        } catch (err) {
+          thrown = err
+        }
+        expect(thrown, JSON.stringify(creds)).toBeInstanceOf(Error)
+        const message = (thrown as Error).message
+        expect(message).toContain('ClaudeUI approval bridge is not configured')
+        expect(message).not.toMatch(/secret-tok|127.0.0.1/)
+        // Nothing registered before the throw: a failed load leaves no half-built gate.
+        expect(registered).toEqual([])
+      })
+    }
+  })
+
+  it('with both credentials the factory loads and registers the tool_call approval hook', () => {
+    withEnv({ ...BRIDGE_CREDS }, () => {
+      const { events } = runExtension()
+      expect(events.has('tool_call')).toBe(true)
+    })
   })
 
   it('registers the approval hook but NO hosted tools when CLAUDEUI_PI_HOSTED_TOOLS is unset', () => {
@@ -385,7 +414,18 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           const d = runExtension().tools.get('dispatch_agent')!.description
           expect(d).toContain('DIFFERENT engine')
           expect(d).toContain('use the agent tool')
-          expect(d).toContain('session_id')
+          // ...and says where the agent runs, as the shared description does (v24).
+          expect(d).toContain(
+            'runs headless in your working directory, or in workdir when you give one'
+          )
+          expect(d).not.toContain('the same working directory')
+          // The fallback carries the shared follow-up sentence (the bridge cannot import it, and a
+          // backtick would end its template literal, so it is the same words without them).
+          expect(d).toContain(DISPATCH_FOLLOW_UP_GUIDANCE.replaceAll('`', ''))
+          expect(d).not.toContain('session_id')
+          // The fallback tells the same background story as the shared description (v20).
+          expect(d).toContain('its report arrives later as a message from it')
+          expect(d).not.toContain('returned as this tool result. The result includes')
         }
       )
     }
@@ -415,7 +455,9 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
       withEnv({}, () => {
         const { tools, events, commands } = runExtension()
         expect(tools.size).toBe(0)
-        expect(events.has('tool_call')).toBe(false)
+        // withEnv's baseline carries the bridge creds (the load throws without them), so the
+        // approval hook is the ONE registration; no ambient gate var may add another.
+        expect([...events.keys()].sort()).toEqual(['project_trust', 'tool_call', 'tool_result'])
         expect(events.has('session_start')).toBe(false)
         expect(commands.has('cui-plan-enter')).toBe(false)
         expect(commands.has('cui-plan-exit')).toBe(false)
@@ -457,6 +499,71 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
     )
   })
 
+  it('dispatch_agent takes an optional name and a REQUIRED description, worded exactly as the shared module does (the bridge cannot import it)', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.name).toEqual({ type: 'string', description: DISPATCH_NAME_PARAM })
+        expect(params.properties.description).toEqual({
+          type: 'string',
+          description: DISPATCH_DESCRIPTION_PARAM
+        })
+        expect(params.required).toEqual(['engine', 'prompt', 'description'])
+      }
+    )
+  })
+
+  it('dispatch_agent takes an optional string workdir, worded exactly as the shared module does', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.workdir).toEqual({
+          type: 'string',
+          description: DISPATCH_WORKDIR_PARAM
+        })
+        expect(params.required).not.toContain('workdir')
+      }
+    )
+  })
+
+  it('dispatch_agent takes an optional boolean run_in_background, worded exactly as the shared module does', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, { type: string; description: string }>
+          required: string[]
+        }
+        expect(params.properties.run_in_background).toEqual({
+          type: 'boolean',
+          description: DISPATCH_BACKGROUND_PARAM
+        })
+        expect(params.required).not.toContain('run_in_background')
+      }
+    )
+  })
+
+  it('dispatch_agent declares no session_id parameter (a follow-up is a session_message)', () => {
+    withEnv(
+      { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
+      () => {
+        const params = runExtension().tools.get('dispatch_agent')!.parameters as {
+          properties: Record<string, unknown>
+        }
+        expect(Object.keys(params.properties)).not.toContain('session_id')
+        expect(JSON.stringify(params)).not.toContain('session_id')
+      }
+    )
+  })
+
   it('parameters are PLAIN JSON-schema object literals — no typebox Type.Object() involved (the load-bearing wire finding)', () => {
     withEnv(
       { ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_DISPATCH_ENABLED: '1' },
@@ -475,7 +582,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
         expect(tools.get('dispatch_agent')!.parameters).toMatchObject({
           type: 'object',
           properties: { engine: { type: 'string', enum: ['claude', 'opencode', 'codex'] } },
-          required: ['engine', 'prompt']
+          required: ['engine', 'prompt', 'description']
         })
       }
     )
@@ -508,7 +615,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-089)', () =>
         CLAUDEUI_PI_BRIDGE_TOKEN: 'tok'
       },
       () => {
-        expect(runExtension().tools.size).toBe(0)
+        expect(() => runExtension()).toThrow(/approval bridge is not configured/)
       }
     )
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1', CLAUDEUI_PI_AGENT_TOOL: '1' }, () => {
@@ -608,9 +715,16 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, A
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SEND_MESSAGE: '' }, () => {
       expect(runExtension().tools.has('send_message')).toBe(false)
     })
-    withEnv({ CLAUDEUI_PI_SEND_MESSAGE: '1', CLAUDEUI_PI_BRIDGE_TOKEN: 'tok' }, () => {
-      expect(runExtension().tools.size).toBe(0)
-    })
+    withEnv(
+      {
+        CLAUDEUI_PI_SEND_MESSAGE: '1',
+        CLAUDEUI_PI_BRIDGE_URL: undefined,
+        CLAUDEUI_PI_BRIDGE_TOKEN: 'tok'
+      },
+      () => {
+        expect(() => runExtension()).toThrow(/approval bridge is not configured/)
+      }
+    )
     withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_AGENT_TOOL: '1', CLAUDEUI_PI_SEND_MESSAGE: '1' }, () => {
       expect([...runExtension().tools.keys()].sort()).toEqual([
         'agent',
@@ -715,7 +829,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, A
 
   it('V1: the tool_result handler exists only with the bridge creds', () => {
     withEnv({ CLAUDEUI_PI_BRIDGE_URL: undefined, CLAUDEUI_PI_BRIDGE_TOKEN: undefined }, () => {
-      expect(runExtension().events.has('tool_result')).toBe(false)
+      expect(() => runExtension()).toThrow(/approval bridge is not configured/)
     })
     withEnv({ ...BRIDGE_CREDS }, () => {
       expect(runExtension().events.has('tool_result')).toBe(true)
@@ -780,6 +894,127 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — send_message / task_stop (bridge v11, A
   })
 })
 
+describe('PI_BRIDGE_EXTENSION_SOURCE — session tools (bridge v15, slice 2)', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+  const ENV = piSessionToolsEnv()
+
+  it('registers the nine session_* tools from the host-built env, with its descriptions, schemas and guidance', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: ENV }, () => {
+      const { tools } = runExtension()
+      expect([...tools.keys()].sort()).toEqual([...SESSION_TOOL_NAMES].sort())
+      const specs = JSON.parse(ENV) as Array<{
+        name: string
+        description: string
+        parameters: unknown
+        promptGuidelines?: string[]
+      }>
+      for (const spec of specs) {
+        const tool = tools.get(spec.name)!
+        expect(tool.description).toBe(spec.description)
+        expect(tool.parameters).toEqual(spec.parameters)
+        expect(tool.promptGuidelines).toEqual(spec.promptGuidelines)
+      }
+      // The guidance rides one tool, as pi's Guidelines section (not nine copies).
+      expect(specs.filter((spec) => spec.promptGuidelines).map((spec) => spec.name)).toEqual([
+        'session_list'
+      ])
+      expect(tools.get('session_list')!.promptGuidelines![0]).toContain('session_start')
+    })
+  })
+
+  it('registers nothing without its own gate, without the bridge creds, or with an empty variable (a host-run child)', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HOSTED_TOOLS: '1' }, () => {
+      expect(runExtension().tools.has('session_start')).toBe(false)
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: '' }, () => {
+      expect(runExtension().tools.size).toBe(0)
+    })
+    withEnv(
+      {
+        CLAUDEUI_PI_BRIDGE_URL: undefined,
+        CLAUDEUI_PI_BRIDGE_TOKEN: 'tok',
+        CLAUDEUI_PI_SESSION_TOOLS: ENV
+      },
+      () => {
+        expect(() => runExtension()).toThrow(/approval bridge is not configured/)
+      }
+    )
+    // Independent of the hosted-tools gate: the variable alone is enough.
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: ENV }, () => {
+      expect(runExtension().tools.size).toBe(SESSION_TOOL_NAMES.length)
+    })
+  })
+
+  it('fails closed: a variable that is not a JSON array registers nothing and does not throw', () => {
+    for (const bad of ['{not json', '{"name":"session_start"}', '"session_start"', 'null', '42']) {
+      withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: bad }, () => {
+        expect(() => runExtension()).not.toThrow()
+        expect(runExtension().tools.size, bad).toBe(0)
+      })
+    }
+  })
+
+  it('skips every entry that is not a well-formed session_* tool, and keeps the good ones', () => {
+    const good = {
+      name: 'session_list',
+      description: 'd',
+      parameters: { type: 'object', properties: {} }
+    }
+    const entries = [
+      null,
+      'session_start',
+      { name: 'bash', description: 'd', parameters: {} },
+      { name: 'dispatch_agent', description: 'd', parameters: {} },
+      { name: 'session_x', parameters: {} },
+      { name: 'session_x', description: 'd' },
+      { name: 'session_x', description: 'd', parameters: 'object' },
+      { name: 7, description: 'd', parameters: {} },
+      good
+    ]
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: JSON.stringify(entries) }, () => {
+      expect([...runExtension().tools.keys()]).toEqual(['session_list'])
+    })
+  })
+
+  it('execute() POSTs the bare tool name to /hosted-tool and returns the host answer; a network error fails closed', async () => {
+    const bodies: unknown[] = []
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: [{ type: 'text', text: 'delivered' }] })
+      } as Response
+    }) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SESSION_TOOLS: ENV }, async () => {
+      const { tools } = runExtension()
+      const out = await tools
+        .get('session_message')!
+        .execute('c-1', { session: 's-a', message: 'hi' })
+      expect(out).toEqual({ content: [{ type: 'text', text: 'delivered' }] })
+      globalThis.fetch = (async () => {
+        throw new TypeError('boom')
+      }) as typeof fetch
+      const failed = (await tools.get('session_stop')!.execute('c-2', { session: 's-a' })) as {
+        content: Array<{ text: string }>
+        isError?: boolean
+      }
+      expect(failed.isError).toBe(true)
+      expect(failed.content[0].text).toBe('ClaudeUI hosted-tool service unreachable (TypeError)')
+    })
+    expect(bodies).toEqual([
+      { toolName: 'session_message', input: { session: 's-a', message: 'hi' }, toolCallId: 'c-1' }
+    ])
+  })
+
+  it('the variable fits one environment entry with room to spare (Windows caps it at 32 767 characters)', () => {
+    expect(ENV.length).toBeLessThan(24_000)
+  })
+})
+
 describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-089 S3)', () => {
   const encode = (p: unknown): string => Buffer.from(JSON.stringify(p), 'utf8').toString('base64')
   const valid = {
@@ -797,12 +1032,12 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-08
       expect(runExtension().commands.has('cui-deliver')).toBe(true)
     })
     withEnv({ CLAUDEUI_PI_BRIDGE_URL: undefined, CLAUDEUI_PI_BRIDGE_TOKEN: 'tok' }, () => {
-      expect(runExtension().commands.has('cui-deliver')).toBe(false)
+      expect(() => runExtension()).toThrow(/approval bridge is not configured/)
     })
     withEnv(
       { CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9', CLAUDEUI_PI_BRIDGE_TOKEN: undefined },
       () => {
-        expect(runExtension().commands.has('cui-deliver')).toBe(false)
+        expect(() => runExtension()).toThrow(/approval bridge is not configured/)
       }
     )
   })
@@ -834,6 +1069,31 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — cui-deliver command (bridge v10, ADR-08
         },
         expect.objectContaining({ options: { triggerTurn: false, deliverAs: 'steer' } })
       ])
+    })
+  })
+
+  it('accepts the session-message kind (bridge v14) and still refuses any other', async () => {
+    await withEnv({ ...BRIDGE_CREDS }, async () => {
+      const ext = runExtension()
+      const message = {
+        ...valid,
+        kind: 'session-message',
+        text: ['<session-message from="s" title="t">', 'hi', '</session-message>'].join('\n'),
+        details: { agentId: 's', toolUseId: '', from: 't', fromId: 's' }
+      }
+      await ext.commands.get('cui-deliver')!.handler(encode(message))
+      expect(ext.sendMessageCalls).toHaveLength(1)
+      expect(ext.sendMessageCalls[0]).toMatchObject({
+        message: {
+          customType: 'claudeui-agent-message',
+          details: { kind: 'session-message', deliveryId: 'd-1', from: 't', fromId: 's' }
+        },
+        options: { triggerTurn: true, deliverAs: 'steer' }
+      })
+      expect(() =>
+        ext.commands.get('cui-deliver')!.handler(encode({ ...message, kind: 'user-message' }))
+      ).toThrow('invalid delivery')
+      expect(ext.sendMessageCalls).toHaveLength(1)
     })
   })
 
@@ -1484,8 +1744,11 @@ describe('Electron-as-Node cleanup (ADR-082 §2)', () => {
         if (vars[k] === undefined) delete process.env[k]
         else process.env[k] = vars[k]
       }
-      // The bridge's own gates all unset: the cleanup must not depend on them.
-      withEnv({}, () => runExtension())
+      // No bridge credentials: the load THROWS (H4), and the cleanup must already have run -- it
+      // precedes the credential check and must not depend on any gate.
+      withEnv({ CLAUDEUI_PI_BRIDGE_URL: undefined, CLAUDEUI_PI_BRIDGE_TOKEN: undefined }, () =>
+        expect(() => runExtension()).toThrow(/approval bridge is not configured/)
+      )
       return {
         runAsNode: process.env.ELECTRON_RUN_AS_NODE,
         marker: process.env.CLAUDEUI_PI_ELECTRON_NODE
@@ -1630,6 +1893,53 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — shared MCP catalog (bridge v13, ADR-096
       expect(notes).toEqual([
         'MCP servers from ClaudeUI could not be registered:\n  the server list could not be loaded (TypeError)'
       ])
+    })
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — hand_back (bridge v18, ADR-105 §3)', () => {
+  it('registers ONLY under CLAUDEUI_PI_HAND_BACK=1 with bridge creds, independently of every other tool', () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '1' }, () => {
+      expect([...runExtension().tools.keys()]).toEqual(['hand_back'])
+    })
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '' }, () => {
+      expect(runExtension().tools.has('hand_back')).toBe(false)
+    })
+    withEnv(
+      {
+        CLAUDEUI_PI_HAND_BACK: '1',
+        CLAUDEUI_PI_BRIDGE_URL: undefined,
+        CLAUDEUI_PI_BRIDGE_TOKEN: 'tok'
+      },
+      () => {
+        expect(() => runExtension()).toThrow(/approval bridge is not configured/)
+      }
+    )
+    // The flags of the other tools never register it: an interactive session has none of them.
+    withEnv(
+      {
+        ...BRIDGE_CREDS,
+        CLAUDEUI_PI_HOSTED_TOOLS: '1',
+        CLAUDEUI_PI_DISPATCH_ENABLED: '1',
+        CLAUDEUI_PI_AGENT_TOOL: '1',
+        CLAUDEUI_PI_SEND_MESSAGE: '1',
+        CLAUDEUI_PI_SESSION_TOOLS: '[]'
+      },
+      () => {
+        expect(runExtension().tools.has('hand_back')).toBe(false)
+      }
+    )
+  })
+
+  it("carries ClaudeUI's one description and a required string report", () => {
+    withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_HAND_BACK: '1' }, () => {
+      const tool = runExtension().tools.get('hand_back')!
+      expect(tool.description).toBe(HAND_BACK_DESCRIPTION)
+      expect(tool.parameters).toEqual({
+        type: 'object',
+        properties: { report: { type: 'string', description: HAND_BACK_REPORT_PARAM } },
+        required: ['report']
+      })
     })
   })
 })

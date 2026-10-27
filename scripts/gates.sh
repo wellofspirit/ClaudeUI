@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
-# The commit gates, with exit codes that cannot be masked by pipes.
+# The commit gate, with exit codes that cannot be masked by pipes: typecheck, lint and the whole
+# default test suite (CI runs the same set). About 40 s on a fast machine.
 #
-# Exists because `bun run test 2>&1 | grep "Test Files"` returns grep's exit
-# code, not the suite's — a trap that has swallowed real failures more than
-# once. Run this instead of ad-hoc pipelines before every commit.
+#   scripts/gates.sh            (`--full` is accepted and means the same, for older callers)
 #
-# Note on the vitest fork-pool teardown crash (Windows): vitest 4.1.10 made it
-# rare but has NOT provably eliminated it. Its signature is "N-1 or N-2 files
-# passed, zero test failures, clean on re-run". This script retries the suite
-# once to absorb it; two consecutive failures are real.
+# Works in a git worktree without its own node_modules (it resolves the main checkout's).
+#
+# Never pipe this into a filter before acting on its result: `gates.sh | tail && git commit`
+# takes tail's exit code.
+#
+# A failed test run is never retried. A "non-zero exit, zero failed tests" retry would also match an
+# unhandled error, which is how a cross-file leak shows up under vmForks (ADR-113), and hide it once.
 set -uo pipefail
+
+cd "$(dirname "$0")/.."
+
+case "${1:-}" in
+  ''|--full) ;;
+  *) echo "usage: scripts/gates.sh" >&2; exit 2 ;;
+esac
+
+start=$(date +%s)
 
 echo "== typecheck"
 bun run typecheck || exit 1
+
 echo "== lint"
 bunx eslint --cache . || exit 1
+
 echo "== test"
-if ! bun run test; then
-  echo "== test failed once — retrying (teardown-crash signature check)"
-  bun run test || exit 1
-fi
-echo "== ALL GATES GREEN"
+bunx vitest run --project unit --project unit-node --project unit-forks --project component \
+  --project e2e --project browser || exit 1
+
+echo "== ALL GATES GREEN ($(( $(date +%s) - start ))s)"

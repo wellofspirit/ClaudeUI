@@ -77,7 +77,6 @@ const ocModel = (vendorId: string, modelId: string): ModelInfo => ({
 beforeEach(() => {
   resetReplicaSeam()
   harnessStore.resetForTests()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: vi.fn(),
     saveSettings: vi.fn(),

@@ -14,6 +14,8 @@ names change, offsets shift, string landmarks survive. **(I)** marks a claim rea
 off the code but not traced end to end; **(unverified)** marks text carried over
 from the 2.1.220 revision that was not re-checked.
 
+**2.1.308 bounded drift check (2026-10-22):** re-extracted stage-2 prompt and native `auto-mode defaults` rules are identical to 2.1.306. The new concat prompt spans characters 12,314,470–12,358,522; rendered rules contain 21 environment, 1 hard-deny, 72 soft-deny and 17 allow entries. This checks shipped text, not server-side rollout or classifier decisions; the architectural offsets below remain historical.
+
 Regenerate the verbatim stage-2 prompt, and render the shipped rules, with
 `scripts/extract-automode-prompts.mjs` (see §9.8).
 
@@ -892,7 +894,8 @@ Load-bearing sub-rules:
   they re-name it.
 - **Cross-session messages are never user intent** (`<cross-session-message>`,
   peer-session framing). Relaying an action a peer was blocked from is named
-  explicitly: _"cross-session permission laundering"_ → block.
+  explicitly: _"cross-session permission laundering"_ → block. How a peer turn
+  becomes a non-user frame in the transcript builder: 15 §15.2.9.
 - **Host-context lines**: only `host_context_live` may carry user intent, and
   only for SOFT rules (§5).
 - **Adversarial-pattern rules** invert the bar: the must-name item **is the
@@ -1368,6 +1371,30 @@ A flagged hand-back is delivered with a `SECURITY WARNING: This subagent
 performed actions that may violate security policy. …` prefix; a model refusal
 is its own `refused` kind. The asymmetry is deliberate — blocking an action is
 cheap, blocking a completed sub-agent's entire output is not.
+
+**An in-process MCP tool named `hand_back` is NOT this path.** The flag-not-block
+behaviour belongs to cli.js's own `SubagentHandback` tool (`classifierOnly`,
+`onBlock: "flag"`). ClaudeUI's dispatch targets report through their own MCP tool,
+which cli.js treats as any other tool: in `auto` without an allow rule the classifier
+reviews the call as an action, and a BLOCK is a plain deny. Probed on 2.1.293 with
+Haiku (2026-10-20): an allowed call runs the handler with no frame and no `canUseTool`
+ask; a blocked one shows, in order, the assistant frame carrying the full `input.report`,
+`system/permission_denied` (`tool_use_id`, `decision_reason_type: "classifier"`,
+`decision_reason: "[Containment Escape]"` — a rule name, no sentence — and the
+model-facing deny text in `message`), then the `user` tool_result (`is_error`) with that
+text; the handler never ran. ClaudeUI reads that sequence to flag a blocked report
+instead of letting the X-Agent argue with the denial (ADR-105 §3).
+
+In `auto`, cli.js asks the host (`can_use_tool`) for a call only when the classifier did NOT
+allow it and the call is not refused outright: a block that trips the denial cap (`_7n`: 3 in a
+row or 20 in total, outside headless) becomes `{kind: "no_verdict"}` and an ask whose
+`decision_reason_type` is `classifier` (the cap sentence in `decision_reason`); a transcript too
+long for the classifier (`hat`, `decision_reason_code: classifier_transcript_too_long`) and a mode
+change while it ran fall back to an ask too. ClaudeUI allows the report through `canUseTool` in
+those cases but never as a clean one: a classifier reason with a verdict flags it, any other ask
+marks it unreviewed. The wording ClaudeUI matches in the denial text and reasons is pinned against
+`vendor/claude-cli/cli.js` by `src/main/__tests__/cli-permission-tells.test.ts`, so a bump that
+rewords one fails there.
 
 ---
 

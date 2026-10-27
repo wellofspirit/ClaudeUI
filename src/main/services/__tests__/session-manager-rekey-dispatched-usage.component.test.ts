@@ -23,13 +23,22 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { mockRenameUsageEventParent, mockCreateSession } = vi.hoisted(() => ({
+const {
+  mockRenameUsageEventParent,
+  mockMoveSessionMeta,
+  mockMoveDispatchTargetParent,
+  mockCreateSession
+} = vi.hoisted(() => ({
   mockRenameUsageEventParent: vi.fn(),
+  mockMoveSessionMeta: vi.fn(),
+  mockMoveDispatchTargetParent: vi.fn(),
   mockCreateSession: vi.fn()
 }))
 
 vi.mock('../../../core/services/db', () => ({
-  renameUsageEventParent: mockRenameUsageEventParent
+  renameUsageEventParent: mockRenameUsageEventParent,
+  moveSessionMeta: mockMoveSessionMeta,
+  moveDispatchTargetParent: mockMoveDispatchTargetParent
 }))
 
 vi.mock('../../../core/services/logger', () => ({
@@ -71,6 +80,8 @@ function makeFakeSession(routingId: string): {
 describe('SessionManager.rekey — the usage-row id chain', () => {
   beforeEach(() => {
     mockRenameUsageEventParent.mockReset()
+    mockMoveSessionMeta.mockReset()
+    mockMoveDispatchTargetParent.mockReset()
     mockCreateSession.mockReset()
   })
 
@@ -84,14 +95,36 @@ describe('SessionManager.rekey — the usage-row id chain', () => {
     mgr.rekey('tmp-routing', 'sdk-session-uuid')
 
     expect(mockRenameUsageEventParent).toHaveBeenCalledWith('tmp-routing', 'sdk-session-uuid')
+    expect(mockMoveSessionMeta).toHaveBeenCalledWith('tmp-routing', 'sdk-session-uuid')
     expect(mgr.has('tmp-routing')).toBe(false)
     expect(mgr.has('sdk-session-uuid')).toBe(true)
+  })
+
+  // ADR-105: an X-Agent is owned by its parent's DURABLE id, so the ledger rows follow
+  // the rekey — otherwise the parent's next continuation of one is "Unknown dispatch session".
+  it('moves the X-Agent ledger rows to the new id, and survives the move failing', () => {
+    mockCreateSession.mockImplementation((_engineId: string, routingId: string) =>
+      makeFakeSession(routingId)
+    )
+    const mgr = new SessionManager()
+    mgr.create('tmp-routing-4', {} as never, '/tmp/proj')
+    mgr.rekey('tmp-routing-4', 'sdk-session-uuid-4')
+    expect(mockMoveDispatchTargetParent).toHaveBeenCalledWith('tmp-routing-4', 'sdk-session-uuid-4')
+
+    mockMoveDispatchTargetParent.mockImplementation(() => {
+      throw new Error('SQLITE_BUSY: database is locked')
+    })
+    mgr.create('tmp-routing-5', {} as never, '/tmp/proj')
+    expect(() => mgr.rekey('tmp-routing-5', 'sdk-session-uuid-5')).not.toThrow()
+    expect(mgr.has('sdk-session-uuid-5')).toBe(true)
   })
 
   it('does not rename anything for an unknown oldId (nothing to rekey)', () => {
     const mgr = new SessionManager()
     mgr.rekey('nonexistent', 'new-id')
     expect(mockRenameUsageEventParent).not.toHaveBeenCalled()
+    expect(mockMoveDispatchTargetParent).not.toHaveBeenCalled()
+    expect(mockMoveSessionMeta).not.toHaveBeenCalled()
   })
 
   // M-CL3: create-over-existing must dispose() (permanently retire + fence) the

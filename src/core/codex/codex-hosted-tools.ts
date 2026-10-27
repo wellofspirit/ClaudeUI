@@ -29,13 +29,20 @@
  * dispatch-model-hint.ts): config edits land on the NEXT thread creation.
  */
 import type { DynamicToolSpec } from './protocol/v2/DynamicToolSpec'
+import type { JsonValue } from './protocol/serde_json/JsonValue'
 import type { ToolResultContent } from '../sdk/types'
 import {
+  DISPATCH_BACKGROUND_PARAM,
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM,
+  DISPATCH_WORKDIR_PARAM,
   dispatchAgentDescription,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
   type DispatchTargetEngine
 } from '../../shared/dispatch-agent-description'
+import { SESSION_TOOL_NAMES } from '../../shared/session-tools-description'
+import { sessionToolJsonSpecs } from '../services/session-tool-specs'
 import { createMermaidServer } from '../services/mermaid-tool'
 import { createMockupServer } from '../services/mockup-tool'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
@@ -45,13 +52,15 @@ import { loadEngineConfig } from '../services/ui-config'
  * Every tool name this module's callers will execute. `CodexSession` refuses an
  * `item/tool/call` for anything outside this set BEFORE dispatching, so the set
  * is the security boundary, not just a lookup table. `dispatch_agent` is IN it
- * (the session executes it itself) even though `runCodexHostedTool` refuses it.
+ * (the session executes it itself) even though `runCodexHostedTool` refuses it, and
+ * so are the nine session tools (slice 2: the session gates and runs them).
  */
 export const CODEX_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'render_mermaid',
   'create_mockup',
   'show_mockup',
-  'dispatch_agent'
+  'dispatch_agent',
+  ...SESSION_TOOL_NAMES
 ])
 
 /**
@@ -76,9 +85,16 @@ const DISPATCH_TARGETS: readonly DispatchTargetEngine[] = ['claude', 'opencode',
  * `includeDispatch` is the session's RESOLVED `crossEngineDispatch` capability
  * (ADR-030 honesty, mirroring the `CLAUDEUI_PI_DISPATCH_ENABLED` env gate pi
  * puts on the same tool): a session that has nowhere to dispatch to must not
- * advertise the tool at all.
+ * advertise the tool at all. `includeSessionTools` is the host having wired the
+ * session tools (slice 2): bare names, ClaudeUI's one shared descriptions and
+ * schemas (`additionalProperties: false`). A thread keeps the specs it was started
+ * with (they are written into the rollout), so a thread started before this
+ * existed does not get them on resume.
  */
-export function codexDynamicToolSpecs(includeDispatch: boolean): DynamicToolSpec[] {
+export function codexDynamicToolSpecs(
+  includeDispatch: boolean,
+  includeSessionTools = false
+): DynamicToolSpec[] {
   return [
     {
       type: 'function',
@@ -131,7 +147,16 @@ export function codexDynamicToolSpecs(includeDispatch: boolean): DynamicToolSpec
         additionalProperties: false
       }
     },
-    ...(includeDispatch ? [dispatchAgentSpec()] : [])
+    ...(includeDispatch ? [dispatchAgentSpec()] : []),
+    ...(includeSessionTools
+      ? sessionToolJsonSpecs({}).map((spec): DynamicToolSpec => ({
+          type: 'function',
+          name: spec.name,
+          description: spec.description,
+          // JSON Schema built from plain data, so it is a JsonValue by construction.
+          inputSchema: spec.parameters as JsonValue
+        }))
+      : [])
   ]
 }
 
@@ -183,12 +208,12 @@ function dispatchAgentSpec(): DynamicToolSpec {
               .map((hint) => `For ${hint.targetEngine}: ${hint.short}`)
               .join(' ')}`
         },
-        session_id: {
-          type: 'string',
-          description: 'session_id from a previous dispatch_agent result — continues that agent'
-        }
+        name: { type: 'string', description: DISPATCH_NAME_PARAM },
+        description: { type: 'string', description: DISPATCH_DESCRIPTION_PARAM },
+        workdir: { type: 'string', description: DISPATCH_WORKDIR_PARAM },
+        run_in_background: { type: 'boolean', description: DISPATCH_BACKGROUND_PARAM }
       },
-      required: ['engine', 'prompt'],
+      required: ['engine', 'prompt', 'description'],
       additionalProperties: false
     }
   }

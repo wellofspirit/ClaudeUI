@@ -98,14 +98,12 @@ beforeEach(() => {
   resetReplicaSeam()
   loadSessionHistory.mockReset()
   logRelay.mockReset()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: {
-      loadSessionHistory,
-      loadSubagentHistory: vi.fn(async () => []),
-      saveSessionConfig: vi.fn(),
-      logRelay
-    }
-  } as never
+  ;(window as unknown as { api: unknown }).api = {
+    loadSessionHistory,
+    loadSubagentHistory: vi.fn(async () => []),
+    saveSessionConfig: vi.fn(),
+    logRelay
+  }
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},
@@ -144,7 +142,9 @@ describe('hydrating a snapshot that dropped an exited session', () => {
     const loaded = await loadSessionIntoStore(GONE_INFO, { isCurrent: () => true })
 
     expect(loaded).toBe('loaded')
-    expect(loadSessionHistory).toHaveBeenCalledWith('gone', '-p')
+    expect(loadSessionHistory).toHaveBeenCalledWith('gone', '-p', undefined, expect.any(Function), {
+      deferStatusLine: true
+    })
     expect(store().sessions['gone'].messages.map((m) => m.id)).toEqual(['g1', 'g2'])
     expect(store().sessions['gone'].evicted).toBe(false)
   })

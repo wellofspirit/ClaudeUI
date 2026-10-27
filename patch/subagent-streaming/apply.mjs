@@ -217,10 +217,11 @@ if (src.includes(patchFMarker)) {
   // `async function*` decl in the window confirms the injected `yield` is legal.
   // v2.1.219 grew the generator body: the decl now sits ~10.9k chars before the
   // RVY gate (was <10k), so widen the window to 20000 to keep the sanity check.
-  // v2.1.261: ~14.5k (`async function*dw(`). The window is clamped to the
-  // anchor's chunk so it can never pick up a generator from a neighbouring
-  // module in the concatenated bundle.
-  const before = prefixWindow(idx, 20000)
+  // v2.1.261: ~14.5k (`async function*dw(`). v2.1.306: ~21.9k
+  // (`async function*dA(`). The window is clamped to the anchor's chunk so it
+  // can never pick up a generator from a neighbouring module in the
+  // concatenated bundle.
+  const before = prefixWindow(idx, 40000)
   if (!/async function\*[\w$]+\(/.test(before)) {
     console.error('ERROR: RVY call site is not inside an async generator. Aborting.')
     process.exit(1)

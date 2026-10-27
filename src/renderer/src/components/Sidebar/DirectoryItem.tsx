@@ -1,7 +1,14 @@
-import { useEffect, useRef, useCallback, memo } from 'react'
+import { useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import type { DirectoryGroup, SessionInfo } from '../../../../shared/types'
 import { SessionItem } from './SessionItem'
 import { useContextMenu } from '../../hooks/useContextMenu'
+import { useSessionStore } from '../../stores/session-store'
+import { groupHeadIdOf, groupSessions } from '../../lib/session-links'
+import {
+  expandParents,
+  toggleParentCollapsed,
+  useCollapsedParents
+} from '../../lib/collapsed-parents'
 
 export const DirectoryItem = memo(function DirectoryItem({
   group,
@@ -62,6 +69,35 @@ export const DirectoryItem = memo(function DirectoryItem({
 }): React.JSX.Element {
   const menu = useContextMenu()
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Groups (slices 1b and 5): sessions grouped with the one they were started or
+  // handed off from sit one level under that group's head, in start order.
+  const sessionLinks = useSessionStore((s) => s.sessionLinks)
+  const sessionRefs = useSessionStore((s) => s.sessionRefs)
+  const collapsedParents = useCollapsedParents()
+  // Opening a session (a card's Open, the continued-in bar, a click elsewhere)
+  // unfolds its group, so the active row is never hidden in a fold. Keyed on the
+  // head, not the links, so folding it again afterwards sticks.
+  const activeHere = group.sessions.some((s) => s.sessionId === activeSessionId)
+  const activeHead = useMemo(
+    () =>
+      activeHere && activeSessionId
+        ? groupHeadIdOf({ sessionLinks, sessionRefs }, activeSessionId)
+        : null,
+    [activeHere, activeSessionId, sessionLinks, sessionRefs]
+  )
+  useEffect(() => {
+    if (activeHead) expandParents([activeHead])
+  }, [activeHead])
+  const rows = useMemo(
+    () =>
+      groupSessions(
+        group.sessions.filter((info) => showHidden || !hiddenSessionIds?.has(info.sessionId)),
+        { sessionLinks, sessionRefs },
+        collapsedParents
+      ),
+    [group.sessions, showHidden, hiddenSessionIds, sessionLinks, sessionRefs, collapsedParents]
+  )
 
   const handleClick = useCallback(() => {
     // Delay single-click to distinguish from double-click
@@ -125,41 +161,73 @@ export const DirectoryItem = memo(function DirectoryItem({
           {group.folderName}
         </span>
         <span className="text-[10px] text-text-muted">{group.sessions.length}</span>
+        {/* The right-click menu for touch screens, where iOS never fires a context-menu.
+            Not rendered on pointer devices: right-click covers them and the button would
+            take row width from every project. */}
+        <button
+          type="button"
+          data-testid="DirectoryItem.menu"
+          aria-label="Project menu"
+          aria-haspopup="menu"
+          aria-expanded={menu.isOpen}
+          // The menu's outside-click handler would close it on this mousedown, and the click
+          // would then reopen it: stop the mousedown so the click toggles.
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation()
+            if (menu.isOpen) {
+              menu.close()
+              return
+            }
+            const rect = e.currentTarget.getBoundingClientRect()
+            menu.openAt(rect.left, rect.bottom)
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
+          className="shrink-0 w-8 h-8 -mr-1 hidden [@media(hover:none)]:flex items-center justify-center rounded text-text-muted cursor-default"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.8" />
+            <circle cx="12" cy="12" r="1.8" />
+            <circle cx="19" cy="12" r="1.8" />
+          </svg>
+        </button>
       </div>
       {expanded && (
         <div className="ml-3">
-          {group.sessions
-            .filter((info) => showHidden || !hiddenSessionIds?.has(info.sessionId))
-            .map((info) => {
-              const sessionHidden = !!hiddenSessionIds?.has(info.sessionId)
-              return (
-                <SessionItem
-                  key={info.sessionId}
-                  info={info}
-                  active={info.sessionId === activeSessionId}
-                  onClick={() => onSessionClick(info)}
-                  onDoubleClick={() => onSessionDoubleClick(info)}
-                  onToggleWatch={() => onToggleWatch(info)}
-                  isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
-                  onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
-                  onFinishRename={(title) => onFinishRename(info.sessionId, title)}
-                  onAutoRename={() => onAutoRename(info.sessionId)}
-                  onCancelRename={onCancelRename}
-                  hidden={sessionHidden}
-                  onHide={
-                    !sessionHidden && onHideSession && info.projectKey
-                      ? () => onHideSession(info)
-                      : undefined
-                  }
-                  onUnhide={
-                    sessionHidden && onUnhideSession ? () => onUnhideSession(info) : undefined
-                  }
-                  onDelete={
-                    onDeleteSession && info.projectKey ? () => onDeleteSession(info) : undefined
-                  }
-                />
-              )
-            })}
+          {rows.map(({ info, depth, memberCount, collapsed }) => {
+            const sessionHidden = !!hiddenSessionIds?.has(info.sessionId)
+            return (
+              <SessionItem
+                key={info.sessionId}
+                info={info}
+                depth={depth}
+                memberCount={memberCount}
+                membersCollapsed={collapsed}
+                onToggleMembers={() => toggleParentCollapsed(info.sessionId)}
+                active={info.sessionId === activeSessionId}
+                onClick={() => onSessionClick(info)}
+                onDoubleClick={() => onSessionDoubleClick(info)}
+                onToggleWatch={() => onToggleWatch(info)}
+                isRenaming={renamingKey === `${renamePrefix}:${info.sessionId}`}
+                onStartRename={() => onStartRename(`${renamePrefix}:${info.sessionId}`)}
+                onFinishRename={(title) => onFinishRename(info.sessionId, title)}
+                onAutoRename={() => onAutoRename(info.sessionId)}
+                onCancelRename={onCancelRename}
+                hidden={sessionHidden}
+                onHide={
+                  !sessionHidden && onHideSession && info.projectKey
+                    ? () => onHideSession(info)
+                    : undefined
+                }
+                onUnhide={
+                  sessionHidden && onUnhideSession ? () => onUnhideSession(info) : undefined
+                }
+                onDelete={
+                  onDeleteSession && info.projectKey ? () => onDeleteSession(info) : undefined
+                }
+              />
+            )
+          })}
         </div>
       )}
 
@@ -167,11 +235,13 @@ export const DirectoryItem = memo(function DirectoryItem({
       {menu.isOpen && (
         <div
           ref={menu.ref}
+          role="menu"
           className="fixed z-50 min-w-[160px] py-1 rounded-lg bg-bg-tertiary border border-border shadow-lg"
           style={menu.style}
         >
           {onViewWorktrees && (
             <button
+              role="menuitem"
               onClick={() => {
                 menu.close()
                 onViewWorktrees()
@@ -199,6 +269,7 @@ export const DirectoryItem = memo(function DirectoryItem({
             </button>
           )}
           <button
+            role="menuitem"
             onClick={() => {
               menu.close()
               onDoubleClick()
@@ -220,9 +291,12 @@ export const DirectoryItem = memo(function DirectoryItem({
             </svg>
             New session here
           </button>
-          {(onHide || onUnhide || onDelete) && <div className="h-px bg-border my-1" />}
+          {(onHide || onUnhide || onDelete) && (
+            <div role="separator" className="h-px bg-border my-1" />
+          )}
           {onHide && !hidden && (
             <button
+              role="menuitem"
               onClick={() => {
                 menu.close()
                 onHide()
@@ -234,6 +308,7 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           {onUnhide && hidden && (
             <button
+              role="menuitem"
               onClick={() => {
                 menu.close()
                 onUnhide()
@@ -245,6 +320,7 @@ export const DirectoryItem = memo(function DirectoryItem({
           )}
           {onDelete && (
             <button
+              role="menuitem"
               data-testid="DirectoryItem.delete"
               onClick={() => {
                 menu.close()

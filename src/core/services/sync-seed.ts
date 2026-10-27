@@ -34,6 +34,9 @@
 
 import { loadSettings, loadSessionConfig, loadSlashCommands } from './ui-config'
 import { pruneOrphanClaudeSessionMeta } from './session-meta-prune'
+import { seedLinkState } from './session-links'
+import { interruptStaleDispatchTargets } from './dispatch-target-ledger'
+import { sweepOrphanDispatchTargets } from './dispatch-target-end'
 import { loadClaudePermissions } from './claude-settings'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
@@ -42,7 +45,8 @@ import { mergeOpencodeIntoDirectories, mergePiIntoDirectories } from '../../shar
 import { emitEvent } from './sync-host'
 import { syncCore } from './sync-host'
 import { logger } from './logger'
-import type { DirectoryGroup } from '../../shared/types'
+import { linkedWorktreeOf } from './worktree-root'
+import type { DirectoryGroup, LinkedWorktree } from '../../shared/types'
 
 const LOG_SOURCE = 'sync-seed'
 
@@ -85,7 +89,26 @@ export async function listAllDirectories(): Promise<DirectoryGroup[]> {
   } catch {
     logger.debug(LOG_SOURCE, 'Native Codex session list unavailable')
   }
-  return merged
+  return markLinkedWorktrees(merged)
+}
+
+/**
+ * Mark every group whose cwd IS a linked git worktree (any engine, any layout: the managed
+ * `.claude/worktrees`, opencode's data dir, `~/.codex/worktrees`). Filesystem facts only, no git
+ * spawn, positive hits cached by `linkedWorktreeOf`. The marker rides the replicated listing, so
+ * every client draws the same worktree rows without a second map; a removal's directories refresh
+ * (after `forgetLinkedWorktrees`) clears it.
+ */
+function markLinkedWorktrees(groups: DirectoryGroup[]): DirectoryGroup[] {
+  return groups.map((g) => {
+    let linked: LinkedWorktree | null = null
+    try {
+      linked = g.cwd ? linkedWorktreeOf(g.cwd) : null
+    } catch (err) {
+      logger.debug(LOG_SOURCE, `worktree check failed for ${g.cwd}: ${String(err)}`)
+    }
+    return linked ? { ...g, linkedWorktree: linked } : g
+  })
 }
 
 /**
@@ -223,7 +246,9 @@ function membershipKey(groups: DirectoryGroup[]): string {
   return groups
     .map(
       (g) =>
-        `${g.projectKey}:${g.sessions
+        // The worktree marker is in the key: a worktree appearing or being removed must beat
+        // the throttle, or the tint would lag a session-less change by up to the 30 s poll.
+        `${g.projectKey}${g.linkedWorktree ? `@${g.linkedWorktree.worktreePath}` : ''}:${g.sessions
           .map((x) => `${x.sessionId}\u0000${x.title}`)
           .sort()
           .join(',')}`
@@ -289,6 +314,20 @@ export async function seedCanonicalAppState(): Promise<void> {
   } catch (err) {
     logger.warn(LOG_SOURCE, 'session-config seed failed', err)
   }
+
+  try {
+    // Parent/child links (session tools, slice 1b) live in SQLite, not the registry file.
+    seedLinkState()
+  } catch (err) {
+    logger.warn(LOG_SOURCE, 'session-link seed failed', err)
+  }
+
+  // ADR-105: an X-Agent still `running` after a restart belonged to a process that is
+  // gone. `interruptStaleDispatchTargets` never throws.
+  interruptStaleDispatchTargets()
+  // ...and one whose parent session no longer exists ends with it (ADR-105 §5). Only a
+  // parent that can be PROVEN gone counts; `sweepOrphanDispatchTargets` never throws.
+  sweepOrphanDispatchTargets()
 
   try {
     // ADR-050: the flag a remote client cannot derive, because it cannot read

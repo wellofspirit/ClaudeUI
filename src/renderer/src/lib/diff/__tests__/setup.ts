@@ -1,4 +1,7 @@
-import '@testing-library/jest-dom/vitest'
+import { expect } from 'vitest'
+import * as matchers from '@testing-library/jest-dom/matchers'
+
+expect.extend(matchers)
 
 // Node 25+ ships a native `localStorage` getter that shadows jsdom's mock
 // when `--localstorage-file` isn't configured. Override it with a simple

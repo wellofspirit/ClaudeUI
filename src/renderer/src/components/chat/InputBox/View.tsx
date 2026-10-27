@@ -160,6 +160,8 @@ export interface InputBoxViewProps {
   /** Subscribe to the live microphone level (0..1) for the recording mic's ring. */
   subscribeVoiceLevel?: (listener: (level: number) => void) => () => void
   statusLine: StatusLineData | null
+  /** The status line is still being read in the background: show a placeholder, not zeros. */
+  statusLinePending?: boolean
 
   // Callbacks
   onSend: () => void
@@ -193,15 +195,29 @@ export interface InputBoxViewProps {
 
 function StatusLine({
   data,
+  pending = false,
   showCost = true,
   showContextMeter = true
 }: {
   data: StatusLineData
+  /** No status line yet and one is on its way (ADR-102 Arc 2): a muted placeholder. */
+  pending?: boolean
   showCost?: boolean
   showContextMeter?: boolean
 }): React.JSX.Element {
   const align = useSessionStore((s) => s.settings.statusLineAlign)
   const rawTemplate = useSessionStore((s) => s.settings.statusLineTemplate)
+
+  if (pending) {
+    return (
+      <div
+        data-testid="InputBox.statusLine.pending"
+        className={`text-[10px] text-text-muted/70 ${ALIGN_CLASS[align]} pt-1.5 select-none truncate`}
+      >
+        Loading usage…
+      </div>
+    )
+  }
 
   // Strip the cost placeholder when the engine doesn't report cost. An
   // unavailable context meter renders as the SAME em-dash `interpolateTemplate`
@@ -1085,6 +1101,7 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
         </div>
         <StatusLine
           data={statusLine ?? DEFAULT_STATUS_LINE}
+          pending={props.statusLinePending ?? false}
           showCost={props.showCostInStatusLine ?? true}
           showContextMeter={props.showContextMeter ?? true}
         />

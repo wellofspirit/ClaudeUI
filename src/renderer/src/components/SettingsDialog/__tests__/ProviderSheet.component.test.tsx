@@ -22,7 +22,7 @@ import { harnessSnapshot } from '@test/helpers/harness-snapshot'
 import { harnessStore } from '../harness-store'
 import { chooseSelectMenuOption } from '@test/helpers/select-menu'
 import { ProviderList } from '../ProviderList'
-import { ownKeysReplacedOnSwitchOn } from '../ProviderSheet'
+import { ProviderSheet, ownKeysReplacedOnSwitchOn } from '../ProviderSheet'
 import { SubscriptionsSection } from '../SubscriptionsSection'
 import { useSessionStore } from '../../../stores/session-store'
 import type {
@@ -819,6 +819,228 @@ describe('Remove provider', () => {
   })
 })
 
+// ── Removal of opencode's own credentials ────────────────────────────
+
+/**
+ * opencode 2.x keeps its credentials in one table that opencode outside ClaudeUI
+ * reads too (ADR-097 §5/§6). A Remove therefore deletes EVERY row the table holds
+ * for the provider, and the sheet says so before the press — and, when Remove is
+ * unavailable, says WHY inline: a tooltip is invisible on touch and in the browser.
+ */
+describe('Remove provider — what it takes with it, and why it is unavailable', () => {
+  const CREDENTIAL_NOTE =
+    'Removing deletes every credential opencode holds for this provider. opencode outside ClaudeUI uses the same store, so it loses them too.'
+  const BOTH_NOTE =
+    'Removing deletes every credential opencode holds for this provider and its declaration in opencode’s config. opencode outside ClaudeUI uses the same store, so it loses them too.'
+  const BUILT_IN = 'Built-in providers cannot be removed — disconnect it instead.'
+
+  /** Replace the OpenRouter native row for one case. */
+  function withNative(patch: Partial<ProviderEntry>): void {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'opencode:openrouter' ? { ...e, ...patch } : e
+      )
+    }
+  }
+
+  const without = (key: 'opencodeRemoveKind' | 'opencodeBlockedReason'): ProviderEntry => {
+    const copy: ProviderEntry = { ...openrouter }
+    delete copy[key]
+    return copy
+  }
+
+  it('says what a credential Remove deletes BEFORE the press, and nothing is sent by reading it', async () => {
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent(CREDENTIAL_NOTE)
+    expect(screen.getByTestId('ProviderSheet.remove')).toBeEnabled()
+    expect(screen.queryByTestId('ProviderSheet.removeBlocked')).not.toBeInTheDocument()
+    expect(sent('session:remove-opencode-provider')).toEqual([])
+  })
+
+  it('a credential-plus-declaration Remove names the config declaration too', async () => {
+    withNative({ opencodeRemoveKind: 'both' })
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent(BOTH_NOTE)
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    expect(sent('session:remove-opencode-provider')).toEqual([['openrouter', 'both']])
+  })
+
+  it('a settings-only Remove keeps its own note, not the credential sentence', async () => {
+    withNative({ opencodeRemoveKind: 'settings', credential: 'none' })
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.removeNote')).toHaveTextContent('disabled list')
+    expect(screen.getByTestId('ProviderSheet.removeNote')).not.toHaveTextContent('every credential')
+  })
+
+  it('a failed removal shows the error in place of the note', async () => {
+    stub('session:remove-opencode-provider', () => {
+      throw new Error('opencode is not installed — nothing to remove.')
+    })
+    await openSheet('opencode:openrouter')
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    await click(screen.getByTestId('ProviderSheet.remove'))
+    expect(screen.getByTestId('ProviderSheet.error')).toHaveTextContent('nothing to remove')
+    expect(screen.queryByTestId('ProviderSheet.removeNote')).not.toBeInTheDocument()
+    expect(screen.getByTestId('ProviderSheet')).toBeInTheDocument()
+  })
+
+  it('explains an unavailable opencode Remove inline, with the catalog’s own reason', async () => {
+    const reason =
+      'opencode gets this one from the OPENROUTER_API_KEY environment variable, which ClaudeUI cannot unset.'
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'opencode:openrouter'
+          ? { ...without('opencodeRemoveKind'), opencodeBlockedReason: reason }
+          : e
+      )
+    }
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.removeBlocked')).toHaveTextContent(reason)
+    expect(screen.getByTestId('ProviderSheet.remove')).toBeDisabled()
+    // The tooltip stays (hover clients) and says the same as the inline note — the catalog's
+    // reason, not the generic "not ClaudeUI's to remove" — and no "it deletes…" note contradicts it.
+    expect(screen.getByTestId('ProviderSheet.remove')).toHaveAttribute('title', reason)
+    expect(screen.queryByTestId('ProviderSheet.removeNote')).not.toBeInTheDocument()
+  })
+
+  it('shows no inline reason when the catalog gave none', async () => {
+    snapshot = {
+      ...snapshot,
+      entries: snapshot.entries.map((e) =>
+        e.id === 'opencode:openrouter' ? without('opencodeRemoveKind') : e
+      )
+    }
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.remove')).toBeDisabled()
+    expect(screen.queryByTestId('ProviderSheet.removeBlocked')).not.toBeInTheDocument()
+    // Without a catalog reason the tooltip falls back to the generic one.
+    expect(screen.getByTestId('ProviderSheet.remove')).toHaveAttribute(
+      'title',
+      'This provider is not ClaudeUI’s to remove.'
+    )
+  })
+
+  it('a removable row never shows a blocked reason, even if one is carried', async () => {
+    withNative({ opencodeBlockedReason: 'stale reason' })
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.remove')).toBeEnabled()
+    expect(screen.queryByTestId('ProviderSheet.removeBlocked')).not.toBeInTheDocument()
+  })
+
+  it('explains a built-in shared provider inline, the same words as the tooltip', async () => {
+    await openSheet('chatgpt')
+    expect(screen.getByTestId('ProviderSheet.removeBlocked')).toHaveTextContent(BUILT_IN)
+    expect(screen.getByTestId('ProviderSheet.remove')).toBeDisabled()
+    expect(screen.getByTestId('ProviderSheet.remove')).toHaveAttribute(
+      'title',
+      expect.stringContaining('disconnect it instead')
+    )
+  })
+
+  it('a user-declared shared provider shows no blocked note — not even while its definition loads', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    app.bridge.ipcMain.handle('shared-provider:list', async () => {
+      await gate
+      return definitions
+    })
+    render(<ProviderList />)
+    const manage = (await screen.findAllByTestId('ProviderList.manage')).find(
+      (el) => el.dataset.id === 'ollama-local'
+    )!
+    await click(manage)
+    // The definition read is still in flight: Remove is not yet known to be
+    // unavailable, so the footer must not claim it is.
+    expect(screen.getByTestId('ProviderSheet.credential')).toHaveAttribute('data-id', 'loading')
+    expect(screen.queryByTestId('ProviderSheet.removeBlocked')).not.toBeInTheDocument()
+    await act(async () => release())
+    await waitFor(() => expect(screen.getByTestId('ProviderSheet.remove')).toBeEnabled())
+    expect(screen.queryByTestId('ProviderSheet.removeBlocked')).not.toBeInTheDocument()
+  })
+
+  it('other origins keep the tooltip only: pi’s rows are removable, the Anthropic row is not ClaudeUI’s', async () => {
+    await openSheet('pi:groq')
+    expect(screen.getByTestId('ProviderSheet.remove')).toBeEnabled()
+    expect(screen.queryByTestId('ProviderSheet.removeBlocked')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('ProviderSheet.removeNote')).not.toBeInTheDocument()
+    cleanup()
+
+    const anthropic: ProviderEntry = {
+      id: 'anthropic',
+      name: 'Anthropic',
+      origin: 'anthropic',
+      credential: 'signed-in',
+      engines: { claude: { enabled: true } },
+      subscription: true
+    }
+    render(<ProviderSheet entry={anthropic} onClose={() => {}} onWrote={async () => {}} />)
+    const remove = screen.getByTestId('ProviderSheet.remove')
+    expect(remove).toBeDisabled()
+    expect(remove).toHaveAttribute('title', 'This provider is not ClaudeUI’s to remove.')
+    expect(screen.queryByTestId('ProviderSheet.removeBlocked')).not.toBeInTheDocument()
+  })
+})
+
+describe('opencode’s credentials are in its credential store, not an auth.json', () => {
+  it('names the store on the native key row; pi’s own key row still names auth.json', async () => {
+    await openSheet('opencode:openrouter')
+    expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent(
+      "Stored in opencode's own credential store, never in ClaudeUI's config."
+    )
+    expect(screen.getByTestId('ProviderSheet.credential')).not.toHaveTextContent('auth.json')
+    cleanup()
+    await openSheet('pi:groq')
+    expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent(
+      "Stored in pi's own auth.json, never in ClaudeUI's config."
+    )
+  })
+
+  describe('an active external credential row (registry credential: custom)', () => {
+    const EXTERNAL =
+      'opencode connects through an external credential source (such as a CLI login). Remove disconnects it in opencode.'
+    const ENV_OR_FILE =
+      'The key comes from an environment variable or a config file ClaudeUI does not own, so there is nothing here to replace.'
+
+    function external(patch: Partial<ProviderEntry>): void {
+      snapshot = {
+        ...snapshot,
+        entries: snapshot.entries.map((e) =>
+          e.id === 'opencode:openrouter' ? { ...e, credential: 'custom', ...patch } : e
+        )
+      }
+    }
+
+    it('says Remove disconnects it, when Remove deletes a credential row', async () => {
+      external({ opencodeRemoveKind: 'credential' })
+      await openSheet('opencode:openrouter')
+      const row = screen.getByTestId('ProviderSheet.credential')
+      expect(row).toHaveAttribute('data-id', 'external')
+      expect(row).toHaveTextContent(EXTERNAL)
+      expect(row).not.toHaveTextContent('nothing here to replace')
+    })
+
+    it('also when Remove takes the declaration with it', async () => {
+      external({ opencodeRemoveKind: 'both' })
+      await openSheet('opencode:openrouter')
+      expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent(EXTERNAL)
+    })
+
+    it('keeps the environment / config-file text when no credential row backs it', async () => {
+      external({ opencodeRemoveKind: undefined })
+      await openSheet('opencode:openrouter')
+      expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent(ENV_OR_FILE)
+      cleanup()
+      // A settings-only Remove deletes no credential, so the sentence would be false.
+      external({ opencodeRemoveKind: 'settings' })
+      await openSheet('opencode:openrouter')
+      expect(screen.getByTestId('ProviderSheet.credential')).toHaveTextContent(ENV_OR_FILE)
+    })
+  })
+})
+
 // ── The write loop ───────────────────────────────────────────────────
 
 describe('after a write', () => {
@@ -1456,8 +1678,9 @@ describe('API providers — one key, delivered to each engine', () => {
       'pi'
     ])
     expect(engineRow('opencode')).toHaveTextContent(
-      'Key delivered to opencode’s auth.json as openrouter · 4 of 382 models'
+      'Key delivered to opencode’s credential store as openrouter · 4 of 382 models'
     )
+    expect(engineRow('opencode')).not.toHaveTextContent('auth.json')
     expect(engineRow('pi')).toHaveTextContent(
       'Off. Turning it on delivers the stored key; nothing to re-enter.'
     )
@@ -1545,7 +1768,8 @@ describe('API providers — one key, delivered to each engine', () => {
       opencodeInstalled: true
     }
     await openSheet('openrouter')
-    expect(engineRow('opencode')).toHaveTextContent('Not in opencode’s auth.json.')
+    expect(engineRow('opencode')).toHaveTextContent('Not in opencode’s credential store.')
+    expect(engineRow('opencode')).not.toHaveTextContent('auth.json')
     expect(engineRow('opencode')).not.toHaveTextContent('Key delivered')
     await click(within(engineRow('opencode')).getByTestId('ProviderSheet.retry'))
     expect(sent('shared-provider:sync')).toEqual([['openrouter']])
@@ -1608,6 +1832,10 @@ describe('native keys — conflict and adoption (ADR-074 §6)', () => {
         .find((el) => el.dataset.id === id)!
     expect(option('opencode')).toHaveTextContent('Keep opencode’s key (…a41f)')
     expect(option('pi')).toHaveTextContent('Keep pi’s key (…09c2)')
+    // Where each key lives: pi has an auth.json; opencode 2.x has no such file.
+    expect(option('opencode')).toHaveTextContent('In opencode’s credential store')
+    expect(option('opencode')).not.toHaveTextContent('auth.json')
+    expect(option('pi')).toHaveTextContent('In pi’s auth.json')
 
     await click(within(option('pi')).getByRole('radio'))
     await click(screen.getByTestId('ProviderSheet.adoptKeep'))

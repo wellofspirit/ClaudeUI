@@ -36,7 +36,7 @@ stay settled, reporting every gap. Read both first. This skill adds only what is
 
 ## Bump gates
 
-These come before ADR-026's own gates (developer test, verifier, orchestrator test, PR + CI, exit review):
+These come before the orchestrate skill's checks and ADR-026 › Gates:
 
 | #   | Gate                                  | How                                                                                  |
 | --- | ------------------------------------- | ------------------------------------------------------------------------------------ |
@@ -64,12 +64,12 @@ for that engine. Follow the linked procedure; the checklist is what past bumps f
 - Read `references/traps.md`. Every item there cost a past bump hours.
 - Check out the new tag in `vendor/<engine>-src` before reading upstream code. The checkout is
   gitignored and per machine; the manifest pin is the contract.
-- Keep the ADR-026 handoff doc (`docs/<engine>-bump-handoff.md`).
+- Keep the ADR-026 handoff doc (`.work/<engine>-bump/handoff.md` in the main checkout).
 
 ## Briefs
 
-`references/kickoffs.md` says what a bump adds to the brief for each role agent (`orch-reader`,
-`orch-implementer`, `orch-verifier`, `orch-design-reviewer`, `orch-pr-reviewer`).
+`references/kickoffs.md` says what a bump adds to the brief for each role (`Explore`, `orch-implementer`,
+`orch-verifier`, `orch-reviewer`).
 
 ## Reporting to the owner
 

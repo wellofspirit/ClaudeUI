@@ -71,6 +71,7 @@ import {
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 import { AUTONOMY_TO_PERMISSION } from '../../../shared/permission-modes'
 import type { PermissionMode, SessionStatus, WorktreeInfo } from '../../../shared/types'
+import { linkedWorktreeFor, worktreeInfoFromLinked } from '../../../shared/linked-worktree'
 import {
   useSessionStore,
   markViewEvicted,
@@ -571,6 +572,69 @@ export function seedWatchedSession(routingId: string, content: WatchedContent): 
 }
 
 /**
+ * Does the replica HOLD this session's transcript — the condition `seedColdSession`
+ * reads before it fills? An entry that was cold-evicted since a background fetch
+ * began has `seeded: false` and no messages, and a late result must not land on it
+ * (R1): it would resurrect a bucket or a status line on a stripped entry.
+ */
+function holdsOwnTranscript(session: CanonicalSessionState | undefined): boolean {
+  return !!session && session.seeded && session.messages.length > 0
+}
+
+/**
+ * Fill ONE subagent transcript bucket from the background load (ADR-102 Arc 2) —
+ * the only writer of `subagentMessages` besides the reducer and the cold seed.
+ *
+ * Fill-only: a bucket that already holds anything (a live agent streaming into it,
+ * an earlier fetch) is left alone, which is also what keeps a running agent's events
+ * from being overwritten by the older run read from disk. A no-op for an unknown
+ * session, an entry that does not hold its transcript (R1), or an empty read.
+ * Returns whether the bucket was written.
+ */
+export function fillSubagentBucket(
+  routingId: string,
+  toolUseId: string,
+  messages: CanonicalSessionState['messages']
+): boolean {
+  const existing = canonical.sessions[routingId]
+  if (!existing || !holdsOwnTranscript(existing) || messages.length === 0) return false
+  if ((existing.subagentMessages[toolUseId]?.length ?? 0) > 0) return false
+  commit({
+    ...canonical,
+    sessions: {
+      ...canonical.sessions,
+      [routingId]: {
+        ...existing,
+        subagentMessages: { ...existing.subagentMessages, [toolUseId]: messages }
+      }
+    }
+  })
+  return true
+}
+
+/**
+ * Land the status line the content-first load deferred (ADR-102 Arc 2). A REPLACE,
+ * not a fill (R3): a re-opened session still shows the figures it had, and the fresh
+ * ones supersede them. Dropped for a LIVE session — it seeds and accumulates its own
+ * figures, subagent spend included, and a disk reading from before the resume would
+ * rewind them — and for an entry that does not hold its transcript (R1).
+ * Returns whether it was written.
+ */
+export function replaceStatusLine(
+  routingId: string,
+  statusLine: NonNullable<CanonicalSessionState['statusLine']>
+): boolean {
+  const existing = canonical.sessions[routingId]
+  if (!existing || !holdsOwnTranscript(existing)) return false
+  if (existing.sdkActive || existing.status.state === 'running') return false
+  commit({
+    ...canonical,
+    sessions: { ...canonical.sessions, [routingId]: { ...existing, statusLine } }
+  })
+  return true
+}
+
+/**
  * Write a session's replicated fields from a LOCAL origin — a session created
  * before it has spawned (so no `session:created` exists yet and the engine/model
  * pick lives nowhere else), a fork seeded from its parent, a conversation
@@ -744,6 +808,8 @@ function buildPatch(
   if (force || prev.customTitles !== next.customTitles) patch.customTitles = next.customTitles
   if (force || prev.sessionEngines !== next.sessionEngines)
     patch.sessionEngines = next.sessionEngines
+  if (force || prev.sessionLinks !== next.sessionLinks) patch.sessionLinks = next.sessionLinks
+  if (force || prev.sessionRefs !== next.sessionRefs) patch.sessionRefs = next.sessionRefs
   if (force || prev.hiddenSessions !== next.hiddenSessions) {
     patch.hiddenSessionIds = next.hiddenSessions
   }
@@ -774,7 +840,10 @@ function buildPatch(
 
   // --- per session --------------------------------------------------------
   const rekey = options.rekey ?? null
-  const worktreesMoved = force || prev.worktreeInfoMap !== next.worktreeInfoMap
+  // The pill's worktree is the explicit entry, else the linked worktree the session's cwd is in
+  // (a marker on the directory listing), so a listing change re-projects too.
+  const worktreesMoved =
+    force || prev.worktreeInfoMap !== next.worktreeInfoMap || prev.directories !== next.directories
   if (force || prev.sessions !== next.sessions || worktreesMoved || rekey) {
     let changed = false
     const sessions: Record<string, PerSessionState> = { ...state.sessions }
@@ -789,14 +858,21 @@ function buildPatch(
     }
     for (const [id, c] of Object.entries(next.sessions)) {
       const resident = sessions[id]
+      // Computed only when the cheap checks pass, and compared by value: a listing refresh must
+      // not re-project (and so re-render) every resident session whose worktree did not change.
+      const worktree = worktreesMoved ? worktreeOf(next, id, c.cwd) : undefined
       const untouched =
         !force &&
         !(rekey && rekey.newId === id) &&
         resident !== undefined &&
         prev.sessions[id] === c &&
-        prev.worktreeInfoMap[id] === next.worktreeInfoMap[id]
+        (!worktreesMoved || sameWorktree(resident.worktreeInfo, worktree ?? null))
       if (untouched) continue
-      sessions[id] = projectSession(resident, c, next.worktreeInfoMap[id])
+      sessions[id] = projectSession(
+        resident,
+        c,
+        worktreesMoved ? worktree : worktreeOf(next, id, c.cwd)
+      )
       changed = true
     }
     // Entries canonical HAD and no longer has (an explicit drop, or the retiring
@@ -812,6 +888,29 @@ function buildPatch(
   }
 
   return patch
+}
+
+/** The worktree a session shows: its recorded entry (wins), else the linked worktree its cwd is in. */
+function worktreeOf(next: CanonicalState, id: string, cwd: string): WorktreeInfo | undefined {
+  const explicit = next.worktreeInfoMap[id]
+  if (explicit) return explicit
+  const linked = linkedWorktreeFor(next.directories, cwd)
+  return linked ? worktreeInfoFromLinked(linked) : undefined
+}
+
+function sameWorktree(a: WorktreeInfo | null, b: WorktreeInfo | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.worktreePath === b.worktreePath &&
+    a.worktreeBranch === b.worktreeBranch &&
+    a.worktreeName === b.worktreeName &&
+    a.originalCwd === b.originalCwd &&
+    a.gitRoot === b.gitRoot &&
+    a.originalHeadCommit === b.originalHeadCommit &&
+    a.createdAt === b.createdAt &&
+    a.origin === b.origin
+  )
 }
 
 /**
@@ -842,6 +941,8 @@ function projectSession(
     todos: c.todos,
     sentFiles: c.sentFiles,
     queuedItems: c.queue,
+    heldCount: c.heldCount,
+    contextPressure: c.contextPressure,
     taskNotifications: c.taskNotifications,
     activeTasks: c.activeTasks,
     taskProgressMap: c.taskProgressMap,
@@ -857,9 +958,7 @@ function projectSession(
     selectedModel: c.selectedModel,
     authRequired: c.authRequired,
     ...(c.codexModelExplicit !== undefined ? { codexModelExplicit: c.codexModelExplicit } : {}),
-    // The per-session mirror of the app-level map, so `session:status`'s
-    // worktree-exit rule (the reducer drops the entry when cwd returns to
-    // `originalCwd`) clears the card without a second code path.
+    // The per-session mirror of the app-level map (plus the linked-worktree marker of its cwd).
     worktreeInfo: worktreeInfo ?? null
   }
 }

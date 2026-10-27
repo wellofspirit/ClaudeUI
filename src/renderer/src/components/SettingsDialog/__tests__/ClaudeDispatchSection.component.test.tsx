@@ -1,32 +1,22 @@
 /**
  * Layer 2: Component tests for ClaudeDispatchSection (ADR-033 M2-C — Claude-side twin).
  *
- * Mirrors OpencodeDispatchSection.component.test.tsx. Claude itself is always
- * installed, but dispatch INTO Claude can only be called FROM another harness,
- * so (ADR-033 M4-A) the dispatch page offers this target only while one of
- * opencode, pi or Codex runs (ADR-082 §8; SettingsDialogView's page test). The
- * section itself never asks.
+ * Only what is specific to the Claude pane lives here. The behaviour it shares
+ * with the opencode and pi panes (load, merged saves, the two halves sharing one
+ * config, the numeric fields) is `DispatchSection.shared.component.test.tsx`.
  *
- * ADR-065 split the pane into TWO group bodies over one config read — "Dispatch
- * into" (`ClaudeDispatchSection`) and "Limits" (`ClaudeDispatchSection.limits`)
- * — and put the allowed models on a CHIP SET rather than a list of toggle rows.
- * This file renders the composition, so it still drives one thing, and every row
- * id it asserts is the id that row carried before the split.
+ * Claude itself is always installed, but dispatch INTO Claude can only be called
+ * FROM another harness, so (ADR-033 M4-A) the dispatch page offers this target
+ * only while one of opencode, pi or Codex runs (ADR-082 §8; SettingsDialogView's
+ * page test). The section itself never asks.
  *
  * Tested flows:
- *   1. Loading while the config is pending
- *   2. Load renders the current dispatch config (select value + chip states),
- *      filtered to Claude models only (opencode models excluded)
- *   3. Editing the default model saves the FULL merged EngineConfig —
- *      sandbox / proxy / other fields must not be clobbered
- *   4. "(not set)" clears defaultModel (undefined, not '')
- *   5. Toggling an allowed model on/off; last-off drops the allowedModels key
- *   6. maxCost round-trips through the merged save (ADR-033 M4-C) and commits on
- *      BLUR, so a half-typed number never reaches the file
- *   7. A long model list collapses behind "Show all N"
+ *   1. A half-typed maxCost never reaches the file — the field commits on BLUR
+ *   2. A long model list collapses behind "Show all N"
+ *   3. A fresh mount re-reads the file
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import type { EngineConfig, EngineModelGroup } from '../../../../../shared/types'
 
 import { ClaudeDispatchSection } from '../settings-sections'
@@ -81,41 +71,6 @@ async function renderLoaded(): Promise<void> {
 }
 
 /**
- * Drive the themed default-model picker (a `ModelPicker`, not a native
- * `<select>` — 8bc26d7's Monokai fix, extended to this section): open the
- * trigger, then click the option carrying `data-value`.
- */
-function pickDefaultModel(value: string): void {
-  const field = screen.getByTestId('ClaudeDispatchSection.defaultModel')
-  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
-  const option = within(field)
-    .getAllByTestId('ModelPicker.option')
-    .find((o) => o.getAttribute('data-value') === value)
-  expect(option, `ModelPicker option for "${value}"`).toBeTruthy()
-  fireEvent.click(option!)
-}
-
-/** The option values the default-model picker currently offers, in order. */
-function defaultModelOptionValues(): (string | null)[] {
-  const field = screen.getByTestId('ClaudeDispatchSection.defaultModel')
-  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
-  const values = within(field)
-    .getAllByTestId('ModelPicker.option')
-    .map((o) => o.getAttribute('data-value'))
-  fireEvent.click(within(field).getByTestId('ModelPicker.trigger'))
-  return values
-}
-
-/** One allowed-models CHIP. The id is the one the toggle rows carried. */
-function allowedChip(modelValue: string): HTMLElement {
-  const chip = screen
-    .getAllByTestId('ClaudeDispatchSection.allowedModel')
-    .find((el) => el.getAttribute('data-id') === modelValue)
-  expect(chip, `allowedModel chip for ${modelValue}`).toBeTruthy()
-  return chip!
-}
-
-/**
  * `NumberField` commits on blur and on Enter, not on every keystroke, so a
  * half-typed number never reaches the store. Every numeric edit below goes
  * through this rather than a bare `fireEvent.change`.
@@ -138,139 +93,7 @@ afterEach(() => {
 
 // ── Tests ────────────────────────────────────────────────────────────
 
-describe('ClaudeDispatchSection — loading', () => {
-  it('shows Loading while the config is pending', () => {
-    installApiStub({ loadEngineConfig: vi.fn(() => new Promise(() => {})) })
-    render(<ClaudeDispatchSection />)
-    expect(screen.getByTestId('ClaudeDispatchSection').textContent).toContain('Loading')
-    expect(screen.queryByTestId('ClaudeDispatchSection.defaultModel')).toBeNull()
-  })
-})
-
-describe('ClaudeDispatchSection — load', () => {
-  it('renders the saved dispatch config: default model selected, Claude models only', async () => {
-    await renderLoaded()
-
-    const field = screen.getByTestId('ClaudeDispatchSection.defaultModel')
-    expect(field.getAttribute('data-value')).toBe('sonnet')
-    // The trigger reads the display name, not the raw value.
-    expect(field.textContent).toContain('Sonnet')
-    // Themed picker, never a native select (the Monokai fix from 8bc26d7).
-    expect(field.querySelector('select')).toBeNull()
-    expect(within(field).getByTestId('ModelPicker')).toBeTruthy()
-
-    // Only Claude-engine models appear (the opencode group is filtered out),
-    // plus the pinned "(not set)" empty option.
-    expect(defaultModelOptionValues()).toEqual(['', 'sonnet', 'haiku'])
-
-    // One allowed-model CHIP per Claude model, discriminated by data-id.
-    const chips = screen.getAllByTestId('ClaudeDispatchSection.allowedModel')
-    expect(chips.map((r) => r.getAttribute('data-id'))).toEqual(['sonnet', 'haiku'])
-  })
-
-  it('renders the allowlist as a chip set whose pressed chips ARE the saved list', async () => {
-    await renderLoaded()
-
-    // ADR-065: a chip set, not the 13-row toggle list the audit called out.
-    expect(screen.getByTestId('ClaudeDispatchSection.allowedModels')).toBeTruthy()
-    expect(allowedChip('sonnet').getAttribute('aria-pressed')).toBe('true')
-    expect(allowedChip('haiku').getAttribute('aria-pressed')).toBe('false')
-  })
-
-  it('splits into two roots over one config read, with the row ids unmoved', async () => {
-    await renderLoaded()
-
-    // "Dispatch into" keeps the pre-split root; "Limits" is its own.
-    expect(screen.getByTestId('ClaudeDispatchSection')).toBeTruthy()
-    expect(screen.getByTestId('ClaudeDispatchSection.limits')).toBeTruthy()
-    expect(screen.getByTestId('ClaudeDispatchSection.maxCost')).toBeTruthy()
-  })
-})
-
-describe('ClaudeDispatchSection — saves merge, never clobber', () => {
-  it('changing the default model saves the FULL config with sandbox/proxy and allowedModels intact', async () => {
-    await renderLoaded()
-
-    pickDefaultModel('haiku')
-
-    expect(saveEngineConfig).toHaveBeenCalledTimes(1)
-    expect(saveEngineConfig.mock.calls[0][0]).toBe('claude')
-    expect(savedConfigs[0]).toEqual({
-      sandbox: { mode: 'workspace-write' },
-      proxy: { enabled: true },
-      dispatch: { defaultModel: 'haiku', allowedModels: ['sonnet'] }
-    })
-  })
-
-  it('"(not set)" clears defaultModel without touching the rest', async () => {
-    await renderLoaded()
-
-    pickDefaultModel('')
-
-    expect(savedConfigs[0].dispatch?.defaultModel).toBeUndefined()
-    expect(savedConfigs[0].dispatch?.allowedModels).toEqual(['sonnet'])
-    expect(savedConfigs[0].sandbox).toEqual(BASE_CONFIG.sandbox)
-    expect(savedConfigs[0].proxy).toEqual(BASE_CONFIG.proxy)
-  })
-
-  it('toggling a model ON appends it to allowedModels (sandbox/proxy intact)', async () => {
-    await renderLoaded()
-
-    fireEvent.click(allowedChip('haiku'))
-
-    expect(savedConfigs[0]).toEqual({
-      sandbox: { mode: 'workspace-write' },
-      proxy: { enabled: true },
-      dispatch: { defaultModel: 'sonnet', allowedModels: ['sonnet', 'haiku'] }
-    })
-  })
-
-  it('toggling the LAST model OFF drops the allowedModels key (empty = all allowed)', async () => {
-    await renderLoaded()
-
-    fireEvent.click(allowedChip('sonnet'))
-
-    expect(savedConfigs[0].dispatch?.allowedModels).toBeUndefined()
-    expect(savedConfigs[0].dispatch?.defaultModel).toBe('sonnet')
-    expect(savedConfigs[0].sandbox).toEqual(BASE_CONFIG.sandbox)
-    expect(savedConfigs[0].proxy).toEqual(BASE_CONFIG.proxy)
-  })
-
-  it('sequential edits accumulate on local state (second save includes the first edit)', async () => {
-    await renderLoaded()
-
-    fireEvent.click(allowedChip('haiku'))
-    pickDefaultModel('haiku')
-
-    expect(savedConfigs).toHaveLength(2)
-    expect(savedConfigs[1].dispatch).toEqual({
-      defaultModel: 'haiku',
-      allowedModels: ['sonnet', 'haiku']
-    })
-  })
-
-  it('setting maxCost saves it alongside the rest, sandbox/proxy intact (ADR-033 M4-C)', async () => {
-    await renderLoaded()
-
-    commitNumber('ClaudeDispatchSection.maxCost', '2.5')
-
-    expect(savedConfigs[0]).toEqual({
-      sandbox: { mode: 'workspace-write' },
-      proxy: { enabled: true },
-      dispatch: { defaultModel: 'sonnet', allowedModels: ['sonnet'], maxCostUsd: 2.5 }
-    })
-  })
-
-  it('clearing maxCost drops the key (undefined = no cap)', async () => {
-    await renderLoaded()
-
-    commitNumber('ClaudeDispatchSection.maxCost', '2.5')
-    commitNumber('ClaudeDispatchSection.maxCost', '')
-
-    expect(savedConfigs[1].dispatch?.maxCostUsd).toBeUndefined()
-    expect(savedConfigs[1].dispatch?.defaultModel).toBe('sonnet')
-  })
-
+describe('ClaudeDispatchSection — numeric fields', () => {
   it('a half-typed maxCost never reaches the file — the field commits on blur', async () => {
     await renderLoaded()
 
@@ -282,42 +105,6 @@ describe('ClaudeDispatchSection — saves merge, never clobber', () => {
 
     fireEvent.blur(screen.getByTestId('ClaudeDispatchSection.maxCost'))
     expect(savedConfigs[0].dispatch?.maxCostUsd).toBe(2)
-  })
-
-  it('shows the cost cap in USD, with "no cap" as what EMPTY means', async () => {
-    await renderLoaded()
-
-    const input = screen.getByTestId('ClaudeDispatchSection.maxCost') as HTMLInputElement
-    expect(input.placeholder).toBe('no cap')
-    expect(screen.getByTestId('ClaudeDispatchSection.maxCostRow').textContent).toContain('USD')
-  })
-
-  it('offers the turn/inactivity timeouts, with "no limit" as what EMPTY means', async () => {
-    // ADR-033's 2026-09-18 amendment: the two caps govern EVERY dispatch
-    // direction and have no built-in default, so the Claude section draws them
-    // like the opencode one and an empty field is honestly "no limit".
-    await renderLoaded()
-
-    const turn = screen.getByTestId('ClaudeDispatchSection.turnTimeout') as HTMLInputElement
-    const idle = screen.getByTestId('ClaudeDispatchSection.idleTimeout') as HTMLInputElement
-    expect(turn.placeholder).toBe('no limit')
-    expect(idle.placeholder).toBe('no limit')
-    expect(screen.getByTestId('ClaudeDispatchSection.turnTimeoutRow').textContent).toContain('min')
-    expect(screen.getByTestId('ClaudeDispatchSection.idleTimeoutRow').textContent).toContain(
-      'Empty or 0 means no limit.'
-    )
-  })
-
-  it('writes the turn/inactivity caps into engines/claude.json in MILLISECONDS', async () => {
-    await renderLoaded()
-
-    commitNumber('ClaudeDispatchSection.turnTimeout', '90')
-    commitNumber('ClaudeDispatchSection.idleTimeout', '5')
-
-    expect(savedConfigs.at(-1)!.dispatch).toMatchObject({
-      turnTimeoutMs: 5_400_000,
-      idleTimeoutMs: 300_000
-    })
   })
 })
 
@@ -359,66 +146,7 @@ describe('ClaudeDispatchSection — long model lists', () => {
   })
 })
 
-/**
- * The two halves edit ONE engine config file, and `saveEngineConfig` REPLACES
- * it — unlike the Remote panes' `setRemoteConfig`, which takes a partial that
- * main merges. So the halves must share one config object, or the second edit
- * is computed against a pre-first-edit copy and silently reverts it on disk.
- *
- * These are the regression pins for that: both halves are on screen together on
- * the real page, so an edit in one must be visible to the other before it saves.
- */
-describe('ClaudeDispatchSection — the two halves share one config', () => {
-  it('reads the engine config ONCE for the whole composition', async () => {
-    await renderLoaded()
-    expect(window.api.loadEngineConfig).toHaveBeenCalledTimes(1)
-    expect(window.api.loadEngineConfig).toHaveBeenCalledWith('claude')
-  })
-
-  it('a Limits edit after an into edit keeps the new default model', async () => {
-    await renderLoaded()
-
-    pickDefaultModel('haiku')
-    commitNumber('ClaudeDispatchSection.maxCost', '4')
-
-    expect(savedConfigs).toHaveLength(2)
-    // Without a shared config the limits half would still hold the pre-edit
-    // copy and write `defaultModel: 'sonnet'` straight back over the choice.
-    expect(savedConfigs[1].dispatch).toEqual({
-      defaultModel: 'haiku',
-      allowedModels: ['sonnet'],
-      maxCostUsd: 4
-    })
-    expect(savedConfigs[1].sandbox).toEqual(BASE_CONFIG.sandbox)
-  })
-
-  it('an into edit after a Limits edit keeps the cost cap', async () => {
-    await renderLoaded()
-
-    commitNumber('ClaudeDispatchSection.maxCost', '4')
-    pickDefaultModel('haiku')
-
-    expect(savedConfigs).toHaveLength(2)
-    expect(savedConfigs[1].dispatch).toEqual({
-      defaultModel: 'haiku',
-      allowedModels: ['sonnet'],
-      maxCostUsd: 4
-    })
-  })
-
-  it('a chip toggle and a cost cap accumulate in either order', async () => {
-    await renderLoaded()
-
-    fireEvent.click(allowedChip('haiku'))
-    commitNumber('ClaudeDispatchSection.maxCost', '9')
-
-    expect(savedConfigs[1].dispatch).toEqual({
-      defaultModel: 'sonnet',
-      allowedModels: ['sonnet', 'haiku'],
-      maxCostUsd: 9
-    })
-  })
-
+describe('ClaudeDispatchSection — remount', () => {
   it('re-reads the file on a fresh mount (the store is dropped with the pane)', async () => {
     await renderLoaded()
     commitNumber('ClaudeDispatchSection.maxCost', '4')

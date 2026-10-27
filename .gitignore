@@ -29,3 +29,8 @@ bin/
 
 /review.md
 .claude/worktrees/
+# Local working files, never part of this repo or a build: an arc's handoff,
+# specs and reports (.work/<arc>/, deleted when the arc merges) and private
+# working notes (.notes/). See CLAUDE.md "Work notes".
+/.work/
+/.notes/

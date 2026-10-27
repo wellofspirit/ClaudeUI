@@ -15,6 +15,11 @@
  *    no pending card to force-deny, so its 'allow' can land seconds after the
  *    host dropped the exchange).
  *
+ *  - A grant also records WHO it was minted for: the session's root agent, or a
+ *    host-run subagent (`owner`). The session tools read it back on `consume` as
+ *    the call's `callOwner`, so the service refuses a subagent's call even if the
+ *    tools ever reached a child by some other route.
+ *
  * Both maps are bounded to {@link MAX_HOSTED_GRANTS} entries, oldest evicted
  * first (Map/Set insertion order), so a long-running session cannot grow them
  * without limit. Evicting an old abandonment is safe: the worst case is the
@@ -22,8 +27,11 @@
  */
 export const MAX_HOSTED_GRANTS = 256
 
+/** Whose call a grant was minted for. */
+export type GrantOwner = 'root' | 'subagent'
+
 export class HostedGrants {
-  private readonly grants = new Map<string, string>()
+  private readonly grants = new Map<string, { toolName: string; owner: GrantOwner }>()
   private readonly abandoned = new Set<string>()
 
   /**
@@ -32,9 +40,9 @@ export class HostedGrants {
    * allow is then authority for a call pi will never make. The withhold is
    * consumed one-shot, so a LATER exchange reusing the id is unaffected.
    */
-  mint(toolCallId: string, toolName: string): boolean {
+  mint(toolCallId: string, toolName: string, owner: GrantOwner = 'root'): boolean {
     if (this.abandoned.delete(toolCallId)) return false
-    this.grants.set(toolCallId, toolName)
+    this.grants.set(toolCallId, { toolName, owner })
     if (this.grants.size > MAX_HOSTED_GRANTS) {
       const oldest = this.grants.keys().next().value
       if (oldest !== undefined) this.grants.delete(oldest)
@@ -44,10 +52,15 @@ export class HostedGrants {
 
   /** True (and the grant is gone) iff a grant exists for exactly this id and name. */
   consume(toolCallId: string, toolName: string): boolean {
+    return this.consumeOwner(toolCallId, toolName) !== null
+  }
+
+  /** As {@link consume}, and says whose call the grant was minted for (null: no grant). */
+  consumeOwner(toolCallId: string, toolName: string): GrantOwner | null {
     const granted = this.grants.get(toolCallId)
-    if (granted === undefined || granted !== toolName) return false
+    if (granted === undefined || granted.toolName !== toolName) return null
     this.grants.delete(toolCallId)
-    return true
+    return granted.owner
   }
 
   /** pi abandoned the `/tool-call` exchange for this id: drop any grant, withhold a late one. */

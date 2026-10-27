@@ -10,6 +10,7 @@ import type {
 } from '../../../../shared/types'
 import type { ToolView } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
+import { approvalActionName, approvalEngine, wireAction } from './tool-registry/approval-action'
 import { AlwaysAllowSection } from './PermissionSuggestions'
 import { HoldCountdown } from './ApprovalButtons'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock/AskUserQuestionBlock'
@@ -323,9 +324,8 @@ export function approvalToolView(
   approval: PendingApproval,
   sessionEngine: EngineId
 ): ToolView | undefined {
-  const dispatched = approval.agent?.subagentType.match(/^dispatch:(\w+)$/)?.[1]
-  const engine = (dispatched as EngineId | undefined) ?? sessionEngine
-  const toolName = approval.toolName.replace(/^dispatch:/, '')
+  const engine = approvalEngine(approval, sessionEngine)
+  const toolName = wireAction(approval)
   try {
     const map = engineToolMap(engine)
     const kind = map.kindOf(toolName)
@@ -336,10 +336,6 @@ export function approvalToolView(
 }
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
-
-/** The wire action without the dispatch forward's `dispatch:` prefix. */
-const wireAction = (approval: PendingApproval): string =>
-  approval.toolName.replace(/^dispatch:/, '')
 
 /**
  * Where an ask raised inside a subagent came from: the agent's spawn-call id
@@ -526,7 +522,7 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
       agent={
         row ? { label: agentRowLabel(row), ...(row.type ? { type: row.type } : {}) } : undefined
       }
-      actionLabel={actionLabel}
+      actionLabel={actionLabel ?? approvalActionName(approval, engineId)}
       target={outside ? approval.patterns : undefined}
     />
   )

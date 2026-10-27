@@ -66,11 +66,13 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     setServerStartedHook: vi.fn(),
     setCallerSessionLookup: vi.fn(),
-    setDispatchAgent: vi.fn()
+    setDispatchAgent: vi.fn(),
+    setHandBack: vi.fn(),
+    setXAgentCaller: vi.fn()
   }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: vi.fn() }
+  crossEngineDispatcher: { dispatch: vi.fn(), configureParents: vi.fn(() => () => {}) }
 }))
 vi.mock('../../auth/vault/CredentialSync', () => ({
   credentialSync: {
@@ -80,7 +82,7 @@ vi.mock('../../auth/vault/CredentialSync', () => ({
   }
 }))
 vi.mock('../../shared-providers', () => ({
-  sharedProviderService: { syncAll: vi.fn(async () => {}) }
+  sharedProviderService: { syncAll: vi.fn(async () => {}), configure: vi.fn() }
 }))
 vi.mock('../host-anchor', () => ({
   createHostAnchor: vi.fn(() => ({ reconcileAndAutostart: vi.fn(async () => {}) }))

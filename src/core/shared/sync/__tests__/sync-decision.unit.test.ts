@@ -59,6 +59,16 @@ describe('decideSync', () => {
     expect(decision.kind).toBe('full')
   })
 
+  it('names WHY a sync became full — the SyncStats log reads it', () => {
+    const reason = (d: ReturnType<typeof decideSync>): string | undefined =>
+      d.kind === 'full' ? d.reason : undefined
+    expect(reason(decideSync(source(), 0, undefined))).toBe('fresh')
+    // A fresh client wins over a stale epoch: it had nothing to compare anyway.
+    expect(reason(decideSync(source(), 0, 'epoch-OLD'))).toBe('fresh')
+    expect(reason(decideSync(source(), 30, 'epoch-OLD'))).toBe('epoch-mismatch')
+    expect(reason(decideSync(source({ getAfter: () => null }), 30, 'epoch-A'))).toBe('ring-miss')
+  })
+
   it('reads the snapshot ONCE, so the caller cannot re-read it in a later tick', () => {
     // The exact-watermark property of phase 4b holds because `seq` is read and the
     // state serialized in one synchronous tick. Handing the snapshot back with the

@@ -146,6 +146,9 @@ const SHARED_DECLARATION_SOURCES = [
   // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
   'src/core/ipc/usage-hub-commands.ts',
+  // The OpenRouter tab's four reads (`config` queries), one declaration spread
+  // by both transports.
+  'src/core/ipc/openrouter-commands.ts',
   // ADR-082 arc 2 — the harness manager, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
   'src/core/ipc/harness-commands.ts',
@@ -164,7 +167,11 @@ const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'que
   'worktree:create': { capability: 'git', kind: 'command' },
   'worktree:status': { capability: 'git', kind: 'query' },
   'worktree:remove': { capability: 'git', kind: 'command' },
-  'worktree:list': { capability: 'git', kind: 'query' },
+  // ADR-112 — the worktree manager.
+  'worktree:inventory': { capability: 'git', kind: 'query' },
+  'worktree:inspect': { capability: 'git', kind: 'query' },
+  'worktree:measure': { capability: 'git', kind: 'query' },
+  'worktree:remove-many': { capability: 'git', kind: 'command' },
   'config:save-slash-commands': { capability: 'config', kind: 'command' },
   'config:load-engine-config': { capability: 'config', kind: 'query' },
   'config:save-engine-config': { capability: 'config', kind: 'command' },

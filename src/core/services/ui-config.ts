@@ -7,7 +7,6 @@ import { writeFileAtomicSync } from './write-json-atomic'
 import {
   allSessionMeta,
   setSessionMeta,
-  deleteSessionMeta,
   importSessionEnginesOnce,
   hasCodexSessionOverrides
 } from './db'
@@ -310,7 +309,8 @@ export function loadSharedAutoModeConfig(): import('../../shared/types').SharedA
  * Replaces the shared trust and guidance lists and the read-only bypass switch.
  * An empty list is written as an ABSENT key, and so is `readOnlyBypass: true`
  * (the default): only an explicit `false` is stored. `blockHoldSeconds` is
- * clamped to whole seconds in [0, 600], and 0 (the default) is absent too. The object is REBUILT from
+ * clamped to whole seconds in [0, 600], and 0 (the default) is absent too, and
+ * `captureJudgeReplies` is stored only as `true`. The object is REBUILT from
  * the known keys rather than spread, so a key missing from
  * {@link SHARED_AUTOMODE_LIST_KEYS} (or not handled below) is dropped on save —
  * which is why the guidance lists have to be named there.
@@ -332,6 +332,8 @@ export function saveSharedAutoModeConfig(
   // ADR-091 part 6 — the default (0, no hold) is the absent key.
   const holdSeconds = normalizeBlockHoldSeconds(config.blockHoldSeconds)
   if (holdSeconds > 0) next.blockHoldSeconds = holdSeconds
+  // Diagnostics switch: only an explicit `true` is stored; off is the absent key.
+  if (config.captureJudgeReplies === true) next.captureJudgeReplies = true
   writeJson(SHARED_AUTOMODE_FILE, next)
 }
 
@@ -421,40 +423,56 @@ export function saveSessionConfig(config: UISessionConfig): void {
   // The renderer sends the full UISessionConfig (including sessionEngines) so we
   // extract it here, write it to the DB, and strip it before writing the JSON.
   if (config.sessionEngines) {
-    const incoming = config.sessionEngines
-    const incomingIds = Object.keys(incoming)
-
     // Add/update entries present in the incoming map
-    for (const [sessionId, meta] of Object.entries(incoming)) {
+    for (const [sessionId, meta] of Object.entries(config.sessionEngines)) {
       // Native-discovered identity is authoritative; a stale client projection cannot change its engine.
       if (meta.engineId !== 'codex' && hasCodexSessionOverrides(sessionId)) continue
       setSessionMeta(sessionId, meta)
     }
 
-    // Remove entries absent from the incoming map — but ONLY when the payload
-    // actually carries the full session set. An EMPTY map is the fingerprint of
-    // an impoverished save: a remote/web client (or an older bundle) whose
-    // snapshot never populated sessionEngines round-trips `{}` here, and the old
-    // unconditional delete-loop then wiped every session's engine/model mapping,
-    // reopening all opencode/pi sessions as Claude (H15). A genuinely-empty save
-    // has nothing legitimate to delete toward — any leftover DB rows are just
-    // harmless orphans, far better than a full wipe. The real cleanup this loop
-    // exists for (rekey: client-id → real-session-id) always sends a non-empty
-    // map, so it keeps working.
-    if (incomingIds.length > 0) {
-      const currentMeta = allSessionMeta()
-      for (const sessionId of Object.keys(currentMeta)) {
-        if (!(sessionId in incoming) && !hasCodexSessionOverrides(sessionId)) {
-          deleteSessionMeta(sessionId)
-        }
-      }
-    }
+    // Entries ABSENT from the incoming map are left alone. A client's map is its
+    // own snapshot, not the registry: a session another client or core created a
+    // moment ago is simply unknown to it, and the delete-absent loop that used to
+    // follow here wiped that session's engine/model row (a remote-created Codex
+    // session reverted to Claude on every connected client). The deletions that
+    // loop stood in for happen host-side on the event that causes them — the
+    // rekey (`SessionManager.rekey`) and an explicit delete
+    // (`handlers-core.deleteSession` / `deleteProject`).
   }
 
   // Write the rest (recentSessions, pinnedSessions, customTitles, etc.) to JSON
   // without sessionEngines — the DB is now the authoritative source.
+  //
+  // Per-key presence, as the reducer reads `config:sessions-changed`: a key in the
+  // payload replaces that key, an absent key keeps its stored value. A save that
+  // carries only part of the registry (the history loader sends `{ sessionEngines }`
+  // alone) used to REPLACE the file and wipe every other key on disk, which showed
+  // only after a restart because the replicas apply the payload per key.
   const { sessionEngines: _dropped, ...rest } = config
-  writeJson(SESSIONS_FILE, rest)
+  const {
+    sessionEngines: _storedEngines,
+    sessionProviders: _storedProviders,
+    ...stored
+  } = readJson<Record<string, unknown>>(SESSIONS_FILE) ?? {}
+  writeJson(SESSIONS_FILE, { ...stored, ...rest })
+}
+
+/**
+ * A session's custom title follows its rekey (client-id → engine session id).
+ *
+ * The reducer renames the key in every replica, but sessions.json is written only
+ * by clients' saves, so a title set before the rekey (the session tools name a
+ * session they start) stayed under the old id on disk until some client happened
+ * to save the registry. This moves just that key, on the host, with no client
+ * needed. An existing title under the new id wins. Returns whether it moved one.
+ */
+export function moveCustomTitle(oldId: string, newId: string): boolean {
+  if (oldId === newId) return false
+  const titles = loadSessionConfig().customTitles
+  if (!titles || titles[oldId] === undefined) return false
+  const { [oldId]: moving, ...rest } = titles
+  saveSessionConfig({ customTitles: newId in rest ? rest : { ...rest, [newId]: moving } })
+  return true
 }
 
 export interface SlashCommandCache {

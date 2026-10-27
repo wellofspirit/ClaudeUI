@@ -5,8 +5,11 @@ import type { SessionInfo } from '../../../../shared/types'
 import { PermissionsDialog } from '../PermissionsDialog'
 import { useContextMenu } from '../../hooks/useContextMenu'
 import { EngineLogo } from '../shared/EngineLogo'
-import { countAutoContinuingTasks } from '../../lib/task-types'
+import { countDotTasks } from '../../lib/task-types'
 import { StatusDot, deriveSessionDotState } from './StatusDot'
+import { originLinkOf, sessionTitleOf } from '../../lib/session-links'
+import { useIsMobile } from '../../hooks/useIsMobile'
+import { linkedWorktreeFor } from '../../../../shared/linked-worktree'
 
 export const SessionItem = memo(function SessionItem({
   info,
@@ -30,7 +33,11 @@ export const SessionItem = memo(function SessionItem({
   onDragStart,
   onDragOver,
   onDragEnd,
-  onDrop
+  onDrop,
+  depth = 0,
+  memberCount = 0,
+  membersCollapsed = false,
+  onToggleMembers
 }: {
   info: SessionInfo
   active: boolean
@@ -58,6 +65,13 @@ export const SessionItem = memo(function SessionItem({
   onDragOver?: (e: React.DragEvent) => void
   onDragEnd?: (e: React.DragEvent) => void
   onDrop?: (e: React.DragEvent) => void
+  /** 1 for a member drawn under its group's head in the project list, else 0 (slices 1b, 5). */
+  depth?: number
+  /** Members of the group this row heads, in the same list. */
+  memberCount?: number
+  membersCollapsed?: boolean
+  /** Fold or unfold the group (the toggle shows only on a head with members). */
+  onToggleMembers?: () => void
 }): React.JSX.Element {
   // Self-subscribe to session status fields — avoids parent needing the full sessions map
   const { isRunning, isSdkActive, isWatching, needsAttention, runningSubagents } = useSessionStore(
@@ -69,11 +83,37 @@ export const SessionItem = memo(function SessionItem({
         isWatching: !!sess?.isWatching,
         needsAttention: !!sess?.needsAttention,
         // A count, not the record map, so useShallow skips the rows whose tasks didn't change.
-        runningSubagents: sess ? countAutoContinuingTasks(sess.activeTasks) : 0
+        runningSubagents: sess ? countDotTasks(sess.activeTasks, !!sess.sdkActive) : 0
       }
     })
   )
-  const isWorktree = useSessionStore((s) => !!s.worktreeInfoMap[info.sessionId])
+  // A recorded entry (EnterWorktree / session.moved / created here), or the session's cwd being a
+  // linked worktree per the directory listing (any engine, any layout). The live session's cwd
+  // wins over the listing's, which can lag a brand-new session.
+  const isWorktree = useSessionStore(
+    (s) =>
+      !!s.worktreeInfoMap[info.sessionId] ||
+      linkedWorktreeFor(s.directories, s.sessions[info.sessionId]?.cwd || info.cwd) !== null
+  )
+  // The link to the session that started this one, when there is one (slices 1b, 5):
+  // the hint names it on every row (grouped or not), and the menu moves the row in or
+  // out of the group.
+  const { grouped, kind, canGroup, originTitle } = useSessionStore(
+    useShallow((s) => {
+      const link = originLinkOf(s, info.sessionId)
+      return {
+        grouped: link?.link.grouped === true,
+        kind: link?.link.kind ?? 'started',
+        // "Add to group" needs an origin that is still a session in the sidebar.
+        canGroup: link !== null && link.originId !== null,
+        originTitle: link?.originId ? sessionTitleOf(s, link.originId) : ''
+      }
+    })
+  )
+  const originHint = originTitle
+    ? `${kind === 'handoff' ? 'continued from' : 'started from'} ${originTitle}`
+    : ''
+  const isMobile = useIsMobile()
   const menu = useContextMenu()
   const [renameValue, setRenameValue] = useState('')
   const renameRef = useRef<HTMLInputElement>(null)
@@ -95,6 +135,9 @@ export const SessionItem = memo(function SessionItem({
   const rightIconCount =
     (isWorktree ? 1 : 0) + (onPin || onUnpin ? 1 : 0) + (onToggleWatch && !isSdkActive ? 1 : 0)
   const blurWidthPx = rightIconCount * 20 + 45
+  // What the icons themselves take at the right edge (the 40px blur-in zone is
+  // only a fade): the room an in-flow control at the row's end must leave.
+  const stripWidthPx = rightIconCount > 0 ? rightIconCount * 20 + 5 : 0
   const blurTransitionPct = Math.round((40 / blurWidthPx) * 100)
 
   // Focus rename input when entering rename mode
@@ -129,13 +172,29 @@ export const SessionItem = memo(function SessionItem({
         onDragOver={onDragOver}
         onDragEnd={onDragEnd}
         onDrop={onDrop}
-        style={{ padding: '0 5px' }}
+        data-depth={depth}
+        style={{ padding: '0 5px', ...(depth > 0 ? { paddingLeft: 5 + depth * 14 } : {}) }}
         className={`
           group relative flex items-center gap-2.5 h-8 rounded-md text-[13px] cursor-default transition-colors
           ${active ? 'text-text-primary bg-bg-tertiary' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'}
           ${hidden ? 'opacity-45 italic' : ''}
+          ${isWorktree ? 'isolate' : ''}
         `}
       >
+        {/* Worktree tint (always visible): strongest at the right edge, fully transparent 30% in
+            from it. Behind the row's content (z -10 inside this row's stacking context, above the
+            row's own background) and under the hover icon backdrop, which paints later. */}
+        {isWorktree && (
+          <div
+            data-testid="SessionItem.worktreeTint"
+            aria-hidden="true"
+            className="absolute inset-0 -z-10 rounded-md pointer-events-none"
+            style={{
+              backgroundImage:
+                'linear-gradient(to left, var(--color-worktree-tint) 0%, transparent 30%)'
+            }}
+          />
+        )}
         <span className="shrink-0 w-[14px] h-[14px] flex items-center justify-center">
           <StatusDot
             state={dotState}
@@ -191,7 +250,7 @@ export const SessionItem = memo(function SessionItem({
                 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)',
               maskImage: 'linear-gradient(to right, black calc(100% - 12px), transparent 100%)'
             }}
-            title={info.title}
+            title={originHint ? `${info.title} (${originHint})` : info.title}
           >
             <EngineLogo
               engineId={info.engineId ?? 'claude'}
@@ -199,7 +258,47 @@ export const SessionItem = memo(function SessionItem({
               className="shrink-0 opacity-80"
             />
             {info.title}
+            {originHint && (
+              <span
+                data-testid="SessionItem.originHint"
+                data-grouped={grouped}
+                className={`ml-1.5 text-[10px] text-text-muted ${grouped ? '' : 'opacity-60'}`}
+              >
+                {originHint}
+              </span>
+            )}
           </span>
+        )}
+        {memberCount > 0 && onToggleMembers && (
+          <button
+            type="button"
+            data-testid="SessionItem.toggleMembers"
+            data-collapsed={membersCollapsed}
+            aria-expanded={!membersCollapsed}
+            aria-label={`${membersCollapsed ? 'Show' : 'Hide'} ${memberCount} grouped ${memberCount === 1 ? 'session' : 'sessions'}`}
+            title={membersCollapsed ? 'Show grouped sessions' : 'Hide grouped sessions'}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleMembers()
+            }}
+            // Clear of the hover strip: it floats over the row's right edge and its
+            // icons (Watch, Pin) would take the clicks meant for the toggle's right half.
+            style={{ marginRight: isRenaming ? 0 : stripWidthPx }}
+            className={`shrink-0 h-8 flex items-center justify-center gap-0.5 text-[10px] text-text-muted hover:text-text-primary transition-colors cursor-pointer ${
+              isMobile ? 'min-w-[40px]' : 'min-w-[28px]'
+            }`}
+          >
+            <svg
+              width="9"
+              height="9"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              className={`transition-transform ${membersCollapsed ? '' : 'rotate-90'}`}
+            >
+              <path d="M8 5l8 7-8 7z" />
+            </svg>
+            {memberCount}
+          </button>
         )}
         {/* Backdrop blur underlay (hover-only) — width scales to the actual icon count so the
             tinted strip is no wider than needed. Progressively blurs + darkens the text so
@@ -218,7 +317,7 @@ export const SessionItem = memo(function SessionItem({
         )}
         {/* Icon overlay (hover-only) — floats over the blurred backdrop */}
         {!isRenaming && (
-          <div className="absolute right-[5px] top-0 h-full flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="absolute right-[5px] top-0 h-full flex items-center gap-1.5 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity">
             {isWorktree && (
               <span className="shrink-0 text-mode-edit opacity-100" title="Worktree session">
                 <svg
@@ -354,6 +453,30 @@ export const SessionItem = memo(function SessionItem({
           >
             Edit permissions
           </button>
+          {grouped && (
+            <button
+              data-testid="SessionItem.detach"
+              onClick={() => {
+                menu.close()
+                void window.api.setSessionGrouped(info.sessionId, false)
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Detach from group
+            </button>
+          )}
+          {!grouped && canGroup && (
+            <button
+              data-testid="SessionItem.attach"
+              onClick={() => {
+                menu.close()
+                void window.api.setSessionGrouped(info.sessionId, true)
+              }}
+              className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
+            >
+              Add to group
+            </button>
+          )}
           {isSdkActive && (
             <button
               onClick={() => {

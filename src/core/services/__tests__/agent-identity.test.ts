@@ -232,8 +232,31 @@ describe('readAgentSidecar', () => {
     expect(readAgentSidecar(file, NESTED)).toEqual({
       toolUseId: NESTED_ORIGIN,
       parentAgentId: 'ab9368ec953c764ac',
-      spawnDepth: 2
+      spawnDepth: 2,
+      agentType: 'general-purpose',
+      description: 'Task B global-row audit'
     })
+  })
+
+  it('reads the spawn name, description and agent type, and ignores non-string or empty ones', () => {
+    const named = withSidecar(
+      JSON.stringify({
+        toolUseId: NESTED_ORIGIN,
+        name: 'hq',
+        description: 'handler slice',
+        agentType: 'Explore'
+      })
+    )
+    expect(readAgentSidecar(named, NESTED)).toEqual({
+      toolUseId: NESTED_ORIGIN,
+      name: 'hq',
+      description: 'handler slice',
+      agentType: 'Explore'
+    })
+    const junk = withSidecar(
+      JSON.stringify({ toolUseId: NESTED_ORIGIN, name: 7, description: '', agentType: null })
+    )
+    expect(readAgentSidecar(junk, NESTED)).toEqual({ toolUseId: NESTED_ORIGIN })
   })
 
   it('reads a top-level agent, which has no parent', () => {

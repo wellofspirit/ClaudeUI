@@ -9,6 +9,14 @@ import { ensureHostTokenFresh } from '../sdk/host-token'
 import { claudeLoginSignal } from '../services/claude-login-state'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import { SessionManager } from '../services/session-manager'
+import { setSessionGrouped } from '../services/session-links'
+import type { CommandConnection } from './command-registry'
+import { configureContextPressure, respondContextPressure } from '../services/context-pressure'
+import {
+  configureSessionTools,
+  dismissProposalFromClient,
+  startProposalFromClient
+} from '../services/session-tools'
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { emitEvent } from '../services/sync-host'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
@@ -20,6 +28,7 @@ import {
   listAllDirectories
 } from '../services/sync-seed'
 import {
+  loadSessionStatusLine,
   loadSubagentHistory,
   buildSubagentFileMap,
   loadBackgroundOutput
@@ -28,6 +37,7 @@ import { watchSession, unwatchSession } from '../services/session-watcher'
 import { voiceRefusal } from '../services/voice-gate'
 import { desktopVoiceOwner, desktopVoiceOwnerKey, voiceRelay } from '../services/voice-relay'
 import { isPathInside, assertSafePathSegment } from '../services/path-containment'
+import { trackMockupWatcher } from '../services/mockup-watch-registry'
 import {
   loadSettings,
   loadSessionConfig,
@@ -55,12 +65,12 @@ import {
 } from '../services/usage-dashboard'
 import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
-import { crossEngineDispatcher, XENG_REQUEST_PREFIX } from '../services/cross-engine-dispatcher'
+import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { answerApproval } from './approval-response'
 import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
-import { opencodeProviderId } from '../shared-providers/OpencodeSharedProviderAdapter'
-import { deliveredDefinition } from '../../shared/shared-provider'
+import { decorateSharedProviderClaims } from '../shared-providers/opencode-claims'
 import {
   accountState,
   hostIsPackaged,
@@ -75,10 +85,10 @@ import type {
   EngineModelGroup,
   PermissionSuggestion,
   EngineId,
-  OpencodeProviderCatalogEntry,
   ProviderRemoveKind,
   PermissionScope,
-  ClaudePermissions
+  ClaudePermissions,
+  LoadSessionHistoryOptions
 } from '../../shared/types'
 import {
   discoverOpencodeProviderCatalog,
@@ -99,6 +109,7 @@ import {
   onOpencodeSessionListChanged
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
+import { withDispatchTasks } from '../services/dispatch-task-history'
 import type { ISession } from '../providers/ISession'
 import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
 import { freshClaudeModels, queryClaudeModels } from '../services/claude-model-catalog'
@@ -108,8 +119,10 @@ import { handleIpc, unbindDesktopChannels } from './desktop-transport-binding'
 import { configCommands } from './config-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
+import { openrouterCommands, OPENROUTER_CHANNELS } from './openrouter-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 import {
   sendPrompt,
   getBlob,
@@ -118,6 +131,7 @@ import {
   readBackgroundRange,
   stopTask,
   backgroundTask,
+  allowPeerMessages,
   dequeueMessage,
   recallQueued,
   askSideQuestion,
@@ -143,6 +157,7 @@ import {
   codexDeletePlanFor,
   clearConversation,
   judgeModelSupport,
+  judgeRouteResting,
   approveBlocked
 } from './handlers-core'
 
@@ -271,6 +286,11 @@ const SESSION_IPC_CHANNELS = [
   'session:stop-task',
   'session:background-task',
   'session:dequeue-message',
+  'session:allow-peer-messages',
+  'session:link:set-grouped',
+  'session:proposal:start',
+  'session:proposal:dismiss',
+  'session:context-pressure:respond',
   'session:ask-side-question',
   'session:set-permission-mode',
   'session:set-model',
@@ -280,6 +300,7 @@ const SESSION_IPC_CHANNELS = [
   'session:get-models',
   'session:get-engine-models',
   'automode:judge-model-support',
+  'automode:judge-route-resting',
   'session:get-opencode-providers',
   'session:set-opencode-provider-disabled',
   'session:remove-opencode-provider',
@@ -300,6 +321,7 @@ const SESSION_IPC_CHANNELS = [
   'session:list-pi',
   'session:load-pi-history',
   'session:load-history',
+  'session:load-status-line',
   'session:load-subagent-history',
   'blob:get',
   'session:build-subagent-file-map',
@@ -377,7 +399,10 @@ const SESSION_IPC_CHANNELS = [
   'worktree:create',
   'worktree:status',
   'worktree:remove',
-  'worktree:list',
+  'worktree:inventory',
+  'worktree:inspect',
+  'worktree:measure',
+  'worktree:remove-many',
   'app:quit-confirm',
   'session:sandbox-violation',
   'voice:start-recording',
@@ -420,12 +445,31 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     ...SESSION_IPC_CHANNELS,
     ...CODEX_CHANNELS,
     ...USAGE_HUB_CHANNELS,
+    ...OPENROUTER_CHANNELS,
     ...HARNESS_CHANNELS,
     ...VOICE_PACK_CHANNELS
   ])
 
   const manager = new SessionManager()
   sharedManager = manager
+  // The session tools create sessions and send prompts through the same functions
+  // the commands below use; the service sits under this layer, so it is handed them.
+  configureSessionTools({
+    manager,
+    // A message to an X-Agent steers its running turn or starts a run of it (ADR-105 §4).
+    xAgents: { message: (request) => crossEngineDispatcher.messageXAgent(request) },
+    createSession: (args) => prepareAndCreateSession(manager, getHostWindow(), args),
+    sendPrompt: (routingId, prompt, options) =>
+      sendPrompt(manager, routingId, prompt, undefined, options)
+  })
+  // No turn-end notes: a session that was started from another reports nothing back
+  // (session-notes.ts is dormant on purpose — nothing here enables it).
+  // So does the context-pressure watcher's hand-off instruction.
+  configureContextPressure({
+    manager,
+    sendPrompt: (routingId, prompt, options) =>
+      sendPrompt(manager, routingId, prompt, undefined, options)
+  })
   for (const command of codexCommands(manager)) handleIpc(command)
 
   // The volatile lane's subscription verb (phase 5 S1). Same declaration the
@@ -551,14 +595,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       answers?: Record<string, string>,
       updatedPermissions?: PermissionSuggestion[]
     ) => {
-      // Reserved `xeng:` prefix → forwarded cross-engine dispatch approval (ADR-033).
-      if (
-        requestId.startsWith(XENG_REQUEST_PREFIX) &&
-        crossEngineDispatcher.resolveApproval(requestId, decision, answers, updatedPermissions)
-      ) {
-        return
-      }
-      manager.get(routingId)?.resolveApproval(requestId, decision, answers, updatedPermissions)
+      // Routing (`xeng:` dispatch cards vs the session) and the cross-client dismiss: approval-response.ts.
+      answerApproval(manager, routingId, requestId, decision, answers, updatedPermissions)
     }
   })
 
@@ -640,6 +678,56 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: async (routingId: string) => recallQueued(manager, routingId)
+  })
+
+  handleIpc({
+    channel: 'session:allow-peer-messages',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string) => allowPeerMessages(manager, routingId)
+  })
+
+  // "Detach from group" / "Add to group" in the sidebar (slice 1b, reworked in slice 5).
+  // `routingId` is the row's own session, so the audit row names the session the user
+  // acted on.
+  handleIpc({
+    channel: 'session:link:set-grouped',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, grouped: boolean) => setSessionGrouped(routingId, grouped)
+  })
+
+  // The user's click on a proposal card (session tools, slice 1c-b). The argument is
+  // the proposal's id, not a session id; the audit row for the click is the registry's.
+  // `grouped` is which Start button was clicked; anything but a boolean (an older client) falls back
+  // to the proposal's own relation.
+  handleIpc({
+    channel: 'session:proposal:start',
+    capability: 'chat',
+    kind: 'command',
+    // The click's audit row carries the calling connection, so it needs it first.
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string, grouped?: boolean) =>
+      startProposalFromClient(proposalId, grouped, connection)
+  })
+  handleIpc({
+    channel: 'session:proposal:dismiss',
+    capability: 'chat',
+    kind: 'command',
+    withConnection: true,
+    handler: async (connection: CommandConnection, proposalId: string) =>
+      dismissProposalFromClient(proposalId, connection)
+  })
+
+  // The user's answer to the context-pressure banner (slice 4): Hand off or Not now.
+  handleIpc({
+    channel: 'session:context-pressure:respond',
+    capability: 'chat',
+    kind: 'command',
+    sessionIdArg: 0,
+    handler: async (routingId: string, answer: string) => respondContextPressure(routingId, answer)
   })
 
   // Deprecated (ADR-053): recall-all shim for cached `/remote` bundles.
@@ -791,6 +879,16 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: (engineId: unknown, values: unknown) => judgeModelSupport(engineId, values)
   })
 
+  // When a judge model's route recovers from a rate limit (the process-wide cooldown the judge
+  // transport files a 429 under). Read-only and token-free: only a time leaves.
+  handleIpc({
+    channel: 'automode:judge-route-resting',
+    capability: 'config',
+    kind: 'query',
+    handler: (engineId: unknown, model: unknown, accountId?: unknown) =>
+      judgeRouteResting(engineId, model, accountId)
+  })
+
   // Full opencode provider catalog for the settings provider manager. Returns []
   // when opencode isn't installed or discovery fails (opencode is optional).
   handleIpc({
@@ -802,7 +900,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       const catalog = await discoverOpencodeProviderCatalog()
       // Decorate with shared-provider ownership HERE rather than inside discovery:
       // shared-providers/index → OpencodeSharedProviderAdapter → model-discovery,
-      // so a shared-provider import inside model-discovery would be a cycle.
+      // so a shared-provider import inside model-discovery would be a cycle. The
+      // remote twin (remote-handlers.ts) calls the same decorator.
       return decorateSharedProviderClaims(catalog)
     }
   })
@@ -983,7 +1082,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async (sessionId: string) => {
-      return await loadOpencodeSessionHistory(sessionId)
+      return withDispatchTasks(sessionId, await loadOpencodeSessionHistory(sessionId))
     }
   })
 
@@ -1001,7 +1100,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: async (sessionId: string) => {
-      return await loadPiSessionHistory(sessionId)
+      return withDispatchTasks(sessionId, await loadPiSessionHistory(sessionId))
     }
   })
 
@@ -1023,8 +1122,40 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:load-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, resumeSessionAt?: string) => {
-      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt)
+    // ADR-102: the reporter leads the args; a caller that sends none gets a no-op.
+    withProgress: true,
+    handler: async (
+      progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      resumeSessionAt?: string,
+      options?: LoadSessionHistoryOptions | null
+    ) => {
+      // Both identifiers are caller-supplied and joined into a ~/.claude/projects path
+      // by the Claude reader. Every engine's real id and projectKey is a single
+      // segment (uuid / `ses_…` ids; `cwdToProjectKey` is `[A-Za-z0-9-]*`), so one
+      // check serves the engine dispatch too.
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionHistory(sessionId, projectKey, resumeSessionAt, undefined, {
+        onProgress: progress,
+        // Strictly a literal `true`: any other shape of the (renderer-supplied) options is ignored.
+        deferStatusLine: options?.deferStatusLine === true
+      })
+    }
+  })
+
+  // The status line a `deferStatusLine` read left out (ADR-102 Arc 2): same
+  // result as the full read's, own progress plan (M + S, phase `costs`).
+  handleIpc({
+    channel: 'session:load-status-line',
+    capability: 'fs-read',
+    kind: 'query',
+    withProgress: true,
+    handler: async (progress: ProgressReporter, sessionId: string, projectKey: string) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      return await loadSessionStatusLine(sessionId, projectKey, progress)
     }
   })
 
@@ -1032,7 +1163,18 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'session:load-subagent-history',
     capability: 'fs-read',
     kind: 'query',
-    handler: async (sessionId: string, projectKey: string, agentId: string) => {
+    // Declared so a remote call gets the transport's `sending` frame (it slides
+    // the client's 30 s timeout while a large bucket transfers); reports nothing itself.
+    withProgress: true,
+    handler: async (
+      _progress: ProgressReporter,
+      sessionId: string,
+      projectKey: string,
+      agentId: string
+    ) => {
+      assertSafePathSegment(sessionId, 'sessionId')
+      assertSafePathSegment(projectKey, 'projectKey')
+      assertSafePathSegment(agentId, 'agentId')
       return await loadSubagentHistory(sessionId, projectKey, agentId)
     }
   })
@@ -1747,6 +1889,12 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handleIpc(cmd)
   }
 
+  // The OpenRouter tab's reads, from the same declarations the remote transport
+  // spreads: `config` queries, key read from the vault per call (never returned).
+  for (const cmd of openrouterCommands()) {
+    handleIpc(cmd)
+  }
+
   // The harness manager (ADR-082 arc 2), from the same declarations the remote
   // transport spreads: reads are `config`, every write `admin` (§7).
   for (const cmd of harnessCommands()) {
@@ -1779,8 +1927,25 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Mockup file watcher — watches a mockup directory for changes
   const mockupWatchers = new Map<
     string,
-    { watcher: fs.FSWatcher; debounceTimer: ReturnType<typeof setTimeout> | null }
+    {
+      watcher: fs.FSWatcher
+      debounceTimer: ReturnType<typeof setTimeout> | null
+      untrack: () => void
+    }
   >()
+
+  const closeMockupWatcher = (key: string): void => {
+    const entry = mockupWatchers.get(key)
+    if (!entry) return
+    try {
+      entry.watcher.close()
+    } catch {
+      /* already closed */
+    }
+    if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
+    entry.untrack()
+    mockupWatchers.delete(key)
+  }
 
   handleIpc({
     channel: 'mockup:watch',
@@ -1795,7 +1960,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
 
       const entry = {
         watcher: null! as fs.FSWatcher,
-        debounceTimer: null as ReturnType<typeof setTimeout> | null
+        debounceTimer: null as ReturnType<typeof setTimeout> | null,
+        untrack: (): void => {}
       }
 
       // Recursive so edits to sibling subdirs (e.g. `images/hero.png`,
@@ -1814,6 +1980,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
         }, 200)
       })
 
+      // Without an 'error' listener a watcher fault (on Windows, deleting the watched dir —
+      // a worktree removal — raises one asynchronously) becomes a process-level
+      // uncaughtException, and the dead watcher would stay in the map behind the has() guard
+      // above, blocking any re-watch. Drop it (the remote twin does the same).
+      entry.watcher.on('error', () => closeMockupWatcher(key))
+      // Visible to the worktree remover, which closes the watches under a removed path first.
+      entry.untrack = trackMockupWatcher(dirPath, () => closeMockupWatcher(key))
+
       mockupWatchers.set(key, entry)
     }
   })
@@ -1823,13 +1997,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'fs-read',
     kind: 'query',
     handler: (cwd: string, directory: string) => {
-      const key = `${cwd}:${directory}`
-      const entry = mockupWatchers.get(key)
-      if (entry) {
-        entry.watcher.close()
-        if (entry.debounceTimer) clearTimeout(entry.debounceTimer)
-        mockupWatchers.delete(key)
-      }
+      closeMockupWatcher(`${cwd}:${directory}`)
     }
   })
 
@@ -1887,40 +2055,4 @@ function startProjectsWatcher(): void {
   } catch (err) {
     logger.warn('ProjectsWatcher', 'Failed to watch projects directory', err)
   }
-}
-
-/**
- * Mark catalog entries whose vendor id is claimed by an ENABLED shared-provider
- * route (today: `chatgpt` → opencode vendor `openai`).
- *
- * Why the row needs to know: CredentialSync re-feeds a shared credential on
- * every refresh, so removing that credential in the opencode provider manager is
- * silently undone — "Remove" would appear to do nothing. The row warns and
- * offers to turn the shared route off instead of losing the race.
- */
-function decorateSharedProviderClaims(
-  catalog: OpencodeProviderCatalogEntry[]
-): OpencodeProviderCatalogEntry[] {
-  let claims: Map<string, { id: string; name: string }>
-  try {
-    claims = new Map(
-      sharedProviderService
-        .listDefinitions()
-        // Switched off, a provider feeds nothing (ADR-074 slice 10).
-        .filter((definition) => deliveredDefinition(definition).routes.opencode.enabled)
-        .map((definition) => [
-          opencodeProviderId(definition),
-          { id: definition.id, name: definition.name }
-        ])
-    )
-  } catch (err) {
-    // Shared-provider config is optional; an unreadable definition must not take
-    // down the provider list.
-    logger.warn('opencode', `Shared-provider claim lookup failed: ${String(err)}`)
-    return catalog
-  }
-  return catalog.map((entry) => {
-    const claim = claims.get(entry.id)
-    return claim ? { ...entry, sharedProviderClaim: claim } : entry
-  })
 }

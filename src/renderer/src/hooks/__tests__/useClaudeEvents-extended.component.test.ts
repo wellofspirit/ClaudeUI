@@ -4,7 +4,7 @@ vi.mock('electron', async () => import('@test/stubs/electron-shim'))
 import { createElement } from 'react'
 import { act, render, cleanup } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { useClaudeEvents } from '../useClaudeEvents'
+import { useClaudeEvents, PENDING_WAKE_GRACE_MS } from '../useClaudeEvents'
 import { useSessionStore } from '../../stores/session-store'
 import {
   makeChatMessage,
@@ -24,7 +24,8 @@ import type {
   PluginViewWithOwner,
   VoiceState,
   WorktreeInfo,
-  FileDiff
+  FileDiff,
+  EngineId
 } from '../../../../shared/types'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import {
@@ -68,7 +69,11 @@ beforeEach(async () => {
   resetFactoryCounter()
   // The hook's own `saveSlashCommands` / `confirmQuit` assertions need spies the
   // bridge-backed api does not provide.
-  Object.assign(window.api, { saveSlashCommands: vi.fn(), confirmQuit: vi.fn() })
+  Object.assign(window.api, {
+    saveSlashCommands: vi.fn(),
+    confirmQuit: vi.fn(),
+    ackQuitPrompt: vi.fn(() => Promise.resolve())
+  })
 
   useSessionStore.setState({
     activeSessionId: null,
@@ -1157,6 +1162,31 @@ describe('useClaudeEvents extended component tests', () => {
       app.emit('app:before-quit')
 
       expect(window.api.confirmQuit as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
+      // No modal, nothing to wait for: the fallback timer is not main's to stop.
+      expect(window.api.ackQuitPrompt as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
+    })
+
+    it('acks the prompt to main when it shows the quit modal, so the 5 s fallback stops (S3)', () => {
+      useSessionStore.setState({
+        worktreeInfoMap: {
+          'route-1': {
+            worktreePath: '/project/worktrees/feature-x',
+            worktreeBranch: 'feature-x',
+            worktreeName: 'feature-x',
+            originalCwd: '/project',
+            gitRoot: '/project',
+            originalHeadCommit: 'abc123',
+            createdAt: Date.now(),
+            origin: 'created'
+          }
+        }
+      })
+      mirrorStoreIntoReplica()
+
+      app.emit('app:before-quit')
+
+      expect(useSessionStore.getState().quitWorktrees).toHaveLength(1)
+      expect(window.api.ackQuitPrompt as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
     })
 
     it('calls setQuitWorktrees with active worktrees instead of confirming quit', () => {
@@ -1181,6 +1211,57 @@ describe('useClaudeEvents extended component tests', () => {
       const state = useSessionStore.getState()
       expect(state.quitWorktrees).toHaveLength(1)
       expect(state.quitWorktrees![0].routingId).toBe('route-1')
+    })
+
+    it('offers only worktrees ClaudeUI created for removal (C-S11)', () => {
+      const base: WorktreeInfo = {
+        worktreePath: '/project/worktrees/created',
+        worktreeBranch: 'created',
+        worktreeName: 'created',
+        originalCwd: '/project',
+        gitRoot: '/project',
+        originalHeadCommit: 'abc123',
+        createdAt: Date.now()
+      }
+      useSessionStore.setState({
+        worktreeInfoMap: {
+          'route-created': { ...base, origin: 'created' },
+          'route-detected': { ...base, worktreePath: '/p/wt/detected', origin: 'detected' },
+          // legacy entry without `origin`: no head commit recorded = detected
+          'route-legacy-detected': { ...base, worktreePath: '/p/wt/legacy', originalHeadCommit: '' }
+        }
+      })
+      mirrorStoreIntoReplica()
+
+      app.emit('app:before-quit')
+
+      expect(useSessionStore.getState().quitWorktrees!.map((w) => w.routingId)).toEqual([
+        'route-created'
+      ])
+    })
+
+    it('does not ask when every recorded worktree was detected, not created', () => {
+      useSessionStore.setState({
+        quitWorktrees: null,
+        worktreeInfoMap: {
+          r1: {
+            worktreePath: '/p/wt/detected',
+            worktreeBranch: 'b',
+            worktreeName: 'detected',
+            originalCwd: '/p',
+            gitRoot: '/p',
+            originalHeadCommit: '',
+            createdAt: 0,
+            origin: 'detected'
+          }
+        }
+      })
+      mirrorStoreIntoReplica()
+
+      app.emit('app:before-quit')
+
+      expect(window.api.confirmQuit as ReturnType<typeof vi.fn>).toHaveBeenCalledOnce()
+      expect(useSessionStore.getState().quitWorktrees).toBeNull()
     })
 
     it('calls confirmQuit after all worktrees are removed', () => {
@@ -1589,9 +1670,224 @@ describe('useClaudeEvents extended component tests', () => {
       expect(notified).not.toHaveBeenCalled()
     })
 
-    it('still claims the turn while a background SHELL is running', () => {
-      // A dev server left running is the user's turn, not the agent's.
+    it.each(['local_bash', 'monitor_mcp', 'monitor_ws'])(
+      'does not claim the turn while a background %s that wakes the agent is running',
+      (taskType) => {
+        // 2.1.293: a finished shell or monitor starts a turn of its own, so the
+        // result under it is a pause, not the user's turn (owner ruling 2026-10-19).
+        seed.taskStarted(routingId, {
+          toolUseId: 't1',
+          taskId: 'a1',
+          taskType,
+          wakesParent: true
+        })
+
+        app.emit('session:result', routingId)
+
+        expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+      }
+    )
+
+    it('claims the turn while only a task that does not wake the agent is running', () => {
+      seed.taskStarted(routingId, {
+        toolUseId: 't1',
+        taskId: 'a1',
+        taskType: 'dream',
+        wakesParent: false
+      })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+      expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+    })
+
+    describe('a background X-Agent (dispatch record with wakesParent) — ADR-105 §3', () => {
+      const dispatchRecord = {
+        toolUseId: 'tx',
+        taskId: 's-abc234',
+        taskType: 'dispatch',
+        isBackgrounded: true,
+        wakesParent: true
+      }
+      const status = (state: 'idle' | 'running'): void =>
+        app.emit('session:status', routingId, makeSessionStatus({ state, sessionId: routingId }))
+      const attention = (): boolean => useSessionStore.getState().sessions[routingId].needsAttention
+
+      it('holds the turn end back while it runs; its result is delivered as a turn whose own end claims the turn', () => {
+        seed.taskStarted(routingId, dispatchRecord)
+        app.emit('session:result', routingId)
+        // Violet, not yellow, and no "Ready for input": the X-Agent's result will wake the agent.
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        // The X-Agent ends: its record leaves and the delivery starts a turn on the parent.
+        seed.taskNotification(
+          routingId,
+          makeTaskNotification({ toolUseId: 'tx', status: 'completed' })
+        )
+        status('running')
+        expect(attention()).toBe(false)
+        app.emit('session:result', routingId)
+        expect(attention()).toBe(true)
+        expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+      })
+
+      it('a result that had to wait raises attention and a notification of its own', () => {
+        seed.taskStarted(routingId, dispatchRecord)
+        app.emit('session:result', routingId)
+        seed.taskNotification(
+          routingId,
+          makeTaskNotification({ toolUseId: 'tx', status: 'completed' })
+        )
+        expect(attention()).toBe(false)
+
+        app.emit('session:dispatch-result-held', routingId, { name: 'rev' })
+
+        expect(attention()).toBe(true)
+        // One notification per parent however many X-Agents are held: they share a tag.
+        expect(notified).toHaveBeenCalledWith(
+          'X-Agent rev finished — result waiting',
+          expect.objectContaining({ tag: `dispatch-result-held:${routingId}` })
+        )
+      })
+
+      it('a held result with no X-Agent name does not read "X-Agent agent finished"', () => {
+        app.emit('session:dispatch-result-held', routingId, {})
+
+        const [title] = notified.mock.calls[0]
+        expect(title).toBe('An X-Agent finished — result waiting')
+      })
+
+      it('says nothing to a user who is looking at that session', () => {
+        useSessionStore.setState({ activeSessionId: routingId })
+        const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+        try {
+          app.emit('session:dispatch-result-held', routingId, { name: 'rev' })
+          expect(attention()).toBe(false)
+          expect(notified).not.toHaveBeenCalled()
+        } finally {
+          focus.mockRestore()
+        }
+      })
+    })
+
+    // The OS notification of an approval names the action as the card does, not the wire
+    // spelling of a first-party tool (owner ask #5, ADR-105).
+    describe('the "Permission required" notification names the action, not its wire spelling', () => {
+      const ask = (toolName: string, subagentType?: string, engineId?: EngineId): string => {
+        // The replica owns the status the notification reads the session's engine from.
+        if (engineId) seed.status(routingId, makeSessionStatus({ sessionId: routingId, engineId }))
+        app.emit('session:approval-request', routingId, {
+          requestId: `req-${toolName}`,
+          toolName,
+          input: {},
+          ...(subagentType ? { agent: { agentId: 'a', label: 'pi', subagentType } } : {})
+        })
+        expect(notified).toHaveBeenCalledWith('Permission required', expect.anything())
+        return notified.mock.calls[0][1]?.body ?? ''
+      }
+
+      it("a Claude parent's own dispatch_agent ask", () => {
+        const body = ask('mcp__claude-ui-collab__dispatch_agent')
+        expect(body).toContain('X-Agent needs approval')
+        expect(body).not.toContain('mcp__')
+      })
+
+      it('an X-Agent session_message ask forwarded with the dispatch: prefix, in the target engine', () => {
+        const body = ask('dispatch:session_message', 'dispatch:pi')
+        expect(body).toContain('Session · message needs approval')
+        expect(body).not.toContain('dispatch:')
+      })
+
+      it('an X-Agent hand_back ask', () => {
+        const body = ask('dispatch:hand_back', 'dispatch:codex')
+        expect(body).toContain('Hand back needs approval')
+      })
+
+      it('a Claude X-Agent’s mcp__ ask is read by the Claude map', () => {
+        const body = ask('dispatch:mcp__claude-ui-sessions__session_message', 'dispatch:claude')
+        expect(body).toContain('Session · message needs approval')
+        expect(body).not.toContain('mcp__')
+      })
+
+      // Codex's map collapses every `mcp__…` name to the kind word "MCP": a first-party tool
+      // keeps its label, a third-party one must still say which tool it asks to run.
+      it('a third-party MCP tool names its server and tool, on every engine', () => {
+        for (const engine of ['claude', 'codex', 'pi', 'opencode'] as const) {
+          notified.mockClear()
+          const body = ask('mcp__github__create_issue', undefined, engine)
+          expect(body).toContain('github / create_issue needs approval')
+        }
+      })
+
+      it('a Codex parent’s first-party tool keeps its label, in either spelling', () => {
+        for (const wire of ['dispatch_agent', 'mcp__claude-ui-collab__dispatch_agent']) {
+          notified.mockClear()
+          expect(ask(wire, undefined, 'codex')).toContain('X-Agent needs approval')
+        }
+      })
+
+      it('a Codex X-Agent’s forwarded third-party MCP ask names its server and tool', () => {
+        const body = ask('dispatch:mcp__github__create_issue', 'dispatch:codex', 'claude')
+        expect(body).toContain('github / create_issue needs approval')
+        expect(body).not.toContain('dispatch:')
+      })
+    })
+
+    it('lets wakesParent: false override the type', () => {
+      // The emitter's word wins over the type set in both directions.
+      seed.taskStarted(routingId, {
+        toolUseId: 't1',
+        taskId: 'a1',
+        taskType: 'local_agent',
+        wakesParent: false
+      })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+    })
+
+    it('judges a record without wakesParent by the legacy type set', () => {
+      // An older replay: a shell record carries no field and stays "not working",
+      // an agent record carries none and still is.
       seed.taskStarted(routingId, { toolUseId: 't1', taskId: 'a1', taskType: 'local_bash' })
+      app.emit('session:result', routingId)
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+
+      useSessionStore.getState().setNeedsAttention(routingId, false)
+      seed.taskNotification(
+        routingId,
+        makeTaskNotification({ toolUseId: 't1', status: 'completed' })
+      )
+      seed.taskStarted(routingId, { toolUseId: 't2', taskId: 'a2', taskType: 'local_agent' })
+      app.emit('session:result', routingId)
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
+    })
+
+    it('does not claim the turn while a queued prompt is about to go out', () => {
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(false)
+      expect(notified).not.toHaveBeenCalled()
+    })
+
+    it('claims the turn for a queued prompt that is held behind a sign-in', () => {
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+      app.emit('session:auth-required', routingId, { providerId: 'chatgpt', message: 'sign in' })
+
+      app.emit('session:result', routingId)
+
+      expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
+    })
+
+    it('claims the turn again once the queue has drained', () => {
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+      seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'consumed' }])
 
       app.emit('session:result', routingId)
 
@@ -1610,10 +1906,93 @@ describe('useClaudeEvents extended component tests', () => {
       expect(useSessionStore.getState().sessions[routingId].needsAttention).toBe(true)
       expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
     })
+
+    describe('a result that cli.js follows with a hand-back turn (pendingWake)', () => {
+      const wakeResult = { totalCostUsd: 0, durationMs: 1, result: 'ok', pendingWake: true }
+      const plainResult = { totalCostUsd: 0, durationMs: 1, result: 'ok' }
+      const status = (state: 'idle' | 'running'): void =>
+        app.emit('session:status', routingId, makeSessionStatus({ state, sessionId: routingId }))
+      const attention = (): boolean => useSessionStore.getState().sessions[routingId].needsAttention
+
+      beforeEach(() => {
+        vi.useFakeTimers()
+      })
+      afterEach(() => {
+        vi.useRealTimers()
+      })
+
+      it('raises nothing at the result; the hand-back turn’s own result decides', () => {
+        app.emit('session:result', routingId, wakeResult)
+        status('idle')
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        // The extra turn starts ~17 ms later: the timer must be gone.
+        status('running')
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS * 2)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        app.emit('session:result', routingId, plainResult)
+        status('idle')
+        expect(attention()).toBe(true)
+        expect(notified).toHaveBeenCalledTimes(1)
+        expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+      })
+
+      it('falls back to the normal gate after 3 s when no turn follows', () => {
+        app.emit('session:result', routingId, wakeResult)
+        status('idle')
+
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS - 1)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        vi.advanceTimersByTime(1)
+        expect(attention()).toBe(true)
+        expect(notified).toHaveBeenCalledTimes(1)
+        expect(notified).toHaveBeenCalledWith('Ready for input', expect.anything())
+      })
+
+      it('applies the full gate at the fallback — waking tasks, a queued prompt', () => {
+        seed.taskStarted(routingId, { toolUseId: 't1', taskId: 'a1', taskType: 'local_agent' })
+        app.emit('session:result', routingId, wakeResult)
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+
+        seed.taskNotification(
+          routingId,
+          makeTaskNotification({ toolUseId: 't1', status: 'completed' })
+        )
+        seed.queue(routingId, [{ itemId: 'q1', text: 'next', state: 'queued' }])
+        app.emit('session:result', routingId, wakeResult)
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS)
+        expect(attention()).toBe(false)
+        expect(notified).not.toHaveBeenCalled()
+      })
+
+      it('a newer result replaces the pending timer instead of adding a second notification', () => {
+        app.emit('session:result', routingId, wakeResult)
+        vi.advanceTimersByTime(1000)
+        app.emit('session:result', routingId, plainResult)
+        expect(notified).toHaveBeenCalledTimes(1)
+
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS * 2)
+        expect(notified).toHaveBeenCalledTimes(1)
+      })
+
+      it('a removed session never fires the fallback', () => {
+        app.emit('session:result', routingId, wakeResult)
+        app.emit('session:removed', routingId)
+        vi.advanceTimersByTime(PENDING_WAKE_GRACE_MS * 2)
+        expect(notified).not.toHaveBeenCalled()
+      })
+    })
   })
 
-  describe('session:status worktree exit detection', () => {
-    it('clears worktreeInfo when cwd returns to originalCwd', () => {
+  describe('session:status never drops a worktree entry', () => {
+    it('does NOT clear worktreeInfo when the status cwd is the original cwd (it is the spawn cwd)', () => {
       const routingId = 'route-1'
       useSessionStore.getState().createNewSession(routingId, '/project/app')
       useSessionStore.getState().setWorktreeInfo(routingId, {
@@ -1636,8 +2015,8 @@ describe('useClaudeEvents extended component tests', () => {
         })
       )
 
-      expect(useSessionStore.getState().sessions[routingId].worktreeInfo).toBeNull()
-      expect(useSessionStore.getState().worktreeInfoMap[routingId]).toBeUndefined()
+      expect(useSessionStore.getState().sessions[routingId].worktreeInfo).not.toBeNull()
+      expect(useSessionStore.getState().worktreeInfoMap[routingId]).toBeDefined()
     })
 
     it('does not clear worktreeInfo when cwd is still in the worktree path', () => {

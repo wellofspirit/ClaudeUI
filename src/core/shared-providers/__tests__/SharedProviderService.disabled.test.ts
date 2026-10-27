@@ -87,18 +87,33 @@ function harness(
 
   /** A removal that fails once, per engine — an interrupted switch-off. */
   const failRemoval = { pi: false, opencode: false }
-  const authTarget = (store: Map<string, string>, engine: 'pi' | 'opencode') => ({
+  const remove = async (store: Map<string, string>, engine: 'pi' | 'opencode', id: string) => {
+    if (failRemoval[engine]) {
+      failRemoval[engine] = false
+      throw new Error(`${engine} auth.json is locked`)
+    }
+    store.delete(id)
+  }
+  const authTarget = (store: Map<string, string>) => ({
     setVendorApiKey: async (id: string, key: string) => void store.set(id, key),
     feedOauthCredential: async () => {},
-    removeVendorAuth: async (id: string) => {
-      if (failRemoval[engine]) {
-        failRemoval[engine] = false
-        throw new Error(`${engine} auth.json is locked`)
-      }
-      store.delete(id)
-    },
     listVendorCredentialIds: async () =>
       Object.fromEntries([...store.keys()].map((id) => [id, 'api' as const]))
+  })
+  // Each adapter gets only the removal verb it must call: pi's is
+  // `removeVendorAuth`; opencode's is the narrow `removeVendorKey`, and its
+  // target also carries the WIDE `removeVendorAuth` (every row the user has too),
+  // which only an explicit user Remove may reach — it throws if a route toggle does.
+  const piAuthTarget = () => ({
+    ...authTarget(piAuth),
+    removeVendorAuth: (id: string) => remove(piAuth, 'pi', id)
+  })
+  const opencodeAuthTarget = () => ({
+    ...authTarget(opencodeAuth),
+    removeVendorKey: (id: string) => remove(opencodeAuth, 'opencode', id),
+    removeVendorAuth: async (id: string): Promise<void> => {
+      throw new Error(`wide: a route toggle reached the wide removal of ${id}`)
+    }
   })
   /** The main-side key readers the service compares keys with. */
   const reader = (store: Map<string, string>) => ({
@@ -120,7 +135,7 @@ function harness(
     },
     pi: new PiSharedProviderAdapter({
       modelsPath,
-      auth: authTarget(piAuth, 'pi'),
+      auth: piAuthTarget(),
       invalidateModelCache: () => {},
       loadCatalog: async () => [],
       readModelAllowlist: () => allowlists.pi
@@ -130,7 +145,7 @@ function harness(
       writeConfig: (next) => {
         opencodeConfig = structuredClone(next)
       },
-      authTarget: authTarget(opencodeAuth, 'opencode'),
+      authTarget: opencodeAuthTarget(),
       invalidateModelCache: () => {},
       readModelAllowlist: () => allowlists.opencode
     }),

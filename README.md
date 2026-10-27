@@ -47,7 +47,7 @@ Issues and PRs are welcome. For anything non-trivial, open an issue first to dis
 
 ```bash
 bun run dev          # run the app
-bun run test         # unit, unit-node, component, e2e, browser (~1 min)
+bun run test         # unit, unit-node, unit-forks, component, e2e, browser (~35 s)
 bun run test:ci      # + git-backed tests (what CI runs)
 bun run typecheck && bun run lint
 ```

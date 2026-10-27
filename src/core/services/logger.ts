@@ -376,6 +376,7 @@ export const logger: {
   debug(source: string, message: string): void
   subscribe(fn: LogSubscriber): () => void
   applyFilter(filter: string, globalLevel?: LogLevel): void
+  isEnabled(source: string, level: LogLevel): boolean
 } = {
   /**
    * Global minimum log level.  Messages below this level are suppressed
@@ -429,6 +430,16 @@ export const logger: {
     const line = `[${timestamp()}] [DEBUG] [${source}] ${message}`
     console.log(line)
     writeToFile('DEBUG', source, message)
+  },
+
+  /**
+   * Would a message from `source` at `level` reach the console and the log file?
+   * For callers whose message is costly to BUILD (a multi-MB `JSON.stringify`):
+   * test first, so the work is only done when someone will read the line. Follows
+   * the same per-source-then-global rule the emitters apply.
+   */
+  isEnabled(source: string, level: LogLevel): boolean {
+    return shouldLog(source, level)
   },
 
   /**

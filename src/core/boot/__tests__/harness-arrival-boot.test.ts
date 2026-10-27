@@ -10,6 +10,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { opencodeCredentialStore } from '../../opencode/opencode-credentials'
 
 const usageMocks = vi.hoisted(() => ({
   usageFetcher: {
@@ -55,11 +56,13 @@ vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     setServerStartedHook: vi.fn(),
     setCallerSessionLookup: vi.fn(),
-    setDispatchAgent: vi.fn()
+    setDispatchAgent: vi.fn(),
+    setHandBack: vi.fn(),
+    setXAgentCaller: vi.fn()
   }
 }))
 vi.mock('../../services/cross-engine-dispatcher', () => ({
-  crossEngineDispatcher: { dispatch: vi.fn() }
+  crossEngineDispatcher: { dispatch: vi.fn(), configureParents: vi.fn(() => () => {}) }
 }))
 const arrivalMocks = vi.hoisted(() => {
   const order: string[] = []
@@ -74,11 +77,17 @@ const arrivalMocks = vi.hoisted(() => {
     sharedProviderService: {
       syncAll: vi.fn(async () => void order.push('sync')),
       adoptNativeKeys: vi.fn(async () => void order.push('adopt')),
-      harnessArrived: vi.fn(async (id: string) => void order.push(`providers:${id}`))
+      harnessArrived: vi.fn(async (id: string) => void order.push(`providers:${id}`)),
+      configure: vi.fn()
     },
     watch: { ids: [] as string[], onArrival: null as ((id: string) => void) | null }
   }
 })
+const syncHostMocks = vi.hoisted(() => ({ emitEvent: vi.fn() }))
+vi.mock('../../services/sync-host', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/sync-host')>()),
+  emitEvent: syncHostMocks.emitEvent
+}))
 vi.mock('../../auth/vault/CredentialSync', () => ({ credentialSync: arrivalMocks.credentialSync }))
 vi.mock('../../shared-providers', () => ({
   sharedProviderService: arrivalMocks.sharedProviderService
@@ -90,6 +99,8 @@ vi.mock('../../harness/arrivals', () => ({
     return () => {}
   })
 }))
+const claimMocks = vi.hoisted(() => ({ claimedOpencodeIds: vi.fn((): Set<string> => new Set()) }))
+vi.mock('../../shared-providers/opencode-claims', () => claimMocks)
 vi.mock('../host-anchor', () => ({
   createHostAnchor: vi.fn(() => ({ reconcileAndAutostart: vi.fn(async () => {}) }))
 }))
@@ -117,6 +128,33 @@ describe('a harness arriving, at the boot seam', () => {
     expect(arrivalMocks.credentialSync.harnessArrived).toHaveBeenCalledWith('pi')
   })
 
+  it('hands the dispatcher its parent lookup and the re-key feed, so a run outlives its launching call (ADR-105)', async () => {
+    const { startCoreServices } = await import('../core-services')
+    const { crossEngineDispatcher } = await import('../../services/cross-engine-dispatcher')
+    const unsubscribe = vi.fn()
+    vi.mocked(crossEngineDispatcher.configureParents).mockReturnValueOnce(unsubscribe)
+    const core = startCoreServices({
+      remoteAccessDisabled: true,
+      authDeps: {} as never,
+      autostart: false
+    })
+    const [lookup, onRekey, onHostEvent] = vi.mocked(crossEngineDispatcher.configureParents).mock
+      .calls[0]
+    expect(lookup).toMatchObject({
+      session: expect.any(Function),
+      emit: expect.any(Function),
+      readMessages: expect.any(Function)
+    })
+    expect(onRekey).toEqual(expect.any(Function))
+    // ...and the host's event feed: a parent's disconnect re-raises its X-Agents' cards, its
+    // deletion ends them.
+    expect(onHostEvent).toEqual(expect.any(Function))
+    // The host's teardown drops that subscription.
+    expect(unsubscribe).not.toHaveBeenCalled()
+    core.releaseDispatchParents()
+    expect(unsubscribe).toHaveBeenCalledOnce()
+  })
+
   it('a failed provider delivery still feeds the credential', async () => {
     const { startCoreServices } = await import('../core-services')
     startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })
@@ -135,5 +173,67 @@ describe('a harness arriving, at the boot seam', () => {
       ([options]) => typeof (options as { harnessRuns?: unknown }).harnessRuns === 'function'
     )
     expect(wired).toBeDefined()
+  })
+
+  it('turns a vault API-key change into the payload-free provider:credentials-changed', async () => {
+    const { startCoreServices } = await import('../core-services')
+    startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })
+    const hooks = arrivalMocks.sharedProviderService.configure.mock.calls.at(-1)?.[0] as
+      { onApiKeyChanged?: () => void } | undefined
+    expect(hooks?.onApiKeyChanged).toBeTypeOf('function')
+    syncHostMocks.emitEvent.mockClear()
+    hooks!.onApiKeyChanged!()
+    expect(syncHostMocks.emitEvent).toHaveBeenCalledWith('provider:credentials-changed', [])
+  })
+})
+
+describe('an opencode Remove, at the boot seam (AC-6)', () => {
+  /**
+   * `vendor-auth:remove` and the Remove modal reach `removeVendorAuth` with no other check, so
+   * the store's in-lease guard is the ONLY refusal for a provider an enabled shared route
+   * delivers. Its production predicate is wired here, in `startCoreServices`, and nowhere the
+   * store's own tests (which inject a guard) can see.
+   */
+  async function wiredGuard(): Promise<(integrationID: string) => boolean | Promise<boolean>> {
+    const configure = vi.spyOn(opencodeCredentialStore, 'configure').mockImplementation(() => {})
+    try {
+      const { startCoreServices } = await import('../core-services')
+      startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })
+      const guard = configure.mock.calls
+        .map(([deps]) => deps.claimedBySharedRoute)
+        .find((fn) => fn !== undefined)
+      expect(guard, 'startCoreServices wires claimedBySharedRoute into the store').toBeDefined()
+      return guard!
+    } finally {
+      configure.mockRestore()
+    }
+  }
+
+  it('hands the credential store a guard that answers from the enabled shared routes', async () => {
+    claimMocks.claimedOpencodeIds.mockReturnValue(new Set(['openai']))
+    const guard = await wiredGuard()
+
+    expect(await guard('openai')).toBe(true)
+    expect(await guard('groq')).toBe(false)
+  })
+
+  it('reads the claims fresh on every ask, so a route enabled mid-session is caught', async () => {
+    claimMocks.claimedOpencodeIds.mockReturnValue(new Set())
+    const guard = await wiredGuard()
+    expect(await guard('openai')).toBe(false)
+
+    claimMocks.claimedOpencodeIds.mockReturnValue(new Set(['openai']))
+    expect(await guard('openai')).toBe(true)
+  })
+
+  it('fails closed: a claim lookup that throws makes the guard throw, never answer false', async () => {
+    claimMocks.claimedOpencodeIds.mockImplementation(() => {
+      throw new Error('definitions unreadable')
+    })
+    const guard = await wiredGuard()
+
+    await expect(Promise.resolve().then(() => guard('openai'))).rejects.toThrow(
+      'definitions unreadable'
+    )
   })
 })

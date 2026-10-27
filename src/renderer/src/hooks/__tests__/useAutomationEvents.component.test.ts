@@ -140,7 +140,6 @@ beforeEach(() => {
 
   // Provide a minimal window.api stub. The automation store doesn't call
   // window.api internally, but the session store may on initialisation.
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     listAutomations: () => Promise.resolve([]),
     saveSessionConfig: () => {},

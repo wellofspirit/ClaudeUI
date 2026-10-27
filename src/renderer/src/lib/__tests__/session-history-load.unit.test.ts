@@ -75,15 +75,13 @@ beforeEach(() => {
   resetReplicaSeam()
   loadSessionHistory.mockReset()
   logRelay.mockReset()
-  ;(globalThis as unknown as { window: { api: unknown } }).window = {
-    api: {
-      loadSessionHistory,
-      loadSubagentHistory: vi.fn(async () => []),
-      loadOpencodeHistory: vi.fn(),
-      saveSessionConfig: vi.fn(),
-      logRelay
-    }
-  } as never
+  ;(window as unknown as { api: unknown }).api = {
+    loadSessionHistory,
+    loadSubagentHistory: vi.fn(async () => []),
+    loadOpencodeHistory: vi.fn(),
+    saveSessionConfig: vi.fn(),
+    logRelay
+  }
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},
@@ -553,6 +551,59 @@ describe('a fill that live events already beat', () => {
     expect(ids('sess')).toEqual(['h1', 'h2'])
     expect(store().sessions['sess'].evicted).toBe(false)
   })
+
+  it('keeps the running X-Agents the read reports (ADR-105 §5)', async () => {
+    evictedEntry([], { sdkActive: true })
+    const record = { taskId: 's-abc123', taskType: 'dispatch', isBackgrounded: true, startedAt: 5 }
+    loadSessionHistory.mockResolvedValue({
+      ...(history('h1') as object),
+      activeTasks: { toolu_1: record }
+    })
+
+    await loadResumedTranscript('sess', { resumeSessionId: 'sess' })
+
+    expect(store().sessions['sess'].activeTasks).toEqual({ toolu_1: record })
+  })
+})
+
+describe('a sidebar click on a parent whose X-Agent still runs (ADR-105 §5)', () => {
+  const record = { taskId: 's-abc123', taskType: 'dispatch', isBackgrounded: true, startedAt: 5 }
+  const click = (info: SessionInfo): Promise<string> =>
+    loadSessionIntoStore(info, { isCurrent: () => true, replace: false })
+
+  it('Claude: the read’s active tasks reach the store beside the transcript', async () => {
+    loadSessionHistory.mockResolvedValue({
+      ...(history('h1') as object),
+      activeTasks: { toolu_1: record }
+    })
+    expect(await click(INFO)).toBe('loaded')
+    expect(store().sessions['sess'].isHistorical).toBe(true)
+    expect(store().sessions['sess'].activeTasks).toEqual({ toolu_1: record })
+  })
+
+  it('Codex: the same', async () => {
+    loadSessionHistory.mockResolvedValue({
+      ...(history('h1') as object),
+      activeTasks: { toolu_1: record }
+    })
+    expect(await click({ ...INFO, engineId: 'codex' })).toBe('loaded')
+    expect(store().sessions['sess'].activeTasks).toEqual({ toolu_1: record })
+  })
+
+  for (const engineId of ['opencode', 'pi'] as const) {
+    it(`${engineId}: the same`, async () => {
+      const load = vi.fn(async () => ({
+        messages: [message('h1')],
+        statusLine: null,
+        activeTasks: { toolu_1: record }
+      }))
+      ;(globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api[
+        engineId === 'opencode' ? 'loadOpencodeHistory' : 'loadPiHistory'
+      ] = load
+      expect(await click({ ...INFO, engineId })).toBe('loaded')
+      expect(store().sessions['sess'].activeTasks).toEqual({ toolu_1: record })
+    })
+  }
 })
 
 describe('finishHydrate', () => {

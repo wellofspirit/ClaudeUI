@@ -7,9 +7,17 @@ import '../providers/register-engines'
 import { readSessionHistory as loadSessionHistory } from './engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from './claude-transcript-locator'
-import { getSessionMeta, renameUsageEventParent } from './db'
+import {
+  getSessionMeta,
+  moveDispatchTargetParent,
+  moveSessionInbox,
+  moveSessionMeta,
+  renameUsageEventParent
+} from './db'
 import { logger } from './logger'
+import { noteTurnStopped } from './context-pressure'
 import { syncCore } from './sync-host'
+import { moveCustomTitle } from './ui-config'
 
 /**
  * Unsubscribe for whichever SessionManager currently owns core's rekeys.
@@ -120,6 +128,52 @@ export class SessionManager {
         `renameUsageEventParent failed (child usage rows may be orphaned): ${err instanceof Error ? err.message : String(err)}`
       )
     }
+
+    // The persisted engine/model row follows the id HERE, on the host. It used to
+    // move only as a side effect of a client's full-map `saveSessionConfig`
+    // (the renamed map lacked the old id, so the host's delete-absent loop dropped
+    // it) — which is how a client that knew nothing of a session could delete or
+    // revert its row. That loop is gone; the rekey is the event that moves it.
+    //
+    // The held inbox moves first: `moveSessionMeta` may drop the old id's rows
+    // (a row already at the new id wins), and deleting a session's meta deletes
+    // its inbox with it.
+    try {
+      moveSessionInbox(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveSessionInbox failed (held messages may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    try {
+      moveSessionMeta(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveSessionMeta failed (the engine row may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    // The X-Agents this session dispatched (ADR-105) are owned by its durable id, so
+    // a continuation after the rekey still finds them.
+    try {
+      moveDispatchTargetParent(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveDispatchTargetParent failed (dispatch targets may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    // A title set before the rekey (a session another session started is named
+    // before its engine reports an id) moves on disk with it, no client needed.
+    try {
+      moveCustomTitle(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveCustomTitle failed (the title may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   }
 
   cancel(routingId: string): void {
@@ -132,6 +186,8 @@ export class SessionManager {
   async interrupt(routingId: string): Promise<void> {
     const session = this.sessions.get(routingId)
     if (session) {
+      // Context pressure must see a stop (the engine hides the teardown error of a stopped turn).
+      noteTurnStopped(routingId)
       await session.interrupt()
     }
   }

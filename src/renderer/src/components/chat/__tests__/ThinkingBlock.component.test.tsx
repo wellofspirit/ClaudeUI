@@ -9,7 +9,6 @@ import { render, screen } from '@testing-library/react'
 import { ThinkingBlock } from '../ThinkingBlock'
 
 beforeEach(() => {
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = { logError: () => {} }
 })
 

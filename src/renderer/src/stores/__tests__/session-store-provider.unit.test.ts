@@ -40,7 +40,6 @@ beforeEach(() => {
   // the previous test's sessions (SyncCore phase 4c).
   resetReplicaSeam()
   saveSessionConfigSpy = vi.fn()
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = {
     saveSessionConfig: saveSessionConfigSpy,
     saveSettings: vi.fn(),
@@ -455,7 +454,6 @@ describe('setSelectedEngine', () => {
 describe('hydrateConfigFromDisk loads piDefaultModel', () => {
   /** Minimal window.api stub covering exactly what hydrateConfigFromDisk reads. */
   function stubWindowApi(piConfig?: { defaultModel?: string }): void {
-    ;(globalThis as any).window = globalThis.window || {}
     ;(globalThis as any).window.api = {
       loadSettings: vi.fn().mockResolvedValue({}),
       loadSessionConfig: vi.fn().mockResolvedValue({}),

@@ -132,6 +132,10 @@ export interface SystemMessage extends BaseSDKMessage {
    * 04-system-subtypes.md §4.5).
    */
   is_backgrounded?: boolean
+  /** task_started-only: the `task_id` of the SUBAGENT that launched this task; absent when the main thread did. */
+  parent_task_id?: string
+  /** task_started-only, `local_agent`: 1 for an agent the main thread launched, 2+ for one a subagent launched. */
+  spawn_depth?: number
   /** task_updated patch — the fields of the task's record that changed */
   patch?: {
     status?: string
@@ -175,6 +179,15 @@ export interface SystemMessage extends BaseSDKMessage {
   skip_transcript?: boolean
   /** task_notification: an ambient (housekeeping) task the model never sees. */
   ambient?: boolean
+  /**
+   * task_notification of an Agent-tool subagent that reports through its
+   * `SubagentHandback` tool (auto mode, cli.js 2.1.293+): how its report
+   * reached the parent. Under it `summary` is a pointer sentence, not the
+   * report (docs/protocol-cc/04-system-subtypes.md §4.4).
+   */
+  handback?: 'send' | 'flagged' | 'withheld' | string
+  /** The report a `send` / `flagged` hand-back delivered, with the auto-mode warning on a flagged one. Absent for `withheld`. */
+  handback_report?: { text?: string; warning?: string }
   /** model_refusal_fallback / model_fallback fields (docs/protocol-cc/04-system-subtypes.md §4.20–4.21) */
   trigger?: string
   direction?: 'retry' | 'revert' | 'sticky'
@@ -211,6 +224,10 @@ export interface ResultMessage extends BaseSDKMessage {
   duration_api_ms?: number
   result?: string
   errors?: string[]
+  /** Model rounds the result covers; `0` on the pointer result of a hand-back (see `isHandbackPointerResult`). */
+  num_turns?: number
+  /** What started the turn this result ends: `{kind: 'task-notification', producer, runId}` for a notification-driven one. */
+  origin?: { kind?: string; [k: string]: unknown }
   /** Per-turn token usage — `{input_tokens, output_tokens, cache_creation_input_tokens,
    *  cache_read_input_tokens, ...}` (docs/protocol-cc/03-inbound-messages.md §3.7). */
   usage?: Record<string, unknown>
@@ -353,6 +370,10 @@ export interface CanUseToolContext {
   suggestions?: PermissionUpdate[]
   blockedPath?: string
   decisionReason?: string
+  /** cli.js's `decision_reason_type` for the ask (`classifier`, `rule`, `mode`, …). */
+  decisionReasonType?: string
+  /** cli.js's `decision_reason_code` (`classifier_transcript_too_long`, …), when it sends one. */
+  decisionReasonCode?: string
   title?: string
   displayName?: string
   description?: string
@@ -560,6 +581,19 @@ export interface SdkMcpTool {
   description: string
   inputSchema: Record<string, ZodLike>
   handler: (input: Record<string, unknown>, extra?: SdkToolExtra) => Promise<ToolResultContent>
+  /**
+   * Keep this tool in the model's prompt from the first turn instead of letting
+   * Claude Code defer it behind its tool search (`_meta["anthropic/alwaysLoad"]`
+   * on the `tools/list` entry). Left unset, cli.js decides.
+   */
+  alwaysLoad?: boolean
+  /**
+   * Let the handler see input keys the `inputSchema` does not declare. By default the shape is
+   * validated as a stripping object, so an undeclared key never reaches the handler; the tool's
+   * `tools/list` schema lists only the declared keys either way. For a handler that must answer
+   * a removed parameter without advertising it.
+   */
+  passthrough?: boolean
 }
 
 /** Minimal Zod-shaped interface — we only need parsing and JSON schema conversion. */
@@ -639,6 +673,14 @@ export interface QueryOptions {
   abortController?: AbortController
   mcpServers?: Record<string, McpServerConfig>
   canUseTool?: CanUseTool
+  /**
+   * Called synchronously with every stream frame the child writes (assistant,
+   * stream_event, user, system, …), in wire order, before it is queued for the
+   * consumer — so a control request that follows a frame on the wire (an MCP
+   * `tools/call` after the assistant frame that announced it) finds the frame
+   * already seen. Must not throw; a throw is swallowed.
+   */
+  onInboundFrame?: (frame: Record<string, unknown>) => void
   settingSources?: SettingSource[]
   includePartialMessages?: boolean
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | string

@@ -19,6 +19,7 @@ import { HARNESS_IDS } from '../../../../shared/harness-types'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { useSessionStore } from '../../stores/session-store'
 import { EngineLogo } from '../shared/EngineLogo'
+import { ProgressBar } from '../shared/ProgressBar'
 import type { SelectMenuOption } from '../shared/SelectMenu'
 import { useEscapeLayer } from '../shared/use-escape-layer'
 import { useConnectionHoldsAdmin } from './connection-admin'
@@ -93,36 +94,6 @@ const VERDICT_TONE: Record<DetectedVerdict, ChipTone> = {
   unsupported: 'muted',
   incompatible: 'danger',
   failed: 'danger'
-}
-
-/** A thin progress bar: determinate with a percentage, pulsing without. Shared with the sidebar's update panel. */
-export function ProgressBar({
-  percent,
-  className,
-  testid,
-  dataId
-}: {
-  percent: number | null
-  className?: string
-  testid?: string
-  dataId?: string
-}): React.JSX.Element {
-  return (
-    <span
-      data-testid={testid}
-      data-id={dataId}
-      role="progressbar"
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={percent ?? undefined}
-      className={`block h-[3px] rounded-full bg-bg-hover overflow-hidden ${className ?? ''}`}
-    >
-      <span
-        className={`block h-full bg-accent ${percent === null ? 'w-1/3 animate-pulse' : ''}`}
-        style={percent === null ? undefined : { width: `${percent}%` }}
-      />
-    </span>
-  )
 }
 
 function CrossIcon(): React.JSX.Element {

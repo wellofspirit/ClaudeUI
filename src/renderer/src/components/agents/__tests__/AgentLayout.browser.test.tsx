@@ -629,6 +629,12 @@ function seedTypeRows(): void {
       'dispatch',
       { engine: 'opencode', model: 'deepseek-v4', prompt: 'review it' },
       'mcp__claude-ui-collab__dispatch_agent'
+    ),
+    mk(
+      'tu-dispatch-named',
+      'e1',
+      { engine: 'codex', name: 'e1', description: 'Implement E1', prompt: 'build it' },
+      'mcp__claude-ui-collab__dispatch_agent'
     )
   ]
   useSessionStore.setState({
@@ -688,6 +694,35 @@ describe('the type tile in the agent list (ADR-094)', () => {
     expect(dispatch.innerText.trim()).toBe('X')
     expect(dispatch.querySelector('[data-testid="AgentTile.bot"]')).not.toBeNull()
     expect(dispatch.title).toBe('Dispatch → opencode · deepseek-v4')
+  })
+
+  it('puts the engine word right after a short X-Agent name, on its line, at any width', async () => {
+    for (const width of [320, 420]) {
+      const root = await mountPanel(width)
+      const row = rowOf(root, 'tu-dispatch-named')
+      const name = byTestId(row, 'AgentRow.name')
+      const engine = byTestId(row, 'AgentRow.engine')
+      expect(name.innerText).toBe('e1')
+      expect(engine.innerText).toBe('codex')
+      // The name's width floor must not open a gap between a short name's TEXT and its
+      // engine word (the box can be wider than the text, so measure the text itself).
+      const range = document.createRange()
+      range.selectNodeContents(name)
+      const textRight = range.getBoundingClientRect().right
+      expect(rectOf(engine).left - textRight).toBeLessThanOrEqual(7)
+      expect(rectOf(engine).left).toBeGreaterThanOrEqual(textRight - 0.5)
+      expect(Math.abs(centreY(engine) - centreY(name))).toBeLessThanOrEqual(2)
+      expect(isInside(engine, row)).toBe(true)
+      expect(hasNoHorizontalOverflow(row)).toBe(true)
+      cleanup()
+    }
+  })
+
+  it('drops the engine word below a 300px roster, so the name keeps the room', async () => {
+    const row = rowOf(await mountPanel(240), 'tu-dispatch-named')
+    expect(getComputedStyle(byTestId(row, 'AgentRow.engine')).display).toBe('none')
+    expect(byTestId(row, 'AgentRow.name').innerText).toBe('e1')
+    expect(hasNoHorizontalOverflow(row)).toBe(true)
   })
 
   it('lines the labels up across bot alone, bot + 1 letter and bot + 2 letters', async () => {

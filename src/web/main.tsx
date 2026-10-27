@@ -6,6 +6,11 @@ import { RemoteConnection, type ConnectionState } from './connection'
 import { ErrorBoundary } from '@renderer/components/ErrorBoundary'
 import { createWebSocketApi } from './api-adapter'
 import { setSyncClient } from '../core/shared/sync/client-registry'
+import {
+  SYNC_REPORT_TIMING_CHANNEL,
+  relaySyncTiming,
+  toSyncTimingReport
+} from '../core/shared/sync/sync-timing'
 import { ConnectionOverlay } from './components/ConnectionOverlay'
 import { PasswordLogin } from './components/PasswordLogin'
 import { PasskeyLogin } from './components/PasskeyLogin'
@@ -261,6 +266,15 @@ function RemoteApp(): React.JSX.Element {
     if (state === 'passkey-required') {
       setPhase((prev) => (prev.kind === 'enroll' ? prev : { kind: 'passkey', error: err }))
     }
+    // Retire a passkey phase as soon as the socket is ACCEPTED, not only at
+    // `connected`: the full sync that follows a passkey sign-in is the long
+    // part of the wait (seconds, on a phone), and it has to show the overlay's
+    // progress bar rather than the sign-in button the ceremony already
+    // finished with. A ceremony owed again later re-enters via the branch
+    // above. The enroll phase is untouched — an enroll-only socket never syncs.
+    if (state === 'syncing') {
+      setPhase((prev) => (prev.kind === 'passkey' ? { kind: 'connecting' } : prev))
+    }
     // Reaching `connected` RETIRES a ceremony phase. Without this the screen
     // would latch for the page's lifetime and a later transient reconnect —
     // a phone waking up — would throw the operator back onto a sign-in button
@@ -365,6 +379,12 @@ function RemoteApp(): React.JSX.Element {
     // isResync=true from the second sync-full onward — see hasHydratedRef.
     const isResync = hasHydratedRef.current
     hasHydratedRef.current = true
+    // `SyncStats` client timing (sync-core.md § Measuring a full sync): the frame's
+    // receive-side cost from the connection, plus the apply time measured here —
+    // dynamic-import wait included, since on a first load that wait is part of what
+    // the user sits through.
+    const frameTiming = connection.takeFullFrameTiming()
+    const hydrateStart = performance.now()
     Promise.all([
       import('@renderer/stores/replica'),
       import('@renderer/utils/projection-audit'),
@@ -381,6 +401,24 @@ function RemoteApp(): React.JSX.Element {
       // hardest to notice and hardest to reproduce, so it audits here too.
       startProjectionAudit()
       const outcome = hydrateReplica(snapshot, isResync)
+      const timing = {
+        transport: 'web',
+        ...frameTiming,
+        hydrateMs: performance.now() - hydrateStart
+      } as const
+      // The console copy, then the one that matters: the HOST log, through the
+      // remote `sync:report-timing` query. Fire-and-forget and never awaited — a
+      // refusal, an older host without the channel or a dead socket must not touch
+      // hydrate, so the sync part is guarded too and the rejection is swallowed.
+      relaySyncTiming(api.logRelay, timing)
+      const report = toSyncTimingReport(timing)
+      if (report) {
+        try {
+          connection.invoke(SYNC_REPORT_TIMING_CHANNEL, report).catch(() => {})
+        } catch {
+          /* diagnostic only */
+        }
+      }
       // Before the post-hydrate reads, so nothing they do can keep the app from
       // rendering.
       setReady(true)
@@ -679,7 +717,7 @@ function RemoteApp(): React.JSX.Element {
           }}
         />
       )}
-      <ConnectionOverlay state={connState} error={error} />
+      <ConnectionOverlay state={connState} error={error} connection={connection} />
       {/* Above the app, below the connection overlay: a ceremony is owed on a
           LIVE connection, so it must never cover the screen that says the
           connection is gone. */}

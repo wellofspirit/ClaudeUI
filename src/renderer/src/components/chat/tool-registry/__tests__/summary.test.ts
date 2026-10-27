@@ -219,12 +219,11 @@ describe('displayName — Claude passthrough', () => {
     }
   })
 
-  it('passes through MCP tool names verbatim', () => {
-    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui__render_mermaid')).toBe(
-      'mcp__claude-ui__render_mermaid'
-    )
-    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui-mockup__create_mockup')).toBe(
-      'mcp__claude-ui-mockup__create_mockup'
+  it('names ClaudeUI own MCP tools, and passes every other MCP tool through verbatim', () => {
+    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui__render_mermaid')).toBe('Diagram')
+    expect(ClaudeEngineToolMap.displayName('mcp__claude-ui-mockup__create_mockup')).toBe('Mockup')
+    expect(ClaudeEngineToolMap.displayName('mcp__github__create_issue')).toBe(
+      'mcp__github__create_issue'
     )
   })
 
@@ -248,7 +247,7 @@ describe('displayName — opencode prettify map', () => {
     expect(OpencodeEngineToolMap.displayName('task')).toBe('Task')
     expect(OpencodeEngineToolMap.displayName('question')).toBe('AskUserQuestion')
     expect(OpencodeEngineToolMap.displayName('apply_patch')).toBe('Patch')
-    expect(OpencodeEngineToolMap.displayName('claudeui_render_mermaid')).toBe('Mermaid')
+    expect(OpencodeEngineToolMap.displayName('claudeui_render_mermaid')).toBe('Diagram')
     expect(OpencodeEngineToolMap.displayName('claudeui_create_mockup')).toBe('Mockup')
     expect(OpencodeEngineToolMap.displayName('claudeui_show_mockup')).toBe('Mockup')
   })

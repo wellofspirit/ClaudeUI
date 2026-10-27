@@ -119,7 +119,7 @@ function adapter(): OpencodeSharedProviderAdapter {
     readModelAllowlist: () => ({}),
     authTarget: {
       setVendorApiKey: async () => {},
-      removeVendorAuth: async () => {}
+      removeVendorKey: async () => {}
     }
   })
 }

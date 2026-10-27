@@ -59,7 +59,9 @@ import { reconcileAfterReconnect } from './reconnect'
 import { convertOpencodeHistory, readOpencodeHistory } from './history'
 import { ShellOutputPoller } from './shell-output-poller'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
+import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
+import { sessionMessageNote } from '../services/agent-note'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { AccountIdentity } from '../../shared/account-key'
 import { resolveOpencodeCapabilities } from '../../shared/model-capabilities'
@@ -96,6 +98,8 @@ import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
 import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
+import { applySessionMoved } from '../services/worktree-detect'
+import { emitEvent } from '../services/sync-host'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { opencodeAuthHooks } from './opencode-auth-hooks'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
@@ -124,6 +128,17 @@ import { ChildRulesetKeeper } from './child-rulesets'
 import { resolveOpencodeOwnDirAllows } from './own-dirs'
 import { locationWorktree, stopOpencodeSessions } from './session-support'
 import { hostPrecheck, type HostPrecheckContext } from './host-precheck'
+import { userDenyRule } from './wildcard'
+import {
+  auditSessionToolDenial,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
+import {
+  SESSION_TOOLS_SERVER_NAME,
+  sessionToolBareName,
+  type SessionToolName
+} from '../../shared/session-tools-description'
 import { OpencodeSessionAllows } from './session-allows'
 import { reviewRationale } from '../shared/tool-review'
 import {
@@ -134,7 +149,20 @@ import {
 import { runJudgePipeline } from '../automode/judge-pipeline'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import { blockGrantKey } from '../automode/blocked-calls'
-import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
+import { cleanAgentLabel } from '../automode/agent-label'
+import { inTimeOrder } from '../automode/trajectory'
+import { ChildJudgeStates } from './child-judge-state'
+import { refreshChatgptAccounts } from '../automode/judge-accounts'
+import {
+  fallbackJudgeAccountFor,
+  fallbackJudgeLabel,
+  fallbackJudgeModelFor,
+  fallbackUnavailableMessage,
+  judgeUnavailableMessage,
+  makeFallbackJudge,
+  makeSessionJudgeTransport,
+  staleJudgeModelMessage
+} from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
   allowRuleReviewBlock,
@@ -142,21 +170,14 @@ import {
   autoModeReviewBlock,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { effectiveShellCwd } from '../automode/read-only-gate'
+import { captureShellActionMeta, opencodeShellFor } from '../automode/action-meta'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { isShellToolName } from '../automode/shell-lexical'
 import {
-  analyzeRedirects,
-  captureGitConfigArmed,
   captureGitRemotes,
-  captureGitStatus,
   captureRepoVisibility,
-  hasGitSegment,
-  needsGitStatus,
-  needsRepoVisibility,
   recordToolOutcome,
   shellCommandOf,
-  tempDirRoots,
   type GitRemote,
   type RepoVisibility,
   type ToolOutcome
@@ -256,7 +277,19 @@ function tokensOf(t: {
   }
 }
 
+/** A tool-call id safe to quote in a host note (provider-stream data is not trusted). */
+const SAFE_CALL_ID = /^[A-Za-z0-9_.:-]{1,128}$/
+
 const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/** The card's explanation when the call's input was not known yet (it could not be scoped). */
+const UNSCOPED_SESSION_TOOL_REASON =
+  "ClaudeUI could not see this call's arguments yet, so it cannot check which session it targets. Approve only if you expect it."
+
+/** The session tool an opencode permission ask (`claudeui_session_*`) is for, or null. */
+function sessionToolOfAsk(action: string): SessionToolName | null {
+  return action.startsWith('claudeui_') ? sessionToolBareName(action) : null
+}
 
 export class OpencodeSession extends BaseSession {
   readonly engineId = 'opencode' as const
@@ -381,7 +414,11 @@ export class OpencodeSession extends BaseSession {
   private autoDenials = new AutoModeDenialTracker()
   private staleJudgeModelReported = false
   private judgeRouteUnavailableReported = false
+  private fallbackRouteUnavailableReported = false
+  private staleFallbackJudgeLogged = false
   private toolOutcomes = new Map<string, ToolOutcome>()
+  /** Per-subagent-child judge context (trajectory, outcomes, denial caps) by child session id. */
+  private readonly childJudge = new ChildJudgeStates()
   private sessionRemotes: GitRemote[] | null = null
   private sessionRemotesPromise: Promise<GitRemote[]> | null = null
   private sessionRepoVisibility: RepoVisibility | null = null
@@ -397,6 +434,9 @@ export class OpencodeSession extends BaseSession {
   private resumeSessionId: string | undefined
   /** The last turn was held before sending for a ChatGPT sign-in (ADR-097 §5). */
   private authHeld = false
+  /** Construction time: redirect mtimes at or after it are `modifiedSinceSessionStart`.
+   *  A resumed session restarts the clock — deliberately conservative. */
+  private readonly sessionStartMs = Date.now()
 
   constructor(
     routingId: string,
@@ -515,8 +555,24 @@ export class OpencodeSession extends BaseSession {
     return this.permissionMode
   }
 
+  /** A live background subagent keeps the session: its end (and its notification) must find it. */
+  protected override idleTimerHeld(): boolean {
+    return this.mapper?.hasLiveBackgroundChild() === true || super.idleTimerHeld()
+  }
+
+  /**
+   * A background child started or ended: hold the idle timer for it, or arm the
+   * one that was held (pi's `backgroundWorkChanged`). A busy session re-arms at
+   * its turn's end.
+   */
+  private backgroundWorkChanged(): void {
+    if (this.isProcessing) return
+    this.rearmIdleTimer()
+  }
+
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
+    if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info('OpencodeSession', `Idle timeout — auto-disconnecting`)
@@ -557,6 +613,53 @@ export class OpencodeSession extends BaseSession {
   // ── Turns ──────────────────────────────────────────────────────────────────
 
   async run(prompt: string | null, attachments?: AttachmentUpload[]): Promise<void> {
+    return this.runPrompt(prompt, attachments)
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, as a plain prompt
+   * whose text names its sender and says it is not the user's. A running turn
+   * takes it as a steer, posted at once so a refusal is known; an idle session
+   * starts a turn on it. The delivered row comes back through the feed as a
+   * user row of that wrapper, which `userChatMessage` turns into a note (live
+   * and on reload), and which is never put in `messageHistory` as the user's.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const text = buildSessionMessageWrapper(wrapperSender(item), item.text)
+    if (this.isProcessing && this.client && this.openSessionId) {
+      try {
+        await this.postNonUserPrompt(text, item)
+        return 'queued'
+      } catch (err) {
+        logger.warn('OpencodeSession', `non-user steer not posted: ${errText(err)}`)
+        return 'unavailable'
+      }
+    }
+    const busy = this.isProcessing
+    // Answer only once opencode has the item in its inbox: connecting, creating
+    // the session and the post can all fail, and then the caller holds it
+    // (`unavailable`) instead of counting a turn that never started.
+    const posted = await new Promise<boolean>((settle) => {
+      this.runPrompt(text, undefined, item, settle)
+        .catch((err) => logger.warn('OpencodeSession', `non-user turn failed: ${errText(err)}`))
+        .finally(() => settle(false))
+    })
+    if (!posted) return 'unavailable'
+    return busy ? 'queued' : 'started'
+  }
+
+  /** The opencode connection is up: a message does not reconnect a closed session. */
+  isEngineLive(): boolean {
+    return !!this.client && !!this.openSessionId && !this.disconnected
+  }
+
+  private async runPrompt(
+    prompt: string | null,
+    attachments?: AttachmentUpload[],
+    nonUser?: NonUserItem,
+    /** Non-user only: told once whether opencode took the item (first call wins). */
+    settle?: (posted: boolean) => void
+  ): Promise<void> {
     this.clearInactivityTimer()
     this._cancelled = false
     this.disconnected = false
@@ -573,16 +676,21 @@ export class OpencodeSession extends BaseSession {
       try {
         await this.establishingPromise
       } catch {
-        return // the first prompt already surfaced its error
+        // the first prompt already surfaced its error
+        settle?.(false)
+        return
       }
-      if (this._cancelled || !this.client || !this.openSessionId) return
-      return this.steer(prompt, attachments)
+      if (this._cancelled || !this.client || !this.openSessionId) {
+        settle?.(false)
+        return
+      }
+      return this.steer(prompt, attachments, nonUser, settle)
     }
 
     // A turn is running: the prompt goes into it (the inbox steers it at the
     // next step boundary). The send path normally queues instead.
     if (this.isProcessing && this.client && this.openSessionId) {
-      return this.steer(prompt, attachments)
+      return this.steer(prompt, attachments, nonUser, settle)
     }
 
     this.endUserStop()
@@ -609,16 +717,22 @@ export class OpencodeSession extends BaseSession {
         if (!this.conn) this.disconnected = true
         this.sendStatus()
         this.resetInactivityTimer()
+        settle?.(false)
         return
       }
       if (gate.notice !== null) {
         this.holdForAuth(gate.notice)
+        settle?.(false)
         return
       }
       this.startTimeMs = Date.now()
-      await this.postUserPrompt(prompt, attachments)
+      if (nonUser) {
+        await this.postNonUserPrompt(prompt, nonUser)
+        settle?.(true)
+      } else await this.postUserPrompt(prompt, attachments)
     } catch (err) {
       logger.error('OpencodeSession', `run() error: ${errText(err)}`)
+      settle?.(false)
       this.isProcessing = false
       if (!this.conn) this.disconnected = true
       this.send('session:error', errText(err))
@@ -633,11 +747,20 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** A prompt into a running turn; a failed post is surfaced, never silently dropped. */
-  private async steer(prompt: string, attachments?: AttachmentUpload[]): Promise<void> {
+  private async steer(
+    prompt: string,
+    attachments?: AttachmentUpload[],
+    nonUser?: NonUserItem,
+    settle?: (posted: boolean) => void
+  ): Promise<void> {
     try {
-      await this.postUserPrompt(prompt, attachments)
+      if (nonUser) {
+        await this.postNonUserPrompt(prompt, nonUser)
+        settle?.(true)
+      } else await this.postUserPrompt(prompt, attachments)
     } catch (err) {
       logger.warn('OpencodeSession', `steer send failed: ${errText(err)}`)
+      settle?.(false)
       this.send('session:error', errText(err))
     }
   }
@@ -662,6 +785,28 @@ export class OpencodeSession extends BaseSession {
     } catch (err) {
       this.messageHistory = this.messageHistory.filter((m) => m !== userMsg)
       this.ownInboxIds.delete(inboxID)
+      throw err
+    }
+  }
+
+  /**
+   * Post a prompt that is NOT the user's (slice 1a). No `messageHistory` row of
+   * the user's: the delivered row returns through {@link onUserMessage} as a
+   * note, recognised by this inbox id being in {@link pendingNonUser} (the engine
+   * marker), not by its text. The id stays in `ownInboxIds` too, so a
+   * reconnect's purge does not cancel it. Posted as text only — a `/command` it
+   * might spell is not run (`knownCommandNames` is checked on the wrapper, which
+   * starts with `<`).
+   */
+  private async postNonUserPrompt(text: string, item: NonUserItem): Promise<void> {
+    const inboxID = newInboxId()
+    this.ownInboxIds.add(inboxID)
+    this.pendingNonUser.set(inboxID, item)
+    try {
+      await this.postPrompt(text, undefined, inboxID, 'steer')
+    } catch (err) {
+      this.ownInboxIds.delete(inboxID)
+      this.pendingNonUser.delete(inboxID)
       throw err
     }
   }
@@ -833,7 +978,8 @@ export class OpencodeSession extends BaseSession {
     try {
       const { rows, children } = await readOpencodeHistory((id) => client.listMessages(id), info.id)
       const sessionTotals = { cost: info.cost, tokens: info.tokens }
-      this.mapper?.seed(rows, { sessionTotals })
+      this.mapper?.seed(rows, { sessionTotals, children })
+      this.childJudge.seedFromHistory(children)
       const parsed = parseModelString(this._model)
       const seed = opencodeHistorySeed(rows, parsed, {
         children: children.values(),
@@ -941,6 +1087,10 @@ export class OpencodeSession extends BaseSession {
       // is this very server (one per config, S2), and it lingers after reads.
       await discoverOpencodeModels().catch(() => [])
       this.adoptCatalogCaps()
+      // The engine is up (a connected client with a session open): say so. The held X-Agent
+      // results of a reopened or respawned parent are flushed on this `idle` (ADR-105 §3,
+      // dispatch-result-flush.ts); a chat that has no session yet is not live and says nothing.
+      if (this.isEngineLive() && !this._cancelled) this.sendStatus()
     } catch (err) {
       const detail =
         err instanceof OpencodePermissionGuardError
@@ -1062,12 +1212,18 @@ export class OpencodeSession extends BaseSession {
             if (open.target.messageId === seal.message.id) this.openItems.delete(key)
         if (!seal.ownerToolUseId && !seal.target?.ownerToolUseId)
           this.rememberOpencodeMessage(seal.message)
+        else
+          this.childJudge.recordMessage(
+            (seal.ownerToolUseId ?? seal.target?.ownerToolUseId) as string,
+            seal.message
+          )
         this.send('session:item-seal', seal)
         return
       }
       case 'message':
         this.noteToolInputs(o.message)
         if (o.ownerToolUseId) {
+          this.childJudge.recordMessage(o.ownerToolUseId, o.message)
           this.send('session:subagent-message', {
             toolUseId: o.ownerToolUseId,
             message: o.message
@@ -1095,13 +1251,29 @@ export class OpencodeSession extends BaseSession {
           this.shellPoller.start(o.toolUseId, o.shellID, this.client)
         return
       case 'subagent-started':
+        this.childJudge.linkCall(o.toolUseId, o.childSessionId)
         // A resumed child re-links under a newer call: re-assert its ruleset.
         if (this.childKeeper.has(o.childSessionId))
           void this.childKeeper.patchChild(o.childSessionId)
         else void this.adoptUnknownChildren()
         return
+      case 'task-started':
+        this.send('session:task-started', o.data)
+        // A run that is (or turned out) background holds the idle timer.
+        if (o.data.isBackgrounded) this.backgroundWorkChanged()
+        return
+      case 'task-progress':
+        this.send('session:task-progress', o.progress)
+        return
+      case 'reinterrupt':
+        // A child the user stopped woke again (a cancelled grandchild's completion): stop it again.
+        void this.client?.interrupt(o.sessionID).catch((err) => {
+          logger.warn('OpencodeSession', `re-interrupt of a stopped agent failed: ${errText(err)}`)
+        })
+        return
       case 'task-notification':
         this.send('session:task-notification', o.notification)
+        if (o.notification.isBackgrounded) this.backgroundWorkChanged()
         return
       case 'approval':
         this.onApproval(o.approval, o.route)
@@ -1152,6 +1324,14 @@ export class OpencodeSession extends BaseSession {
         this.appliedModelKey = this.modelKey(o.model)
         return
       case 'session-renamed':
+        return
+      case 'session-moved':
+        // 3d: mark (or unmark) the session's worktree; `cwd` stays the spawn cwd.
+        try {
+          applySessionMoved(this.routingId, o.directory, this.cwd, emitEvent)
+        } catch (err) {
+          logger.warn('OpencodeSession', `could not record session.moved: ${String(err)}`)
+        }
         return
       case 'session-deleted':
         logger.warn('OpencodeSession', `opencode session ${this.openSessionId} was deleted`)
@@ -1213,6 +1393,27 @@ export class OpencodeSession extends BaseSession {
    * prompt another client posted into this session is painted here.
    */
   private onUserMessage(inboxID: string, message: ChatMessage): void {
+    // A session message or agent note ClaudeUI posted, recognised by its inbox id
+    // (never by its text, which a user can type): shown as a note from its
+    // sender, and no longer pending — the model has it.
+    const pending = this.pendingNonUser.get(inboxID)
+    if (pending) {
+      this.pendingNonUser.delete(inboxID)
+      this.ownInboxIds.delete(inboxID)
+      // The model has it now: tainted from here, whatever consumed order a queued
+      // user prompt of the same stretch took.
+      this.originLedger.nonUserDelivered()
+      this.rememberAndSend(
+        sessionMessageNote({
+          id: message.id,
+          fromTitle: pending.from.title,
+          fromKey: wrapperSender(pending).key,
+          text: pending.text,
+          timestamp: message.timestamp
+        })
+      )
+      return
+    }
     if (this.ownInboxIds.delete(inboxID) || this.inboxToItem.has(inboxID)) return
     if (inboxID.startsWith(CLAUDEUI_INBOX_PREFIX)) return
     if (this.pendingCommandEchoes > 0) {
@@ -1228,6 +1429,11 @@ export class OpencodeSession extends BaseSession {
       ...(result.images ? { images: result.images } : {})
     }
     if (ownerToolUseId) {
+      this.childJudge.recordOutcomeByOwner(
+        ownerToolUseId,
+        result.toolUseId,
+        result.isError ? 'error' : 'ok'
+      )
       this.send('session:subagent-tool-result', {
         toolUseId: ownerToolUseId,
         toolResultToolUseId: result.toolUseId,
@@ -1382,6 +1588,11 @@ export class OpencodeSession extends BaseSession {
   }
 
   private onInbox(o: Extract<OpencodeMapperOutput, { kind: 'inbox' }>): void {
+    // A message from another session that opencode cancelled never reaches the model.
+    if (o.change === 'cancelled' && this.pendingNonUser.has(o.inboxID)) {
+      this.reholdNonUser(o.inboxID, 'opencode cancelled it')
+      return
+    }
     const itemId = this.inboxToItem.get(o.inboxID)
     if (!itemId) return
     if (o.change === 'delivered') {
@@ -1440,6 +1651,54 @@ export class OpencodeSession extends BaseSession {
       await this.client.interrupt(this.openSessionId, { resume: true })
     } catch (err) {
       logger.warn('OpencodeSession', `interrupt failed: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * ISession.stopTask — the per-agent Stop on a subagent card, row or detail panel
+   * (`handlers-core.stopTask`, gated on `capabilities.backgroundTasks`). Interrupts
+   * the call's child and every live descendant (deepest first; opencode cancels only
+   * FOREGROUND children with their parent, so a background grandchild is stopped
+   * itself), never a sibling or the parent. A foreground call then fails with
+   * "Subagent cancelled" and its parent's turn goes on; a background child's
+   * cancellation reaches the parent as a `<subagent state="cancelled">` message.
+   * The result carries `hostNote` for the model — the caller sends it once, only
+   * after something was interrupted (never from a teardown).
+   */
+  async stopTask(
+    toolUseId: string
+  ): Promise<{ success: boolean; error?: string; hostNote?: string }> {
+    const client = this.client
+    const stop = client && !this.disconnected ? this.mapper?.stopRun(toolUseId) : null
+    if (!client || !stop) return { success: false, error: 'No running agent for that card' }
+    const interrupted = new Set<string>()
+    for (const [i, id] of stop.sessions.entries()) {
+      try {
+        await client.interrupt(id)
+        interrupted.add(id)
+      } catch (err) {
+        logger.warn('OpencodeSession', `stop of agent session ${id} failed: ${errText(err)}`)
+        // The child itself (last) was not reached: the Stop did not happen. A
+        // descendant that was interrupted stays stopped (it did end).
+        if (i === stop.sessions.length - 1) {
+          stop.undo(stop.sessions.filter((s) => !interrupted.has(s)))
+          return { success: false, error: `Could not stop the agent: ${errText(err)}` }
+        }
+      }
+    }
+    // The note is a user-role prompt the auto-mode judge reads as a `User:` line,
+    // so it carries nothing the model authored: the call's `description` and
+    // `prompt` stay out. It names the agent by its TYPE (opencode validates the
+    // `agent` id; a safe identifier charset is enforced here regardless) and the
+    // call id. The id is provider-stream data (model/endpoint-authored), so it is
+    // checked too, and the wording is "started by call": a depth-2 call was made
+    // by the child, not by the caller.
+    const type = cleanAgentLabel(this.subagentTask({ parentToolUseId: toolUseId })?.type ?? '')
+    const agentType = /^[A-Za-z0-9._-]{1,64}$/.test(type) ? type : 'subagent'
+    const callRef = SAFE_CALL_ID.test(toolUseId) ? `call ${toolUseId}` : 'one of your calls'
+    return {
+      success: true,
+      hostNote: `The user stopped the "${agentType}" subagent started by ${callRef}. Do not restart it or redo its work unless the user asks.`
     }
   }
 
@@ -1529,7 +1788,12 @@ export class OpencodeSession extends BaseSession {
   private endLease(conn: ServerConnection, client: OpencodeClient | null): void {
     const release = () => opencodeServerManager.releaseIfCurrent(this.cwd, conn)
     const sessionID = this.openSessionId
-    const inboxIDs = [...this.inboxToItem.keys()]
+    // A message from another session still waiting in opencode's inbox is taken
+    // back here too: it is re-held by recallQueuedOnEngineLoss right after, and a
+    // copy left server-side would be read a second time at the next turn.
+    const pendingIDs = [...this.pendingNonUser.keys()]
+    for (const id of pendingIDs) this.ownInboxIds.delete(id)
+    const inboxIDs = [...this.inboxToItem.keys(), ...pendingIDs]
     this.inboxToItem.clear()
     this.itemToInbox.clear()
     if (!client || !sessionID) {
@@ -1584,6 +1848,15 @@ export class OpencodeSession extends BaseSession {
       this.send('session:approval-request', approval)
       return
     }
+    // A session tool's card offers no "always allow" (neither a rule nor a session
+    // allow): either would skip the scope and mode-parity checks of the gate for
+    // every later call (spec 7.3).
+    if (sessionToolOfAsk(approval.toolName)) {
+      const { suggestions: _suggestions, always: _always, ...single } = approval
+      approval = single
+    }
+    // A child's card names the agent whose action it is (ADR-089 F4 parity).
+    if (approval.subagent) approval = { ...approval, agent: this.childAgent(approval.subagent) }
     this.pendingApprovals.set(approval.requestId, {
       toolUseId: approval.toolUseId,
       approval,
@@ -1625,16 +1898,18 @@ export class OpencodeSession extends BaseSession {
     // A held auto-mode block (ADR-091 §3): override this ONE call either way.
     if (pending?.hold) {
       if (allow) {
-        this.autoDenials.recordAllow()
+        // A child's caps are its own (ADR-088 D1); a human's override resets them.
+        this.denialsFor(pending.approval.subagent).recordAllow()
         if (toolUseId) this.blockedCalls.approveHeld(toolUseId)
         this.replyPermission(requestId, { decision: 'once' })
       } else {
-        this.keepBlocked(requestId, toolUseId, pending.hold.reason)
+        this.keepBlocked(requestId, toolUseId, pending.hold.reason, pending.approval.subagent)
       }
       return
     }
     const persist = allow && !!updatedPermissions && updatedPermissions.length > 0
-    if (!allow && toolUseId) this.recordToolOutcome(toolUseId, 'rejected-by-user')
+    if (!allow && toolUseId)
+      this.recordToolOutcome(toolUseId, 'rejected-by-user', pending?.approval.subagent)
     // ADR-085 S2: never `always` (opencode's saved table is shared with the
     // user's own opencode); a session allow is remembered host-side. A reject
     // always carries the model-visible reason (ADR-097 §3).
@@ -1998,8 +2273,14 @@ export class OpencodeSession extends BaseSession {
     return asHostPrecheckRules(this.lastUserRules)
   }
 
-  private recordToolOutcome(toolUseId: string, outcome: ToolOutcome): void {
-    recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
+  /** A child's call outcome goes to ITS judge context, never the parent's. */
+  private recordToolOutcome(
+    toolUseId: string,
+    outcome: ToolOutcome,
+    child?: PendingApproval['subagent']
+  ): void {
+    if (child) this.childJudge.recordOutcome(child.sessionId, toolUseId, outcome)
+    else recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
   }
 
   private async sessionGitRemotes(): Promise<GitRemote[]> {
@@ -2035,24 +2316,20 @@ export class OpencodeSession extends BaseSession {
   ): Promise<Record<string, unknown> | undefined> {
     const command = shellCommandOf(toolName, input)
     if (!command) return undefined
-    const meta: Record<string, unknown> = {}
-    if (needsGitStatus(command)) {
-      const gitStatus = await captureGitStatus(this.cwd)
-      if (gitStatus) meta.gitStatus = gitStatus
-    }
-    if (needsRepoVisibility(command)) meta.repoVisibility = await this.sessionVisibility()
-    const redirects = analyzeRedirects(command, {
+    // opencode's shell honours `input.workdir`, resolved against the session
+    // directory — the same rule the read-only gate uses.
+    return captureShellActionMeta({
+      command,
+      input,
       cwd: this.cwd,
-      tempDirs: tempDirRoots(),
-      additionalDirectories: this.mergedUserPermissions().additionalDirectories
+      honoursWorkdir: true,
+      // opencode's shell on win32: PowerShell when `$SHELL` is unset or names
+      // it, unknown (both readings) for any other `$SHELL`; POSIX elsewhere.
+      shell: opencodeShellFor(),
+      additionalDirectories: this.mergedUserPermissions().additionalDirectories,
+      sessionStartMs: this.sessionStartMs,
+      repoVisibility: () => this.sessionVisibility()
     })
-    if (redirects) meta.redirects = redirects
-    if (hasGitSegment(command)) {
-      const runIn = effectiveShellCwd(this.cwd, input, true)
-      const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
-      if (armed && armed.length > 0) meta.gitConfigArmed = armed
-    }
-    return Object.keys(meta).length > 0 ? meta : undefined
   }
 
   /**
@@ -2126,17 +2403,71 @@ export class OpencodeSession extends BaseSession {
       this.staleJudgeModelReported = true
       this.send(
         'session:error',
-        `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
-          `Change it in Settings › Sessions & autonomy › Auto-mode judge (opencode).`
+        staleJudgeModelMessage('opencode', configured, this.fallbackLabel())
       )
     }
     return true
   }
 
+  /** The judge model this session's primary judge calls: `autoMode.judgeModel`, else its own. */
+  private judgeModelValue(): string {
+    return this.autoModeConfig().judgeModel ?? this._model
+  }
+
+  /**
+   * The fallback judge model in effect (`autoMode.fallbackJudgeModel`), or undefined: none set,
+   * the same as the primary, or no longer offered by opencode. A gone one is no fallback — the
+   * human decides — with one log line; it never crashes the judge. Same rule as the primary's
+   * check: an empty catalog cannot tell "removed" from "not discovered", so it passes.
+   */
+  private fallbackJudgeModel(): string | undefined {
+    const model = fallbackJudgeModelFor(
+      this.autoModeConfig().fallbackJudgeModel,
+      this.judgeModelValue(),
+      this.autoModeConfig().fallbackJudgeAccount
+    )
+    if (!model) return undefined
+    const all = (peekOpencodeModels() ?? []).flatMap((g) => g.models)
+    if (all.length === 0 || all.some((m) => m.value === model)) return model
+    if (!this.staleFallbackJudgeLogged) {
+      this.staleFallbackJudgeLogged = true
+      logger.warn(
+        'OpencodeSession',
+        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
+      )
+    }
+    return undefined
+  }
+
+  /** The ChatGPT vault account the fallback judge pays with (`autoMode.fallbackJudgeAccount`), if one is named. */
+  private fallbackJudgeAccount(): string | undefined {
+    return fallbackJudgeAccountFor(this.autoModeConfig().fallbackJudgeAccount)
+  }
+
+  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
+  private fallbackLabel(): string | undefined {
+    const model = this.fallbackJudgeModel()
+    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
+  }
+
   private reportJudgeRouteUnavailable(reason: string): void {
     if (this.judgeRouteUnavailableReported) return
     this.judgeRouteUnavailableReported = true
-    this.send('session:error', judgeRouteUnavailableMessage('opencode', reason))
+    this.send('session:error', judgeUnavailableMessage('opencode', reason, this.fallbackLabel()))
+  }
+
+  /** The fallback judge's own one banner: it could not be called either. */
+  private reportFallbackRouteUnavailable(model: string, reason: string): void {
+    if (this.fallbackRouteUnavailableReported) return
+    this.fallbackRouteUnavailableReported = true
+    this.send(
+      'session:error',
+      fallbackUnavailableMessage(
+        'opencode',
+        fallbackJudgeLabel(model, this.fallbackJudgeAccount()),
+        reason
+      )
+    )
   }
 
   /** ClaudeUI's own judge call (ADR-081), on `autoMode.judgeModel` or the session's model. */
@@ -2144,10 +2475,23 @@ export class OpencodeSession extends BaseSession {
     if (this.judgeModelUnavailable()) return null
     return makeSessionJudgeTransport({
       engine: 'opencode',
-      modelValue: () => this.autoModeConfig().judgeModel ?? this._model,
+      modelValue: () => this.judgeModelValue(),
       sessionId: () => this.openSessionId,
       routingId: this.routingId,
       onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
+    })
+  }
+
+  /** The pipeline's `fallbackJudgeTransport`: the user's fallback judge model, when one is in effect. */
+  private fallbackJudge(): { transport: JudgeTransport; label: string } | undefined {
+    const model = this.fallbackJudgeModel()
+    if (!model) return undefined
+    return makeFallbackJudge(model, {
+      engine: 'opencode',
+      sessionId: () => this.openSessionId,
+      routingId: this.routingId,
+      chatgptAccountId: () => this.fallbackJudgeAccount(),
+      onUnavailable: (reason) => this.reportFallbackRouteUnavailable(model, reason)
     })
   }
 
@@ -2162,6 +2506,11 @@ export class OpencodeSession extends BaseSession {
    * ladder.
    */
   private routePermissionAsk(approval: PendingApproval): void {
+    const sessionTool = sessionToolOfAsk(approval.toolName)
+    if (sessionTool) {
+      this.routeSessionToolAsk(approval, sessionTool)
+      return
+    }
     const category = approval.toolName
     const autoMode = this.isAutoMode(this.permissionMode)
     const verdict = hostPrecheck(approval, this.precheckContext())
@@ -2220,6 +2569,62 @@ export class OpencodeSession extends BaseSession {
     else this.send('session:approval-request', approval)
   }
 
+  /** The calling session as the session tools see it: this chat, its root agent. */
+  private sessionToolCaller(): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode
+    }
+  }
+
+  /**
+   * An ask for one of the session tools (`claudeui_session_*`, `SESSION_TOOLS_ASK_RULE`
+   * makes every call ask in every mode): ClaudeUI's own gate decides, never the
+   * judge. allow → once; deny → rejected with the gate's reason and audited (acting
+   * tools); ask → the approval card. A user deny rule written for Claude's spelling
+   * of the tool holds first. An ask that arrives without the call's input (the tool
+   * part not seen yet) cannot be scoped, so it goes to the user.
+   */
+  private routeSessionToolAsk(approval: PendingApproval, tool: SessionToolName): void {
+    const caller = this.sessionToolCaller()
+    const input = (approval.input ?? {}) as Record<string, unknown>
+    const reject = (message: string): void => {
+      auditSessionToolDenial(caller, tool, input, message)
+      this.autoReply(approval.requestId, { decision: 'reject', message })
+      if (approval.toolUseId && !approval.subagent)
+        this.sendDenial(approval.toolUseId, 'rule', message)
+    }
+    const rule = userDenyRule(
+      this.userOriginRules(),
+      opencodeMcpKey(SESSION_TOOLS_SERVER_NAME, tool),
+      undefined
+    )
+    if (rule) {
+      reject(`Denied by permission rule: ${rule.permission}(${rule.pattern})`)
+      return
+    }
+    const unscoped =
+      tool !== 'session_list' && tool !== 'session_usage' && Object.keys(input).length === 0
+    const decision = unscoped
+      ? ({ behavior: 'ask' } as const)
+      : sessionToolsGate(caller, tool, input, { agentId: approval.subagent?.sessionId })
+    if (decision.behavior === 'allow') {
+      this.autoReply(approval.requestId, { decision: 'once' })
+    } else if (decision.behavior === 'deny') {
+      reject(decision.message)
+    } else {
+      const pending = this.pendingApprovals.get(approval.requestId)
+      if (pending) pending.sweepable = false
+      // An ask without the call's input must not read as an approval of a blank: say so on the card.
+      this.send(
+        'session:approval-request',
+        unscoped ? { ...approval, decisionReason: UNSCOPED_SESSION_TOOL_REASON } : approval
+      )
+    }
+  }
+
   private precheckContext(): HostPrecheckContext {
     const permissions = this.mergedUserPermissions()
     return {
@@ -2250,10 +2655,39 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  /** An auto-mode edit on an agent-control path always sees the gate/judge (ADR-084 §3). */
+  /** The label a child's card and blocked-call row carry: its task description, else its agent. */
+  private childAgentLabel(task: { type: string; description?: string } | undefined): string {
+    return cleanAgentLabel(task?.description ?? task?.type ?? '')
+  }
+
+  /** WHICH agent proposes a child's action — the card's `agent` (the child's session id is its id). */
+  private childAgent(marker: NonNullable<PendingApproval['subagent']>): {
+    agentId: string
+    label: string
+    subagentType: string
+  } {
+    const task = this.subagentTask(marker)
+    return {
+      agentId: marker.sessionId,
+      label: this.childAgentLabel(task),
+      subagentType: task?.type ?? 'unknown'
+    }
+  }
+
+  /** The denial caps an ask counts against: the acting child's own, else the session's. */
+  private denialsFor(child?: PendingApproval['subagent']): AutoModeDenialTracker {
+    return child ? this.childJudge.state(child.sessionId).denials : this.autoDenials
+  }
+
+  /**
+   * Under auto mode an edit on an agent-control path (ADR-084 §3) and a subagent
+   * spawn (ADR-085: the delegation payload is always the judge's to read) never
+   * ride a session allow.
+   */
   private sessionAllowApplies(approval: PendingApproval): boolean {
+    if (!this.isAutoMode(this.permissionMode)) return true
+    if (approval.toolName === 'subagent') return false
     return !(
-      this.isAutoMode(this.permissionMode) &&
       approval.toolName === 'edit' &&
       !editClearsAgentControl(approval.patterns, approval.input, this.cwd)
     )
@@ -2309,6 +2743,13 @@ export class OpencodeSession extends BaseSession {
       return
     }
     let transport: JudgeTransport | null = null
+    // A subagent child's call (ADR-088 D1, ADR-091 §4, as pi's `childHooks`): the
+    // acting child's own header, outcomes and denial caps, and a transcript that is
+    // this session's (whose human turns are the only real authorisation), its
+    // still-queued user turns and THAT child's assistant trajectory in time order.
+    // An intermediate agent's trajectory is not included for a grandchild: its
+    // prompts to the child are agent-authored.
+    const child = approval.subagent ? this.childJudge.state(approval.subagent.sessionId) : undefined
     const outcome = await runJudgePipeline(
       { toolUseId: approval.toolUseId ?? '', toolName: category, input: approval.input },
       {
@@ -2326,16 +2767,29 @@ export class OpencodeSession extends BaseSession {
           ? (this.subagentTask(approval.subagent) ?? { type: 'unknown' })
           : undefined,
         judgeAvailable: () => {
-          transport = this.makeJudgeFn()
-          return transport !== null
+          const available = (): boolean => {
+            transport = this.makeJudgeFn()
+            return transport !== null
+          }
+          // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
+          // learn which one is active (and the fallback's plan, for its label) before deciding.
+          return this.fallbackJudgeAccount()
+            ? refreshChatgptAccounts().then(available)
+            : available()
         },
         judgeTransport: () => transport!,
-        messages: () => this.messageHistory,
+        fallbackJudgeTransport: () => this.fallbackJudge(),
         environment: () => this.classifierEnvironment(),
         captureActionMeta: (name, input) => this.captureActionMeta(name, input),
-        outcomes: () =>
-          this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
-        denials: this.autoDenials,
+        messages: () =>
+          child
+            ? inTimeOrder(this.messageHistory, this.queuedUserTurns(), child.trajectory.values())
+            : this.messageHistory,
+        outcomes: () => {
+          const outcomes = child ? child.outcomes : this.toolOutcomes
+          return outcomes.size ? Object.fromEntries(outcomes) : undefined
+        },
+        denials: child ? child.denials : this.autoDenials,
         twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
         sendReview: (_id, review) => this.sendToolReview(approval.toolUseId, review),
         consumeGrant: (name, input) =>
@@ -2393,8 +2847,7 @@ export class OpencodeSession extends BaseSession {
     const { requestId } = approval
     const ms = blockHoldMs()
     if (review && approval.toolUseId) {
-      const task = approval.subagent ? this.subagentTask(approval.subagent) : undefined
-      const agentLabel = approval.subagent ? (task?.description ?? task?.type) : undefined
+      const agentLabel = approval.agent?.label
       this.blockedCalls.record(
         approval.toolUseId,
         {
@@ -2408,7 +2861,7 @@ export class OpencodeSession extends BaseSession {
       )
     }
     if (ms === 0) {
-      this.keepBlocked(requestId, approval.toolUseId, reason)
+      this.keepBlocked(requestId, approval.toolUseId, reason, approval.subagent)
       return
     }
     const timer = armBlockHold(() => {
@@ -2426,8 +2879,13 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** A judge block that stands: the model reads the judge's text. */
-  private keepBlocked(requestId: string, toolUseId: string | undefined, reason: string): void {
-    if (toolUseId) this.recordToolOutcome(toolUseId, 'automode-blocked')
+  private keepBlocked(
+    requestId: string,
+    toolUseId: string | undefined,
+    reason: string,
+    child?: PendingApproval['subagent']
+  ): void {
+    if (toolUseId) this.recordToolOutcome(toolUseId, 'automode-blocked', child)
     this.autoReply(requestId, { decision: 'reject', message: reason })
   }
 

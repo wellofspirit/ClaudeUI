@@ -46,6 +46,37 @@ export interface WsInvokeResponse {
   error?: string
 }
 
+/**
+ * Progress of one in-flight invoke (ADR-102). Handlers registered with
+ * `withProgress` report these; the transport throttles them and ships them to
+ * the ONE requesting connection (desktop: `invoke:progress` IPC to the calling
+ * window; remote: an `invoke-progress` frame). Additive: an old client ignores
+ * the frame and an old server never sends it.
+ */
+export interface InvokeProgress {
+  /** Units done so far (bytes for the Claude history read). Monotonic per call. */
+  done: number
+  /** Units in total, or null when unknown (indeterminate). */
+  total: number | null
+  /**
+   * Handler-defined phase label. The Claude history read uses the shared union
+   * {@link SessionHistoryPhase}; the transport adds `'sending'` itself.
+   */
+  phase: string
+}
+
+/** Phases of the Claude `session:load-history` read (the `phase` of its progress). */
+export type SessionHistoryPhase = 'transcript' | 'costs' | 'sending'
+
+/** What a `withProgress` handler (or the transport on its behalf) calls to report. */
+export type ProgressReporter = (progress: InvokeProgress) => void
+
+/** Server → Client: progress of an in-flight invoke, addressed by the request id. */
+export interface WsInvokeProgress extends InvokeProgress {
+  type: 'invoke-progress'
+  id: string
+}
+
 /** Server → Client: push event (mirrors webContents.send) */
 export interface WsEvent {
   type: 'event'
@@ -274,6 +305,14 @@ export interface WsSyncRequest {
    * catchup that would falsely report "caught up" (M-DB4).
    */
   epoch?: string
+  /**
+   * Opt in to a chunked answer: when the host decides on a FULL sync it replies
+   * with {@link WsSyncFullChunk} frames instead of one `sync-full`, so the client
+   * can draw real progress (a browser WebSocket only delivers whole messages).
+   * Catchup is unaffected. A client that omits it (an old tab left open across a
+   * host update) gets the single `sync-full` exactly as before.
+   */
+  chunked?: true
 }
 
 /** Server → Client: catchup (replay missed events) */
@@ -306,6 +345,25 @@ export interface WsSyncFull {
    * on a tunnel, E2E-encrypted) channel.
    */
   fileToken?: string
+}
+
+/**
+ * Server → Client: one slice of a chunked full sync (ADR-102 amendment), sent in
+ * answer to a {@link WsSyncRequest} with `chunked`.
+ *
+ * `data` is a slice of the exact `JSON.stringify` of the {@link WsSyncFull} that
+ * would otherwise have been sent, so the chunks joined in `index` order and parsed
+ * ARE that message, tokens included. `count` and `totalChars` (UTF-16 code units of
+ * the whole JSON, ≈ MB) repeat on every chunk instead of a begin/end frame: the
+ * client is determinate from the first frame and finishes at `index === count - 1`.
+ * A snapshot smaller than one chunk is still ONE chunk (`count` 1).
+ */
+export interface WsSyncFullChunk {
+  type: 'sync-full-chunk'
+  index: number
+  count: number
+  totalChars: number
+  data: string
 }
 
 /** Bidirectional keepalive */
@@ -945,6 +1003,8 @@ export interface WsVoiceAudio {
 // by snapshots and a tail is a lossy preview of a durable reliable event.
 export type { StreamEventFrame, StreamLaneFrame } from '../core/shared/sync/stream'
 import type { StreamEventFrame } from '../core/shared/sync/stream'
+import type { SessionLinkInfo } from './session-links'
+import type { ContextPressureBanner } from './context-pressure'
 import type { ItemStreamFrame, ItemStreams } from '../core/shared/sync/item-stream'
 
 export type WsClientMessage =
@@ -965,9 +1025,11 @@ export type WsServerMessage =
   | WsAuthResponse
   | WsAuthWebauthnChallenge
   | WsInvokeResponse
+  | WsInvokeProgress
   | WsEvent
   | WsSyncCatchup
   | WsSyncFull
+  | WsSyncFullChunk
   | WsPing
   | WsPong
   | WsE2EAck
@@ -1032,6 +1094,12 @@ export interface PerSessionSnapshot {
    *  chat messages. Optional for the same older-server-compat reason as
    *  `sentFiles`: without it every resync silently emptied the queue card. */
   queue?: QueuedItem[]
+  /** Items from other sessions or agents held for this session's next turn
+   *  (slice 1a). Omitted when none, and by an older server. */
+  heldCount?: number
+  /** The context-pressure banner above this session's composer (slice 4); `null` when none,
+   *  and absent from an older server. */
+  contextPressure?: ContextPressureBanner | null
   taskNotifications: TaskNotification[]
   /** Started-but-not-finished tasks (task_started with no task_notification
    *  yet) — without this a remote client that connects or resyncs mid-task
@@ -1155,6 +1223,11 @@ export interface FullStateSnapshot {
   hiddenSessions?: string[]
   /** Hidden project keys — carried for the same non-destructive-save reason. */
   hiddenProjects?: string[]
+  /** Origin links between sessions, keyed by the started session's ref (session tools, slice 1b).
+   *  Optional: an older server omits it, which reads as "no links". */
+  sessionLinks?: Record<string, SessionLinkInfo>
+  /** sidebar id → ref for every session a link names (slice 1b). */
+  sessionRefs?: Record<string, string>
 }
 
 // Re-export RemoteStatus / RemoteAuthMethod / StepUpIntent from the main types

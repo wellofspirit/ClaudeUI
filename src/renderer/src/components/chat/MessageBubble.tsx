@@ -16,8 +16,12 @@ import { TodoToolBlock } from './TodoToolBlock'
 import { SleepRow } from './SleepRow'
 import { ToolNoteRow } from './ToolNoteRow'
 import { ContextNoteBlock } from './ContextNoteBlock'
+import { PeerHoldRow } from './PeerHoldRow'
+import { SessionCard } from './SessionCard'
+import { ProposalCard } from './ProposalCard'
 import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
+import { hasDispatchBehindCall, isQueuedDispatchCall } from './task-state'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
 import type { EngineToolMap } from '../../../../shared/tool-kinds'
 import { engineToolMap } from './tool-registry/engine-tool-maps'
@@ -63,7 +67,10 @@ function renderToolBlock(
   // Whether this block is on the LAST assistant message — read only by the plan
   // card, whose no-approval action set (Codex, F20) belongs to the latest plan
   // and to no earlier one.
-  isLastAssistant = false
+  isLastAssistant = false,
+  // The call waits for an earlier call of its own message (cli.js runs a first-party MCP
+  // call exclusively): only the task card says so.
+  queued = false
 ): React.JSX.Element {
   const kind = hostedMcpKind(block.toolName) ?? toolMap.kindOf(block.toolName)
 
@@ -121,6 +128,7 @@ function renderToolBlock(
         approval={approval}
         denial={decision?.type === 'permission_denial' ? decision : undefined}
         review={decision?.type === 'tool_review' ? decision : undefined}
+        queued={queued}
       />
     )
   }
@@ -189,6 +197,11 @@ export const MessageBubble = memo(function MessageBubble({
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage)
   const forkCapability = useActiveSession((s) => s.status.capabilities.forkFromMessage)
   const engineId = useActiveSession((s) => s.status.engineId)
+  // Only a dispatch call behind another tool call of its own message can read "queued"
+  // (isQueuedDispatchCall), so only such a bubble follows the turn: every other one would
+  // re-render at each turn start and end for nothing.
+  const mayBeQueued = engineId === 'claude' && hasDispatchBehindCall(message.content)
+  const turnRunning = useActiveSession((s) => mayBeQueued && s.status.state === 'running')
   const [forking, setForking] = useState(false)
   // No-op + `enabled: false` when no ImageGalleryProvider is mounted above, so
   // an unwrapped MessageBubble still renders its thumbnails (just inert).
@@ -231,6 +244,18 @@ export const MessageBubble = memo(function MessageBubble({
           // third-party text).
           if (block.type === 'context_note') {
             return <ContextNoteBlock key={i} block={block} />
+          }
+          // Claude Code holding a message another Claude session sent.
+          if (block.type === 'peer_hold') {
+            return <PeerHoldTranscriptRow key={i} block={block} />
+          }
+          // A session this one started or handed off to.
+          if (block.type === 'session_card') {
+            return <SessionCard key={i} block={block} />
+          }
+          // A session an agent proposed for the user to start.
+          if (block.type === 'proposal_card') {
+            return <ProposalCard key={i} block={block} />
           }
           // A code review's findings. The one untrusted-text block that DOES go
           // through markdown, by decision (F20) — see ReviewResultCard.
@@ -297,6 +322,11 @@ export const MessageBubble = memo(function MessageBubble({
           className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]"
           data-markdown-source={userMarkdown || undefined}
         >
+          {message.hostInstruction && (
+            <div data-testid="MessageBubble.hostLabel" className="text-[11px] text-text-muted mb-1">
+              Sent by ClaudeUI for you
+            </div>
+          )}
           {hasAttachments && (
             <div className="flex gap-2 flex-wrap mb-2">
               {imageBlocks.map((block, i) => (
@@ -444,6 +474,12 @@ export const MessageBubble = memo(function MessageBubble({
     }
   }
 
+  // cli.js (Claude Code only) runs a first-party MCP call such as `dispatch_agent` only when
+  // nothing else of its assistant message is executing, so one behind an unanswered call has
+  // not started: the card says "queued", not "running" (task-state.ts).
+  const isQueuedCall = (block: ToolUseBlock): boolean =>
+    isQueuedDispatchCall({ engineId, turnRunning, content: message.content, block })
+
   return (
     <div
       data-testid="MessageBubble"
@@ -474,7 +510,16 @@ export const MessageBubble = memo(function MessageBubble({
           const result = resultMap.get(block.toolUseId)
           const approval = approvalMap.get(block.toolUseId)
           const decision = decisionMap.get(block.toolUseId)
-          return renderToolBlock(toolMap, block, result, approval, index, decision, isLastAssistant)
+          return renderToolBlock(
+            toolMap,
+            block,
+            result,
+            approval,
+            index,
+            decision,
+            isLastAssistant,
+            isQueuedCall(block)
+          )
         }
         // Multiple tool calls — wrap in bordered group
         return (
@@ -493,7 +538,8 @@ export const MessageBubble = memo(function MessageBubble({
                 approval,
                 index,
                 decision,
-                isLastAssistant
+                isLastAssistant,
+                isQueuedCall(block)
               )
             })}
           </div>
@@ -648,6 +694,37 @@ function CliCommandBlock({
       </div>
     </div>
   )
+}
+
+/**
+ * The peer-hold row wired to its session: the transcript's own routing id (never
+ * the active one — a watched or background session's row acts on ITS session) and
+ * the one command, `allowPeerMessages`, which works the same from the desktop and
+ * from the browser client. The row itself updates when cli.js's release frame
+ * arrives; this only reports a refusal.
+ */
+function PeerHoldTranscriptRow({
+  block
+}: {
+  block: Extract<ContentBlock, { type: 'peer_hold' }>
+}): React.JSX.Element {
+  const routingId = useTranscriptSessionId()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const allow = routingId
+    ? (): void => {
+        setBusy(true)
+        setError(null)
+        window.api
+          .allowPeerMessages(routingId)
+          .then((result) => {
+            if (!result.success) setError(result.error ?? 'Claude Code did not accept the change.')
+          })
+          .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+          .finally(() => setBusy(false))
+      }
+    : undefined
+  return <PeerHoldRow block={block} onAllow={allow} busy={busy} error={error} />
 }
 
 function ApiErrorBlock({

@@ -13,6 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
+import { closeMockupWatchersUnder } from '../../../core/services/mockup-watch-registry'
 import { setHostAuth, type HostAuth } from '../../../core/host'
 import * as fs from 'fs'
 import * as os from 'os'
@@ -43,6 +44,7 @@ vi.mock('../../../core/auth/CodexAuthProvider', () => ({
 vi.mock('../../../core/services/session-history', () => ({
   listDirectories: vi.fn(async () => [{ id: 'dir-1' }]),
   loadSessionHistory: vi.fn(async () => [{ id: 'm1' }]),
+  loadSessionStatusLine: vi.fn(async () => ({ totalCostUsd: 1 })),
   loadSubagentHistory: vi.fn(async () => []),
   buildSubagentFileMap: vi.fn(() => ({})),
   loadBackgroundOutput: vi.fn(() => '')
@@ -185,13 +187,14 @@ vi.mock('../../../core/services/socks-bridge', () => ({
 
 const claudeSettingsSpies = vi.hoisted(() => ({
   saveClaudePermissions: vi.fn(),
+  saveCleanupPeriodDays: vi.fn(),
   isWorkspaceTrusted: vi.fn(() => true)
 }))
 
 vi.mock('../../../core/services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   loadCleanupPeriodDays: vi.fn(() => 30),
-  saveCleanupPeriodDays: vi.fn(),
+  saveCleanupPeriodDays: claudeSettingsSpies.saveCleanupPeriodDays,
   saveClaudePermissions: claudeSettingsSpies.saveClaudePermissions,
   isWorkspaceTrusted: claudeSettingsSpies.isWorkspaceTrusted
 }))
@@ -284,6 +287,8 @@ import {
   resetCachedClaudeModels
 } from '../../../core/services/claude-model-catalog'
 import { hostAppVersion } from '../../../core/host'
+import { loadOpencodeSessionHistory } from '../../../core/services/opencode-session-list'
+import { dispatchLedger } from '../../../core/services/dispatch-target-ledger'
 import { getCliVersion } from '../../../core/sdk/harness'
 import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import {
@@ -304,13 +309,18 @@ import {
   AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
   SHELL_ACT_VERBS,
+  classifyDispatch,
   SHELL_READ_VERBS
 } from '../../../core/services/step-up-tier'
 import { gitWatchRegistry } from '../../../core/services/git-watch-registry'
 import { voiceRelay } from '../../../core/services/voice-relay'
 import { sharedProviderService } from '../../../core/shared-providers'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
-import { resolveOpencodeSpawnModel } from '../../../core/opencode/model-discovery'
+import {
+  discoverOpencodeProviderCatalog,
+  resolveOpencodeSpawnModel
+} from '../../../core/opencode/model-discovery'
+import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
 import { setProxyEnv } from '../../../core/sdk/proxy'
 import { setEndpointEnv } from '../../../core/sdk/endpoint-env'
 import { setModelEnv } from '../../../core/sdk/model-env'
@@ -320,6 +330,11 @@ import { logger } from '../../../core/services/logger'
 import { blobStore } from '../../../core/services/blob-store'
 import { query } from '../../../core/sdk'
 import { discoverCodexModels } from '../../../core/codex/model-discovery'
+import {
+  loadSessionHistory as loadClaudeHistoryMock,
+  loadSessionStatusLine as loadStatusLineMock,
+  loadSubagentHistory as loadSubagentHistoryMock
+} from '../../../core/services/session-history'
 import { engineInstalled } from '../../../core/harness/resolve'
 
 // ---------------------------------------------------------------------------
@@ -583,6 +598,40 @@ describe('registerRemoteHandlers', () => {
     expect(crossEngineSpies.resolveApproval).not.toHaveBeenCalled()
   })
 
+  it('an answer retires the card on every client: emits session:approval-dismiss for the routing id (pi, xeng:)', async () => {
+    // pi's resolveApproval and the dispatcher's claude/pi/codex-kind cards emit
+    // nothing on a human answer, and the answering client only drops its own copy.
+    await dispatcher.handle(
+      makeRequest('session:approval-response', 'pi-rid', 'req-pi', 'allow'),
+      remoteConn
+    )
+    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'pi-rid', {
+      requestId: 'req-pi'
+    })
+    await dispatcher.handle(
+      makeRequest('session:approval-response', 'parent-rid', 'xeng:perm-9', 'deny'),
+      remoteConn
+    )
+    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'parent-rid', {
+      requestId: 'xeng:perm-9'
+    })
+  })
+
+  it('a resolve that throws still dismisses the card and still rejects', async () => {
+    sessionStub.resolveApproval.mockImplementationOnce(() => {
+      throw new Error('Stale or unknown Codex approval')
+    })
+    await expect(
+      dispatcher.handle(
+        makeRequest('session:approval-response', 'codex-rid', 'req-x', 'allow'),
+        remoteConn
+      )
+    ).rejects.toThrow('Stale or unknown Codex approval')
+    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'codex-rid', {
+      requestId: 'req-x'
+    })
+  })
+
   it("routes a known dispatch toolUseId to the cross-engine dispatcher's stopDispatch, scoped by routingId (ADR-033 M3)", async () => {
     crossEngineSpies.stopDispatch.mockReturnValueOnce(true)
     const res = await dispatcher.handle(
@@ -739,6 +788,89 @@ describe('registerRemoteHandlers', () => {
     expect(commandRegistry.channels('remote')).toContain('blob:get')
   })
 
+  describe('sync:report-timing', () => {
+    const REPORT = { frameBytes: 2048, decodeMs: 3.5, syncToFrameMs: 40, hydrateMs: 12.25 }
+
+    function syncStatsLines(): string[] {
+      return [...vi.mocked(logger.info).mock.calls, ...vi.mocked(logger.warn).mock.calls]
+        .filter(([source]) => source === 'SyncStats')
+        .map(([, message]) => message as string)
+    }
+
+    beforeEach(() => {
+      vi.mocked(logger.info).mockClear()
+      vi.mocked(logger.warn).mockClear()
+    })
+
+    it('is a base-reachable chat QUERY that takes the connection, registered for remote only', () => {
+      const decl = commandRegistry.declaration('sync:report-timing')
+      expect(decl).toMatchObject({ capability: 'chat', kind: 'query', withConnection: true })
+      // `chat` is in the base grant set, so every connection that can sync holds it.
+      expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
+      expect(commandRegistry.get('sync:report-timing', 'remote')).toBeDefined()
+      // A `query` is read-class: free on every step-up tier and never audited.
+      expect(
+        classifyDispatch({ channel: 'sync:report-timing', capability: 'chat', kind: 'query' })
+      ).toBe('read')
+    })
+
+    it('writes one host-formatted SyncStats line for a valid report', async () => {
+      await dispatcher.handle(
+        makeRequest('sync:report-timing', REPORT),
+        makeRemoteConnection('password', null)
+      )
+      expect(syncStatsLines()).toEqual([
+        'client sync-full applied: transport=web frameChars=2048 decodeMs=3.5 ' +
+          'syncToFrameMs=40.0 hydrateMs=12.3 totalMs=55.8'
+      ])
+    })
+
+    it('answers nothing for a malformed report and logs nothing', async () => {
+      const conn = makeRemoteConnection('password', null)
+      for (const bad of [
+        null,
+        'x',
+        [1, 2],
+        { ...REPORT, decodeMs: -1 },
+        { ...REPORT, hydrateMs: '1' }
+      ]) {
+        expect(
+          await dispatcher.handle(makeRequest('sync:report-timing', bad), conn)
+        ).toBeUndefined()
+      }
+      expect(await dispatcher.handle(makeRequest('sync:report-timing'), conn)).toBeUndefined()
+      expect(syncStatsLines()).toEqual([])
+    })
+
+    it('is refused for a connection without the chat class', async () => {
+      const enrollOnly = makeRemoteConnection('enroll-token', null, ENROLL_ONLY_GRANTS)
+      await expect(
+        dispatcher.handle(makeRequest('sync:report-timing', REPORT), enrollOnly)
+      ).rejects.toThrow(/Permission denied: "sync:report-timing" requires the "chat" capability/)
+      expect(syncStatsLines()).toEqual([])
+    })
+
+    it('rate-limits per connection (6 a minute) through the real dispatch path', async () => {
+      const noisy = makeRemoteConnection('password', null)
+      const quiet = makeRemoteConnection('password', null)
+      for (let i = 0; i < 9; i++) {
+        await dispatcher.handle(makeRequest('sync:report-timing', REPORT), noisy)
+      }
+      expect(syncStatsLines()).toHaveLength(6)
+      // Another connection's budget is its own: `withConnection` carries the right id.
+      await dispatcher.handle(makeRequest('sync:report-timing', REPORT), quiet)
+      expect(syncStatsLines()).toHaveLength(7)
+    })
+
+    it('ignores padded arguments: only the first is the report', async () => {
+      await dispatcher.handle(
+        makeRequest('sync:report-timing', REPORT, { frameBytes: 'evil' }, 'x'),
+        makeRemoteConnection('password', null)
+      )
+      expect(syncStatsLines()).toHaveLength(1)
+    })
+  })
+
   it('session:send rejects when routingId not found', async () => {
     sessionManagerStub.get.mockReturnValueOnce(undefined)
     await expect(
@@ -778,7 +910,11 @@ describe('registerRemoteHandlers', () => {
   describe('ISession optional-member safety (Item 3)', () => {
     it('claude:set-cleanup-period triggers notifySettingsChanged via the neutral forEach', async () => {
       await dispatcher.handle(makeRequest('claude:set-cleanup-period', 30), remoteConn)
-      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+      // The value is persisted AND the running session is told to re-read it —
+      // notifySettingsChanged is the ISession hot-reload seam, so the call is the
+      // contract; the persisted value is what it would re-read.
+      expect(claudeSettingsSpies.saveCleanupPeriodDays).toHaveBeenCalledWith(30)
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
     })
 
     it('mcp:status returns [] without throwing for a capability-true session lacking mcpServerStatus', async () => {
@@ -826,7 +962,13 @@ describe('registerRemoteHandlers', () => {
         makeRequest('claude:save-permissions', 'user', PERMS, '/other/repo'),
         remoteConn
       )
-      expect(sessionStub.notifySettingsChanged).toHaveBeenCalled()
+      // sessionStub has no cwd, so only the user-scope rule can reach it.
+      expect(claudeSettingsSpies.saveClaudePermissions).toHaveBeenCalledWith(
+        'user',
+        PERMS,
+        '/other/repo'
+      )
+      expect(sessionStub.notifySettingsChanged).toHaveBeenCalledTimes(1)
     })
 
     it('scopes a project-scope write to sessions on that cwd', async () => {
@@ -1055,6 +1197,27 @@ describe('registerRemoteHandlers', () => {
     })
   })
 
+  describe('remote mockup watcher + worktree removal (C-S7, ADR-112)', () => {
+    it('a remote mockup watch is visible to the worktree remover, which closes it and frees the key', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cui-rmockup-'))
+      try {
+        fs.mkdirSync(path.join(root, '.claude', 'ui', 'mockups', 'm1'), { recursive: true })
+        await dispatcher.handle(makeRequest('mockup:watch', root, 'm1'), remoteConn)
+
+        expect(closeMockupWatchersUnder(root)).toBe(1)
+        // Re-armable: the has() guard no longer sees the closed watcher.
+        await dispatcher.handle(makeRequest('mockup:watch', root, 'm1'), remoteConn)
+        expect(closeMockupWatchersUnder(root)).toBe(1)
+        await dispatcher.handle(makeRequest('mockup:watch', root, 'm1'), remoteConn)
+        await dispatcher.handle(makeRequest('mockup:unwatch', root, 'm1'), remoteConn)
+        expect(closeMockupWatchersUnder(root)).toBe(0)
+      } finally {
+        closeMockupWatchersUnder(root)
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    })
+  })
+
   // R5 — full channel parity (user decision: register every channel the web
   // api-adapter invokes that a remote grant covers). These were missing from the
   // dispatcher, so the web client hit "Channel not available" for git, live
@@ -1166,6 +1329,144 @@ describe('registerRemoteHandlers', () => {
       }
     })
 
+    describe('session:get-opencode-providers — shared-route claims (remote parity)', () => {
+      const entry = (id: string): any => ({
+        id,
+        name: id,
+        authState: 'authenticated',
+        authMethods: ['api'],
+        modelCount: 1,
+        disabled: false,
+        actions: {
+          canSetCredential: true,
+          canEditDeclaration: false,
+          canRemove: true,
+          removeKind: 'credential'
+        }
+      })
+      const chatgptDefinition: any = {
+        id: 'chatgpt',
+        name: 'ChatGPT',
+        kind: 'subscription',
+        models: [],
+        managed: true,
+        routes: {
+          pi: { enabled: true, providerId: 'openai-codex' },
+          opencode: { enabled: true, providerId: 'openai' }
+        }
+      }
+
+      let definitionsSpy: { mockRestore: () => void } | undefined
+
+      afterEach(() => {
+        vi.mocked(opencodeServerManager.isBinaryAvailable).mockReturnValue(false)
+        vi.mocked(discoverOpencodeProviderCatalog).mockResolvedValue([])
+        definitionsSpy?.mockRestore()
+        definitionsSpy = undefined
+      })
+
+      function serve(catalog: unknown[], definitions: unknown[]): void {
+        vi.mocked(opencodeServerManager.isBinaryAvailable).mockReturnValue(true)
+        vi.mocked(discoverOpencodeProviderCatalog).mockResolvedValue(catalog as never)
+        definitionsSpy = vi
+          .spyOn(sharedProviderService, 'listDefinitions')
+          .mockReturnValue(definitions as never)
+      }
+
+      it('marks the entry an ENABLED shared route delivers, exactly as the desktop handler does', async () => {
+        serve([entry('openai'), entry('groq')], [chatgptDefinition])
+        const result = (await dispatcher.handle(
+          makeRequest('session:get-opencode-providers'),
+          remoteConn
+        )) as any[]
+        // The desktop handler's decoration, so a phone shows the same "delivered by
+        // ChatGPT" warning (and the Remove is refused for the same reason).
+        expect(result.find((e) => e.id === 'openai').sharedProviderClaim).toEqual({
+          id: 'chatgpt',
+          name: 'ChatGPT'
+        })
+        expect(result.find((e) => e.id === 'groq').sharedProviderClaim).toBeUndefined()
+      })
+
+      it('leaves the entry unmarked once the route is switched off', async () => {
+        serve(
+          [entry('openai')],
+          [
+            {
+              ...chatgptDefinition,
+              routes: { ...chatgptDefinition.routes, opencode: { enabled: false } }
+            }
+          ]
+        )
+        const [openai] = (await dispatcher.handle(
+          makeRequest('session:get-opencode-providers'),
+          remoteConn
+        )) as any[]
+        expect(openai.sharedProviderClaim).toBeUndefined()
+      })
+
+      it('still serves the plain catalog when the shared definitions cannot be read', async () => {
+        serve([entry('openai')], [])
+        vi.mocked(sharedProviderService.listDefinitions).mockImplementation(() => {
+          throw new Error('unreadable')
+        })
+        const result = (await dispatcher.handle(
+          makeRequest('session:get-opencode-providers'),
+          remoteConn
+        )) as any[]
+        expect(result.map((e) => e.id)).toEqual(['openai'])
+        expect(result[0].sharedProviderClaim).toBeUndefined()
+      })
+
+      it('is empty without an opencode binary — nothing to decorate', async () => {
+        vi.mocked(opencodeServerManager.isBinaryAvailable).mockReturnValue(false)
+        await expect(
+          dispatcher.handle(makeRequest('session:get-opencode-providers'), remoteConn)
+        ).resolves.toEqual([])
+      })
+    })
+
+    it('an opencode/pi history read carries the ledger’s X-Agent cards (ADR-105 §5), as the sidebar’s cold load needs', async () => {
+      const parent = `oc-parent-${process.pid}`
+      const row = dispatchLedger.create({
+        engine: 'pi',
+        harnessRef: `h-${parent}`,
+        parentSessionId: parent,
+        parentEngine: 'opencode',
+        parentToolUseId: 'call_dispatch',
+        cwd: '/x',
+        parentCwd: '/x',
+        model: 'm',
+        launchMode: 'default',
+        accountKey: null,
+        codexAccountId: null,
+        callerRestriction: null,
+        name: null,
+        description: null
+      })
+      const messages = [
+        {
+          id: 'm1',
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', toolUseId: 'call_dispatch', toolName: 'claudeui_dispatch_agent' }
+          ],
+          timestamp: 1
+        }
+      ]
+      vi.mocked(loadOpencodeSessionHistory).mockResolvedValueOnce({
+        messages,
+        statusLine: null
+      } as never)
+      const res = (await dispatcher.handle(
+        makeRequest('session:load-opencode-history', parent),
+        remoteConn
+      )) as { activeTasks?: Record<string, { taskId: string }> }
+      expect(res.activeTasks).toEqual({
+        call_dispatch: expect.objectContaining({ taskId: row.id, taskType: 'dispatch' })
+      })
+    })
+
     it('git:commit dispatches to the service with get/release bracketing', async () => {
       const res = await dispatcher.handle(makeRequest('git:commit', '/tmp/proj', 'msg'), remoteConn)
       expect(gitManagerSpies.get).toHaveBeenCalledWith('/tmp/proj')
@@ -1180,6 +1481,135 @@ describe('registerRemoteHandlers', () => {
         dispatcher.handle(makeRequest('git:push', '/tmp/proj'), remoteConn)
       ).rejects.toThrow('remote rejected')
       expect(gitManagerSpies.release).toHaveBeenCalledWith('/tmp/proj')
+    })
+
+    it('session:load-history declares withProgress and forwards the reporter to the Claude reader (ADR-102)', async () => {
+      expect(commandRegistry.declaration('session:load-history')?.withProgress).toBe(true)
+      const progress = vi.fn()
+      await dispatcher.handle(
+        makeRequest('session:load-history', 'sess-1', 'proj-key', null),
+        remoteConn,
+        progress
+      )
+      // The reporter LEADS the handler args (not the wire's), and the wire's
+      // null anchor is still normalised to undefined. No options on the wire
+      // (an old client's 3-arg call) means the full read.
+      expect(loadClaudeHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', undefined, {
+        onProgress: progress,
+        deferStatusLine: false
+      })
+    })
+
+    it('session:load-history validates its options arg: only a literal deferStatusLine === true defers (ADR-102 Arc 2)', async () => {
+      const progress = vi.fn()
+      const deferredOf = async (...options: unknown[]): Promise<unknown> => {
+        await dispatcher.handle(
+          makeRequest('session:load-history', 'sess-1', 'proj-key', null, ...options),
+          remoteConn,
+          progress
+        )
+        return (
+          vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3] as { deferStatusLine?: boolean }
+        ).deferStatusLine
+      }
+      expect(await deferredOf({ deferStatusLine: true })).toBe(true)
+      // Anything else is ignored, never coerced: non-objects, wrong types, extras.
+      expect(await deferredOf({ deferStatusLine: 'true' })).toBe(false)
+      expect(await deferredOf({ deferStatusLine: 1 })).toBe(false)
+      expect(await deferredOf({ deferStatusLine: false })).toBe(false)
+      expect(await deferredOf({})).toBe(false)
+      expect(await deferredOf(null)).toBe(false)
+      expect(await deferredOf('deferStatusLine')).toBe(false)
+      expect(await deferredOf(42)).toBe(false)
+      expect(await deferredOf(['deferStatusLine'])).toBe(false)
+      // Extra fields are ignored and are not forwarded.
+      expect(await deferredOf({ deferStatusLine: true, resumeSessionAt: 'x', onProgress: 1 })).toBe(
+        true
+      )
+      expect(vi.mocked(loadClaudeHistoryMock).mock.lastCall?.[3]).toEqual({
+        onProgress: progress,
+        deferStatusLine: true
+      })
+    })
+
+    it('session:load-status-line is an fs-read query that declares withProgress and forwards the reporter (ADR-102 Arc 2)', async () => {
+      expect(commandRegistry.declaration('session:load-status-line')).toMatchObject({
+        capability: 'fs-read',
+        kind: 'query',
+        withProgress: true
+      })
+      // The server sends its `sending` frame only for a channel this says reports.
+      expect(dispatcher.reportsProgress('session:load-status-line')).toBe(true)
+      const progress = vi.fn()
+      const res = await dispatcher.handle(
+        makeRequest('session:load-status-line', 'sess-1', 'proj-key'),
+        remoteConn,
+        progress
+      )
+      expect(res).toEqual({ totalCostUsd: 1 })
+      expect(loadStatusLineMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', progress)
+    })
+
+    it('session:load-subagent-history declares withProgress (the transport `sending` frame) and keeps its wire args (ADR-102 Arc 2, C8)', async () => {
+      expect(commandRegistry.declaration('session:load-subagent-history')?.withProgress).toBe(true)
+      expect(dispatcher.reportsProgress('session:load-subagent-history')).toBe(true)
+      await dispatcher.handle(
+        makeRequest('session:load-subagent-history', 'sess-1', 'proj-key', 'agent-9'),
+        remoteConn
+      )
+      // The reporter takes the leading slot, so the wire args land where they did.
+      expect(loadSubagentHistoryMock).toHaveBeenLastCalledWith('sess-1', 'proj-key', 'agent-9')
+    })
+
+    // The three Claude history readers join sessionId / projectKey (/ agentId) into a
+    // ~/.claude/projects path, and these channels are reachable by any `fs-read`
+    // caller. A traversal value must be refused before the reader (the filesystem) runs.
+    describe.each([
+      ['session:load-history', () => loadClaudeHistoryMock, []],
+      ['session:load-status-line', () => loadStatusLineMock, []],
+      ['session:load-subagent-history', () => loadSubagentHistoryMock, ['agent-9']]
+    ] as const)('%s path-segment validation', (channel, reader, tail) => {
+      it.each([
+        ['sessionId', ['../x', 'proj-key']],
+        ['sessionId', ['a/b', 'proj-key']],
+        ['sessionId', ['a\\b', 'proj-key']],
+        ['sessionId', ['', 'proj-key']],
+        ['projectKey', ['sess-1', '../x']],
+        ['projectKey', ['sess-1', 'a/b']],
+        ['projectKey', ['sess-1', 'a\\b']],
+        ['projectKey', ['sess-1', '..']],
+        ['projectKey', ['sess-1', '']]
+      ])('refuses a bad %s (%j) before any read (GUARD — fails pre-fix)', async (label, ids) => {
+        vi.mocked(reader()).mockClear()
+        await expect(
+          dispatcher.handle(makeRequest(channel, ...ids, ...tail), remoteConn)
+        ).rejects.toThrow(new RegExp(`Invalid ${label}`))
+        expect(reader()).not.toHaveBeenCalled()
+      })
+
+      it('passes a valid call through unchanged', async () => {
+        vi.mocked(reader()).mockClear()
+        await dispatcher.handle(makeRequest(channel, 'sess-1', 'proj-key', ...tail), remoteConn)
+        expect(reader()).toHaveBeenCalledTimes(1)
+        expect(vi.mocked(reader()).mock.lastCall?.slice(0, 2 + tail.length)).toEqual([
+          'sess-1',
+          'proj-key',
+          ...tail
+        ])
+      })
+    })
+
+    it('session:load-subagent-history refuses a bad agentId before any read (GUARD — fails pre-fix)', async () => {
+      vi.mocked(loadSubagentHistoryMock).mockClear()
+      for (const agentId of ['../x', 'a/b', 'a\\b', '..', '']) {
+        await expect(
+          dispatcher.handle(
+            makeRequest('session:load-subagent-history', 'sess-1', 'proj-key', agentId),
+            remoteConn
+          )
+        ).rejects.toThrow(/Invalid agentId/)
+      }
+      expect(loadSubagentHistoryMock).not.toHaveBeenCalled()
     })
 
     it('account:get returns the account-manager state', async () => {
@@ -1249,11 +1679,22 @@ describe('registerRemoteHandlers', () => {
         sandbox: { enabled: true, DIFFERENT: true }
       } as unknown as ReturnType<typeof uiConfigMocks.loadSettings>)
 
-      await dispatcher.handle(makeRequest('session:create', 'rid-sandbox', '/tmp/proj'), remoteConn)
+      try {
+        await dispatcher.handle(
+          makeRequest('session:create', 'rid-sandbox', '/tmp/proj'),
+          remoteConn
+        )
 
-      expect(sessionManagerStub.create).toHaveBeenCalled()
-      // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
-      expect(sessionManagerStub.create.mock.calls[0][3].sandboxConfig).toEqual(SENTINEL)
+        expect(sessionManagerStub.create).toHaveBeenCalled()
+        // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
+        expect(sessionManagerStub.create.mock.calls[0][3].sandboxConfig).toEqual(SENTINEL)
+      } finally {
+        // The decoy is never consumed when the code sources sandbox correctly, and
+        // vi.clearAllMocks() leaves queued once-values alone — so it would answer the
+        // next test that calls loadSettings (config:load-settings). Reset restores
+        // the vi.fn(impl) default.
+        uiConfigMocks.loadSettings.mockReset()
+      }
     })
 
     it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
@@ -1408,6 +1849,23 @@ describe('registerRemoteHandlers', () => {
       expect(persisted).not.toHaveProperty('proxy')
       expect(persisted).not.toHaveProperty('anthropicEndpoint')
       expect(persisted).not.toHaveProperty('modelOverride')
+    })
+
+    it('stores the context-pressure setting only in its valid form, whoever sends it (slice 4)', async () => {
+      await dispatcher.handle(
+        makeRequest('config:save-settings', {
+          contextPressure: { mode: 'sometimes', thresholds: [95, 5, 40, 40, 'x', 120, 60] }
+        }),
+        remoteConn
+      )
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0].contextPressure).toEqual({
+        mode: 'off',
+        thresholds: [40, 60, 95]
+      })
+      // Absent stays absent: the default is not written into every profile.
+      uiConfigMocks.saveSettings.mockClear()
+      await dispatcher.handle(makeRequest('config:save-settings', { theme: 'dark' }), remoteConn)
+      expect(uiConfigMocks.saveSettings.mock.calls[0][0]).not.toHaveProperty('contextPressure')
     })
 
     it('applies endpoint/model env sourced from the vendor store (GUARD — fails pre-fix)', async () => {
@@ -1579,6 +2037,20 @@ describe('registerRemoteHandlers', () => {
 //   - `session:approve-blocked` (ADR-091 part 6) — approving an auto-mode
 //     block after the fact; a `chat` command on the named session, gated
 //     exactly like `session:approval-response`, which it extends.
+//   - `session:allow-peer-messages` (session tools, slice 1a) — the "Allow messages
+//     from other Claude sessions here" action on a held peer message; a `chat`
+//     command on the named session, so the browser client can answer the hold row
+//     exactly as the desktop does.
+//   - `session:link:set-grouped` (session tools, slice 5; was `session:link:detach`) — the
+//     "Detach from group" / "Add to group" row menu action; a `chat` command naming the
+//     session, so the browser and phone clients can move a session in or out of its group as
+//     the desktop can.
+//   - `session:proposal:start` / `session:proposal:dismiss` (session tools, slice 1c-b, 5) — the
+//     two Start buttons (in this group / as standalone work) and Dismiss on a proposal card; `chat` commands naming a proposal, so the
+//     browser and phone clients can act on a card exactly as the desktop does.
+//   - `session:context-pressure:respond` (session tools, slice 4) — Hand off / Not now on the
+//     banner above the composer; a `chat` command naming the session, so the browser and
+//     phone clients answer exactly as the desktop does.
 // ---------------------------------------------------------------------------
 
 const PRE_PORT_REMOTE_CHANNELS = [
@@ -1624,12 +2096,14 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'mockup:watch',
   'pi:auth-status',
   'pi:binary-path',
+  'session:allow-peer-messages',
   'session:approval-response',
   'session:approve-blocked',
   'session:ask-side-question',
   'session:background-task',
   'session:build-subagent-file-map',
   'session:cancel',
+  'session:context-pressure:respond',
   'session:create',
   'session:delete-project',
   'session:delete-session',
@@ -1644,6 +2118,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:get-plan-content',
   'session:get-session-log-path',
   'session:interrupt',
+  'session:link:set-grouped',
   'session:list-directories',
   'session:list-opencode',
   'session:list-pi',
@@ -1652,6 +2127,8 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'session:load-opencode-history',
   'session:load-pi-history',
   'session:load-subagent-history',
+  'session:proposal:dismiss',
+  'session:proposal:start',
   'session:read-background-range',
   'session:recall-queued',
   'session:rekey',
@@ -1748,6 +2225,10 @@ const SHELL_GATED_CHANNELS = [
 const POST_PORT_CHANNELS = [
   'session:clear-conversation',
   'file:list-places',
+  // ADR-102 Arc 2: the status line a `deferStatusLine` history read left out.
+  // `fs-read`, the capability of the `session:load-history` it is the second half
+  // of — the same transcript bytes, summed instead of returned.
+  'session:load-status-line',
   // ADR-087: the bytes behind a transcript BlobRef. `chat`, the capability that
   // already read these exact bytes inside the snapshot — an invoke, not an HTTP
   // route, so on an E2E origin they stay inside the encrypted channel.
@@ -1893,8 +2374,11 @@ const S1B_SWEEP_CHANNELS = [
   'proxy:test-connection',
   'usage:refresh-prices',
   'worktree:create',
-  'worktree:list',
+  'worktree:inspect',
+  'worktree:inventory',
+  'worktree:measure',
   'worktree:remove',
+  'worktree:remove-many',
   'worktree:status'
 ] as const
 
@@ -2103,6 +2587,13 @@ const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
  */
 const JUDGE_MODEL_SUPPORT_CHANNELS = ['automode:judge-model-support'] as const
 
+/**
+ * The same class for the judge route's rate-limit cooldown: the Settings picker shows "resting
+ * until …" next to a model or ChatGPT account, in the browser client too. Only a time leaves —
+ * the route the resolver builds (token and all) is dropped by the handler.
+ */
+const JUDGE_ROUTE_RESTING_CHANNELS = ['automode:judge-route-resting'] as const
+
 /** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
 const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
 
@@ -2120,6 +2611,18 @@ const USAGE_HUB_CHANNELS = [
   'usage-hub:sync-now',
   'usage-hub:resync',
   'usage-hub:forget'
+] as const
+
+/**
+ * The OpenRouter tab's four reads. Restated rather than imported from
+ * `openrouter-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. All
+ * `config` queries: the key they are read with never appears in an answer.
+ */
+const OPENROUTER_CHANNELS = [
+  'openrouter:status',
+  'openrouter:overview',
+  'openrouter:models',
+  'openrouter:model-endpoints'
 ] as const
 
 /**
@@ -2166,6 +2669,13 @@ const VOICE_PACK_CHANNELS = [
   'voice:pack-install-cancel',
   'voice:pack-remove'
 ] as const
+
+/**
+ * The web client's full-sync timing report (`SyncStats`, sync-core.md § Measuring
+ * a full sync). REMOTE-only: the desktop renderer relays its own through
+ * `log:relay`. `chat` / `query` / `withConnection` — see its registration.
+ */
+const SYNC_TIMING_CHANNELS = ['sync:report-timing'] as const
 
 /** The part of {@link VOICE_PACK_CHANNELS} that is gated by `admin`. */
 const VOICE_PACK_ADMIN_CHANNELS = [
@@ -2227,6 +2737,7 @@ describe('remote surface parity (phase 1 port)', () => {
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
         ...JUDGE_MODEL_SUPPORT_CHANNELS,
+        ...JUDGE_ROUTE_RESTING_CHANNELS,
         // ADR-068 §1: the three `codex:login-*` channels are gone with the
         // native device-code UI; the vault owns the ChatGPT identity and
         // `provider-account:*` is how a remote client reads it.
@@ -2254,12 +2765,17 @@ describe('remote surface parity (phase 1 port)', () => {
         // not desktop-only — and no shape among them can return the device
         // secret, which is why a write-only `set-secret` command is safe here.
         ...USAGE_HUB_CHANNELS,
+        // The OpenRouter tab (Usage Analytics): four `config` queries, declared
+        // once in `openrouter-commands.ts`. Remote because the dashboard is not
+        // desktop-only; the vault key is read per call and never returned.
+        ...OPENROUTER_CHANNELS,
         // ADR-082 arc 2: the Installed page is on every device (reads are
         // `config`); installing, re-sourcing and detecting are `admin`.
         ...HARNESS_CHANNELS,
         // ADR-101 §6: the speech pack. Its status is `chat`; install, cancel and
         // remove are `admin`.
-        ...VOICE_PACK_CHANNELS
+        ...VOICE_PACK_CHANNELS,
+        ...SYNC_TIMING_CHANNELS
       ].sort()
     )
   })
@@ -2267,6 +2783,16 @@ describe('remote surface parity (phase 1 port)', () => {
   it('automode:judge-model-support is a base-reachable config QUERY, like get-engine-models', () => {
     const decl = commandRegistry.declaration('automode:judge-model-support')
     const twin = commandRegistry.declaration('session:get-engine-models')
+    expect(decl?.capability).toBe('config')
+    expect(decl?.capability).toBe(twin?.capability)
+    expect(decl?.kind).toBe('query')
+    expect(decl?.kind).toBe(twin?.kind)
+    expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
+  })
+
+  it('automode:judge-route-resting is a base-reachable config QUERY, like judge-model-support', () => {
+    const decl = commandRegistry.declaration('automode:judge-route-resting')
+    const twin = commandRegistry.declaration('automode:judge-model-support')
     expect(decl?.capability).toBe('config')
     expect(decl?.capability).toBe(twin?.capability)
     expect(decl?.kind).toBe('query')

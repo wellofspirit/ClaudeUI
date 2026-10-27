@@ -25,7 +25,11 @@ import {
   DISPATCH_ASK_RULE,
   EXECUTE_DENY_RULE,
   externalDirectoryGates,
+  HAND_BACK_ALLOW_RULE,
+  HAND_BACK_DENY_RULE,
   modeGates,
+  SESSION_TOOLS_ASK_RULE,
+  SESSION_TOOLS_DENY_RULE,
   THROWAWAY_RULESET,
   withoutAllowRulesV2,
   withoutMutatingAllowRulesV2,
@@ -404,6 +408,15 @@ describe('modeGates', () => {
     expect(modeGates('autoEdit')).toEqual(modeGates('acceptEdits'))
   })
 
+  it('acceptEdits asks on the nested `.config/git` entry and a cli.js-list file, rendered from the one table', () => {
+    const edits = modeGates('acceptEdits')
+      .filter((g) => g.action === 'edit')
+      .map((g) => g.resource)
+    expect(edits).toEqual(
+      expect.arrayContaining(['*/.config/git/*', '.config/git', '*/.npmrc', '*/.idea/*'])
+    )
+  })
+
   it('plan: shell, webfetch and external_directory ask (edits are enforced after the user rules)', () => {
     expect(modeGates('plan')).toEqual([
       r('shell', 'ask'),
@@ -412,17 +425,31 @@ describe('modeGates', () => {
     ])
   })
 
-  it('auto (classifier on): every edit asks, every MCP tool asks via the `*_*` catch-all, claudeui allowed', () => {
+  it('auto (classifier on): every edit, websearch, skill and subagent spawn asks, every MCP tool asks via the `*_*` catch-all, claudeui allowed', () => {
     const own = [r('external_directory', 'allow', '/data/opencode/tool-output/*')]
     expect(modeGates('auto', { autoMode: true, externalDirAllows: own })).toEqual([
       r('shell', 'ask'),
       r('webfetch', 'ask'),
+      r('websearch', 'ask'),
+      r('skill', 'ask'),
+      r('subagent', 'ask'),
       r('edit', 'ask'),
       AUTO_MCP_CATCH_ALL,
       r('claudeui_*', 'allow'),
       r('external_directory', 'ask'),
       ...own
     ])
+  })
+
+  it('only the judged auto ruleset gates websearch, skill and subagent (R3); every other mode leaves opencode’s own baseline', () => {
+    const gated = (rules: V2Rule[], action: string): boolean =>
+      rules.some((x) => x.action === action && x.effect === 'ask')
+    for (const action of ['websearch', 'skill', 'subagent']) {
+      expect(gated(modeGates('auto', { autoMode: true }), action)).toBe(true)
+      for (const mode of ['default', 'ask', 'acceptEdits', 'plan', 'full'])
+        expect(gated(modeGates(mode), action)).toBe(false)
+      expect(gated(modeGates('auto', { autoMode: false }), action)).toBe(false)
+    }
   })
 
   it('no mode carries a catch-all allow (the agent supplies the baseline; children keep their own narrowing)', () => {
@@ -449,7 +476,7 @@ describe('buildSessionRuleset', () => {
     ...over
   })
 
-  it('default: gates, user rules, the Code Mode deny last, the dispatch ask after the user rules', () => {
+  it('default: gates, user rules, the Code Mode deny, the dispatch and session-tools asks after the user rules', () => {
     const { rules, userRules, agent } = buildSessionRuleset(
       input({ permissions: perms({ allow: ['Bash(npm test)'] }) })
     )
@@ -462,8 +489,123 @@ describe('buildSessionRuleset', () => {
       r('external_directory', 'ask'),
       r('shell', 'allow', 'npm test'),
       DISPATCH_ASK_RULE,
-      EXECUTE_DENY_RULE
+      SESSION_TOOLS_ASK_RULE,
+      EXECUTE_DENY_RULE,
+      HAND_BACK_DENY_RULE
     ])
+  })
+
+  // ADR-105 §3: `hand_back` is on the shared hosted server, so every session of the server is
+  // offered it; only a dispatch target may keep it. The interactive ruleset hides it from the
+  // model in every mode (a whole-category deny), whatever the user allowed.
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['plan', false],
+    ['auto', true],
+    ['auto', false]
+  ] as const)(
+    '%s (classifier %s): claudeui_hand_back is denied and hidden for an interactive session',
+    (mode, autoMode) => {
+      const { rules } = buildSessionRuleset(
+        input({ mode, autoMode, permissions: perms({ allow: ['mcp__claudeui'] }) })
+      )
+      expect(rules.at(-1)).toEqual(HAND_BACK_DENY_RULE)
+      expect(evaluateV2Call(rules, 'claudeui_hand_back', ['*'], 'linux')).toBe('deny')
+      expect(v2ToolHidden(rules, 'claudeui_hand_back', 'linux')).toBe(true)
+      // The rest of the hosted server is untouched.
+      expect(evaluateV2Call(rules, 'claudeui_render_mermaid', ['*'], 'linux')).not.toBe('deny')
+    }
+  )
+
+  it("a dispatch target's ruleset (handBackTarget) carries no hand_back deny, and the allow wins in every mode", () => {
+    for (const [mode, autoMode] of [
+      ['default', false],
+      ['acceptEdits', false],
+      ['plan', false],
+      ['auto', true]
+    ] as const) {
+      const { rules } = buildSessionRuleset(input({ mode, autoMode, handBackTarget: true }))
+      expect(rules).not.toContainEqual(HAND_BACK_DENY_RULE)
+      const withAllow = wireOrder([...rules, HAND_BACK_ALLOW_RULE])
+      expect(evaluateV2Call(withAllow, 'claudeui_hand_back', ['*'], 'linux'), mode).toBe('allow')
+      expect(v2ToolHidden(withAllow, 'claudeui_hand_back', 'linux')).toBe(false)
+    }
+  })
+
+  // Slice 2: every hosted session tool asks in EVERY mode (auto allows `claudeui_*`, and a user
+  // allow for the server must not un-gate them), so ClaudeUI's gate sees each call.
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['plan', false],
+    ['auto', true],
+    ['auto', false]
+  ] as const)(
+    '%s (classifier %s): every claudeui_session_* tool asks, whatever the user allowed',
+    (mode, autoMode) => {
+      const { rules } = buildSessionRuleset(
+        input({
+          mode,
+          autoMode,
+          permissions: perms({ allow: ['mcp__claudeui', 'mcp__claudeui__session_start'] })
+        })
+      )
+      for (const tool of [
+        'list',
+        'get',
+        'read',
+        'message',
+        'start',
+        'dismiss_proposal',
+        'hand_off',
+        'usage',
+        'stop'
+      ])
+        expect(evaluateV2Call(rules, `claudeui_session_${tool}`, ['*'], 'linux'), tool).toBe('ask')
+      // The other hosted tools are untouched by the glob.
+      expect(evaluateV2Call(rules, 'claudeui_render_mermaid', ['*'], 'linux')).not.toBe('deny')
+    }
+  )
+
+  // Auto mode's gates allow `claudeui_*`; only the ask being the LAST non-deny rule keeps the
+  // session tools gated there. A rule appended after it would un-gate them silently.
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['plan', false],
+    ['auto', true],
+    ['auto', false]
+  ] as const)(
+    '%s (classifier %s): the session tools ask is the last non-deny rule',
+    (mode, autoMode) => {
+      const { rules } = buildSessionRuleset(
+        input({
+          mode,
+          autoMode,
+          permissions: perms({ allow: ['Bash(npm test)', 'mcp__claudeui'] })
+        })
+      )
+      const nonDeny = rules.filter((rule) => rule.effect !== 'deny')
+      expect(nonDeny.at(-1)).toEqual(SESSION_TOOLS_ASK_RULE)
+      if (autoMode) {
+        // …and it sits after the allow it has to outrank.
+        expect(rules.indexOf(SESSION_TOOLS_ASK_RULE)).toBeGreaterThan(
+          rules.findIndex((rule) => rule.action === 'claudeui_*' && rule.effect === 'allow')
+        )
+      }
+    }
+  )
+
+  it('the session tools are hidden from a subagent child, whatever its agent and parent allow', () => {
+    const { rules } = buildSessionRuleset(input({ mode: 'auto', autoMode: true }))
+    const explore: V2Rule[] = [r('*', 'allow')]
+    const child = childSessionRuleset(rules, explore, 'linux')
+    expect(child.at(-1)).toEqual(SESSION_TOOLS_DENY_RULE)
+    expect(v2ToolHidden(child, 'claudeui_session_start', 'linux')).toBe(true)
+    expect(evaluateV2Call(child, 'claudeui_session_message', ['*'], 'linux')).toBe('deny')
+    // Its sibling hosted tools are not hidden with them.
+    expect(v2ToolHidden(child, 'claudeui_render_mermaid', 'linux')).toBe(false)
   })
 
   it('a user allow for the dispatch tool cannot un-gate it', () => {
@@ -483,6 +625,36 @@ describe('buildSessionRuleset', () => {
     expect(evaluateV2Call(rules, 'shell', ['git status'], 'linux')).toBe('ask')
     expect(evaluateV2Call(rules, 'jira_create', ['*'], 'linux')).toBe('ask')
     expect(evaluateV2Call(rules, 'shell', ['rm x'], 'linux')).toBe('deny')
+  })
+
+  it('auto: a spawn, a web search and a skill ask; a user deny still wins, a user allow never reaches the server', () => {
+    const { rules } = buildSessionRuleset(
+      input({
+        mode: 'auto',
+        autoMode: true,
+        permissions: perms({ allow: ['Task', 'WebSearch', 'Skill(demo)'], deny: ['Task(general)'] })
+      })
+    )
+    // An explicit ask (no match would also read as ask, but opencode's baseline allow would win then).
+    expect(lastMatchingV2Rule('subagent', 'explore', rules, 'linux')).toEqual(r('subagent', 'ask'))
+    expect(lastMatchingV2Rule('websearch', 'rust news', rules, 'linux')).toEqual(
+      r('websearch', 'ask')
+    )
+    expect(lastMatchingV2Rule('skill', 'demo', rules, 'linux')).toEqual(r('skill', 'ask'))
+    expect(evaluateV2Call(rules, 'subagent', ['general'], 'linux')).toBe('deny')
+    expect(rules.filter((x) => x.effect === 'allow')).toEqual([r('claudeui_*', 'allow')])
+  })
+
+  it('auto: a subagent child keeps the spawn ask unless its agent wholly denies it (explore: hidden websearch/subagent)', () => {
+    const { rules } = buildSessionRuleset(input({ mode: 'auto', autoMode: true }))
+    const explore = [r('*', 'deny'), r('read', 'allow'), r('grep', 'allow'), r('shell', 'allow')]
+    const child = childSessionRuleset(rules, explore, 'linux')
+    expect(v2ToolHidden(child, 'subagent', 'linux')).toBe(true)
+    expect(v2ToolHidden(child, 'websearch', 'linux')).toBe(true)
+    const general = childSessionRuleset(rules, [r('*', 'allow')], 'linux')
+    expect(lastMatchingV2Rule('subagent', 'explore', general, 'linux')).toEqual(
+      r('subagent', 'ask')
+    )
   })
 
   it('auto with the classifier off is gated like default (never allow-all)', () => {

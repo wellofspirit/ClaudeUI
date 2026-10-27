@@ -2,8 +2,10 @@
  * Tests for provider-actions.ts — the Disable/Remove availability matrix.
  *
  * Guards:
- * - Remove is offered ONLY for what ClaudeUI itself can delete: an auth.json
- *   credential and/or a declaration in the one global config file it writes.
+ * - Remove is offered for what an explicit Remove deletes: ANY credential row
+ *   opencode's credential table holds for the id (the user's own included —
+ *   `hasStoredCredential`) and/or a declaration in the one global config file
+ *   ClaudeUI writes.
  * - removeKind names exactly what would be destroyed ('both' when both exist).
  * - Remove is blocked, with an actionable reason, for every source ClaudeUI
  *   cannot delete from: the other global config file, env vars, credential-free
@@ -12,7 +14,7 @@
  *   caller always renders it) and credential update is gated only on free.
  *
  * REGRESSION ANCHOR: the ChatGPT case. A subscription credential fed into
- * opencode's auth.json under id 'openai' must resolve to canRemove/'credential'
+ * opencode's credential table under id 'openai' must resolve to canRemove/'credential'
  * — never to "nothing to remove", which is what pushed the old UI into writing
  * disabled_providers and stranding the route at 0 models.
  */
@@ -24,7 +26,7 @@ import { resolveProviderActions, type ProviderActionInput } from '../provider-ac
 
 const base: ProviderActionInput = {
   isFree: false,
-  hasCredential: false,
+  hasStoredCredential: false,
   declaredInOurFile: false,
   declaredElsewhereGlobal: false
 }
@@ -35,17 +37,35 @@ const input = (over: Partial<ProviderActionInput> = {}): ProviderActionInput => 
 })
 
 describe('resolveProviderActions — removable classes', () => {
-  it('offers credential removal for a provider whose only listing source is auth.json', () => {
+  it('offers credential removal for a provider whose only listing source is a stored credential row', () => {
     // The ChatGPT/openai case: plugin-auth path, openai's own loader is autoload:false.
-    const actions = resolveProviderActions(input({ hasCredential: true, source: 'custom' }))
+    const actions = resolveProviderActions(input({ hasStoredCredential: true, source: 'custom' }))
     expect(actions.canRemove).toBe(true)
     expect(actions.removeKind).toBe('credential')
     expect(actions.blockedReason).toBeUndefined()
   })
 
   it('offers credential removal for a plain API-key provider', () => {
-    const actions = resolveProviderActions(input({ hasCredential: true, source: 'api' }))
+    const actions = resolveProviderActions(input({ hasStoredCredential: true, source: 'api' }))
     expect(actions.removeKind).toBe('credential')
+  })
+
+  it('a stored row of anyone’s is enough — whatever else keeps the provider listed does not block it', () => {
+    // Remove deletes the rows; an env var, a free gateway or a vetoed provider
+    // with a key behind it is still removable (and `settings` never wins over it).
+    expect(
+      resolveProviderActions(
+        input({ hasStoredCredential: true, source: 'env', envVarNames: ['OPENROUTER_API_KEY'] })
+      ).removeKind
+    ).toBe('credential')
+    expect(
+      resolveProviderActions(input({ hasStoredCredential: true, isFree: true })).removeKind
+    ).toBe('credential')
+    expect(
+      resolveProviderActions(input({ hasStoredCredential: true, disabled: true })).removeKind
+    ).toBe('credential')
+    // No row, only the veto: the stale-entry clean-up, as before.
+    expect(resolveProviderActions(input({ disabled: true })).removeKind).toBe('settings')
   })
 
   it('offers declaration removal for a provider declared in the file we write', () => {
@@ -56,7 +76,7 @@ describe('resolveProviderActions — removable classes', () => {
 
   it("reports 'both' when a declared provider also has a stored credential", () => {
     const actions = resolveProviderActions(
-      input({ declaredInOurFile: true, hasCredential: true, source: 'config' })
+      input({ declaredInOurFile: true, hasStoredCredential: true, source: 'config' })
     )
     expect(actions.removeKind).toBe('both')
   })
@@ -113,12 +133,66 @@ describe('resolveProviderActions — blocked classes', () => {
     expect(actions.blockedReason).toMatch(/no stored credential/i)
   })
 
-  it('explains an external credential source instead of claiming there is no stored credential', () => {
-    const actions = resolveProviderActions(input({ source: 'external' }))
-    expect(actions.canRemove).toBe(false)
-    expect(actions.blockedReason).toMatch(/external credential source/i)
-    expect(actions.blockedReason).toMatch(/disable/i)
-    expect(actions.blockedReason).not.toMatch(/no stored credential/i)
+  it('an external credential source is a stored row like any other: removable, and not special-cased once nothing is stored', () => {
+    // A row that only references a CLI login (Azure) is deleted by Remove.
+    const stored = resolveProviderActions(input({ hasStoredCredential: true, source: 'external' }))
+    expect(stored.removeKind).toBe('credential')
+    expect(stored.blockedReason).toBeUndefined()
+    // `source` is wording only: with no row left, the generic reason applies.
+    const none = resolveProviderActions(input({ source: 'external' }))
+    expect(none.canRemove).toBe(false)
+    expect(none.blockedReason).toMatch(/no stored credential/i)
+    expect(none.blockedReason).not.toMatch(/external credential source/i)
+  })
+
+  describe('a credential stored under another integration id (wording only)', () => {
+    const SHARED_REASON =
+      'Its credential is stored under opencode’s “google-vertex” integration, which this provider shares, so it can’t be removed from here. Disable it to hide it.'
+    const shared = (over: Partial<ProviderActionInput> = {}) =>
+      resolveProviderActions(input({ credentialIntegrationId: 'google-vertex', ...over }))
+
+    it('says where the credential lives, instead of claiming there is none', () => {
+      const actions = shared({ source: 'api' })
+      expect(actions).toMatchObject({ canRemove: false, removeKind: null })
+      expect(actions.blockedReason).toBe(SHARED_REASON)
+      // ... and it beats the config-declared and the generic reasons.
+      expect(shared({ source: 'config' }).blockedReason).toBe(SHARED_REASON)
+      expect(shared({ source: 'custom' }).blockedReason).not.toMatch(/no stored credential/i)
+    })
+
+    it('never changes the decision: removeKind and canRemove are those of the same input without it', () => {
+      const cases: Partial<ProviderActionInput>[] = [
+        {},
+        { source: 'api' },
+        { hasStoredCredential: true },
+        { declaredInOurFile: true },
+        { hasStoredCredential: true, declaredInOurFile: true },
+        { disabled: true },
+        { disabled: true, declaredElsewhereGlobal: true },
+        { declaredElsewhereGlobal: true },
+        { isFree: true },
+        { source: 'env', envVarNames: ['FOO_KEY'] }
+      ]
+      for (const over of cases) {
+        const without = resolveProviderActions(input(over))
+        const with_ = shared(over)
+        expect(with_.canRemove, JSON.stringify(over)).toBe(without.canRemove)
+        expect(with_.removeKind, JSON.stringify(over)).toBe(without.removeKind)
+        expect(with_.canSetCredential, JSON.stringify(over)).toBe(without.canSetCredential)
+        expect(with_.canEditDeclaration, JSON.stringify(over)).toBe(without.canEditDeclaration)
+        // A removable row never carries a reason.
+        if (with_.canRemove) expect(with_.blockedReason).toBeUndefined()
+      }
+    })
+
+    it('yields to the more specific reasons: another config file, an env var, a free gateway', () => {
+      expect(
+        shared({ declaredElsewhereGlobal: true, elsewhereConfigPath: '/x/opencode.json' })
+          .blockedReason
+      ).toContain('/x/opencode.json')
+      expect(shared({ source: 'env', envVarNames: ['FOO_KEY'] }).blockedReason).toContain('FOO_KEY')
+      expect(shared({ isFree: true }).blockedReason).toMatch(/needs no credentials/i)
+    })
   })
 
   it('prefers the env explanation over the generic one when both could apply', () => {

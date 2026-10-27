@@ -3,6 +3,8 @@
 **Status:** Accepted (2026-09-28; owner rulings of the same day, one open item in §5). Implementation is arc 1 of the 3.6
 line on branch `harnesses`. §4's output cap is amended by
 [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) (2026-09-29).
+Amended 2026-10-22 by [ADR-106](adr-106_judge-calibration-measured-facts.md) (OpenRouter stage 1 never reasons unless the catalog says the model does not).
+Amended 2026-10-23 by [ADR-107](adr-107_judge-outage-and-fallback-judge.md) (§3: an optional, user-chosen fallback judge model and account; failed calls are explained on the card and in a banner).
 **Supersedes:** [ADR-037 (engine fork patch policy)](adr-037_engine-fork-patch-policy.md) §1 and
 its opencode bump protocol (§3). Its §2, "pi: extend, don't patch", stands.
 **Amends:** [ADR-023](adr-023_opencode-automode-classifier.md) (the judge no longer runs through
@@ -78,6 +80,8 @@ added outside ClaudeUI, Anthropic, Google, Bedrock. Every gated action goes to t
 session shows one banner saying why and linking to the judge picker. The judge picker marks the
 models it can't call directly and says so, the same way `judgeModelUnavailable()` reports a removed
 model today. The engine transports are deleted, not kept as a fallback.
+
+_Amended 2026-10-23 ([ADR-107](adr-107_judge-outage-and-fallback-judge.md)): the user may name a fallback judge model (and, for a ChatGPT model, a fallback account) — a second ClaudeUI route that judges when the first cannot. The engine transports stay deleted._
 
 ### 4. Wire rules
 

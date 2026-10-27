@@ -144,7 +144,7 @@ export async function compressDir(dir, { quiet = false } = {}) {
 
 // CLI entry. `import.meta.url` equals the entry script's URL only when this
 // file is run directly, not when `electron.vite.config.ts` imports it. No
-// top-level await: the config is bundled by esbuild, which may emit CJS.
+// top-level await: the config bundler may emit CJS.
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const argv = process.argv.slice(2)
   const dirArgIndex = argv.indexOf('--dir')

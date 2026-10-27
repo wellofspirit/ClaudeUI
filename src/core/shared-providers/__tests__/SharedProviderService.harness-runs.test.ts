@@ -84,18 +84,34 @@ function harness(definitions: SharedProviderDefinition[], running: Record<Route,
   const modelsPath = join(dir, 'agent', 'models.json')
   const fingerprintsPath = join(dir, 'ui', 'delivered-key-fingerprints.json')
 
+  const remove =
+    (engine: Route) =>
+    async (id: string): Promise<void> => {
+      writes[engine].push(`remove:${id}`)
+      auth[engine].delete(id)
+    }
   const authTarget = (engine: Route) => ({
     setVendorApiKey: async (id: string, key: string) => {
       writes[engine].push(`set:${id}`)
       auth[engine].set(id, key)
     },
     feedOauthCredential: async () => {},
-    removeVendorAuth: async (id: string) => {
-      writes[engine].push(`remove:${id}`)
-      auth[engine].delete(id)
-    },
     listVendorCredentialIds: async () =>
       Object.fromEntries([...auth[engine].keys()].map((id) => [id, 'api' as const]))
+  })
+  // Each adapter gets only the removal verb it must call, so `writes` tells the
+  // two apart: pi removes through `removeVendorAuth`; opencode through the
+  // narrow `removeVendorKey` (ClaudeUI's own key rows). opencode's target also
+  // carries the WIDE `removeVendorAuth` (every row the user has too), which only
+  // an explicit user Remove may reach — a route toggle that did shows `wide:<id>`.
+  const piAuthTarget = () => ({ ...authTarget('pi'), removeVendorAuth: remove('pi') })
+  const opencodeAuthTarget = () => ({
+    ...authTarget('opencode'),
+    removeVendorKey: remove('opencode'),
+    removeVendorAuth: async (id: string): Promise<void> => {
+      writes.opencode.push(`wide:${id}`)
+      throw new Error(`a route toggle reached the wide removal of ${id}`)
+    }
   })
   const reader = (engine: Route) => ({
     listApiKeyVendorIds: () => [...auth[engine].keys()],
@@ -118,7 +134,7 @@ function harness(definitions: SharedProviderDefinition[], running: Record<Route,
       },
       pi: new PiSharedProviderAdapter({
         modelsPath,
-        auth: authTarget('pi'),
+        auth: piAuthTarget(),
         invalidateModelCache: () => {},
         loadCatalog: async () => [],
         readModelAllowlist: () => ({})
@@ -129,7 +145,7 @@ function harness(definitions: SharedProviderDefinition[], running: Record<Route,
           writes.opencode.push('config')
           opencodeConfig = structuredClone(next)
         },
-        authTarget: authTarget('opencode'),
+        authTarget: opencodeAuthTarget(),
         invalidateModelCache: () => {},
         readModelAllowlist: () => ({})
       }),

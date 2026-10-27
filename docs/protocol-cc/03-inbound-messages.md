@@ -180,6 +180,13 @@ an `isReplay: true` echo; a duplicate that was persisted but not received by thi
 gets a `command_lifecycle` `completed`. The one exception: a persisted message whose turn went
 unanswered is re-run when nothing else is queued. A host must therefore never reuse a uuid.
 
+### Native peer messages (another Claude Code process, over cli.js's socket)
+
+Without `--replay-user-messages` the peer's text never reaches stdout: the host sees `command_lifecycle`
+`started` for a uuid it never sent, the turn's frames, and the user row on disk. A message cli.js parks
+arrives as `system/peer_message_hold`. The wire shapes, the receive policy, the on-disk row and the
+release levers are in 15 (§15.2, §15.3.6); how ClaudeUI reads them is 15 §15.6.
+
 ### Subagent variant (`parent_tool_use_id`)
 
 ```jsonc
@@ -336,6 +343,58 @@ Emitted exactly once per turn, last message of the turn.
 }
 ```
 
+### The zero-turn pointer `result` of a hand-back (2.1.293, probed 2026-10-19)
+
+"Emitted exactly once per turn" has one exception. When a `SubagentHandback` subagent finishes (auto
+mode, §4.4), cli.js delivers its report to the parent as a prompt that starts the parent's turn, and
+ALSO emits the subagent's `task_notification` as a "pointer" (`shouldQuery: false` — it never queries
+the model). That pointer has no turn of its own, but cli.js still brackets it on the wire: `system/init`
+then
+
+```jsonc
+{ "type": "result", "subtype": "success", "num_turns": 0, "result": "", "duration_api_ms": 0,
+  "stop_reason": null, "total_cost_usd": <same cumulative figure as the previous result>,
+  "origin": { "kind": "task-notification", "producer": "session-task", "runId": "..." } }
+```
+
+It lands between turns (observed: after the hand-back prompt's turn was queued, before the next
+turn). It ends no turn, so ClaudeUI keeps the cost/`modelUsage` replace and nothing else: no
+`session:result`, no idle flip, no queue flush, no attention or "Ready for input" (`claude-session.ts`
+`handleResultMessage`, `isHandbackPointerResult`). A background Bash's notification carries the same
+`origin` with `num_turns >= 1` and is a real turn.
+
+### A hand-back that starts an extra turn behind the parent's `result` (2.1.293, probed 2026-10-19, n=1 per case)
+
+cli.js drains its queue (where the hand-back prompt waits) only at the START of a main-agent model
+round. So when the subagent's `task_notification` (`handback` `send` / `flagged`) arrives:
+
+- BEFORE a round starts (`system/status` `requesting`, no `parent_tool_use_id`): the prompt is folded
+  into that round. One turn, one `result`, nothing after it.
+- AFTER the parent's last round began: the turn ends with the prompt still queued and cli.js starts
+  an EXTRA turn about 17 ms after the `result` (`system/init`, `status requesting`, the reply, a second
+  `result` with `origin.kind: "peer"`, `num_turns` 1), then the zero-turn pointer `result` above.
+
+Nothing in the first `result` tells the two apart (same keys; `queued_turn_count` counts user sends only;
+`post_turn_summary.status_detail` is model-written and misleading). Only frame order does. ClaudeUI sets
+`pendingHandbackWake` on a hand-back notification of a MAIN-agent task (a nested child's, `task_started`
+`parent_task_id` / `spawn_depth` > 1, reports to its parent subagent and never sets it), clears it on the
+next `system/status` `requesting`, and carries `pendingWake: true` on the `session:result` it is still set
+at. The renderer does not raise attention or "Ready for input" for that result; the extra turn's own result
+does. A `message_start` / assistant frame cannot be the clear point: they trail the round's request by
+seconds, and a notification landing in that gap would wrongly read as folded. The race between the
+notification frame (about 10 ms behind the enqueue) and a round start is untested, so the renderer also
+applies the normal gate 3 s after a `pendingWake` result if no turn has started
+(`useClaudeEvents.ts` `PENDING_WAKE_GRACE_MS`); the core reports the session running at the extra turn's
+`status requesting`, which cancels that timer.
+
+That `requesting` is also the signal for ANY turn cli.js starts by itself behind an intermediate
+`result` — a background task's notification continuing the work (`system/init`, `status requesting`, …),
+with no pending hand-back at all: a main-level `requesting` (no `parent_tool_use_id` / `agent_id`) on an
+idle session reports it running, so the sidebar dot does not read `idle` from the notification until the
+turn's first assistant frame, seconds later. A subagent's rounds emit none; neither does the zero-turn
+pointer `result`. A round that is cancelled or fails ends with its own `result` (or the process
+ending), which sets idle as for any turn.
+
 ### Cumulative vs per-turn fields (probed 2026-07-15 against the pinned binary)
 
 - **`total_cost_usd` and `modelUsage` are CUMULATIVE within one cli.js process** —
@@ -394,10 +453,19 @@ Consequence for consumers: "the conversation is waiting for the user" must be de
 `task_started`/`task_notification` (§4.5/§4.4) and checking for active auto-continuing task types at
 `result` time. Because mid-turn completions are absorbed, that tracked state is always accurate at
 the moment a `result` is observed. cli.js's own interactive UI uses the same rule (busy predicate
-`S3e`/`rsi`, `cli.js@char3683025` in 2.1.241): active tasks of type `local_agent`, `remote_agent`
+`DCn`/`CF`, `cli.js@char6097665`/`@char6097331` in 2.1.293 — `S3e`/`rsi` in 2.1.241; the print loop's
+own check is `nl`/`o_`/`e_` near `@char34396201`): active tasks of type `local_agent`, `remote_agent`
 (unless `isLongRunning`), `in_process_teammate` (unless `isIdle`), or `local_workflow` ⇒ busy;
-`local_bash` shows as idle-with-shell; monitor types never count as busy. ClaudeUI mirrors this in
-the `session:result` observer (`useClaudeEvents.ts`) to gate the "Ready for input" notification.
+`local_bash` shows as idle-with-shell; monitor types never count as busy.
+
+ClaudeUI deliberately counts MORE than that predicate. Probed live on 2.1.293 (2026-10-19): a
+background Bash's terminal `task_notification` starts an auto-continued turn of its own, exactly like
+an agent's, and `task_started` always precedes the `result` of the turn that launched the task. So the
+emitter stamps `wakesParent` on every `session:task-started` record (`src/shared/waking-task-types.ts`:
+the four agent-like types plus `local_bash`, `monitor_mcp`, `monitor_ws`, `mcp_task`; not `dream`,
+`auto_mode_scan`, `local_memory_import` or an unknown type), and the `session:result` observer
+(`useClaudeEvents.ts`) skips attention and "Ready for input" while any such record is live. Accepted
+cost: a session that leaves a dev server or watcher running gets no turn-end yellow.
 
 ---
 

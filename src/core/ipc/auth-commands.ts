@@ -382,6 +382,9 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
         if (!provider.removeVendorAuth) {
           throw new Error(`Engine "${engineId}" does not support removeVendorAuth`)
         }
+        // The WIDE verb on every engine (opencode: every credential row of the
+        // provider, the user's own included): only an explicit, confirmed user
+        // action may call this channel (ADR-097 §5 amendment 2026-10-21).
         return provider.removeVendorAuth(vendorId)
       })
     },

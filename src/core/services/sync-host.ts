@@ -56,10 +56,11 @@ import { isItemTarget, itemStreamKey } from '../shared/sync/item-stream'
 import { getHostWindow } from './host-window'
 import { logger } from './logger'
 import {
-  detectEnteredWorktree,
-  deriveWorktreeName,
-  recordWorktreeEntry,
-  WORKTREE_ENTER_TOOL_NAMES
+  forgetSessionWorktree,
+  recordDetectedWorktree,
+  resolveEnteredWorktree,
+  WORKTREE_ENTER_TOOL_NAMES,
+  WORKTREE_EXIT_TOOL_NAMES
 } from './worktree-detect'
 
 const LOG_SOURCE = 'sync-core'
@@ -94,6 +95,25 @@ export function syncSubscriberCount(): number {
 /** Drop every subscriber. Test seam only — production unsubscribes individually. */
 export function clearSyncSubscribersForTests(): void {
   subscribers.clear()
+}
+
+/**
+ * Main-side observers: services that react to a replicated event BEFORE it fans
+ * out to the clients (like {@link observeWorktreeEntry} below, but registered by
+ * the service that owns the reaction, so this module needs no import of it).
+ * Their own emissions queue behind the event that caused them. A throwing
+ * observer is logged and skipped. Not cleared by
+ * {@link clearSyncSubscribersForTests}: it holds clients, these are the host.
+ */
+export type HostObserver = (channel: string, args: unknown[]) => void
+
+const hostObservers = new Set<HostObserver>()
+
+export function addHostObserver(observer: HostObserver): () => void {
+  hostObservers.add(observer)
+  return () => {
+    hostObservers.delete(observer)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +443,16 @@ function hostDelivery(
   // SyncCore's reentrancy guard, so they land after this event and never take a
   // lower seq than the event that caused them.
   observeWorktreeEntry(channel, args)
+  for (const observer of [...hostObservers]) {
+    try {
+      observer(channel, args)
+    } catch (err) {
+      logger.error(
+        LOG_SOURCE,
+        `host observer threw on "${channel}": ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
   for (const sink of [...subscribers]) {
     try {
       sink(seq, channel, args)
@@ -507,13 +537,38 @@ export function emitEvent(channel: string, args: unknown[], win?: HostWindowHand
 // Gone with it: `main/sync/shadow.ts`, `CLIENT_WRITTEN_FIELDS`, the renderer's
 // `__getRemoteState` / `getRemoteStateSnapshot`, and the CLAUDEUI_SYNC_SHADOW flag.
 
+/** Worktree tool results already acted on (keyed by routingId and toolUseId), oldest first; bounded. */
+const handledWorktreeResults = new Set<string>()
+const HANDLED_WORKTREE_RESULTS_MAX = 512
+
+/** True the first time a key is claimed. Only Enter/Exit calls get here, so the bound is far away. */
+function claimWorktreeResult(key: string): boolean {
+  if (handledWorktreeResults.has(key)) return false
+  handledWorktreeResults.add(key)
+  if (handledWorktreeResults.size > HANDLED_WORKTREE_RESULTS_MAX) {
+    const oldest = handledWorktreeResults.values().next().value
+    if (oldest !== undefined) handledWorktreeResults.delete(oldest)
+  }
+  return true
+}
+
+/** Test seam: forget which worktree tool results were acted on (tests reuse tool-call ids). */
+export function resetWorktreeObserverForTests(): void {
+  handledWorktreeResults.clear()
+}
+
 /**
- * Detect an entered worktree from an `EnterWorktree` tool result and persist it
- * (SyncCore phase 4c — the last client-computation violation, moved to main).
+ * Detect an entered or left worktree from an `EnterWorktree` / `ExitWorktree` tool result and
+ * persist it (SyncCore phase 4c — the last client-computation violation, moved to main).
  *
  * Runs on DELIVERY, which is after append + apply, so canonical already carries
- * the tool_result attached to its tool_use: the `EnterWorktree` gate can be
+ * the tool_result attached to its tool_use: the tool-name gate can be
  * checked against real state rather than against a regex over the tool NAME.
+ *
+ * Enter: the result's path (or, when that is inexact or not a directory, the call's own `path` /
+ * `name`) must be a linked worktree of the session's repository (C-B4), or nothing is recorded;
+ * an entry for a DIFFERENT worktree is overwritten. Exit: a successful `ExitWorktree` forgets the
+ * entry. `status.cwd` never follows either (it is the spawn cwd), so nothing else may drop it.
  */
 function observeWorktreeEntry(channel: string, args: unknown[]): void {
   if (channel !== 'session:tool-result') return
@@ -521,34 +576,42 @@ function observeWorktreeEntry(channel: string, args: unknown[]): void {
   const data = args[1] as { toolUseId?: string; result?: string; isError?: boolean } | undefined
   if (typeof routingId !== 'string' || !data?.toolUseId || !data.result || data.isError) return
   const state = syncCore.getCanonicalState()
-  if (state.worktreeInfoMap[routingId]) return
   const session = state.sessions[routingId]
   if (!session) return
-  const isEnterWorktree = session.messages.some((msg) =>
-    msg.content.some(
-      (b) =>
-        b.type === 'tool_use' &&
-        b.toolUseId === data.toolUseId &&
-        WORKTREE_ENTER_TOOL_NAMES.has(b.toolName)
-    )
-  )
-  if (!isEnterWorktree) return
-  const detected = detectEnteredWorktree(data.result)
-  if (!detected) return
+  // The tool_use is almost always among the newest messages: search from the end.
+  let toolName: string | undefined
+  let toolInput: Record<string, unknown> | undefined
+  search: for (let i = session.messages.length - 1; i >= 0; i--) {
+    for (const b of session.messages[i].content) {
+      if (b.type === 'tool_use' && b.toolUseId === data.toolUseId) {
+        toolName = b.toolName
+        toolInput = b.toolInput
+        break search
+      }
+    }
+  }
+  if (!toolName) return
+  const isEnter = WORKTREE_ENTER_TOOL_NAMES.has(toolName)
+  if (!isEnter && !WORKTREE_EXIT_TOOL_NAMES.has(toolName)) return
+  // A re-delivered result (a resume replay, a reconnect) must not redo a stale Enter/Exit over a
+  // newer one: act once per (session, tool call).
+  if (!claimWorktreeResult(`${routingId}\u0000${data.toolUseId}`)) return
   try {
-    recordWorktreeEntry(
-      routingId,
-      {
-        worktreePath: detected.worktreePath,
-        worktreeBranch: detected.worktreeBranch,
-        worktreeName: deriveWorktreeName(detected.worktreePath, detected.worktreeBranch),
-        originalCwd: session.cwd,
-        gitRoot: session.cwd,
-        originalHeadCommit: '',
-        createdAt: Date.now()
-      },
-      emitEvent
-    )
+    if (isEnter) {
+      recordDetectedWorktree(
+        routingId,
+        resolveEnteredWorktree(
+          data.result,
+          toolInput,
+          session.cwd,
+          state.worktreeInfoMap[routingId]?.worktreePath
+        ),
+        session.cwd,
+        emitEvent
+      )
+    } else if (WORKTREE_EXIT_TOOL_NAMES.has(toolName)) {
+      forgetSessionWorktree(routingId, emitEvent)
+    }
   } catch (err) {
     logger.warn(
       LOG_SOURCE,

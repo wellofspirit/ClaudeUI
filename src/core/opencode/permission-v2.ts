@@ -225,6 +225,28 @@ export const CLAUDEUI_MCP_SERVER = 'claudeui'
 export const DISPATCH_ASK_RULE: V2Rule = rule('claudeui_dispatch_agent', 'ask')
 
 /**
+ * Every hosted session tool asks in every mode (session tools, slice 2), so opencode
+ * hands each call to ClaudeUI's `sessionToolsGate` (`OpencodeSession.routeSessionToolAsk`):
+ * the scope and mode-parity decisions live there, and a mode that approves everything
+ * (auto allows `claudeui_*`) must not skip them. After the user's rules, like the
+ * dispatch ask.
+ */
+export const SESSION_TOOLS_ASK_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_session_*`, 'ask')
+
+/** The session tools are hidden from a subagent child and a dispatch target: the root agent only. */
+export const SESSION_TOOLS_DENY_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_session_*`, 'deny')
+
+/**
+ * `hand_back` (ADR-105 §3) lives on the shared hosted server, so every session of the server is
+ * offered it. Only a dispatch target is meant to have it: an interactive session and its
+ * subagents get this whole-category deny (hidden from the model), a target's ruleset gets
+ * {@link HAND_BACK_ALLOW_RULE} instead, in every mode (auto's classifier and the asking modes
+ * must never put the report behind an approval).
+ */
+export const HAND_BACK_DENY_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_hand_back`, 'deny')
+export const HAND_BACK_ALLOW_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_hand_back`, 'allow')
+
+/**
  * Auto mode's catch-all for MCP tools. 2.x names an MCP tool's action
  * `<server>_<tool>` (`tool/mcp.ts` `name`), so every MCP action contains `_` —
  * whichever server, whenever it connected. The direct built-ins that contain
@@ -304,16 +326,26 @@ export function externalDirectoryGates(ownDirAllows: readonly V2Rule[] = []): V2
 }
 
 /**
- * Auto mode (classifier on): shell, webfetch and every edit ask; every MCP
- * tool asks ({@link AUTO_MCP_CATCH_ALL}) except ClaudeUI's hosted `claudeui_*`
- * tools (the dispatch tool keeps its own ask, appended later). The catch-all
- * also covers `external_directory`; it is re-stated as the ordinary ask with
- * opencode's own directories allowed after it ({@link externalDirectoryGates}).
+ * Auto mode (classifier on): shell, webfetch, websearch, skill, every edit and
+ * every subagent spawn ask; every MCP tool asks ({@link AUTO_MCP_CATCH_ALL})
+ * except ClaudeUI's hosted `claudeui_*` tools (the dispatch tool keeps its own
+ * ask, appended later). The catch-all also covers `external_directory`; it is
+ * re-stated as the ordinary ask with opencode's own directories allowed after
+ * it ({@link externalDirectoryGates}).
+ *
+ * `subagent` / `websearch` / `skill` have no gate in the other modes (opencode's
+ * own baseline allows them): in auto mode Claude Code's classifier reads them
+ * too, and a spawn's prompt is a delegation payload (policy rule 7). A `deny`
+ * the user or plan mode adds later still wins — it is checked first and sits
+ * after these in the ruleset.
  */
 export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule[] {
   return [
     rule('shell', 'ask'),
     rule('webfetch', 'ask'),
+    rule('websearch', 'ask'),
+    rule('skill', 'ask'),
+    rule('subagent', 'ask'),
     rule('edit', 'ask'),
     AUTO_MCP_CATCH_ALL,
     rule(`${CLAUDEUI_MCP_SERVER}_*`, 'allow'),
@@ -366,6 +398,11 @@ export interface SessionRulesetInput {
   home?: string
   /** The platform path rules are read for (tests; default `process.platform`). */
   platform?: NodeJS.Platform
+  /**
+   * The ruleset is a dispatch target's (the dispatcher adds the `hand_back` allow after it):
+   * leave out the deny every other session gets. Default false.
+   */
+  handBackTarget?: boolean
 }
 
 /** The compiled session ruleset and what the host keeps beside it. */
@@ -386,7 +423,7 @@ export interface SessionRuleset {
  * The ruleset a ClaudeUI opencode session runs with (and every subagent child
  * inherits): mode gates → the user's rules (auto: without allows; plan:
  * without edit/shell/subagent allows) → plan enforcement → Code Mode deny →
- * dispatch ask, in {@link wireOrder}. Deterministic (equal input, equal
+ * dispatch ask → session tools ask, in {@link wireOrder}. Deterministic (equal input, equal
  * output), so a caller can skip an unchanged PATCH.
  */
 export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset {
@@ -403,12 +440,19 @@ export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset 
     : input.mode === 'plan'
       ? withoutMutatingAllowRulesV2(userRules)
       : userRules
+  // ORDER IS LOAD-BEARING (last match wins on the wire): auto mode's gates carry
+  // `claudeui_*` allow ({@link autoModeGates}), and the two asks below are what outrank it.
+  // `SESSION_TOOLS_ASK_RULE` must stay the last non-deny rule: anything appended after it
+  // that could match `claudeui_session_*` would silently un-gate the family in auto mode
+  // (permission-v2.test pins this for every mode).
   const rules = wireOrder([
     ...modeGates(input.mode, { autoMode, externalDirAllows: input.externalDirAllows }),
     ...effective,
     ...(input.mode === 'plan' ? planEnforcement() : []),
     EXECUTE_DENY_RULE,
-    DISPATCH_ASK_RULE
+    DISPATCH_ASK_RULE,
+    SESSION_TOOLS_ASK_RULE,
+    ...(input.handBackTarget ? [] : [HAND_BACK_DENY_RULE])
   ])
   return { rules, userRules, agent: input.mode === 'plan' ? 'plan' : undefined }
 }

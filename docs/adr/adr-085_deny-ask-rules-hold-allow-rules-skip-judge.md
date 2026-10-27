@@ -3,6 +3,9 @@
 **Status:** Accepted (2026-09-30). Built on branch `harnesses` in the 3.6 line, five slices (S1–S5),
 plus a follow-up that keeps opencode's `DeniedError` rule dump out of the model's context (§3 "No
 server-side rule dump").
+**Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-23: a dispatch target's deny/ask rules are the union of the dispatcher's and the target's directories; targets still get no allow rules or additional directories in any ruleset)
+**Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-24 amendment: a target's additional directories, plus the dispatcher's directory when it runs elsewhere, are real scope on every engine; allow rules stay excluded)
+**Amended by:** [ADR-110](adr-110_pi-path-containment-and-judge-off.md) §7a (2026-10-25: on pi, with a path scope, an edit of an agent-control path asks before the allow tier, so a user allow rule no longer allows it; the ladder reads deny → plan → hosted → ask → human-only → session allow → sensitive-edit ask → allow → mode base)
 **Amends:** [ADR-083](adr-083_judge-policy-rebalance-and-permission-context.md) §3 (the "strip every
 allow rule" deviation is retired for narrow rules — §4 here), [ADR-022](adr-022_opencode-permission-mapping.md)
 (the compiled ruleset, session approvals, subagents, plan mode), [ADR-033](adr-033_cross-engine-dispatch.md)

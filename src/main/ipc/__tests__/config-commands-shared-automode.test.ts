@@ -77,14 +77,20 @@ describe('config:save-shared-automode', () => {
   })
 
   it('accepts the three optional string arrays, in any subset', () => {
-    invoke('config:save-shared-automode', {})
-    invoke('config:save-shared-automode', { trustedDomains: ['files.acme.com'] })
-    invoke('config:save-shared-automode', {
-      trustedDomains: ['files.acme.com'],
-      trustedRegistries: ['https://npm.acme.internal'],
-      protectedPatterns: ['acme-live-*']
-    })
-    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(3)
+    const payloads = [
+      {},
+      { trustedDomains: ['files.acme.com'] },
+      {
+        trustedDomains: ['files.acme.com'],
+        trustedRegistries: ['https://npm.acme.internal'],
+        protectedPatterns: ['acme-live-*']
+      }
+    ]
+    for (const payload of payloads) invoke('config:save-shared-automode', payload)
+    // What reached the service is exactly what the caller sent, in order.
+    expect(uiConfigMocks.saveSharedAutoModeConfig.mock.calls.map(([saved]) => saved)).toEqual(
+      payloads
+    )
   })
 
   it('refuses a non-array list', () => {
@@ -207,6 +213,22 @@ describe('config:save-shared-automode', () => {
         () => invoke('config:save-shared-automode', { readOnlyBypass: bad }),
         JSON.stringify(bad)
       ).toThrow(/"readOnlyBypass" must be a boolean/)
+    }
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+  })
+
+  it('accepts captureJudgeReplies as a boolean only', () => {
+    invoke('config:save-shared-automode', { captureJudgeReplies: true })
+    invoke('config:save-shared-automode', { captureJudgeReplies: false })
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
+    expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenLastCalledWith({
+      captureJudgeReplies: false
+    })
+    for (const bad of ['true', 1, null, []]) {
+      expect(
+        () => invoke('config:save-shared-automode', { captureJudgeReplies: bad }),
+        JSON.stringify(bad)
+      ).toThrow(/"captureJudgeReplies" must be a boolean/)
     }
     expect(uiConfigMocks.saveSharedAutoModeConfig).toHaveBeenCalledTimes(2)
   })

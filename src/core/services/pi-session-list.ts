@@ -47,6 +47,7 @@ import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
+import { removePiScratchpad } from '../pi/pi-scratchpad'
 import { blobStore } from './blob-store'
 import {
   childSessionFile,
@@ -103,7 +104,7 @@ function readPiSessionFile(filePath: string): ParsedPiSessionFile | null {
 /** Every `sessions/--<mangled-cwd>--/*.jsonl` path, across all projects. Best-effort: [] if the dir tree is missing/unreadable. */
 function walkAllSessionFiles(): string[] {
   const dir = piSessionsDir()
-  let projectDirs: string[] = []
+  let projectDirs: string[]
   try {
     projectDirs = fs
       .readdirSync(dir, { withFileTypes: true })
@@ -672,8 +673,11 @@ export function resolvePiForkAnchor(sessionId: string, messageIndex: number): Fo
 
 /**
  * Delete a pi session: unlink its .jsonl file and prune the parent
- * `--<mangled-cwd>--` dir if it's now empty. Best-effort: logs + swallows on
- * any error (mirrors deleteOpencodeSession) — never throws to the IPC layer.
+ * `--<mangled-cwd>--` dir if it's now empty, then remove its scratchpad
+ * (ADR-110, `pi/pi-scratchpad.ts`: only once the session itself is gone). Best-effort: logs + swallows on
+ * any error (mirrors deleteOpencodeSession) — never throws to the IPC layer. Resolves
+ * `false` when the session is still there afterwards (a caller that ends things with
+ * the session, like a parent's X-Agents, must not act on a delete that did not happen).
  *
  * Its host-run subagent children (ADR-089) go with it — read from the parent
  * file FIRST, recursively through the child files — except a child another pi
@@ -681,10 +685,18 @@ export function resolvePiForkAnchor(sessionId: string, messageIndex: number): Fo
  * links included): those files are found by a substring prefilter on the ids,
  * then parsed to confirm, and everything they reach is kept.
  */
-export async function deletePiSession(sessionId: string): Promise<void> {
+export async function deletePiSession(sessionId: string): Promise<boolean> {
+  const deleted = await deletePiSessionFile(sessionId)
+  // The session's scratchpad (ADR-110) is keyed by this same id, and exists before the session
+  // has a file (nothing is written until its first turn). It goes with the session, nowhere else.
+  if (deleted) removePiScratchpad(sessionId)
+  return deleted
+}
+
+async function deletePiSessionFile(sessionId: string): Promise<boolean> {
   try {
     const filePath = findPiSessionFile(sessionId)
-    if (!filePath) return
+    if (!filePath) return true
     const parsed = readPiSessionFile(filePath)
     const children = parsed ? reachableAgentIds(parsed.entries) : new Set<string>()
     if (children.size > 0) {
@@ -714,10 +726,13 @@ export async function deletePiSession(sessionId: string): Promise<void> {
     } catch {
       // Best-effort prune — a non-empty or already-gone dir is not an error.
     }
+    return true
   } catch (err) {
     logger.debug(
       'PiSessionList',
       `deletePiSession(${sessionId}) failed: ${err instanceof Error ? err.message : String(err)}`
     )
+    // A file that is already gone is deleted; anything else left the session standing.
+    return (err as { code?: string } | null)?.code === 'ENOENT'
   }
 }

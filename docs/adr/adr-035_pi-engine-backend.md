@@ -4,6 +4,8 @@
 **Date:** 2026-07-20
 **Amended by:** [ADR-092](adr-092_model-catalogs-per-engine-and-a-clean-boot.md) (2026-10-05) — `PiRpcClient.dispose()` closes stdin and tree-kills only after a 2 s grace (a pi signalled during startup leaks its `models-store.json` lock).
 **Amended by:** [ADR-096](adr-096_pi-mcp-shared-catalog.md) (2026-10-06) — pi 1.0 has an MCP client; the bridge (v13) registers ClaudeUI's shared MCP catalog with `pi.registerMcpServer`, fetched from the bridge host's `/mcp-servers`.
+**Amended by:** [ADR-110](adr-110_pi-path-containment-and-judge-off.md) (2026-10-25) — the bridge extension throws (pi exits) without its URL/token instead of loading inert; the ladder contains pi's path tools to the workspace and matches path rules on the path pi opens.
+**Amended 2026-10-26:** the bridge extension may import pi's own package (Decision › Bridge extension imports).
 **Superseded in part (as built, recorded 2026-10-16):** the packaging below is history. pi is no longer packaged or vendored: the tested version installs into ClaudeUI's managed store (`src/shared/harness-manifests/pi.json`, [ADR-082](adr-082_harness-sources-downloads-and-unbundling.md) §8), and the upstream source is checked out at the pinned tag in `vendor/pi-src` (its version-exact docs are in `vendor/pi-src/packages/coding-agent/docs/`). The bridge extension file lives under `~/.claude/ui/pi-ext`, not `os.tmpdir()`. `auth.json` is no longer the only ClaudeUI write under `~/.pi/agent/`: the native settings editor writes `settings.json` (leaf patches) and the shared-provider adapter writes `models.json`.
 **Relates to:** ADR-018 (engine/vendor/account model), ADR-019 (opencode backend — the template this
 mirrors), ADR-020 (persistence/config plane), ADR-021 (neutral auth), ADR-022 (permission mapping),
@@ -58,6 +60,15 @@ Two facts drove the design, both **probed against the real binary before any pro
   file under `os.tmpdir()` is **content-verified against the compiled source on every spawn**
   (rewrite on any mismatch) — write-if-absent alone left a preplant window on world-writable
   POSIX `/tmp`.
+- **Bridge extension imports (2026-10-26):** the extension may import Node builtins and pi's own
+  package (`@earendil-works/pi-coding-agent`), nothing else. pi's extension loader aliases that
+  package to the running binary in Node and compiled modes (`src/core/extensions/loader.ts` at the
+  pinned tag), so there is nothing to install and no version skew. A missing module fails the load
+  and pi exits; a removed or changed export only shows at first use, where the bridge must fail closed, so a pi
+  bump exercises a contained path tool through the bridge. It was import-free by choice until then. Importing
+  pi's tool factories lets containment check the path pi actually resolved, inside its pluggable
+  tool operations, instead of predicting it from the raw `tool_call` input (issue #170). It still
+  fails closed on every error path.
 - **Interaction parity (ADR-024):** mid-turn `steer`, thinking levels → the effort picker
   (`set_thinking_level`, gated on the model's catalog `reasoning` flag), slash-command + skill
   discovery (`get_commands`), and live bash-output streaming (reusing opencode's `BashStreamGate`).

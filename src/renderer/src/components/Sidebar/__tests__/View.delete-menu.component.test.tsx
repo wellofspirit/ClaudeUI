@@ -119,7 +119,12 @@ describe('SidebarView delete menus', () => {
     const props = renderView(group)
 
     const dir = screen.getByTestId('DirectoryItem')
-    fireEvent.contextMenu(within(dir).getByText('demo'))
+    const projectRow = within(dir).getByText('demo').parentElement!
+    // The ⋯ button is touch-only; on pointer devices the row carries no button.
+    expect(within(projectRow).getByTestId('DirectoryItem.menu').className.split(/\s+/)).toContain(
+      'hidden'
+    )
+    fireEvent.contextMenu(projectRow)
     fireEvent.click(screen.getByTestId('DirectoryItem.delete'))
 
     expect(props.onDeleteProject).toHaveBeenCalledWith(group)

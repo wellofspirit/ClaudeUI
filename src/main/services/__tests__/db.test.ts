@@ -226,7 +226,14 @@ describe('migration framework — user_version guard', () => {
       // v27: remote_account — the hub's names for the account keys — and the
       //      one-time cursor reset that re-reads the ledger under the
       //      attribution rule (ADR-072 §2, amended)
-      expect(userVersion(db)).toBe(29)
+      // v30: session_inbox — items other sessions left for a session's next turn
+      //      (slice 1a)
+      // v31: session_ref / session_link — short session refs and parent/child links
+      //      (slice 1b)
+      expect(userVersion(db)).toBe(40)
+      expect(db.prepare('SELECT * FROM session_inbox').all()).toEqual([])
+      expect(db.prepare('SELECT * FROM session_ref').all()).toEqual([])
+      expect(db.prepare('SELECT * FROM session_link').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_session_overrides').all()).toEqual([])
       expect(db.prepare('SELECT * FROM codex_forks').all()).toEqual([])
       // session_meta must exist and be queryable.
@@ -315,7 +322,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(29)
+      expect(userVersion(db)).toBe(40)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -459,7 +466,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(29)
+      expect(userVersion(db)).toBe(40)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

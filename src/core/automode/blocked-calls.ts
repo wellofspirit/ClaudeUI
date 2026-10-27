@@ -42,8 +42,8 @@ export interface BlockedCall {
   grantKey?: string
   /** The agent that made the call (a subagent's or a dispatch target's label); absent → the root's own. */
   agentLabel?: string
-  /** A dispatch target's session id, so the dispatching agent can send the call back to it. */
-  dispatchSessionId?: string
+  /** A dispatch target's ledger ref, so the dispatching agent can message the call back to it. */
+  xAgentRef?: string
   /**
    * The engine family's routing below the root (ADR-091 part 6): deliver the
    * nudge to the nearest LIVE agent on the path from the blocked agent up, and
@@ -182,8 +182,8 @@ export function blockedCallNudge(call: BlockedCall): string {
   const label = cleanLabel(call.agentLabel)
   const head = `I approve the ${call.toolName} call auto mode blocked${label ? ` for the "${label}" subagent` : ''}${summaryPart(call)}. Run it again exactly as it was`
   if (!label) return `${head}.`
-  if (call.dispatchSessionId) {
-    return `${head} — yourself, or by dispatching it back to that agent (session_id "${call.dispatchSessionId}").`
+  if (call.xAgentRef) {
+    return `${head} — yourself, or by messaging that X-Agent with session_message (session: "${call.xAgentRef}").`
   }
   return `${head} — yourself, or by sending it back to that subagent.`
 }

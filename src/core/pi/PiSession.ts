@@ -4,7 +4,7 @@ import { join, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { v4 as uuid } from 'uuid'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import { resolvePiCapabilities } from '../../shared/model-capabilities'
 import { voicePackPlatformKey } from '../../shared/voice-pack'
@@ -75,6 +75,8 @@ import {
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
 import type { SpawnPiChildFn } from './pi-child-runner'
 import { deliveryCommand, isReservedPiCommandText, type PiAgentDelivery } from './pi-delivery'
+import { sessionMessageNoteTitle } from '../services/agent-note'
+import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
 import { narrowMode, PiSubagentManager, type PiChildScope } from './pi-subagents'
 import type {
   GateDecision,
@@ -105,14 +107,32 @@ import {
   decideWithSource,
   piToolKind,
   mergedClaudeRulesFor,
-  withoutAllowRules,
-  sessionAllowKey,
+  piSessionAllowKey,
   normalizeWhitespace,
   PI_TOOL_TO_CLAUDE_TOOL,
   PI_HOSTED_TOOL_NAMES,
   PLAN_MODE_DENY_REASON,
-  PLAN_EXIT_OUTSIDE_PLAN_REASON
+  PLAN_EXIT_OUTSIDE_PLAN_REASON,
+  sessionToolDenyRule
 } from './permission-engine'
+import {
+  buildPiPathScope,
+  isPiPathTool,
+  outsideAllowRules,
+  withPathGuard,
+  workspaceEditRules,
+  type PiPathScope
+} from './pi-path-scope'
+import { ensurePiScratchpad, scratchpadPromptArgs, type ScratchpadEnv } from './pi-scratchpad'
+import { isSessionToolName, type SessionToolName } from '../../shared/session-tools-description'
+import { piSessionToolsEnv } from '../services/session-tool-specs'
+import {
+  auditSessionToolDenial,
+  runSessionTool,
+  sessionToolsAvailable,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
@@ -123,36 +143,44 @@ import {
   autoModeReviewBlock,
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
-import { effectiveShellCwd } from '../automode/read-only-gate'
+import { captureShellActionMeta } from '../automode/action-meta'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { runJudgePipeline } from '../automode/judge-pipeline'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import { blockGrantKey, type BlockedCall } from '../automode/blocked-calls'
 import { inTimeOrder } from '../automode/trajectory'
 import {
-  analyzeRedirects,
-  captureGitConfigArmed,
   captureGitRemotes,
-  captureGitStatus,
   captureRepoVisibility,
-  hasGitSegment,
-  needsGitStatus,
-  needsRepoVisibility,
   recordToolOutcome,
   shellCommandOf,
-  tempDirRoots,
   type GitRemote,
   type RepoVisibility,
   type ToolOutcome
 } from '../automode/ground-truth'
-import { judgeRouteUnavailableMessage, makeSessionJudgeTransport } from '../automode/session-judge'
+import { refreshChatgptAccounts } from '../automode/judge-accounts'
+import {
+  fallbackJudgeAccountFor,
+  fallbackJudgeLabel,
+  fallbackJudgeModelFor,
+  fallbackUnavailableMessage,
+  judgeUnavailableMessage,
+  makeFallbackJudge,
+  makeSessionJudgeTransport,
+  staleJudgeModelMessage
+} from '../automode/session-judge'
 import { buildClassifierEnvironment } from '../automode/environment'
 import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import {
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
   dispatchAgentDescription,
+  dispatchResultSuffix,
+  dispatchWorkdirArg,
+  hasRemovedSessionId,
   joinDispatchHints,
   OWN_SUBAGENT_TOOL,
+  runsInBackground,
   type DispatchTargetEngine
 } from '../../shared/dispatch-agent-description'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
@@ -453,7 +481,7 @@ export class PiSession extends BaseSession {
       hold?: { reason: string; denials: AutoModeDenialTracker; cancel: () => void }
     }
   >()
-  /** "Allow for this session" entries — bare pi tool name, or `bash:<normalized command>` for bash (see permission-engine.ts's sessionAllowKey). */
+  /** "Allow for this session" entries — `bash:<normalized command>`, `<path tool>:<abs path>` (read, edit, write, grep, find, ls), else the bare pi tool name (see permission-engine.ts's piSessionAllowKey). */
   private sessionAllows = new Set<string>()
   /**
    * The MCP catalog this session's pi registers (ADR-096): read at each spawn,
@@ -467,6 +495,30 @@ export class PiSession extends BaseSession {
   private mcpSkipWarned = false
   /** Lazily loaded, cached merge of the user/project/local Claude permission scopes. Invalidated by notifySettingsChanged() and by persistAllowRules() (so a just-persisted rule is honored on the very next gate call in this same session). */
   private cachedRules: MergedClaudeRules | null = null
+  /**
+   * This session's scratchpad (read + write in scope in every mode) and the project temp dir (read
+   * root), as the path scope takes them: canonical spellings, or undefined while the session has
+   * none (the containment rung then simply has no such root).
+   */
+  private scratchpadDir: string | undefined
+  private projectTempDir: string | undefined
+  /**
+   * The scratchpad's session key, fixed at the first spawn. It is pi's own session id, the one
+   * ClaudeUI persists, rekeys to, resumes by and deletes by: a resumed session's id, or (for a
+   * fresh one) an id ClaudeUI mints and hands pi as `--session-id`, so it is known BEFORE the
+   * spawn that needs it. A fork (pi mints the new id after the spawn) and a respawn after a crash
+   * (pi starts a new session) keep the first key: their scratchpad is reused, but deleting the
+   * session by its new id does not find it.
+   */
+  private scratchKey: string | undefined
+  private readonly scratchpadEnv: Partial<ScratchpadEnv> | undefined
+  /** {@link pathScope}'s memo: rebuilt when the merged rules are (settings change), or a root changes. */
+  private pathScopeMemo: {
+    rules: MergedClaudeRules
+    scratch?: string
+    temp?: string
+    scope: PiPathScope
+  } | null = null
 
   // ── Auto mode (`auto`/`full`) LLM gatekeeper — phase 4 ───────────────────────
   /** Memoized `engines/pi.json#autoMode` (see autoModeConfig()). */
@@ -484,6 +536,13 @@ export class PiSession extends BaseSession {
   // The same one-banner rule for a judge model ClaudeUI has no route to call
   // (ADR-081 §3) — the resolver runs on every judge call.
   private judgeRouteUnavailableReported = false
+  // …and for the FALLBACK judge model (`autoMode.fallbackJudgeModel`), apart from the primary's:
+  // its own banner when it cannot be called either, and one log line when it is gone.
+  private fallbackRouteUnavailableReported = false
+  private staleFallbackJudgeLogged = false
+  /** pi's model values as the last `judgeAvailable()` saw them — what the synchronous fallback
+   *  check reads. Empty = unknown (validates nothing). */
+  private catalogValues: string[] = []
   /** How prior tool calls ended, keyed by toolCallId — the classifier's
    *  `{"outcome":…}` annotations. The ONLY channel by which a refusal reaches
    *  the judge, since the transcript slimmer drops tool RESULTS. Bounded by
@@ -587,6 +646,9 @@ export class PiSession extends BaseSession {
   /** Accumulated ACTIVE (turn-processing) duration of completed turns, ms. Not seeded on
    *  resume in M1 (only cost is — see the kickoff spec's resume bullet); starts at 0. */
   private accTotalDurationMs = 0
+  /** Construction time: redirect mtimes at or after it are `modifiedSinceSessionStart`.
+   *  A resumed session restarts the clock — deliberately conservative. */
+  private readonly sessionStartMs = Date.now()
 
   constructor(
     routingId: string,
@@ -598,9 +660,12 @@ export class PiSession extends BaseSession {
       spawnPiChild?: SpawnPiChildFn
       subagentsRoot?: string
       loadAgentRegistry?: (cwd: string) => PiAgentRegistry
+      /** Where the scratchpad lives (tests); production uses the OS temp dir. */
+      scratchpad?: Partial<ScratchpadEnv>
     } = {}
   ) {
     super(routingId, win, cwd)
+    this.scratchpadEnv = deps.scratchpad
     this.loadAgentRegistry = deps.loadAgentRegistry ?? ((dir) => loadPiAgentRegistry({ cwd: dir }))
     // The host reads this session LIVE (routingId changes on a rekey).
     // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -614,6 +679,7 @@ export class PiSession extends BaseSession {
           return session.cwd
         },
         currentModel: () => session._model,
+        scratchpadDir: () => session.scratchpadDir,
         skillDirsEnv: () => session.computeSkillDirsEnv(),
         bridgedMcpServers: () => session.mcpCatalog?.servers ?? {},
         send: (channel, data) => session.send(channel, data),
@@ -717,12 +783,17 @@ export class PiSession extends BaseSession {
     return this.permissionMode
   }
 
+  protected override idleTimerHeld(): boolean {
+    return this.subagents.liveBackgroundCount > 0 || super.idleTimerHeld()
+  }
+
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
     // A live background agent keeps the session (ADR-089 S3): disposing would
     // kill it and lose its notification. backgroundWorkChanged re-arms this
-    // once the last one ends.
-    if (this.subagents.liveBackgroundCount > 0) return
+    // once the last one ends. A running X-Agent holds it the same way
+    // (`idleTimerHeld`; the dispatcher re-arms through `rearmIdleTimer`).
+    if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
         logger.info('PiSession', 'Idle timeout — auto-disconnecting')
@@ -862,6 +933,19 @@ export class PiSession extends BaseSession {
     return catalog
   }
 
+  /**
+   * Create (or find again) this session's scratchpad and publish it to the path scope and the
+   * judge's environment. A session that cannot have one (a planted link, a foreign owner) simply
+   * has none: containment works without it.
+   */
+  private prepareScratchpad(): { sessionId: string } | undefined {
+    this.scratchKey ??= this.resumeSessionId && !this.forkSession ? this.resumeSessionId : uuid()
+    const pad = ensurePiScratchpad(this.cwd, this.scratchKey, this.scratchpadEnv)
+    this.scratchpadDir = pad?.dir
+    this.projectTempDir = pad?.projectTemp
+    return pad ? { sessionId: this.scratchKey } : undefined
+  }
+
   private async doStart(): Promise<void> {
     const launch = locatePiLaunch()
     if (!launch) throw new Error(harnessUnavailableMessage('pi'))
@@ -928,13 +1012,20 @@ export class PiSession extends BaseSession {
           )
         }
       }
+      const scratchpad = this.prepareScratchpad()
       if (this.resumeSessionId) {
         // Resolve the on-disk file for the resume id; fall back to the raw id
         // (verified: --session accepts an absolute file path) if not found —
         // pi will then report whatever it can, rather than us refusing to spawn.
         const resolvedPath = findPiSessionFile(this.resumeSessionId)
         args.push('--session', resolvedPath ?? this.resumeSessionId)
+      } else if (scratchpad && this.piSessionId === null) {
+        // A fresh session's id is chosen here (`--session-id` creates it), so the scratchpad is
+        // keyed by the id the session is known by from its first turn to its deletion.
+        args.push('--session-id', scratchpad.sessionId)
       }
+      // The model is told where its scratch space is, as Claude Code's is; no scratchpad, no flag.
+      args.push(...scratchpadPromptArgs(this.scratchpadDir))
 
       client = new PiRpcClient(launch, {
         cwd: this.cwd,
@@ -946,6 +1037,11 @@ export class PiSession extends BaseSession {
           // the configs themselves come over the host channel, not from here.
           CLAUDEUI_PI_MCP: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
+          // The session tools (bridge v15), on the same two conditions as the hosted
+          // tools above plus the host having wired the service.
+          ...(this.capabilities.hostedMcp && sessionToolsAvailable()
+            ? { CLAUDEUI_PI_SESSION_TOOLS: piSessionToolsEnv() }
+            : {}),
           ...(this.capabilities.crossEngineDispatch
             ? {
                 CLAUDEUI_PI_DISPATCH_ENABLED: '1',
@@ -1254,6 +1350,12 @@ export class PiSession extends BaseSession {
     if (this.resumeSessionId && !this.forkSession) {
       await this.replayStoredHistory(this.resumeSessionId)
     }
+
+    // The engine is up: say so. `isEngineLive()` turned true when the client was assigned
+    // above, but no status followed unless the model or effort needed correcting; the held
+    // X-Agent results of a respawned parent are flushed on exactly this `idle` (ADR-105 §3,
+    // dispatch-result-flush.ts). A turn already running reports `running` as ever.
+    if (!this._cancelled && this.client === client) this.sendStatus()
   }
 
   /**
@@ -1533,7 +1635,9 @@ export class PiSession extends BaseSession {
    */
   deliverAgentMessage(payload: PiAgentDelivery): void {
     this.deliveryChain = this.deliveryChain
-      .then(() => this.sendDelivery(payload))
+      .then(async () => {
+        await this.sendDelivery(payload)
+      })
       .catch((err) => {
         logger.warn(
           'PiSession',
@@ -1542,13 +1646,19 @@ export class PiSession extends BaseSession {
       })
   }
 
-  private async sendDelivery(payload: PiAgentDelivery): Promise<void> {
+  /**
+   * What became of one delivery: `woke` (pi was idle and a turn began), `appended`
+   * (a running turn steers it, or an idle session just stores it) or `refused`
+   * (no process, or pi did not accept the command). Only
+   * {@link deliverNonUser} reads it.
+   */
+  private async sendDelivery(payload: PiAgentDelivery): Promise<'woke' | 'appended' | 'refused'> {
     const ids = `delivery ${payload.deliveryId} (agent ${payload.details.agentId})`
     // No process: its children are already gone with it (cancel/exit dispose
     // them), and respawning would open a fresh pi session. Dropped.
     if (!this.client || this._cancelled) {
       logger.info('PiSession', `${ids} dropped: the session has no pi process`)
-      return
+      return 'refused'
     }
     // Fact S8: a user prompt whose ack is not in yet may still be in pi's
     // pre-run awaits; once its ack is in, a delivery steers it.
@@ -1556,7 +1666,7 @@ export class PiSession extends BaseSession {
     const client = this.client
     if (!client || this._cancelled) {
       logger.info('PiSession', `${ids} dropped: the session has no pi process`)
-      return
+      return 'refused'
     }
     const waking = payload.wake && !this.isProcessing
     if (waking) {
@@ -1567,16 +1677,62 @@ export class PiSession extends BaseSession {
       this.clearInactivityTimer()
       this.sendStatus()
     }
-    let ok = false
+    let ok: boolean
     try {
       const resp = await client.request({ type: 'prompt', message: deliveryCommand(payload) })
       ok = resp.success
     } catch {
       ok = false
     }
-    if (ok) return
+    if (ok) return waking ? 'woke' : 'appended'
     logger.warn('PiSession', `${ids} was not accepted by pi`)
     if (waking && this.wakePending) this.undoWake()
+    return 'refused'
+  }
+
+  /** The pi process is up: a message does not respawn one. */
+  isEngineLive(): boolean {
+    return !!this.client && !this._cancelled
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, through the same
+   * `/cui-deliver` path as every other agent-authored text (the marking rule,
+   * pi-delivery.ts). The row arrives as pi's own `custom` message, so nothing is
+   * recorded here. Resolves once pi has taken (or refused) the command, so the
+   * caller's next prompt sees `willQueue` already true when this woke the session.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    const from = wrapperSender(item)
+    const payload: PiAgentDelivery = {
+      v: 1,
+      deliveryId: uuid(),
+      kind: 'session-message',
+      text: buildSessionMessageWrapper(from, item.text),
+      // A `dispatch-result` carries its own `wake: true` (an item that wakes nothing is held
+      // by the delivery rule, never sent); only a session message wakes unasked.
+      wake: item.wake || item.origin === 'session-message',
+      title: sessionMessageNoteTitle(from.title, false, from.key),
+      details: {
+        agentId: from.key,
+        toolUseId: '',
+        from: from.title,
+        fromId: from.key
+      }
+    }
+    let result: 'woke' | 'appended' | 'refused' = 'refused'
+    const delivered = this.deliveryChain.then(async () => {
+      result = await this.sendDelivery(payload)
+    })
+    this.deliveryChain = delivered.catch((err) => {
+      logger.warn(
+        'PiSession',
+        `delivery ${payload.deliveryId} failed: ${err instanceof Error ? err.constructor.name : 'Error'}`
+      )
+    })
+    await this.deliveryChain
+    if (result === 'refused') return 'unavailable'
+    return result === 'woke' ? 'started' : 'queued'
   }
 
   /** A woken delivery will start no run after all: back to idle (M-2). */
@@ -1817,13 +1973,13 @@ export class PiSession extends BaseSession {
     // only abort the CURRENT turn, leaving the target alive for a later
     // continuation, same as a manual Stop click would). Idempotent: a
     // dispatch that already settled is simply absent from the map
-    // (dispatchInner's `activeByToolUseId` entry is deleted in its own
+    // (the run leaves the dispatcher's registry when it ends, in its own
     // `finally`), so `stopDispatch` harmlessly misses — see the doc comment
     // on `inFlightDispatchIds` and cancel()'s later disposeFor call, which
     // remains safe to run afterward regardless (PiRpcClient.dispose()/
     // PiBridgeHost.dispose() are both documented idempotent).
     for (const id of this.inFlightDispatchIds) {
-      crossEngineDispatcher.stopDispatch(id, this.routingId)
+      crossEngineDispatcher.stopDispatch(id, this.routingId, { blockingOnly: true })
     }
     this.inFlightDispatchIds.clear()
     // Host-run subagents (ADR-089 S3, Q9 — Claude Code's Esc spares
@@ -2087,26 +2243,27 @@ export class PiSession extends BaseSession {
    * inner fn only decides; it never mints a hosted-tool grant itself.
    *
    * AUTO MODE'S BASE (phase 4, mirrors OpencodeSession.applyPermissionMode's
-   * `const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode`): with the
-   * classifier active, the mode BASE fed to the engine is `acceptEdits`, not
-   * `auto`. Without this the wiring would be dead code — `modeBaseDecision`
-   * answers 'allow' for every kind under `auto`/`full`, so nothing except a
-   * user-authored ask rule could ever reach the branch below, and those go
-   * straight to the human by G9. The downgrade is what routes bash/dispatch/
-   * unknown-kind calls into the judge while reads and edits stay auto-allowed
-   * (cli.js's fast-path-A equivalence). With auto mode DISABLED, `auto` keeps
-   * its historical allow-everything base — there would be no classifier to
-   * compensate for a tightening.
+   * `const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode`): the ladder is
+   * handed the user's effective mode and `judge: isAutoMode(mode)` and picks the base
+   * itself (permission-engine.ts `ladderBase`). With the classifier active the base is
+   * `acceptEdits`, not `auto`: without that the wiring would be dead code, because an
+   * allow-everything base leaves nothing but a user ask rule to reach the branch below
+   * (and those go straight to the human by G9). The downgrade is what routes bash/
+   * dispatch/unknown-kind calls into the judge while reads and edits stay auto-allowed
+   * (cli.js's fast-path-A equivalence). With auto mode DISABLED (`autoMode.enabled:
+   * false`) there is no judge, so `auto`/`full` read the `default` base with the full
+   * rule set: a human is asked exactly as in `default` and the user's allow rules are
+   * their way to stop being asked — never the old allow-everything base (H2).
    *
-   * AUTO MODE'S RULES (cli.js §3 step 2 parity): the user's ALLOW rules are
-   * filtered out of what the engine decides on, so the actions they would have
-   * silently auto-allowed fall through to the `acceptEdits` base's 'ask' and
-   * reach the classifier instead of bypassing it. Applied HERE, at the
-   * composition seam, rather than inside the pure ladder — see
-   * `withoutAllowRules` for the full reasoning, the live evasion that motivated
-   * it, and why this leaves G9's `source: 'ask-rule'` provenance exact (deny and
-   * ask are both evaluated before the allow tier, so filtering the allow tier
-   * cannot change which of them answers).
+   * AUTO MODE'S RULES (cli.js §3 step 2 parity): under a judged auto mode the user's
+   * ALLOW rules are filtered out of what the ladder decides on, so the actions they would
+   * have silently auto-allowed fall through to the `acceptEdits` base's 'ask' and reach the
+   * classifier instead of bypassing it. The strip lives inside the ladder (one place that
+   * knows "judged auto") — see `withoutAllowRules` for the full reasoning, the live evasion
+   * that motivated it, and why this leaves G9's `source: 'ask-rule'` provenance exact (deny
+   * and ask are both evaluated before the allow tier). A session allow is not stripped, but
+   * it no longer silences the judge for agents, messages, unclassified tools or
+   * agent-control edits (`sessionAllowHolds`, H3).
    */
   private gateToolCallInner = (payload: PiToolCallPayload): Promise<GateDecision> =>
     this.decideToolCall(payload, null)
@@ -2129,18 +2286,62 @@ export class PiSession extends BaseSession {
    * on EVERY call (live, owner ruling 1), and every deny reason uses it where
    * the session's own call reads `this.permissionMode`.
    */
-  private async decideToolCall(
+  private decideToolCall(
+    payload: PiToolCallPayload,
+    scope: PiChildScope | null
+  ): Promise<GateDecision> {
+    // Path containment's two bookends (pi-path-scope.ts): an allowed path-tool call is pinned to
+    // the path that was gated, and one that sat on a human approval is re-checked afterwards.
+    return withPathGuard(payload.toolName, payload.input, this.pathScope(), () =>
+      this.decideToolCallLadder(payload, scope)
+    )
+  }
+
+  /**
+   * The workspace the containment rung checks pi's path tools against: cwd + the user's
+   * additional directories (resolved, with project-settings provenance for the read block) + this
+   * session's scratchpad and project temp dir. Shared by a host-run subagent's calls (the
+   * parent's workspace).
+   */
+  private pathScope(): PiPathScope {
+    const rules = this.currentRules()
+    const memo = this.pathScopeMemo
+    if (
+      memo &&
+      memo.rules === rules &&
+      memo.scratch === this.scratchpadDir &&
+      memo.temp === this.projectTempDir
+    ) {
+      return memo.scope
+    }
+    const scope = buildPiPathScope({
+      cwd: this.cwd,
+      rules,
+      scratchpad: this.scratchpadDir,
+      projectTemp: this.projectTempDir
+    })
+    this.pathScopeMemo = { rules, scratch: this.scratchpadDir, temp: this.projectTempDir, scope }
+    return scope
+  }
+
+  private async decideToolCallLadder(
     payload: PiToolCallPayload,
     scope: PiChildScope | null
   ): Promise<GateDecision> {
     const { toolName, input } = payload
+    if (isSessionToolName(toolName)) return this.decideSessionToolCall(payload, toolName, scope)
     const mode = this.gateMode(scope)
     const rules = this.currentRules()
     const autoMode = this.isAutoMode(mode)
     const verdict = decideWithSource(toolName, input, {
-      mode: autoMode ? 'acceptEdits' : mode,
-      rules: autoMode ? withoutAllowRules(rules) : rules,
+      // The user's effective mode and whether the judge is on: the ladder derives its base (and
+      // strips the allow tier for a judged auto mode) from the pair — see `ladderBase`.
+      mode,
+      judge: autoMode,
+      rules,
       sessionAllows: this.sessionAllows,
+      sessionAllowsByPath: true,
+      scope: this.pathScope(),
       cwd: this.cwd,
       // pi's MCP tool names are sanitized (ADR-096): spell rules the same way.
       mcpRuleKey: piMcpRuleKey
@@ -2151,16 +2352,17 @@ export class PiSession extends BaseSession {
     // child takes is gated by this same live mode anyway. After the deny-rule
     // check, before the mode base. In auto mode it falls through: the `task`
     // kind under the `acceptEdits` base asks, and the judge decides.
-    // (The deny-rule guard cannot fire yet: no rule row maps Agent/Task to a
-    // pi kind — permission-engine.ts CLAUDE_TOOL_TO_KIND.)
+    // A user `Agent`/`Task` rule is not bypassed: a deny rule refuses the launch and an ask rule
+    // puts the human card in front of it, in every mode (in auto, G9 sends it to the human).
     // `send_message` takes the same rung (ADR-089 S3b, Q6): a message that
     // resumes or redirects an agent is delegation, judged like a spawn in auto.
-    // (As above, the deny-rule guard cannot fire yet: no rule row maps a
-    // Claude tool to the `detail`/`note` kinds these two tools carry.)
+    // (No rule row maps a Claude tool to the `detail`/`note` kinds it and
+    // `task_stop` carry, so the two source checks cannot fire for them.)
     if (
       (toolName === 'agent' || toolName === 'send_message') &&
       !autoMode &&
-      verdict.source !== 'deny-rule'
+      verdict.source !== 'deny-rule' &&
+      verdict.source !== 'ask-rule'
     ) {
       return { behavior: 'allow' }
     }
@@ -2177,6 +2379,11 @@ export class PiSession extends BaseSession {
     if (decision === 'deny') {
       if (verdict.source === 'deny-rule' && verdict.rule) {
         return { behavior: 'deny', reason: `Denied by permission rule: ${verdict.rule}` }
+      }
+      // The containment rung's own denials (a write through a symbolic link, a read the read block
+      // refuses) carry the model-facing text.
+      if (verdict.source === 'path-scope' && verdict.message) {
+        return { behavior: 'deny', reason: verdict.message }
       }
       // exit_plan OUTSIDE plan mode (M5a addendum): registerTool
       // auto-activates the tool, so the model can see/call exit_plan in any
@@ -2196,6 +2403,17 @@ export class PiSession extends BaseSession {
       return { behavior: 'deny', reason: 'Denied by permission rules' }
     }
 
+    // A human-only ask from the containment rung (an unplaceable path, a Windows path trick, an
+    // edit a link carried out of the workspace): a person decides, in every mode — the judge
+    // never sees it, as it never sees a user ask rule.
+    if (verdict.source === 'path-scope') {
+      logger.info(
+        'PiSession',
+        `human-only: ${verdict.pathReason ?? 'path'} (${toolName}${autoMode ? ', auto mode' : ''})`
+      )
+      return this.askHuman(payload, verdict.message, scope, undefined, verdict)
+    }
+
     // 'ask' — in auto mode the classifier gets first refusal; anything it
     // cannot decide falls through to the human below, optionally explaining why
     // (the denial caps do).
@@ -2203,10 +2421,38 @@ export class PiSession extends BaseSession {
       const auto = await this.classifyAutoMode(payload, verdict, scope)
       if (auto.kind === 'decided') return auto.decision
       if (auto.kind === 'hold') return this.holdBlock(payload, auto, scope)
-      return this.askHuman(payload, auto.reason, scope)
+      return this.askHuman(payload, auto.reason, scope, undefined, verdict)
     }
 
-    return this.askHuman(payload, undefined, scope)
+    return this.askHuman(payload, undefined, scope, undefined, verdict)
+  }
+
+  /**
+   * A session tool's gate (slice 2): the user's deny rule written for Claude's spelling
+   * of the tool, then `sessionToolsGate` (allow / ask / deny; plan mode, the family and
+   * project scope, the mode class). Never the judge: an ask goes to the human, in auto
+   * mode too. A host-run child is not the root agent, so it is refused (it is not
+   * offered the tools either).
+   */
+  private decideSessionToolCall(
+    payload: PiToolCallPayload,
+    tool: SessionToolName,
+    scope: PiChildScope | null
+  ): Promise<GateDecision> | GateDecision {
+    const caller = this.sessionToolCaller(payload.toolCallId)
+    const deny = (reason: string): GateDecision => {
+      auditSessionToolDenial(caller, tool, payload.input, reason)
+      return { behavior: 'deny', reason }
+    }
+    if (scope) {
+      return deny(`${tool} can only be used by the session's main agent, not by a subagent.`)
+    }
+    const rule = sessionToolDenyRule(tool, payload.input, this.currentRules(), this.cwd)
+    if (rule) return deny(`Denied by permission rule: ${rule}`)
+    const decision = sessionToolsGate(caller, tool, payload.input, {})
+    if (decision.behavior === 'allow') return { behavior: 'allow' }
+    if (decision.behavior === 'deny') return deny(decision.message)
+    return this.askHuman(payload)
   }
 
   /** The mode a call is gated under: the session's, narrowed for a child (ADR-089 D3). */
@@ -2240,7 +2486,8 @@ export class PiSession extends BaseSession {
     payload: PiToolCallPayload,
     decisionReason?: string,
     scope: PiChildScope | null = null,
-    block?: { reason: string; ms: number }
+    block?: { reason: string; ms: number },
+    verdict?: PermissionVerdict
   ): Promise<GateDecision> {
     const { toolCallId, toolName, input } = payload
     return new Promise<GateDecision>((resolve) => {
@@ -2270,7 +2517,9 @@ export class PiSession extends BaseSession {
             }
           : {})
       })
-      const suggestions = timer ? undefined : this.buildApprovalSuggestions(toolName, input)
+      const suggestions = timer
+        ? undefined
+        : this.buildApprovalSuggestions(toolName, input, verdict)
       const approval: PendingApproval = {
         requestId,
         toolUseId: toolCallId,
@@ -2477,7 +2726,7 @@ export class PiSession extends BaseSession {
     if (this.inFlightDispatchIds.has(info.toolCallId)) {
       // The same call interrupt() and TaskCard's Stop button make — the child
       // has no consumer left, so letting it run would only burn tokens.
-      crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId)
+      crossEngineDispatcher.stopDispatch(info.toolCallId, this.routingId, { blockingOnly: true })
     }
     // A host-run subagent (ADR-089) whose `agent` exchange pi stopped
     // waiting for has no consumer either.
@@ -2541,26 +2790,62 @@ export class PiSession extends BaseSession {
    * PREFIX rule (`Bash(<command>:*)` — the whole typed command plus a
    * trailing glob, matching Claude's own suggestion convention and round-
    * tripping through permission-engine.ts's bash prefix matcher); every other
-   * mapped tool gets a bare tool rule. Returns undefined for a pi tool with no
+   * mapped tool gets a bare tool rule — except for a path tool, where the containment rung
+   * decides: a HUMAN-ONLY card (`path-scope`: an unplaceable or network path, a link-carried
+   * edit), an edit/write card on an agent-control path (`pathSensitive`, in the workspace or
+   * out) and a card raised by a user ASK rule get no suggestion at all — the ladder asks each of
+   * them before the allow tier, so a saved allow could never silence the card; it would only
+   * widen what other calls may do. A call that asked because its target is OUTSIDE the
+   * workspace gets rules scoped to where it LANDS (`Read(//<dir>/**)` / `Edit(//<dir>/**)`,
+   * {@link outsideAllowRules}; the symbolic-link landing, not the in-project link's spelling),
+   * and an in-workspace edit/write gets `Edit(//<root>/**)` for the workspace root that holds
+   * its target ({@link workspaceEditRules}) — never the bare tool, which would be a standing
+   * allow for every file the tool can reach. Returns undefined for a pi tool with no
    * Claude analog (mcp/custom/unknown) — nothing persistable to suggest.
    */
   private buildApprovalSuggestions(
     toolName: string,
-    input: Record<string, unknown>
+    input: Record<string, unknown>,
+    verdict?: PermissionVerdict
   ): PermissionSuggestion[] | undefined {
     const claudeTool = PI_TOOL_TO_CLAUDE_TOOL[toolName]
     if (!claudeTool) return undefined
+    if (verdict?.source === 'path-scope' || verdict?.pathSensitive) return undefined
+    // A user ASK rule answered a file tool: the ask tier outranks every allow rule, so a saved allow
+    // could never silence this card — it would only widen what other calls may do (the same
+    // rationale as the human-only and agent-control cards above).
+    if (verdict?.source === 'ask-rule' && isPiPathTool(toolName)) return undefined
 
-    const ruleContent =
-      toolName === 'bash' ? `${normalizeWhitespace(String(input.command ?? ''))}:*` : undefined
-    const rule = { toolName: claudeTool, ...(ruleContent ? { ruleContent } : {}) }
+    let rules: Array<{ toolName: string; ruleContent?: string }>
+    if (verdict?.pathReason === 'outside-scope') {
+      const scoped = verdict.pathTarget
+        ? outsideAllowRules(
+            toolName,
+            verdict.pathTarget,
+            this.pathScope().platform ?? process.platform
+          )
+        : undefined
+      if (!scoped) return undefined
+      rules = scoped
+    } else if (toolName === 'edit' || toolName === 'write') {
+      // An in-workspace edit/write asked (default mode): the rule is scoped to the workspace root
+      // that holds the target, never the bare `Edit` / `Write` (which would cover every file the
+      // tool can reach, the ones outside the workspace included).
+      const scoped = workspaceEditRules(toolName, input, this.pathScope())
+      if (!scoped) return undefined
+      rules = scoped
+    } else {
+      const ruleContent =
+        toolName === 'bash' ? `${normalizeWhitespace(String(input.command ?? ''))}:*` : undefined
+      rules = [{ toolName: claudeTool, ...(ruleContent ? { ruleContent } : {}) }]
+    }
 
     const destinations = ['userSettings', 'projectSettings', 'localSettings'] as const
     return destinations.map((destination) => ({
       type: 'addRules',
       behavior: 'allow',
       destination,
-      rules: [rule]
+      rules
     }))
   }
 
@@ -2625,8 +2910,13 @@ export class PiSession extends BaseSession {
     }
 
     // allow / allowForSession
-    if (decision === 'allowForSession') {
-      this.sessionAllows.add(sessionAllowKey(pending.toolName, pending.input))
+    // A session tool's click is for this one call: no session allow and no saved rule
+    // (either would skip the gate's scope and mode-parity checks next time).
+    const standing = !isSessionToolName(pending.toolName)
+    if (decision === 'allowForSession' && standing) {
+      this.sessionAllows.add(
+        piSessionAllowKey(pending.toolName, pending.input, this.cwd, this.pathScope())
+      )
     }
     pending.resolve({ behavior: 'allow' })
 
@@ -2646,7 +2936,7 @@ export class PiSession extends BaseSession {
       this.send('session:permission-mode', 'default')
     }
 
-    if (updatedPermissions && updatedPermissions.length > 0) {
+    if (standing && updatedPermissions && updatedPermissions.length > 0) {
       this.persistAllowRules(updatedPermissions)
     }
   }
@@ -2743,19 +3033,27 @@ export class PiSession extends BaseSession {
    *  engine decides with, so the judge and the engine never disagree about what
    *  the rules say — including across a `cachedRules` invalidation.
    *
-   *  pi has no `additionalDirectories` enforcement of its own
-   *  (permission-engine.ts documents the deliberate deferral), but the user's
-   *  configured list is still the honest answer to "which directories did the
-   *  user grant?", so it is reported to the judge exactly as opencode reports
-   *  it. */
+   *  The user's configured `additionalDirectories` are the honest answer to
+   *  "which directories did the user grant?" (they are also the containment
+   *  rung's roots), so they are reported to the judge exactly as opencode
+   *  reports them; the scratchpad, when the session has one, is listed with
+   *  them. */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
     const remotes = await this.sessionGitRemotes()
+    const rules = this.currentRules()
     return buildClassifierEnvironment({
       cwd: this.cwd,
       platform: process.platform,
       remotes,
       repoVisibility: this.sessionRepoVisibility,
-      permissions: this.currentRules(),
+      // The scratchpad is in scope for this session's file tools (path containment), so the judge
+      // is told it is a directory the session may use.
+      permissions: this.scratchpadDir
+        ? {
+            ...rules,
+            additionalDirectories: [...rules.additionalDirectories, this.scratchpadDir]
+          }
+        : rules,
       shared: this.sharedAutoModeConfig()
     })
   }
@@ -2772,45 +3070,27 @@ export class PiSession extends BaseSession {
   ): Promise<Record<string, unknown> | undefined> {
     const command = shellCommandOf(toolName, input)
     if (!command) return undefined
-    const meta: Record<string, unknown> = {}
-    if (needsGitStatus(command)) {
-      const gitStatus = await captureGitStatus(this.cwd)
-      if (gitStatus) meta.gitStatus = gitStatus
-    }
-    if (needsRepoVisibility(command)) {
-      meta.repoVisibility = await this.sessionVisibility()
-    }
-    // Pure and synchronous — no subprocess, so unlike the captures above it
-    // costs nothing to attempt on every shell action. Scope mirrors what
-    // `classifierEnvironment` publishes (cwd + the user's additionalDirectories)
-    // plus the process's temp roots.
-    const redirects = analyzeRedirects(command, {
+    // Scope mirrors what `classifierEnvironment` publishes (cwd + the user's
+    // additionalDirectories) plus the process's temp roots; pi's `bash` has no
+    // `workdir`, so the shell starts in the session cwd.
+    return captureShellActionMeta({
+      command,
+      input,
       cwd: this.cwd,
-      tempDirs: tempDirRoots(),
-      additionalDirectories: this.currentRules().additionalDirectories
+      honoursWorkdir: false,
+      // pi's `bash` is a POSIX shell everywhere (Git Bash on win32).
+      shell: 'posix',
+      additionalDirectories: this.currentRules().additionalDirectories,
+      sessionStartMs: this.sessionStartMs,
+      repoVisibility: () => this.sessionVisibility()
     })
-    if (redirects) meta.redirects = redirects
-    // ADR-084 §2 — repo-local git config that makes git run a program. pi's
-    // bash always runs in the session cwd (it has no `workdir`). Only a
-    // non-empty list is emitted: `[]` (clean) and `null` (not measured) both
-    // say nothing, per this method's rule that absence is never "fine".
-    if (hasGitSegment(command)) {
-      const runIn = effectiveShellCwd(this.cwd, input, false)
-      const armed = runIn === null ? null : await captureGitConfigArmed(runIn)
-      if (armed && armed.length > 0) meta.gitConfigArmed = armed
-    }
-    return Object.keys(meta).length > 0 ? meta : undefined
   }
 
   /** One banner per session, whatever made the configured judge model unusable. */
   private reportStaleJudgeModel(configured: string): void {
     if (this.staleJudgeModelReported) return
     this.staleJudgeModelReported = true
-    this.send(
-      'session:error',
-      `Auto-mode judge model "${configured}" is no longer available — every gated action will ask you instead. ` +
-        `Change it in Settings › Sessions & autonomy › Auto-mode judge (pi).`
-    )
+    this.send('session:error', staleJudgeModelMessage('pi', configured, this.fallbackLabel()))
   }
 
   /**
@@ -2830,23 +3110,110 @@ export class PiSession extends BaseSession {
   private async judgeModelUnavailable(): Promise<boolean> {
     const configured = this.autoModeConfig().judgeModel
     if (!configured) return false
-    let values: string[] = []
-    try {
-      values = (await discoverPiModels()).flatMap((g) => g.models.map((m) => m.value))
-    } catch {
-      return false
-    }
+    const values = await this.piModelValues()
     if (values.length === 0) return false
     if (values.includes(configured)) return false
     this.reportStaleJudgeModel(configured)
     return true
   }
 
+  /** Every model value pi's catalog lists; `[]` when discovery fails or finds nothing. */
+  private async piModelValues(): Promise<string[]> {
+    try {
+      return (await discoverPiModels()).flatMap((g) => g.models.map((m) => m.value))
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * The pipeline's `judgeAvailable`: the primary's catalog check, and — when a fallback is
+   * configured — a refresh of the catalog the synchronous {@link fallbackJudgeModel} reads (a
+   * session with only a fallback configured would otherwise never have called discovery).
+   */
+  private async judgeAvailable(): Promise<boolean> {
+    if (this.autoModeConfig().fallbackJudgeModel?.trim()) {
+      this.catalogValues = await this.piModelValues()
+      // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
+      // learn which one is active (and the fallback's plan, for its label) before deciding.
+      if (this.fallbackJudgeAccount()) await refreshChatgptAccounts()
+    }
+    return !(await this.judgeModelUnavailable())
+  }
+
+  /** The judge model this session's primary judge calls: `autoMode.judgeModel`, else its own. */
+  private judgeModelValue(): string {
+    return this.autoModeConfig().judgeModel ?? this._model
+  }
+
+  /**
+   * The fallback judge model in effect (`autoMode.fallbackJudgeModel`), or undefined: none set,
+   * the same as the primary, or no longer in pi's catalog. A gone one is no fallback — the human
+   * decides — with one log line; it never crashes the judge. An unknown catalog cannot tell
+   * "removed" from "never discovered", so it passes (like the primary's check).
+   */
+  private fallbackJudgeModel(): string | undefined {
+    const model = fallbackJudgeModelFor(
+      this.autoModeConfig().fallbackJudgeModel,
+      this.judgeModelValue(),
+      this.autoModeConfig().fallbackJudgeAccount
+    )
+    if (!model) return undefined
+    const values = this.catalogValues
+    if (values.length === 0 || values.includes(model)) return model
+    if (!this.staleFallbackJudgeLogged) {
+      this.staleFallbackJudgeLogged = true
+      logger.warn(
+        'PiSession',
+        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
+      )
+    }
+    return undefined
+  }
+
+  /** The ChatGPT vault account the fallback judge pays with (`autoMode.fallbackJudgeAccount`), if one is named. */
+  private fallbackJudgeAccount(): string | undefined {
+    return fallbackJudgeAccountFor(this.autoModeConfig().fallbackJudgeAccount)
+  }
+
+  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
+  private fallbackLabel(): string | undefined {
+    const model = this.fallbackJudgeModel()
+    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
+  }
+
   /** One banner per session for a judge model ClaudeUI can't call (ADR-081 §3). */
   private reportJudgeRouteUnavailable(reason: string): void {
     if (this.judgeRouteUnavailableReported) return
     this.judgeRouteUnavailableReported = true
-    this.send('session:error', judgeRouteUnavailableMessage('pi', reason))
+    this.send('session:error', judgeUnavailableMessage('pi', reason, this.fallbackLabel()))
+  }
+
+  /** The fallback judge's own one banner: it could not be called either. */
+  private reportFallbackRouteUnavailable(model: string, reason: string): void {
+    if (this.fallbackRouteUnavailableReported) return
+    this.fallbackRouteUnavailableReported = true
+    this.send(
+      'session:error',
+      fallbackUnavailableMessage(
+        'pi',
+        fallbackJudgeLabel(model, this.fallbackJudgeAccount()),
+        reason
+      )
+    )
+  }
+
+  /** The pipeline's `fallbackJudgeTransport`: the user's fallback judge model, when one is in effect. */
+  private fallbackJudge(): { transport: JudgeTransport; label: string } | undefined {
+    const model = this.fallbackJudgeModel()
+    if (!model) return undefined
+    return makeFallbackJudge(model, {
+      engine: 'pi',
+      sessionId: () => this.piSessionId,
+      routingId: this.routingId,
+      chatgptAccountId: () => this.fallbackJudgeAccount(),
+      onUnavailable: (reason) => this.reportFallbackRouteUnavailable(model, reason)
+    })
   }
 
   /**
@@ -2864,7 +3231,7 @@ export class PiSession extends BaseSession {
   private judgeTransport(): JudgeTransport {
     return makeSessionJudgeTransport({
       engine: 'pi',
-      modelValue: () => this.autoModeConfig().judgeModel ?? this._model,
+      modelValue: () => this.judgeModelValue(),
       sessionId: () => this.piSessionId,
       routingId: this.routingId,
       onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
@@ -2969,8 +3336,9 @@ export class PiSession extends BaseSession {
         mcpToolKey: piMcpName,
         // A configured judge model that no longer exists fails CLOSED — never
         // judged by a stand-in (see judgeModelUnavailable).
-        judgeAvailable: async () => !(await this.judgeModelUnavailable()),
+        judgeAvailable: () => this.judgeAvailable(),
         judgeTransport: () => this.judgeTransport(),
+        fallbackJudgeTransport: () => this.fallbackJudge(),
         messages: () => this.messageHistory,
         environment: () => this.classifierEnvironment(),
         captureActionMeta: (name, args) => this.captureActionMeta(name, args),
@@ -3069,8 +3437,9 @@ export class PiSession extends BaseSession {
   ): Promise<PiHostedToolResult> => {
     const { toolName, input, toolCallId } = payload
 
-    // One-shot — consumed on first (matching) use.
-    if (!this.hostedGrants.consume(toolCallId, toolName)) return notApprovedHostedTool()
+    // One-shot — consumed on first (matching) use. The grant also says whose call it was.
+    const owner = this.hostedGrants.consumeOwner(toolCallId, toolName)
+    if (owner === null) return notApprovedHostedTool()
 
     switch (toolName) {
       case 'render_mermaid': {
@@ -3109,7 +3478,44 @@ export class PiSession extends BaseSession {
         return this.subagents.listModels(input)
 
       default:
+        // The session tools (slice 2): the root agent's, run by the shared service.
+        if (isSessionToolName(toolName))
+          return this.handleSessionTool(toolName, input, toolCallId, owner)
         return unknownHostedTool(toolName)
+    }
+  }
+
+  /**
+   * The calling session as the session tools see it. `owner` is whose call the gate's grant
+   * was minted for (the root bridge's gate mints `root`; a host-run child's grants say
+   * `subagent`), so the service refuses a subagent even if a child ever got the tools: the
+   * env lists that drop them are a second line, not the only one. The gate rung itself
+   * (`decideSessionToolCall`) is always the root agent's, hence the default.
+   */
+  private sessionToolCaller(
+    toolCallId?: string,
+    owner: 'root' | 'subagent' = 'root'
+  ): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode,
+      ...(toolCallId ? { toolUseId: toolCallId } : {}),
+      callOwner: async () => owner
+    }
+  }
+
+  private async handleSessionTool(
+    tool: SessionToolName,
+    input: Record<string, unknown>,
+    toolCallId: string,
+    owner: 'root' | 'subagent'
+  ): Promise<PiHostedToolResult> {
+    const result = await runSessionTool(this.sessionToolCaller(toolCallId, owner), tool, input)
+    return {
+      content: [{ type: 'text', text: result.text }],
+      ...(result.isError ? { isError: true } : {})
     }
   }
 
@@ -3123,8 +3529,8 @@ export class PiSession extends BaseSession {
    * DispatchContext construction verbatim (fromEngine/fromRoutingId/cwd/
    * getAutonomyMode/getMessages/emit/addDispatchedCost/toolUseId), NOT via MCP — pi has no
    * MCP client of its own, so this calls crossEngineDispatcher.dispatch()
-   * directly. Result text formatting (the `[dispatch session_id: …]` success
-   * suffix) is copied verbatim from collab-tool.ts too, so a pi-sourced
+   * directly. Result text formatting (the shared `dispatchResultSuffix` on a
+   * blocking answer) is the same as collab-tool.ts's, so a pi-sourced
    * dispatch reads identically to a Claude-sourced one.
    *
    * `extra` (SdkToolExtra) is intentionally OMITTED — DispatchContext.extra is
@@ -3162,11 +3568,32 @@ export class PiSession extends BaseSession {
       }
     }
 
+    // `session_id` left `dispatch_agent` (ADR-105 §4); the bridge no longer declares it, but a model
+    // working from an older transcript may still send one. Nothing is launched.
+    if (hasRemovedSessionId(input.session_id)) {
+      return {
+        content: [{ type: 'text', text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+        isError: true
+      }
+    }
+
+    const workdir = dispatchWorkdirArg(input.workdir)
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof input.model === 'string' ? input.model : undefined,
-      sessionId: typeof input.session_id === 'string' ? input.session_id : undefined
+      name: typeof input.name === 'string' ? input.name : undefined,
+      description: typeof input.description === 'string' ? input.description : undefined,
+      ...(workdir ? { workdir } : {}),
+      // Only the root session registers dispatch_agent (a host-run subagent's gate is empty),
+      // so the caller is always the top-level agent: background unless it says otherwise.
+      ...(runsInBackground(
+        typeof input.run_in_background === 'boolean' ? input.run_in_background : undefined,
+        true,
+        toolCallId
+      )
+        ? { runInBackground: true }
+        : {})
     }
     const ctx: DispatchContext = {
       fromEngine: 'pi',
@@ -3194,9 +3621,10 @@ export class PiSession extends BaseSession {
     } finally {
       this.inFlightDispatchIds.delete(toolCallId)
     }
-    const text = result.isError
-      ? result.text
-      : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+    const text =
+      result.isError || !result.agentRef
+        ? result.text
+        : `${result.text}${dispatchResultSuffix(result.agentRef)}`
     return {
       content: [{ type: 'text', text }],
       ...(result.isError ? { isError: true } : {})

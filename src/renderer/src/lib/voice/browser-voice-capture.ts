@@ -420,7 +420,7 @@ export class BrowserVoiceCapture {
     } catch (err) {
       await this.release()
       this.discard()
-      throw new Error(describeCaptureFailure(err, this.deniedMessage))
+      throw new Error(describeCaptureFailure(err, this.deniedMessage), { cause: err })
     }
   }
 

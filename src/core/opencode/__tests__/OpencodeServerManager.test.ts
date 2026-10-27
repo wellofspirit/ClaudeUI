@@ -26,7 +26,10 @@ import { waitForPermissionGuard } from '../opencode-server-readiness'
 import type { McpHttpHost } from '../mcp-http-host'
 import type { OpencodeConfigInput } from '../opencode-server-config'
 import type { ClaudeAgentShim } from '../claude-agent-shim'
+import * as modelAllowlistModule from '../model-allowlist'
+import * as modelDiscoveryModule from '../model-discovery'
 import { logger } from '../../services/logger'
+import { configureSessionTools } from '../../services/session-tools'
 
 // The manager `resolve`s every cwd (`/proj/a` becomes `D:\proj\a` on Windows), so
 // the rig's per-cwd config map is keyed, and every expected directory is spelled,
@@ -309,7 +312,9 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     const cfg = JSON.parse(calls[0].configContent)
     expect(cfg.mcp.servers.claudeui.url).toBe(`http://127.0.0.1:${hosts[0].port}/mcp`)
     expect(cfg.mcp.servers.claudeui.headers.Authorization).toBe(`Bearer ${hosts[0].token}`)
-    expect(cfg.plugins).toEqual(['/res/claudeui-xeng'])
+    expect(cfg.plugins).toEqual([
+      { package: '/res/claudeui-xeng', options: { modelAllowlist: {} } }
+    ])
   })
 
   it('the MCP host builds a fresh claudeui McpServer per session', async () => {
@@ -319,6 +324,62 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     const s2 = hosts[0].createServer()
     expect(s1).toBeInstanceOf(McpServer)
     expect(s1).not.toBe(s2)
+  })
+
+  it("the hosted server offers list_models, answered from ClaudeUI's allowlist-filtered discovery", async () => {
+    const discover = vi.spyOn(modelDiscoveryModule, 'discoverOpencodeModels').mockResolvedValue([
+      {
+        engineId: 'opencode',
+        vendorId: 'openai',
+        vendorName: 'OpenAI',
+        models: [
+          {
+            value: 'openai/gpt-a',
+            displayName: 'GPT A',
+            description: '',
+            engineId: 'opencode',
+            vendorId: 'openai',
+            reasoningVariants: ['low']
+          }
+        ]
+      }
+    ])
+    const { manager, hosts } = makeRig()
+    await manager.acquire('/p')
+    const tools = (
+      hosts[0].createServer() as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (args: Record<string, unknown>) => Promise<{ content: { text: string }[] }> }
+        >
+      }
+    )._registeredTools
+    const result = await tools['list_models'].handler({})
+    expect(discover).toHaveBeenCalledTimes(1)
+    expect(result.content[0].text).toContain('openai/gpt-a — GPT A · variants: #low')
+    discover.mockRestore()
+  })
+
+  // Session tools (slice 2): the hosted server offers them exactly when the host wired the service,
+  // read when each MCP session is built (the host is configured at boot, before any server spawns).
+  describe('the session tools on the hosted server', () => {
+    const toolNames = (server: McpServer): string[] =>
+      Object.keys(
+        (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools
+      )
+    afterEach(() => configureSessionTools(null))
+
+    it('are registered once the service is wired, and not before', async () => {
+      const { manager, hosts } = makeRig()
+      await manager.acquire('/p')
+      expect(toolNames(hosts[0].createServer())).not.toContain('session_start')
+      configureSessionTools({} as never)
+      const names = toolNames(hosts[0].createServer())
+      for (const tool of ['session_list', 'session_message', 'session_start', 'session_hand_off'])
+        expect(names).toContain(tool)
+      configureSessionTools(null)
+      expect(toolNames(hosts[0].createServer())).not.toContain('session_start')
+    })
   })
 })
 
@@ -809,6 +870,28 @@ describe('ADR-097 §3 (S6) — fail closed without the plugin permission guard',
     manager.dispose()
   })
 
+  it('an active guard whose allowlist did not load logs a warning and still runs the session', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager } = makeRig({
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0, allowlistLoaded: false })
+    })
+    await expect(manager.acquire('/p')).resolves.toMatchObject({ directory: dir('/p') })
+    expect(warn.mock.calls.some((c) => /model allowlist NOT loaded/.test(String(c[1])))).toBe(true)
+    manager.dispose()
+    warn.mockRestore()
+  })
+
+  it('an active guard with a loaded allowlist logs no warning', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const { manager } = makeRig({
+      waitGuardFn: async () => ({ state: 'active', elapsedMs: 0, allowlistLoaded: true })
+    })
+    await manager.acquire('/p')
+    expect(warn.mock.calls.some((c) => /model allowlist NOT loaded/.test(String(c[1])))).toBe(false)
+    manager.dispose()
+    warn.mockRestore()
+  })
+
   it('a failed probe is not memoized: the next acquire probes again and can succeed', async () => {
     let answer: 'missing' | 'active' = 'missing'
     const probes: string[] = []
@@ -925,6 +1008,30 @@ describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
     expect(JSON.parse(calls[1].configContent).agents.reader.system).toBe('v2')
     // The old server keeps serving its holder until its last release.
     expect(calls[0].child.killed).toBe(false)
+  })
+
+  it("the default input hands ClaudeUI's model allowlist to the plugin as its options, and a change is a new server", async () => {
+    let allowlist: Record<string, string[]> = { openai: ['gpt-a'] }
+    const spy = vi
+      .spyOn(modelAllowlistModule, 'loadOpencodeModelAllowlist')
+      .mockImplementation(() => allowlist)
+    const { manager, calls } = makeShimRig(() => ({ agents: {}, injected: [], diagnostics: [] }))
+    await manager.acquire('/proj/a')
+    expect(JSON.parse(calls[0].configContent).plugins).toHaveLength(1)
+    expect(JSON.parse(calls[0].configContent).plugins[0].options).toEqual({
+      modelAllowlist: { openai: ['gpt-a'] }
+    })
+    await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(1)
+    allowlist = { openai: ['gpt-a', 'gpt-b'] }
+    await manager.acquire('/proj/a')
+    expect(calls).toHaveLength(2)
+    expect(JSON.parse(calls[1].configContent).plugins[0].options).toEqual({
+      modelAllowlist: { openai: ['gpt-a', 'gpt-b'] }
+    })
+    // The old server keeps serving its holder until its last release.
+    expect(calls[0].child.killed).toBe(false)
+    spy.mockRestore()
   })
 
   it('a shim that throws injects nothing and never blocks the spawn', async () => {

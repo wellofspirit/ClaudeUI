@@ -23,7 +23,12 @@
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
+import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
 import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
+import {
+  sessionToolBareName,
+  sessionToolMcpFields
+} from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -34,6 +39,8 @@ function opencodeKindOf(toolName: string): ToolKind {
   // Real MCP tools (mcp__*) resolve engine-independently first.
   const mcpKind = hostedMcpKind(toolName)
   if (mcpKind !== null) return mcpKind
+  // The session tools (slice 2): `claudeui_session_*`, the generic MCP row.
+  if (toolName.startsWith('claudeui_') && sessionToolBareName(toolName)) return 'mcp'
 
   switch (toolName) {
     case 'bash':
@@ -154,7 +161,14 @@ function opencodeNormalize(
       // note in ClaudeEngineToolMap.ts. `engine` is present only on the
       // dispatch tool's input, never on opencode's native task tool.
       if (typeof inp.engine === 'string')
-        return dispatchTaskView({ engine: inp.engine, prompt: inp.prompt, model: inp.model })
+        return dispatchTaskView({
+          engine: inp.engine,
+          prompt: inp.prompt,
+          model: inp.model,
+          name: inp.name,
+          description: inp.description,
+          runInBackground: inp.run_in_background
+        })
       // 2.x `subagent` names its agent `agent`; 1.x `task` named it `subagent_type`.
       const agent = inp.agent ?? inp.subagent_type
       return {
@@ -222,7 +236,9 @@ function opencodeNormalize(
       }
 
     case 'mcp':
-      return { kind: 'mcp', input: inp }
+      // The server and tool of a session tool call; any other opencode MCP name is
+      // underscore-joined and cannot be split, so it keeps the JSON dump.
+      return { kind: 'mcp', input: inp, ...(toolName ? sessionToolMcpFields(toolName) : null) }
 
     case 'unknown':
     default:
@@ -260,15 +276,14 @@ const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
   websearch: 'WebSearch',
   todowrite: 'TodoWrite',
   task: 'Task',
-  question: 'AskUserQuestion',
-  claudeui_render_mermaid: 'Mermaid',
-  claudeui_create_mockup: 'Mockup',
-  claudeui_show_mockup: 'Mockup',
-  claudeui_dispatch_agent: 'Dispatch'
+  question: 'AskUserQuestion'
 }
 
 function opencodeDisplayName(toolName: string): string {
-  return OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
+  // ClaudeUI's own hosted tools are `claudeui_<tool>` (first-party-tool-names.ts).
+  return (
+    firstPartyDisplayName(toolName, 'claudeui_') ?? OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
+  )
 }
 
 export const OpencodeEngineToolMap: EngineToolMap = {

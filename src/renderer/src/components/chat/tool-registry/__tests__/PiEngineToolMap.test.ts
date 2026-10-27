@@ -57,13 +57,13 @@ describe('PiEngineToolMap.kindOf', () => {
     expect(PiEngineToolMap.hidden.size).toBe(0)
   })
 
-  it.each(cases)(
-    "single-source guard: main's piToolKind(%s) agrees with the renderer's kindOf",
-    (name, kind) => {
-      expect(piToolKind(name)).toBe(kind)
-      expect(piToolKind(name)).toBe(PiEngineToolMap.kindOf(name))
-    }
-  )
+  it("single-source guard: main's piToolKind agrees with the table for every row", () => {
+    // The `kindOf` rows above pin the renderer to `cases`, so one equality over
+    // the table pins main's copy to the renderer's.
+    expect(Object.fromEntries(cases.map(([name]) => [name, piToolKind(name)]))).toEqual(
+      Object.fromEntries(cases)
+    )
+  })
 })
 
 describe('PiEngineToolMap.normalize', () => {
@@ -423,10 +423,10 @@ describe('PiEngineToolMap.displayName', () => {
   })
 
   it('prettifies hosted tool bare names (M4a+b)', () => {
-    expect(PiEngineToolMap.displayName('render_mermaid')).toBe('Mermaid')
+    expect(PiEngineToolMap.displayName('render_mermaid')).toBe('Diagram')
     expect(PiEngineToolMap.displayName('create_mockup')).toBe('Mockup')
     expect(PiEngineToolMap.displayName('show_mockup')).toBe('Mockup')
-    expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('Dispatch')
+    expect(PiEngineToolMap.displayName('dispatch_agent')).toBe('X-Agent')
     expect(PiEngineToolMap.displayName('subagent')).toBe('Subagent')
     expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
   })

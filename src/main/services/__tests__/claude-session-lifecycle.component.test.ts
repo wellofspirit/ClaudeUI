@@ -80,6 +80,7 @@ vi.mock('../../auth/ClaudeAuthProvider', () => ({
 }))
 
 import { ClaudeSession } from '../../../core/services/claude-session'
+import { startRunningDispatch } from '../../../test/helpers/running-dispatch'
 import type { BrowserWindow } from 'electron'
 
 // Every `makeWin()` registers a funnel subscriber; drop them per test so a long
@@ -377,5 +378,54 @@ describe('ClaudeSession — the voice server port dies with the child (S2 item 4
     // The next capture spawns a fresh child — and must ask IT for the port.
     expect(await session.voiceStartServer()).toEqual({ port: 4202 })
     expect(mockQuery).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('ClaudeSession — the idle timer holds for a running X-Agent (ADR-105 §3)', () => {
+  const IDLE_MS = 60_000
+
+  it('does not auto-disconnect while an X-Agent runs, and does once it has ended and the dispatcher re-arms it', async () => {
+    vi.useFakeTimers()
+    try {
+      const { win } = makeWin()
+      const session = new ClaudeSession('routing-idle-hold', win, '/tmp/proj')
+      liveSessions.push(session)
+      const endRun = startRunningDispatch('routing-idle-hold')
+      session.setInactivityTimeout(IDLE_MS)
+      const parked = session.run(null) // spawn only: a live engine with no turn in flight
+      await session.run(null)
+      mockDisposeFor.mockClear()
+
+      vi.advanceTimersByTime(5 * IDLE_MS)
+      expect(mockDisposeFor).not.toHaveBeenCalled()
+
+      endRun()
+      session.rearmIdleTimer()
+      vi.advanceTimersByTime(IDLE_MS + 1)
+      expect(mockDisposeFor).toHaveBeenCalledTimes(1)
+      void parked
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an X-Agent of another session holds nothing', async () => {
+    vi.useFakeTimers()
+    try {
+      const { win } = makeWin()
+      const session = new ClaudeSession('routing-idle-free', win, '/tmp/proj')
+      liveSessions.push(session)
+      const endRun = startRunningDispatch('routing-somebody-else')
+      session.setInactivityTimeout(IDLE_MS)
+      const parked = session.run(null)
+      await session.run(null)
+      mockDisposeFor.mockClear()
+      vi.advanceTimersByTime(IDLE_MS + 1)
+      expect(mockDisposeFor).toHaveBeenCalledTimes(1)
+      endRun()
+      void parked
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -47,8 +47,19 @@ import { createCollabServer } from '../../../core/services/collab-tool'
 import type { CollabServerContext } from '../../../core/services/collab-tool'
 import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
 import { loadEngineConfig } from '../../../core/services/ui-config'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { peekOpencodeModels } from '../../../core/opencode/model-discovery'
 import type { SdkToolExtra } from '../../../core/sdk'
+import {
+  DISPATCH_BACKGROUND_PARAM,
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_FOLLOW_UP_GUIDANCE,
+  DISPATCH_NAME_PARAM,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  DISPATCH_WORKDIR_PARAM,
+  dispatchResultSuffix
+} from '../../../shared/dispatch-agent-description'
 
 function makeCtx(overrides: Partial<CollabServerContext> = {}): CollabServerContext & {
   emit: ReturnType<typeof vi.fn>
@@ -83,8 +94,10 @@ describe('createCollabServer', () => {
     expect(server.name).toBe('claude-ui-collab')
     expect(server.tools).toHaveLength(1)
     expect(server.tools[0].name).toBe('dispatch_agent')
-    // The description must teach the model the continuation contract.
-    expect(server.tools[0].description).toContain('session_id')
+    // A follow-up is a session_message now; the description no longer offers a session_id.
+    expect(server.tools[0].description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
+    expect(server.tools[0].description).not.toContain('session_id')
+    expect(server.tools[0].inputSchema.session_id).toBeUndefined()
     expect(server.tools[0].description).toContain('user-configured')
     // S4: Claude is steered to its own Agent tool for ordinary delegation.
     expect(server.tools[0].description).toContain(
@@ -93,10 +106,10 @@ describe('createCollabServer', () => {
     expect(server.tools[0].description).toContain('use your own Agent tool instead')
   })
 
-  it('happy path: delegates to the dispatcher with the full context and appends the session_id', async () => {
+  it('happy path: delegates to the dispatcher with the full context and appends the agent ref', async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')
-      .mockResolvedValue({ text: 'the review', sessionId: 'oc-42' })
+      .mockResolvedValue({ text: 'the review', sessionId: 'oc-42', agentRef: 's-abc123' })
     const ctx = makeCtx()
     const server = createCollabServer(ctx)
     const extra = makeExtra()
@@ -110,8 +123,7 @@ describe('createCollabServer', () => {
       {
         engine: 'opencode',
         prompt: 'review the diff',
-        model: 'openai/gpt-5',
-        sessionId: undefined
+        model: 'openai/gpt-5'
       },
       {
         fromEngine: 'claude',
@@ -127,8 +139,20 @@ describe('createCollabServer', () => {
     )
     expect(result.isError).toBeUndefined()
     const text = (result.content[0] as { text: string }).text
-    expect(text).toContain('the review')
-    expect(text).toContain('session_id: oc-42')
+    expect(text).toBe(`the review${dispatchResultSuffix('s-abc123')}`)
+    expect(text).not.toContain('session_id')
+  })
+
+  it('no agent ref (a failure, or a run the dispatcher kept no ledger row for) gets no suffix', async () => {
+    vi.spyOn(crossEngineDispatcher, 'dispatch').mockResolvedValue({
+      text: 'the review',
+      sessionId: 'oc-42'
+    })
+    const result = await createCollabServer(makeCtx()).tools[0].handler(
+      { engine: 'opencode', prompt: 'x' },
+      makeExtra()
+    )
+    expect((result.content[0] as { text: string }).text).toBe('the review')
   })
 
   it("threads extra.meta['claudecode/toolUseId'] into ctx.toolUseId (cli.js's per-mcp-call _meta stamp)", async () => {
@@ -159,20 +183,79 @@ describe('createCollabServer', () => {
     )
   })
 
-  it('passes session_id through as the continuation sessionId', async () => {
+  it('passes name and description through to the DispatchRequest (ADR-105)', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 'oc-42' })
+    const server = createCollabServer(makeCtx())
+
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'go', name: 'impl-e1', description: 'Review auth diff' },
+      makeExtra()
+    )
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'impl-e1', description: 'Review auth diff' }),
+      expect.anything()
+    )
+  })
+
+  it('a call that still passes session_id gets the guiding error and launches nothing', async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')
       .mockResolvedValue({ text: 'more', sessionId: 'oc-42' })
     const server = createCollabServer(makeCtx())
 
-    await server.tools[0].handler(
+    const result = await server.tools[0].handler(
       { engine: 'opencode', prompt: 'continue', session_id: 'oc-42' },
       makeExtra()
     )
-    expect(dispatchSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: 'oc-42' }),
-      expect.anything()
+    expect(result.isError).toBe(true)
+    expect((result.content[0] as { text: string }).text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
+    expect(dispatchSpy).not.toHaveBeenCalled()
+  })
+
+  it('an empty session_id is no session_id', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'ok', sessionId: 'oc-42' })
+    const result = await createCollabServer(makeCtx()).tools[0].handler(
+      { engine: 'opencode', prompt: 'go', session_id: '' },
+      makeExtra()
     )
+    expect(result.isError).toBeUndefined()
+    expect(dispatchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('over the real MCP protocol: tools/list does not list session_id, and a call that sends one still reaches the handler', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'more', sessionId: 'oc-42' })
+    const server = createCollabServer(makeCtx())
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    await server.instance!.connect(serverTransport)
+    const client = new Client({ name: 'test-client', version: '0.0.0' }, {})
+    await client.connect(clientTransport)
+    try {
+      const { tools } = await client.listTools()
+      const dispatch = tools.find((t) => t.name === 'dispatch_agent')!
+      expect(Object.keys(dispatch.inputSchema.properties ?? {})).not.toContain('session_id')
+      expect(JSON.stringify(dispatch)).not.toContain('session_id')
+      // A raw zod shape would strip the undeclared key before the handler: the tool is registered loose.
+      const result = (await client.callTool({
+        name: 'dispatch_agent',
+        arguments: {
+          engine: 'opencode',
+          prompt: 'continue',
+          description: 'Continue task',
+          session_id: 'oc-42'
+        }
+      })) as { isError?: boolean; content: Array<{ text: string }> }
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toBe(DISPATCH_SESSION_ID_REMOVED_TEXT)
+      expect(dispatchSpy).not.toHaveBeenCalled()
+    } finally {
+      await client.close()
+    }
   })
 
   it('reads routingId and autonomy mode LIVE at call time (rekey / mode-switch safety)', async () => {
@@ -213,7 +296,7 @@ describe('createCollabServer', () => {
     )
   })
 
-  it('propagates dispatcher isError as an isError tool result without a session_id suffix', async () => {
+  it('propagates dispatcher isError as an isError tool result without an agent suffix', async () => {
     vi.spyOn(crossEngineDispatcher, 'dispatch').mockResolvedValue({
       text: 'something broke',
       sessionId: '',
@@ -230,16 +313,148 @@ describe('createCollabServer', () => {
     // No spy — exercise the genuine singleton. loadEngineConfig is mocked to {}
     // so model resolution fails before any server work.
     const server = createCollabServer(makeCtx())
-    const result = await server.tools[0].handler({ engine: 'opencode', prompt: 'x' }, makeExtra())
+    const result = await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'x', description: 'Task' },
+      makeExtra()
+    )
     expect(result.isError).toBe(true)
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('dispatch.defaultModel')
+  })
+
+  it('REAL dispatcher path: a launch without a description is refused (the schema is not the only guard)', async () => {
+    const server = createCollabServer(makeCtx())
+    const result = await server.tools[0].handler({ engine: 'opencode', prompt: 'x' }, makeExtra())
+    expect(result.isError).toBe(true)
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('The description is required')
   })
 
   // -------------------------------------------------------------------------
   // ADR-033 M4c — pi as a second dispatch target (engine enum widening)
   // ADR-033 slice H — codex as a third
   // -------------------------------------------------------------------------
+
+  it.each([
+    ['a directory', { workdir: '/proj/wt' }, '/proj/wt'],
+    ['a padded one, trimmed', { workdir: '  ../wt  ' }, '../wt'],
+    ['an empty one, absent', { workdir: '' }, undefined],
+    ['a blank one, absent', { workdir: '   ' }, undefined],
+    ['none, absent', {}, undefined]
+  ])('passes the workdir through to the DispatchRequest: %s', async (_label, extra, expected) => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 'oc-42' })
+    const server = createCollabServer(makeCtx())
+
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'go', description: 'Review auth diff', ...extra },
+      makeExtra()
+    )
+    const sent = dispatchSpy.mock.calls[0][0]
+    if (expected === undefined) expect(sent).not.toHaveProperty('workdir')
+    else expect(sent).toMatchObject({ workdir: expected })
+  })
+
+  it('takes an optional workdir string, worded by the shared description module', () => {
+    const schema = createCollabServer(makeCtx()).tools[0].inputSchema.workdir as unknown as {
+      description?: string
+      safeParse: (v: unknown) => { success: boolean }
+    }
+    expect(schema.description).toBe(DISPATCH_WORKDIR_PARAM)
+    expect(schema.safeParse(undefined).success).toBe(true)
+    expect(schema.safeParse('/proj/wt').success).toBe(true)
+    expect(schema.safeParse(7).success).toBe(false)
+  })
+
+  it('takes an optional name and a required description, worded by the shared description module', () => {
+    const { inputSchema } = createCollabServer(makeCtx()).tools[0]
+    for (const [key, text, optional] of [
+      ['name', DISPATCH_NAME_PARAM, true],
+      ['description', DISPATCH_DESCRIPTION_PARAM, false]
+    ] as const) {
+      const schema = inputSchema[key] as unknown as {
+        description?: string
+        safeParse: (v: unknown) => { success: boolean }
+      }
+      expect(schema.description).toBe(text)
+      expect(schema.safeParse(undefined).success).toBe(optional)
+      expect(schema.safeParse('x').success).toBe(true)
+    }
+  })
+
+  it('takes an optional boolean run_in_background, worded by the shared module, and tells the dispatcher only when true', async () => {
+    const server = createCollabServer(makeCtx())
+    const schema = server.tools[0].inputSchema.run_in_background as unknown as {
+      description?: string
+      safeParse: (v: unknown) => { success: boolean }
+    }
+    expect(schema.description).toBe(DISPATCH_BACKGROUND_PARAM)
+    expect(schema.safeParse(undefined).success).toBe(true)
+    expect(schema.safeParse(true).success).toBe(true)
+    expect(schema.safeParse('yes').success).toBe(false)
+
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'p', run_in_background: true },
+      makeExtra()
+    )
+    expect(dispatchSpy.mock.calls[0][0]).toMatchObject({ runInBackground: true })
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'p', run_in_background: false },
+      makeExtra()
+    )
+    expect(dispatchSpy.mock.calls[1][0]).not.toHaveProperty('runInBackground')
+  })
+
+  it('runs in the background by default for the ROOT agent only: a subagent, an unattributed call and a call with no id wait (ADR-105 §2)', async () => {
+    const owners: Record<string, 'root' | 'subagent' | 'unknown'> = {
+      toolu_root: 'root',
+      toolu_sub: 'subagent',
+      toolu_unseen: 'unknown'
+    }
+    const callOwner = vi.fn(async (id: string | undefined) => owners[id ?? ''] ?? 'unknown')
+    const server = createCollabServer(makeCtx({ callOwner }))
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    const call = async (
+      toolUseId: string | undefined,
+      args: Record<string, unknown> = {}
+    ): Promise<unknown> => {
+      const extra = { ...makeExtra(), meta: toolUseId ? { 'claudecode/toolUseId': toolUseId } : {} }
+      await server.tools[0].handler({ engine: 'opencode', prompt: 'p', ...args }, extra)
+      return dispatchSpy.mock.calls.at(-1)![0]
+    }
+    expect(await call('toolu_root')).toMatchObject({ runInBackground: true })
+    expect(await call('toolu_sub')).not.toHaveProperty('runInBackground')
+    expect(await call('toolu_unseen')).not.toHaveProperty('runInBackground')
+    expect(await call(undefined)).not.toHaveProperty('runInBackground')
+    // Explicit values win over the caller. An explicit false is not even asked who it is;
+    // an explicit true from a subagent is told its report goes to the top-level agent (N3).
+    callOwner.mockClear()
+    expect(await call('toolu_root', { run_in_background: false })).not.toHaveProperty(
+      'runInBackground'
+    )
+    expect(callOwner).not.toHaveBeenCalled()
+    const fromSub = await call('toolu_sub', { run_in_background: true })
+    expect(fromSub).toMatchObject({ runInBackground: true, fromSubagent: true })
+    expect(await call('toolu_root', { run_in_background: true })).not.toHaveProperty('fromSubagent')
+  })
+
+  it('without an owner lookup every call waits, as before', async () => {
+    const server = createCollabServer(makeCtx())
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'x', sessionId: 's' })
+    await server.tools[0].handler(
+      { engine: 'opencode', prompt: 'p' },
+      { ...makeExtra(), meta: { 'claudecode/toolUseId': 'toolu_1' } }
+    )
+    expect(dispatchSpy.mock.calls[0][0]).not.toHaveProperty('runInBackground')
+  })
 
   it("the engine param's schema accepts every OTHER engine and rejects both 'claude' (same-engine) and an unlisted value", () => {
     const server = createCollabServer(makeCtx())
@@ -260,7 +475,7 @@ describe('createCollabServer', () => {
   it("accepts engine: 'pi' and delegates to the dispatcher with the full context (ADR-033 M4c)", async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')
-      .mockResolvedValue({ text: 'pi says hi', sessionId: 'pi-sess-1' })
+      .mockResolvedValue({ text: 'pi says hi', sessionId: 'pi-sess-1', agentRef: 's-pi0001' })
     const ctx = makeCtx()
     const server = createCollabServer(ctx)
     const extra = makeExtra()
@@ -274,8 +489,7 @@ describe('createCollabServer', () => {
       {
         engine: 'pi',
         prompt: 'do a thing',
-        model: 'openai-codex/gpt-5.6-luna',
-        sessionId: undefined
+        model: 'openai-codex/gpt-5.6-luna'
       },
       {
         fromEngine: 'claude',
@@ -292,7 +506,7 @@ describe('createCollabServer', () => {
     expect(result.isError).toBeUndefined()
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('pi says hi')
-    expect(text).toContain('session_id: pi-sess-1')
+    expect(text).toContain(dispatchResultSuffix('s-pi0001'))
   })
 })
 

@@ -19,6 +19,9 @@ import type { ActiveTask, ChatMessage, ContentBlock } from '../../../../../share
 vi.mock('../../chat/MarkdownRenderer', () => ({
   MarkdownRenderer: (p: { content: string }) => <div data-testid="md">{p.content}</div>
 }))
+// ADR-102 Arc 2: the entry's on-demand request is the load's; asserted, not run.
+const { requestSubagentTranscript } = vi.hoisted(() => ({ requestSubagentTranscript: vi.fn() }))
+vi.mock('../../../lib/subagent-prefetch', () => ({ requestSubagentTranscript }))
 import { TaskEntry } from '../TaskEntry'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import { B, nestedActiveTasks, nestedBuckets, nestedMessages } from '@test/factories/nested-agents'
@@ -224,6 +227,230 @@ describe('TaskEntry — a nested agent', () => {
 })
 
 /**
+ * A dispatch's child (and anything nested in it) speaks the TARGET engine's tool
+ * names; the panel reads them through that engine's map, not the session's.
+ */
+describe("TaskEntry - a dispatch child's tool cards use the target engine's tool map", () => {
+  let app: TestApp
+  const DISPATCH = 'call_dispatch_pi'
+  const NESTED = 'call_pi_nested_agent'
+
+  const readUse = (id: string): ChatMessage => ({
+    id: `m-${id}`,
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_use',
+        toolUseId: id,
+        toolName: 'read',
+        toolInput: { path: '/d/repo/a.ts' }
+      } as ToolUseBlock
+    ],
+    timestamp: 0
+  })
+
+  const nestedAgent: ChatMessage = {
+    id: 'm-nested',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_use',
+        toolUseId: NESTED,
+        toolName: 'agent',
+        toolInput: { description: 'inner', prompt: 'inner' }
+      } as ToolUseBlock
+    ],
+    timestamp: 0
+  }
+
+  const dispatchMsg: ChatMessage = {
+    id: 'assistant-d',
+    role: 'assistant',
+    content: [
+      {
+        type: 'tool_use',
+        toolUseId: DISPATCH,
+        toolName: 'mcp__claude-ui-collab__dispatch_agent',
+        toolInput: { engine: 'pi', prompt: 'look' }
+      } as ToolUseBlock
+    ],
+    timestamp: 0
+  }
+
+  const stage = (nested: boolean): void => {
+    const buckets: Record<string, ChatMessage[]> = nested
+      ? { [DISPATCH]: [nestedAgent], [NESTED]: [readUse('inner-read')] }
+      : { [DISPATCH]: [readUse('child-read')] }
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [dispatchMsg],
+          subagentMessages: buckets
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  }
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it("renders the pi child's `read` as a Read card", () => {
+    stage(false)
+    render(<TaskEntry toolUseId={DISPATCH} />)
+    const header = screen.getByTestId('ToolCard.expand').textContent ?? ''
+    expect(header).toContain('Read')
+    expect(header).not.toContain('{"path"')
+  })
+
+  it('a default-background X-Agent that failed does not show the launch acknowledgement as its body (ADR-105 §2)', () => {
+    const ack = 'X-Agent rev launched on pi (id s-abc123). It runs in the background.'
+    const resultMsg: ChatMessage = {
+      id: 'result-d',
+      role: 'user',
+      content: [{ type: 'tool_result', toolUseId: DISPATCH, toolResult: ack, isError: false }],
+      timestamp: 1
+    }
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], messages: [dispatchMsg, resultMsg] }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    const end = (isBackgrounded: boolean): void =>
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: DISPATCH,
+        status: 'failed',
+        outputFile: '',
+        summary: 'X-Agent rev failed: boom',
+        ...(isBackgrounded ? { isBackgrounded: true } : {})
+      })
+    // Without the run's own word the ack reads as an answer (the input has no flag)...
+    end(false)
+    const { unmount } = render(<TaskEntry toolUseId={DISPATCH} />)
+    expect(screen.queryByText(/It runs in the background/)).toBeInTheDocument()
+    unmount()
+    // ...with it, the ack is not the body.
+    end(true)
+    render(<TaskEntry toolUseId={DISPATCH} />)
+    expect(screen.queryByText(/It runs in the background/)).not.toBeInTheDocument()
+  })
+
+  describe('an X-Agent call, as the panel names and ends it', () => {
+    const call = (input: Record<string, unknown>, result?: Partial<ContentBlock>): void => {
+      const messages: ChatMessage[] = [
+        {
+          ...dispatchMsg,
+          content: [
+            { ...(dispatchMsg.content[0] as ToolUseBlock), toolInput: input } as ToolUseBlock
+          ]
+        }
+      ]
+      if (result)
+        messages.push({
+          id: 'result-d',
+          role: 'user',
+          content: [
+            { type: 'tool_result', toolUseId: DISPATCH, toolResult: '', isError: false, ...result }
+          ] as ContentBlock[],
+          timestamp: 1
+        })
+      useSessionStore.setState((state) => ({
+        activeSessionId: ROUTE,
+        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], messages } }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    const toggleText = (): string => screen.getByTestId('TaskEntry.toggle').textContent ?? ''
+
+    it('the header says X-Agent and the description is the X-Agent’s, not the raw prompt', () => {
+      call({ engine: 'pi', prompt: 'a very long instruction nobody wants in a header' })
+      const { unmount } = render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(toggleText()).toContain('X-Agent')
+      expect(toggleText()).toContain('Dispatch: pi')
+      expect(toggleText()).not.toContain('very long instruction')
+      unmount()
+
+      call({ engine: 'pi', prompt: 'long', description: 'Review the auth change' })
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(toggleText()).toContain('Review the auth change')
+    })
+
+    it('a refused background launch shows the reason it was refused', () => {
+      call(
+        { engine: 'pi', prompt: 'go', run_in_background: true },
+        {
+          toolResult: 'X-Agent refused: 4 X-Agents are already running (the limit).',
+          isError: true
+        }
+      )
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(screen.getByTestId('TaskEntry.failureSummary')).toHaveTextContent(
+        'X-Agent refused: 4 X-Agents are already running (the limit).'
+      )
+    })
+
+    it.each([
+      ['failed', 'The X-Agent ran out of time.'],
+      ['stopped', 'The X-Agent was stopped.']
+    ] as const)('a %s run with no report says how it ended: "%s"', (status, summary) => {
+      call(
+        { engine: 'pi', prompt: 'go' },
+        { toolResult: 'X-Agent launched on pi. It runs in the background.' }
+      )
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: DISPATCH,
+        status,
+        outputFile: '',
+        summary,
+        isBackgrounded: true
+      })
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(screen.getByTestId('TaskEntry.endNote')).toHaveTextContent(summary)
+    })
+
+    it('a withheld report of an X-Agent to an engine this build does not know still says X-Agent', () => {
+      call({ engine: 'gemini', prompt: 'go' }, { toolResult: 'X-Agent launched.' })
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: DISPATCH,
+        status: 'completed',
+        outputFile: '',
+        summary: 'ignored',
+        handback: 'withheld',
+        isBackgrounded: true
+      })
+      render(<TaskEntry toolUseId={DISPATCH} />)
+      expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent('The X-Agent ended')
+      expect(screen.queryByTestId('TaskEntry.endNote')).not.toBeInTheDocument()
+    })
+  })
+
+  it("a task nested in that child inherits the child's engine", () => {
+    stage(true)
+    render(<TaskEntry toolUseId={NESTED} />)
+    const header = screen.getByTestId('ToolCard.expand').textContent ?? ''
+    expect(header).toContain('Read')
+    expect(header).not.toContain('{"path"')
+  })
+})
+
+/**
  * The detail panel's body must follow its content to the bottom. It used to pin
  * in a React effect on `[msgs, bashOutput, following]`, so growth that happens
  * AFTER the commit (a Bash card finishing its render, highlighting, a result
@@ -353,5 +580,170 @@ describe('TaskEntry — following the bottom', () => {
     expect(distanceFromBottom(body())).toBe(0)
     growLayoutOnly(600)
     expect(distanceFromBottom(body())).toBe(0)
+  })
+})
+
+describe('TaskEntry — a SubagentHandback report (S6)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: { ...state.sessions[ROUTE], messages: [taskMessage()] }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const ended = (extra: {
+    summary: string
+    handback?: 'send' | 'flagged' | 'withheld'
+    warning?: string
+  }): void => {
+    seed.taskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: TOOL_USE_ID,
+      status: 'completed',
+      outputFile: '',
+      ...extra
+    })
+  }
+
+  it('shows the report, with a flagged warning above it', () => {
+    ended({ summary: 'Found 3 files.', handback: 'flagged', warning: 'SECURITY WARNING: x' })
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    const warning = screen.getByTestId('HandbackReport.warning')
+    const text = screen.getByTestId('HandbackReport.text')
+    expect(text).toHaveTextContent('Found 3 files.')
+    expect(warning.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows a withheld hand-back as "ended without delivering a report"', () => {
+    ended({ summary: 'ignored', handback: 'withheld' })
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent(
+      'ended without delivering a report'
+    )
+  })
+
+  it('shows nothing for a notification without a hand-back', () => {
+    ended({ summary: 'Found 3 files.' })
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * ADR-102 Arc 2: the content-first load leaves a subagent's transcript on disk until
+ * it is needed. The entry (expanded by default) asks for it at once and says
+ * "Loading…" in place of the result text it would otherwise flash.
+ */
+describe('TaskEntry — subagent transcript on its way (ADR-102 Arc 2)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    requestSubagentTranscript.mockClear()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState((state) => ({
+      activeSessionId: ROUTE,
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          messages: [
+            taskMessage(),
+            {
+              id: 'user-1',
+              role: 'user',
+              content: [
+                {
+                  type: 'tool_result',
+                  toolUseId: TOOL_USE_ID,
+                  toolResult: 'The audit found 3 issues',
+                  isError: false
+                }
+              ],
+              timestamp: 1
+            } as ChatMessage
+          ],
+          subagentIndex: {
+            [TOOL_USE_ID]: { agentId: 'agent-x', parentToolUseId: null, bytes: 900, order: 1 }
+          }
+        }
+      }
+    }))
+    mirrorStoreIntoReplica()
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  it('requests its bucket and shows "Loading…", not the markdown result', () => {
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+
+    expect(requestSubagentTranscript).toHaveBeenCalledWith(ROUTE, TOOL_USE_ID)
+    expect(screen.getByTestId('TaskEntry.subagentLoading')).toHaveTextContent('Loading…')
+    expect(screen.queryByTestId('md')).toBeNull()
+  })
+
+  it('shows the transcript once the bucket lands', async () => {
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    await act(async () => {
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            subagentMessages: {
+              [TOOL_USE_ID]: [
+                {
+                  id: 'b1',
+                  role: 'assistant',
+                  content: [{ type: 'text', text: 'on it' }],
+                  timestamp: 1
+                }
+              ]
+            }
+          }
+        }
+      }))
+      mirrorStoreIntoReplica()
+    })
+
+    expect(screen.queryByTestId('TaskEntry.subagentLoading')).toBeNull()
+    expect(screen.getByText('on it')).toBeInTheDocument()
+  })
+
+  it('falls back to the result when the load gave the transcript up (entry zeroed)', () => {
+    useSessionStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [ROUTE]: {
+          ...state.sessions[ROUTE],
+          subagentIndex: {
+            [TOOL_USE_ID]: { agentId: 'agent-x', parentToolUseId: null, bytes: 0, order: 1 }
+          }
+        }
+      }
+    }))
+    render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+
+    expect(requestSubagentTranscript).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('TaskEntry.subagentLoading')).toBeNull()
+    expect(screen.getByTestId('md')).toHaveTextContent('The audit found 3 issues')
   })
 })

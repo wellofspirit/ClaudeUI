@@ -54,6 +54,7 @@ import { readFileSync, chmodSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { syntaxCheckChunk, syntaxCheckNodeVersion } from './lib/syntax-check-chunk.mjs'
 import { detectFormat } from './lib/binary-format.mjs'
 import { CHUNK_DELIM_RE, isChunkConcat } from './lib/chunk-format.mjs'
 import { cliJsPath, cliTrashDir, cliVendorDir, versionJsonPath } from './lib/cli-paths.mjs'
@@ -604,36 +605,6 @@ function parseChunkFile(path) {
   return chunks
 }
 
-/**
- * Parse-check one chunk with esbuild. Each chunk is standalone ESM, which
- * esbuild's transform mode (stdin) handles by default.
- *
- * Note `--bundle=false` is NOT accepted in transform mode ("Invalid transform
- * flag") — transform can't bundle at all, so its absence is not a loosening.
- *
- * @returns {string|null} esbuild stderr on failure, null on success
- */
-function syntaxCheckChunk(bytes) {
-  try {
-    execFileSync(resolve(ROOT, 'node_modules', '.bin', 'esbuild'), ['--loader=js'], {
-      input: bytes,
-      // Discard stdout — the transformed source can be multiple MB and would
-      // blow execFileSync's 1 MB maxBuffer.
-      stdio: ['pipe', 'ignore', 'pipe'],
-      maxBuffer: 8 * 1024 * 1024
-    })
-    return null
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      die(
-        'esbuild not found at node_modules/.bin/esbuild — cannot syntax-check patched chunks. ' +
-          'Run `bun install` first.'
-      )
-    }
-    return err.stderr?.toString() || err.message
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -738,11 +709,19 @@ function main() {
     // structural sanity check on the concat.
     for (const { module: m, bytes } of changed) {
       const name = m.name.toString('utf8')
-      const stderr = syntaxCheckChunk(bytes)
+      let stderr
+      try {
+        stderr = syntaxCheckChunk(bytes)
+      } catch (err) {
+        // The checker itself could not run (no real Node): fail the rebundle.
+        die(err.message)
+      }
       if (stderr) die(`syntax check failed for chunk "${name}":\n${stderr}`)
     }
     if (changed.length > 0) {
-      log(`syntax check passed for all ${changed.length} modified chunk(s) (esbuild)`)
+      log(
+        `syntax check passed for all ${changed.length} modified chunk(s) (Node ${syntaxCheckNodeVersion()} --check)`
+      )
     }
   } else {
     log('NO-OP mode: reusing original module contents (drops bytecode + optional records only)')

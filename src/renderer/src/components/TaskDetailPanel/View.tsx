@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { AgentRoster } from '../../hooks/useAgentRoster'
 import { AgentRosterList } from '../agents/AgentRosterList'
-import { TaskEntry } from './TaskEntry'
+import { TaskEntry, TaskEntryLoading } from './TaskEntry'
 import { BashBackgroundEntry } from './BashBackgroundEntry'
 
-export type TaskEntryKind = 'bash-background' | 'task' | 'missing'
+/** `loading`: a nested agent whose spawn is in its parent's transcript, which is still being fetched. */
+export type TaskEntryKind = 'bash-background' | 'task' | 'missing' | 'loading'
 
 export interface TaskEntryDescriptor {
   toolUseId: string
@@ -50,6 +51,7 @@ function HResizeHandle({
 
 function PanelEntry({ entry }: { entry: TaskEntryDescriptor }): React.JSX.Element | null {
   if (entry.kind === 'missing') return null
+  if (entry.kind === 'loading') return <TaskEntryLoading />
   if (entry.kind === 'bash-background')
     return <BashBackgroundEntry toolUseId={entry.toolUseId} ownerLabel={entry.ownerLabel} />
   return <TaskEntry toolUseId={entry.toolUseId} />

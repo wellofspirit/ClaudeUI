@@ -31,7 +31,12 @@ const mocks = vi.hoisted(() => ({
    * The lineage cache (db v17), as a map so the tests can seed and inspect it:
    * thread id -> [lineage or null, the native `updatedAt` it was verified at].
    */
-  forks: new Map<string, [string | null, number | null]>()
+  forks: new Map<string, [string | null, number | null]>(),
+  /** The dispatch ledger's thread ids (ADR-105): threads that are targets, not sessions. */
+  dispatchTargets: new Set<string>()
+}))
+vi.mock('../../services/dispatch-target-ledger', () => ({
+  isDispatchTargetSession: (id: string) => mocks.dispatchTargets.has(id)
 }))
 vi.mock('../codex-locate', () => ({
   codexBinaryAvailable: () => mocks.available,
@@ -74,6 +79,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   mocks.available = true
   mocks.forks.clear()
+  mocks.dispatchTargets.clear()
   mocks.sessionMeta.clear()
   mocks.usage.clear()
   mocks.config.mockResolvedValue({ model_provider: 'openai', model: 'native' })
@@ -277,6 +283,34 @@ it('lists roots only and records their actual provider/model metadata', async ()
     engineId: 'codex',
     model: { engineId: 'codex', vendorId: 'openai', modelId: 'native' }
   })
+})
+
+it("keeps a dispatch target's thread out of the list, whether it is listed or read back as a cached branch", async () => {
+  const root = {
+    id: 'root',
+    model: 'native',
+    modelProvider: 'openai',
+    name: 'Root',
+    cwd: '/isolated',
+    createdAt: 1,
+    updatedAt: 2
+  }
+  mocks.dispatchTargets.add('target-thread')
+  mocks.dispatchTargets.add('target-fork')
+  mocks.list.mockResolvedValue([root, { ...root, id: 'target-thread', name: 'Dispatched' }])
+  mocks.forks.set('root', [null, 2])
+  mocks.forks.set('target-fork', ['root', null])
+  mocks.read.mockImplementation(async ({ threadId }: { threadId: string }) => ({
+    thread: { ...root, id: threadId, forkedFromId: 'root' }
+  }))
+  expect((await listCodexSessions(undefined, instant)).map((s) => s.sessionId)).toEqual(['root'])
+  // Control: the same listing without the ledger shows them.
+  mocks.dispatchTargets.clear()
+  expect((await listCodexSessions(undefined, instant)).map((s) => s.sessionId).sort()).toEqual([
+    'root',
+    'target-fork',
+    'target-thread'
+  ])
 })
 
 it('anchors a fork on the completed turn that owns the message, and refuses the rest', async () => {

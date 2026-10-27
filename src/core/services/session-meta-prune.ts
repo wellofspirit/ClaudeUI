@@ -40,6 +40,48 @@ function listClaudeTranscriptIds(projectsDir: string): Set<string> | null {
 }
 
 /**
+ * Which of these Claude session ids provably have NO record (criteria 3-6 below): no
+ * transcript in any project dir and no mention in `sessions.json`. Empty whenever the
+ * store proves nothing — `CLAUDE_CONFIG_DIR` set, an unreadable or empty transcript
+ * store, an unparseable registry — so a caller that acts on "gone" never acts on doubt.
+ * `consequence` completes the log line that says why nothing was decided.
+ */
+export function claudeSessionsWithNoRecord(
+  candidates: readonly string[],
+  projectsDir: string = claudeProjectsDir(),
+  consequence = 'treating every session as present'
+): string[] {
+  if (candidates.length === 0) return []
+  if (process.env.CLAUDE_CONFIG_DIR) {
+    logger.info(
+      LOG_SOURCE,
+      `CLAUDE_CONFIG_DIR is set; transcripts may live elsewhere, ${consequence}`
+    )
+    return []
+  }
+
+  const transcripts = listClaudeTranscriptIds(projectsDir)
+  if (!transcripts || transcripts.size === 0) return []
+
+  if (!sessionConfigIsReadable()) {
+    logger.warn(
+      LOG_SOURCE,
+      `sessions.json does not parse; cannot tell what is referenced, ${consequence}`
+    )
+    return []
+  }
+  const config = loadSessionConfig()
+  const referenced = new Set<string>([
+    ...(config.recentSessions ?? []),
+    ...(config.pinnedSessions ?? []),
+    ...(config.hiddenSessions ?? []),
+    ...Object.keys(config.customTitles ?? {}),
+    ...Object.keys(config.worktreeInfoMap ?? {})
+  ])
+  return candidates.filter((id) => !transcripts.has(id) && !referenced.has(id))
+}
+
+/**
  * Drop `session_meta` rows of Claude sessions that never produced a transcript.
  *
  * An abandoned "New session" used to leave its engine/model row behind (the store's
@@ -69,36 +111,8 @@ function listClaudeTranscriptIds(projectsDir: string): Set<string> | null {
  * ran; a live session re-writes its row from the renderer's map on its next save.
  */
 export function pruneOrphanClaudeSessionMeta(projectsDir: string = claudeProjectsDir()): string[] {
-  if (process.env.CLAUDE_CONFIG_DIR) {
-    logger.info(
-      LOG_SOURCE,
-      'CLAUDE_CONFIG_DIR is set; transcripts may live elsewhere, pruning nothing'
-    )
-    return []
-  }
   const candidates = claudeUnmeteredSessionIds().filter((id) => !hasCodexSessionOverrides(id))
-  if (candidates.length === 0) return []
-
-  const transcripts = listClaudeTranscriptIds(projectsDir)
-  if (!transcripts || transcripts.size === 0) return []
-
-  if (!sessionConfigIsReadable()) {
-    logger.warn(
-      LOG_SOURCE,
-      'sessions.json does not parse; cannot tell what is referenced, pruning nothing'
-    )
-    return []
-  }
-  const config = loadSessionConfig()
-  const referenced = new Set<string>([
-    ...(config.recentSessions ?? []),
-    ...(config.pinnedSessions ?? []),
-    ...(config.hiddenSessions ?? []),
-    ...Object.keys(config.customTitles ?? {}),
-    ...Object.keys(config.worktreeInfoMap ?? {})
-  ])
-
-  const orphans = candidates.filter((id) => !transcripts.has(id) && !referenced.has(id))
+  const orphans = claudeSessionsWithNoRecord(candidates, projectsDir, 'pruning nothing')
   for (const id of orphans) deleteSessionMeta(id)
   if (orphans.length > 0) {
     // `warn`, not `info`: this deletes user data, and it runs at boot before the

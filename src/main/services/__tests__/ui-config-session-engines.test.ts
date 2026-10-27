@@ -107,20 +107,76 @@ describe('saveSessionConfig — sessionEngines durability (H15)', () => {
     }
   })
 
-  it('a NON-EMPTY map still prunes entries absent from it (rekey cleanup preserved)', async () => {
+  it('a NON-EMPTY map lacking a session KEEPS its row (a snapshot is not the registry)', async () => {
     const { db, ui } = await fresh()
     try {
-      db.setSessionMeta('client-old', { engineId: 'claude' })
+      // A session another client / core created: the saving client's snapshot
+      // predates it, so its map names other sessions and not this one.
+      db.setSessionMeta('remote-codex', { engineId: 'codex' })
       db.setSessionMeta('real-1', { engineId: 'opencode', model: OPENCODE_MODEL })
 
-      // A complete (desktop) save that no longer contains the ephemeral client id.
       ui.saveSessionConfig({
         sessionEngines: { 'real-1': { engineId: 'opencode', model: OPENCODE_MODEL } }
       })
 
-      expect(Object.keys(db.allSessionMeta())).toEqual(['real-1'])
+      expect(Object.keys(db.allSessionMeta()).sort()).toEqual(['real-1', 'remote-codex'])
+      expect(db.getSessionMeta('remote-codex')?.engineId).toBe('codex')
     } finally {
       db.closeDb()
     }
+  })
+
+  describe('sessions.json is merged per key, not replaced', () => {
+    const SESSIONS_FILE = (): string => nodePath.join(TEMP_HOME, '.claude', 'ui', 'sessions.json')
+    const onDisk = (): Record<string, unknown> =>
+      JSON.parse(fs.readFileSync(SESSIONS_FILE(), 'utf-8'))
+
+    it('a payload carrying only sessionEngines keeps every other stored key', async () => {
+      const { db, ui } = await fresh()
+      try {
+        // What the history loader sends: `{ sessionEngines }` and nothing else.
+        fs.writeFileSync(
+          SESSIONS_FILE(),
+          JSON.stringify({
+            recentSessions: ['a', 'b'],
+            pinnedSessions: ['a'],
+            customTitles: { a: 'Title' },
+            worktreeInfoMap: { b: { path: '/wt' } },
+            hiddenSessions: ['c'],
+            hiddenProjects: ['p']
+          })
+        )
+
+        ui.saveSessionConfig({ sessionEngines: { a: { engineId: 'pi' } } })
+
+        expect(onDisk()).toEqual({
+          recentSessions: ['a', 'b'],
+          pinnedSessions: ['a'],
+          customTitles: { a: 'Title' },
+          worktreeInfoMap: { b: { path: '/wt' } },
+          hiddenSessions: ['c'],
+          hiddenProjects: ['p']
+        })
+        expect(db.getSessionMeta('a')?.engineId).toBe('pi')
+      } finally {
+        db.closeDb()
+      }
+    })
+
+    it('a key the payload does carry replaces the stored one (including an emptied list)', async () => {
+      const { db, ui } = await fresh()
+      try {
+        fs.writeFileSync(
+          SESSIONS_FILE(),
+          JSON.stringify({ recentSessions: ['a', 'b'], pinnedSessions: ['a'] })
+        )
+
+        ui.saveSessionConfig({ recentSessions: ['b'], pinnedSessions: [] })
+
+        expect(onDisk()).toEqual({ recentSessions: ['b'], pinnedSessions: [] })
+      } finally {
+        db.closeDb()
+      }
+    })
   })
 })

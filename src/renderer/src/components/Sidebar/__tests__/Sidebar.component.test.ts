@@ -334,6 +334,197 @@ describe('Sidebar FC', () => {
   })
 
   // -------------------------------------------------------------------------
+  // 4a. Navigate-first (ADR-102): the click opens the loading view at once, the
+  //     read lands in it later, and a failed or superseded read behaves.
+  // -------------------------------------------------------------------------
+
+  describe('navigate-first click on an unloaded session', () => {
+    const history = (messageId: string): unknown => ({
+      messages: [
+        { id: messageId, role: 'assistant', content: [{ type: 'text', text: 'hi' }], timestamp: 1 }
+      ],
+      taskNotifications: [],
+      customTitle: null,
+      agentIdToToolUseId: {},
+      statusLine: null,
+      warnings: []
+    })
+
+    /** A `session:load-history` that stays open until the test settles it. */
+    function gatedLoad(): {
+      calls: unknown[][]
+      resolve: (v: unknown) => void
+      reject: (e: Error) => void
+    } {
+      const calls: unknown[][] = []
+      let resolve!: (v: unknown) => void
+      let reject!: (e: Error) => void
+      const gate = new Promise<unknown>((res, rej) => {
+        resolve = res
+        reject = rej
+      })
+      app.bridge.ipcMain.handle('session:load-history', async (...args) => {
+        calls.push(args)
+        return gate
+      })
+      return { calls, resolve, reject }
+    }
+
+    const click = async (id: string): Promise<void> => {
+      await act(async () => {
+        void viewProps.onClickSession(makeSessionInfo(id))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+    }
+    const session = (id: string): ReturnType<typeof useSessionStore.getState>['sessions'][string] =>
+      useSessionStore.getState().sessions[id]
+
+    /**
+     * PRE-FIX: the click awaited the whole load before `switchSession`, so the
+     * active session was still the previous one (null) while the read was open.
+     */
+    it('switches to the loading view BEFORE the read resolves, then fills it', async () => {
+      const load = gatedLoad()
+      await act(async () => {
+        await renderFC()
+      })
+
+      await click('slow')
+
+      expect(load.calls).toHaveLength(1)
+      expect(useSessionStore.getState().activeSessionId).toBe('slow')
+      expect(session('slow')).toMatchObject({ evicted: true, messages: [] })
+
+      await act(async () => {
+        load.resolve(history('m1'))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      expect(session('slow').evicted).toBe(false)
+      expect(session('slow').messages.map((m) => m.id)).toEqual(['m1'])
+      expect(useSessionStore.getState().activeSessionId).toBe('slow')
+    })
+
+    it('shows progress on the placeholder while loading and leaves none after', async () => {
+      const load = gatedLoad()
+      const real = window.api.loadSessionHistory
+      window.api.loadSessionHistory = (async (
+        sessionId: string,
+        projectKey: string,
+        at: string | undefined,
+        onProgress?: (p: unknown) => void
+      ) => {
+        onProgress?.({ done: 0, total: 1000, phase: 'transcript' })
+        onProgress?.({ done: 400, total: 1000, phase: 'transcript' })
+        return real(sessionId, projectKey, at)
+      }) as typeof real
+      await act(async () => {
+        await renderFC()
+      })
+
+      await click('slow')
+      expect(session('slow').transcriptLoadProgress).toMatchObject({
+        fraction: 0.4,
+        phase: 'reading',
+        totalBytes: 1000
+      })
+
+      await act(async () => {
+        load.resolve(history('m1'))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      expect(session('slow').transcriptLoadProgress).toBeNull()
+    })
+
+    it('a read that fails leaves the user on the session with the failed state, not on the old view', async () => {
+      const load = gatedLoad()
+      await act(async () => {
+        await renderFC()
+      })
+      await click('broken')
+
+      await act(async () => {
+        load.reject(new Error('disk gone'))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      expect(useSessionStore.getState().activeSessionId).toBe('broken')
+      expect(session('broken')).toMatchObject({
+        evicted: true,
+        transcriptLoadFailed: true,
+        transcriptLoadProgress: null
+      })
+    })
+
+    /**
+     * PRE-FIX (no placeholder): nothing to be dropped. With a placeholder but the
+     * old `cleanupEmptySession`, leaving it dropped it from recents.
+     */
+    it('a superseded click commits nothing, navigates nowhere, flags nothing, and keeps its recents row', async () => {
+      const load = gatedLoad()
+      useSessionStore.getState().createNewSession('other', CWD, false)
+      useSessionStore.getState().addRecentSession('slow')
+      await act(async () => {
+        await renderFC()
+      })
+
+      await click('slow')
+      await click('other') // resident: the user moved on while 'slow' was loading
+      expect(useSessionStore.getState().activeSessionId).toBe('other')
+
+      await act(async () => {
+        load.resolve(history('m1'))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      const state = useSessionStore.getState()
+      expect(state.activeSessionId).toBe('other')
+      expect(session('slow')).toMatchObject({
+        evicted: true,
+        messages: [],
+        transcriptLoadFailed: false,
+        transcriptLoadProgress: null
+      })
+      expect(state.recentSessionIds).toContain('slow')
+    })
+
+    it('clicking the session again while it loads does not start a second load, and keeps it current', async () => {
+      const load = gatedLoad()
+      await act(async () => {
+        await renderFC()
+      })
+      await click('slow')
+      await click('slow')
+      expect(load.calls).toHaveLength(1)
+
+      await act(async () => {
+        load.resolve(history('m1'))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      expect(session('slow').messages.map((m) => m.id)).toEqual(['m1'])
+    })
+
+    it('clicking away and BACK to a loading session re-adopts its load instead of stranding the spinner', async () => {
+      const load = gatedLoad()
+      useSessionStore.getState().createNewSession('other', CWD, false)
+      await act(async () => {
+        await renderFC()
+      })
+      await click('slow')
+      await click('other')
+      await click('slow')
+      expect(load.calls).toHaveLength(1)
+      expect(useSessionStore.getState().activeSessionId).toBe('slow')
+
+      await act(async () => {
+        load.resolve(history('m1'))
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      expect(session('slow').evicted).toBe(false)
+      expect(session('slow').messages.map((m) => m.id)).toEqual(['m1'])
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // 4b. onClickSession on opencode / pi — the status line comes with the
   //     transcript, so a reopened session shows its cost and tokens at once
   //     (S1d) instead of `In: 0 / Out: 0` until the first new prompt.
@@ -888,7 +1079,7 @@ describe('Sidebar FC', () => {
     expect(viewProps.cleanupWorktree?.sessionId).toBe('wt-sess')
   })
 
-  it('onWorktreeCleanupRemove clears worktree info and removes from recents', async () => {
+  it('onWorktreeCleanupRemove removes from recents and leaves the worktree map to the server', async () => {
     useSessionStore.setState({
       recentSessionIds: ['wt-sess'],
       worktreeInfoMap: {
@@ -914,8 +1105,37 @@ describe('Sidebar FC', () => {
     })
 
     expect(useSessionStore.getState().recentSessionIds).not.toContain('wt-sess')
-    expect(useSessionStore.getState().worktreeInfoMap['wt-sess']).toBeUndefined()
+    // The server forgets the entry when it removes the worktree; a client-side save of the whole
+    // map could resurrect entries the server already dropped.
+    expect(useSessionStore.getState().worktreeInfoMap['wt-sess']).toBeDefined()
     expect(viewProps.cleanupWorktree).toBeNull()
+  })
+
+  it('onRemoveRecent does not offer removal for a worktree ClaudeUI only detected (C-S11)', async () => {
+    useSessionStore.setState({
+      recentSessionIds: ['wt-sess'],
+      worktreeInfoMap: {
+        'wt-sess': {
+          worktreeName: 'feat-x',
+          worktreePath: '/p',
+          worktreeBranch: 'b',
+          gitRoot: '/r',
+          originalHeadCommit: '',
+          origin: 'detected'
+        } as any
+      }
+    })
+    mirrorStoreIntoReplica()
+
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      viewProps.onRemoveRecent(makeSessionInfo('wt-sess'))
+    })
+
+    expect(viewProps.cleanupWorktree).toBeNull()
+    expect(useSessionStore.getState().recentSessionIds).not.toContain('wt-sess')
   })
 
   it('onWorktreeCleanupCancel dismisses the modal without touching recents or worktree info', async () => {
@@ -1107,6 +1327,28 @@ describe('Sidebar FC', () => {
       removeDir: true,
       sessionFiles: [{ sessionId: 'moved', projectKey: worktreeKey }]
     })
+  })
+
+  // -------------------------------------------------------------------------
+  // In-memory rows take their engine from the birth event
+  // -------------------------------------------------------------------------
+
+  it('shows a session with no sessionEngines entry as its BIRTH engine, not Claude', async () => {
+    // A session another client or the host created: `session:created` replicates
+    // its engine, but no model-bearing status has filled `sessionEngines` yet
+    // (Codex sends none before its first prompt).
+    await act(async () => {
+      await renderFC()
+    })
+    act(() => {
+      seed.created('remote-codex', { cwd: CWD, engineId: 'codex' })
+      seed.created('remote-claude', { cwd: CWD })
+    })
+
+    expect(useSessionStore.getState().sessionEngines['remote-codex']).toBeUndefined()
+    const rows = viewProps.augmentedDirs.flatMap((group) => group.sessions)
+    expect(rows.find((s) => s.sessionId === 'remote-codex')?.engineId).toBe('codex')
+    expect(rows.find((s) => s.sessionId === 'remote-claude')?.engineId).toBe('claude')
   })
 
   // -------------------------------------------------------------------------

@@ -66,7 +66,9 @@
  */
 
 import type { SessionManager } from '../services/session-manager'
+import type { ISession } from '../providers/ISession'
 import { safeHandler } from './safe-handler'
+import { logger } from '../services/logger'
 import type { CommandRegistration } from './command-registry'
 import {
   saveSlashCommands,
@@ -88,8 +90,22 @@ import {
   createWorktree,
   getWorktreeStatus,
   removeWorktree,
-  listWorktrees
+  inventoryWorktrees,
+  inspectWorktree,
+  measureWorktree,
+  removeWorktrees
 } from '../services/worktree'
+import * as path from 'path'
+import { forgetWorktreeEntries, isCreatedWorktreePath } from '../services/worktree-detect'
+import { closeMockupWatchersUnder } from '../services/mockup-watch-registry'
+import { createHolderSources } from '../services/live-holder-sources'
+import type { HolderSources } from '../services/worktree-holders'
+import { emitEvent, syncCore } from '../services/sync-host'
+import { refreshCanonicalDirectories } from '../services/sync-seed'
+import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { liveDispatchTargets } from '../services/dispatch-target-ledger'
+import { terminalService } from '../services/terminal-service'
+import type { ProgressReporter } from '../../shared/remote-protocol'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { invalidatePiModelCache } from '../pi/model-discovery'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
@@ -111,7 +127,7 @@ import {
 } from '../opencode/opencode-agents'
 import type { OpencodeAgentInput } from '../opencode/opencode-agents'
 import { generateAgent } from '../opencode/agent-generate'
-import { listAgentTypes } from '../services/agent-type-catalog'
+import { listAgentTypesChecked } from '../services/agent-type-catalog'
 import { ENGINE_META } from '../../shared/engine-meta'
 import { refreshPrices } from '../services/opencode-pricing'
 import { socks5Connect } from '../services/socks-bridge'
@@ -308,7 +324,8 @@ const JUDGE_GUIDANCE_KEYS = ['judgeAllow', 'judgeBlock'] as const
  * The shape is narrow on purpose: five OPTIONAL string arrays, each entry a
  * non-empty trimmed string, one optional boolean (`readOnlyBypass`, ADR-084's
  * opt-out), one optional finite number (`blockHoldSeconds`, ADR-091 part 6,
- * clamped by the service), and no other keys. An empty list is expressed by
+ * clamped by the service), one optional boolean (`captureJudgeReplies`, the judge-reply
+ * capture switch), and no other keys. An empty list is expressed by
  * omitting the key (see {@link SharedAutoModeConfig}) — `[]` is accepted from a
  * caller and normalised away by the service, so an older client cannot create a
  * second encoding of "nothing is trusted".
@@ -333,7 +350,12 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
   }
   const lists = new Set<string>([...SHARED_TRUST_KEYS, ...JUDGE_GUIDANCE_KEYS])
   for (const key of Object.keys(value)) {
-    if (!lists.has(key) && key !== 'readOnlyBypass' && key !== 'blockHoldSeconds') {
+    if (
+      !lists.has(key) &&
+      key !== 'readOnlyBypass' &&
+      key !== 'blockHoldSeconds' &&
+      key !== 'captureJudgeReplies'
+    ) {
       throw new Error(`Invalid shared auto-mode config: unknown key "${key}"`)
     }
   }
@@ -341,6 +363,10 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
   // ADR-084 §1's opt-out: a boolean or nothing.
   if (record.readOnlyBypass !== undefined && typeof record.readOnlyBypass !== 'boolean') {
     throw new Error('Invalid shared auto-mode config: "readOnlyBypass" must be a boolean')
+  }
+  // The judge-reply capture switch: a boolean or nothing.
+  if (record.captureJudgeReplies !== undefined && typeof record.captureJudgeReplies !== 'boolean') {
+    throw new Error('Invalid shared auto-mode config: "captureJudgeReplies" must be a boolean')
   }
   // ADR-091 part 6's hold window: a number or nothing. The service clamps it
   // to whole seconds in [0, 600]; a string or NaN never reaches the file.
@@ -387,6 +413,57 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
 }
 
 // ---------------------------------------------------------------------------
+// Worktree manager wiring (ADR-112)
+// ---------------------------------------------------------------------------
+
+/** One call removes at most this many worktrees (a crafted array cannot queue unbounded git work). */
+const MAX_REMOVE_IDS = 500
+
+/** The directory a manager call works from: a non-empty absolute path (a relative one would resolve against the host's cwd). */
+function assertAbsoluteCwd(cwd: unknown, channel: string): asserts cwd is string {
+  if (typeof cwd !== 'string' || cwd === '' || !path.isAbsolute(cwd)) {
+    throw new Error(`${channel} needs an absolute directory`)
+  }
+}
+
+/** The real holder sources: live sessions, canonical cold sessions, X-Agents, terminals. */
+function worktreeHolderSources(manager: SessionManager): HolderSources {
+  return createHolderSources({
+    liveSessions: () => {
+      const out: ISession[] = []
+      manager.forEach((s) => out.push(s))
+      return out
+    },
+    canonical: () => syncCore.getCanonicalState(),
+    liveTargets: () => crossEngineDispatcher.liveTargetCwds(),
+    ledgerRows: () => liveDispatchTargets(),
+    terminals: () => terminalService.liveTerminals()
+  })
+}
+
+/**
+ * Drop the recorded worktree entries of removed directories, server-side, and tell every client.
+ * Nothing else: the quit-time removal uses exactly this, because re-listing the directories
+ * would reach for a Codex app-server after the teardown.
+ */
+export function forgetEntriesQuiet(worktreePaths: string[]): void {
+  forgetWorktreeEntries(worktreePaths, (channel, args) => emitEvent(channel, args))
+}
+
+/**
+ * {@link forgetEntriesQuiet}, then re-list the directories so a worktree marker the removal
+ * invalidated (C-S10) does not outlive the folder. The refresh is coalesced and throttled by the
+ * sync seed.
+ */
+export function forgetEntriesAndEmit(worktreePaths: string[]): void {
+  forgetEntriesQuiet(worktreePaths)
+  // Best effort: the sidebar catches up on its next poll anyway.
+  refreshCanonicalDirectories().catch((err) =>
+    logger.warn('IPC', `directories refresh after a worktree removal failed: ${err}`)
+  )
+}
+
+// ---------------------------------------------------------------------------
 // The registrations
 // ---------------------------------------------------------------------------
 
@@ -422,19 +499,87 @@ export function configCommands(
       })
     },
     {
+      // Legacy single-path entry point (session-delete cleanup modal): the same mechanics as
+      // `worktree:remove-many`, holders ENFORCED (the modal does not stop the session), and
+      // the per-entry result goes back to the caller (`refused` names the holder). It walks a
+      // whole tree too, so it declares `withProgress` like `remove-many`: the web client's
+      // invoke timeout then slides (C-S5) instead of cutting off a slow removal.
       channel: 'worktree:remove',
       capability: 'git',
       kind: 'command',
-      handler: safeHandler(async (worktreePath: string, branch: string, gitRoot: string) => {
-        await removeWorktree(worktreePath, branch, gitRoot)
-      })
+      withProgress: true,
+      handler: safeHandler(
+        async (
+          progress: ProgressReporter,
+          worktreePath: string,
+          branch: string,
+          gitRoot: string
+        ) => {
+          // N3: a renderer/remote-supplied path: absolute, or nothing resolves against the host's cwd.
+          assertAbsoluteCwd(worktreePath, 'worktree:remove')
+          return await removeWorktree(worktreePath, branch, gitRoot, {
+            progress: (p) => progress(p),
+            sources: worktreeHolderSources(manager),
+            forgetEntries: forgetEntriesAndEmit,
+            beforeWalk: closeMockupWatchersUnder,
+            // C-S11: this modal only ever offers what ClaudeUI created, so that is all it removes.
+            createdOnly: isCreatedWorktreePath
+          })
+        }
+      )
     },
     {
-      channel: 'worktree:list',
+      channel: 'worktree:inventory',
       capability: 'git',
       kind: 'query',
       handler: safeHandler(async (cwd: string) => {
-        return await listWorktrees(cwd)
+        assertAbsoluteCwd(cwd, 'worktree:inventory')
+        return await inventoryWorktrees(cwd, worktreeHolderSources(manager))
+      })
+    },
+    {
+      channel: 'worktree:inspect',
+      capability: 'git',
+      kind: 'query',
+      handler: safeHandler(async (cwd: string, id: string) => {
+        assertAbsoluteCwd(cwd, 'worktree:inspect')
+        return await inspectWorktree(cwd, id)
+      })
+    },
+    {
+      // A big tree takes seconds: a QUERY with progress so the web client's invoke timeout
+      // slides (C-S5); the reporter leads the args (ADR-102).
+      channel: 'worktree:measure',
+      capability: 'git',
+      kind: 'query',
+      withProgress: true,
+      handler: safeHandler(async (progress: ProgressReporter, cwd: string, id: string) => {
+        assertAbsoluteCwd(cwd, 'worktree:measure')
+        return await measureWorktree(cwd, id, (p) =>
+          progress({ done: p.files, total: null, phase: 'measuring' })
+        )
+      })
+    },
+    {
+      channel: 'worktree:remove-many',
+      capability: 'git',
+      kind: 'command',
+      withProgress: true,
+      handler: safeHandler(async (progress: ProgressReporter, cwd: string, ids: string[]) => {
+        assertAbsoluteCwd(cwd, 'worktree:remove-many')
+        if (
+          !Array.isArray(ids) ||
+          ids.length > MAX_REMOVE_IDS ||
+          ids.some((i) => typeof i !== 'string')
+        ) {
+          throw new Error(`worktree:remove-many takes up to ${MAX_REMOVE_IDS} string ids`)
+        }
+        return await removeWorktrees(cwd, ids, (p) => progress(p), {
+          enforceHolders: true,
+          sources: worktreeHolderSources(manager),
+          forgetEntries: forgetEntriesAndEmit,
+          beforeWalk: closeMockupWatchersUnder
+        })
       })
     },
 
@@ -685,7 +830,10 @@ export function configCommands(
         if (typeof engine !== 'string' || !Object.hasOwn(ENGINE_META, engine)) {
           throw new Error(`Unknown engine: ${engine}`)
         }
-        return listAgentTypes(engine as EngineId, typeof cwd === 'string' && cwd ? cwd : undefined)
+        return listAgentTypesChecked(
+          engine as EngineId,
+          typeof cwd === 'string' && cwd ? cwd : undefined
+        )
       })
     },
     {

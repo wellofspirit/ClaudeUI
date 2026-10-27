@@ -23,8 +23,13 @@ import {
 import { ImageGalleryProvider } from '../../shared/ImageViewer'
 import { DiagramGalleryProvider } from '../DiagramGallery'
 import { TopBar } from './TopBar'
+import { SessionLinkBar } from './SessionLinkBar'
 import { WelcomeState } from './WelcomeState'
 import { reloadActiveTranscript } from '../../../lib/session-history-load'
+import { describeTranscriptLoad } from '../../../lib/transcript-load-progress'
+import { ProgressBar } from '../../shared/ProgressBar'
+import { ContextPressureBanner } from './ContextPressureBanner'
+import { HeldMessagesNotice } from './HeldMessagesNotice'
 import { QueuedMessageCard } from './QueuedMessageCard'
 import { ChatSearchOverlay } from '../ChatSearch'
 import { SEARCH_ANCHOR } from '../ChatSearch/search-scope'
@@ -92,6 +97,10 @@ export function ChatPanel(): React.JSX.Element {
   )
   const evicted = useActiveSession((s) => s.evicted)
   const transcriptLoadFailed = useActiveSession((s) => s.transcriptLoadFailed)
+  // A field selector, not the whole session: progress changes four times a second.
+  const transcriptLoadProgress = useActiveSession((s) => s.transcriptLoadProgress)
+  // The background phase (status line, subagent transcripts): also a field selector.
+  const backgroundLoad = useActiveSession((s) => s.backgroundLoad)
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -242,7 +251,30 @@ export function ChatPanel(): React.JSX.Element {
 
   return (
     <div data-testid="ChatPanel" className="flex-1 flex flex-col min-h-0 min-w-0 relative">
-      <TopBar hasContent={hasContent} />
+      {/* The bar hangs off the TopBar's lower edge (`top-full`, out of flow), so it
+          appears and disappears without moving anything. */}
+      <div className="relative shrink-0">
+        <TopBar hasContent={hasContent} />
+        {backgroundLoad && (
+          <div
+            data-testid="ChatPanel.backgroundLoad"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.floor(backgroundLoad.fraction * 100)}
+            aria-label={backgroundLoad.label}
+            title={backgroundLoad.label}
+            // Decoration over the chat's top edge: it must never take a click.
+            className="pointer-events-none absolute left-0 right-0 top-full z-[2] h-[2px] bg-bg-hover/60"
+          >
+            <div
+              className="h-full bg-accent transition-[width] duration-200"
+              style={{ width: `${Math.floor(backgroundLoad.fraction * 100)}%` }}
+            />
+          </div>
+        )}
+      </div>
+      <SessionLinkBar />
 
       <div className="flex-1 flex flex-col min-h-0 relative">
         <ChatSearchOverlay
@@ -289,7 +321,28 @@ export function ChatPanel(): React.JSX.Element {
                 data-testid="TranscriptLoading"
                 className="h-full flex items-center justify-center"
               >
-                <LoadingState label="Loading conversation..." />
+                <LoadingState label="Loading conversation...">
+                  {transcriptLoadProgress && (
+                    <div className="mt-3 flex w-56 max-w-[90%] flex-col items-center gap-1.5">
+                      <ProgressBar
+                        percent={
+                          transcriptLoadProgress.fraction === null
+                            ? null
+                            : Math.round(transcriptLoadProgress.fraction * 100)
+                        }
+                        testid="TranscriptLoading.progress"
+                        className="w-full"
+                        smooth
+                      />
+                      <span
+                        data-testid="TranscriptLoading.detail"
+                        className="max-w-full text-center text-[12px] text-text-muted tabular-nums"
+                      >
+                        {describeTranscriptLoad(transcriptLoadProgress)}
+                      </span>
+                    </div>
+                  )}
+                </LoadingState>
               </div>
             )
           ) : !hasContent && status.state === 'running' ? (
@@ -370,6 +423,8 @@ export function ChatPanel(): React.JSX.Element {
               </button>
             </div>
           )}
+          <HeldMessagesNotice isMobile={isMobile} />
+          <ContextPressureBanner isMobile={isMobile} />
           <QueuedMessageCard isMobile={isMobile} />
           <BtwCard isMobile={isMobile} />
           <InputBox />
@@ -451,19 +506,28 @@ export function ChatNoticeStack(): React.JSX.Element {
   )
 }
 
-function LoadingState({ label = 'Thinking...' }: { label?: string }): React.JSX.Element {
+function LoadingState({
+  label = 'Thinking...',
+  children
+}: {
+  label?: string
+  children?: React.ReactNode
+}): React.JSX.Element {
   return (
-    <div className="flex items-center gap-2.5 -mt-16 animate-fade-in">
-      <div className="flex gap-[3px]">
-        {[0, 200, 400].map((delay) => (
-          <span
-            key={delay}
-            className="w-[5px] h-[5px] rounded-full bg-accent"
-            style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }}
-          />
-        ))}
+    <div className="flex flex-col items-center -mt-16 animate-fade-in">
+      <div className="flex items-center gap-2.5">
+        <div className="flex gap-[3px]">
+          {[0, 200, 400].map((delay) => (
+            <span
+              key={delay}
+              className="w-[5px] h-[5px] rounded-full bg-accent"
+              style={{ animation: 'pulse-dot 1.4s infinite', animationDelay: `${delay}ms` }}
+            />
+          ))}
+        </div>
+        <span className="text-[13px] text-text-muted">{label}</span>
       </div>
-      <span className="text-[13px] text-text-muted">{label}</span>
+      {children}
     </div>
   )
 }

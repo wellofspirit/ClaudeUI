@@ -1,6 +1,7 @@
 /**
  * @vitest-environment node
  */
+import { createCipheriv, hkdfSync } from 'node:crypto'
 import { describe, it, expect } from 'vitest'
 import { E2ECrypto, WebCryptoUnavailableError, webCryptoAvailable } from '../e2e-crypto'
 
@@ -238,6 +239,46 @@ describe('E2ECrypto', () => {
       })
       expect(webCryptoAvailable()).toBe(true)
     })
+
+    it.each(['webcrypto', 'noble'] as const)(
+      'decrypts the pinned Node-native binary frame and rejects tampering (%s)',
+      async (backend) => {
+        // Generated independently with Node native HKDF-SHA256 + AES-256-GCM:
+        // IKM=32 bytes AA, salt/info below, nonce=00..0b, plaintext=BE seq 1 + UTF-8 JSON.
+        // Wire bytes are nonce || ciphertext || 16-byte tag (no AAD).
+        const fixture =
+          'AAECAwQFBgcICQoLqQd/Xk1EFcgd4pKxP1wi2OyFUWIBzC9rhuPJB3yKTORf6Ps+Obx/oVM/2TM5mOss/QI='
+        const nonce = Buffer.from('000102030405060708090a0b', 'hex')
+        const key = hkdfSync('sha256', Buffer.alloc(32, 0xaa), 'ClaudeUI-E2E-v1', 'aes-gcm-256', 32)
+        const plaintext = Buffer.concat([
+          Buffer.from('00000001', 'hex'),
+          Buffer.from('{"hello":"fixture","count":42}', 'utf8')
+        ])
+        const cipher = createCipheriv('aes-256-gcm', Buffer.from(key), nonce)
+        expect(
+          Buffer.concat([
+            nonce,
+            cipher.update(plaintext),
+            cipher.final(),
+            cipher.getAuthTag()
+          ]).toString('base64')
+        ).toBe(fixture)
+
+        const check = async () => {
+          const peer = new E2ECrypto()
+          await peer.init(TEST_KEY_HEX)
+          // Tamper checks precede any accepted sequence, so rejection cannot be replay.
+          for (const index of [0, 12, Buffer.from(fixture, 'base64').length - 1]) {
+            const tampered = Buffer.from(fixture, 'base64')
+            tampered[index] ^= 1
+            await expect(peer.decrypt(tampered.toString('base64'))).rejects.toThrow()
+          }
+          await expect(peer.decrypt(fixture)).resolves.toEqual({ hello: 'fixture', count: 42 })
+        }
+        if (backend === 'noble') await withoutSubtle(check)
+        else await check()
+      }
+    )
 
     it('initializes and round-trips on the pure-JS path', async () => {
       await withoutSubtle(async () => {

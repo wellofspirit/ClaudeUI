@@ -63,6 +63,26 @@ export function framesOf(chunks: string[]): AsyncGenerator<SseFrame, void, undef
   return readSseFrames(sseStream(chunks))
 }
 
+/**
+ * Wrap a frame iterable so a test can count how many frames the reader pulled — proof that an
+ * abort (e.g. the off-format throw) stopped the stream instead of draining it.
+ */
+export function countingFrames(inner: AsyncIterable<SseFrame>): {
+  frames: AsyncIterable<SseFrame>
+  pulls: () => number
+} {
+  let pulls = 0
+  const frames: AsyncIterable<SseFrame> = {
+    async *[Symbol.asyncIterator]() {
+      for await (const frame of inner) {
+        pulls++
+        yield frame
+      }
+    }
+  }
+  return { frames, pulls: () => pulls }
+}
+
 /** One chat-completions `data:` frame. */
 export const chat = (obj: unknown): string => `data: ${JSON.stringify(obj)}\n\n`
 export const CHAT_DONE = 'data: [DONE]\n\n'

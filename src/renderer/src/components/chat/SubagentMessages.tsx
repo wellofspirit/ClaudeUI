@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from 'react'
 import type {
   ChatMessage,
   ContentBlock,
+  EngineId,
   PendingApproval,
   ToolReviewBlock,
   PermissionDenialBlock
@@ -17,6 +18,9 @@ import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 interface Props {
   messages: ChatMessage[]
   maxHeight?: string
+  /** The engine that produced these messages (a dispatch child's target); its tool
+   *  map reads the tool calls. Defaults to the active session's engine. */
+  engineId?: EngineId
 }
 
 // Seeded once from settings.expandThinking (same semantics as
@@ -71,7 +75,8 @@ const ContentBlockView = memo(function ContentBlockView({
 
 export const SubagentMessages = memo(function SubagentMessages({
   messages,
-  maxHeight = '400px'
+  maxHeight = '400px',
+  engineId
 }: Props): React.JSX.Element {
   const resultMap = useMemo(() => {
     const map = new Map<string, Extract<ContentBlock, { type: 'tool_result' }>>()
@@ -168,6 +173,7 @@ export const SubagentMessages = memo(function SubagentMessages({
                     <ToolCallBlock
                       key={`${msg.id}-${i}`}
                       block={block}
+                      engineId={engineId}
                       result={resultMap.get(block.toolUseId)}
                       approval={approvalMap.get(block.toolUseId)}
                       review={decision?.type === 'tool_review' ? decision : undefined}

@@ -272,7 +272,8 @@ describe('PiBridgeHost', () => {
     if (res instanceof Response) {
       expect(res.status).toBe(413)
     } else {
-      expect(res).toBeInstanceOf(Error)
+      // not toBeInstanceOf(Error): undici's rejection comes from another realm under vmForks
+      expect(res).toMatchObject({ name: expect.any(String), message: expect.any(String) })
     }
     expect(called).toBe(false)
   })

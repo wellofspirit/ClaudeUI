@@ -1,6 +1,6 @@
 /**
- * Single McpServer ('claudeui') that exposes all four hosted tools:
- *   render_mermaid, create_mockup, show_mockup, dispatch_agent
+ * Single McpServer ('claudeui') that exposes all hosted tools:
+ *   render_mermaid, create_mockup, show_mockup, dispatch_agent, list_models
  *
  * Reuses the real tool handler logic from mermaid-tool.ts and
  * mockup-tool.ts — no duplication. Tool definitions are extracted from
@@ -19,6 +19,15 @@
  * because it depends on TWO things this module must NOT import directly —
  * see the cycle note on `CallerSessionLookup`/`DispatchAgentFn` below.
  *
+ * `list_models` (ADR-111) is the model's way to find the ids the `subagent` tool's
+ * `model` parameter accepts, filtered by ClaudeUI's model allowlist; opencode's own
+ * `models` tool is unreachable (a Code Mode tool, and `execute` is hidden). It is
+ * registered only when the host passes `deps.listModels`.
+ *
+ * The session tools (session tools, slice 2) are registered here too, as
+ * `claudeui_session_*`, when the host wired them (`deps.sessionTools`): see
+ * `registerSessionTools`. Root agent only.
+ *
  * Caller identity (ADR-097 §4, amends ADR-033): see `resolveCallerIdentity`.
  * One McpServer is built per MCP SESSION (mcp-http-host.ts): an opencode 2.x
  * server serves every directory and connects its MCP clients per directory, so
@@ -33,12 +42,33 @@ import { createMockupServer } from '../services/mockup-tool'
 import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import {
+  DISPATCH_BACKGROUND_PARAM,
+  DISPATCH_DESCRIPTION_PARAM,
+  DISPATCH_NAME_PARAM,
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  DISPATCH_WORKDIR_PARAM,
   dispatchAgentDescription,
+  dispatchResultSuffix,
+  dispatchWorkdirArg,
+  hasRemovedSessionId,
+  HAND_BACK_DESCRIPTION,
+  HAND_BACK_REPORT_PARAM,
+  HAND_BACK_TOOL,
   joinDispatchHints,
-  OWN_SUBAGENT_TOOL
+  OWN_SUBAGENT_TOOL,
+  runsInBackground
 } from '../../shared/dispatch-agent-description'
+import {
+  SESSION_TOOL_NAMES,
+  sessionToolDescriptions,
+  sessionToolsGuidance,
+  type SessionToolName
+} from '../../shared/session-tools-description'
+import { SESSION_TOOL_SHAPES } from '../services/session-tool-specs'
+import { formatOpencodeModelList, OPENCODE_MODEL_LIST_EMPTY } from './model-list'
+import type { SessionToolCaller, SessionToolResult } from '../services/session-tools'
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
-import type { ChatMessage, EngineId } from '../../shared/types'
+import type { ChatMessage, EngineId, EngineModelGroup } from '../../shared/types'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 import type { CallerRestriction } from './caller-restriction'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
@@ -109,6 +139,48 @@ export type CallerRootResolver = (
   | { readonly refused: string }
   | undefined
 >
+
+/**
+ * The session tools' service, injected like {@link DispatchAgentFn}; absent (the
+ * host did not wire them, or a test) registers none of the nine.
+ */
+export interface HostedSessionTools {
+  run: (
+    caller: SessionToolCaller,
+    tool: SessionToolName,
+    input: Record<string, unknown>
+  ) => Promise<SessionToolResult>
+}
+
+/**
+ * `list_models`' description (pi's, adapted): what the subagent tool's `model` accepts. The
+ * "only when the user asks" rule is the subagent tool's own (opencode's description keeps it).
+ */
+export const LIST_MODELS_DESCRIPTION =
+  "List the models a subagent may run on, for the subagent tool's model parameter (provider/id, " +
+  'or provider/id#variant where a model lists variants). Only pass a model when the user asks ' +
+  'for one. Pass query to filter by a substring of the id or name.'
+
+/** The `claudeui_` prefix opencode puts on this server's tool names. */
+const HOSTED_TOOL_PREFIX = 'claudeui_'
+
+/**
+ * `hand_back` (ADR-105 §3), injected like {@link DispatchAgentFn}: the dispatcher holds the
+ * targets. `sessionId` is the session `_meta` names; the dispatcher refuses anything that is
+ * not a dispatch target's own session.
+ */
+export type HandBackFn = (
+  sessionId: string,
+  report: unknown,
+  callId: string | undefined
+) => { text: string; isError: boolean }
+
+/**
+ * The session tools' caller when the opencode session is a dispatch target (an X-Agent, ADR-105
+ * §4), or undefined for any other session. Injected like {@link HandBackFn}: the dispatcher holds
+ * the targets. Only `session_message` is ever run for it (the service refuses the rest).
+ */
+export type XAgentCallerFn = (sessionId: string) => SessionToolCaller | undefined
 
 /** Same cycle-avoidance rationale as CallerSessionLookup above. */
 export type DispatchAgentFn = (
@@ -191,10 +263,10 @@ function buildDispatchAgentInputSchema(
           `that engine's configured default. For claude: a Claude alias (e.g. "haiku", "sonnet") — ` +
           `${modelHintShort} For pi: ${piModelHintShort} For codex: ${codexModelHintShort}`
       ),
-    session_id: z
-      .string()
-      .optional()
-      .describe('session_id from a previous dispatch_agent result — continues that agent'),
+    name: z.string().optional().describe(DISPATCH_NAME_PARAM),
+    description: z.string().describe(DISPATCH_DESCRIPTION_PARAM),
+    workdir: z.string().optional().describe(DISPATCH_WORKDIR_PARAM),
+    run_in_background: z.boolean().optional().describe(DISPATCH_BACKGROUND_PARAM),
     // Internal — see resources/opencode/claudeui-xeng/index.js. Declared
     // explicitly so our Zod validator does not STRIP it (z.object() drops
     // unknown keys by default); the handler reads then removes it before any
@@ -236,13 +308,35 @@ export function createOpencodeHostedToolsServer(
      */
     resolveCallerRoot?: CallerRootResolver
     dispatch?: DispatchAgentFn
+    /** The dispatch targets' report channel (ADR-105 §3); `hand_back` is not registered without it. */
+    handBack?: HandBackFn
+    /** The session tools' service (slice 2); none registered without it. */
+    sessionTools?: HostedSessionTools
+    /** An X-Agent's session as a session-tools caller (`session_message` only, ADR-105 §4). */
+    xAgentCaller?: XAgentCallerFn
+    /**
+     * The models a subagent may run on (`discoverOpencodeModels`, allowlist-filtered);
+     * `list_models` is not registered without it. Injected, not imported: model discovery
+     * imports the server manager, which imports this module.
+     */
+    listModels?: () => Promise<readonly EngineModelGroup[]>
     /** Called when `_meta` and the plugin stamp disagree (diagnostics). */
     onIdentityMismatch?: (identity: CallerIdentity) => void
   } = {}
 ): McpServer {
   const server = new McpServer(
     { name: 'claudeui', version: '1.0.0' },
-    { capabilities: { tools: {} } }
+    {
+      capabilities: { tools: {} },
+      // The session tools' guidance rides the MCP server's own instructions, which
+      // opencode puts in the model's prompt (`core/src/mcp/instructions.ts`). Every
+      // session on the server reads it, subagents and dispatch targets too: they
+      // are not offered the tools (`SESSION_TOOLS_DENY_RULE`), so it costs them
+      // one short paragraph.
+      ...(deps.sessionTools
+        ? { instructions: sessionToolsGuidance({ toolPrefix: HOSTED_TOOL_PREFIX }) }
+        : {})
+    }
   )
 
   // Extract tool definitions from the canonical implementations.
@@ -346,6 +440,37 @@ export function createOpencodeHostedToolsServer(
     defaultModel: codexDispatchCfg?.defaultModel
   })
 
+  if (deps.listModels) {
+    const listModels = deps.listModels
+    server.registerTool(
+      'list_models',
+      {
+        description: LIST_MODELS_DESCRIPTION,
+        inputSchema: {
+          query: z
+            .string()
+            .optional()
+            .describe('A case-insensitive substring of the model id or display name')
+        }
+      },
+      async (args: { query?: unknown }) => {
+        if (args.query !== undefined && typeof args.query !== 'string') {
+          return {
+            content: [{ type: 'text' as const, text: 'list_models "query" must be a string.' }],
+            isError: true
+          }
+        }
+        // A discovery failure is "no list", never an error: the model can still omit `model`.
+        const groups = await listModels().catch(() => [])
+        const text =
+          groups.length === 0
+            ? OPENCODE_MODEL_LIST_EMPTY
+            : formatOpencodeModelList(groups, args.query)
+        return { content: [{ type: 'text' as const, text }] }
+      }
+    )
+  }
+
   server.registerTool(
     'dispatch_agent',
     {
@@ -358,23 +483,45 @@ export function createOpencodeHostedToolsServer(
           { targetEngine: 'codex', long: codexModelHint.long }
         ])
       }),
-      inputSchema: buildDispatchAgentInputSchema(
-        modelHint.short,
-        piModelHint.short,
-        codexModelHint.short
+      // Loose: the removed `session_id` is not declared (the model must not see it) but a call
+      // that still sends one must reach the handler for its guiding error; a plain raw shape
+      // would strip it. `tools/list` shows only the declared keys either way.
+      inputSchema: z.looseObject(
+        buildDispatchAgentInputSchema(modelHint.short, piModelHint.short, codexModelHint.short)
       )
     },
     async (
       args: Record<string, unknown>,
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
-      const { engine, prompt, model, session_id, __xeng_caller_session, __xeng_call_id } = args as {
+      const {
+        engine,
+        prompt,
+        model,
+        name,
+        description,
+        workdir,
+        run_in_background,
+        __xeng_caller_session,
+        __xeng_call_id
+      } = args as {
         engine: 'claude' | 'pi' | 'codex'
         prompt: string
         model?: string
-        session_id?: string
+        name?: string
+        description?: string
+        workdir?: string
+        run_in_background?: boolean
         __xeng_caller_session?: string
         __xeng_call_id?: string
+      }
+
+      // `session_id` left `dispatch_agent` (ADR-105 §4): a call that still sends one launches nothing.
+      if (hasRemovedSessionId(args.session_id)) {
+        return {
+          content: [{ type: 'text' as const, text: DISPATCH_SESSION_ID_REMOVED_TEXT }],
+          isError: true
+        }
       }
 
       const identity = resolveCallerIdentity(extra?._meta as Record<string, unknown> | undefined, {
@@ -403,6 +550,9 @@ export function createOpencodeHostedToolsServer(
       let routingId = callerId
       let callerRestriction: CallerRestriction | undefined
       let caller = deps.lookupCallerSession?.(callerId)
+      // The chat's own agent is the root caller; a subagent child resolves to its chat below.
+      // Only the root agent defaults to a background run (ADR-105 §2).
+      const callerIsRoot = !!caller
       if (!caller && deps.resolveCallerRoot) {
         const resolved = await deps.resolveCallerRoot(callerId).catch(() => undefined)
         if (resolved && 'refused' in resolved) {
@@ -443,8 +593,20 @@ export function createOpencodeHostedToolsServer(
         meta: extra._meta as Record<string, unknown> | undefined
       }
 
+      const workdirArg = dispatchWorkdirArg(workdir)
+      const background = runsInBackground(run_in_background, callerIsRoot, identity.callId)
       const result = await deps.dispatch(
-        { engine, prompt, model, sessionId: session_id },
+        {
+          engine,
+          prompt,
+          model,
+          name,
+          description,
+          ...(workdirArg ? { workdir: workdirArg } : {}),
+          ...(background ? { runInBackground: true } : {}),
+          // A subagent child asked for the background: its report goes to the chat's root agent.
+          ...(background && !callerIsRoot ? { fromSubagent: true } : {})
+        },
         {
           fromEngine: 'opencode',
           fromRoutingId: routingId,
@@ -461,9 +623,10 @@ export function createOpencodeHostedToolsServer(
         }
       )
 
-      const text = result.isError
-        ? result.text
-        : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+      const text =
+        result.isError || !result.agentRef
+          ? result.text
+          : `${result.text}${dispatchResultSuffix(result.agentRef)}`
 
       return {
         content: [{ type: 'text' as const, text }],
@@ -472,5 +635,135 @@ export function createOpencodeHostedToolsServer(
     }
   )
 
+  if (deps.handBack) registerHandBack(server, deps.handBack)
+  if (deps.sessionTools) registerSessionTools(server, deps)
+
   return server
+}
+
+/**
+ * `claudeui_hand_back`: the report a dispatch target ends its run with (ADR-105 §3). It is on
+ * the shared server, so every session of the server is offered it; the interactive rulesets
+ * deny it (`HAND_BACK_DENY_RULE`, hidden from the model) and only a target's ruleset allows
+ * it. The caller is the session opencode's `_meta` names — never the model's say-so — and the
+ * dispatcher accepts only a dispatch target's own session, so a subagent child of a target,
+ * an interactive chat or an unidentified call is refused here as well.
+ */
+function registerHandBack(server: McpServer, handBack: HandBackFn): void {
+  server.registerTool(
+    HAND_BACK_TOOL,
+    {
+      description: HAND_BACK_DESCRIPTION,
+      inputSchema: { report: z.string().describe(HAND_BACK_REPORT_PARAM) }
+    },
+    async (
+      args: { report: string },
+      extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+    ) => {
+      const callerId = resolveCallerIdentity(
+        extra?._meta as Record<string, unknown> | undefined,
+        {}
+      ).sessionId
+      const answer = callerId
+        ? handBack(callerId, args.report, undefined)
+        : {
+            text: 'hand_back could not identify the calling session, so no report was taken.',
+            isError: true
+          }
+      return {
+        content: [{ type: 'text' as const, text: answer.text }],
+        ...(answer.isError ? { isError: true as const } : {})
+      }
+    }
+  )
+}
+
+/**
+ * The nine session tools on the hosted server (`claudeui_session_*`). The caller is
+ * the session opencode names in `_meta` (the plugin's stamp exists for dispatch's
+ * call id only, and opencode 2.x sends `_meta` on every `tools/call`): a ClaudeUI
+ * chat is the root agent; a subagent child resolves to the chat it descends from and
+ * is attributed `subagent`, which the service refuses for every acting tool. Any
+ * other caller (a dispatch target, a session ClaudeUI never created, an agent whose
+ * rules cannot be read) gets a refusal and nothing runs: fail closed.
+ */
+function registerSessionTools(
+  server: McpServer,
+  deps: {
+    lookupCallerSession?: CallerSessionLookup
+    resolveCallerRoot?: CallerRootResolver
+    sessionTools?: HostedSessionTools
+    xAgentCaller?: XAgentCallerFn
+  }
+): void {
+  // No `ownMessageTool`: opencode has no teammate-messaging tool to point `session_message`
+  // away from (pi passes `send_message`, Claude `SendMessage`).
+  const descriptions = sessionToolDescriptions({})
+  const refuse = (text: string): { content: { type: 'text'; text: string }[]; isError: true } => ({
+    content: [{ type: 'text' as const, text: `Refused: ${text}` }],
+    isError: true
+  })
+  for (const name of SESSION_TOOL_NAMES) {
+    server.registerTool(
+      name,
+      {
+        description: descriptions[name],
+        inputSchema: SESSION_TOOL_SHAPES[name] as unknown as Record<string, z.ZodTypeAny>
+      },
+      async (
+        args: Record<string, unknown>,
+        extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+      ) => {
+        const callerId = resolveCallerIdentity(
+          extra?._meta as Record<string, unknown> | undefined,
+          {}
+        ).sessionId
+        if (!callerId) {
+          return refuse(`${name} could not identify the calling session, so it is not run.`)
+        }
+        // A dispatch target's own session may message its dispatcher, and nothing else (the
+        // service refuses every other tool for it, the target's ruleset hides them).
+        const xAgent = name === 'session_message' ? deps.xAgentCaller?.(callerId) : undefined
+        if (xAgent) {
+          const sent = await deps.sessionTools!.run(xAgent, name, args)
+          return {
+            content: [{ type: 'text' as const, text: sent.text }],
+            ...(sent.isError ? { isError: true as const } : {})
+          }
+        }
+        let routingId = callerId
+        let owner: 'root' | 'subagent' = 'root'
+        let handle = deps.lookupCallerSession?.(callerId)
+        if (!handle && deps.resolveCallerRoot) {
+          const resolved = await deps.resolveCallerRoot(callerId).catch(() => undefined)
+          if (resolved && 'refused' in resolved) return refuse(resolved.refused)
+          if (resolved) {
+            routingId = resolved.root
+            owner = 'subagent'
+            handle = deps.lookupCallerSession?.(resolved.root)
+          }
+        }
+        if (!handle) {
+          return refuse(
+            `${name} is for the main agent of a ClaudeUI session; the calling session (${callerId}) is not one.`
+          )
+        }
+        const result = await deps.sessionTools!.run(
+          {
+            routingId,
+            engine: 'opencode',
+            cwd: handle.cwd,
+            permissionMode: handle.getAutonomyMode(),
+            callOwner: async () => owner
+          },
+          name,
+          args
+        )
+        return {
+          content: [{ type: 'text' as const, text: result.text }],
+          ...(result.isError ? { isError: true as const } : {})
+        }
+      }
+    )
+  }
 }

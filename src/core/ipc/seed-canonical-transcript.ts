@@ -22,6 +22,15 @@ import type { EngineId } from '../../shared/types'
  * truncated prefix of its parent's transcript, and a seed that ignored the anchor
  * showed every client the parent's post-anchor turns above an engine that had
  * never seen them. Both seeds pass the anchor, so both truncate at the same line.
+ *
+ * **A non-fork Claude resume reads content-first (`deferStatusLine`).** The cost
+ * pass is most of a big transcript's read time, and `sendPrompt` waits on this
+ * seed. The totals it would put on canonical's status line reach it anyway: that
+ * resume's `ClaudeSession` reconciles its accumulators from the same transcript
+ * at spawn and emits `session:status-line` (and `sendPrompt` waits for THAT, via
+ * `resumeSeedReady`, so the turn never starts on zeros). A fork has no such
+ * reconcile — its totals come only from this read, anchored — so it, and every
+ * other engine, reads in full.
  */
 export async function seedCanonicalTranscript(
   routingId: string,
@@ -39,16 +48,20 @@ export async function seedCanonicalTranscript(
       (engineId ?? 'claude') === 'claude'
         ? claudeProjectKeyFor(resumeSessionId, cwd)
         : cwdToProjectKey(cwd)
-    const { messages, taskNotifications, statusLine } = await loadSessionHistory(
+    const contentFirst = (engineId ?? 'claude') === 'claude' && !resumeSessionAt
+    const { messages, taskNotifications, statusLine, activeTasks } = await loadSessionHistory(
       resumeSessionId,
       projectKey,
       resumeSessionAt,
-      engineId
+      engineId,
+      contentFirst ? { deferStatusLine: true } : undefined
     )
     syncCore.seedSession(routingId, {
       cwd,
       messages,
       taskNotifications,
+      // The X-Agents still running (ADR-105 §5): a resumed parent's cards and roster.
+      ...(activeTasks ? { activeTasks } : {}),
       ...(statusLine ? { statusLine } : {}),
       // Derived fields follow from the transcript, so derive them here rather
       // than leaving canonical to wait for the next live message.

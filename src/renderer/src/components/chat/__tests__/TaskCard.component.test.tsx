@@ -33,6 +33,7 @@ import { TaskCard } from '../TaskCard'
 import { resetAgentTypeCatalog } from '../../../hooks/useAgentTypeCatalog'
 import { rosterScanStats, useSessionAgentTypes } from '../../../hooks/useAgentRoster'
 import { PiEngineToolMap } from '../tool-registry/PiEngineToolMap'
+import { dispatchTaskView } from '../../../../../shared/tool-kinds'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
@@ -280,6 +281,368 @@ describe('TaskCard — "Send to background" gate', () => {
 
     expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
     expect(screen.queryByText('sending to background…')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A dispatch run's lifecycle (ADR-105): the dispatcher emits task-started /
+// task-notification for every run, blocking or background
+// ---------------------------------------------------------------------------
+describe('TaskCard — a dispatch run (task-started / task-notification)', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const block = makeTaskBlock({
+    toolUseId: 'toolu_dispatch_run',
+    toolName: 'mcp__claude-ui-collab__dispatch_agent',
+    toolInput: { engine: 'pi', prompt: 'go', run_in_background: true }
+  })
+  const view = {
+    kind: 'task' as const,
+    description: 'Dispatch: pi',
+    prompt: 'go',
+    dispatch: { engine: 'pi' }
+  }
+  const ack = {
+    type: 'tool_result' as const,
+    toolUseId: 'toolu_dispatch_run',
+    toolResult: 'X-Agent s-abc123 launched on pi (id s-abc123).',
+    isError: false
+  }
+  const status = (): string | undefined => screen.getByTestId('TaskCard').dataset.status
+  const started = (isBackgrounded: boolean): void =>
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'toolu_dispatch_run',
+      taskId: 's-abc123',
+      taskType: 'dispatch',
+      isBackgrounded,
+      wakesParent: true
+    })
+
+  it('a BLOCKING run (record, no tool_result yet) reads as running with Stop, then completed', () => {
+    started(false)
+    const { rerender } = render(<TaskCard block={block} view={view} />)
+    expect(status()).toBe('running')
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+
+    seed.taskNotification(ROUTE, {
+      taskId: 's-abc123',
+      toolUseId: 'toolu_dispatch_run',
+      status: 'completed',
+      outputFile: '',
+      summary: 'the whole answer, well past a hundred characters '.repeat(4)
+    })
+    rerender(<TaskCard block={block} view={view} />)
+    expect(status()).toBe('completed')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+  })
+
+  it('a BACKGROUND run (launch ack + record, view.background) reads as running, then completed without showing the ack as its result', () => {
+    started(true)
+    const backgroundView = { ...view, background: true }
+    const { rerender } = render(<TaskCard block={block} result={ack} view={backgroundView} />)
+    expect(status()).toBe('running')
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+
+    seed.taskNotification(ROUTE, {
+      taskId: 's-abc123',
+      toolUseId: 'toolu_dispatch_run',
+      status: 'completed',
+      outputFile: '',
+      summary: 'done'
+    })
+    rerender(<TaskCard block={block} result={ack} view={backgroundView} />)
+    expect(status()).toBe('completed')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+    // The launch acknowledgement is not the agent's result.
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.queryByTestId('md')).not.toBeInTheDocument()
+  })
+
+  // A root agent's dispatch is background by default (ADR-105 §2): its input carries no
+  // `run_in_background`, so the card learns it from the run's own record and terminal notification.
+  describe('a default-background run (no run_in_background on the input)', () => {
+    const plainBlock = makeTaskBlock({
+      toolUseId: 'toolu_dispatch_run',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'pi', prompt: 'go' }
+    })
+    const launchAck = {
+      ...ack,
+      toolResult:
+        'X-Agent rev launched on pi (id s-abc123). It runs in the background and you can keep working.'
+    }
+    const end = (status: 'failed' | 'stopped', isBackgrounded: boolean): void =>
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status,
+        outputFile: '',
+        summary: status === 'failed' ? 'X-Agent failed: boom' : 'stopped',
+        ...(isBackgrounded ? { isBackgrounded: true } : {})
+      })
+    const expand = (): void => {
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    }
+
+    it.each(['failed', 'stopped'] as const)(
+      'a %s one does not show the launch acknowledgement as its body',
+      (status) => {
+        end(status, true)
+        render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+        expand()
+        expect(screen.queryByText(/It runs in the background/)).not.toBeInTheDocument()
+        expect(screen.queryByTestId('md')).not.toBeInTheDocument()
+      }
+    )
+
+    // The card never hid these before the background became the default: why a run
+    // failed, and how one that sent no report ended, were in the result body.
+    it('a refused background launch (an error result) shows its reason', () => {
+      const refused = {
+        ...ack,
+        toolResult: 'X-Agent refused: 4 X-Agents are already running (the limit).',
+        isError: true
+      }
+      const refusedBlock = makeTaskBlock({
+        toolUseId: 'toolu_dispatch_run',
+        toolName: 'mcp__claude-ui-collab__dispatch_agent',
+        toolInput: { engine: 'pi', prompt: 'go', run_in_background: true }
+      })
+      render(
+        <TaskCard block={refusedBlock} result={refused} view={{ ...view, background: true }} />
+      )
+      expect(status()).toBe('failed')
+      expand()
+      expect(screen.getByTestId('TaskCard.failureSummary')).toHaveTextContent(
+        'X-Agent refused: 4 X-Agents are already running (the limit).'
+      )
+    })
+
+    it('a refused launch keeps the X-Agent label on a narrow card; a native Task sheds its word', () => {
+      const refused = { ...ack, toolResult: 'X-Agent refused: over the limit.', isError: true }
+      const { unmount } = render(
+        <TaskCard
+          block={plainBlock}
+          result={refused}
+          view={dispatchTaskView({ engine: 'pi', prompt: 'go', runInBackground: true })}
+        />
+      )
+      expect(status()).toBe('failed')
+      // No description was given, so the header text is the fallback: the label must say what it is.
+      expect(screen.getByTestId('TaskCard.expand')).toHaveTextContent('X-AgentDispatch: pi')
+      expect(screen.getByTestId('TaskCard.label')).not.toHaveClass('@max-[480px]/taskcard:hidden')
+      unmount()
+      render(<TaskCard block={makeTaskBlock()} result={refused} view={defaultTaskView} />)
+      expect(screen.getByTestId('TaskCard.label')).toHaveTextContent('Task')
+      expect(screen.getByTestId('TaskCard.label')).toHaveClass('@max-[480px]/taskcard:hidden')
+    })
+
+    it.each([
+      ['failed', 'The X-Agent ran out of time.'],
+      ['failed', 'Dispatched turn failed: boom'],
+      ['stopped', 'The X-Agent was stopped.']
+    ] as const)('a %s run with no report says how it ended: "%s"', (endStatus, summary) => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: endStatus,
+        outputFile: '',
+        summary,
+        isBackgrounded: true
+      })
+      render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+      expand()
+      expect(screen.getByTestId('TaskCard.endNote')).toHaveTextContent(summary)
+    })
+
+    it('a reloaded run the ledger found interrupted says it can be resumed (neutral card)', () => {
+      useSessionStore.setState((state) => ({
+        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true } }
+      }))
+      mirrorStoreIntoReplica()
+      const summary =
+        'The X-Agent was interrupted before it finished (the app closed or its parent session cancelled). It can be resumed.'
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'unfinished',
+        outputFile: '',
+        summary,
+        isBackgrounded: true
+      })
+      render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+      expect(status()).toBe('loaded')
+      expand()
+      expect(screen.getByTestId('TaskCard.endNote')).toHaveTextContent(summary)
+    })
+
+    it('says nothing twice: a hand-back report, or the result body of a blocking call, is the card’s words', () => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'completed',
+        outputFile: '',
+        summary: 'the report',
+        handback: 'send',
+        isBackgrounded: true
+      })
+      const { unmount } = render(<TaskCard block={plainBlock} result={launchAck} view={view} />)
+      expand()
+      expect(screen.queryByTestId('TaskCard.endNote')).not.toBeInTheDocument()
+      expect(screen.getByTestId('HandbackReport.text')).toHaveTextContent('the report')
+      unmount()
+
+      // A blocking call: the tool result carries the answer (the notification's is a 100-char cut).
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc124',
+        toolUseId: 'toolu_blocking',
+        status: 'failed',
+        outputFile: '',
+        summary: 'Dispatched turn failed: boom'
+      })
+      const blockingBlock = makeTaskBlock({
+        toolUseId: 'toolu_blocking',
+        toolName: 'mcp__claude-ui-collab__dispatch_agent',
+        toolInput: { engine: 'pi', prompt: 'go' }
+      })
+      render(
+        <TaskCard
+          block={blockingBlock}
+          result={{
+            ...ack,
+            toolUseId: 'toolu_blocking',
+            toolResult: 'Dispatched turn failed: boom'
+          }}
+          view={view}
+        />
+      )
+      expand()
+      expect(screen.queryByTestId('TaskCard.endNote')).not.toBeInTheDocument()
+    })
+
+    it('a native background agent’s notification summary is not drawn (only an X-Agent’s)', () => {
+      const nativeBlock = makeTaskBlock({ toolUseId: 'toolu_native' })
+      seed.taskNotification(ROUTE, {
+        taskId: 'a1',
+        toolUseId: 'toolu_native',
+        status: 'failed',
+        outputFile: '',
+        summary: 'Agent "x" failed',
+        isBackgrounded: true
+      })
+      render(
+        <TaskCard
+          block={nativeBlock}
+          result={{ ...ack, toolUseId: 'toolu_native', toolResult: 'Async agent launched' }}
+          view={{ ...defaultTaskView, background: true }}
+        />
+      )
+      expand()
+      expect(screen.queryByTestId('TaskCard.endNote')).not.toBeInTheDocument()
+    })
+
+    it('an explicit blocking card is unchanged: its result is the body', () => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'completed',
+        outputFile: '',
+        summary: 'the answer'
+      })
+      const answer = { ...ack, toolResult: 'the answer the parent receives' }
+      render(<TaskCard block={plainBlock} result={answer} view={view} />)
+      expand()
+      expect(screen.getByText(/the answer the parent receives/)).toBeInTheDocument()
+    })
+  })
+
+  // A reopened parent (sidebar click) is a historical session, but its X-Agent still runs: the
+  // ledger rebuilt its record (ADR-105 §5), and the card must show it and offer Stop.
+  describe('on a reopened (historical) parent', () => {
+    const reopen = (): void => {
+      useSessionStore.setState((state) => ({
+        sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], isHistorical: true } }
+      }))
+      mirrorStoreIntoReplica()
+    }
+    const backgroundView = { ...view, background: true }
+
+    it('a running X-Agent reads running and Stop reaches the dispatcher (no live parent needed)', async () => {
+      started(true)
+      reopen()
+      const stopCalls: Array<{ routingId: string; toolUseId: string; isDispatch?: boolean }> = []
+      app.bridge.ipcMain.handle(
+        'session:stop-task',
+        async (_e, routingId: string, toolUseId: string, isDispatch?: boolean) => {
+          stopCalls.push({ routingId, toolUseId, isDispatch })
+          return { success: true }
+        }
+      )
+      render(<TaskCard block={block} result={ack} view={backgroundView} />)
+      expect(status()).toBe('running')
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('TaskCard.stop'))
+      })
+      expect(stopCalls).toEqual([
+        { routingId: ROUTE, toolUseId: 'toolu_dispatch_run', isDispatch: true }
+      ])
+    })
+
+    it('a finished X-Agent (the ledger’s terminal notification, no record) reads completed with no Stop', () => {
+      reopen()
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'completed',
+        outputFile: '',
+        summary: 'The X-Agent finished.'
+      })
+      render(<TaskCard block={block} result={ack} view={backgroundView} />)
+      expect(status()).toBe('completed')
+      expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+    })
+
+    it('an interrupted X-Agent (neutral `unfinished`) reads loaded, not stopped', () => {
+      reopen()
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_run',
+        status: 'unfinished',
+        outputFile: '',
+        summary: 'interrupted; it can be resumed.'
+      })
+      render(<TaskCard block={block} result={ack} view={backgroundView} />)
+      expect(status()).toBe('loaded')
+      expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
+    })
+  })
+
+  it('a stopped run ends stopped, not running', () => {
+    started(true)
+    const backgroundView = { ...view, background: true }
+    const { rerender } = render(<TaskCard block={block} result={ack} view={backgroundView} />)
+    seed.taskNotification(ROUTE, {
+      taskId: 's-abc123',
+      toolUseId: 'toolu_dispatch_run',
+      status: 'stopped',
+      outputFile: '',
+      summary: 'Dispatch stopped by user.'
+    })
+    rerender(<TaskCard block={block} result={ack} view={backgroundView} />)
+    expect(status()).toBe('stopped')
+    expect(screen.queryByTestId('TaskCard.stop')).not.toBeInTheDocument()
   })
 })
 
@@ -985,6 +1348,62 @@ describe('TaskCard — cross-engine dispatch card (ADR-033 M3)', () => {
     expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
   })
 
+  // ADR-105 §3: an X-Agent ends in the report it handed back, which is the terminal
+  // notification's summary: the card shows it (the HandbackReport component), once.
+  describe('the report an X-Agent handed back', () => {
+    const notify = (extra: {
+      summary: string
+      handback: 'send' | 'flagged' | 'withheld'
+      warning?: string
+    }): void => {
+      seed.taskNotification(ROUTE, {
+        taskId: 's-abc123',
+        toolUseId: 'toolu_dispatch_1',
+        status: 'completed',
+        outputFile: '',
+        ...extra
+      })
+    }
+    const ended = {
+      type: 'tool_result' as const,
+      toolUseId: 'toolu_dispatch_1',
+      toolResult: '[X-Agent report] framed text the parent model reads',
+      isError: false
+    }
+
+    it('shows the whole report, not the framed text a blocking call returned', () => {
+      const report = `Done.\n${'long line '.repeat(30)}`
+      notify({ summary: report, handback: 'send' })
+      render(<TaskCard block={dispatchBlock} result={ended} view={dispatchView} />)
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+      expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
+      expect(screen.getByTestId('HandbackReport.text').textContent).toContain('long line long line')
+      expect(screen.queryByText(/framed text the parent model reads/)).not.toBeInTheDocument()
+    })
+
+    it('a fallback report shows its warning above it', () => {
+      notify({
+        summary: 'last words',
+        handback: 'flagged',
+        warning: 'This X-Agent has no hand_back tool.'
+      })
+      render(<TaskCard block={dispatchBlock} result={ended} view={dispatchView} />)
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+      expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent('no hand_back tool')
+      expect(screen.getByTestId('HandbackReport.text')).toHaveTextContent('last words')
+    })
+
+    it('withheld: the card says the X-Agent ended without a report', () => {
+      notify({ summary: 'X-Agent rev ended without delivering a report.', handback: 'withheld' })
+      render(<TaskCard block={dispatchBlock} result={ended} view={dispatchView} />)
+      fireEvent.click(screen.getByTestId('TaskCard.expand'))
+      expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent(
+        'The X-Agent ended without delivering a report.'
+      )
+      expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+    })
+  })
+
   it('opencode-named dispatch card (claudeui_dispatch_agent) also hides "Send to background"', () => {
     const ocBlock = makeTaskBlock({
       toolUseId: 'call_oc_dispatch_1',
@@ -1416,5 +1835,240 @@ describe('TaskCard — failure reason', () => {
   it('a completed task shows no failure strip', () => {
     renderFinished('completed', 'all done')
     expect(screen.queryByTestId('TaskCard.failureSummary')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A dispatch child's tool cards use the TARGET engine's tool map
+// ---------------------------------------------------------------------------
+
+describe("TaskCard - a dispatch child's tool cards use the target engine's tool map", () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const childRead = (
+    parentToolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>
+  ): void =>
+    seed.subagentMessage(ROUTE, parentToolUseId, {
+      id: `m-${parentToolUseId}`,
+      role: 'assistant',
+      content: [{ type: 'tool_use', toolUseId: 'child-read', toolName, toolInput }],
+      timestamp: Date.now()
+    })
+
+  // The child's cards only: the TaskCard header is not a ToolCard.
+  const childHeaders = (): string[] =>
+    screen.getAllByTestId('ToolCard.expand').map((el) => el.textContent ?? '')
+
+  it("a pi dispatch under the Claude session renders the child's `read` as a Read card", () => {
+    const block = makeTaskBlock({
+      toolUseId: 'toolu_dispatch_pi',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'pi', prompt: 'look' }
+    })
+    const view = {
+      kind: 'task' as const,
+      description: 'Dispatch: pi',
+      prompt: 'look',
+      dispatch: { engine: 'pi' }
+    }
+    childRead('toolu_dispatch_pi', 'read', { path: '/d/repo/a.ts' })
+    render(<TaskCard block={block} view={view} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    const headers = childHeaders()
+    expect(headers).toHaveLength(1)
+    expect(headers[0]).toContain('Read')
+    expect(headers[0]).not.toContain('{"path"')
+  })
+
+  it("a native subagent (no dispatch) keeps the session's map: Claude `Read` as before", () => {
+    const block = makeTaskBlock({ toolUseId: 'toolu_native_claude' })
+    childRead('toolu_native_claude', 'Read', { file_path: '/d/repo/a.ts' })
+    render(<TaskCard block={block} view={defaultTaskView} />)
+
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    const headers = childHeaders()
+    expect(headers).toHaveLength(1)
+    expect(headers[0]).toContain('Read')
+    expect(headers[0]).toContain('a.ts')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The header word: a dispatch is an "X-Agent", any other task a "Task"
+// ---------------------------------------------------------------------------
+
+describe('TaskCard - header label', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  // The label is the first text in the header button (the status icon has none).
+  const headerText = (): string => screen.getByTestId('TaskCard.expand').textContent ?? ''
+
+  it('a dispatch card reads "X-Agent"', () => {
+    const block = makeTaskBlock({
+      toolUseId: 'toolu_hdr_dispatch',
+      toolName: 'mcp__claude-ui-collab__dispatch_agent',
+      toolInput: { engine: 'pi', prompt: 'look' }
+    })
+    const view = {
+      kind: 'task' as const,
+      description: 'Dispatch: pi',
+      prompt: 'look',
+      dispatch: { engine: 'pi' }
+    }
+    render(<TaskCard block={block} view={view} />)
+    expect(headerText().startsWith('X-Agent')).toBe(true)
+  })
+
+  it('a native task card reads "Task"', () => {
+    render(<TaskCard block={makeTaskBlock()} view={defaultTaskView} />)
+    expect(headerText().startsWith('Task')).toBe(true)
+    expect(headerText()).not.toContain('X-Agent')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A SubagentHandback subagent: the card shows its REPORT (S6)
+// ---------------------------------------------------------------------------
+
+describe('TaskCard - a SubagentHandback report', () => {
+  let app: TestApp
+
+  beforeEach(async () => {
+    app = await bootTestApp()
+    useSessionStore.getState().createNewSession(ROUTE, '/d/repo')
+    useSessionStore.setState({ activeSessionId: ROUTE })
+  })
+
+  afterEach(() => {
+    app.teardown()
+    useSessionStore.setState({ activeSessionId: null, sessions: {} })
+    mirrorStoreIntoReplica()
+  })
+
+  const launched = {
+    type: 'tool_result' as const,
+    toolUseId: 'call_task_1',
+    toolResult: 'Async agent launched successfully. agentId: agent-abc123',
+    isError: false
+  }
+
+  function renderEnded(extra: {
+    summary: string
+    handback?: 'send' | 'flagged' | 'withheld'
+    warning?: string
+  }): void {
+    seed.subagentMessage(ROUTE, 'call_task_1', {
+      id: 'child_m1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'looking around' }],
+      timestamp: Date.now()
+    })
+    seed.taskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: 'call_task_1',
+      status: 'completed',
+      outputFile: '',
+      ...extra
+    })
+    render(<TaskCard block={makeTaskBlock()} result={launched} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+  }
+
+  it('send: the report text is on the card, and no warning', () => {
+    renderEnded({ summary: 'Found 3 files.', handback: 'send' })
+    expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
+    expect(screen.getByTestId('HandbackReport.text')).toHaveTextContent('Found 3 files.')
+    expect(screen.queryByTestId('HandbackReport.warning')).not.toBeInTheDocument()
+  })
+
+  it('flagged: the security warning is shown above the report', () => {
+    renderEnded({
+      summary: 'Found 3 files.',
+      handback: 'flagged',
+      warning: 'SECURITY WARNING: auto mode blocked this subagent’s report.'
+    })
+    const warning = screen.getByTestId('HandbackReport.warning')
+    const text = screen.getByTestId('HandbackReport.text')
+    expect(warning).toHaveTextContent('SECURITY WARNING: auto mode blocked')
+    expect(warning.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('send with a note (no review ran, B-3c): the note is above the report, and it is not a security warning', () => {
+    renderEnded({
+      summary: 'Found 3 files.',
+      handback: 'send',
+      warning: 'Note: the report could not be reviewed (HTTP 503). Please verify it carefully.'
+    })
+    const note = screen.getByTestId('HandbackReport.note')
+    expect(note).toHaveTextContent('Note: the report could not be reviewed (HTTP 503)')
+    expect(screen.queryByTestId('HandbackReport.warning')).not.toBeInTheDocument()
+    expect(
+      note.compareDocumentPosition(screen.getByTestId('HandbackReport.text')) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
+  })
+
+  it('flagged without a warning text still says so', () => {
+    renderEnded({ summary: 'Found 3 files.', handback: 'flagged' })
+    expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent(/flagged/i)
+  })
+
+  it('withheld: reads "ended without delivering a report", with no report text', () => {
+    renderEnded({
+      summary: 'The subagent ended without delivering a report.',
+      handback: 'withheld'
+    })
+    expect(screen.getByTestId('HandbackReport.withheld')).toHaveTextContent(
+      'ended without delivering a report'
+    )
+    expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+  })
+
+  it('a foreground agent’s tool_result is not repeated under its hand-back report', () => {
+    seed.taskNotification(ROUTE, {
+      taskId: 'task-abc123',
+      toolUseId: 'call_task_1',
+      status: 'completed',
+      outputFile: '',
+      summary: 'THE REPORT',
+      handback: 'send'
+    })
+    const result = { ...launched, toolResult: 'THE REPORT' }
+    render(<TaskCard block={makeTaskBlock()} result={result} view={defaultTaskView} />)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getAllByText('THE REPORT')).toHaveLength(1)
+  })
+
+  it('no handback: nothing extra renders and the summary stays out of the card', () => {
+    renderEnded({ summary: 'Found 3 files.' })
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
   })
 })

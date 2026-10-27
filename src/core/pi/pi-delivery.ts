@@ -20,7 +20,7 @@ import type { TaskTerminalStatus } from '../../shared/types'
 /** The `customType` pi stores on every message ClaudeUI injects. */
 export const PI_AGENT_MESSAGE_CUSTOM_TYPE = 'claudeui-agent-message'
 
-/** The bridge command (pi-bridge-source.ts v10). */
+/** The bridge command (pi-bridge-source.ts v10; `session-message` kind since v14). */
 export const PI_DELIVER_COMMAND = '/cui-deliver'
 
 /** Every ClaudeUI bridge command starts with this (`/cui-deliver`, `/cui-plan-enter`, …). */
@@ -37,7 +37,13 @@ export function isReservedPiCommandText(text: string): boolean {
   return text.trimStart().startsWith(PI_RESERVED_COMMAND_PREFIX)
 }
 
-export type PiAgentDeliveryKind = 'task-notification' | 'agent-message'
+/**
+ * `session-message` (slice 1a): text another ClaudeUI session or agent sent this
+ * session. Its `details` reuse `agentId` / `from` / `fromId` for the sender's key
+ * and display name (`toolUseId` is empty), and `text` is the wrapped
+ * model-facing form (`buildSessionMessageWrapper`).
+ */
+export type PiAgentDeliveryKind = 'task-notification' | 'agent-message' | 'session-message'
 
 /** What the row and the history loader read back from `details` (never from the text). */
 export interface PiAgentDeliveryDetails {
@@ -102,7 +108,8 @@ export function piAgentDeliveryDetails(
   if (!details || typeof details !== 'object' || Array.isArray(details)) return null
   const d = details as Record<string, unknown>
   if (d.v !== 1) return null
-  if (d.kind !== 'task-notification' && d.kind !== 'agent-message') return null
+  if (d.kind !== 'task-notification' && d.kind !== 'agent-message' && d.kind !== 'session-message')
+    return null
   if (typeof d.deliveryId !== 'string') return null
   return d as unknown as PiStoredDeliveryDetails
 }

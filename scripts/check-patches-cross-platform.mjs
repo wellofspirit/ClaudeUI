@@ -16,7 +16,7 @@
  *
  *   extract-cli --platform <key>  →  patch/apply-all.mjs  →  rebundle-cli
  *
- * Rebundle on PE / Mach-O writes into the scratch dir; its per-chunk esbuild
+ * Rebundle on PE / Mach-O writes into the scratch dir; its per-chunk Node
  * syntax check of every patched chunk is the point. On ELF it prints its skip
  * line (no Linux rebundle yet), which counts as a pass. The produced binaries
  * are never executed. The official binaries are downloaded once into

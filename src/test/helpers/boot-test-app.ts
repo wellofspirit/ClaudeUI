@@ -138,6 +138,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
     loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
       ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
+    loadSessionStatusLine: (sessionId, projectKey) =>
+      ipcRenderer.invoke('session:load-status-line', sessionId, projectKey),
     loadSubagentHistory: (sessionId, projectKey, agentId) =>
       ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
     getBlob: (blobId) => ipcRenderer.invoke('blob:get', blobId),
@@ -172,6 +174,15 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:background-task', routingId, toolUseId),
     dequeueMessage: (routingId, value) =>
       ipcRenderer.invoke('session:dequeue-message', routingId, value),
+    allowPeerMessages: (routingId) => ipcRenderer.invoke('session:allow-peer-messages', routingId),
+    setSessionGrouped: (routingId, grouped) =>
+      ipcRenderer.invoke('session:link:set-grouped', routingId, grouped),
+    startSessionProposal: (proposalId, grouped) =>
+      ipcRenderer.invoke('session:proposal:start', proposalId, grouped),
+    dismissSessionProposal: (proposalId) =>
+      ipcRenderer.invoke('session:proposal:dismiss', proposalId),
+    respondContextPressure: (routingId, answer) =>
+      ipcRenderer.invoke('session:context-pressure:respond', routingId, answer),
     recallQueued: (routingId) => ipcRenderer.invoke('session:recall-queued', routingId),
     askSideQuestion: (routingId, question) =>
       ipcRenderer.invoke('session:ask-side-question', routingId, question),
@@ -189,6 +200,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     getEngineModels: (engineId) => ipcRenderer.invoke('session:get-engine-models', engineId),
     judgeModelSupport: (engineId, values) =>
       ipcRenderer.invoke('automode:judge-model-support', engineId, values),
+    judgeRouteResting: (engineId, model, accountId) =>
+      ipcRenderer.invoke('automode:judge-route-resting', engineId, model, accountId),
     getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
     setOpencodeProviderDisabled: (providerId, disabled) =>
       ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),
@@ -252,11 +265,17 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       unwrap('worktree:status', worktreePath, originalHead),
     removeWorktree: (worktreePath, branch, gitRoot) =>
       unwrap('worktree:remove', worktreePath, branch, gitRoot),
-    listWorktrees: (cwd) => unwrap('worktree:list', cwd),
+    inventoryWorktrees: (cwd) => unwrap('worktree:inventory', cwd),
+    inspectWorktree: (cwd, id) => unwrap('worktree:inspect', cwd, id),
+    // The harness bridge has no progress channel: the callback is simply never called.
+    measureWorktree: (cwd, id) => unwrap('worktree:measure', cwd, id),
+    removeWorktrees: (cwd, ids) => unwrap('worktree:remove-many', cwd, ids),
 
     // App
-    confirmQuit: () => ipcRenderer.invoke('app:quit-confirm'),
+    confirmQuit: (removeWorktreePaths) =>
+      ipcRenderer.invoke('app:quit-confirm', removeWorktreePaths ?? []),
     cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
+    ackQuitPrompt: () => ipcRenderer.invoke('app:quit-prompting'),
 
     // Git
     gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),
@@ -310,6 +329,10 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     syncUsageHubNow: () => ipcRenderer.invoke('usage-hub:sync-now'),
     resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
     forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
+    openrouterStatus: () => unwrap('openrouter:status'),
+    openrouterOverview: () => unwrap('openrouter:overview'),
+    openrouterModels: (scope) => unwrap('openrouter:models', scope),
+    openrouterModelEndpoints: (modelId) => unwrap('openrouter:model-endpoints', modelId),
     signIn: () => ipcRenderer.invoke('auth:sign-in'),
     submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
     cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
@@ -617,7 +640,6 @@ export async function bootTestApp(): Promise<TestApp> {
   const api = buildTestApi(bridge)
 
   // Assign to globalThis.window.api for hooks/components that read it
-  ;(globalThis as any).window = globalThis.window || {}
   ;(globalThis as any).window.api = api
 
   // 4. Install the sync transport seam (SyncCore phase 4c).

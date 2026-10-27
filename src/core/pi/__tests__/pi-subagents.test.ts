@@ -40,6 +40,7 @@ import {
 import { AutoModeDenialTracker } from '../../automode/denial-tracker'
 import { HostedGrants } from '../hosted-grants'
 import { logger } from '../../services/logger'
+import { scratchpadPrompt } from '../pi-scratchpad'
 import type { PiAgentDelivery } from '../pi-delivery'
 
 type Cmd = Record<string, unknown>
@@ -241,6 +242,8 @@ describe('buildPiSubagentChildEnv', () => {
       CLAUDEUI_PI_AGENT_TOOL: '1',
       CLAUDEUI_PI_AGENT_LISTING: '- x: y',
       CLAUDEUI_PI_SEND_MESSAGE: '1',
+      // Slice 2: a host-run child never gets the session tools (root agent only).
+      CLAUDEUI_PI_SESSION_TOOLS: '',
       CLAUDEUI_PI_SKILL_DIRS: '/s',
       // ADR-096: the parent's MCP catalog, served by the child's own bridge host.
       CLAUDEUI_PI_MCP: '1'
@@ -753,6 +756,33 @@ describe('PiSubagentManager.run', () => {
     await pending
   })
 
+  it('a grant minted at a child bridge is marked as the subagent call (the session tools read it as callOwner)', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeHost()
+    const mgr = new PiSubagentManager(host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root
+    })
+    const pending = mgr.run(
+      { description: 'd', prompt: 'p', run_in_background: false },
+      'call-owner',
+      null
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(1))
+    await fake.children[0].opts.gateHandler({
+      toolCallId: 'owner-1',
+      toolName: 'agent',
+      input: { description: 'd', prompt: 'q' }
+    })
+    const scope = vi
+      .mocked(host.gateChild)
+      .mock.calls.find(([, p]) => p.toolCallId === 'owner-1')![0]
+    expect(scope.grants.consumeOwner('owner-1', 'agent')).toBe('subagent')
+    mgr.stop('call-owner')
+    await pending
+  })
+
   it('R1: a child that cannot spawn (Explore; depth 3) is refused on the HOST — its gate denies agent with no grant, and a forged grant is refused by run()', async () => {
     const fake = makeFakeSpawn()
     const { host } = makeHost()
@@ -893,6 +923,8 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     const child = fake.children[0]
     const started = sent.find(([c]) => c === 'session:task-started')![1] as Record<string, unknown>
     expect(started).toMatchObject({ toolUseId: 'bg-1', runIndex: 1, isBackgrounded: true })
+    // A finished background child wakes its owner, so the record says it is work.
+    expect(started.wakesParent).toBe(true)
     expect(result.isError).toBeUndefined()
     expect(result.content[0].text).toBe(
       'Async agent launched successfully.\n' +
@@ -1576,6 +1608,7 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
       unknown
     >
     expect(firstStart.isBackgrounded).toBe(false)
+    expect(firstStart.wakesParent).toBe(true)
 
     expect(mgr.background('call-s')).toEqual({ success: true })
     const r = await pending
@@ -1586,7 +1619,8 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
       toolUseId: 'call-s',
       runIndex: 1,
       startedAt: firstStart.startedAt,
-      isBackgrounded: true
+      isBackgrounded: true,
+      wakesParent: true
     })
     expect(mgr.liveBackgroundCount).toBe(1)
     expect(mgr.background('call-s')).toMatchObject({ success: false })
@@ -2743,6 +2777,45 @@ describe('PiSubagentManager — S2: identity in the system prompt, foreground ch
     fake.children[2].push({ type: 'agent_start' })
     fake.children[2].push(deliveredEvent(deliveriesOn(fake.children[2])[0]))
     fake.children[2].push({ type: 'agent_settled' })
+  })
+
+  it('a child is told its PARENT’s scratchpad (ADR-110), live at every launch; a parent without one adds nothing', async () => {
+    const fake = makeFakeSpawn()
+    const { host } = makeOrderedHost()
+    let scratch: string | undefined = '/t/claudeui/proj/sess/scratchpad'
+    host.scratchpadDir = () => scratch
+    const mgr = mgrWith(fake, host)
+    await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    const lead = fake.children[0]
+    await promptedWith(lead)
+    const text = promptOf(mgr, lead)
+    expect(
+      text.endsWith(`
+
+${scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')}`)
+    ).toBe(true)
+    // the prompt FILE is what pi appends: the flag still names the file, not argv text
+    expect(lead.opts.args!.slice(4, 6)).toEqual([
+      '--append-system-prompt',
+      mgr.record(agentIdOf(lead))!.promptFile
+    ])
+
+    // a grandchild shares the same (the parent session's) scratchpad
+    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
+    await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(2))
+    expect(promptOf(mgr, fake.children[1])).toContain(
+      scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')
+    )
+
+    // no scratchpad: the file is the identity block and nothing after it
+    scratch = undefined
+    await mgr.run({ description: 'd2', prompt: 'p2', name: 'plain' }, 'call-P', null)
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    const plain = promptOf(mgr, fake.children[2])
+    expect(plain).not.toContain('Scratchpad directory')
+    for (const c of fake.children) c.push({ type: 'agent_settled' })
   })
 
   it('an unnamed spawner is addressed by its id', async () => {

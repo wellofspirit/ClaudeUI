@@ -3,7 +3,15 @@ import path from 'node:path'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type { HostWindowHandle } from '../host'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions } from '../providers/ISession'
+import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
+import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
+import {
+  DISPATCH_SESSION_ID_REMOVED_TEXT,
+  dispatchResultSuffix,
+  dispatchWorkdirArg,
+  hasRemovedSessionId,
+  runsInBackground
+} from '../../shared/dispatch-agent-description'
 import type {
   ApprovalDecision,
   FileDiff,
@@ -41,11 +49,24 @@ import {
   mergedClaudeRulesFor,
   normalizeWhitespace,
   sessionAllowKey,
+  sessionToolDenyRule,
   type PermissionDecision,
   PI_TOOL_TO_CLAUDE_TOOL,
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
 import { persistAllowSuggestions } from '../opencode/permission-compiler'
+import {
+  isSessionToolName,
+  sessionToolsGuidance,
+  type SessionToolName
+} from '../../shared/session-tools-description'
+import {
+  auditSessionToolDenial,
+  runSessionTool,
+  sessionToolsAvailable,
+  sessionToolsGate,
+  type SessionToolCaller
+} from '../services/session-tools'
 import type { CodexMethods } from './protocol/methods'
 import type { ThreadSettings } from './protocol/v2/ThreadSettings'
 import type { ThreadTokenUsage } from './protocol/v2/ThreadTokenUsage'
@@ -53,6 +74,12 @@ import type { TokenUsageBreakdown } from './protocol/v2/TokenUsageBreakdown'
 import { resolveCodexCapabilities } from '../../shared/model-capabilities'
 import { voicePackPlatformKey } from '../../shared/voice-pack'
 import { logger } from '../services/logger'
+import { ApprovalAnswerRejected } from '../services/approval-errors'
+import {
+  existingDirectories,
+  resolveAdditionalDirectories,
+  uniqueDirs
+} from '../services/additional-directories'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { CodexTransportError, type CodexClientOptions } from './CodexAppServerClient'
 import {
@@ -114,6 +141,7 @@ import { codexNativeIdentity } from '../auth/account-identity'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { UNKNOWN_ACCOUNT_KEY, type AccountIdentity } from '../../shared/account-key'
 import { equivalentCostUsd } from '../../shared/pricing'
+import { BOUNDED_SET_DEFAULT_CAP, BoundedSet } from '../services/bounded-set'
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 import {
   setSessionMeta,
@@ -374,6 +402,8 @@ const GUARDIAN_BREAKER_WARNING =
 
 type Pending = {
   turnId: string
+  /** False for a card that offers no standing grant (no session allow, no saved rule). */
+  standing?: false
   choices: CodexApprovalDecision[]
   questions?: ToolRequestUserInputParams['questions']
   /** `sessionAllows` keys to add when a human answers `allowForSession`. */
@@ -491,38 +521,10 @@ function hostedContentItems(result: ToolResultContent): DynamicToolCallOutputCon
 }
 
 /** Cap for the ended-turn guards below — generous, and still bounded. */
-export const ENDED_TURN_CAP = 512
+export const ENDED_TURN_CAP = BOUNDED_SET_DEFAULT_CAP
 
-/**
- * Insertion-ordered set that evicts its OLDEST member once `cap` is exceeded.
- *
- * The ended-turn guards only ever have to answer for the recent past: a turn
- * old enough to fall out of a 512-deep window cannot still be delivering
- * notifications, so eviction costs nothing and the set stops growing for the
- * life of a long-lived thread. Exported for the unit test — driving 513 real
- * turns through the session would test the fixture, not the eviction.
- */
-export class BoundedSet {
-  private readonly entries = new Set<string>()
-
-  constructor(private readonly cap: number = ENDED_TURN_CAP) {}
-
-  /** Re-adding an existing member keeps its ORIGINAL position (Set semantics). */
-  add(value: string): void {
-    this.entries.add(value)
-    while (this.entries.size > this.cap) {
-      this.entries.delete(this.entries.values().next().value!)
-    }
-  }
-
-  has(value: string): boolean {
-    return this.entries.has(value)
-  }
-
-  get size(): number {
-    return this.entries.size
-  }
-}
+// Exported from here too: the Codex unit test and its callers import it from this module.
+export { BoundedSet }
 
 /**
  * One root is one THREAD on its account's host (ADR-069 §2). No process of its
@@ -557,6 +559,10 @@ export class CodexSession extends BaseSession {
   private sending = false
   private interruptRequested = false
   private settingsUpdating = false
+  /** `clientUserMessageId`s of the session messages ClaudeUI sent: their native user items are notes. */
+  private readonly nonUserClientIds = new BoundedSet()
+  /** Callers of {@link deliverNonUser} waiting for a turn start or a settings update to settle. */
+  private settleWaiters: Array<() => void> = []
   private deltas = new Map<string, ChatMessage>()
   private deltaTargets = new Map<string, { target: ItemStreamTarget; turnId: string }>()
   /** Bounded: a thread can outlive thousands of turns (see {@link BoundedSet}). */
@@ -601,6 +607,8 @@ export class CodexSession extends BaseSession {
   private permissionMode: string
   /** "Allow for this session" clicks, in the shared engine's key vocabulary. */
   private sessionAllows = new Set<string>()
+  /** The additional directories the current turn started with (`turnPolicy`); null before the first turn. */
+  private turnDirs: string[] | null = null
   private pending = new Map<string, Pending>()
   /** Guardian-denial overrides by requestId — never `this.pending` (see the type). */
   private guardianOverrides = new Map<string, GuardianOverride>()
@@ -793,6 +801,11 @@ export class CodexSession extends BaseSession {
     return this.threadId
   }
 
+  /** The current permission mode; a dispatch run reads it through its parent facade (ADR-105). */
+  getAutonomyMode(): string {
+    return this.permissionMode
+  }
+
   /**
    * Hand ONE held item to Codex (ADR-053 on this engine's two transports).
    *
@@ -851,6 +864,66 @@ export class CodexSession extends BaseSession {
       return
     }
     if (this.queue.consumeById(item.itemId)) this.queue.emit()
+  }
+
+  /**
+   * The app-server host is connected and this session's thread is open: `threadId` is set
+   * only after `thread/start|resume|fork` was answered on the attached host, and `closed`
+   * covers a lost host or a disposed session. A session that has not started its thread yet
+   * (just constructed, a reopen before the first prompt) is not live: a message does not
+   * start or reopen one.
+   */
+  isEngineLive(): boolean {
+    return !this.closed && this.threadId !== null
+  }
+
+  /**
+   * Slice 1a: a message from another session or an agent, as a plain prompt
+   * whose text names its sender and says it is not the user's. Mid-turn it is
+   * `turn/steer` (never through the user queue: no queue card, no steer bubble),
+   * at idle `turn/start`. The native user item that follows is a note — see
+   * `mapCodexItem` — so no row is minted here. Anything not accepted is
+   * `unavailable` (the caller holds it); an ambiguous timeout may have landed,
+   * so it counts as queued and is never sent again.
+   */
+  async deliverNonUser(item: NonUserItem): Promise<NonUserOutcome> {
+    if (this.closed) return 'unavailable'
+    const text = buildSessionMessageWrapper(wrapperSender(item), item.text)
+    const clientUserMessageId = `msg-${randomUUID()}`
+    this.nonUserClientIds.add(clientUserMessageId)
+    // A turn start or a settings update is in flight and there is no turn to
+    // steer yet: wait for it to settle (the turn id is known right after) rather
+    // than hold the item for a whole turn.
+    if (this.willQueue && !this.turnId) {
+      await this.untilSettled(15_000)
+      if (this.closed) return 'unavailable'
+    }
+    if (this.willQueue) {
+      const turnId = this.turnId
+      if (!this.busy || !turnId || !this.threadId) return 'unavailable'
+      try {
+        await this.wire.request('turn/steer', {
+          threadId: this.threadId,
+          expectedTurnId: turnId,
+          clientUserMessageId,
+          input: codexTurnInput(text)
+        })
+        return 'queued'
+      } catch (error) {
+        return error instanceof CodexTransportError &&
+          error.code === 'request-timeout' &&
+          error.ambiguousDelivery
+          ? 'queued'
+          : 'unavailable'
+      }
+    }
+    try {
+      await this.run(text, undefined, clientUserMessageId)
+      return 'started'
+    } catch {
+      // `run()` already surfaced the failure (and disposed if it was fatal).
+      return 'unavailable'
+    }
   }
 
   /**
@@ -994,7 +1067,25 @@ export class CodexSession extends BaseSession {
       throw error
     } finally {
       if (prompt !== null) this.sending = false
+      this.wakeSettleWaiters()
     }
+  }
+
+  private wakeSettleWaiters(): void {
+    const waiters = this.settleWaiters
+    this.settleWaiters = []
+    for (const wake of waiters) wake()
+  }
+
+  /** Resolve once a turn start / settings update in flight has settled (or after `ms`). */
+  private untilSettled(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms)
+      this.settleWaiters.push(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
   }
 
   private async start(): Promise<void> {
@@ -1119,7 +1210,16 @@ export class CodexSession extends BaseSession {
               // at creation (`core/src/session/session.rs`, `CreateThreadParams
               // .dynamic_tools`) and a resume with an empty list restores them
               // from there (`core/src/session/mod.rs:721`).
-              dynamicTools: codexDynamicToolSpecs(this.capabilities.crossEngineDispatch)
+              dynamicTools: codexDynamicToolSpecs(
+                this.capabilities.crossEngineDispatch,
+                sessionToolsAvailable()
+              ),
+              // The session tools' guidance, as a developer message (slice 2). The tool
+              // descriptions are the primary carrier (they persist with the rollout); this
+              // is a bonus, and START ONLY like the specs.
+              ...(sessionToolsAvailable()
+                ? { developerInstructions: sessionToolsGuidance({ toolPrefix: '' }) }
+                : {})
             })
       if (this.closed) return
       assertCodexProvider(response.modelProvider)
@@ -1562,6 +1662,7 @@ export class CodexSession extends BaseSession {
         })
     } finally {
       this.settingsUpdating = false
+      this.wakeSettleWaiters()
       if (!this.closed) {
         this.status(this.busy ? 'running' : 'idle')
         if (!this.busy) this.resetInactivityTimer()
@@ -1872,8 +1973,11 @@ export class CodexSession extends BaseSession {
   } {
     const model = this.model ?? this.effectiveModel
     const effort = this.effort ?? this.native?.reasoningEffort ?? undefined
+    // One resolved list per turn, for the sandbox's writable roots AND `insideWorkspace`, so the
+    // gate and the sandbox never disagree within a turn. Settings edits apply from the next turn.
+    this.turnDirs = this.additionalDirs()
     return {
-      ...codexTurnPolicy(this.permissionMode),
+      ...codexTurnPolicy(this.permissionMode, existingDirectories(this.turnDirs, 'CodexSession')),
       ...(model !== undefined
         ? { collaborationMode: codexCollaborationMode(this.permissionMode, model, effort) }
         : {})
@@ -2015,8 +2119,20 @@ export class CodexSession extends BaseSession {
   /** Stop every dispatch this session still has in flight, scoped to it. */
   private stopInFlightDispatches(): void {
     for (const id of this.inFlightDispatchIds)
-      crossEngineDispatcher.stopDispatch(id, this.routingId)
+      crossEngineDispatcher.stopDispatch(id, this.routingId, { blockingOnly: true })
     this.inFlightDispatchIds.clear()
+  }
+
+  /**
+   * The session's headline cost: the API-rate equivalent the status line
+   * carries — see `equivalentCost` for why a priced model's $0 and an unpriced
+   * one's null are different statements.
+   */
+  private headlineCostUsd(): number | null {
+    return (
+      this.equivalentCostUsd ??
+      this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+    )
   }
 
   private status(state: SessionStatus['state']): void {
@@ -2037,9 +2153,7 @@ export class CodexSession extends BaseSession {
       // known $0 so far (the zero-token equivalent), while an unpriced one —
       // or a thread whose model is not known yet — cannot be priced at all and
       // reports null, which the renderers show as "unknown" rather than free.
-      totalCostUsd:
-        this.equivalentCostUsd ??
-        this.equivalentCost({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+      totalCostUsd: this.headlineCostUsd(),
       account: this.account,
       ...(this.native
         ? {
@@ -2590,7 +2704,13 @@ export class CodexSession extends BaseSession {
       if (item.type === 'agentMessage' && completed) child.summary = item.text
       return
     }
+    // A child's completed `imageView` is held back the same way the root's is
+    // (see {@link item}): the subagent-tool-result reducer appends rather than
+    // keeping the first, so the mapper's empty result and the one with the bytes
+    // would both land. {@link attachChildImageView} emits the single result.
+    const deferredRead = completed && item.type === 'imageView'
     for (const event of mapCodexItem(childThreadId, turnId, item, completed, timestamp)) {
+      if (deferredRead && event.kind === 'toolResult') continue
       if (event.kind === 'message') {
         const text = event.message.content.find((block) => block.type === 'text')
         if (item.type === 'agentMessage' && text?.type === 'text') child.summary = text.text
@@ -2608,6 +2728,25 @@ export class CodexSession extends BaseSession {
           ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {})
         })
     }
+    // Not awaited, for the reason {@link item} gives.
+    if (completed && item.type === 'imageView') void this.attachChildImageView(child, id, item.path)
+  }
+
+  /** The ONE result a child's completed `imageView` gets; see {@link attachImageView}. */
+  private async attachChildImageView(
+    child: CodexChild,
+    toolUseId: string,
+    path: string
+  ): Promise<void> {
+    const image = await readCodexImageView(path)
+    if (this.closed) return
+    this.send('session:subagent-tool-result', {
+      toolUseId: child.parentToolUseId,
+      toolResultToolUseId: toolUseId,
+      result: '',
+      isError: false,
+      ...(image ? { images: [image] } : {})
+    })
   }
 
   /**
@@ -2902,6 +3041,16 @@ export class CodexSession extends BaseSession {
           this.send('session:error', banner)
       }
       this.endUserStop()
+      // The turn boundary every other engine raises (the renderer's "Ready for
+      // input" / attention edge keys on it). Only the ROOT thread's turn gets
+      // here — a child's `turn/completed` goes through `routeChild` — and the
+      // `endedTurns` latch above keeps a replay from raising it twice.
+      this.send('session:result', {
+        totalCostUsd: this.headlineCostUsd(),
+        durationMs: turn.durationMs ?? 0,
+        result: '',
+        sessionId: this.threadId
+      })
       this.status('idle')
       this.resetInactivityTimer()
     }
@@ -2979,7 +3128,8 @@ export class CodexSession extends BaseSession {
       turnId,
       this.withKnownAgents(item),
       completed,
-      timestamp
+      timestamp,
+      (clientId) => !!clientId && this.nonUserClientIds.has(clientId)
     ))
       if (!deferredRead || event.kind !== 'toolResult') this.dispatch(event)
     // Not awaited: the card is already on screen, the read is best-effort, and
@@ -3253,6 +3403,24 @@ export class CodexSession extends BaseSession {
     value: unknown,
     context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
   ): Promise<DynamicToolCallResponse> {
+    // A session tool asked for by a thread that is not this session's root (a native
+    // child): refused below like any other tool, and audited, since the service never
+    // sees it. The row is the root session's (a child has no identity of its own), so the
+    // detail names the thread. Host thread routing is what keeps this from firing for a
+    // thread no session claimed: those never reach any session (the host answers "Method
+    // not found"), so every call seen here comes from a thread this session owns.
+    if (
+      record(value) &&
+      typeof value.tool === 'string' &&
+      isSessionToolName(value.tool) &&
+      value.threadId !== this.threadId
+    )
+      auditSessionToolDenial(
+        this.sessionToolCaller(),
+        value.tool,
+        record(value.arguments) ? value.arguments : {},
+        `${value.tool} can only be used by the session's main agent, not by a native subagent thread (${String(value.threadId)}).`
+      )
     if (
       this.closed ||
       context.signal.aborted ||
@@ -3271,6 +3439,8 @@ export class CodexSession extends BaseSession {
     if (this.hostedCalls.has(id)) throw new Error('Duplicate Codex hosted tool call')
     this.hostedCalls.add(id)
     const args = record(value.arguments) ? value.arguments : undefined
+    if (isSessionToolName(value.tool))
+      return this.sessionTool(id, value.turnId, value.tool, args, context)
     const verdict = args
       ? this.gate([{ tool: value.tool, input: args }])
       : {
@@ -3295,6 +3465,65 @@ export class CodexSession extends BaseSession {
     return { contentItems: hostedContentItems(result), success: !result.isError }
   }
 
+  /** The calling session as the session tools see it: `hostedToolCall` already required this session's own root thread and a live root turn. */
+  private sessionToolCaller(toolUseId?: string): SessionToolCaller {
+    return {
+      routingId: this.routingId,
+      engine: this.engineId,
+      cwd: this.cwd,
+      permissionMode: this.permissionMode,
+      ...(toolUseId ? { toolUseId } : {}),
+      callOwner: async () => 'root'
+    }
+  }
+
+  /**
+   * One session tool call (slice 2): the user's deny rule written for Claude's spelling
+   * of the tool, then `sessionToolsGate` -- deny refuses with its reason, ask parks a
+   * card (no session allow and no saved rule: either would skip the gate's scope checks
+   * next time), allow runs. The service re-checks the rules the gate cannot enforce
+   * alone. Never the judge, in auto mode too.
+   */
+  private async sessionTool(
+    toolUseId: string,
+    turnId: string,
+    tool: SessionToolName,
+    args: Record<string, unknown> | undefined,
+    context: Parameters<NonNullable<CodexClientOptions['onServerRequest']>>[2]
+  ): Promise<DynamicToolCallResponse> {
+    const caller = this.sessionToolCaller(toolUseId)
+    const refuse = (text: string): DynamicToolCallResponse => ({
+      contentItems: [{ type: 'inputText', text }],
+      success: false
+    })
+    const deny = (text: string): DynamicToolCallResponse => {
+      auditSessionToolDenial(caller, tool, args ?? {}, text)
+      return refuse(text)
+    }
+    if (!args) return deny(`${tool} arguments must be an object.`)
+    const rule = sessionToolDenyRule(tool, args, mergedClaudeRulesFor(this.cwd), this.cwd)
+    if (rule) return deny(`Denied by permission rule: ${rule}`)
+    const decision = sessionToolsGate(caller, tool, args, {})
+    if (decision.behavior === 'deny') return deny(decision.message)
+    if (decision.behavior === 'ask') {
+      const card: PendingApproval = {
+        requestId: this.approvalRequestId(toolUseId, context.id),
+        toolUseId,
+        toolName: tool,
+        input: args
+      }
+      const answer = this.park(card, turnId, [], context)
+      const parked = this.pending.get(card.requestId)
+      if (parked) parked.standing = false
+      if (((await answer) as { decision?: string }).decision !== 'accept')
+        return refuse(`${tool} was declined by the user.`)
+    }
+    const result = await runSessionTool(caller, tool, args)
+    if (this.closed || context.signal.aborted)
+      throw new Error('Codex hosted tool call was cancelled before it finished')
+    return { contentItems: [{ type: 'inputText', text: result.text }], success: !result.isError }
+  }
+
   /**
    * `dispatch_agent` (ADR-033, slice E) — Codex as a dispatch SOURCE. Codex as
    * a dispatch TARGET is a separate slice: the dispatcher has no Codex target
@@ -3302,8 +3531,8 @@ export class CodexSession extends BaseSession {
    * codex → codex, which is same-engine besides).
    *
    * Mirrors `PiSession.handleDispatchAgent` in spirit — identical validation,
-   * identical `DispatchContext` construction, identical `[dispatch session_id:
-   * …]` success suffix, so a Codex-sourced dispatch reads exactly like a
+   * identical `DispatchContext` construction, identical blocking-result
+   * suffix (`dispatchResultSuffix`), so a Codex-sourced dispatch reads exactly like a
    * pi-sourced or Claude-sourced one — but imports nothing from pi and differs
    * in two ways the transport forces:
    *
@@ -3352,11 +3581,34 @@ export class CodexSession extends BaseSession {
       return refuse(
         'dispatch_agent requires "engine" (one of "claude"|"opencode"|"pi") and a string "prompt".'
       )
+    // `session_id` left `dispatch_agent` (ADR-105 §4), but a thread started before that keeps the
+    // static spec it was given and can still send one: refuse it, with nothing launched and no
+    // approval card raised.
+    if (hasRemovedSessionId(args?.session_id)) return refuse(DISPATCH_SESSION_ID_REMOVED_TEXT)
+    // A Codex dynamic tool's arguments are not checked against its schema, so a `workdir` that is not
+    // a string is refused here: ignoring it would run the agent in the parent's directory, not the
+    // one the model asked for. `null` is absent, like an empty string.
+    const workdirInput = args?.workdir
+    if (workdirInput != null && typeof workdirInput !== 'string')
+      return refuse('dispatch_agent "workdir" must be a string (a directory path).')
+    const workdir = dispatchWorkdirArg(workdirInput)
     const req: DispatchRequest = {
       engine,
       prompt,
       model: typeof args?.model === 'string' ? args.model : undefined,
-      sessionId: typeof args?.session_id === 'string' ? args.session_id : undefined
+      name: typeof args?.name === 'string' ? args.name : undefined,
+      description: typeof args?.description === 'string' ? args.description : undefined,
+      ...(workdir ? { workdir } : {}),
+      // The hosted tool call needs the root thread and a live root turn (a native child can
+      // never call it), so the caller is always the top-level agent: background unless it
+      // says otherwise (ADR-105 §2).
+      ...(runsInBackground(
+        typeof args?.run_in_background === 'boolean' ? args.run_in_background : undefined,
+        true,
+        toolUseId
+      )
+        ? { runInBackground: true }
+        : {})
     }
     if (verdict.decision === 'ask') {
       const card: PendingApproval = {
@@ -3367,7 +3619,8 @@ export class CodexSession extends BaseSession {
           engine: req.engine,
           prompt: req.prompt,
           ...(req.model !== undefined ? { model: req.model } : {}),
-          ...(req.sessionId !== undefined ? { session_id: req.sessionId } : {})
+          ...(req.workdir ? { workdir: req.workdir } : {}),
+          ...(req.runInBackground ? { run_in_background: true } : {})
         }
       }
       // `allowForSession` keys on the bare tool name, exactly as the shared
@@ -3414,9 +3667,10 @@ export class CodexSession extends BaseSession {
       contentItems: [
         {
           type: 'inputText',
-          text: result.isError
-            ? result.text
-            : `${result.text}\n\n[dispatch session_id: ${result.sessionId} — pass it as session_id to continue this agent]`
+          text:
+            result.isError || !result.agentRef
+              ? result.text
+              : `${result.text}${dispatchResultSuffix(result.agentRef)}`
         }
       ],
       success: !result.isError
@@ -3784,9 +4038,25 @@ export class CodexSession extends BaseSession {
     return { decision }
   }
 
+  /**
+   * The user's additional directories (merged user/project/local settings for this cwd) as
+   * absolute paths, entries resolved against this session's cwd: its workspace beyond the cwd.
+   * Codex adds the cwd to the sandbox itself.
+   */
+  private additionalDirs(): string[] {
+    return uniqueDirs(
+      resolveAdditionalDirectories(mergedClaudeRulesFor(this.cwd).additionalDirectories, this.cwd),
+      this.cwd
+    )
+  }
+
+  /** In the cwd or in one of the additional directories the current turn was started with. */
   private insideWorkspace(target: string): boolean {
-    const relative = path.relative(this.cwd, path.resolve(this.cwd, target))
-    return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+    const resolved = path.resolve(this.cwd, target)
+    return [this.cwd, ...(this.turnDirs ?? this.additionalDirs())].some((root) => {
+      const relative = path.relative(root, resolved)
+      return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
+    })
   }
 
   /**
@@ -3867,20 +4137,21 @@ export class CodexSession extends BaseSession {
     if (!pending) throw new Error('Stale or unknown Codex approval')
     if (pending.questions) {
       if (decision !== 'allow' || !answers)
-        throw new Error('Codex questions require explicit answers')
+        throw new ApprovalAnswerRejected('Codex questions require explicit answers')
       const nativeAnswers: Record<string, { answers: string[] }> = Object.create(null)
       for (const question of pending.questions) {
         const duplicateText =
           pending.questions.filter((entry) => entry.question === question.question).length > 1
         const answer =
           answers[question.id] ?? (duplicateText ? undefined : answers[question.question])
-        if (typeof answer !== 'string') throw new Error('Missing Codex question answer')
+        if (typeof answer !== 'string')
+          throw new ApprovalAnswerRejected('Missing Codex question answer')
         if (
           question.options?.length &&
           !question.isOther &&
           !question.options.some((option) => option.label === answer)
         )
-          throw new Error('Codex question answer is not an offered choice')
+          throw new ApprovalAnswerRejected('Codex question answer is not an offered choice')
         nativeAnswers[question.id] = { answers: [answer] }
       }
       pending.settle({ answers: nativeAnswers })
@@ -3891,7 +4162,7 @@ export class CodexSession extends BaseSession {
     pending.settle(pending.reply(decision !== 'deny'))
     // No rules cache to invalidate here: `gate()` re-reads the merged rules per
     // request, so a newly persisted rule is honoured on the very next approval.
-    if (updatedPermissions && updatedPermissions.length > 0)
+    if (pending.standing !== false && updatedPermissions && updatedPermissions.length > 0)
       persistAllowSuggestions(updatedPermissions, this.cwd, 'CodexSession')
   }
 }

@@ -158,3 +158,71 @@ describe('createSdkMcpServer — SdkToolExtra threading (ADR-033 Slice A)', () =
     })
   })
 })
+
+describe('createSdkMcpServer — alwaysLoad (session tools, slice 1c)', () => {
+  it('lists a tool built with alwaysLoad with the _meta Claude Code reads to skip tool search', async () => {
+    const t = tool(
+      'pinned',
+      'A tool the model must see from the first turn.',
+      {},
+      async () => ({
+        content: [{ type: 'text' as const, text: 'ok' }]
+      }),
+      { alwaysLoad: true }
+    )
+    const u = tool('plain', 'An ordinary tool.', {}, async () => ({
+      content: [{ type: 'text' as const, text: 'ok' }]
+    }))
+    const server = createSdkMcpServer({ name: 'load-server', tools: [t, u] })
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    await server.instance!.connect(serverTransport)
+    const client = new Client({ name: 'test-client', version: '0.0.0' }, {})
+    await client.connect(clientTransport)
+    try {
+      const { tools } = await client.listTools()
+      const meta = (name: string): unknown =>
+        (tools.find((x) => x.name === name) as { _meta?: unknown })._meta
+      expect(meta('pinned')).toEqual({ 'anthropic/alwaysLoad': true })
+      // Unset means "cli.js decides": no _meta at all, as every existing tool had.
+      expect(meta('plain')).toBeUndefined()
+    } finally {
+      await client.close()
+    }
+  })
+})
+
+describe('createSdkMcpServer — passthrough', () => {
+  it('strips an undeclared input key by default; passthrough hands it to the handler without listing it', async () => {
+    const seen: Record<string, Record<string, unknown>> = {}
+    const make = (name: string, passthrough: boolean): SdkMcpTool =>
+      tool(
+        name,
+        'Records the input it was given.',
+        { x: z.string() },
+        async (input) => {
+          seen[name] = input as Record<string, unknown>
+          return { content: [{ type: 'text' as const, text: 'ok' }] }
+        },
+        passthrough ? { passthrough: true } : {}
+      )
+    const server = createSdkMcpServer({
+      name: 'passthrough-server',
+      tools: [make('plain', false), make('loose', true)]
+    })
+    const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()
+    await server.instance!.connect(serverTransport)
+    const client = new Client({ name: 'test-client', version: '0.0.0' }, {})
+    await client.connect(clientTransport)
+    try {
+      await client.callTool({ name: 'plain', arguments: { x: 'a', extra: 'z' } })
+      await client.callTool({ name: 'loose', arguments: { x: 'a', extra: 'z' } })
+      expect(seen.plain).toEqual({ x: 'a' })
+      expect(seen.loose).toEqual({ x: 'a', extra: 'z' })
+      // The model-facing schema lists the declared keys only, either way.
+      const { tools } = await client.listTools()
+      for (const t of tools) expect(Object.keys(t.inputSchema.properties ?? {})).toEqual(['x'])
+    } finally {
+      await client.close()
+    }
+  })
+})

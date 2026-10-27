@@ -481,6 +481,28 @@ describe('allowRuleSkip — shell, write targets: scope roots, secret and agent-
     ['sed -i s/a/b/ .claude/settings.json', ['Bash(sed:*)'], {}, 'write:path:agent-control'],
     ['cp CLAUDE.md x', ['Bash(cp:*)'], {}, 'write:path:agent-control'],
     ['rm sub/AGENTS.md', RM, {}, 'write:path:agent-control'],
+    // (d) …the cli.js 2.1.308 additions, and the multi-component `.config/git`.
+    ['tee .ripgreprc', ['Bash(tee:*)'], {}, 'write:path:agent-control'],
+    ['cp x bunfig.toml', ['Bash(cp:*)'], {}, 'write:path:agent-control'],
+    ['cp x .idea/workspace.xml', ['Bash(cp:*)'], {}, 'write:path:agent-control'],
+    ['touch .config/git/config', ['Bash(touch:*)'], {}, 'write:path:agent-control'],
+    ['rm -rf .config/git', RM, {}, 'write:path:agent-control'],
+    ['cp x sub/.CONFIG/Git/ignore', ['Bash(cp:*)'], {}, 'write:path:agent-control'],
+    // …and a glob run that can name `.config/git` (each component against its own entry component).
+    ['rm .config/gi*', RM, {}, 'write:path:pattern-may-match-agent-control .config/gi*'],
+    ['rm -rf .con*/git', RM, {}, 'write:path:pattern-may-match-agent-control .con*/git'],
+    [
+      "find . -path '*/.config/gi*' -delete",
+      FIND,
+      {},
+      'write:find:pattern-may-match-agent-control */.config/gi*'
+    ],
+    ['find sub -path .config/git -delete', FIND, {}, 'write:find:agent-control .config/git'],
+    // Near misses of the run stay allowed: another directory, another leaf, a gap.
+    ['rm .config/z*', RM, {}, 'allow Bash(rm:*)'],
+    ['rm .config/gitx', RM, {}, 'allow Bash(rm:*)'],
+    ['rm .config/sub/gi*', RM, {}, 'allow Bash(rm:*)'],
+    ['rm foo/gi*', RM, {}, 'allow Bash(rm:*)'],
     // Controls: still allowed.
     ['rm -rf sub', RM, {}, 'allow Bash(rm:*)'],
     ['rm -rf dist/*', RM, {}, 'allow Bash(rm:*)'],

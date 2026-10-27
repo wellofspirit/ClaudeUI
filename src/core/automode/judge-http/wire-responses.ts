@@ -71,7 +71,8 @@ function responsesUsage(u: Record<string, unknown>): JudgeUsageSample {
  * Read a Responses stream up to its terminal event.
  *
  * - Text: `response.output_text.delta` only (reasoning summaries and every
- *   other item event are ignored).
+ *   other item event are ignored — the reasoning text deltas only feed the
+ *   `onReasoningDelta` capture tap).
  * - Terminal: `response.completed` / `response.done`, or `response.incomplete`
  *   — which is a length stop when `incomplete_details.reason` is
  *   `max_output_tokens`, and an error for any other reason.
@@ -104,6 +105,11 @@ export async function readResponsesStream(
         if (typeof ev.delta === 'string' && ev.delta !== '' && !acc.push(ev.delta)) {
           return acc.finish('stop', usage)
         }
+        break
+      case 'response.reasoning_summary_text.delta':
+      case 'response.reasoning_text.delta':
+        // Capture tap only: reasoning text the stream already carries, never part of the verdict.
+        if (typeof ev.delta === 'string' && ev.delta !== '') opts.onReasoningDelta?.(ev.delta)
         break
       case 'response.completed':
       case 'response.done':

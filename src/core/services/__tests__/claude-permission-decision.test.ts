@@ -11,6 +11,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   classifierReviewBlock,
+  handBackReviewOf,
+  handBackReviewOfAsk,
   isClassifierDecision,
   permissionDecisionBlock,
   permissionDenialBlock,
@@ -360,5 +362,93 @@ describe('permissionDecisionBlock', () => {
     expect(
       permissionDecisionBlock(read({ decision_reason_type: 'autoModeNoVerdict' }))
     ).toMatchObject({ type: 'permission_denial', source: 'other' })
+  })
+})
+
+describe('handBackReviewOf — a denied hand_back call as a review of the report (ADR-105 §3, B-3c)', () => {
+  const read = (over: Record<string, unknown>): ReturnType<typeof readPermissionDecisionFrame> =>
+    readPermissionDecisionFrame(
+      frame({
+        tool_name: 'mcp__claude-ui-handback__hand_back',
+        decision_reason_type: 'classifier',
+        ...over
+      })
+    )
+
+  it('a classifier block is a block, with the rule it named (the frame cli.js 2.1.293 sent in the live probe)', () => {
+    const f = read({ decision_reason: '[Containment Escape]' })!
+    expect(
+      handBackReviewOf(
+        f,
+        'Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Containment Escape]. If you have other tasks…'
+      )
+    ).toEqual({ kind: 'block', reason: '[Containment Escape]' })
+  })
+
+  it('a rule, mode or hook denial says nothing about the report', () => {
+    expect(
+      handBackReviewOf(read({ decision_reason_type: 'rule', decision_reason: 'deny rule' })!)
+    ).toBeNull()
+    expect(handBackReviewOf(read({ decision_reason_type: 'mode' })!)).toBeNull()
+  })
+
+  it('a classifier that refused the review request is unreviewed, not a verdict', () => {
+    expect(
+      handBackReviewOf(
+        read({ decision_reason: 'blocked' })!,
+        'x. This is not a judgment that the action is unsafe. Retrying it will hit the same refusal, so don’t rework…'
+      )
+    ).toEqual({ kind: 'refused' })
+  })
+
+  it('a classifier that gave no verdict is "could not review", never a block', () => {
+    for (const f of [
+      read({ decision_reason: 'Classifier unavailable' })!,
+      read({
+        decision_reason:
+          'Auto mode unavailable — stopped after repeated responses with no safety verdict'
+      })!,
+      read({
+        decision_reason: 'Auto mode could not evaluate this action and is blocking it for safety'
+      })!,
+      read({ decision_reason: 'x', decision_reason_code: 'classifier_transcript_too_long' })!
+    ]) {
+      expect(handBackReviewOf(f)).toMatchObject({ kind: 'unavailable' })
+    }
+    expect(
+      handBackReviewOf(
+        read({ decision_reason: 'y' })!,
+        'The API told the classifier to wait. This is not a judgment that the action is unsafe.'
+      )
+    ).toMatchObject({ kind: 'unavailable' })
+  })
+})
+
+describe('handBackReviewOfAsk — cli.js ASKED the host about the report while the target ran in auto (B-3c)', () => {
+  const NOTE = { kind: 'unavailable', why: 'auto mode asked instead of reviewing it' }
+
+  it('a classifier reason that names a verdict (the denial cap turning a block into an ask) is a block with that reason', () => {
+    expect(
+      handBackReviewOfAsk({
+        decisionReasonType: 'classifier',
+        decisionReason: '3 consecutive actions were blocked. Please review the transcript.'
+      })
+    ).toEqual({
+      kind: 'block',
+      reason: '3 consecutive actions were blocked. Please review the transcript.'
+    })
+  })
+
+  it('anything else is the note: no verdict (transcript too long, unavailable), another reason type, or none', () => {
+    for (const ask of [
+      { decisionReasonType: 'classifier', decisionReasonCode: 'classifier_transcript_too_long' },
+      { decisionReasonType: 'classifier', decisionReason: 'Classifier unavailable' },
+      { decisionReasonType: 'rule', decisionReason: 'ask rule' },
+      { decisionReasonType: 'mode', decisionReason: 'x' },
+      { decisionReason: '3 consecutive actions were blocked.' },
+      {}
+    ]) {
+      expect(handBackReviewOfAsk(ask)).toEqual(NOTE)
+    }
   })
 })

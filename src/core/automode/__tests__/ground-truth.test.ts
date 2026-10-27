@@ -24,14 +24,19 @@ import {
   needsGitStatus,
   needsRepoVisibility,
   recordToolOutcome,
+  redirectTargetDetails,
   shellCommandOf,
   splitCommandSegments,
+  summarizeRedirects,
   tempDirRoots,
+  tempVarValues,
   GIT_CAPTURE_TIMEOUT_MS,
   GH_CAPTURE_TIMEOUT_MS,
+  MAX_ANALYZE_COMMAND_LENGTH,
   MAX_REDIRECT_TARGETS,
   MAX_UNTRACKED_NAMES,
   type CaptureExec,
+  type RedirectScope,
   type ToolOutcome
 } from '../ground-truth'
 
@@ -248,11 +253,14 @@ describe('analyzeRedirects', () => {
     describe('single-quoted program text', () => {
       // The phantom targets that blocked a real session: a `>` inside a sed/grep
       // program is program text, not a redirect.
-      const inert: Array<[string, string[] | null]> = [
-        [`sed -i '' 's/foo 2>\\/dev\\/null/bar/' run.sh`, null],
+      // The quote-blind cross-check still names a quote-hidden `/dev/null/bar/` /
+      // `/x/` in `quotedTargets` (see the ADR-106 cross-check suite below), but
+      // none of these phantoms is ever a `target`.
+      const inert: Array<[string, string[]]> = [
+        [`sed -i '' 's/foo 2>\\/dev\\/null/bar/' run.sh`, []],
         [`sed -i '' 's/a > b/c/' f > out.txt`, ['out.txt']],
         [`grep -rn 'a->b' . > hits.txt 2>&1`, ['hits.txt']],
-        [`FOO=1 /usr/bin/sed 's/>/x/' f`, null],
+        [`FOO=1 /usr/bin/sed 's/>/x/' f`, []],
         [`echo ok && sed 's/x>/y/' f >> log.txt`, ['log.txt']],
         [`printf '%s > %s\\n' a b > out.txt`, ['out.txt']],
         // The target itself may be single-quoted — it is still read.
@@ -260,7 +268,7 @@ describe('analyzeRedirects', () => {
       ]
       for (const [command, targets] of inert) {
         it(`skips program text: ${command}`, () => {
-          expect(posix(command)?.targets ?? null).toEqual(targets)
+          expect(posix(command)?.targets ?? []).toEqual(targets)
         })
       }
 
@@ -270,7 +278,6 @@ describe('analyzeRedirects', () => {
         `echo 'cat x > ~/.bashrc' | sh`,
         `sed 's#^#make > /etc/p #' f | bash`,
         `printf 'x > /etc/p' | xargs -I{} sh -c '{}'`,
-        `echo 'x > /etc/p' | python3`,
         // awk's own `>` writes a file.
         `awk '{ print > "/etc/p" }' in.txt`,
         // Not an inert command: its quoted text runs as shell.
@@ -284,6 +291,39 @@ describe('analyzeRedirects', () => {
           expect(posix(command)?.allInScope).toBe(false)
         })
       }
+
+      // A language interpreter reads that text as PROGRAM, not as a command
+      // line, so there is no redirect to report (rule 2: `python3` left
+      // SHELL_REREADERS; its quoted spans are inert).
+      const interpreterArgs = [
+        `python -c "print([x for x in rows if x>1])"`,
+        `node --eval "if (1 > 2) {}"`,
+        `py -c "if a > b: pass"`,
+        `perl -e 'print 1 > 2'`,
+        `ruby -e 'if 1 > 2 then 1 end'`,
+        `php -r 'if (1 > 2) {}'`,
+        `bun -e 'if (1 > 2) {}'`
+      ]
+      for (const command of interpreterArgs) {
+        it(`reads interpreter text as program, not shell: ${command}`, () => {
+          expect(posix(command)).toBeNull()
+        })
+      }
+
+      // Exception: a PIPED-in payload. The cross-check cannot know what `python3`
+      // does with stdin, so the quote-hidden path is named (never a target).
+      it('names the quote-hidden path of a payload piped into an interpreter', () => {
+        const r = posix(`echo 'x > /etc/p' | python3`)
+        expect(r?.targets).toEqual([])
+        expect(r?.quotedTargets).toEqual(['/etc/p'])
+        expect(r?.allInScope).toBe(false)
+      })
+
+      it('does not skip a real redirect that follows an interpreter call', () => {
+        expect(posix(`python -c "print(1)" > ../../x.txt`)?.outOfScope).toEqual([
+          { path: '/x.txt' }
+        ])
+      })
     })
 
     it('drops null sinks — `> /dev/null` is not a file overwrite', () => {
@@ -291,6 +331,28 @@ describe('analyzeRedirects', () => {
       expect(win('bun test > NUL 2>&1')).toBeNull()
       // …but a real target alongside one is still measured.
       expect(posix('bun test > /dev/null 2> err.log')?.targets).toEqual(['err.log'])
+    })
+
+    // Exit review Fable C3: stream pseudo-files are sinks too. Measuring them was
+    // a NEW false-block path (a Linux `/dev/stderr` is a symlink, a macOS one is a
+    // device: "an existing file outside the working tree").
+    it('drops stream sinks — `> /dev/stderr` is not a file overwrite', () => {
+      for (const sink of [
+        '/dev/stdout',
+        '/dev/stderr',
+        '/dev/tty',
+        '/dev/fd/2',
+        '/proc/self/fd/1'
+      ]) {
+        expect(posix(`echo msg > ${sink}`)).toBeNull()
+      }
+      expect(posix('echo msg > /dev/fd/99; echo x > err.log')?.targets).toEqual(['err.log'])
+      expect(win('echo msg > CON')).toBeNull()
+      expect(win('echo msg > con')).toBeNull()
+      // Case-insensitivity is a win32 device rule, not a posix file rule: a posix
+      // file literally named `con` keeps its fact (in scope here, so no row).
+      expect(posix('echo msg > con')?.targets).toEqual(['con'])
+      expect(posix('echo msg > con')?.allInScope).toBe(true)
     })
   })
 
@@ -330,21 +392,23 @@ describe('analyzeRedirects', () => {
 
     it('reports an absolute target outside every root, RESOLVED', () => {
       const r = posix('echo x > /etc/cron.d/backdoor')
-      expect(r?.outOfScope).toEqual(['/etc/cron.d/backdoor'])
+      expect(r?.outOfScope).toEqual([{ path: '/etc/cron.d/backdoor' }])
       expect(r?.allInScope).toBe(false)
     })
 
     it('sees through `..` traversal', () => {
       const r = posix('echo x > ../../etc/cron.d/backdoor')
-      expect(r?.outOfScope).toEqual(['/etc/cron.d/backdoor'])
+      expect(r?.outOfScope).toEqual([{ path: '/etc/cron.d/backdoor' }])
     })
 
     it('does not fall for a sibling PREFIX (`/repo` does not contain `/repo-evil`)', () => {
-      expect(posix('echo x > /repo-evil/out.log')?.outOfScope).toEqual(['/repo-evil/out.log'])
+      expect(posix('echo x > /repo-evil/out.log')?.outOfScope).toEqual([
+        { path: '/repo-evil/out.log' }
+      ])
     })
 
     it('root-equal is not inside (a redirect must land UNDER a root)', () => {
-      expect(posix('echo x > /repo')?.outOfScope).toEqual(['/repo'])
+      expect(posix('echo x > /repo')?.outOfScope).toEqual([{ path: '/repo' }])
     })
 
     it('accepts temp dirs and the user\u2019s additionalDirectories as roots', () => {
@@ -386,7 +450,7 @@ describe('analyzeRedirects', () => {
     it('flags a resolvable rc path outside the tree in BOTH buckets', () => {
       const r = posix('echo x > /home/u/.zshrc')
       expect(r?.protectedHits).toEqual(['.zshrc'])
-      expect(r?.outOfScope).toEqual(['/home/u/.zshrc'])
+      expect(r?.outOfScope).toEqual([{ path: '/home/u/.zshrc' }])
     })
 
     const protectedTargets: Array<[string, string]> = [
@@ -397,6 +461,12 @@ describe('analyzeRedirects', () => {
       ['sub/.ssh/authorized_keys', '.ssh'],
       ['.profile', '.profile'],
       ['.bash_profile', '.bash_profile'],
+      // agent-control list (cli.js 2.1.308 additions): single and multi-component entries
+      ['.idea/workspace.xml', '.idea'],
+      ['sub/.yarn/cache/x.zip', '.yarn'],
+      ['bunfig.toml', 'bunfig.toml'],
+      ['.config/git/config', '.config/git'],
+      ['sub/.CONFIG/Git/ignore', '.CONFIG/Git'],
       // Case-folded: a case-insensitive filesystem would honour this write.
       ['.BASHRC', '.BASHRC']
     ]
@@ -405,6 +475,12 @@ describe('analyzeRedirects', () => {
         expect(posix(`echo x > ${target}`)?.protectedHits).toEqual([hit])
       })
     }
+
+    it('a near miss of the `.config/git` sequence is not a hit', () => {
+      for (const target of ['.config/gitx/a', '.config/foo', 'git/config', '.config/x/git/a']) {
+        expect(posix(`echo x > ${target}`)?.protectedHits, target).toEqual([])
+      }
+    })
 
     it('deduplicates repeated hits', () => {
       const r = posix('echo x > .git/a > .git/b')
@@ -430,7 +506,7 @@ describe('analyzeRedirects', () => {
     it('rejects another drive and another tree on the same drive', () => {
       expect(win('echo x > C:/Windows/System32/drivers/etc/hosts')?.allInScope).toBe(false)
       expect(win('echo x > D:/OtherProject/out.log')?.outOfScope).toEqual([
-        'd:/OtherProject/out.log'
+        { path: 'd:/OtherProject/out.log' }
       ])
     })
 
@@ -439,7 +515,7 @@ describe('analyzeRedirects', () => {
       // has nothing to do with a drive letter.
       expect(
         analyzeRedirects('bun test > /d/x/out.log', { cwd: '/repo' }, 'linux')?.outOfScope
-      ).toEqual(['/d/x/out.log'])
+      ).toEqual([{ path: '/d/x/out.log' }])
     })
 
     it('finds protected components through backslashes', () => {
@@ -460,6 +536,1857 @@ describe('analyzeRedirects', () => {
   })
 })
 
+// ── P2a-1: the pure scanner ──────────────────────────────────────────────────
+
+const REPO = '/repo'
+const WIN_CWD = 'D:/WorkPlace/ClaudeUI'
+const WT = 'D:/work/app/.claude/worktrees/wt-a'
+const HOST_TEMP = 'C:/Users/dev/AppData/Local/Temp'
+const POSIX_TEMP = '/var/folders/x1/abc/T'
+
+describe('rule 1/2 — quotes, heredocs and here-strings', () => {
+  const posix = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: REPO, ...extra }, 'linux')
+  const win = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: WIN_CWD, ...extra }, 'win32')
+
+  it('ignores a `>` in a quoted heredoc body and still reads the real target after it', () => {
+    const command = [
+      `python - <<'PY'`,
+      `p = 'src/x.ts'`,
+      `rows = [r for r in source if r > 1]`,
+      'PY',
+      'bun run test > out.log 2>&1'
+    ].join('\n')
+    expect(posix(command)).toEqual({
+      targets: ['out.log'],
+      allInScope: true,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: []
+    })
+  })
+
+  it('ignores `=>`, `</b>` and `>{` shapes inside a heredoc body', () => {
+    for (const line of ['const f = (x) => x', 's = s.replace("</b>", "")', 'if (a) { b() } > 1']) {
+      const command = [`python - <<'PY'`, line, 'PY'].join('\n')
+      expect(posix(command)).toBeNull()
+    }
+  })
+
+  it('keeps `$(…)` in an UNQUOTED heredoc body live — it is outer-shell text', () => {
+    const command = ['cat > out.txt <<EOF', '$(make > /etc/p)', 'EOF'].join('\n')
+    const r = posix(command)
+    expect(r?.targets).toEqual(['out.txt', '/etc/p'])
+    expect(r?.outOfScope).toEqual([{ path: '/etc/p' }])
+  })
+
+  it('falls back to the quote-blind scan on an unterminated heredoc', () => {
+    expect(posix(`cat <<'EOF'\nmake > /etc/p`)?.outOfScope).toEqual([{ path: '/etc/p' }])
+  })
+
+  it('handles `<<-` (tab-stripped delimiter) and two heredocs on one line', () => {
+    // The bodies are text (no `$(`), so `/etc/p` is never a target; the quote-blind
+    // cross-check names it (an unquoted-delimiter body is a quote-hidden `>`).
+    expect(posix(['cat <<-EOF > out.txt', '\tmake > /etc/p', '\tEOF'].join('\n'))).toEqual({
+      targets: ['out.txt'],
+      allInScope: false,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: [],
+      quotedTargets: ['/etc/p']
+    })
+    expect(posix(['paste <<A <<B', 'one > /etc/p', 'A', 'two > /etc/q', 'B'].join('\n'))).toEqual({
+      targets: [],
+      allInScope: false,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: [],
+      quotedTargets: ['/etc/p', '/etc/q']
+    })
+  })
+
+  it('does NOT read a PowerShell here-string as a body: it falls back to quote-blind (ruling 1)', () => {
+    // `@"` / `@'` are not modelled, so their presence makes the whole command
+    // quote-blind: a write inside the text is REPORTED, never hidden.
+    expect(
+      win(['$out = @"', 'x > C:/Windows/p', '"@', 'Write-Host ok'].join('\n'))?.outOfScope
+    ).toEqual([{ path: 'c:/Windows/p' }])
+    expect(win(['$out = @"', '$(date > /etc/p)', '"@'].join('\n'))?.outOfScope).toEqual([
+      { path: '/etc/p' }
+    ])
+    expect(win(["$out = @'", '$(make > /etc/p)', "'@"].join('\n'))?.allInScope).toBe(false)
+  })
+
+  it('reads double-quoted text of an inert command as text', () => {
+    // `echo "a > /etc/p"` is text, so nothing is a TARGET — but the quote-blind
+    // cross-check cannot tell it from `… | "$BASH"`, so the path is named.
+    const echoed = posix('echo "a > /etc/p"')
+    expect(echoed?.targets).toEqual([])
+    expect(echoed?.quotedTargets).toEqual(['/etc/p'])
+    expect(echoed?.allInScope).toBe(false)
+    expect(win('Write-Host "a > b"')).toBeNull()
+    expect(win('Write-Output "x => y"')).toBeNull()
+    expect(win('Select-String -Pattern "a|b" -Path log.txt')).toBeNull()
+    expect(posix('echo "a > /etc/p" > real.log')?.targets).toEqual(['real.log'])
+  })
+
+  it('reads a segment that is nothing but one quoted string as text', () => {
+    // Never a target; the quote-blind cross-check names the unresolvable `$hit`.
+    const r = win('foreach($n in $needles){ "$n => $hit" }')
+    expect(r?.targets).toEqual([])
+    expect(r?.quotedTargets).toEqual(['$hit'])
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('still reports a real redirect after an interpreter call', () => {
+    expect(posix(`python -c "print(1)" > ../../x.txt`)?.outOfScope).toEqual([{ path: '/x.txt' }])
+  })
+})
+
+describe('rule 3 — PowerShell null sinks', () => {
+  // `$null` is a sink only in a KNOWN PowerShell shell (judge-hardening fix 3).
+  const win = (command: string) =>
+    analyzeRedirects(command, { cwd: WIN_CWD, shell: 'powershell' }, 'win32')
+
+  it('drops `$null` in every spelling', () => {
+    expect(win('Get-ChildItem > $null')).toBeNull()
+    expect(win('cmd 2>$null')).toBeNull()
+    expect(win('cmd *>$null')).toBeNull()
+    expect(win('cmd > $NULL 2>&1')).toBeNull()
+    expect(win('cmd | Out-Null')).toBeNull()
+  })
+
+  it('still measures a real target beside a sink', () => {
+    expect(win('cmd 2>$null 3> err.log')?.targets).toEqual(['err.log'])
+  })
+
+  it('extracts the target of `*>`', () => {
+    expect(win('cmd *> "build out.log"')).toEqual({
+      targets: ['build out.log'],
+      allInScope: true,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: []
+    })
+  })
+})
+
+describe('rule 4/5 — writer commands and the append flag', () => {
+  const posix = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: REPO, ...extra }, 'linux')
+  const win = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: WIN_CWD, ...extra }, 'win32')
+
+  it('reads bash tee targets (every non-option argument)', () => {
+    expect(posix('bun test 2>&1 | tee build.log')?.targets).toEqual(['build.log'])
+    expect(posix('bun test | tee -a build.log other.log')?.targets).toEqual([
+      'build.log',
+      'other.log'
+    ])
+    expect(posix('bun test | tee --append out.log')?.targets).toEqual(['out.log'])
+    expect(posix('bun test | tee -i quiet.log')?.targets).toEqual(['quiet.log'])
+  })
+
+  it('reads PowerShell write cmdlets', () => {
+    expect(win('Get-ChildItem | Out-File -FilePath logs/listing.txt')?.targets).toEqual([
+      'logs/listing.txt'
+    ])
+    expect(win('Get-ChildItem | Out-File logs/listing.txt')?.targets).toEqual(['logs/listing.txt'])
+    expect(win('Set-Content -Path out.txt -Value x')?.targets).toEqual(['out.txt'])
+    expect(win('Add-Content -Path:out.txt -Value x')?.targets).toEqual(['out.txt'])
+    expect(win('Set-Content -LiteralPath out.txt x')?.targets).toEqual(['out.txt'])
+    expect(win('Get-ChildItem | Tee-Object -FilePath copy.txt')?.targets).toEqual(['copy.txt'])
+    // PowerShell aliases `tee` to Tee-Object; read it the bash way.
+    expect(win('Get-ChildItem | tee copy.txt')?.targets).toEqual(['copy.txt'])
+  })
+
+  it('does not read a writer NAME that is only an argument', () => {
+    expect(posix('rg tee src/')).toBeNull()
+    expect(posix('echo "tee out.txt"')).toBeNull()
+  })
+
+  it('marks append only where the form appends', () => {
+    expect(posix('echo x >> /etc/p')?.outOfScope).toEqual([{ path: '/etc/p', append: true }])
+    expect(posix('echo x | tee -a /etc/p')?.outOfScope).toEqual([{ path: '/etc/p', append: true }])
+    expect(posix('echo x | tee /etc/p')?.outOfScope).toEqual([{ path: '/etc/p' }])
+    expect(win('Add-Content -Path C:/other/p.txt -Value x')?.outOfScope).toEqual([
+      { path: 'c:/other/p.txt', append: true }
+    ])
+    expect(win('Set-Content -Path C:/other/p.txt x')?.outOfScope).toEqual([
+      { path: 'c:/other/p.txt' }
+    ])
+    expect(win('Get-ChildItem | Out-File -Append C:/other/p.txt')?.outOfScope).toEqual([
+      { path: 'c:/other/p.txt', append: true }
+    ])
+    expect(win('Get-ChildItem | Tee-Object -Append C:/other/p.txt')?.outOfScope).toEqual([
+      { path: 'c:/other/p.txt', append: true }
+    ])
+  })
+
+  it('reports the same protected facts for a writer target as for a `>` target', () => {
+    expect(win('Set-Content -Path CLAUDE.md -Value x')?.protectedHits).toEqual(['CLAUDE.md'])
+    expect(win('Set-Content -Path .claude/settings.json -Value x')?.protectedHits).toEqual([
+      '.claude'
+    ])
+  })
+})
+
+describe('rule 6 — effective directory (cd tracking + shellCwd)', () => {
+  const posix = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: REPO, ...extra }, 'linux')
+  const win = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: WIN_CWD, ...extra }, 'win32')
+
+  it('resolves a relative target against the cd directory, not the session cwd', () => {
+    expect(posix('cd /other/sub && bun test > ../_scratch/b.txt')?.outOfScope).toEqual([
+      { path: '/other/_scratch/b.txt' }
+    ])
+  })
+
+  it('follows a chain of cd, pushd and Set-Location', () => {
+    expect(posix('cd /repo/a && cd ../b && bun test > out.log')?.allInScope).toBe(true)
+    expect(posix('pushd /repo/sub && bun test > out.log')?.allInScope).toBe(true)
+    expect(win('Set-Location D:/WorkPlace/ClaudeUI/sub; bun test > out.log')?.allInScope).toBe(true)
+    expect(win('sl -Path D:/WorkPlace/ClaudeUI/sub; bun test > out.log')?.allInScope).toBe(true)
+  })
+
+  it('closes the false-allow hole: `cd /etc && echo x > passwd` is NOT in scope', () => {
+    expect(posix('cd /etc && echo x > passwd')?.outOfScope).toEqual([{ path: '/etc/passwd' }])
+  })
+
+  it('makes LATER relative targets unresolvable when the directory is unknowable', () => {
+    for (const command of [
+      'popd && bun test > out.log',
+      'Pop-Location; bun test > out.log',
+      'cd - && bun test > out.log',
+      'cd ~ && bun test > out.log',
+      'cd && bun test > out.log',
+      'cd $SOMEWHERE && bun test > out.log',
+      'echo cd /etc && bun test > out.log',
+      '( cd /etc && bun test > out.log )',
+      'foreach($x in $pairs){ cd C:/elsewhere; bun test > out.log }'
+    ]) {
+      const r = /foreach/.test(command) ? win(command) : posix(command)
+      expect(r?.unresolvable).toEqual(['out.log'])
+      expect(r?.allInScope).toBe(false)
+    }
+  })
+
+  it('leaves ABSOLUTE targets alone and does not move the scope roots', () => {
+    const r = posix('cd /etc && bun test > /repo/x.log')
+    expect(r?.allInScope).toBe(true)
+    expect(r?.outOfScope).toEqual([])
+  })
+
+  it('starts from shellCwd when the call carries a workdir', () => {
+    expect(
+      analyzeRedirects('bun test > out.log', { cwd: REPO, shellCwd: '/repo/wt' }, 'linux')
+        ?.allInScope
+    ).toBe(true)
+    expect(
+      analyzeRedirects('bun test > out.log', { cwd: REPO, shellCwd: '/elsewhere' }, 'linux')
+        ?.outOfScope
+    ).toEqual([{ path: '/elsewhere/out.log' }])
+  })
+
+  it('null shellCwd makes relative targets unresolvable but absolutes still resolve', () => {
+    const r = analyzeRedirects(
+      'bun test > out.log && bun test > /repo/x.log',
+      { cwd: REPO, shellCwd: null },
+      'linux'
+    )
+    expect(r?.unresolvable).toEqual(['out.log'])
+    expect(r?.outOfScope).toEqual([])
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('a directory change inside `$(…)` poisons a relative target in that substitution', () => {
+    const r = posix('echo "$(cd /etc && echo x > passwd)"')
+    expect(r?.unresolvable).toEqual(['passwd'])
+    expect(r?.allInScope).toBe(false)
+  })
+})
+
+describe('rule 7 — temp variables', () => {
+  const scope: Partial<Parameters<typeof analyzeRedirects>[1]> = {
+    cwd: REPO,
+    tempDirs: [POSIX_TEMP],
+    tempVars: { TMPDIR: POSIX_TEMP, TEMP: POSIX_TEMP, TMP: POSIX_TEMP }
+  }
+  const posix = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(
+      command,
+      { ...scope, shell: 'posix', ...extra } as Parameters<typeof analyzeRedirects>[1],
+      'linux'
+    )
+  const powershell = (
+    command: string,
+    extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}
+  ) =>
+    analyzeRedirects(
+      command,
+      { ...scope, shell: 'powershell', ...extra } as Parameters<typeof analyzeRedirects>[1],
+      'linux'
+    )
+
+  // Ruling 18: each dialect recognises only its own spellings, and only for the
+  // non-authoritative hint — nothing expands for scope any more.
+  const refs: Array<[string, 'posix' | 'powershell']> = [
+    ['$TMPDIR', 'posix'],
+    ['${TMPDIR}', 'posix'],
+    ['$TEMP', 'posix'],
+    ['${TEMP}', 'posix'],
+    ['$TMP', 'posix'],
+    ['${TMP}', 'posix'],
+    ['$env:TEMP', 'powershell'],
+    ['$env:tmp', 'powershell'],
+    ['${env:TEMP}', 'powershell']
+  ]
+  for (const [ref, dialect] of refs) {
+    // ruling 18: the target stays unresolvable (HEAD behaviour) and only the
+    // hint names the path the variable normally points at.
+    it(`keeps ${ref} unresolvable and hints its temp path in ${dialect}`, () => {
+      const r =
+        dialect === 'posix'
+          ? posix(`bun test > ${ref}/x.log`)
+          : powershell(`bun test > ${ref}/x.log`)
+      expect(r?.targets).toEqual([`${ref}/x.log`])
+      expect(r?.unresolvable).toEqual([`${ref}/x.log`])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toEqual([{ target: `${ref}/x.log`, path: `${POSIX_TEMP}/x.log` }])
+    })
+  }
+
+  it('hints no PowerShell name outside TEMP/TMP (ruling 18)', () => {
+    const r = powershell('bun test > $env:TMPDIR/x.log')
+    expect(r?.unresolvable).toEqual(['$env:TMPDIR/x.log'])
+    expect(r?.allInScope).toBe(false)
+    expect(r?.tempVarTargets).toBeUndefined()
+  })
+
+  it('gives no hint for a reference the dialect cannot read (bare $TEMP in PowerShell)', () => {
+    // In PowerShell `$TEMP` is a (usually empty) ordinary variable, NOT the
+    // environment variable — resolving it would invent `\evil.txt` at the drive
+    // root, so it stays unresolvable (ruling 4/18).
+    const r = powershell('"x" > $TEMP\\evil.txt')
+    expect(r?.unresolvable).toEqual(['$TEMP\\evil.txt'])
+    expect(r?.allInScope).toBe(false)
+    expect(r?.tempVarTargets).toBeUndefined()
+    // …and `$env:TEMP` is not a POSIX variable either.
+    expect(posix('bun test > $env:TEMP/x.log')?.unresolvable).toEqual(['$env:TEMP/x.log'])
+    expect(posix('bun test > $env:TEMP/x.log')?.tempVarTargets).toBeUndefined()
+  })
+
+  it('%TEMP% is a literal in BOTH dialects, never a variable', () => {
+    for (const r of [posix('"x" > %TEMP%\\evil.txt'), powershell('"x" > %TEMP%\\evil.txt')]) {
+      expect(r?.unresolvable).toEqual(['%TEMP%\\evil.txt'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toBeUndefined()
+    }
+  })
+
+  it('keeps temp targets unresolvable and hints nothing when the shell is unnamed', () => {
+    // ruling 18: no dialect → no temp reference to recognise, exactly as HEAD.
+    expect(
+      analyzeRedirects('bun test > $TMPDIR/x.log', scope as never, 'linux')?.unresolvable
+    ).toEqual(['$TMPDIR/x.log'])
+    expect(
+      analyzeRedirects('bun test > $TMPDIR/x.log', scope as never, 'linux')?.tempVarTargets
+    ).toBeUndefined()
+    expect(
+      analyzeRedirects(
+        'bun test > $env:TEMP/x.log',
+        { ...scope, tempVars: { TEMP: POSIX_TEMP } } as never,
+        'linux'
+      )?.unresolvable
+    ).toEqual(['$env:TEMP/x.log'])
+  })
+
+  it('keeps other variables unresolvable and hints nothing', () => {
+    expect(posix('bun test > $OUT/x.log')?.unresolvable).toEqual(['$OUT/x.log'])
+    expect(posix('bun test > $OUT/x.log')?.tempVarTargets).toBeUndefined()
+    expect(posix('bun test > $TMPDIRX/x.log')?.unresolvable).toEqual(['$TMPDIRX/x.log'])
+    expect(posix('bun test > $TMPDIRX/x.log')?.tempVarTargets).toBeUndefined()
+    expect(posix('bun test > ~/x.log')?.unresolvable).toEqual(['~/x.log'])
+    // No host value → nothing to hint either, exactly as before.
+    expect(
+      analyzeRedirects('bun test > $TMPDIR/x.log', { cwd: REPO, shell: 'posix' }, 'linux')
+        ?.unresolvable
+    ).toEqual(['$TMPDIR/x.log'])
+    expect(
+      analyzeRedirects('bun test > $TMPDIR/x.log', { cwd: REPO, shell: 'posix' }, 'linux')
+        ?.tempVarTargets
+    ).toBeUndefined()
+  })
+
+  it('hints a same-command assignment for LATER segments without claiming scope (ruling 18)', () => {
+    const winScope = {
+      cwd: WIN_CWD,
+      tempDirs: [HOST_TEMP],
+      tempVars: { TEMP: HOST_TEMP },
+      shell: 'powershell' as const
+    }
+    const spaced = analyzeRedirects(
+      '$t = $env:TEMP; bun test > "$t\\je-unit.txt"',
+      winScope,
+      'win32'
+    )
+    expect(spaced?.unresolvable).toEqual(['$t\\je-unit.txt'])
+    expect(spaced?.allInScope).toBe(false)
+    expect(spaced?.tempVarTargets).toEqual([
+      { target: '$t\\je-unit.txt', path: 'c:/Users/dev/AppData/Local/Temp/je-unit.txt' }
+    ])
+    const compact = analyzeRedirects(
+      '$t=$env:TEMP; bun test *> "$t\\je-unit.txt"',
+      winScope,
+      'win32'
+    )
+    expect(compact?.unresolvable).toEqual(['$t\\je-unit.txt'])
+    expect(compact?.allInScope).toBe(false)
+    expect(
+      analyzeRedirects('T=$TMPDIR; bun test > $T/x.log', scope as never, 'linux')?.allInScope
+    ).toBe(false) // no shell named → nothing expands or hints
+    const posixBound = analyzeRedirects(
+      'T=$TMPDIR; bun test > $T/x.log',
+      { ...scope, shell: 'posix' } as never,
+      'linux'
+    )
+    expect(posixBound?.unresolvable).toEqual(['$T/x.log'])
+    expect(posixBound?.allInScope).toBe(false)
+    expect(posixBound?.tempVarTargets).toEqual([
+      { target: '$T/x.log', path: `${POSIX_TEMP}/x.log` }
+    ])
+  })
+
+  it('does not hint a same-SEGMENT assignment (conservative: unresolved)', () => {
+    const r = analyzeRedirects(
+      'T=$TMPDIR bun test > $T/x.log',
+      { ...scope, shell: 'posix' } as never,
+      'linux'
+    )
+    expect(r?.unresolvable).toEqual(['$T/x.log'])
+    expect(r?.tempVarTargets).toBeUndefined()
+  })
+
+  it('does not hint a single-quoted literal as a binding (N7)', () => {
+    const r = analyzeRedirects(
+      "t='$TMPDIR'; echo x > $t/y",
+      { ...scope, shell: 'posix' } as never,
+      'linux'
+    )
+    expect(r?.unresolvable).toEqual(['$t/y'])
+    expect(r?.tempVarTargets).toBeUndefined()
+  })
+
+  it('collects only the set, non-blank names', () => {
+    expect(tempVarValues({ TMPDIR: '/a', TEMP: '  ', TMP: 'C:\\t' } as NodeJS.ProcessEnv)).toEqual({
+      TMPDIR: '/a',
+      TMP: 'C:\\t'
+    })
+  })
+})
+
+describe('rule 8 — win32 /tmp', () => {
+  it('is a temp root and does not fold to a drive', () => {
+    expect(tempDirRoots({}, 'win32')).toContain('/tmp')
+    const scope = { cwd: WIN_CWD, tempDirs: tempDirRoots({}, 'win32') }
+    expect(analyzeRedirects('bun run typecheck > /tmp/usage.log 2>&1', scope, 'win32')).toEqual({
+      targets: ['/tmp/usage.log'],
+      allInScope: true,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: []
+    })
+  })
+})
+
+describe('rule 9 — protected hits relative to the scope root', () => {
+  const wt = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: WT, ...extra }, 'win32')
+
+  it('does not read the worktree ancestors as a `.claude` hit', () => {
+    const r = wt('bunx vitest run --project unit-node src/a.test.ts > ui-sync-final.log 2>&1')
+    expect(r?.protectedHits).toEqual([])
+    expect(r?.allInScope).toBe(true)
+    expect(wt('bun run typecheck > .cache/typecheck.log 2>&1')?.protectedHits).toEqual([])
+    // A file whose NAME starts with `.pi` is not the `.pi` directory.
+    expect(wt('bunx vitest run src/core/pi > .pi-all-tests.log 2>&1')?.protectedHits).toEqual([])
+  })
+
+  it('still flags agent-control targets inside the worktree, relative to it', () => {
+    expect(wt('echo x > .claude/settings.json')?.protectedHits).toEqual(['.claude'])
+    expect(wt('echo x > CLAUDE.md')?.protectedHits).toEqual(['CLAUDE.md'])
+    expect(wt('echo x > .agents/skills/x.md')?.protectedHits).toEqual(['.agents'])
+    expect(wt('echo x > .vscode/tasks.json')?.protectedHits).toEqual(['.vscode'])
+    expect(wt('echo x > sub/.git/config')?.protectedHits).toEqual(['.git'])
+    expect(wt('echo x > .env.local')?.protectedHits).toEqual(['.env.local'])
+  })
+
+  it('flags an out-of-scope absolute path on its own components', () => {
+    const r = wt('echo x > ../other/.claude/settings.json')
+    expect(r?.protectedHits).toEqual(['.claude'])
+    expect(r?.allInScope).toBe(false)
+    expect(wt('echo x > C:/Users/u/.ssh/authorized_keys')?.protectedHits).toEqual(['.ssh'])
+  })
+
+  it('keeps the raw-spelling check for unresolvable targets', () => {
+    expect(wt('echo x > $HOME/.ssh/config')?.protectedHits).toEqual(['.ssh'])
+    expect(wt('echo x > ~/.bashrc')?.protectedHits).toEqual(['.bashrc'])
+  })
+})
+
+describe('rule 10 — redirectTargetDetails / summarizeRedirects', () => {
+  it('details carry raw/path/append/root/protectedHits/base; null matches analyzeRedirects', () => {
+    const details = redirectTargetDetails(
+      'cd /repo/sub && echo x >> ../out.log && echo y > $X',
+      { cwd: REPO },
+      'linux'
+    )
+    expect(details).toEqual([
+      {
+        raw: '../out.log',
+        path: '/repo/out.log',
+        append: true,
+        root: '/repo',
+        protectedHits: [],
+        base: '/repo/sub'
+      },
+      { raw: '$X', append: false, protectedHits: [] }
+    ])
+    expect(redirectTargetDetails('ls', { cwd: REPO }, 'linux')).toBeNull()
+    expect(analyzeRedirects('ls', { cwd: REPO }, 'linux')).toBeNull()
+    expect(redirectTargetDetails('echo x > /dev/null', { cwd: REPO }, 'linux')).toBeNull()
+  })
+
+  it('emits measured fields only when present', () => {
+    const details = redirectTargetDetails(
+      'echo a > /etc/a && echo b >> /etc/b && echo c > /etc/c',
+      { cwd: REPO },
+      'linux'
+    )!
+    const measured = new Map([
+      ['/etc/a', { exists: false }],
+      ['/etc/b', { exists: true, empty: true, modifiedSinceSessionStart: true }],
+      ['/etc/c', { symlinked: true }]
+    ])
+    expect(summarizeRedirects(details, measured)).toEqual({
+      targets: ['/etc/a', '/etc/b', '/etc/c'],
+      allInScope: false,
+      outOfScope: [
+        { path: '/etc/a', exists: false },
+        { path: '/etc/b', append: true, exists: true, empty: true, modifiedSinceSessionStart: true }
+      ],
+      unresolvable: [],
+      protectedHits: [],
+      symlinked: ['/etc/c']
+    })
+  })
+
+  it('omits `symlinked` entirely when nothing is measured as a link', () => {
+    const details = redirectTargetDetails('echo x > /etc/a', { cwd: REPO }, 'linux')!
+    const out = summarizeRedirects(details, new Map([['/etc/a', { exists: true, empty: false }]]))
+    expect('symlinked' in out).toBe(false)
+    expect(out.outOfScope).toEqual([{ path: '/etc/a', exists: true, empty: false }])
+  })
+
+  it('an in-scope symlink is listed only in `symlinked` and clears allInScope', () => {
+    const details = redirectTargetDetails('echo x > build.log', { cwd: REPO }, 'linux')!
+    expect(
+      summarizeRedirects(details, new Map([['/repo/build.log', { symlinked: true }]]))
+    ).toEqual({
+      targets: ['build.log'],
+      allInScope: false,
+      outOfScope: [],
+      unresolvable: [],
+      protectedHits: [],
+      symlinked: ['build.log']
+    })
+  })
+
+  it('analyzeRedirects is summarize(details()) with no measurements', () => {
+    const command = 'echo x > /etc/p && echo y > .git/config'
+    expect(analyzeRedirects(command, { cwd: REPO }, 'linux')).toEqual(
+      summarizeRedirects(redirectTargetDetails(command, { cwd: REPO }, 'linux')!)
+    )
+  })
+})
+
+describe('acceptance — the real destructive shapes still report', () => {
+  const posix = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: REPO, ...extra }, 'linux')
+  const win = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: WIN_CWD, ...extra }, 'win32')
+
+  it('reports every shape named in the spec', () => {
+    const rc = posix('echo malicious > ~/.bashrc')
+    expect(rc?.unresolvable).toEqual(['~/.bashrc'])
+    expect(rc?.protectedHits).toEqual(['.bashrc'])
+    expect(posix('echo x | tee ../unrelated.txt')?.outOfScope).toEqual([{ path: '/unrelated.txt' }])
+    const ssh = win('Set-Content $HOME\\.ssh\\config x')
+    expect(ssh?.unresolvable).toEqual(['$HOME\\.ssh\\config'])
+    expect(ssh?.protectedHits).toEqual(['.ssh'])
+    expect(posix('cd /etc && echo x > passwd')?.outOfScope).toEqual([{ path: '/etc/passwd' }])
+    expect(posix(`bash -c "make > /etc/p"`)?.allInScope).toBe(false)
+    expect(posix(`echo 'x > /etc/p' | sh`)?.allInScope).toBe(false)
+    expect(posix(`git submodule foreach 'git log > /etc/p'`)?.allInScope).toBe(false)
+    expect(posix(`echo "$(date > /etc/p)"`)?.outOfScope).toEqual([{ path: '/etc/p' }])
+    expect(posix(`python -c "print(1)" > ../../x.txt`)?.outOfScope).toEqual([{ path: '/x.txt' }])
+    expect(posix(['cat > out.txt <<EOF', '$(make > /etc/p)', 'EOF'].join('\n'))?.targets).toEqual([
+      'out.txt',
+      '/etc/p'
+    ])
+    expect(posix(`awk '{ print > "/etc/p" }' in.txt`)?.allInScope).toBe(false)
+    expect(posix('echo x > CLAUDE.md')?.protectedHits).toEqual(['CLAUDE.md'])
+    // `> in-tree-symlink→outside` is P2a-2's measurement: the path is in scope
+    // here, and `symlinked` (rule 10) is what turns it into a finding.
+    expect(posix('echo x > link-to-outside.txt')?.allInScope).toBe(true)
+  })
+
+  it('resolves `../../x.txt` from a nested cwd', () => {
+    expect(
+      analyzeRedirects('cd /repo/a/b && echo x > ../../../x.txt', { cwd: REPO }, 'linux')
+        ?.outOfScope
+    ).toEqual([{ path: '/x.txt' }])
+  })
+})
+
+/**
+ * Sanitised fixtures of the real replay patterns (case ids in the P2a spec
+ * table). Paths, project names and payloads are neutral stand-ins; only the
+ * COMMAND SHAPE is reproduced.
+ */
+describe('real replay patterns (sanitised)', () => {
+  const APP = 'D:/work/app'
+  const WTB = 'D:/work/app/.claude/worktrees/wt-b'
+  const win = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: APP, ...extra }, 'win32')
+  const inApp = (command: string, extra: Partial<Parameters<typeof analyzeRedirects>[1]> = {}) =>
+    analyzeRedirects(command, { cwd: APP, ...extra }, 'win32')
+  const winTemp = { tempDirs: tempDirRoots({}, 'win32') }
+
+  it('cd then relative redirect — resolved against the cd dir, not the session cwd', () => {
+    const command =
+      'cd D:/work/app-wt/s11c-qt && PYTHONIOENCODING=utf-8 uv run --no-project ' +
+      '../_scratch/impl/evidence.py > ../_scratch/impl/evidence.txt && ' +
+      'head -6 ../_scratch/impl/evidence.txt && tail -40 ../_scratch/impl/evidence.txt'
+    expect(win(command)?.outOfScope).toEqual([
+      { path: 'd:/work/app-wt/_scratch/impl/evidence.txt' }
+    ])
+  })
+
+  it('cd then a relative redirect resolves from the cd dir (path asserted)', () => {
+    const command =
+      'cd .claude/worktrees/wt-b && bunx prettier --write src/a.ts && ' +
+      'bun run test src/a.test.ts > ../../../out/history-tests.log 2>&1; echo test_exit:$?'
+    // From the worktree, three levels up is the session cwd — resolving against
+    // the SESSION cwd instead would clamp to `d:/out/…`.
+    expect(redirectTargetDetails(command, { cwd: 'D:/work/app' }, 'win32')?.[0].path).toBe(
+      'd:/work/app/out/history-tests.log'
+    )
+    expect(analyzeRedirects(command, { cwd: 'D:/work/app' }, 'win32')?.allInScope).toBe(true)
+  })
+
+  it('win32 `/tmp` is scratch, in scope', () => {
+    expect(
+      win(
+        'cd D:/work/app/.claude/worktrees/wt-b && bun node_modules/vitest/vitest.mjs run ' +
+          "src/a.test.ts -t 'removing an account' > /tmp/removal-red.log 2>&1; code=$?; " +
+          'echo exit=$code',
+        winTemp
+      )?.allInScope
+    ).toBe(true)
+    expect(
+      win('bun run typecheck > /tmp/usage-typecheck.log 2>&1; echo EXIT:$?', winTemp)?.allInScope
+    ).toBe(true)
+    expect(
+      win(
+        'cd /d/work/app/.claude/worktrees/wt-b && bunx prettier --write src/a.ts ' +
+          '> /tmp/format.log 2>&1; code=$?; printf \'format exit=%s\\n\' "$code"',
+        winTemp
+      )?.allInScope
+    ).toBe(true)
+  })
+
+  it('a worktree cwd under `.claude/worktrees/<n>` is not a `.claude` hit', () => {
+    const commands = [
+      "bunx vitest run --project unit-node src/a.test.ts src/b.test.ts > ui-sync-final.log 2>&1; echo SYNC_EXIT:$?\nbun run typecheck > ui-typecheck-final.log 2>&1\nrg -n 'Test Files|FAIL' ui-sync-final.log",
+      'bunx vitest run --project component src/a.test.ts > .cache/dispatch-component-1.log 2>&1; printf \'EXIT:%s\\n\' "$?"',
+      'bunx prettier --write src/a.ts src/b.ts; bunx vitest run src/core/pi > .pi-all-tests.log 2>&1; bun run typecheck > .pi-typecheck.log 2>&1'
+    ]
+    for (const command of commands) {
+      const r = analyzeRedirects(command, { cwd: WTB }, 'win32')
+      expect(r?.protectedHits).toEqual([])
+      expect(r?.allInScope).toBe(true)
+    }
+  })
+
+  it('`python -c` with a double-quoted program (including `v>1`) has no phantom target', () => {
+    const dispatch =
+      'cd D:/work/app-wt/s11c-qt && python -c "\n' +
+      'import csv, sys\n' +
+      "print('duplicate keys', [k for k, v in c.items() if v>1])\n" +
+      '"'
+    // No phantom TARGET; the cwd is out of scope after the `cd`, so the
+    // quote-hidden relative `1` is named by the cross-check.
+    const hidden = win(dispatch)
+    expect(hidden?.targets).toEqual([])
+    expect(hidden?.quotedTargets).toEqual(['1'])
+
+    const opencode =
+      'cd D:/work/app-wt/s11c-qt; $env:PYTHONIOENCODING="utf-8"; ' +
+      'uv run --no-project python -c "\n' +
+      "for f in ['src/a.cs','src/b.cs']:\n" +
+      "    print('HEAD', f, len(f))\n" +
+      '"; dotnet build tests/App.Tests -v q 2>&1 | Select-String -Pattern "error|Error\\(s\\)"'
+    expect(win(opencode)).toBeNull()
+  })
+
+  it('a heredoc fed to python has no phantom target (arrow, `</b>`, `>{`, `=>`)', () => {
+    const bodies = [
+      ["python - <<'PY'", "p='src/core/x.ts'; s=p.read_text(); s=s.replace('a','b')", 'PY'],
+      [
+        "python - <<'PY'",
+        'const valid = (): boolean => hooks.ok()',
+        'const s = s.replace("<b>untrusted</b>", "")',
+        'PY'
+      ],
+      [
+        "python - <<'PY'",
+        'try{let timer:any;try{await Promise.race([fn(h),new Promise((_,reject)=>{timer=setTimeout(reject,1)})])}finally{clearTimeout(timer)}}',
+        'PY'
+      ],
+      [
+        "python - <<'PY'",
+        "const c = CASES.find((entry) => entry.id === 'H3')!",
+        "expect(s).not.toContain('User: x')",
+        'PY'
+      ]
+    ]
+    for (const lines of bodies) {
+      expect(
+        win([...lines, 'node .cache/drive.mjs > .cache/electron-third.log 2>&1'].join('\n'))
+          ?.targets
+      ).toEqual(['.cache/electron-third.log'])
+    }
+  })
+
+  it('`node --eval "<js>"` reports only the real targets', () => {
+    const command =
+      'cd D:\\work\\app\\.claude\\worktrees\\wt-b; node scripts/shot.mjs ' +
+      "--click 'text=All Settings' --eval \"(() => { const items = [...document.querySelectorAll('[data-testid=Rail]')]; return items.map(e => e.textContent.trim()).join('|') })()\" " +
+      '--out .cache/screenshots/bump.png --timeout 120000 2>&1 | Select-Object -Last 25'
+    // No phantom TARGET. The cross-check still names the quote-hidden `=> e.…`
+    // (a relative name after a `cd` that left the scope), once, as quoted.
+    const r = win(command)
+    expect(r?.targets).toEqual([])
+    expect(r?.quotedTargets).toEqual(['e.textContent.trim'])
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('a PowerShell bare string `"$n => $hit"` is text', () => {
+    const command =
+      "cd D:\\work\\app\\.work\\bump; $pairs=@(@{v='1.0';p='D:\\x.exe'}); " +
+      'foreach($x in $pairs){ "== $($x.v)"; foreach($n in $needles){ ' +
+      '$hit = Select-String -Path $x.p -Pattern $n -SimpleMatch -Quiet; "$n => $hit" } }'
+    const r = win(command)
+    expect(r?.targets).toEqual([])
+    expect(r?.quotedTargets).toEqual(['$hit'])
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('PowerShell `2>$null` is a null sink', () => {
+    const command =
+      'cd D:\\work\\app-wt\\_work\\reports 2>$null; cd D:\\work\\app-wt && ' +
+      'rg -n "alliance|--resume" _work/reports --glob "c0*.txt" | Select-Object -First 30'
+    expect(win(command, { shell: 'powershell' })).toBeNull()
+  })
+
+  it('ruling 18: `$t=$env:TEMP; ... *> "$t\\x.txt"` is unresolvable with a temp hint', () => {
+    // The real -113/-114 shape. Ruling 18: the scanner no longer expands `$t`
+    // for scope, so the target stays unresolvable exactly as HEAD reported it —
+    // the hint says where it normally lands.
+    for (const tail of ['*>"$t\\je-vitest-unit.txt"', '*> "$t\\je-typecheck.txt"']) {
+      const command = `cd D:/work/app/.claude/worktrees/wt-b; $t=$env:TEMP; bun run typecheck ${tail}; "EXIT=$LASTEXITCODE"`
+      const name = tail.includes('vitest') ? 'je-vitest-unit.txt' : 'je-typecheck.txt'
+      const r = analyzeRedirects(
+        command,
+        {
+          cwd: APP,
+          tempVars: { TEMP: HOST_TEMP },
+          tempDirs: [HOST_TEMP],
+          shell: 'powershell'
+        },
+        'win32'
+      )
+      expect(r?.allInScope).toBe(false)
+      expect(r?.targets).toEqual([`$t\\${name}`])
+      expect(r?.unresolvable).toEqual([`$t\\${name}`])
+      expect(r?.tempVarTargets).toEqual([
+        { target: `$t\\${name}`, path: `c:/Users/dev/AppData/Local/Temp/${name}` }
+      ])
+    }
+  })
+
+  it('ruling 18: `> $env:TEMP/x.cs` is unresolvable with the temp hint (-257)', () => {
+    const command =
+      'cd D:\\work\\app-wt\\s11c && git show HEAD:src/a.cs > $env:TEMP/ds-real-head.cs; ' +
+      'Copy-Item $env:TEMP/ds-real-head.cs src/a.cs -Force'
+    const r = inApp(command, {
+      tempVars: { TEMP: HOST_TEMP },
+      tempDirs: [HOST_TEMP],
+      shell: 'powershell'
+    })
+    expect(r?.allInScope).toBe(false)
+    expect(r?.unresolvable).toEqual(['$env:TEMP/ds-real-head.cs'])
+    expect(r?.tempVarTargets).toEqual([
+      {
+        target: '$env:TEMP/ds-real-head.cs',
+        path: 'c:/Users/dev/AppData/Local/Temp/ds-real-head.cs'
+      }
+    ])
+  })
+})
+
+/**
+ * Round-2 regression tests: every input the security review filed, grouped by
+ * finding id. The expectation is always the HEAD-or-better one — the target is
+ * REPORTED (out of scope / protected) when bash or PowerShell would write it,
+ * UNRESOLVABLE when we cannot place it, and never `allInScope: true`.
+ */
+describe('review round 2 — false-allow regressions', () => {
+  const POSIX = {
+    cwd: '/repo',
+    tempDirs: ['/tmp'],
+    tempVars: { TMPDIR: '/tmp', TEMP: '/tmp', TMP: '/tmp' },
+    shell: 'posix' as const
+  }
+  const WIN = {
+    cwd: 'D:/work/app',
+    tempDirs: ['C:/Users/dev/AppData/Local/Temp', '/tmp'],
+    tempVars: { TEMP: 'C:/Users/dev/AppData/Local/Temp', TMP: 'C:/Users/dev/AppData/Local/Temp' },
+    shell: 'powershell' as const
+  }
+  const posix = (c: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(c, { ...POSIX, ...extra } as never, 'linux')
+  const win = (c: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(c, { ...WIN, ...extra } as never, 'win32')
+
+  /** Reported somewhere: out of scope, protected, or unresolvable. */
+  const expectReported = (r: ReturnType<typeof analyzeRedirects>): void => {
+    expect(r).not.toBeNull()
+    expect(r?.allInScope).toBe(false)
+  }
+
+  describe('R1 — inertness on a wrong quote structure', () => {
+    it('R1a: nested quotes inside $() inside double quotes', () => {
+      for (const command of [
+        'make > build.log; echo "$(echo "a" > /etc/p)"',
+        'make > build.log; echo "$(echo ")" > /etc/p)"',
+        'make > build.log; echo "$(echo \')\' > /etc/p)"',
+        'make > build.log; echo "`echo "a" > /etc/p`"',
+        'node x.js "$(cat "cfg" > /etc/p)" > build.log'
+      ]) {
+        expectReported(posix(command))
+      }
+      expect(posix('echo "$(echo "a" > /etc/p)"')?.outOfScope).toEqual([{ path: '/etc/p' }])
+    })
+
+    it('R1b: parens inside quotes inside an unquoted heredoc body', () => {
+      const r = posix(['cat > out.txt <<EOF', '$(echo ")" > /etc/p)', 'EOF'].join('\n'))
+      expect(r?.outOfScope).toEqual([{ path: '/etc/p' }])
+    })
+
+    it('R1c: PowerShell backslash and backtick escapes in a double-quoted string', () => {
+      const tralingBackslash = win(
+        [
+          'Write-Host "src: D:\\work\\app\\"',
+          'Get-Content secrets.txt > ..\\..\\shared\\leak.txt',
+          'Write-Host "dst: D:\\out\\"',
+          'bun test *> build.log'
+        ].join('\n')
+      )
+      expect(tralingBackslash?.outOfScope).toEqual([{ path: 'd:/shared/leak.txt' }])
+
+      const backtickQuote = win('Write-Output "a`"" > C:\\Windows\\x.txt; Write-Output "`""')
+      expect(backtickQuote?.outOfScope).toEqual([{ path: 'c:/Windows/x.txt' }])
+    })
+
+    it('R1d: a # comment is not lexed, so its apostrophes cannot hide a write', () => {
+      for (const command of [
+        "python build.py  # don't\nmake > /etc/p   # it's\nmake > build.log",
+        'echo a #"\nmake > /etc/p #"\nmake > build.log',
+        'make > build.log # see <<X\nmake > /etc/p\nX'
+      ]) {
+        expect(posix(command)?.outOfScope).toContainEqual({ path: '/etc/p' })
+      }
+    })
+
+    it('R1e: bash text shaped like a PowerShell here-string', () => {
+      expect(posix('bun test > build.log; echo @"a"\nmake > /etc/p\n"@""')?.outOfScope).toEqual([
+        { path: '/etc/p' }
+      ])
+    })
+  })
+
+  describe('R2 — re-readers', () => {
+    const reread: Array<[string, string]> = [
+      ['R2: | bash.exe', `make > build.log; echo 'x > /etc/p' | bash.exe`],
+      ['R2: | $SHELL', `make > build.log; echo 'x > /etc/p' | $SHELL`],
+      ['R2: | s\\h', `make > build.log; echo 'x > /etc/p' | s\\h`],
+      ['R2: | iex', `make *> build.log; echo 'x > C:\\Windows\\p' | iex`],
+      [
+        'R2: | Invoke-Expression',
+        `make *> build.log; echo 'x > C:\\Windows\\p' | Invoke-Expression`
+      ],
+      ['R2: at now heredoc', `make > build.log; at now <<'EOF'\necho x > /etc/p\nEOF`],
+      ['R2: . /dev/stdin heredoc', `make > build.log; . /dev/stdin <<'EOF'\necho x > /etc/p\nEOF`],
+      ['R2: source', `source ./env.sh; echo x > /etc/p`],
+      ['R2: $SHELL heredoc', `make > build.log; $SHELL <<EOF\necho x > /etc/p\nEOF`],
+      ['R2: bun exec', `make > build.log; bun exec 'echo x > /etc/p'`],
+      ['R2: sed 1e', `make > build.log; sed "1e echo x > /etc/p" a.txt`],
+      ['R2: sed s///e', `make > build.log; sed 's/a/> /etc/p/e' f`]
+    ]
+    for (const [name, command] of reread) {
+      it(name, () => {
+        expectReported(/Windows|iex|Invoke/.test(command) ? win(command) : posix(command))
+      })
+    }
+  })
+
+  describe('R3 — a temp binding is dropped when anything else assigns it', () => {
+    const bash: Array<[string, string]> = [
+      ['R3: TMPDIR=/etc', 'TMPDIR=/etc; echo x > $TMPDIR/passwd'],
+      ['R3: export TMPDIR', 'export TMPDIR=/etc; echo x > $TMPDIR/passwd'],
+      ['R3: brace group', '{ TMPDIR=/etc; }; echo x > $TMPDIR/passwd'],
+      ['R3: for TMPDIR in', 'for TMPDIR in /etc; do echo x > $TMPDIR/passwd; done'],
+      ['R3: t reassigned', 't=$TMPDIR; t=/etc; echo x > $t/passwd'],
+      ['R3: subshell assignment', '( t=$TMPDIR ); echo x > $t/y']
+    ]
+    for (const [name, command] of bash) {
+      it(name, () => {
+        const r = posix(command)
+        expect(r?.unresolvable.length).toBeGreaterThan(0)
+        expect(r?.allInScope).toBe(false)
+      })
+    }
+
+    it('R3: $env:TEMP reassigned in PowerShell', () => {
+      const r = win(`$env:TEMP = 'C:\\Windows'; "x" > $env:TEMP\\evil.dll`)
+      expect(r?.unresolvable).toEqual(['$env:TEMP\\evil.dll'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R3: a PowerShell local reassigned off the temp root', () => {
+      const r = win(`$t = $env:TEMP; $t = 'C:\\Windows'; "x" > $t\\evil.dll`)
+      expect(r?.unresolvable).toEqual(['$t\\evil.dll'])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+
+  describe('R4 — dialect', () => {
+    it('R4: bare $TEMP/$TMP/$TMPDIR/${TEMP} are NOT env vars in PowerShell', () => {
+      for (const ref of ['$TEMP', '$TMP', '$TMPDIR', '${TEMP}']) {
+        const r = win(`"x" > ${ref}\\evil.txt`)
+        expect(r?.unresolvable).toEqual([`${ref}\\evil.txt`])
+        expect(r?.allInScope).toBe(false)
+      }
+    })
+
+    it('R4: %TEMP% is a literal in bash and in PowerShell', () => {
+      for (const r of [posix('"x" > %TEMP%\\evil.txt'), win('"x" > %TEMP%\\evil.txt')]) {
+        expect(r?.unresolvable).toEqual(['%TEMP%\\evil.txt'])
+        expect(r?.allInScope).toBe(false)
+      }
+    })
+  })
+
+  describe('R5 — a cd that may not have moved', () => {
+    const maybe: string[] = [
+      'cd sub | true; echo x > ../y',
+      'cd sub & echo x > ../y',
+      'cd sub; echo x > ../y',
+      'case $x in a) cd sub;; esac; echo x > ../y',
+      '[ -d sub ] && cd sub; echo x > ../y',
+      'cd /nonexistent 2>/dev/null; echo x > ../y'
+    ]
+    for (const command of maybe) {
+      it(`R5: ${command}`, () => {
+        expect(posix(command)?.outOfScope).toContainEqual({ path: '/y' })
+      })
+    }
+
+    it('R5: an `&&`-joined cd still resolves against the new directory alone', () => {
+      const r = posix('cd sub && echo x > ../y')
+      expect(r?.allInScope).toBe(true)
+    })
+  })
+
+  describe('R6 — the unbalanced fallback keeps the cd hazard', () => {
+    it('R6: unterminated heredoc after a cd', () => {
+      const r = posix('cd /etc && cat <<EOF > passwd\nroot::0:0\n')
+      expect(r?.unresolvable).toEqual(['passwd'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R6: unbalanced quote after a cd', () => {
+      const r = posix('cd /etc\necho x > passwd\necho "')
+      expect(r?.unresolvable).toEqual(['passwd'])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+
+  describe('R7 — protected names are checked against the cwd, not a granted root', () => {
+    it('R7: a granted ~/.claude does not make .claude/settings.json ordinary', () => {
+      const r = win('"x" > C:\\Users\\dev\\.claude\\settings.json', {
+        additionalDirectories: ['C:/Users/dev/.claude']
+      })
+      expect(r?.protectedHits).toEqual(['.claude'])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+
+  describe('C1 — target words', () => {
+    it('C1: >| noclobber override', () => {
+      expect(posix('make > build.log; echo x >| /etc/passwd')?.outOfScope).toEqual([
+        { path: '/etc/passwd' }
+      ])
+    })
+
+    it('C1: an empty quoted prefix joins the word', () => {
+      expect(posix('make > build.log; echo x > ""/etc/passwd')?.outOfScope).toEqual([
+        { path: '/etc/passwd' }
+      ])
+    })
+
+    it('C1: quote concatenation joins the word (protected name)', () => {
+      expect(posix('echo x > "CLAUDE".md')?.protectedHits).toEqual(['CLAUDE.md'])
+      expect(posix('echo x > CLAUDE".md"')?.protectedHits).toEqual(['CLAUDE.md'])
+    })
+
+    it('C1: a quoted directory then .. traversal', () => {
+      expect(posix(`echo x > 'a'/../../../etc/p`)?.outOfScope).toEqual([{ path: '/etc/p' }])
+    })
+  })
+
+  describe('C2 — writer commands', () => {
+    it('C2: -Path (Join-Path …) is an unreadable target, not a skip', () => {
+      const r = win(
+        `make *> build.log; Set-Content -Path (Join-Path $env:USERPROFILE '.ssh\\authorized_keys') -Value $k`
+      )
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+      expect(r?.protectedHits).toEqual(['.ssh'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('C2: Out-File (Join-Path …) is an unreadable target', () => {
+      const r = win(`make *> build.log; 'x' | Out-File (Join-Path C:\\Windows 'x.txt')`)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('C2: an unquoted comma splits into several paths', () => {
+      expect(win('Set-Content -Path in.txt, C:\\Windows\\x.txt -Value v')?.outOfScope).toEqual([
+        { path: 'c:/Windows/x.txt' }
+      ])
+      expect(win('Set-Content in.txt,C:\\Windows\\x.txt v')?.outOfScope).toEqual([
+        { path: 'c:/Windows/x.txt' }
+      ])
+    })
+
+    it('C2: value-taking flags are skipped, path prefixes are honoured', () => {
+      expect(win('Set-Content -Stream s -Path C:\\Windows\\x.txt -Value v')?.outOfScope).toEqual([
+        { path: 'c:/Windows/x.txt' }
+      ])
+      expect(win('Set-Content -Va v -Pat C:\\Windows\\x.txt')?.outOfScope).toEqual([
+        { path: 'c:/Windows/x.txt' }
+      ])
+    })
+
+    it('C2: a redirect word is not a positional path (2>$null)', () => {
+      expect(win('Set-Content 2>$null C:\\Windows\\x.txt v')?.outOfScope).toEqual([
+        { path: 'c:/Windows/x.txt' }
+      ])
+    })
+
+    it('C2: `ac` is Add-Content (append)', () => {
+      expect(win('ac C:\\Windows\\x.txt v')?.outOfScope).toEqual([
+        { path: 'c:/Windows/x.txt', append: true }
+      ])
+    })
+
+    it('C2: a splat argument is unreadable, never dropped', () => {
+      const r = win(`$p = @{FilePath='C:\\Windows\\x'}; 'x' | Out-File @p`)
+      expect(r?.unresolvable).toEqual(['@p'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('C2: tee behind wrapper commands', () => {
+      expect(posix('make 2> err.log | sudo -u root tee /etc/sudoers.d/x')?.outOfScope).toEqual([
+        { path: '/etc/sudoers.d/x' }
+      ])
+      expect(posix('make 2> err.log | timeout 5 tee /etc/p')?.outOfScope).toEqual([
+        { path: '/etc/p' }
+      ])
+      expect(posix('make 2> err.log | tee.exe /etc/p')?.outOfScope).toEqual([{ path: '/etc/p' }])
+    })
+
+    it('C2: tee inside $(…) and inside sh -c', () => {
+      expect(posix('make > build.log; echo "$(date | tee /etc/p)"')?.outOfScope).toEqual([
+        { path: '/etc/p' }
+      ])
+      expect(posix(`make > build.log; sh -c 'date | tee /etc/p'`)?.outOfScope).toEqual([
+        { path: '/etc/p' }
+      ])
+    })
+  })
+
+  describe('C3 — directory changes the lexer does not follow', () => {
+    const changes: Array<[string, string, 'posix' | 'win']> = [
+      ['C3: eval "cd"', 'eval "cd /etc"; echo x > passwd', 'posix'],
+      ['C3: source', 'source ./env.sh; echo x > passwd', 'posix'],
+      ['C3: dot', '. ./env.sh; echo x > passwd', 'posix'],
+      ['C3: cd..', 'cd..; "x" > settings.json', 'win'],
+      ['C3: cd\\', 'cd\\; "x" > evil.txt', 'win'],
+      ['C3: cd #comment', 'cd #home\necho x > ../y', 'posix']
+    ]
+    for (const [name, command, dialect] of changes) {
+      it(name, () => {
+        const r = dialect === 'posix' ? posix(command) : win(command)
+        expect(r?.unresolvable.length).toBeGreaterThan(0)
+        expect(r?.allInScope).toBe(false)
+      })
+    }
+  })
+
+  describe('C4 — no quadratic behaviour', () => {
+    it('C4: a command over 64 KB emits no meta', () => {
+      const big = 'echo ' + '"a>b" '.repeat(40_000)
+      expect(big.length).toBeGreaterThan(MAX_ANALYZE_COMMAND_LENGTH)
+      const t0 = performance.now()
+      expect(analyzeRedirects(big, POSIX as never, 'linux')).toBeNull()
+      expect(performance.now() - t0).toBeLessThan(1000)
+    })
+
+    it('C4: a many-cd chain stays linear', () => {
+      const chain = 'cd a; '.repeat(4_000) + ' echo > x'
+      const t0 = performance.now()
+      posix(chain)
+      expect(performance.now() - t0).toBeLessThan(1000)
+    })
+  })
+
+  describe('C5 — backslashes bash would remove', () => {
+    it('C5: CLA\\UDE.md is CLAUDE.md to bash', () => {
+      expect(posix('echo x > CLA\\UDE.md')?.protectedHits).toEqual(['CLAUDE.md'])
+      expect(posix('echo x > CLA\\UDE.md')?.allInScope).toBe(false)
+    })
+
+    it('C5: s\\ub/../../y lands at /y', () => {
+      expect(posix('echo x > s\\ub/../../y')?.outOfScope).toEqual([{ path: '/y' }])
+    })
+  })
+
+  describe('C6 — drive-relative targets', () => {
+    it('C6: C:evil.txt resolves under the drive cwd, so it is unresolvable', () => {
+      const r = win('"x" > C:evil.txt')
+      expect(r?.unresolvable).toEqual(['C:evil.txt'])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+
+  describe('C7 — no false blocks', () => {
+    it('C7: a redirect word is not a pushd argument', () => {
+      expect(posix('pushd sub > /dev/null && make > build.log')?.allInScope).toBe(true)
+    })
+
+    it('C7: an absolute cd && -joined clears a poisoned directory', () => {
+      const r = posix('cd /etc 2>/dev/null; cd /repo/sub && make > out.log')
+      expect(r?.allInScope).toBe(true)
+    })
+  })
+
+  describe('N — nits with a behavioural edge', () => {
+    it('N5: protected names fold trailing dots and ADS suffixes', () => {
+      expect(win('"x" > .ssh.\\authorized_keys')?.protectedHits).toEqual(['.ssh.'])
+      expect(win('"x" > .bashrc::$DATA')?.protectedHits).toEqual(['.bashrc::$DATA'])
+      expect(win('"x" > .git.\\hooks\\pre-commit')?.protectedHits).toEqual(['.git.'])
+    })
+
+    it('N6: <<< is a here-string, not a heredoc', () => {
+      expect(posix('cat <<< "$x"\necho "a > b"\nmake > build.log')?.allInScope).toBe(true)
+    })
+
+    it('N7: a single-quoted $TMPDIR is a literal, not a binding', () => {
+      expect(posix("t='$TMPDIR'; echo x > $t/y")?.unresolvable).toEqual(['$t/y'])
+    })
+
+    it('N8: Tee-Object -Variable writes no file', () => {
+      expect(win('"x" | Tee-Object -Variable v')).toBeNull()
+    })
+  })
+})
+
+/**
+ * Round-3 regression tests (rulings 12 and 13).
+ *
+ * Ruling 13 replaces the round-2 candidate-set logic with the exact and-or
+ * dataflow: a command after `;`/newline may run with the OLD directory when an
+ * earlier `cd` failed, and a temp binding after `&&`/`||` only exists in the
+ * branch that ran it. Ruling 12 makes the backslash readings follow the dialect:
+ * PowerShell has separators only, bash removes the escape.
+ */
+describe('review round 3 — and-or dataflow and dialect backslashes', () => {
+  const POSIX = {
+    cwd: '/repo',
+    tempDirs: ['/tmp'],
+    tempVars: { TMPDIR: '/tmp', TEMP: '/tmp', TMP: '/tmp' },
+    shell: 'posix' as const
+  }
+  const WIN = {
+    cwd: 'D:/work/app',
+    tempDirs: ['C:/Users/dev/AppData/Local/Temp'],
+    tempVars: { TEMP: 'C:/Users/dev/AppData/Local/Temp' },
+    shell: 'powershell' as const
+  }
+  const posix = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...POSIX, ...extra } as never, 'linux')
+  const win = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...WIN, ...extra } as never, 'win32')
+
+  describe('ruling 13 — a cd that may have failed still counts', () => {
+    it('R13: a `;`-joined target after `cd && true` sees the old directory too', () => {
+      const r = posix('cd a/b && true; echo x > ../../x')
+      expect(r?.outOfScope).toEqual([{ path: '/x' }])
+      expect(r?.unresolvable).toEqual([])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R13: a `;`-joined target after `cd && make` sees the old directory too', () => {
+      const r = posix('cd a/b && make; echo x > ../../x')
+      expect(r?.outOfScope).toEqual([{ path: '/x' }])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R13: a newline is a `;` for the same purpose', () => {
+      const r = posix('cd a/b\necho x > ../../x')
+      expect(r?.outOfScope).toEqual([{ path: '/x' }])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R13: `false || cd a/b; echo` runs the echo from the old directory', () => {
+      const r = posix('false || cd a/b; echo x > ../../x')
+      expect(r?.outOfScope).toEqual([{ path: '/x' }])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R13: an `&&` chain after the cd alone cannot see a failed cd', () => {
+      const r = posix('cd a/b && make && echo x > ../../x')
+      expect(r?.allInScope).toBe(true)
+      expect(r?.outOfScope).toEqual([])
+      expect(r?.unresolvable).toEqual([])
+    })
+  })
+
+  describe('ruling 13 — a binding only exists in the branch that ran it', () => {
+    const unbound = [
+      'false && t=$TMPDIR; echo x > $t/passwd',
+      'true || t=$TMPDIR; echo x > $t/passwd',
+      't=$TMPDIR & echo x > $t/passwd',
+      't=$TMPDIR | true; echo x > $t/passwd'
+    ]
+    for (const command of unbound) {
+      it(`R13: ${command}`, () => {
+        const r = posix(command)
+        expect(r?.unresolvable).toEqual(['$t/passwd'])
+        expect(r?.allInScope).toBe(false)
+      })
+    }
+
+    // ruling 18: a binding in a success branch is still only a hint now.
+    it('ruling 18: `make && t=$TMPDIR && echo` is unresolvable, and a conditional binding gives no hint', () => {
+      // The hint guard (round-6 re-review C1) ignores a binding after `&&`/`||`:
+      // conservative — the target simply stays unresolvable without a hint.
+      const r = posix('make && t=$TMPDIR && echo x > $t/ok.log')
+      expect(r?.unresolvable).toEqual(['$t/ok.log'])
+      expect(r?.allInScope).toBe(false)
+      expect(r).not.toHaveProperty('tempVarTargets')
+    })
+
+    it('ruling 18: an unconditional binding is a hint too, never scope', () => {
+      const r = posix('t=$TMPDIR; echo x > $t/ok.log')
+      expect(r?.unresolvable).toEqual(['$t/ok.log'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toEqual([{ target: '$t/ok.log', path: '/tmp/ok.log' }])
+    })
+  })
+
+  describe('ruling 12 — backslash readings follow the dialect', () => {
+    // ruling 18: the backslash reading is unchanged, but the temp variable no
+    // longer expands for scope — the target is unresolvable with a hint.
+    it('R12: `$env:TEMP\\x.txt` keeps one separator reading and a temp hint in PowerShell', () => {
+      const r = win('*> $env:TEMP\\x.txt')
+      expect(r?.targets).toEqual(['$env:TEMP\\x.txt'])
+      expect(r?.unresolvable).toEqual(['$env:TEMP\\x.txt'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toEqual([
+        { target: '$env:TEMP\\x.txt', path: 'c:/Users/dev/AppData/Local/Temp/x.txt' }
+      ])
+    })
+
+    it('R12: with no shell named the worse reading is kept (and nothing is hinted)', () => {
+      const r = analyzeRedirects(
+        '*> $env:TEMP\\x.txt',
+        {
+          cwd: WIN.cwd,
+          tempDirs: WIN.tempDirs,
+          tempVars: WIN.tempVars
+        },
+        'win32'
+      )
+      expect(r?.unresolvable).toEqual(['$env:TEMP\\x.txt'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toBeUndefined()
+    })
+
+    it('R12: `CLA\\UDE.md` is a path in PowerShell and CLAUDE.md to bash', () => {
+      const ps = win('echo x > CLA\\UDE.md')
+      expect(ps?.protectedHits).toEqual([])
+      expect(ps?.allInScope).toBe(true)
+      const bash = posix('echo x > CLA\\UDE.md')
+      expect(bash?.protectedHits).toEqual(['CLAUDE.md'])
+      expect(bash?.allInScope).toBe(false)
+    })
+  })
+})
+
+describe('review round 4 — deny-by-default temp expansion, group status, loops', () => {
+  const POSIX = {
+    cwd: '/repo',
+    tempDirs: ['/tmp'],
+    tempVars: { TMPDIR: '/tmp', TEMP: '/tmp', TMP: '/tmp' },
+    shell: 'posix' as const
+  }
+  const WIN = {
+    cwd: 'D:/work/app',
+    tempDirs: ['C:/Users/dev/AppData/Local/Temp'],
+    tempVars: { TEMP: 'C:/Users/dev/AppData/Local/Temp' },
+    shell: 'powershell' as const
+  }
+  const posix = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...POSIX, ...extra } as never, 'linux')
+  const win = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...WIN, ...extra } as never, 'win32')
+
+  describe('ruling 14 — a temp name expands only when every mention is a read', () => {
+    // Every one of these reassigns a temp name in a way the old "count the
+    // assignments" scan missed, and HEAD (which never expanded) called it
+    // unresolvable. All are shell-verified false allows (R-A).
+    const renames: Array<[string, 'posix' | 'powershell', string]> = [
+      ['R-A: bash +=', 'posix', 'TMPDIR+=/../etc; echo x > $TMPDIR/passwd'],
+      ['R-A: bash binding +=', 'posix', 't=$TMPDIR; t+=/../etc; echo x > $t/passwd'],
+      ['R-A: bash printf -v', 'posix', "printf -v TMPDIR '/etc'; echo x > $TMPDIR/passwd"],
+      ['R-A: bash mapfile', 'posix', 'mapfile -t TMPDIR <<< /etc; echo x > $TMPDIR/passwd'],
+      ['R-A: bash declare nameref', 'posix', 'declare -n t=TMPDIR; t=/etc; echo x > $t/passwd'],
+      ['R-A: PowerShell +=', 'powershell', `$env:TEMP += '\\..\\etc'; 'x' > $env:TEMP\\evil.dll`],
+      [
+        'R-A: PowerShell binding +=',
+        'powershell',
+        `$t = $env:TEMP; $t += '\\..\\etc'; 'x' > $t\\evil.dll`
+      ],
+      [
+        'R-A: PowerShell case-insensitive name',
+        'powershell',
+        `$t = $env:TEMP; $T = 'C:\\Windows'; 'x' > $t\\evil.dll`
+      ],
+      [
+        'R-A: PowerShell ${env:} assignment',
+        'powershell',
+        "${env:TEMP} = 'C:\\Windows'; 'x' > $env:TEMP\\evil.dll"
+      ],
+      [
+        'R-A: PowerShell ${t} assignment',
+        'powershell',
+        "$t = $env:TEMP; ${t} = 'C:\\Windows'; 'x' > $t\\evil.dll"
+      ],
+      [
+        'R-A: PowerShell scope prefix',
+        'powershell',
+        `$t = $env:TEMP; $script:t = 'C:\\Windows'; 'x' > $t\\evil.dll`
+      ],
+      [
+        'R-A: Set-Item reordered flags',
+        'powershell',
+        `Set-Item -Value C:\\Windows -Path env:TEMP; 'x' > $env:TEMP\\evil.dll`
+      ],
+      ['R-A: si alias', 'powershell', `si env:TEMP C:\\Windows; 'x' > $env:TEMP\\evil.dll`],
+      [
+        'R-A: Set-Item backslash path',
+        'powershell',
+        `Set-Item Env:\\TEMP C:\\Windows; 'x' > $env:TEMP\\evil.dll`
+      ],
+      ['R-A: sv alias', 'powershell', `$t = $env:TEMP; sv t C:\\Windows; 'x' > $t\\evil.dll`],
+      [
+        'R-A: [Environment]::SetEnvironmentVariable',
+        'powershell',
+        `[Environment]::SetEnvironmentVariable('TEMP', 'C:\\Windows'); 'x' > $env:TEMP\\evil.dll`
+      ],
+      [
+        'R-A: foreach loop variable',
+        'powershell',
+        `$t = $env:TEMP; foreach ($t in @('C:\\Windows')) {}; 'x' > $t\\evil.dll`
+      ]
+    ]
+    for (const [name, dialect, command] of renames) {
+      it(name, () => {
+        const r = dialect === 'posix' ? posix(command) : win(command)
+        expect(r?.allInScope).toBe(false)
+        expect(r?.unresolvable.length).toBeGreaterThan(0)
+      })
+    }
+
+    // ruling 18: the real shapes are unresolvable WITH the right hint.
+    it('R14: the -113/-114 shape is unresolvable with the temp hint', () => {
+      const r = win('$t=$env:TEMP; bun run typecheck *> "$t\\je-typecheck.txt"')
+      expect(r?.targets).toEqual(['$t\\je-typecheck.txt'])
+      expect(r?.unresolvable).toEqual(['$t\\je-typecheck.txt'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toEqual([
+        {
+          target: '$t\\je-typecheck.txt',
+          path: 'c:/Users/dev/AppData/Local/Temp/je-typecheck.txt'
+        }
+      ])
+    })
+
+    it('R14: the -257 shape is unresolvable with the temp hint', () => {
+      const r = win('git show HEAD:x.cs > $env:TEMP/ds-real-head.cs')
+      expect(r?.targets).toEqual(['$env:TEMP/ds-real-head.cs'])
+      expect(r?.unresolvable).toEqual(['$env:TEMP/ds-real-head.cs'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toEqual([
+        {
+          target: '$env:TEMP/ds-real-head.cs',
+          path: 'c:/Users/dev/AppData/Local/Temp/ds-real-head.cs'
+        }
+      ])
+    })
+
+    it('R14: a command with any rebinding construct expands nothing at all', () => {
+      // `read` is enough to poison every temp name in the command, even one the
+      // command only reads.
+      const r = posix('read answer; bun test > $TMPDIR/x.log')
+      expect(r?.unresolvable).toEqual(['$TMPDIR/x.log'])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+
+  describe('ruling 15 — a group before || or && has an unknown status', () => {
+    it('R-B: `cd /etc && (false) || echo` runs the echo in /etc', () => {
+      const r = posix('cd /etc && (false) || echo x > passwd')
+      expect(r?.outOfScope).toEqual([{ path: '/etc/passwd' }])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R-B: a brace group before `||` is just as unknown', () => {
+      const r = posix('cd /etc && { grep -q z passwd; } || echo x >> passwd')
+      expect(r?.outOfScope).toEqual([{ path: '/etc/passwd', append: true }])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('R15: a brace EXPANSION is not a group and cannot revive a failed branch', () => {
+      const r = posix('cd sub && rg x game/{A/A.cs,B/B.cs} && git rm y && echo build > ../out.txt')
+      expect(r?.outOfScope).toEqual([])
+      expect(r?.unresolvable).toEqual([])
+      expect(r?.allInScope).toBe(true)
+    })
+  })
+
+  describe('ruling 16 — cheap closures', () => {
+    it('C-A: a relative cd inside a loop body poisons later relative targets', () => {
+      const r = posix('for i in 1 2; do true; cd ..; done; echo x > repo/x')
+      expect(r?.unresolvable).toEqual(['repo/x'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('C-B: a backslash-newline continuation inside a target is unresolvable', () => {
+      const r = posix('echo x > out\\\n/../../../etc/passwd')
+      expect(r?.targets).toEqual(['out\\'])
+      expect(r?.unresolvable).toEqual(['out\\'])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+})
+
+describe('review round 5 — any-occurrence mentions, cd continuations, name cap', () => {
+  const POSIX = {
+    cwd: '/repo',
+    tempDirs: ['/tmp'],
+    tempVars: { TMPDIR: '/tmp', TEMP: '/tmp', TMP: '/tmp' },
+    shell: 'posix' as const
+  }
+  const WIN = {
+    cwd: 'D:/work/app',
+    tempDirs: ['C:/Users/dev/AppData/Local/Temp'],
+    tempVars: { TEMP: 'C:/Users/dev/AppData/Local/Temp' },
+    shell: 'powershell' as const
+  }
+  const posix = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...POSIX, ...extra } as never, 'linux')
+  const win = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...WIN, ...extra } as never, 'win32')
+
+  describe('ruling 17 — every identifier-boundary occurrence must be a plain read', () => {
+    // Q1: each of these re-points/removes a temp var without spelling an
+    // assignment the old enumerated scan recognised; each was a shell-verified
+    // false allow (pwsh 7 / Git Bash 5.3) and a regression vs HEAD.
+    const mutators: Array<[string, 'posix' | 'powershell', string]> = [
+      [
+        'Q1: New-Item -Path env:TEMP',
+        'powershell',
+        `New-Item -Path env:TEMP -Value C:\\Windows -Force | Out-Null; 'x' > $env:TEMP\\sshd_config`
+      ],
+      [
+        'Q1: ni env:TEMP (New-Item alias)',
+        'powershell',
+        `ni env:TEMP -Value C:\\Windows -Force | Out-Null; 'x' > $env:TEMP\\sshd_config`
+      ],
+      [
+        'Q1: Set-Content -Path env:TEMP',
+        'powershell',
+        `Set-Content -Path env:TEMP -Value C:\\Windows; 'x' > $env:TEMP\\sshd_config`
+      ],
+      [
+        'Q1: Clear-Item env:TEMP',
+        'powershell',
+        `Clear-Item env:TEMP; 'x' > $env:TEMP\\sshd_config`
+      ],
+      [
+        'Q1: ri env:TEMP (Remove-Item alias)',
+        'powershell',
+        `ri env:TEMP; 'x' > $env:TEMP\\sshd_config`
+      ],
+      [
+        'Q1: rm env:TEMP (Remove-Item alias)',
+        'powershell',
+        `rm env:TEMP; 'x' > $env:TEMP\\sshd_config`
+      ],
+      ['Q1: bash unset TMPDIR', 'posix', 'unset TMPDIR; echo x > $TMPDIR/passwd']
+    ]
+    for (const [name, dialect, command] of mutators) {
+      it(name, () => {
+        const r = dialect === 'posix' ? posix(command) : win(command)
+        expect(r?.allInScope).toBe(false)
+        expect(r?.unresolvable.length).toBeGreaterThan(0)
+      })
+    }
+
+    it('Q1: a bare env:N is a mention, not a read (every mutator shares this shape)', () => {
+      const r = win(`Set-Content -Path env:TEMP -Value D:\\x; 'x' > $env:TEMP\\y.txt`)
+      expect(r?.unresolvable).toEqual(['$env:TEMP\\y.txt'])
+    })
+
+    it('Q1: a bare word mention outside a read disables the whole name', () => {
+      // `TMPDIR` appears as plain text, so the binding `t` can no longer be
+      // resolved through it — HEAD behaviour.
+      const r = posix('t=$TMPDIR; echo TMPDIR > $t/x')
+      expect(r?.unresolvable).toEqual(['$t/x'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('Q1: a quoted or scoped spelling is not a plain read either', () => {
+      expect(win(`$x = 'TEMP'; 'p' > $env:TEMP\\evil.dll`)?.unresolvable).toEqual([
+        '$env:TEMP\\evil.dll'
+      ])
+      expect(win(`echo $script:TEMP; 'p' > $env:TEMP\\evil.dll`)?.unresolvable).toEqual([
+        '$env:TEMP\\evil.dll'
+      ])
+    })
+
+    it('Q1: an identifier boundary keeps a longer name from blocking (no false block)', () => {
+      // `MY_TMPDIR2` is not the variable; the binding still hints, and nothing
+      // is claimed in scope (ruling 18).
+      const r = posix('t=$TMPDIR; echo MY_TMPDIR2 > $t/x')
+      expect(r?.unresolvable).toEqual(['$t/x'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.outOfScope).toEqual([])
+      expect(r?.protectedHits).toEqual([])
+      expect(r?.tempVarTargets).toEqual([{ target: '$t/x', path: '/tmp/x' }])
+    })
+
+    it('Q1: the real -113/-114/-257 shapes are unresolvable with the hint (ruling 18)', () => {
+      const bound = win('$t=$env:TEMP; bun run typecheck *> "$t\\je-typecheck.txt"')
+      expect(bound?.unresolvable).toEqual(['$t\\je-typecheck.txt'])
+      expect(bound?.allInScope).toBe(false)
+      expect(bound?.tempVarTargets).toEqual([
+        {
+          target: '$t\\je-typecheck.txt',
+          path: 'c:/Users/dev/AppData/Local/Temp/je-typecheck.txt'
+        }
+      ])
+      const host = win('git show HEAD:x.cs > $env:TEMP/ds-real-head.cs')
+      expect(host?.unresolvable).toEqual(['$env:TEMP/ds-real-head.cs'])
+      expect(host?.allInScope).toBe(false)
+      expect(host?.tempVarTargets).toEqual([
+        {
+          target: '$env:TEMP/ds-real-head.cs',
+          path: 'c:/Users/dev/AppData/Local/Temp/ds-real-head.cs'
+        }
+      ])
+    })
+  })
+
+  describe('Q2 — a cd argument continued with a backslash', () => {
+    it('Q2: `cd out\\` + newline poisons where the shell lands', () => {
+      const r = posix('cd out\\\n/../.. ; echo x > y')
+      expect(r?.unresolvable).toEqual(['y'])
+      expect(r?.allInScope).toBe(false)
+    })
+
+    it('Q2: the same cd without the continuation still resolves', () => {
+      expect(posix('cd out; echo x > y')?.allInScope).toBe(true)
+    })
+  })
+
+  describe('Q3 — many distinct temp names', () => {
+    it('Q3: 4000 bindings (~59 KB) finish fast and claim nothing', () => {
+      // Ruling 18 deleted the 8-name cap together with expansion; this stays as
+      // a perf guard that a long binding chain is still linear.
+      const bindings: string[] = []
+      for (let i = 0; i < 4_000; i++) bindings.push(`v${i}=$TMPDIR`)
+      const command = `${bindings.join('; ')}; echo x > $v0/out.txt`
+      expect(command.length).toBeLessThan(MAX_ANALYZE_COMMAND_LENGTH)
+      const t0 = performance.now()
+      const r = posix(command)
+      const elapsed = performance.now() - t0
+      // Generous bound: this catches a quadratic regression, not CI jitter.
+      expect(elapsed).toBeLessThan(1000)
+      // Nothing expands for scope; the last binding alone words the hint.
+      expect(r?.unresolvable).toEqual(['$v0/out.txt'])
+      expect(r?.allInScope).toBe(false)
+      expect(r?.tempVarTargets).toEqual([{ target: '$v0/out.txt', path: '/tmp/out.txt' }])
+    })
+  })
+
+  describe('NIT — a trailing `&& {` at end of input', () => {
+    it('does not open a group or lose the preceding cd', () => {
+      // `isRealGroup` reads `command[seg.start]`; past the end it must not throw
+      // and must not change the verdict of the segments before it.
+      const r = posix('cd /etc && echo x > passwd && {')
+      expect(r?.outOfScope).toEqual([{ path: '/etc/passwd' }])
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+})
+
+/**
+ * Round-6 regression tests (ruling 18). The scanner stops expanding temp
+ * variables for SCOPE: every input the round-5 re-review filed — all
+ * shell-confirmed false allows — is UNRESOLVABLE with `allInScope: false`,
+ * exactly as HEAD reported it, whatever the command does to the variable.
+ */
+describe('review round 6 — temp variables are a hint, never an in-scope claim', () => {
+  const POSIX = {
+    cwd: '/repo',
+    tempDirs: ['/tmp'],
+    tempVars: { TMPDIR: '/tmp', TEMP: '/tmp', TMP: '/tmp' },
+    shell: 'posix' as const
+  }
+  const WIN = {
+    cwd: 'D:/work/app',
+    tempDirs: ['C:/Users/dev/AppData/Local/Temp'],
+    tempVars: { TEMP: 'C:/Users/dev/AppData/Local/Temp' },
+    shell: 'powershell' as const
+  }
+  const posix = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...POSIX, ...extra } as never, 'linux')
+  const win = (command: string, extra: Record<string, unknown> = {}) =>
+    analyzeRedirects(command, { ...WIN, ...extra } as never, 'win32')
+
+  // [name, dialect, command, the target that must be reported unresolvable]
+  const cases: Array<[string, 'posix' | 'powershell', string, string]> = [
+    // R5-1: the 8-character look-ahead window (whitespace before `=`/`+=`).
+    [
+      'R5-1: 9 spaces before $env:TEMP =',
+      'powershell',
+      "$env:TEMP         = 'C:\\Windows'; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-1: 12 tabs before $t =',
+      'powershell',
+      "$t = $env:TEMP; $t\t\t\t\t\t\t\t\t\t\t\t= 'C:\\Windows'; 'x' > $t\\f.txt",
+      '$t\\f.txt'
+    ],
+    [
+      'R5-1: 9 spaces before $env:TEMP +=',
+      'powershell',
+      "$env:TEMP         += '\\..\\etc'; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    // R5-2: assignment shapes `assignsAfter` did not recognise.
+    [
+      'R5-2: backtick line continuation before =',
+      'powershell',
+      "$env:TEMP `\n= 'C:\\Windows'; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-2: multi-assignment, name first',
+      'powershell',
+      "$env:TEMP, $a = 'C:\\Windows', 1; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-2: multi-assignment of a binding',
+      'powershell',
+      "$t = $env:TEMP; $t, $a = 'C:\\Windows', 1; 'x' > $t\\f.txt",
+      '$t\\f.txt'
+    ],
+    [
+      'R5-2: block comment before =',
+      'powershell',
+      "$env:TEMP <# c #> = 'C:\\Windows'; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-2: NBSP before =',
+      'powershell',
+      "$env:TEMP\u00a0= 'C:\\Windows'; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    // R5-3: rebinding without spelling the name.
+    [
+      'R5-3: iex with a built name',
+      'powershell',
+      "iex ('$env:TE' + 'MP = C:\\Windows'); 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-3: [scriptblock]::Create with a built name',
+      'powershell',
+      "& ([scriptblock]::Create('$env:TE' + 'MP = C:\\Windows')); 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-3: InvokeScript with a built name',
+      'powershell',
+      "$ExecutionContext.InvokeCommand.InvokeScript('$env:TE' + 'MP = C:\\Windows') | Out-Null; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-3: [ref] to a binding',
+      'powershell',
+      "$t = $env:TEMP; $r = [ref]$t; $r.Value = 'C:\\Windows'; 'x' > $t\\f.txt",
+      '$t\\f.txt'
+    ],
+    [
+      'R5-3: Get-Variable .Value',
+      'powershell',
+      "$t = $env:TEMP; (gv -Name ([string][char]116)).Value = 'C:\\Windows'; 'x' > $t\\f.txt",
+      '$t\\f.txt'
+    ],
+    [
+      'R5-3: New-Item with a built env: path',
+      'powershell',
+      "New-Item -Path ('env:TE' + 'MP') -Value 'C:\\Windows' -Force | Out-Null; 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-3: Copy-Item from one env: name to another',
+      'powershell',
+      "$env:FOO = 'C:\\Windows'; Copy-Item -Path env:FOO -Destination ('env:TE' + 'MP'); 'x' > $env:TEMP\\f.txt",
+      '$env:TEMP\\f.txt'
+    ],
+    [
+      'R5-3: bash readonly with a built name',
+      'posix',
+      'n=TM; readonly "${n}PDIR=/etc"; echo x > $TMPDIR/f.txt',
+      '$TMPDIR/f.txt'
+    ],
+    [
+      'R5-3: bash trap with a built name',
+      'posix',
+      'n=TM; trap "${n}PDIR=/etc" DEBUG; true; echo x > $TMPDIR/f.txt',
+      '$TMPDIR/f.txt'
+    ],
+    [
+      'R5-3: bash alias with a built name',
+      'posix',
+      'shopt -s expand_aliases\nn=TM\nalias x="${n}PDIR=/etc"\nx\necho x > $TMPDIR/f.txt',
+      '$TMPDIR/f.txt'
+    ],
+    // R5-4: a `$env:NAME` binding must not leak NAME into a bare `$NAME`.
+    [
+      'R5-4: $env:TEMP = $env:TEMP, then bare $TEMP',
+      'powershell',
+      "$env:TEMP = $env:TEMP; 'x' > $TEMP\\f.txt",
+      '$TEMP\\f.txt'
+    ],
+    [
+      'R5-4: compact $env:TEMP=$env:TEMP, then bare $TEMP',
+      'powershell',
+      "$env:TEMP=$env:TEMP; 'x' > $TEMP\\f.txt",
+      '$TEMP\\f.txt'
+    ],
+    [
+      'R5-4: $env:TMP = $env:TEMP, then ${TMP}',
+      'powershell',
+      "$env:TMP = $env:TEMP; 'x' > ${TMP}\\f.txt",
+      '${TMP}\\f.txt'
+    ],
+    // The round-4 R-A inputs, re-checked under ruling 18.
+    ['R-A: bash +=', 'posix', 'TMPDIR+=/../etc; echo x > $TMPDIR/passwd', '$TMPDIR/passwd'],
+    [
+      'R-A: PowerShell +=',
+      'powershell',
+      "$env:TEMP += '\\..\\etc'; 'x' > $env:TEMP\\evil.dll",
+      '$env:TEMP\\evil.dll'
+    ],
+    [
+      'R-A: Set-Item reordered flags',
+      'powershell',
+      "Set-Item -Value C:\\Windows -Path env:TEMP; 'x' > $env:TEMP\\evil.dll",
+      '$env:TEMP\\evil.dll'
+    ],
+    [
+      'R-A: [Environment]::SetEnvironmentVariable',
+      'powershell',
+      "[Environment]::SetEnvironmentVariable('TEMP', 'C:\\Windows'); 'x' > $env:TEMP\\evil.dll",
+      '$env:TEMP\\evil.dll'
+    ]
+  ]
+
+  for (const [name, dialect, command, target] of cases) {
+    it(name, () => {
+      const r = dialect === 'posix' ? posix(command) : win(command)
+      expect(r).not.toBeNull()
+      expect(r?.unresolvable).toContain(target)
+      expect(r?.allInScope).toBe(false)
+    })
+  }
+
+  it('posix `> $TMPDIR/x.log` is unresolvable WITH the hint', () => {
+    const r = posix('bun test > $TMPDIR/x.log')
+    expect(r?.unresolvable).toEqual(['$TMPDIR/x.log'])
+    expect(r?.allInScope).toBe(false)
+    expect(r?.tempVarTargets).toEqual([{ target: '$TMPDIR/x.log', path: '/tmp/x.log' }])
+  })
+
+  it('a non-temp variable is unresolvable with NO hint', () => {
+    const r = posix('bun test > $LOGFILE/x.log')
+    expect(r?.unresolvable).toEqual(['$LOGFILE/x.log'])
+    expect(r?.allInScope).toBe(false)
+    expect(r?.tempVarTargets).toBeUndefined()
+  })
+
+  it('the hint never turns a verdict: an in-scope command stays in scope without one', () => {
+    const r = win('bun run typecheck > build.log')
+    expect(r?.allInScope).toBe(true)
+    expect(r?.tempVarTargets).toBeUndefined()
+  })
+})
+
 describe('tempDirRoots', () => {
   it('collects os.tmpdir plus the env spellings, deduped and blank-free', () => {
     const roots = tempDirRoots({ TMPDIR: '/tmp/a', TEMP: '/tmp/a', TMP: '  ' } as NodeJS.ProcessEnv)
@@ -468,12 +2395,14 @@ describe('tempDirRoots', () => {
     expect(roots.every((r) => r.trim().length > 0)).toBe(true)
   })
 
-  it('adds the conventional /tmp on POSIX — macOS env temp dirs never point there', () => {
+  it('adds the conventional /tmp on POSIX (and on win32, where it is scratch)', () => {
     const env = { TMPDIR: '/var/folders/x/T/' } as NodeJS.ProcessEnv
     expect(tempDirRoots(env, 'darwin')).toEqual(expect.arrayContaining(['/tmp', '/private/tmp']))
     expect(tempDirRoots(env, 'linux')).toContain('/tmp')
     expect(tempDirRoots(env, 'linux')).not.toContain('/private/tmp')
-    expect(tempDirRoots(env, 'win32')).not.toContain('/tmp')
+    // Git Bash's `/tmp` is the user temp dir; PowerShell's is `<drive>:\tmp`.
+    // Either way it is scratch, never a protected path.
+    expect(tempDirRoots(env, 'win32')).toContain('/tmp')
   })
 
   it('puts `> /tmp/x` in scope on macOS', () => {
@@ -921,5 +2850,1386 @@ describe('recordToolOutcome', () => {
     recordToolOutcome(m, 'a', 'error', 3) // touch 'a'
     recordToolOutcome(m, 'd', 'ok', 3)
     expect([...m.keys()]).toEqual(['c', 'a', 'd'])
+  })
+})
+
+describe('ruling 18 hint guard — no hint where the command touches the variable (round-6 re-review C1)', () => {
+  const ps = (command: string) =>
+    analyzeRedirects(
+      command,
+      {
+        cwd: 'D:/work/app',
+        tempDirs: ['C:/Users/dev/AppData/Local/Temp'],
+        tempVars: { TEMP: 'C:/Users/dev/AppData/Local/Temp' },
+        shell: 'powershell'
+      },
+      'win32'
+    )
+  const sh = (command: string) =>
+    analyzeRedirects(
+      command,
+      { cwd: '/repo', tempDirs: ['/tmp'], tempVars: { TMPDIR: '/tmp' }, shell: 'posix' },
+      'linux'
+    )
+
+  const withheld: Array<[string, () => ReturnType<typeof analyzeRedirects>]> = [
+    [
+      'PowerShell reassignment of $env:TEMP',
+      () => ps("$env:TEMP = 'C:/Windows'; 'x' > $env:TEMP/x.dll")
+    ],
+    [
+      'PowerShell op-assign of $env:TEMP',
+      () => ps("$env:TEMP += '/../../Windows'; 'x' > $env:TEMP/x.dll")
+    ],
+    [
+      'PowerShell env-drive mutation',
+      () => ps("Set-Item env:TEMP C:/Windows; 'x' > $env:TEMP/x.dll")
+    ],
+    [
+      'PowerShell SetEnvironmentVariable',
+      () => ps("[Environment]::SetEnvironmentVariable('TEMP', 'C:/Windows'); 'x' > $env:TEMP/x.dll")
+    ],
+    ['PowerShell rebound binding', () => ps("$t = $env:TEMP; $t = 'C:/Windows'; 'x' > $t/x.dll")],
+    ['PowerShell re-reader in the command', () => ps("iex 'x'; 'x' > $env:TEMP/x.dll")],
+    ['bash reassignment of TMPDIR', () => sh('TMPDIR=/etc; echo x > $TMPDIR/passwd')],
+    ['bash rebound binding', () => sh('t=$TMPDIR; t=/etc; echo x > $t/passwd')],
+    ['bash conditional binding', () => sh('false && t=$TMPDIR; echo x > $t/passwd')],
+    ['bash backgrounded binding', () => sh('t=$TMPDIR & echo x > $t/passwd')],
+    ['bash unset', () => sh('unset TMPDIR; echo x > $TMPDIR/passwd')]
+  ]
+  for (const [name, run] of withheld) {
+    it(`withholds the hint: ${name}`, () => {
+      const r = run()
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+      expect(r).not.toHaveProperty('tempVarTargets')
+    })
+  }
+
+  it('keeps the hint for the real shapes (single binding, plain reads)', () => {
+    expect(
+      ps(
+        'cd D:/work/app; $t=$env:TEMP; bunx vitest run *> "$t/out.txt"; Get-Content "$t/out.txt" -Tail 5'
+      )?.tempVarTargets
+    ).toEqual([{ target: '$t/out.txt', path: 'c:/Users/dev/AppData/Local/Temp/out.txt' }])
+    expect(
+      ps('git show HEAD:a.cs > $env:TEMP/a.cs; Copy-Item $env:TEMP/a.cs b.cs -Force')
+        ?.tempVarTargets
+    ).toEqual([{ target: '$env:TEMP/a.cs', path: 'c:/Users/dev/AppData/Local/Temp/a.cs' }])
+    expect(sh('make > $TMPDIR/build.log 2>&1')?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/build.log', path: '/tmp/build.log' }
+    ])
+  })
+})
+
+describe('exit review Fable C1 — hint withheld on loop/array/script rebinding', () => {
+  const ps = (command: string) =>
+    analyzeRedirects(
+      command,
+      {
+        cwd: 'd:/proj',
+        tempDirs: ['c:/Users/dev/AppData/Local/Temp', '/tmp'],
+        tempVars: {
+          TEMP: 'C:\\Users\\dev\\AppData\\Local\\Temp',
+          TMP: 'C:\\Users\\dev\\AppData\\Local\\Temp'
+        },
+        shell: 'powershell'
+      },
+      'win32'
+    )
+  const sh = (command: string) =>
+    analyzeRedirects(
+      command,
+      { cwd: '/repo', tempDirs: ['/tmp'], tempVars: { TMPDIR: '/tmp' }, shell: 'posix' },
+      'linux'
+    )
+
+  // Every row is the reviewer's own input: the target stays unresolvable (the
+  // trusted signal) and the reassuring hint must be ABSENT.
+  const withheld: Array<[string, () => ReturnType<typeof analyzeRedirects>]> = [
+    ['bash for loop rebinding', () => sh('for TMPDIR in /out; do echo x > $TMPDIR/a; done')],
+    ['bash select loop rebinding', () => sh('select TMPDIR in /out; do echo x > $TMPDIR/a; done')],
+    [
+      'bash while loop rebinding',
+      () => sh('while read TMPDIR; do echo x > $TMPDIR/a; done < list')
+    ],
+    ['bash until loop rebinding', () => sh('until TMPDIR; do echo x > $TMPDIR/a; done')],
+    ['bash indexed assignment', () => sh('TMPDIR[0]=/out; echo x > $TMPDIR/a')],
+    ['bash loop rebinding a binding', () => sh('t=$TMPDIR; for t in /out; do echo x > $t/a; done')],
+    [
+      'PowerShell foreach rebinding a binding',
+      () => ps("$t = $env:TEMP; foreach ($t in 'd:/out') { 'x' > $t\\a }")
+    ],
+    ['PowerShell dot-sourced script', () => ps(".\\setup.ps1; 'x' > $env:TEMP\\a.dll")],
+    ['PowerShell invoked script', () => ps("& .\\setup.ps1; 'x' > $env:TEMP\\a.dll")],
+    ['PowerShell Import-Module', () => ps("Import-Module .\\m.psm1; 'x' > $env:TEMP\\a.dll")],
+    ['PowerShell dot-source with a space', () => ps(". .\\setup.ps1; 'x' > $env:TEMP\\a.dll")]
+  ]
+  for (const [name, run] of withheld) {
+    it(`withholds the hint: ${name}`, () => {
+      const r = run()
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+      expect(r).not.toHaveProperty('tempVarTargets')
+    })
+  }
+
+  it('keeps the hint for a plain read and a single plain binding', () => {
+    expect(sh('echo x > $TMPDIR/a')?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/a', path: '/tmp/a' }
+    ])
+    expect(sh('t=$TMPDIR; echo x > $t/a')?.tempVarTargets).toEqual([
+      { target: '$t/a', path: '/tmp/a' }
+    ])
+  })
+})
+
+describe('exit review #4 — a temp hint must stay inside the temp root it names', () => {
+  // The reviewer's input: `$TMPDIR/../../../Documents/thesis.docx` used to hint
+  // `c:/Users/me/Documents/thesis.docx` with no protected hit, so the ILD NOT
+  // bullet for `tempVarTargets` cleared an out-of-tree overwrite.
+  const winScope = {
+    cwd: 'C:/proj',
+    tempDirs: [HOST_TEMP],
+    tempVars: { TMPDIR: HOST_TEMP, TEMP: HOST_TEMP, TMP: HOST_TEMP },
+    shell: 'posix' as const
+  }
+  const posixTempScope = {
+    cwd: '/repo',
+    tempDirs: [POSIX_TEMP],
+    tempVars: { TMPDIR: POSIX_TEMP, TEMP: POSIX_TEMP, TMP: POSIX_TEMP },
+    shell: 'posix' as const
+  }
+
+  const escaping = [
+    '$TMPDIR/../x',
+    '${TMP}/../x',
+    '$TMPDIR/../../../Documents/thesis.docx',
+    '$TEMP/sub/../../outside.txt',
+    '$t/../../x'
+  ]
+  for (const target of escaping) {
+    it(`emits no hint for ${target}`, () => {
+      const command = target.startsWith('$t/')
+        ? `t=$TMPDIR; echo x > ${target}`
+        : `echo x > ${target}`
+      const scope = target.startsWith('$t/') ? posixTempScope : winScope
+      const r = analyzeRedirects(command, scope as never, 'win32')
+      expect(r?.unresolvable).toContain(target)
+      expect(r?.allInScope).toBe(false)
+      expect(r).not.toHaveProperty('tempVarTargets')
+    })
+  }
+
+  it('still hints a path that stays inside, and normalises the `..` away', () => {
+    // The positive half: `$TMPDIR/sub/../x.log` IS `<temp>/x.log`, and the hint
+    // says exactly that.
+    const r = analyzeRedirects('echo x > $TMPDIR/sub/../x.log', winScope, 'win32')
+    expect(r?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/sub/../x.log', path: 'c:/Users/dev/AppData/Local/Temp/x.log' }
+    ])
+    // Equal to the root itself is still inside.
+    const atRoot = analyzeRedirects('echo x > $TMPDIR', winScope, 'win32')
+    expect(atRoot?.tempVarTargets).toEqual([
+      { target: '$TMPDIR', path: 'c:/Users/dev/AppData/Local/Temp' }
+    ])
+  })
+
+  it('compares case-insensitively on win32 (the hint is a real path there)', () => {
+    const r = analyzeRedirects(
+      'echo x > $TMPDIR/Out.txt',
+      { ...winScope, tempVars: { TMPDIR: HOST_TEMP.toLowerCase() } } as never,
+      'win32'
+    )
+    expect(r?.tempVarTargets).toEqual([
+      { target: '$TMPDIR/Out.txt', path: `${HOST_TEMP.toLowerCase()}/Out.txt` }
+    ])
+  })
+})
+
+describe('exit review C1 — credential stores are protected components', () => {
+  const stores: Array<[string, string]> = [
+    ['.aws/credentials', '.aws'],
+    ['.netrc', '.netrc'],
+    ['.npmrc', '.npmrc'],
+    ['.pypirc', '.pypirc'],
+    ['.gnupg/private-keys-v1.d', '.gnupg'],
+    ['.docker/config.json', '.docker'],
+    ['.kube/config', '.kube'],
+    ['.gitconfig', '.gitconfig'],
+    ['.config/gcloud/credentials.db', 'gcloud']
+  ]
+  for (const [store, hit] of stores) {
+    it(`${store} is a protected hit when the session cwd is the home directory`, () => {
+      // DeepSeek C1's shape: cwd = home, so the file IS lexically in scope; the
+      // old component list was empty and `allInScope: true` + no hit cleared it.
+      const r = analyzeRedirects(`echo x > ${store}`, { cwd: 'C:/Users/me' }, 'win32')
+      expect(r?.protectedHits).toContain(hit)
+      expect(r?.allInScope).toBe(false)
+    })
+  }
+
+  it('still reports the original agent-control and rc components', () => {
+    const wins = analyzeRedirects('echo x > .ssh/authorized_keys', { cwd: 'C:/Users/me' }, 'win32')
+    expect(wins?.protectedHits).toEqual(['.ssh'])
+    const rc = analyzeRedirects('echo x > .bashrc', { cwd: 'C:/Users/me' }, 'win32')
+    expect(rc?.protectedHits).toEqual(['.bashrc'])
+  })
+
+  it('does not over-match an ordinary project directory that merely starts with a store name', () => {
+    const r = analyzeRedirects('echo x > .awsome/notes.txt', { cwd: 'C:/Users/me' }, 'win32')
+    expect(r?.protectedHits).toEqual([])
+    expect(r?.allInScope).toBe(true)
+  })
+})
+
+describe('exit-fix4 R6 — stream sinks follow the established dialect', () => {
+  const WIN_ROOT = 'c:/fixture/app'
+  const posix = (command: string) => analyzeRedirects(command, { cwd: '/repo' }, 'linux')
+  const win = (command: string, extra: Partial<RedirectScope> = {}) =>
+    analyzeRedirects(command, { cwd: WIN_ROOT, ...extra }, 'win32')
+
+  it('drops POSIX stream spellings for a known POSIX shell on Windows', () => {
+    expect(win('echo x > /dev/stderr', { shell: 'posix' })).toBeNull()
+    expect(win('echo x > /proc/self/fd/1', { shell: 'posix' })).toBeNull()
+  })
+
+  it('keeps the PowerShell file interpretation for /dev/stderr (known dialect)', () => {
+    const r = win('echo x > /dev/stderr; echo harmless > ok.txt', { shell: 'powershell' })
+    expect(r?.targets).toContain('/dev/stderr')
+    expect(r?.targets).toContain('ok.txt')
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('keeps the PowerShell file interpretation for an unknown Windows dialect', () => {
+    const r = win('echo x > /dev/stderr; echo harmless > ok.txt')
+    expect(r?.targets).toContain('/dev/stderr')
+    expect(r?.allInScope).toBe(false)
+  })
+
+  it('still drops the spellings on an ordinary POSIX host and keeps CON on Windows', () => {
+    expect(posix('echo x > /dev/stderr')).toBeNull()
+    expect(win('echo x > CON')).toBeNull()
+  })
+})
+
+describe('exit-fix4 R7 — append aggregation over every write to one resolved path', () => {
+  const posix = (command: string) =>
+    analyzeRedirects(command, { cwd: '/repo', tempDirs: [] }, 'linux')
+
+  it('does not clear a truncating write that follows an append', () => {
+    const r = posix('echo harmless >> ../docs/notes.txt; echo overwritten > ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt' }])
+  })
+
+  it('does not clear a truncating write that precedes an append', () => {
+    const r = posix('echo overwritten > ../docs/notes.txt; echo harmless >> ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt' }])
+  })
+
+  it('keeps append:true when every write appends', () => {
+    const r = posix('echo a >> ../docs/notes.txt; echo b | tee -a ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt', append: true }])
+  })
+
+  it('aggregates mixed redirect/writer forms and normalised spellings', () => {
+    const r = posix('echo a >> ../docs/sub/../notes.txt; tee ../docs/notes.txt')
+    expect(r?.outOfScope).toEqual([{ path: '/docs/notes.txt' }])
+  })
+})
+
+// ── ADR-106 addendum: the quote-blind cross-check ─────────────────────────────
+//
+// The quote-aware scan reads `>` inside quoted text as text, which removes the
+// phantom targets and ALSO hides a real write whenever the lexer is wrong about
+// the quote structure or the text is re-read as shell by something it does not
+// know. The cross-check reads every `>` once more with no quote awareness and
+// names the ones the aware scan dropped that are not cleanly in scope.
+
+describe('quote-blind cross-check (ADR-106 addendum)', () => {
+  const posix = (command: string, extra: Partial<RedirectScope> = {}) =>
+    analyzeRedirects(command, { cwd: '/repo', shell: 'posix', ...extra }, 'linux')
+  const ps = (command: string) =>
+    analyzeRedirects(command, { cwd: 'D:/WorkPlace/ClaudeUI', shell: 'powershell' }, 'win32')
+
+  describe('a hidden write that is not cleanly in scope is named, never cleared', () => {
+    // Each command really writes the file in Git Bash / PowerShell; the quote-aware
+    // scan alone reports nothing (or `allInScope: true`). The hidden name is
+    // spelled out of scope so the cross-check has something it must not clear
+    // (the in-scope spellings of the same shapes are covered further down).
+    const hidden: Array<[string, string]> = [
+      ['echo "$(cat "my file" > /etc/v2)"', '/etc/v2'],
+      ['echo "done: $(date +"%F %T" > /etc/v5)"', '/etc/v5'],
+      [`echo "$(echo '"' > /etc/f2; echo '"')"`, '/etc/f2'],
+      [`echo 'x > /etc/w1' | "$BASH"`, '/etc/w1'],
+      [`echo 'x > /etc/g3' | {sh,}`, '/etc/g3'],
+      [`echo 'x > /etc/g5' | ( $BASH )`, '/etc/g5'],
+      ['echo $((1<<EOF))\necho x > /etc/g1\nEOF', '/etc/g1'],
+      [`find d -name python -exec sh -c 'echo x > /etc/f6' \\;`, '/etc/f6'],
+      // The audit's headline case: the real `> ok.txt` makes the scan report a
+      // target, and `allInScope: true` used to follow.
+      ['echo "$(echo "a " > /etc/passwd)" > ok.txt', '/etc/passwd']
+    ]
+    for (const [command, name] of hidden) {
+      it(`names ${name} in: ${command.replace(/\n/g, '⏎')}`, () => {
+        const r = posix(command)
+        expect(r).not.toBeNull()
+        expect(r?.allInScope).toBe(false)
+        expect(r?.quotedTargets).toContain(name)
+        // It is "probably text", never claimed as a definite write.
+        expect(r?.targets).not.toContain(name)
+        expect(r?.outOfScope).toEqual([])
+        expect(r?.unresolvable).toEqual([])
+      })
+    }
+
+    it('keeps the real target of the headline case in `targets`', () => {
+      const r = posix('echo "$(echo "a " > /etc/passwd)" > ok.txt')
+      expect(r).toEqual({
+        targets: ['ok.txt'],
+        allInScope: false,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: [],
+        quotedTargets: ['/etc/passwd']
+      })
+    })
+
+    it('names the PowerShell spellings the aware scan hid', () => {
+      const tick = ps("Write-Output `'hello > /etc/f10 `'")
+      expect(tick?.allInScope).toBe(false)
+      expect(tick?.quotedTargets).toEqual(['/etc/f10'])
+      const block = ps("& ([scriptblock]::Create('echo x > /etc/w5'))")
+      expect(block?.allInScope).toBe(false)
+      expect(block?.quotedTargets).toEqual(['/etc/w5'])
+    })
+
+    it('names an unresolvable and a protected hidden target too', () => {
+      // `$HOME` cannot be measured from the string.
+      expect(posix(`echo 'x > $HOME/y' | "$BASH"`)?.quotedTargets).toEqual(['$HOME/y'])
+      // A relative name is in scope, but `.bashrc` is protected: the stray closing
+      // quote must never hide the component.
+      expect(posix(`echo 'x > .bashrc' | "$BASH"`)?.quotedTargets).toEqual(['.bashrc'])
+      expect(posix(`echo 'x > .git/config' | "$BASH"`)?.quotedTargets).toEqual(['.git/config'])
+      // Out of scope by `..`.
+      expect(posix(`echo 'x > ../../y' | "$BASH"`)?.quotedTargets).toEqual(['../../y'])
+    })
+
+    it('is a relative name unknowable when the quoted text itself changes directory', () => {
+      const r = posix(`echo 'cd /etc; echo x > passwd' | "$BASH"`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toEqual(['passwd'])
+    })
+
+    it('does not let an unclosed quote after `>` swallow the operators after it', () => {
+      // The `>` is directly followed by the closing quote of its own string; a
+      // reader that took it as an opening quote would eat the real hidden write.
+      const r = posix(`echo 'a >' ; echo "$(echo "b " > /etc/p)"`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toEqual(['/etc/p'])
+    })
+  })
+
+  describe('a hidden target that is cleanly in scope is a harmless phantom (the false-block gain)', () => {
+    // The audit's literal commands name RELATIVE files. A relative file in the
+    // working tree is inside the scope the judge was told about, so nothing
+    // untrue is claimed — and with a real target alongside, `allInScope: true`
+    // is still TRUE.
+    const inScopeHidden = [
+      'echo "$(cat "my file" > v2)"',
+      'echo "done: $(date +"%F %T" > v5)"',
+      `echo "$(echo '"' > f2; echo '"')"`,
+      `echo 'x > w1' | "$BASH"`,
+      `echo 'x > g3' | {sh,}`,
+      `echo 'x > g5' | ( $BASH )`,
+      'echo $((1<<EOF))\necho x > g1\nEOF',
+      `find d -name python -exec sh -c 'echo x > f6' \\;`
+    ]
+    for (const command of inScopeHidden) {
+      it(`says nothing false about: ${command.replace(/\n/g, '⏎')}`, () => {
+        expect(posix(command)?.quotedTargets).toBeUndefined()
+        expect(posix(command) === null || posix(command)?.allInScope === true).toBe(true)
+        // With a real in-scope target next to it the claim stays true.
+        expect(posix(`${command} > ok.txt`)?.allInScope ?? true).toBe(true)
+      })
+    }
+  })
+
+  describe('benign commands keep a clean `allInScope: true` (or no meta at all)', () => {
+    it('is silent on comparison / arrow text in code and prompts', () => {
+      expect(posix('python -c "print(1>0)"')).toBeNull()
+      expect(posix('node -e "a>b"')).toBeNull()
+      expect(posix(`grep '->' f`)).toBeNull()
+      expect(posix('cmd 2>&1')).toBeNull()
+    })
+
+    it('keeps a clean in-scope claim next to quoted text', () => {
+      expect(posix('echo "a > b" > out.txt')).toEqual({
+        targets: ['out.txt'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+      expect(posix('git commit -m "fix: a > b"')?.allInScope).toBe(true)
+      expect(posix('git commit -m "fix: a > b"')?.quotedTargets).toBeUndefined()
+      expect(posix('cd sub && echo "a -> b" > out.txt')?.allInScope).toBe(true)
+    })
+
+    it('keeps a clean claim for a quoted heredoc whose body only mentions a relative name', () => {
+      const r = posix(["cat > notes.md <<'EOF'", 'x > y', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['notes.md'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('reads code arrows and closers as code, not as a glob', () => {
+      // `=> {`, `-> []` and `x>1]` name no path.
+      const body = [
+        "cat > a.js <<'EOF'",
+        'const f = (x) => { return x }',
+        'const g = () => []',
+        'EOF'
+      ]
+      expect(posix(body.join('\n'))?.allInScope).toBe(true)
+      expect(posix('python -c "print([x for x in rows if x>1])"')).toBeNull()
+    })
+
+    it('reports no quotedTargets for any real operator spelling (position matching)', () => {
+      for (const command of [
+        'bun test > a.log',
+        'bun test >> a.log',
+        'bun test >| a.log',
+        'bun test &> a.log',
+        'bun test &>> a.log',
+        'bun test >& a.log',
+        'bun test 2>> a.log',
+        'bun test > a.log 2>&1',
+        'bun test > "my file.log"',
+        'echo x >a.log>b.log'
+      ]) {
+        const r = posix(command)
+        expect(r?.quotedTargets, command).toBeUndefined()
+        expect(r?.allInScope, command).toBe(true)
+      }
+    })
+  })
+
+  describe('the accepted trade-off', () => {
+    it('names a path a quoted heredoc body mentions (it may be a script that runs later)', () => {
+      const r = posix(["cat > notes.md <<'EOF'", 'cp x > /usr/local/bin', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['notes.md'],
+        allInScope: false,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: [],
+        quotedTargets: ['/usr/local/bin']
+      })
+    })
+
+    it('names text the aware scan correctly read as text, because it cannot tell', () => {
+      expect(posix('echo "a > /etc/p"')?.quotedTargets).toEqual(['/etc/p'])
+      expect(posix(`sed 's/>/x/' f`)?.quotedTargets).toEqual(['/x/'])
+    })
+  })
+
+  describe('bounds', () => {
+    it('lists at most MAX_REDIRECT_TARGETS quoted targets, each at most 200 characters', () => {
+      const body = Array.from({ length: 200 }, (_, i) => `a > /etc/f${i}`).join('\n')
+      const r = posix(`echo '${body}' | "$BASH"`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toHaveLength(MAX_REDIRECT_TARGETS)
+      const long = posix(`echo 'x > /etc/${'a'.repeat(300)}' | "$BASH"`)
+      expect(long?.quotedTargets).toEqual([`/etc/${'a'.repeat(195)}…`])
+    })
+
+    it('says nothing (null) rather than guess when thousands of operators are quote-hidden', () => {
+      const body = Array.from({ length: 2500 }, (_, i) => `a >/etc/f${i}`).join('\n')
+      expect(posix(`echo '${body}' > ok.txt`)).toBeNull()
+    })
+
+    it('stays fast on a 64 KB command of identical quote-hidden operators', () => {
+      const body = 'a > b\n'.repeat(10_000)
+      const command = `echo "${body}"`
+      expect(command.length).toBeLessThanOrEqual(MAX_ANALYZE_COMMAND_LENGTH)
+      const started = Date.now()
+      expect(posix(command)).toBeNull()
+      expect(Date.now() - started).toBeLessThan(1000)
+    })
+  })
+
+  describe('`unmeasured` and `quotedTargets` through summarizeRedirects', () => {
+    const scope: RedirectScope = { cwd: '/repo', shell: 'posix' }
+
+    it('lists the spelling of every target whose containment could not be established', () => {
+      const details = redirectTargetDetails('echo x > a.log 2> b.log', scope, 'linux') ?? []
+      const marked = details.map((d) =>
+        d.raw === 'a.log' ? { ...d, reviewRequired: true as const } : d
+      )
+      const summary = summarizeRedirects(marked)
+      expect(summary.allInScope).toBe(false)
+      expect(summary.unmeasured).toEqual(['a.log'])
+      // Everything else is still reported as before.
+      expect(summary.targets).toEqual(['a.log', 'b.log'])
+      expect(summary.outOfScope).toEqual([])
+      expect(summary.unresolvable).toEqual([])
+    })
+
+    it('omits `unmeasured` and `quotedTargets` when empty', () => {
+      const summary = summarizeRedirects(
+        redirectTargetDetails('echo x > a.log', scope, 'linux') ?? []
+      )
+      expect(summary).toEqual({
+        targets: ['a.log'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+      expect('unmeasured' in summary).toBe(false)
+      expect('quotedTargets' in summary).toBe(false)
+    })
+
+    it('reports a quoted detail ONLY in quotedTargets', () => {
+      const details =
+        redirectTargetDetails(`echo 'x > /etc/p' | "$BASH" > ok.txt`, scope, 'linux') ?? []
+      const quoted = details.filter((d) => d.quoted === true)
+      expect(quoted.map((d) => d.raw)).toEqual(['/etc/p'])
+      const summary = summarizeRedirects(details)
+      expect(summary.targets).toEqual(['ok.txt'])
+      expect(summary.outOfScope).toEqual([])
+      expect(summary.unresolvable).toEqual([])
+      expect(summary.protectedHits).toEqual([])
+      expect(summary.quotedTargets).toEqual(['/etc/p'])
+      expect(summary.allInScope).toBe(false)
+    })
+
+    it('drops a quoted detail that measurement proved clean, but not one that is a link', () => {
+      const [detail] = redirectTargetDetails(`echo 'x > /etc/p' | "$BASH"`, scope, 'linux') ?? []
+      const inScope = { ...detail, root: '/repo' }
+      expect(summarizeRedirects([inScope]).quotedTargets).toBeUndefined()
+      expect(summarizeRedirects([inScope]).allInScope).toBe(true)
+      const linked = summarizeRedirects([inScope], new Map([['/etc/p', { symlinked: true }]]))
+      expect(linked.quotedTargets).toEqual(['/etc/p'])
+      expect(linked.symlinked).toBeUndefined()
+      expect(linked.allInScope).toBe(false)
+    })
+
+    it('keeps a reviewRequired quoted detail in quotedTargets', () => {
+      const [detail] = redirectTargetDetails(`echo 'x > /etc/p' | "$BASH"`, scope, 'linux') ?? []
+      const summary = summarizeRedirects([{ ...detail, root: '/repo', reviewRequired: true }])
+      expect(summary.quotedTargets).toEqual(['/etc/p'])
+      expect(summary.allInScope).toBe(false)
+    })
+  })
+
+  it('still returns null when there is no `>` at all, or only sinks', () => {
+    expect(posix('bun run test')).toBeNull()
+    expect(posix('echo "a > /dev/null"')).toBeNull()
+    expect(posix(`echo 'x > /dev/stderr' | "$BASH"`)).toBeNull()
+  })
+})
+
+// ── Judge hardening: writer arguments, wrappers, protected names, phantom names ─
+//
+// A fabricated `allInScope: true` is the worst bug class here, because the judge
+// trusts these facts. Every command below was reproduced with the real exports;
+// the PowerShell behaviours were also confirmed in `pwsh` (a scratch directory).
+
+describe('judge hardening (ADR-106)', () => {
+  const CWD = 'D:/WorkPlace/ClaudeUI'
+  const OUTSIDE = 'C:\\Windows\\x'
+  const OUTSIDE_PATH = 'c:/Windows/x'
+  // bash removes an unquoted backslash, so the POSIX-shell tests spell the path with `/`.
+  const OUT_FWD = 'C:/Windows/x'
+  const ps = (command: string) =>
+    analyzeRedirects(command, { cwd: CWD, shell: 'powershell' }, 'win32')
+  const anyShell = (command: string) => analyzeRedirects(command, { cwd: CWD }, 'win32')
+  const bash = (command: string) => analyzeRedirects(command, { cwd: CWD, shell: 'posix' }, 'win32')
+
+  /** The analysis names the real file out of scope and nothing in scope is claimed. */
+  const expectWritesOutside = (r: ReturnType<typeof analyzeRedirects>, append?: true): void => {
+    expect(r?.allInScope).toBe(false)
+    expect(r?.outOfScope).toEqual([{ path: OUTSIDE_PATH, ...(append ? { append } : {}) }])
+    expect(r?.unresolvable).toEqual([])
+  }
+
+  describe('fix 1 — PowerShell writer arguments are scanned for a path flag first', () => {
+    it('does not read the value of -ErrorAction as the file', () => {
+      const r = ps(`Set-Content -ErrorAction Stop -Path ${OUTSIDE} -Value hi`)
+      expect(r?.targets).toEqual([OUTSIDE])
+      expectWritesOutside(r)
+    })
+
+    it('does not read the value of -ea as the file', () => {
+      const r = ps(`"hi" | Out-File -ea 0 -FilePath ${OUTSIDE}`)
+      expect(r?.targets).toEqual([OUTSIDE])
+      expectWritesOutside(r)
+    })
+
+    it('does not read the second element of a comma list as the file', () => {
+      const r = ps(`Set-Content -Value "a", "b" -Path ${OUTSIDE}`)
+      expect(r?.targets).toEqual([OUTSIDE])
+      expectWritesOutside(r)
+    })
+
+    it('skips the value of every common parameter and value parameter', () => {
+      const valueFlags = [
+        '-ErrorAction',
+        '-EA',
+        '-WarningAction',
+        '-WA',
+        '-InformationAction',
+        '-InfA',
+        '-ErrorVariable',
+        '-EV',
+        '-WarningVariable',
+        '-WV',
+        '-InformationVariable',
+        '-IV',
+        '-OutVariable',
+        '-OV',
+        '-OutBuffer',
+        '-OB',
+        '-PipelineVariable',
+        '-PV',
+        '-Encoding',
+        '-Filter',
+        '-Include',
+        '-Exclude',
+        '-Credential',
+        '-Stream'
+      ]
+      for (const flag of valueFlags) {
+        // Before the path flag, and ahead of a positional path.
+        expectWritesOutside(ps(`Set-Content ${flag} v -Path ${OUTSIDE} -Value hi`))
+        expectWritesOutside(ps(`Set-Content ${flag} v ${OUTSIDE} hi`))
+      }
+    })
+
+    it('reads every path flag spelling: prefix, colon form, -PSPath, en dash', () => {
+      expectWritesOutside(ps(`Set-Content -Pat ${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content -Path:${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content -PSPath ${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content -Lit ${OUTSIDE} -Value hi`))
+      expectWritesOutside(ps(`Set-Content \u2013Path ${OUTSIDE} -Value hi`))
+    })
+
+    it('an explicit path flag wins over a positional (it binds -Value)', () => {
+      expectWritesOutside(ps(`Set-Content hi -Path ${OUTSIDE}`))
+    })
+
+    it('never guesses a positional beside an unrecognised flag', () => {
+      for (const command of [
+        'Set-Content -Bogus foo bar',
+        'Set-Content -Value -Bogus C:\\Windows\\x',
+        'Set-Content -P C:\\Windows\\x'
+      ]) {
+        const r = ps(command)
+        expect(r?.allInScope, command).toBe(false)
+        expect(r?.unresolvable.length, command).toBeGreaterThan(0)
+        expect(r?.outOfScope, command).toEqual([])
+      }
+    })
+
+    it('a splat can supply -Path, so a positional beside it is not the file', () => {
+      const r = ps('Set-Content x @args')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+    })
+
+    it('never guesses a comma-continued positional', () => {
+      const r = ps('Set-Content "a", "b"')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['"a", "b"'])
+    })
+
+    it('a path flag after a parenthesised value is still found', () => {
+      const r = ps(`Set-Content -Value (1) -Path ${OUTSIDE}`)
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+      const positional = ps(`Set-Content x (Get-Date) -Path ${OUTSIDE}`)
+      expect(positional?.allInScope).toBe(false)
+      expect(positional?.unresolvable.length).toBeGreaterThan(0)
+    })
+
+    it('still reads a plain positional, even before a parenthesised argument', () => {
+      expect(ps('Set-Content x (Get-Date)')).toEqual({
+        targets: ['x'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('reads Export-Csv', () => {
+      expectWritesOutside(ps(`Get-Process | Export-Csv -NoTypeInformation -Path ${OUTSIDE}`))
+    })
+  })
+
+  describe('fix 2 — `tee` is Tee-Object in PowerShell, and append is only claimed when true', () => {
+    it('does not claim append for `tee -FilePath x` (it overwrites)', () => {
+      expectWritesOutside(ps(`"new" | tee -FilePath ${OUTSIDE}`))
+      expectWritesOutside(anyShell(`"new" | tee -FilePath ${OUTSIDE}`))
+    })
+
+    it('reads `tee -FilePath:value`', () => {
+      expectWritesOutside(ps(`tee -FilePath:${OUTSIDE}`))
+      expectWritesOutside(anyShell(`tee -FilePath:${OUTSIDE}`))
+    })
+
+    it('keeps the bash reading in a POSIX shell and for a native tee', () => {
+      expectWritesOutside(bash(`tee -a ${OUT_FWD}`), true)
+      // A path or `.exe` spelling is the program, not the alias.
+      expectWritesOutside(ps(`tee.exe -a ${OUTSIDE}`), true)
+    })
+
+    it('claims append for `tee -a` only when both readings append', () => {
+      expectWritesOutside(ps(`tee -a ${OUTSIDE}`), true)
+      expectWritesOutside(anyShell(`tee -a ${OUTSIDE}`), true)
+      expectWritesOutside(anyShell(`tee ${OUTSIDE}`))
+    })
+
+    it('takes -Append, -Append:$true and prefixes; -Append:$false overwrites', () => {
+      expectWritesOutside(ps(`Out-File -Append ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Out-File -Append:$true ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Out-File -App ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`"x" | Tee-Object -a ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Export-Csv -Append -Path ${OUTSIDE}`), true)
+      expectWritesOutside(ps(`Out-File -Append:$false ${OUTSIDE}`))
+    })
+
+    it('only Add-Content always appends; `Set-Content -Value -Append` does not', () => {
+      expectWritesOutside(ps(`Add-Content -Path ${OUTSIDE} -Value x`), true)
+      expectWritesOutside(ps(`ac ${OUTSIDE} x`), true)
+      expectWritesOutside(ps(`Set-Content -Path ${OUTSIDE} -Value -Append`))
+      expectWritesOutside(ps(`Set-Content -Value "-Append" -Path ${OUTSIDE}`))
+    })
+
+    it('keeps the bash append flag to the letters tee defines', () => {
+      // `-FilePath` contains an `a`, and is not an append.
+      expectWritesOutside(bash(`tee -FilePath ${OUT_FWD}`))
+    })
+  })
+
+  describe('fix 3 — `$null` is a sink only in PowerShell', () => {
+    it('is an unresolvable target in bash (`null=/etc/passwd; echo x > $null`)', () => {
+      const r = bash('null=/etc/passwd; echo x > $null')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['$null'])
+    })
+
+    it('is an unresolvable target when the shell is unknown', () => {
+      const r = anyShell('echo x > $null')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['$null'])
+    })
+
+    it('is still dropped for a known PowerShell shell', () => {
+      expect(ps('echo x > $null')).toBeNull()
+      expect(ps('cmd 2>$null')).toBeNull()
+    })
+
+    it('is dropped in no spelling of a POSIX shell, in the quote-blind cross-check too', () => {
+      expect(bash(`echo 'x > $null' | "$BASH"`)?.quotedTargets).toEqual(['$null'])
+    })
+  })
+
+  describe('fix 4 — writer coverage gaps', () => {
+    it('brace expansion in a writer target is unresolvable and keeps its protected hits', () => {
+      const r = bash('echo | tee {.git,x}/config > out.log')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['{.git,x}/config'])
+      expect(r?.protectedHits).toEqual(['.git'])
+      expect(r?.targets).toEqual(['{.git,x}/config', 'out.log'])
+      const home = bash('echo | tee ~/{.bashrc,.profile}')
+      expect(home?.unresolvable).toEqual(['~/{.bashrc,.profile}'])
+      expect(home?.protectedHits).toEqual(['.bashrc', '.profile'])
+    })
+
+    it('a brace in a later argument cannot hide the argument after it', () => {
+      const r = bash('echo | tee {a,b} C:\\Windows\\x')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable.length).toBeGreaterThan(0)
+    })
+
+    it('finds the command word behind a wrapper (stdbuf)', () => {
+      for (const command of [
+        `echo | stdbuf -oL tee ${OUT_FWD} > out.log`,
+        `echo | stdbuf -o L tee ${OUT_FWD} > out.log`,
+        `echo | stdbuf --output=L tee ${OUT_FWD} > out.log`
+      ]) {
+        expectWritesOutside(bash(command))
+      }
+    })
+
+    it('finds the command word behind every new wrapper', () => {
+      const wrapped = [
+        'ionice -c 3',
+        'ionice -n5',
+        'nice -n 5',
+        'nice -5',
+        'nice --adjustment=5',
+        'setsid',
+        'setsid -w',
+        'chrt -r 10',
+        'taskset -c 0',
+        'taskset 0x1',
+        'busybox',
+        'builtin',
+        'sudo stdbuf -oL',
+        'stdbuf -oL ionice -c 3 nice'
+      ]
+      for (const wrapper of wrapped) {
+        expectWritesOutside(bash(`echo > out.log; ${wrapper} tee ${OUT_FWD}`))
+      }
+    })
+
+    it('xargs: the writer is found, and the names its stdin supplies are unreadable', () => {
+      for (const wrapper of ['xargs', 'xargs -n1', 'xargs -n 1', 'xargs -0 -r']) {
+        const r = bash(`echo > out.log; ${wrapper} tee ${OUT_FWD}`)
+        expect(r?.allInScope, wrapper).toBe(false)
+        expect(r?.outOfScope, wrapper).toEqual([{ path: OUTSIDE_PATH }])
+        expect(r?.unresolvable.length, wrapper).toBeGreaterThan(0)
+      }
+    })
+
+    it('xargs -I{}: the `{}` placeholder is a brace the writer cannot read', () => {
+      const r = bash('echo > out.log; xargs -I{} tee {}')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['{}'])
+    })
+
+    it('an unknown wrapper option makes the writer target unreadable, never a guess', () => {
+      for (const command of [
+        `echo > out.log; stdbuf --bogus tee ${OUT_FWD}`,
+        `echo > out.log; ionice -Z 3 tee ${OUT_FWD}`,
+        `echo > out.log; setsid -q tee ${OUT_FWD}`,
+        `echo > out.log; chrt --bogus 1 tee ${OUT_FWD}`
+      ]) {
+        const r = bash(command)
+        expect(r?.allInScope, command).toBe(false)
+        expect(r?.unresolvable.length, command).toBeGreaterThan(0)
+      }
+    })
+
+    it('finds the command word after shell keywords', () => {
+      const commands = [
+        `if true; then tee ${OUT_FWD} <<< hi; fi`,
+        `if true; then :; else tee ${OUT_FWD} <<< hi; fi`,
+        `if false; then :; elif true; then tee ${OUT_FWD} <<< hi; fi`,
+        `for i in 1; do tee ${OUT_FWD} <<< hi; done`,
+        `while true; do tee ${OUT_FWD} <<< hi; done`,
+        `! tee ${OUT_FWD} <<< hi`,
+        `{ tee ${OUT_FWD} <<< hi; }`,
+        `time tee ${OUT_FWD} <<< hi`
+      ]
+      for (const command of commands) {
+        // Alone, and beside another in-scope redirect (the shape that used to clear).
+        expectWritesOutside(bash(command))
+        expectWritesOutside(bash(`echo > out.log; ${command}`))
+      }
+    })
+
+    it('does not read a keyword-looking ARGUMENT as a command position', () => {
+      expect(bash('echo then tee out.log')).toBeNull()
+      expect(bash('echo "then" tee out.log')).toBeNull()
+    })
+  })
+
+  describe('fix 5 — more shell rc and git credential names are protected', () => {
+    for (const name of ['.zshenv', '.zprofile', '.bash_login', '.git-credentials', '.gitmodules']) {
+      it(`${name} is a protected hit`, () => {
+        const r = bash(`echo x > ${name}`)
+        expect(r?.protectedHits).toEqual([name])
+        expect(r?.allInScope).toBe(false)
+        const upper = bash(`echo x > ${name.toUpperCase()}`)
+        expect(upper?.protectedHits).toEqual([name.toUpperCase()])
+      })
+    }
+
+    it('keeps every earlier entry', () => {
+      for (const name of ['.bashrc', '.zshrc', '.profile', '.bash_profile', '.ssh', '.git']) {
+        expect(bash(`echo x > ${name}`)?.protectedHits).toEqual([name])
+      }
+    })
+  })
+
+  describe('fix 6 — glob-bearing quote-hidden phantoms are literal names', () => {
+    it('a Python return annotation in a quoted heredoc is no write', () => {
+      const r = bash(["cat > x.py <<'EOF'", 'def f() -> list[int]:', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['x.py'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('a markdown block quote is no write', () => {
+      const r = bash(["cat > n.md <<'EOF'", '> **Note**', 'EOF'].join('\n'))
+      expect(r).toEqual({
+        targets: ['n.md'],
+        allInScope: true,
+        outOfScope: [],
+        unresolvable: [],
+        protectedHits: []
+      })
+    })
+
+    it('says nothing at all when nothing else remains', () => {
+      expect(bash(`echo 'def f() -> list[int]:' | "$BASH"`)).toBeNull()
+      expect(bash(`echo '> **Note**' | "$BASH"`)).toBeNull()
+    })
+
+    it('a hidden glob that can name a protected or agent-control file stays named', () => {
+      for (const glob of ['.bash*', 'CLAUDE.m?', '*', '*.md', '[C]LAUDE.md', '{a,.git}']) {
+        const r = bash(["cat > n.md <<'EOF'", `> ${glob}`, 'EOF'].join('\n'))
+        expect(r?.allInScope, glob).toBe(false)
+        expect(r?.quotedTargets, glob).toEqual([glob])
+      }
+    })
+
+    it("a hidden path-shaped or expanding token keeps today's behaviour", () => {
+      for (const token of ['a/list[int]', '$f*', '~x*', '%A*%']) {
+        const r = bash(["cat > n.md <<'EOF'", `> ${token}`, 'EOF'].join('\n'))
+        expect(r?.allInScope, token).toBe(false)
+        expect(r?.quotedTargets, token).toEqual([token])
+      }
+    })
+
+    it('a REAL glob target stays unresolvable', () => {
+      const r = bash('echo x > list[int]')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.unresolvable).toEqual(['list[int]'])
+    })
+
+    it('follows the normal in-scope drop: a phantom after `cd` out of scope is still named', () => {
+      const r = bash(['cd C:/Windows', "cat > n.md <<'EOF'", '> **Note**', 'EOF'].join('\n'))
+      expect(r?.allInScope).toBe(false)
+    })
+  })
+})
+
+// The audit of ADR-106 §1: `cd` tracked as a set of possible directories. Every
+// command below was reproduced with the real exports before it was fixed.
+describe('judge hardening (ADR-106 §1) — cd tracking audit', () => {
+  const BS = '\\'
+  const SCOPE = {
+    cwd: 'D:/WorkPlace/proj',
+    tempDirs: ['C:/Users/dev/AppData/Local/Temp'],
+    additionalDirectories: [] as string[]
+  }
+  type Dialect = 'posix' | 'powershell' | undefined
+  const run = (command: string, shell?: Dialect) =>
+    analyzeRedirects(command, { ...SCOPE, ...(shell ? { shell } : {}) }, 'win32')
+  /** Not claimed in scope: a write outside it, or one we could not place. */
+  const expectNotInScope = (command: string, shell?: Dialect): void => {
+    const r = run(command, shell)
+    const label = `${shell ?? 'no shell'}: ${command}`
+    expect(r, label).not.toBeNull()
+    expect(r?.allInScope, label).toBe(false)
+    expect(r!.outOfScope.length + r!.unresolvable.length, label).toBeGreaterThan(0)
+  }
+  /** Measured clean: every target resolved inside the scope. */
+  const expectInScope = (command: string, shell?: Dialect): void => {
+    const r = run(command, shell)
+    const label = `${shell ?? 'no shell'}: ${command}`
+    expect(r?.allInScope, label).toBe(true)
+    expect(r?.outOfScope, label).toEqual([])
+    expect(r?.unresolvable, label).toEqual([])
+  }
+  const ALL: Dialect[] = [undefined, 'powershell', 'posix']
+  const NOT_POSIX: Dialect[] = [undefined, 'powershell']
+
+  describe('false allows', () => {
+    it('1: a PowerShell trailing backslash does not swallow the `;`', () => {
+      for (const command of [
+        `cd ..${BS}; echo hi > x.txt`,
+        `cd D:${BS}WorkPlace${BS}other${BS}; echo hi > x.txt`,
+        `cd ${BS}; echo hi > x.txt`,
+        `Set-Location ..${BS}; echo hi > x.txt`
+      ]) {
+        for (const shell of NOT_POSIX) expectNotInScope(command, shell)
+      }
+    })
+
+    it('1: in bash the same `\\;` IS an escape, so the cd segment really is one command', () => {
+      // `cd '..;' echo hi` fails; the redirect still opens x.txt in the cwd.
+      expectInScope(`cd ..${BS}; echo hi > x.txt`, 'posix')
+    })
+
+    it('1: a trailing backslash with no directory change is just a path', () => {
+      expectInScope(`ls C:${BS}Windows${BS}; echo hi > x.txt`, 'powershell')
+    })
+
+    it('3: a function defined before a cd runs from wherever it is called', () => {
+      for (const command of [
+        'f() { echo hi > x.txt; }; cd ..; f',
+        'function f { echo hi > x.txt; }; cd ..; f'
+      ]) {
+        for (const shell of ALL) expectNotInScope(command, shell)
+      }
+    })
+
+    it('3: a trap body runs at exit, after the cd', () => {
+      for (const shell of ALL) {
+        const r = run("trap 'echo done > log.txt' EXIT; cd ..", shell)
+        expect(r?.allInScope, String(shell)).toBe(false)
+        expect([...(r?.unresolvable ?? []), ...(r?.quotedTargets ?? [])]).toContain('log.txt')
+      }
+    })
+
+    it('3: a PowerShell script block kept in a variable runs later too', () => {
+      expectNotInScope('$sb = { echo hi > x.txt }; cd ..; & $sb', 'powershell')
+    })
+
+    it('3: a function with no directory change anywhere stays measurable', () => {
+      expectInScope('f() { echo hi > x.txt; }; f', 'posix')
+      expectInScope('trap "rm -f t" EXIT; echo hi > x.txt', 'posix')
+    })
+
+    it('4: Invoke-Expression and iex change the location in the current scope', () => {
+      for (const command of [
+        "iex 'cd ..'; echo hi > x.txt",
+        "Invoke-Expression 'Set-Location ..'; echo hi > x.txt"
+      ]) {
+        for (const shell of NOT_POSIX) expectNotInScope(command, shell)
+      }
+    })
+
+    it('4: a `$()` inside double quotes runs in the current scope in PowerShell only', () => {
+      const command = 'Write-Host "$(Set-Location ..)"; echo hi > x.txt'
+      expectNotInScope(command, 'powershell')
+      expectNotInScope(command, undefined)
+      // bash runs it in a subshell: the redirect still lands in the cwd.
+      expectInScope(command, 'posix')
+    })
+
+    it('4: a splatted or variable location change cannot be placed', () => {
+      expectNotInScope("$p = @{Path='..'}; Set-Location @p; echo hi > x.txt", 'powershell')
+      expectNotInScope("$p = @{Path='..'}; Set-Location -Path @p; echo hi > x.txt", 'powershell')
+      expectNotInScope('Set-Location $d; echo hi > x.txt', 'powershell')
+    })
+
+    it('5: env --chdir / -C run the wrapped command somewhere else', () => {
+      for (const command of ['env --chdir=.. tee x.txt', 'env -C .. tee x.txt']) {
+        for (const shell of ALL) expectNotInScope(command, shell)
+      }
+      expectNotInScope('sudo -D .. tee x.txt', 'posix')
+    })
+
+    it('5: an `-C` that belongs to the wrapped command is no chdir', () => {
+      expectInScope('env grep -C 3 pat > out.txt', 'posix')
+      expectInScope('env FOO=1 tee x.txt', 'posix')
+    })
+
+    it('5: pushd +N / -N rotate the stack to an earlier directory', () => {
+      for (const arg of ['+1', '-1']) {
+        for (const shell of ALL) {
+          expectNotInScope(`pushd .. && pushd proj && pushd ${arg} && echo hi > x.txt`, shell)
+        }
+      }
+    })
+  })
+
+  describe('false blocks', () => {
+    it('6: a pipeline after `&&` runs only when the `cd` succeeded', () => {
+      for (const command of [
+        'cd src && npm test 2>&1 | tee ../out.log',
+        'cd src && npm test 2>&1 | tail -5 > ../out.log'
+      ]) {
+        for (const shell of ALL) expectInScope(command, shell)
+      }
+    })
+
+    it('6: a group after `&&` runs only when the `cd` succeeded', () => {
+      for (const command of ['cd src && (make > ../out.log)', 'cd src && { make; } > ../out.log']) {
+        for (const shell of ALL) expectInScope(command, shell)
+      }
+    })
+
+    it('6: a member of a longer pipeline inherits the gate too', () => {
+      expectInScope('cd src && make | tee a.log | tee ../b.log', 'posix')
+    })
+
+    it('6: without the `&&` gate the failed `cd` still counts', () => {
+      for (const command of [
+        'cd src; npm test | tee ../out.log',
+        'cd src\nnpm test | tee ../out.log',
+        'cd src || { make; } > ../out.log',
+        'cd src && true; npm test | tee ../out.log'
+      ]) {
+        const r = run(command, 'posix')
+        expect(r?.allInScope, command).toBe(false)
+        expect(r?.outOfScope, command).toEqual([{ path: 'd:/WorkPlace/out.log' }])
+      }
+    })
+
+    it('6: the part of the list after a gated pipeline still sees the failed `cd`', () => {
+      const r = run('cd src && npm test 2>&1 | tee ../out.log; echo x > ../y', 'posix')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.outOfScope).toEqual([{ path: 'd:/WorkPlace/y' }])
+    })
+
+    it('7: a loop word in a heredoc body, a quoted string or a message is prose', () => {
+      for (const command of [
+        ["cd docs && cat > README.md <<'EOF'", 'A guide for users', 'EOF'].join('\n'),
+        `cd src && printf '%s' "waiting for build" > out.txt`,
+        `cd docs && git commit -m 'refactor: wait until done' && git log > ../log.txt`
+      ]) {
+        for (const shell of ALL) expectInScope(command, shell)
+      }
+    })
+
+    it('7: a real loop still poisons the directory', () => {
+      for (const command of [
+        'for d in a b; do cd $d; echo hi > x.txt; done',
+        'while true; do cd ..; echo hi > x.txt; done',
+        'until false; do cd ..; echo hi > x.txt; done',
+        'cd docs && if true; then for f in a; do cd ..; done; fi; echo hi > x.txt'
+      ]) {
+        for (const shell of ALL) expectNotInScope(command, shell)
+      }
+      expectNotInScope("foreach ($d in 'a','b') { cd $d; echo hi > x.txt }", 'powershell')
+    })
+
+    it('8: a comment after a `cd` does not change where the cd lands', () => {
+      const commented = run('cd src # note\necho hi > ../x.txt', 'posix')
+      const plain = run('cd src\necho hi > ../x.txt', 'posix')
+      expect(commented).toEqual(plain)
+      // Still placed (the failed-cd branch is the out-of-scope one), never unresolvable.
+      expect(commented?.unresolvable).toEqual([])
+      expect(commented?.outOfScope).toEqual([{ path: 'd:/WorkPlace/x.txt' }])
+    })
+
+    it('8: a comment with an apostrophe no longer makes the whole command quote-blind', () => {
+      for (const shell of ALL) expectInScope(`cd src && echo hi > ../x.txt # it's a note`, shell)
+    })
+
+    it('8: a `>` inside a comment is still named, never cleared', () => {
+      const r = run('echo hi > ok.txt # > /etc/p', 'posix')
+      expect(r?.allInScope).toBe(false)
+      expect(r?.quotedTargets).toEqual(['/etc/p'])
+    })
+
+    it('8: `cd # note` is a `cd` with no argument (HOME)', () => {
+      expectNotInScope('cd # note\necho hi > x.txt', 'posix')
+    })
+
+    it('8: a PowerShell block comment keeps the quote-blind fallback', () => {
+      expectNotInScope("cd src <# it's #>; echo hi > ../x.txt", 'powershell')
+    })
+  })
+})
+
+describe('judge hardening (ADR-106 §4) — the temp hint is withheld when the variable may be rebound', () => {
+  const TEMP_DIR = 'C:/Users/dev/AppData/Local/Temp'
+  const ps = (command: string) =>
+    analyzeRedirects(
+      command,
+      {
+        cwd: 'D:/work/app',
+        tempDirs: [TEMP_DIR],
+        tempVars: { TEMP: TEMP_DIR, TMP: TEMP_DIR },
+        shell: 'powershell'
+      },
+      'win32'
+    )
+  const sh = (command: string) =>
+    analyzeRedirects(
+      command,
+      { cwd: '/repo', tempDirs: ['/tmp'], tempVars: { TMPDIR: '/tmp' }, shell: 'posix' },
+      'linux'
+    )
+
+  /** The target stays unresolvable (the trusted signal) and the hint is ABSENT. */
+  const expectWithheld = (r: ReturnType<typeof analyzeRedirects>): void => {
+    expect(r?.allInScope).toBe(false)
+    expect(r?.unresolvable.length).toBeGreaterThan(0)
+    expect(r).not.toHaveProperty('tempVarTargets')
+  }
+  /** The hint is present and names exactly one temp path. */
+  const expectHint = (r: ReturnType<typeof analyzeRedirects>, path: string | RegExp): void => {
+    expect(r?.allInScope).toBe(false)
+    expect(r?.tempVarTargets).toHaveLength(1)
+    const actual = r?.tempVarTargets?.[0].path ?? ''
+    if (typeof path === 'string') expect(actual).toBe(path)
+    else expect(actual).toMatch(path)
+  }
+
+  describe('1 — a binding that may not run is no binding (bash, any line)', () => {
+    const cases: Array<[string, string]> = [
+      [
+        'if body (the audit input)',
+        'if false; then\nHOME=$TMPDIR\nfi\necho x > $HOME/Documents/thesis.docx'
+      ],
+      ['if / then on separate lines', 'if false\nthen\nT=$TMPDIR\nfi\necho x > $T/a'],
+      ['elif body', 'if a; then :\nelif b; then\nT=$TMPDIR\nfi\necho x > $T/a'],
+      ['else body', 'if a; then :\nelse\nT=$TMPDIR\nfi\necho x > $T/a'],
+      ['else-if nesting', 'if a; then :\nelse if b; then\nT=$TMPDIR\nfi; fi\necho x > $T/a'],
+      ['case arm on one line', 'case $x in\n a) T=$TMPDIR ;;\nesac\necho x > $T/a'],
+      ['case arm body on its own line', 'case $x in\n a)\n T=$TMPDIR\n ;;\nesac\necho x > $T/a'],
+      ['loop body', 'while a; do\nT=$TMPDIR\ndone\necho x > $T/a'],
+      ['line ending in &&', 'false &&\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in && then a comment', 'false && # why\n\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in ||', 'false ||\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in a pipe', 'echo a |\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in a backslash after &&', 'test -d /x && \\\nT=$TMPDIR\necho x > $T/a'],
+      ['line ending in a backslash (an argument of echo)', 'echo hi \\\nT=$TMPDIR\necho x > $T/a']
+    ]
+    it.each(cases)('withholds the hint: %s', (_name, command) => {
+      expectWithheld(sh(command))
+    })
+
+    it('still hints a binding that always runs, before or after such a construct', () => {
+      for (const command of [
+        'T=$TMPDIR\necho x > $T/a',
+        'if true; then echo a; fi\nT=$TMPDIR\necho x > $T/a',
+        'case x in a) :;; esac\nT=$TMPDIR\necho x > $T/a',
+        '# note\nT=$TMPDIR\necho x > $T/a',
+        'sleep 1 &\nT=$TMPDIR\necho x > $T/a',
+        'echo if; T=$TMPDIR\necho x > $T/a',
+        '"if" a; T=$TMPDIR\necho x > $T/a'
+      ]) {
+        expectHint(sh(command), '/tmp/a')
+      }
+    })
+
+    it('applies to PowerShell: a body in braces, a backtick continuation', () => {
+      expectWithheld(ps("if ($false) {\n$t = $env:TEMP\n}\n'x' > $t\\a"))
+      expectWithheld(ps("Write-Host a `\n$t = $env:TEMP\n'x' > $t\\a"))
+      expectHint(ps("$t = $env:TEMP\n'x' > $t\\a"), 'c:/Users/dev/AppData/Local/Temp/a')
+    })
+  })
+
+  describe('2 — PowerShell rebinding forms', () => {
+    const forms: Array<[string, string]> = [
+      ['multi-assignment', String.raw`$t, $u = 'C:\x', 1`],
+      ['parenthesised multi-assignment', String.raw`($t, $u) = 'C:\x', 1`],
+      ['multi-assignment with the name last', String.raw`$u, $t = 1, 'C:\x'`],
+      ['global-qualified assignment', String.raw`$global:t = 'C:\x'`],
+      ['script-qualified assignment', String.raw`$script:t = 'C:\x'`],
+      ['variable-drive assignment', '$' + String.raw`{variable:t} = 'C:\x'`],
+      ['Set-Item variable:t', String.raw`Set-Item variable:t C:\x`],
+      ['Set-Item -Path Variable:\\t', String.raw`Set-Item -Path Variable:\t -Value C:\x`],
+      ['New-Item variable:t -Force', String.raw`New-Item variable:t -Value 'C:\x' -Force`],
+      ['Set-Variable -Name', String.raw`Set-Variable -Name t -Value C:\x`],
+      ['Set-Variable positional', String.raw`Set-Variable t C:\x`],
+      ['sv', String.raw`sv t C:\x`],
+      ['set (alias of Set-Variable)', String.raw`set t C:\x`],
+      ['New-Variable', String.raw`New-Variable -Name t -Value C:\x -Force`],
+      ['nv', String.raw`nv t C:\x -Force`],
+      ['Remove-Variable -Name', 'Remove-Variable -Name t'],
+      ['Remove-Variable positional', 'Remove-Variable t'],
+      ['rv', 'rv t'],
+      ['Clear-Variable', 'Clear-Variable t'],
+      ['clv', 'clv t'],
+      ['PSVariable.Set', String.raw`$ExecutionContext.SessionState.PSVariable.Set('t', 'C:\x')`],
+      ['a variable cmdlet inside a subexpression', String.raw`Write-Host "$(Set-Variable t C:\x)"`],
+      ['a cmdlet called through a variable', String.raw`$c = 'Set-Variable'; & $c t C:\x`]
+    ]
+    it.each(forms)('withholds the hint: %s', (_name, rebind) => {
+      expectWithheld(ps(`$t = $env:TEMP; ${rebind}; 'x' > $t\\a`))
+    })
+
+    it('does not bind a constant or read-only variable ($null, $HOME)', () => {
+      expectWithheld(ps("$null = $env:TEMP; 'x' > $null\\Windows\\x"))
+      expectWithheld(ps("$HOME = $env:TEMP; 'x' > $HOME\\Documents\\a"))
+    })
+  })
+
+  describe('3 — a current-scope runner is read through its quoting and backslashes (bash)', () => {
+    const cases: Array<[string, string]> = [
+      ['\\eval', String.raw`\eval "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['"eval"', String.raw`"eval" "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['ev\\al', String.raw`ev\al "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['\\declare', String.raw`\declare TMP""DIR=/etc; echo x > $TMPDIR/x`],
+      ['\\export', String.raw`\export TMP""DIR=/etc; echo x > $TMPDIR/x`],
+      ['\\command eval', String.raw`\command eval "TMP""DIR=/etc"; echo x > $TMPDIR/x`],
+      ['builtin source', 'builtin source ./env.sh; echo x > $TMPDIR/x'],
+      ['a command named by a variable', 'c=eval; $c "TMP""DIR=/etc"; echo x > $TMPDIR/x']
+    ]
+    it.each(cases)('withholds the hint: %s', (_name, command) => {
+      expectWithheld(sh(command))
+    })
+  })
+
+  describe('4 — `$null` is an ordinary variable in a POSIX shell', () => {
+    it('an unbound `$null` target is unresolvable with no temp hint', () => {
+      for (const command of ['echo x > $null', 'echo x > $null/a', 'echo x 2> $null']) {
+        expectWithheld(sh(command))
+      }
+    })
+
+    it('is a plain variable: a binding to the temp dir is read like any other', () => {
+      expectHint(sh('null=$TMPDIR; echo x > $null/a'), '/tmp/a')
+    })
+  })
+
+  describe('5 — keywords count only at command position', () => {
+    it('keeps the hint when the words are arguments, quoted text or heredoc bodies', () => {
+      for (const command of [
+        "find . -name '*.ts' > $TMPDIR/files.txt",
+        'git diff . > $TMPDIR/d.patch',
+        'git commit -m "fix tests for the parser" > $TMPDIR/out.txt',
+        'echo eval source for while . > $TMPDIR/out.txt',
+        "cat <<'EOF' > $TMPDIR/out.txt\nfor eval export source . while\nEOF",
+        'ls ./x > $TMPDIR/out.txt',
+        'set -euo pipefail; make > $TMPDIR/out.txt',
+        'export CI=1; npm test > $TMPDIR/out.txt',
+        'export CI=1 PATH="$PATH:/x"; npm test > $TMPDIR/out.txt',
+        't=$TMPDIR; export t; echo x > $t/out.txt'
+      ]) {
+        expectHint(sh(command), /^\/tmp\/(?:files\.txt|d\.patch|out\.txt)$/)
+      }
+    })
+
+    it('keeps the hint in PowerShell for `.`, `select` and ForEach-Object', () => {
+      const path = 'c:/Users/dev/AppData/Local/Temp/a.txt'
+      expectHint(ps('Get-ChildItem . | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('Get-ChildItem . | select -First 5 | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('Get-ChildItem | foreach { $_ } | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('Get-ChildItem | ForEach-Object { $_ } | Out-File $env:TEMP\\a.txt'), path)
+      expectHint(ps('git commit -m "for the parser" > $env:TEMP\\a.txt'), path)
+    })
+
+    it('still withholds on a command-position runner, loop or rebinding declaration', () => {
+      for (const command of [
+        'export TMPDIR=/etc; echo x > $TMPDIR/x',
+        'export; echo x > $TMPDIR/x',
+        'export -p; echo x > $TMPDIR/x',
+        'set -a; echo x > $TMPDIR/x',
+        'set -o allexport; echo x > $TMPDIR/x',
+        'declare -x; echo x > $TMPDIR/x',
+        'n=TMPDIR; export "$n=/etc"; echo x > $TMPDIR/x',
+        'declare -n r=TMPDIR; r=/etc; echo x > $TMPDIR/x',
+        'f() { local TMPDIR; echo x > $TMPDIR/a; }; f',
+        'getopts a TMPDIR; echo x > $TMPDIR/x',
+        ': ${TMPDIR:=/etc}; echo x > $TMPDIR/x',
+        'unset TMPDIR; echo x > $TMPDIR/x',
+        'source ./env.sh; echo x > $TMPDIR/x',
+        '. ./env.sh; echo x > $TMPDIR/x',
+        'eval "$x"; echo x > $TMPDIR/x',
+        'for f in a b; do echo x > $TMPDIR/$f; done',
+        'while read l; do echo x > $TMPDIR/$l; done < list'
+      ]) {
+        expectWithheld(sh(command))
+      }
+      expectWithheld(ps("foreach ($x in 1..3) { $x }; 'x' > $env:TEMP\\a.txt"))
+      expectWithheld(ps("iex 'x'; 'x' > $env:TEMP\\a.txt"))
+    })
+
+    it('a child shell or a bash command substitution cannot rebind this shell', () => {
+      expectHint(sh("bash -c 'eval foo' > $TMPDIR/x"), '/tmp/x')
+      expectHint(sh('echo "$(eval foo)" > $TMPDIR/x'), '/tmp/x')
+    })
   })
 })

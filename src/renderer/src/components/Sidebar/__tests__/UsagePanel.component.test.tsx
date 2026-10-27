@@ -45,14 +45,21 @@ function makeUsage(overrides: Partial<AccountUsage> = {}): AccountUsage {
   }
 }
 
+// The store stub is module state shared by every describe below: the ChatGPT
+// ones fill `chatgptLimits`, and a leftover account block adds progress bars to
+// the Claude-only tests. Reset it before every test, not per describe.
+beforeEach(() => {
+  store.chatgptLimits = null
+  store.loadChatgptLimits.mockClear()
+})
+afterEach(cleanup)
+
 /** The bar labelled `label`, or null when the panel didn't render one. */
 function bar(label: string): HTMLElement | null {
   return document.querySelector(`[data-testid="UsageProgressBar"][data-id="${label}"]`)
 }
 
 describe('UsagePanel — weekly per-model bars', () => {
-  afterEach(cleanup)
-
   it('renders one bar per sevenDayModels entry, labelled from the server', () => {
     render(
       <UsagePanel
@@ -129,12 +136,6 @@ describe('UsagePanel — weekly per-model bars', () => {
  * would be useless the moment there is more than one.
  */
 describe('UsagePanel — the ChatGPT section', () => {
-  beforeEach(() => {
-    store.chatgptLimits = null
-    store.loadChatgptLimits.mockClear()
-  })
-  afterEach(cleanup)
-
   // The durations are the backend's own: the block's labels are derived from
   // them (S3c), so a fixture without them describes no real plan.
   const limits = {
@@ -299,12 +300,6 @@ describe('UsagePanel — the ChatGPT section', () => {
  * statements — the first one is useful, the second is an apology.
  */
 describe('UsagePanel — ChatGPT credits', () => {
-  beforeEach(() => {
-    store.chatgptLimits = null
-    store.loadChatgptLimits.mockClear()
-  })
-  afterEach(cleanup)
-
   const account = (over: Record<string, unknown>): Record<string, unknown> => ({
     'acct-biz': {
       email: 'biz@example.test',
@@ -417,12 +412,6 @@ describe('UsagePanel — ChatGPT credits', () => {
  * is resolved — an unnamed heading would be worse than none.
  */
 describe('UsagePanel — the Claude account heading', () => {
-  beforeEach(() => {
-    store.chatgptLimits = null
-    store.loadChatgptLimits.mockClear()
-  })
-  afterEach(cleanup)
-
   it('names the account above the Claude meters', () => {
     render(
       <UsagePanel
