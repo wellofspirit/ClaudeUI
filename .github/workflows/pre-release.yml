@@ -129,7 +129,7 @@ jobs:
           # Node. Revisit once a Node 24.x lands with the libuv fix.
           node-version: 24.15.0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       # Not on Windows: extracting the ~700 MB cache (hundreds of thousands of
       # small files) took 161-223 s, and `bun install` from a warm cache was no
@@ -382,7 +382,7 @@ jobs:
           # Pinned to match the other jobs — see the build matrix note.
           node-version: 24.15.0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Cache bun install
         uses: actions/cache@v6

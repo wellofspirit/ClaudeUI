@@ -28,7 +28,8 @@ runs:
         # cascading vitest workers to "failed". Kept identical here for parity.
         node-version: 24.15.0
 
-    - uses: oven-sh/setup-bun@v2
+    # Third-party actions are pinned by commit: tags are movable. Re-vet before bumping.
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
     # Not on Windows: extracting the cache took longer than a fresh download
     # (measured for pre-release.yml, 2026-10-03).
