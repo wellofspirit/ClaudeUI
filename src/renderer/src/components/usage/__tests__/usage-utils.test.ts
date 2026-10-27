@@ -6,7 +6,11 @@ import {
   buildSeriesColorMap,
   creditLimitUsedPercent,
   formatCreditAmount,
+  formatContextLength,
   formatCreditLimitSummary,
+  formatMoney,
+  formatPricePerM,
+  formatUtcMonthDay,
   formatReset,
   formatResetDate,
   formatResetRelative,
@@ -447,5 +451,34 @@ describe('formatResetDate', () => {
   it('draws a dash rather than a guess when there is no reset to show', () => {
     expect(formatResetDate(null, now)).toBe('—')
     expect(formatResetDate('not a date', now)).toBe('—')
+  })
+})
+
+describe('OpenRouter formatters', () => {
+  it('groups money', () => {
+    expect(formatMoney(1019.75)).toBe('$1,019.75')
+    expect(formatMoney(204.7, 0)).toBe('$205')
+    expect(formatMoney(0)).toBe('$0.00')
+  })
+
+  it('scales a per-million price to its magnitude, and keeps free distinct from unknown', () => {
+    expect(formatPricePerM(0.0039)).toBe('0.0039')
+    expect(formatPricePerM(0.14)).toBe('0.14')
+    expect(formatPricePerM(0.195)).toBe('0.195')
+    expect(formatPricePerM(15)).toBe('15.00')
+    expect(formatPricePerM(0)).toBe('0')
+    expect(formatPricePerM(null)).toBe('—')
+  })
+
+  it('prints a context window as model pages do', () => {
+    expect(formatContextLength(1_048_576)).toBe('1M')
+    expect(formatContextLength(262_144)).toBe('262K')
+    expect(formatContextLength(128_000)).toBe('128K')
+    expect(formatContextLength(null)).toBe('—')
+  })
+
+  it('reads a reset instant in UTC, not the viewer zone', () => {
+    expect(formatUtcMonthDay('2026-11-01T00:00:00Z')).toBe('Nov 1')
+    expect(formatUtcMonthDay('not a date')).toBe('—')
   })
 })
