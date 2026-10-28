@@ -462,6 +462,7 @@ function claudePicksOnAliases(
 export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
+import { sessionWorkdir } from '../lib/session-workdir'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -3996,7 +3997,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setGitStatus: (routingId, status) =>
     set((state) => {
       const session = state.sessions[routingId]
-      if (session?.cwd) setCapped(gitStatusCache, session.cwd, status, GIT_STATUS_CACHE_MAX)
+      const workdir = session ? sessionWorkdir(session) : ''
+      if (workdir) setCapped(gitStatusCache, workdir, status, GIT_STATUS_CACHE_MAX)
       return { sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status })) }
     }),
 
@@ -4310,22 +4312,23 @@ harnessStore.followRunChanges((changed) => {
 })
 
 // ---------------------------------------------------------------------------
-// Terminal selectors (derive from active session's cwd)
+// Terminal selectors (derive from active session's workdir)
 // ---------------------------------------------------------------------------
 
 function getActiveCwd(state: SessionState): string | null {
   const id = state.activeSessionId
-  return id ? (state.sessions[id]?.cwd ?? null) : null
+  const session = id ? state.sessions[id] : undefined
+  return session ? sessionWorkdir(session) || null : null
 }
 
-/** Terminal tabs for the active session's cwd. */
+/** Terminal tabs for the active session's workdir. */
 export function selectVisibleTerminalTabs(state: SessionState): TerminalTab[] {
   const cwd = getActiveCwd(state)
   if (!cwd) return []
   return state.terminalGroups[normalizeCwd(cwd)]?.tabs ?? []
 }
 
-/** Active terminal ID for the active session's cwd. */
+/** Active terminal ID for the active session's workdir. */
 export function selectActiveTerminalId(state: SessionState): string | null {
   const cwd = getActiveCwd(state)
   if (!cwd) return null

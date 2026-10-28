@@ -1,6 +1,7 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { Fragment, useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { findSessionInfo } from '../../../lib/session-history-load'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import { useSidebarCollapsed } from '../../SessionView'
 import { WindowControls } from '../../WindowControls'
 import {
@@ -31,6 +32,7 @@ import { toggleTerminalPanel } from '../../terminal/toggle-terminal'
 import { useTerminalAvailability } from '../../terminal/terminal-availability'
 import { useIdeAvailability } from '../ide-availability'
 import { IdeUnavailableDialog } from '../IdeUnavailableDialog'
+import { VSCodeFolderMenu } from './VSCodeFolderMenu'
 import { shortModelName } from '../../usage/usage-utils'
 import { COST_UNKNOWN, formatCostOrUnknown, formatCostUsd } from '../../../utils/cost'
 import { ideLaunchPageHtml } from '../../../../../shared/ide-launch-page'
@@ -120,7 +122,13 @@ interface BarControl {
    * stateful components that render themselves — the pill IS the bar form — so
    * their descriptors carry a menu row alone.
    */
-  bar?: { testId: string; content: React.JSX.Element; className?: string }
+  bar?: {
+    testId: string
+    content: React.JSX.Element
+    className?: string
+    /** A second half drawn beside the button, joined to it as one split control. */
+    split?: React.JSX.Element
+  }
   /** This control's OWN gate: the single condition both surfaces read. */
   available: boolean
   onSelect: () => void
@@ -210,6 +218,11 @@ const VSCODE_BAR_MARK = (
 
 export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
+  // What VS Code opens: the worktree the session works in, else its cwd. A
+  // worktree with a known parent repo also gets the ▾ folder choice.
+  const ideFolder = useActiveSession(sessionWorkdir)
+  const worktreeInfo = useActiveSession((s) => s.worktreeInfo)
+  const ideParent = worktreeInfo?.gitRoot ? worktreeInfo : null
   const sdkSessionId = useActiveSession((s) => s.status.sessionId)
   const statusLine = useActiveSession((s) => s.statusLine)
   const fallbackCost = useActiveSession((s) => s.status.totalCostUsd)
@@ -335,97 +348,100 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
    *     the tab in silence — the operator just declined, and has nothing to be
    *     told.
    */
-  const handleOpenVSCode = useCallback(async (): Promise<void> => {
-    if (!cwd) return
-    if (!isWeb) {
-      window.api.openInVSCode(cwd)
-      return
-    }
-    setIdeError(null)
-    if (ideAvailability && !ideAvailability.originAllowed) {
-      setIdeDialog({ reason: ideAvailability.originReason ?? 'origin-not-allowed' })
-      return
-    }
-    if (ideAvailability && !ideAvailability.probe.ok) {
-      setIdeDialog({
-        reason: ideAvailability.probe.reason,
-        ...(ideAvailability.probe.detail ? { detail: ideAvailability.probe.detail } : {})
-      })
-      return
-    }
-    let ceremonyRan = false
-    if (ideAvailability?.needsStepUp) {
-      // The web bundle installs this before React mounts; the desktop build has
-      // no ceremony at all, hence the optional access rather than an import —
-      // TerminalPanel's exact idiom. A build WITHOUT the global falls through to
-      // the old order, where the invoke gate runs the ceremony instead: degrading
-      // to the previous behaviour beats a button that silently does nothing.
-      const request = (
-        window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }
-      ).__STEP_UP_REQUEST__
-      if (request) {
-        const granted = await request('ide:mint-entry')
-        // Cancelled or failed. Silent, exactly as a cancelled ceremony has always
-        // been: the operator declined, and has nothing to be told.
-        if (!granted) return
-        ceremonyRan = true
-        // The answer this flow was gated on is now stale in the one field that
-        // matters, and nothing else re-queries between here and the mint.
-        await refreshIdeAvailability()
+  const handleOpenVSCode = useCallback(
+    async (folder: string): Promise<void> => {
+      if (!folder) return
+      if (!isWeb) {
+        window.api.openInVSCode(folder)
+        return
       }
-    }
-    const tab = window.open('', '_blank')
-    if (!tab) {
-      // NEVER navigate this tab instead: the operator would lose the session
-      // they are in to a workbench they did not ask to replace it with.
-      setIdeError(
-        ceremonyRan
-          ? // Not a pop-up-blocker problem to solve: the ceremony consumed the
-            // click's user gesture. The grant is held now, so the next click
-            // opens the tab synchronously and works.
-            'VS Code unlocked — click the button again to open it.'
-          : 'Allow pop-ups for this site to open VS Code.'
-      )
-      return
-    }
-    try {
-      // So the round-trip isn't a bare tab — and not a bare WHITE tab on a dark
-      // client: the shared launch page (spinner + label, the session's scheme),
-      // static variant since this tab is navigated by us, not by a refresh.
-      // Best-effort by construction: a tab we cannot write to is still a tab we
-      // can navigate.
-      tab.document.write(ideLaunchPageHtml(ideThemeKind, 'static'))
-      tab.document.close()
-    } catch {
-      /* see above */
-    }
-    try {
-      const { url } = await window.api.ideMintEntry(cwd, ideThemeKind)
-      // RELATIVE by contract — this page's own origin is the one the entry
-      // cookie is scoped to, so the host never has to guess what it is.
-      tab.location.href = url
-    } catch (err) {
+      setIdeError(null)
+      if (ideAvailability && !ideAvailability.originAllowed) {
+        setIdeDialog({ reason: ideAvailability.originReason ?? 'origin-not-allowed' })
+        return
+      }
+      if (ideAvailability && !ideAvailability.probe.ok) {
+        setIdeDialog({
+          reason: ideAvailability.probe.reason,
+          ...(ideAvailability.probe.detail ? { detail: ideAvailability.probe.detail } : {})
+        })
+        return
+      }
+      let ceremonyRan = false
+      if (ideAvailability?.needsStepUp) {
+        // The web bundle installs this before React mounts; the desktop build has
+        // no ceremony at all, hence the optional access rather than an import —
+        // TerminalPanel's exact idiom. A build WITHOUT the global falls through to
+        // the old order, where the invoke gate runs the ceremony instead: degrading
+        // to the previous behaviour beats a button that silently does nothing.
+        const request = (
+          window as unknown as { __STEP_UP_REQUEST__?: (channel: string) => Promise<boolean> }
+        ).__STEP_UP_REQUEST__
+        if (request) {
+          const granted = await request('ide:mint-entry')
+          // Cancelled or failed. Silent, exactly as a cancelled ceremony has always
+          // been: the operator declined, and has nothing to be told.
+          if (!granted) return
+          ceremonyRan = true
+          // The answer this flow was gated on is now stale in the one field that
+          // matters, and nothing else re-queries between here and the mint.
+          await refreshIdeAvailability()
+        }
+      }
+      const tab = window.open('', '_blank')
+      if (!tab) {
+        // NEVER navigate this tab instead: the operator would lose the session
+        // they are in to a workbench they did not ask to replace it with.
+        setIdeError(
+          ceremonyRan
+            ? // Not a pop-up-blocker problem to solve: the ceremony consumed the
+              // click's user gesture. The grant is held now, so the next click
+              // opens the tab synchronously and works.
+              'VS Code unlocked — click the button again to open it.'
+            : 'Allow pop-ups for this site to open VS Code.'
+        )
+        return
+      }
       try {
-        tab.close()
+        // So the round-trip isn't a bare tab — and not a bare WHITE tab on a dark
+        // client: the shared launch page (spinner + label, the session's scheme),
+        // static variant since this tab is navigated by us, not by a refresh.
+        // Best-effort by construction: a tab we cannot write to is still a tab we
+        // can navigate.
+        tab.document.write(ideLaunchPageHtml(ideThemeKind, 'static'))
+        tab.document.close()
       } catch {
-        /* the operator may have closed it already */
+        /* see above */
       }
-      if (!isIdeUnavailableError(err)) {
-        console.warn('[TopBar] IDE entry mint failed:', err)
-        return
+      try {
+        const { url } = await window.api.ideMintEntry(folder, ideThemeKind)
+        // RELATIVE by contract — this page's own origin is the one the entry
+        // cookie is scoped to, so the host never has to guess what it is.
+        tab.location.href = url
+      } catch (err) {
+        try {
+          tab.close()
+        } catch {
+          /* the operator may have closed it already */
+        }
+        if (!isIdeUnavailableError(err)) {
+          console.warn('[TopBar] IDE entry mint failed:', err)
+          return
+        }
+        const reason = ideUnavailableReason(err)
+        if (!reason) {
+          // A typed refusal that lost its suffix. There is no honest copy for
+          // "unknown", so say the little that is true rather than picking one.
+          console.warn('[TopBar] IDE refusal carried no reason:', err)
+          setIdeError('Could not open VS Code.')
+          return
+        }
+        const detail = await ideFailureDetail(reason)
+        setIdeDialog({ reason, ...(detail ? { detail } : {}) })
       }
-      const reason = ideUnavailableReason(err)
-      if (!reason) {
-        // A typed refusal that lost its suffix. There is no honest copy for
-        // "unknown", so say the little that is true rather than picking one.
-        console.warn('[TopBar] IDE refusal carried no reason:', err)
-        setIdeError('Could not open VS Code.')
-        return
-      }
-      const detail = await ideFailureDetail(reason)
-      setIdeDialog({ reason, ...(detail ? { detail } : {}) })
-    }
-  }, [cwd, isWeb, ideAvailability, ideThemeKind, refreshIdeAvailability])
+    },
+    [isWeb, ideAvailability, ideThemeKind, refreshIdeAvailability]
+  )
 
   /**
    * Every collapsible control, in the bar's own left-to-right order, described
@@ -446,7 +462,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
       {
         id: 'vscode',
         tier: 2,
-        label: 'Open in VS Code',
+        label: ideParent ? 'Open worktree in VS Code' : 'Open in VS Code',
         menuTestId: 'TopBar.overflowMenuVSCode',
         menuIcon: VSCODE_MENU_MARK,
         bar: {
@@ -459,16 +475,38 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               {VSCODE_BAR_MARK}
               <span>VSCode</span>
             </>
-          )
+          ),
+          ...(ideParent
+            ? {
+                split: (
+                  <VSCodeFolderMenu worktree={ideParent} onOpen={(f) => void handleOpenVSCode(f)} />
+                )
+              }
+            : {})
         },
         // On the desktop the `vscode://` deep link is always available; on web
         // only once the host says the owner turned the remote IDE on (a null
         // "still asking" renders nothing rather than flashing in and out).
         // Origin / CLI refusals deliberately do NOT hide it: ADR-064 rules those
         // must be EXPLAINED, so the control stays and opens the dialog.
-        available: !!cwd && (!isWeb || ideAvailability?.allowed === true),
-        onSelect: () => void handleOpenVSCode()
+        available: !!ideFolder && (!isWeb || ideAvailability?.allowed === true),
+        onSelect: () => void handleOpenVSCode(ideFolder)
       },
+      // The ⋯ form of the ▾ choice: a menu row cannot hold a submenu, so the
+      // worktree session gets a second row instead.
+      ...(ideParent
+        ? [
+            {
+              id: 'vscode-parent',
+              tier: 2 as const,
+              label: 'Open parent repo in VS Code',
+              menuTestId: 'TopBar.overflowMenuVSCodeParent',
+              menuIcon: VSCODE_MENU_MARK,
+              available: !isWeb || ideAvailability?.allowed === true,
+              onSelect: () => void handleOpenVSCode(ideParent.gitRoot)
+            }
+          ]
+        : []),
       {
         id: 'terminal',
         tier: 2,
@@ -547,6 +585,8 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
     return all.filter((control) => control.available)
   }, [
     cwd,
+    ideFolder,
+    ideParent,
     capSkills,
     canUseMcp,
     engineId,
@@ -1090,17 +1130,31 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               a label or a mark. The width rule alone decides which of the two
               surfaces the user sees; `!isMobileCtx` went with the device branch
               it belonged to. */}
-          {barControls.map((control) => (
-            <button
-              key={control.id}
-              data-testid={control.bar.testId}
-              onClick={control.onSelect}
-              title={control.keyHint ? `${control.label} ${control.keyHint}` : control.label}
-              className={`${control.tier === 1 ? TIER1_HIDE : TIER2_HIDE} flex gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default ${control.bar.className ?? 'items-center'}`}
-            >
-              {control.bar.content}
-            </button>
-          ))}
+          {barControls.map((control) => {
+            const hide = control.tier === 1 ? TIER1_HIDE : TIER2_HIDE
+            const { split } = control.bar
+            const button = (
+              <button
+                data-testid={control.bar.testId}
+                onClick={control.onSelect}
+                title={control.keyHint ? `${control.label} ${control.keyHint}` : control.label}
+                className={`${split ? '' : hide} flex gap-1.5 px-2 py-1 ${split ? 'rounded-l-md pr-1.5' : 'rounded-md'} text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default ${control.bar.className ?? 'items-center'}`}
+              >
+                {control.bar.content}
+              </button>
+            )
+            if (!split) return <Fragment key={control.id}>{button}</Fragment>
+            return (
+              <div
+                key={control.id}
+                data-testid={`${control.bar.testId}Group`}
+                className={`${hide} flex items-stretch rounded-md`}
+              >
+                {button}
+                {split}
+              </div>
+            )
+          })}
           {/* TIER 1 — the first 344px the bar gives back. Both pills are
               ACTIONS, not inert state: `GitBranchPill` opens the app's only
               fetch / pull / push / switch dropdown and `WorktreePill` copies a
