@@ -260,7 +260,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onTerminalDetached: () => () => {},
 
     // Worktree
-    createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
+    createWorktree: (cwd, name, opts) => unwrap('worktree:create', cwd, name, opts),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
     removeWorktree: (worktreePath, branch, gitRoot) =>

@@ -1076,6 +1076,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     expect(groupIds()).not.toContain('trust')
     expect(screen.queryByTestId('OtherEnginePermissionsRow')).toBeNull()
     expect(groupIds()).toEqual([
+      'worktrees',
       'autonomy',
       'permissions',
       'judge',
@@ -1090,6 +1091,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     renderView({ activePage: 'sessions' })
     await settle()
     expect(groupIds()).toEqual([
+      'worktrees',
       'autonomy',
       'permissions',
       'session-tools',

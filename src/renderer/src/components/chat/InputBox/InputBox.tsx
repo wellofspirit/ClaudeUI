@@ -12,6 +12,11 @@ import {
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
 import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
+import {
+  createPendingWorktree,
+  onDraftSendRequest,
+  WorktreeCreateError
+} from '../../../lib/worktree-start'
 import { voiceController } from '../../../lib/voice/voice-controller'
 import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
 import {
@@ -736,6 +741,7 @@ export function InputBox(): React.JSX.Element {
         // read still in flight would then lose the race and show only this turn.
         await awaitReloadBeforeSpawn(activeSessionId)
         assertModelResolved(activeSessionId)
+        await createPendingWorktree(activeSessionId)
         const { sessions } = useSessionStore.getState()
         const session = sessions[activeSessionId]
         const opts = resolveSessionSdkOptions(activeSessionId)
@@ -794,6 +800,7 @@ export function InputBox(): React.JSX.Element {
     if (!sdkActive) {
       await awaitReloadBeforeSpawn(activeSessionId)
       assertModelResolved(activeSessionId)
+      await createPendingWorktree(activeSessionId)
       const { sessions } = useSessionStore.getState()
       const session = sessions[activeSessionId]
       const opts = resolveSessionSdkOptions(activeSessionId)
@@ -1020,6 +1027,7 @@ export function InputBox(): React.JSX.Element {
 
   // Not wrapped in useCallback: deps include `text`, which changes on every
   // keystroke, so memoization gives no benefit. View is unmemoized too.
+  const spawningSendRef = useRef<string | null>(null)
   const handleSend = async (): Promise<void> => {
     if (harnessBlocked) return
     const action = resolveSendAction({
@@ -1067,6 +1075,13 @@ export function InputBox(): React.JSX.Element {
         // disconnect, spawn error) the draft + attachments are left intact and
         // the error surfaced, so the prompt is never silently lost (gpt#15).
         const sessionId = activeSessionId!
+        // A second send while the first is still spawning this session (making its worktree,
+        // starting the engine) would spawn it twice: the draft stays, and the first send clears it.
+        const spawning = action.type === 'send-prompt' && !sdkActive
+        if (spawning) {
+          if (spawningSendRef.current === sessionId) return
+          spawningSendRef.current = sessionId
+        }
         try {
           if (action.type === 'queue-prompt') {
             await window.api.sendPrompt(sessionId, action.prompt, action.attachments)
@@ -1074,10 +1089,14 @@ export function InputBox(): React.JSX.Element {
             await doSend(action.prompt, action.attachments)
           }
         } catch (err) {
+          // The welcome screen already shows why the worktree failed, with its own buttons.
+          if (err instanceof WorktreeCreateError) return
           useSessionStore
             .getState()
             .addError(resolveRekeyed(sessionId), `Failed to send message: ${err}`)
           return
+        } finally {
+          if (spawning) spawningSendRef.current = null
         }
         // The engine can report its stable session id WHILE the send is in
         // flight — Codex rekeys on `thread/start`, which lands well before
@@ -1097,6 +1116,19 @@ export function InputBox(): React.JSX.Element {
       }
     }
   }
+
+  // The welcome screen's Retry / Send without a worktree buttons send the draft from here.
+  const handleSendRef = useRef(handleSend)
+  useEffect(() => {
+    handleSendRef.current = handleSend
+  })
+  useEffect(
+    () =>
+      onDraftSendRequest((routingId) => {
+        if (routingId === activeSessionId) void handleSendRef.current()
+      }),
+    [activeSessionId]
+  )
 
   const handleEditQueued = useCallback(async () => {
     await recallQueuedInto(activeSessionId, setText)

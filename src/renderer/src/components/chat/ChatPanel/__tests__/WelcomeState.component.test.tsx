@@ -19,18 +19,31 @@ import type { DirEntry, DirectoryGroup } from '../../../../../../shared/types'
 
 // ── Store mock (WelcomeState only reads four slices) ─────────────────
 
-const { store } = vi.hoisted(() => ({
+const { store, active } = vi.hoisted(() => ({
+  // The active session the welcome screen reads: no directory chosen yet by default.
+  active: {
+    cwd: '',
+    pendingWorktree: null as null | {
+      enabled: boolean
+      name: string
+      phase: 'idle' | 'creating' | 'failed'
+      error?: string
+    },
+    isGitRepo: false,
+    sdkActive: false
+  },
   store: {
     directories: [] as DirectoryGroup[],
     createNewSession: vi.fn(),
-    setWorktreeInfo: vi.fn(),
+    setPendingWorktree: vi.fn(),
+    settings: { startInWorktree: false },
     activeSessionId: 'route-1',
     welcomeBrowseToken: 0
   }
 }))
 
 vi.mock('../../../../stores/session-store', () => ({
-  useActiveSession: (selector: (s: { cwd: string }) => unknown) => selector({ cwd: '' }),
+  useActiveSession: (selector: (s: typeof active) => unknown) => selector(active),
   useSessionStore: (selector: (s: typeof store) => unknown) => selector(store)
 }))
 
@@ -81,6 +94,7 @@ function openDropdown(): void {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  Object.assign(active, { cwd: '', pendingWorktree: null, isGitRepo: false, sdkActive: false })
   store.directories = [KNOWN_DIR]
   // 0 is below every token the sidebar can hand out, so nothing auto-browses.
   store.welcomeBrowseToken = 0
@@ -234,6 +248,115 @@ describe('WelcomeState — sidebar browse request', () => {
 
     expect(screen.queryByTestId('DirectoryBrowserDialog')).toBeNull()
     expect(screen.getByTestId('WelcomeState.selectDirectory')).toBeTruthy()
+  })
+})
+
+describe('WelcomeState — worktree choice before a directory is picked', () => {
+  beforeEach(() => stubApi('win32'))
+
+  it('creates no worktree itself: it hands the toggle and name to the new session', async () => {
+    store.directories = [KNOWN_DIR]
+    render(<WelcomeState />)
+    fireEvent.click(screen.getByTestId('WelcomeState.worktreeToggle'))
+    fireEvent.change(screen.getByTestId('WelcomeState.worktreeName'), {
+      target: { value: 'my-tree' }
+    })
+    openDropdown()
+    fireEvent.click(screen.getByTestId('WelcomeState.directory'))
+
+    expect(store.createNewSession).toHaveBeenCalledWith(expect.any(String), KNOWN_DIR.cwd)
+    expect(
+      (window as unknown as { api: { createWorktree: ReturnType<typeof vi.fn> } }).api
+        .createWorktree
+    ).not.toHaveBeenCalled()
+    expect(store.setPendingWorktree).toHaveBeenCalledWith(expect.any(String), {
+      enabled: true,
+      name: 'my-tree',
+      nameTouched: true
+    })
+  })
+
+  it('keeps a name typed before the directory was picked even if the toggle was never touched', () => {
+    // The global default is on, so the toggle shows on and is left alone; only the name is typed.
+    store.settings = { startInWorktree: true }
+    store.directories = [KNOWN_DIR]
+    render(<WelcomeState />)
+    fireEvent.change(screen.getByTestId('WelcomeState.worktreeName'), {
+      target: { value: 'my-tree' }
+    })
+    openDropdown()
+    fireEvent.click(screen.getByTestId('WelcomeState.directory'))
+
+    expect(store.setPendingWorktree).toHaveBeenCalledWith(expect.any(String), {
+      name: 'my-tree',
+      nameTouched: true
+    })
+    store.settings = { startInWorktree: false }
+  })
+
+  it('leaves the new session at its project default when the toggle was not touched', () => {
+    store.directories = [KNOWN_DIR]
+    render(<WelcomeState />)
+    openDropdown()
+    fireEvent.click(screen.getByTestId('WelcomeState.directory'))
+
+    expect(store.createNewSession).toHaveBeenCalledTimes(1)
+    expect(store.setPendingWorktree).not.toHaveBeenCalled()
+  })
+})
+
+describe('WelcomeState — worktree toggle once a directory is chosen', () => {
+  beforeEach(() => {
+    stubApi('win32')
+    Object.assign(active, {
+      cwd: 'D:/work/known',
+      pendingWorktree: { enabled: true, name: 'calm-river', phase: 'idle' },
+      isGitRepo: true
+    })
+  })
+
+  it('shows the toggle, the name and the hint for a git directory that has not spawned', () => {
+    render(<WelcomeState />)
+    expect(screen.getByTestId('WelcomeState.worktreeToggle').getAttribute('aria-checked')).toBe(
+      'true'
+    )
+    expect(screen.getByTestId('WelcomeState.worktreeName')).toHaveValue('calm-river')
+    expect(screen.getByTestId('WelcomeState.worktreeHint')).toBeTruthy()
+  })
+
+  it('toggling and typing write to the session, the typed name marked as touched', () => {
+    render(<WelcomeState />)
+    fireEvent.click(screen.getByTestId('WelcomeState.worktreeToggle'))
+    expect(store.setPendingWorktree).toHaveBeenLastCalledWith('route-1', { enabled: false })
+
+    fireEvent.change(screen.getByTestId('WelcomeState.worktreeName'), {
+      target: { value: 'mine' }
+    })
+    expect(store.setPendingWorktree).toHaveBeenLastCalledWith('route-1', {
+      name: 'mine',
+      nameTouched: true
+    })
+  })
+
+  it('hides the toggle for a directory that is not a git repository', () => {
+    active.isGitRepo = false
+    render(<WelcomeState />)
+    expect(screen.queryByTestId('WelcomeState.worktreeToggle')).toBeNull()
+  })
+
+  it('hides the toggle once the session has spawned', () => {
+    active.sdkActive = true
+    render(<WelcomeState />)
+    expect(screen.queryByTestId('WelcomeState.worktreeToggle')).toBeNull()
+  })
+
+  it('shows "Creating worktree…" in place of the toggle while it is being made', () => {
+    active.pendingWorktree = { enabled: true, name: 'calm-river', phase: 'creating' }
+    render(<WelcomeState />)
+    expect(screen.getByTestId('WelcomeState.worktreeCreating')).toHaveTextContent(
+      'Creating worktree…'
+    )
+    expect(screen.queryByTestId('WelcomeState.worktreeToggle')).toBeNull()
   })
 })
 

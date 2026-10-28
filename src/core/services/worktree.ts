@@ -1,7 +1,9 @@
 import { simpleGit, type SimpleGit } from 'simple-git'
+import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { promisify } from 'util'
 import type {
   WorktreeInfo,
   WorktreeStatus,
@@ -38,6 +40,7 @@ import {
 } from './worktree-root'
 
 const LOG = 'worktree'
+const execFileAsync = promisify(execFile)
 const WORKTREES_DIR = '.claude/worktrees'
 const UNCOMMITTED_SAMPLE_MAX = 20
 const COMMIT_SAMPLE_MAX = 10
@@ -97,7 +100,48 @@ function requireRepoRoot(cwd: string): string {
   return root
 }
 
-export async function createWorktree(cwd: string, name: string): Promise<WorktreeInfo> {
+/** How long `git fetch origin` may run before `base: 'default'` gives up and branches from HEAD. */
+const FETCH_TIMEOUT_MS = 15_000
+
+/**
+ * The start point of a `base: 'default'` worktree: a fresh `origin/<default>`, or null (with a log)
+ * when there is no remote, the fetch fails or times out, or `origin/HEAD` is not set. Never
+ * prompts for credentials.
+ */
+async function resolveDefaultBase(gitRoot: string): Promise<string | null> {
+  try {
+    // Not through simple-git: a custom `env` is refused there whenever the user's own
+    // environment sets GIT_EDITOR, GIT_ASKPASS and the like.
+    await execFileAsync('git', ['fetch', 'origin'], {
+      cwd: gitRoot,
+      timeout: FETCH_TIMEOUT_MS,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }
+    })
+    const git = simpleGit(gitRoot)
+    const branch = await getRemoteDefaultBranch(git)
+    if (!branch) {
+      logger.info(LOG, 'No origin/HEAD; creating the worktree from HEAD')
+      return null
+    }
+    // origin/HEAD can dangle (the remote branch was deleted or renamed): fall back, don't fail.
+    await git.raw(['rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`])
+    return `origin/${branch}`
+  } catch (err) {
+    logger.warn(LOG, 'Could not fetch origin; creating the worktree from HEAD', err)
+    return null
+  }
+}
+
+/**
+ * `base: 'head'` (the default) branches from the repo root's HEAD; `'default'` from the remote's
+ * default branch (`origin/<branch>`, fetched first), falling back to HEAD when there is none.
+ */
+export async function createWorktree(
+  cwd: string,
+  name: string,
+  opts?: { base?: 'head' | 'default' | null }
+): Promise<WorktreeInfo> {
   validateWorktreeName(name)
 
   // From a worktree's cwd this is still the MAIN root, so worktrees never nest.
@@ -115,11 +159,22 @@ export async function createWorktree(cwd: string, name: string): Promise<Worktre
   }
   const branchName = `worktree-${name}`
 
-  // Get current HEAD commit before creating worktree
-  const headCommit = (await git.revparse(['HEAD'])).trim()
+  const remoteBase = opts?.base === 'default' ? await resolveDefaultBase(gitRoot) : null
+  const startPoint = remoteBase ?? 'HEAD'
+  // The commit the worktree starts from, read before it is created
+  const headCommit = (await git.revparse([startPoint])).trim()
 
-  // Create the worktree with a new branch from HEAD
-  await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD'])
+  // Create the worktree with a new branch from the start point. A remote-tracking start point
+  // would make the branch track it (a plain push would then target the default branch).
+  await git.raw([
+    'worktree',
+    'add',
+    '-b',
+    branchName,
+    ...(remoteBase ? ['--no-track'] : []),
+    worktreePath,
+    startPoint
+  ])
   // A "not a worktree" answer cached for this path (the 30 s negative cache) must not hide the
   // marker of the worktree that now exists.
   forgetLinkedWorktrees([worktreePath])

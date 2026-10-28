@@ -2618,7 +2618,15 @@ interface FileAPI {
     sessionKey: string,
     filePath: string
   ): Promise<{ src: string } | { error: string }>
-  createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
+  /**
+   * `opts.base`: `'head'` (default) branches from HEAD; `'default'` from the remote's default
+   * branch (HEAD when there is none).
+   */
+  createWorktree(
+    cwd: string,
+    name: string,
+    opts?: { base?: 'head' | 'default' }
+  ): Promise<WorktreeInfo>
   getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
   /**
    * Legacy single-path removal (session-delete cleanup modal). Same mechanics as
