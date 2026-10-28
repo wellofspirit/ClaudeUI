@@ -389,8 +389,27 @@ function unavailable(code: JudgeRouteUnavailableCode, reason: string): Unavailab
 // ---------------------------------------------------------------------------
 
 /** `ClaudeUI/<version> (<platform> <release>; <arch>)`, the shape opencode's own agent sends. */
-function chatgptUserAgent(appVersion: string): string {
+export function chatgptUserAgent(appVersion: string): string {
   return `ClaudeUI/${appVersion} (${os.platform()} ${os.release()}; ${os.arch()})`
+}
+
+/**
+ * The headers every ChatGPT backend call carries for `token`: the judge's and the usage-limits
+ * read's (`shared-providers/chatgpt-rate-limits.ts`). The residency header is present only for an
+ * account whose token pins one.
+ */
+export function chatgptRequestHeaders(
+  token: CodexInjectionToken,
+  appVersion: string
+): Record<string, string> {
+  const residency = computeResidencyFromToken(token.accessToken)
+  return {
+    Authorization: `Bearer ${token.accessToken}`,
+    'ChatGPT-Account-Id': token.chatgptAccountId,
+    originator: 'opencode',
+    'User-Agent': chatgptUserAgent(appVersion),
+    ...(residency ? { 'x-openai-internal-codex-residency': residency } : {})
+  }
 }
 
 /**
@@ -405,19 +424,12 @@ async function chatgptRoute(ctx: RouteContext, accountId?: string): Promise<Judg
 
   const build = async (token: CodexInjectionToken): Promise<ResolvedJudgeRoute> => {
     const identity = await deps.chatgptIdentity(token.vaultAccountId)
-    const residency = computeResidencyFromToken(token.accessToken)
     return {
       kind: 'chatgpt',
       wire: 'responses',
       url: CHATGPT_RESPONSES_URL,
       model,
-      headers: {
-        Authorization: `Bearer ${token.accessToken}`,
-        'ChatGPT-Account-Id': token.chatgptAccountId,
-        originator: 'opencode',
-        'User-Agent': chatgptUserAgent(deps.appVersion),
-        ...(residency ? { 'x-openai-internal-codex-residency': residency } : {})
-      },
+      headers: chatgptRequestHeaders(token, deps.appVersion),
       caps: capsFor('chatgpt', model),
       label: `ChatGPT · ${model}`,
       account: {
