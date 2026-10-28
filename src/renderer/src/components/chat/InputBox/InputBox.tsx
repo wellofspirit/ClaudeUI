@@ -63,90 +63,8 @@ import {
   modelResolveEffort,
   modelDefaultThinkingMode,
   type EffortLevel,
-  type ThinkingMode,
-  codexPublishesEffort
+  type ThinkingMode
 } from '../../../../../shared/model-capabilities'
-
-const codexCatalogOf = (models: ReadonlyArray<{ value: string; engineId?: string }>) =>
-  models.filter((model) => model.engineId === 'codex')
-
-/**
- * THE predicate for "this Codex spawn carries an explicit model". The request
- * (`resolveSessionSdkOptions`) sends `selectedModel` exactly when this is true,
- * and the pill reads "Native default" exactly when it is false. Keeping two
- * copies of the rule is what let the pill advertise a catalog model the request
- * then omitted, so Codex silently ran its own configured default instead.
- *
- * The empty-`selectedModel` case is the one the second copy got wrong: the flag
- * can say "explicit" while the value is gone (a sticky pick the catalog no
- * longer offers), and an absent value is an omitted model whatever the flag
- * says.
- */
-export function codexModelIsExplicit(
-  session:
-    | {
-        codexModelExplicit?: boolean
-        isHistorical?: boolean
-        selectedModel: string
-        status: { sessionId: string | null }
-      }
-    | undefined,
-  sticky: string | undefined,
-  codexModels: ReadonlyArray<{ value: string }>,
-  /** `engines/codex.json#codexConfig.defaultModel`, '' when unset (Slice 5b). */
-  configuredDefault: string = ''
-): boolean {
-  // Welcome screen: no session holds the pick yet, so answer for the one
-  // `createNewSession` is about to seed — it marks a sticky model explicit, and
-  // drops it only when a codex catalog exists that no longer lists it. A
-  // CONFIGURED default is the next rung of the same ladder (ADR-059: naming it
-  // in settings is as explicit as picking it in the picker), and the store
-  // seeds it in exactly this order.
-  if (!session) {
-    const candidate = sticky || configuredDefault
-    return (
-      !!candidate &&
-      (codexModels.length === 0 || codexModels.some((model) => model.value === candidate))
-    )
-  }
-  if (!session.selectedModel) return false
-  return !!(session.codexModelExplicit || session.isHistorical || session.status.sessionId)
-}
-
-/**
- * The configured native tier to send with a FRESH Codex spawn, or undefined.
- *
- * PAIRED with the model. The Default-models pane offers only the tiers the
- * configured default model publishes, so `codexConfig.defaultEffort` is a
- * statement about THAT model: a session the user steered onto another model
- * (a sticky pick) runs that model's own default tier, because sending the
- * configured one would make `CodexSession.validateEffort` refuse the start for a
- * mismatch the user never chose. With no default model configured the tier came
- * from the union, so it goes when the catalog says the session's model publishes
- * it, and when the model is Codex's own (not explicit, unknown here) — where a
- * mismatch is the loud thread-start failure ADR-059 wants, not a silent drop.
- */
-export function codexDefaultEffortFor(
-  defaults: {
-    codexDefaultModel: string
-    codexDefaultModelConfigured: boolean
-    codexDefaultEffort: string
-  },
-  model: string | undefined,
-  codexModels: ReadonlyArray<{
-    value: string
-    nativeEffortOptions?: ReadonlyArray<{ value: string }>
-  }>
-): string | undefined {
-  const effort = defaults.codexDefaultEffort
-  if (!effort) return undefined
-  if (defaults.codexDefaultModelConfigured)
-    return model === defaults.codexDefaultModel ? effort : undefined
-  if (!model) return effort
-  const options = codexModels.find((m) => m.value === model)?.nativeEffortOptions
-  if (!options || options.length === 0) return effort
-  return options.some((option) => option.value === effort) ? effort : undefined
-}
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
@@ -328,7 +246,6 @@ export function InputBox(): React.JSX.Element {
   // once initialization starts. Historical sessions are committed by definition.
   const startedSessionId = useActiveSession((s) => s.status.sessionId)
   const isHistorical = useActiveSession((s) => s.isHistorical)
-  const codexModelExplicit = useActiveSession((s) => s.codexModelExplicit)
   const sessionEngineId = useActiveSession((s) => s.selectedEngineId)
   // On welcome, the picker controls the engine that createNewSession will seed.
   // Once a session exists, it always reflects that session's own engine instead.
@@ -435,30 +352,6 @@ export function InputBox(): React.JSX.Element {
     if (activeSessionId && selectedModelValue && engine === 'claude') {
       return missingSelection
     }
-    if (engine === 'codex') {
-      // Welcome screen, no sticky pick: the CONFIGURED default is what
-      // `createNewSession` will seed, so the pill must name it rather than the
-      // catalog's first row (which the spawn would not carry).
-      if (!activeSessionId && engineDefaults.codexDefaultModelConfigured) {
-        const configured = sameEngine.find((mm) => mm.value === engineDefaults.codexDefaultModel)
-        if (configured) return configured
-      }
-      if (
-        activeSessionId &&
-        (codexModelExplicit || isHistorical || startedSessionId) &&
-        selectedModelValue
-      ) {
-        return sameEngine.length > 0
-          ? { ...unset, displayName: 'Model unavailable', shortName: 'Model unavailable' }
-          : {
-              ...unset,
-              value: selectedModelValue,
-              displayName: selectedModelValue,
-              shortName: selectedModelValue
-            }
-      }
-      return sameEngine[0] ?? unset
-    }
     if (engine === 'opencode' || engine === 'pi') {
       // An ACTIVE session holds its own model, and the configured default is
       // not it: on a reopened session whose model the discovered catalog
@@ -504,8 +397,6 @@ export function InputBox(): React.JSX.Element {
     engineDefaults,
     lastSelectedModelByEngine,
     activeSessionId,
-    codexModelExplicit,
-    isHistorical,
     startedSessionId,
     sdkActive,
     capabilities.reasoning
@@ -516,22 +407,6 @@ export function InputBox(): React.JSX.Element {
     selectedModelValue,
     pickerModels.length
   )
-  const stickyCodexModel = lastSelectedModelByEngine.codex
-  // The exact four fields `resolveSessionSdkOptions` reads off the store, so
-  // the pill and the spawn ask `codexModelIsExplicit` the same question.
-  const activeCodexSession = useMemo(
-    () =>
-      activeSessionId
-        ? {
-            codexModelExplicit,
-            isHistorical,
-            selectedModel: selectedModelValue,
-            status: { sessionId: startedSessionId }
-          }
-        : undefined,
-    [activeSessionId, codexModelExplicit, isHistorical, selectedModelValue, startedSessionId]
-  )
-
   const statusLine = useActiveSession((s) => s.statusLine)
   // The content-first load defers the status line (ADR-102 Arc 2): with none yet, the
   // footer says so instead of showing zeros. A previous one stays on screen until replaced.
@@ -642,36 +517,6 @@ export function InputBox(): React.JSX.Element {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
-    if (engineId === 'codex') {
-      const catalog = codexCatalogOf(state.availableModels)
-      const model = codexModelIsExplicit(
-        session,
-        seedingModelPicks(state).codex,
-        catalog,
-        state.codexDefaultModel
-      )
-        ? session?.selectedModel
-        : undefined
-      // The configured NATIVE tier seeds a session that has no thread yet, and
-      // only when it is paired with the session's model (`codexDefaultEffortFor`).
-      // A resume must not carry the DEFAULT: `CodexSession.start` folds an
-      // explicit effort OVER the thread's remembered one, so re-sending it
-      // would silently undo a live `thread/settings/update` the user made.
-      const fresh = !session?.status.sessionId && !session?.isHistorical
-      // The user's OWN pick outranks it and rides EVERY spawn, resume included
-      // (F15): it is the tier they set in the composer with no process there to
-      // take it, and folding it over the thread's remembered one is exactly
-      // what they asked for. Only a tier the SELECTED model's catalog row
-      // publishes may go: `CodexSession.validateEffort` refuses the start on
-      // any other, so an unpublished leftover is dropped and — on a fresh
-      // spawn only — the configured default applies as before.
-      const picked =
-        session?.effort && codexPublishesEffort(catalog, session.selectedModel, session.effort)
-          ? session.effort
-          : undefined
-      const effort = picked ?? (fresh ? codexDefaultEffortFor(state, model, catalog) : undefined)
-      return { model, ...(effort ? { effort } : {}) }
-    }
     const { modelInfo } = catalogFor(state, {
       selectedModel: session?.selectedModel ?? '',
       selectedEngineId: engineId
@@ -681,7 +526,7 @@ export function InputBox(): React.JSX.Element {
     // Effort precedence (explicit pick > Claude's per-model starting effort >
     // cli.js heuristic, clamped to the model): `sessionSpawnEffort`, the SAME
     // function — fed the same inputs — as the pill and the retry / plan / review
-    // spawns. Not the codex branch (returned above).
+    // spawns.
     const effort = session ? sessionSpawnEffort(state, session) : undefined
     return {
       model: session?.selectedModel,
@@ -704,19 +549,6 @@ export function InputBox(): React.JSX.Element {
     const state = useSessionStore.getState()
     const session = state.sessions[routingId]
     const engineId = session?.selectedEngineId ?? 'claude'
-    // Codex without an explicit model is a SUPPORTED spawn (the pill says
-    // "Native default" and Codex uses its own configured model), so the
-    // engine-default guard below must not fire on it.
-    if (
-      engineId === 'codex' &&
-      !codexModelIsExplicit(
-        session,
-        seedingModelPicks(state).codex,
-        codexCatalogOf(state.availableModels),
-        state.codexDefaultModel
-      )
-    )
-      return
     if (session?.selectedModel) return
     // Claude's `'default'` alias is always a real value — EXCEPT when the user
     // configured a Claude default the account no longer offers, which seeds ''
@@ -757,10 +589,7 @@ export function InputBox(): React.JSX.Element {
             spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
           )
         } else {
-          const isHistorical =
-            session?.selectedEngineId === 'codex'
-              ? !!(session.status.sessionId || session.isHistorical)
-              : session && hasResumableTranscript(session)
+          const isHistorical = session && hasResumableTranscript(session)
           // For opencode sessions, always pass the routingId as resumeSessionId so
           // OpencodeSession can resume a prior session even when messages are empty
           // (history is replayed from the server, not preloaded into the store).
@@ -813,10 +642,7 @@ export function InputBox(): React.JSX.Element {
           spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
         )
       } else {
-        const isHistorical =
-          session?.selectedEngineId === 'codex'
-            ? !!(session.status.sessionId || session.isHistorical)
-            : session && hasResumableTranscript(session) && !session.sdkActive
+        const isHistorical = session && hasResumableTranscript(session) && !session.sdkActive
         const resumeId = isHistorical ? activeSessionId : undefined
         await window.api.createSession(
           activeSessionId,
@@ -1080,8 +906,8 @@ export function InputBox(): React.JSX.Element {
           return
         }
         // The engine can report its stable session id WHILE the send is in
-        // flight — Codex rekeys on `thread/start`, which lands well before
-        // `turn/start` resolves this await — and the rekey retires `sessionId`
+        // flight — an engine may rekey on its first handshake, which lands well
+        // before the send resolves this await — and the rekey retires `sessionId`
         // out from under us. Follow the move first, or the guard below compares
         // the new active id against a dead one, the textarea never clears, and
         // the attachment reset lands on an id nothing holds any more.
@@ -1255,17 +1081,7 @@ export function InputBox(): React.JSX.Element {
         if (coerced !== session.thinkingMode) setThinkingMode(coerced)
       }
       if (session?.effort !== null && session?.effort !== undefined) {
-        if (selectedEngine === 'codex') {
-          // A codex pick is a NATIVE tier, not a rung of the Claude ladder, so
-          // it is coerced against the new model's own published options (F11).
-          // A started session is left alone: the backend re-validates the tier
-          // against the model it switches to and echoes the result back.
-          if (
-            !started &&
-            !codexPublishesEffort(codexCatalogOf(state.availableModels), value, session.effort)
-          )
-            setEffort(null)
-        } else if (!started && !session.sdkActive) {
+        if (!started && !session.sdkActive) {
           // Not started and nothing running: no process holds this effort, so it
           // is no one's value to keep. (A session spawned but not yet initialised
           // has `sdkActive` and no id: its process runs the frozen effort, so it
@@ -1291,17 +1107,11 @@ export function InputBox(): React.JSX.Element {
     [activeSessionId, setSelectedModel, setThinkingMode, setEffort]
   )
 
-  // Engine-native reasoning tiers, published by the live session's capabilities
-  // (Codex reads them off its own model catalog). Absent for Claude/opencode/pi,
-  // which use the fixed EffortLevel ladder derived from the selected model.
-  const nativeEffortOptions = capabilities.reasoning.nativeEffort?.options
-
-  // THE predicate for "a process is there to take a live setter": a thread id
-  // AND a connected backend. Everything else — not spawned yet, a historical
-  // read from the sidebar, a session whose host died (ADR-045 projects
-  // `disconnected` as idle + `sdkActive: false`) — has no session on the host
-  // for `session:set-effort` to find, so the store is the only place a pick can
-  // live until the next spawn or resume reads it (F15).
+  // THE predicate for "a process is there": a thread id AND a connected backend.
+  // Everything else — not spawned yet, a historical read from the sidebar, a
+  // session whose host died (ADR-045 projects `disconnected` as idle +
+  // `sdkActive: false`) — has no live process, so the store is the only place a
+  // pick can live until the next spawn or resume reads it (F15).
   const liveBackend = sdkActive && !!startedSessionId
 
   // Effort and thinking mode are read at sdkQuery start time, so restart the
@@ -1330,20 +1140,6 @@ export function InputBox(): React.JSX.Element {
 
   const handleSelectEffort = useCallback(
     async (level: string) => {
-      // An engine with NATIVE effort tiers applies them live over IPC (Codex's
-      // `thread/settings/update`), and the acknowledged value arrives back on
-      // `session:status` — no local optimistic write and no respawn. Claude and
-      // opencode have no live setter, hence the cancel/recreate below.
-      if (nativeEffortOptions) {
-        // The store mirrors the user's LAST EXPLICIT PICK either way: with no
-        // process on the host the main `setEffort` handler finds no live
-        // session and returns without emitting, and the pick would vanish
-        // (F11 pre-spawn, F15 historical + disconnected). It is what
-        // `resolveSessionSdkOptions` carries into the next spawn or resume.
-        setEffort(level)
-        if (liveBackend && activeSessionId) await window.api.setEffort(activeSessionId, level)
-        return
-      }
       setEffort(level as EffortLevel)
       // Effort is remembered PER MODEL (Claude and pi — `rememberedEffortPatch`
       // writes nothing for another engine): the pick also becomes the model's
@@ -1363,7 +1159,7 @@ export function InputBox(): React.JSX.Element {
       if (remembered) state.updateSettings(remembered)
       await restartSdkSession()
     },
-    [activeSessionId, nativeEffortOptions, liveBackend, setEffort, restartSdkSession]
+    [activeSessionId, setEffort, restartSdkSession]
   )
 
   const handleSelectReasoningVariant = useCallback(
@@ -1383,69 +1179,6 @@ export function InputBox(): React.JSX.Element {
     },
     [setThinkingMode, restartSdkSession]
   )
-
-  // -------------------------------------------------------------------------
-  // The per-session ChatGPT account pin (ADR-068 §2)
-  // -------------------------------------------------------------------------
-  //
-  // Read once on mount and again whenever the menu opens, so an account added
-  // or removed in Settings since this bar mounted is offered (or gone) without
-  // the input bar knowing anything about the settings surface.
-  const providerAccounts = useSessionStore((s) => s.providerAccounts)
-  const loadProviderAccounts = useSessionStore((s) => s.loadProviderAccounts)
-  useEffect(() => {
-    void loadProviderAccounts()
-  }, [loadProviderAccounts])
-
-  // Three conditions, all of them honest refusals rather than cosmetic gates:
-  // the ENGINE must be able to run one session on another account, the provider
-  // must have per-session accounts turned on, and there must be a second account
-  // to switch to. `providerAccounts === null` means "not read yet", which is a
-  // fourth reason to stay hidden — guessing would flash a picker and then take
-  // it away.
-  const showAccountPicker =
-    capabilities.auth.perSessionAccount &&
-    providerAccounts?.perSession === true &&
-    providerAccounts.accounts.length > 1
-  const accountChoices = useMemo(
-    () =>
-      (providerAccounts?.accounts ?? []).map(({ id, email, planType }) => ({
-        id,
-        ...(email ? { email } : {}),
-        ...(planType ? { planType } : {})
-      })),
-    [providerAccounts]
-  )
-  const handleSelectAccount = useCallback(
-    async (accountId: string | null) => {
-      if (!activeSessionId) return
-      try {
-        await window.api.setSessionAccount(activeSessionId, accountId)
-      } catch (error) {
-        // Codex can REFUSE the re-injection (a managed workspace policy, or a
-        // token it will not parse), and the native message is the only thing the
-        // user can act on. It goes where `session:error` goes — an error row on
-        // this session — rather than dying as an unhandled rejection in the
-        // console, which is all it did before. Both surfaces reach this one
-        // handler: the desktop `AccountPicker` and the mobile sheet's account
-        // page are both wired to `onSelectAccount`.
-        useSessionStore
-          .getState()
-          .addError(
-            activeSessionId,
-            error instanceof Error
-              ? error.message
-              : 'The ChatGPT account for this session could not be changed'
-          )
-      }
-    },
-    [activeSessionId]
-  )
-  const handleAddAccount = useCallback(() => {
-    window.dispatchEvent(
-      new CustomEvent('open-settings', { detail: { page: 'models', group: 'subscriptions' } })
-    )
-  }, [])
 
   const handleOpenSandboxSettings = useCallback(() => {
     window.dispatchEvent(
@@ -1538,46 +1271,33 @@ export function InputBox(): React.JSX.Element {
   // present the right tier (e.g. xhigh on Opus 4.7, high on Sonnet 4.6).
   const effectiveEffort = useMemo<string>(
     () =>
-      nativeEffortOptions
-        ? // On a LIVE thread the engine's ACKNOWLEDGED tier is the truth, and a
-          // pick is pushed to it over IPC, so the pill follows the thread.
-          // Without a process nothing can refresh that acknowledgement, so the
-          // session's OWN pick comes first: it is what the next spawn or resume
-          // will carry (F15). Only then the selected model's catalog default
-          // (`nativeDefaultEffort`, from model-discovery), never the first
-          // catalog row: that row is just the lowest tier the catalog happens
-          // to list, so it claimed a tier the engine never said.
-          liveBackend
-          ? (status.codex?.reasoningEffort ?? effort ?? selectedModel.nativeDefaultEffort ?? '')
-          : (effort ?? status.codex?.reasoningEffort ?? selectedModel.nativeDefaultEffort ?? '')
-        : // The SPAWN's own function over the SAME inputs, so the pill names the
-          // effort the process starts with — Claude's per-model starting effort
-          // included, and a model missing from the catalog resolved exactly as
-          // spawn resolves it (this used to feed the picker's synthetic
-          // "missing selection" row instead and disagree). With a session, the
-          // inputs are the session's own model and engine; only the welcome
-          // screen, which has no session, resolves from the picker's model.
-          sessionSpawnEffort(
-            {
-              availableModels,
-              settings: { modelEffortDefaults, engineEffortDefaults, newSessionModel }
-            },
-            activeSessionId
-              ? {
-                  selectedModel: requestedModelValue,
-                  selectedEngineId: sessionEngineId,
-                  effort: effort ?? null
-                }
-              : {
-                  selectedModel: selectedModel.value,
-                  selectedEngineId: effectiveEngineId,
-                  effort: null
-                }
-          ),
+      // The SPAWN's own function over the SAME inputs, so the pill names the
+      // effort the process starts with — Claude's per-model starting effort
+      // included, and a model missing from the catalog resolved exactly as
+      // spawn resolves it (this used to feed the picker's synthetic
+      // "missing selection" row instead and disagree). With a session, the
+      // inputs are the session's own model and engine; only the welcome
+      // screen, which has no session, resolves from the picker's model.
+      sessionSpawnEffort(
+        {
+          availableModels,
+          settings: { modelEffortDefaults, engineEffortDefaults, newSessionModel }
+        },
+        activeSessionId
+          ? {
+              selectedModel: requestedModelValue,
+              selectedEngineId: sessionEngineId,
+              effort: effort ?? null
+            }
+          : {
+              selectedModel: selectedModel.value,
+              selectedEngineId: effectiveEngineId,
+              effort: null
+            }
+      ),
     [
       effort,
       selectedModel.value,
-      selectedModel.nativeDefaultEffort,
       availableModels,
       activeSessionId,
       requestedModelValue,
@@ -1585,10 +1305,7 @@ export function InputBox(): React.JSX.Element {
       effectiveEngineId,
       modelEffortDefaults,
       engineEffortDefaults,
-      newSessionModel,
-      nativeEffortOptions,
-      liveBackend,
-      status.codex?.reasoningEffort
+      newSessionModel
     ]
   )
   const effectiveThinking = useMemo<ThinkingMode>(
@@ -1631,44 +1348,22 @@ export function InputBox(): React.JSX.Element {
       }
       sendBlocked={harnessBlocked}
       banner={harnessBlocked ? <HarnessInstallBanner engineId={effectiveEngineId} /> : null}
-      selectedModel={
-        effectiveEngineId === 'codex' &&
-        !codexModelIsExplicit(
-          activeCodexSession,
-          stickyCodexModel,
-          pickerModels,
-          engineDefaults.codexDefaultModel
-        )
-          ? {
-              ...selectedModel,
-              displayName: 'Native configured model',
-              shortName: 'Native default'
-            }
-          : selectedModel
-      }
+      selectedModel={selectedModel}
       selectedEngineId={effectiveEngineId}
       engineLocked={engineLocked}
       showEnginePicker={!engineLocked}
       effort={effectiveEffort}
-      effortSupported={nativeEffortOptions != null || effortCap != null}
+      effortSupported={effortCap != null}
       allowedEffortLevels={allowedEffortLevels}
-      nativeEffortOptions={nativeEffortOptions}
-      showAccountPicker={showAccountPicker}
-      accounts={accountChoices}
-      activeAccountId={providerAccounts?.activeId ?? null}
-      pinnedAccountId={status.codex?.pinnedAccountId ?? null}
-      onSelectAccount={handleSelectAccount}
-      onAddAccount={handleAddAccount}
-      onAccountMenuOpen={loadProviderAccounts}
       thinkingMode={effectiveThinking}
       adaptiveSupported={adaptiveSupported}
-      showThinkingPicker={effectiveEngineId !== 'codex' && thinkingCap != null}
+      showThinkingPicker={thinkingCap != null}
       showModelPicker={true}
-      showCostInStatusLine={effectiveEngineId !== 'codex' && billingType !== 'free'}
+      showCostInStatusLine={billingType !== 'free'}
       showContextMeter={
-        // Codex's window is never in the catalog — it arrives on a usage frame,
-        // and (S1e) from `session_meta` on a cold reopen — so the status line
-        // is the second source the meter can come from.
+        // An engine's window may be missing from the catalog and arrive on a
+        // usage frame instead — the status line is the second source the meter
+        // can come from.
         capabilities.contextWindow > 0 || (statusLine?.contextWindow.size ?? 0) > 0
       }
       visionEnabled={capabilities.vision}

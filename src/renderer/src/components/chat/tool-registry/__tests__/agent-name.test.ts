@@ -10,7 +10,6 @@ import { describe, expect, it } from 'vitest'
 import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
 import { OpencodeEngineToolMap } from '../OpencodeEngineToolMap'
 import { PiEngineToolMap } from '../PiEngineToolMap'
-import { CodexEngineToolMap } from '../CodexEngineToolMap'
 
 const nameOf = (view: { kind: string }): string | undefined => (view as { name?: string }).name
 
@@ -66,35 +65,14 @@ describe('task ToolView — agent name', () => {
     ).toBe('solo')
   })
 
-  it('codex takes the leaf of the agent path', () => {
-    expect(
-      nameOf(
-        CodexEngineToolMap.normalize('task', {
-          receiverThreadIds: ['t1'],
-          agentPath: '/root/probe'
-        })
-      )
-    ).toBe('probe')
-    expect(
-      nameOf(CodexEngineToolMap.normalize('task', { receiverThreadIds: ['t1'], model: 'gpt-5' }))
-    ).toBeUndefined()
-  })
-
   it('leaves cross-engine dispatch cards unnamed on every engine', () => {
     // Dispatch has no agent identity and no type — it is marked by the
     // structured `dispatch` field (ADR-094), on every engine.
     for (const map of [ClaudeEngineToolMap, OpencodeEngineToolMap, PiEngineToolMap]) {
-      const view = map.normalize('task', { engine: 'codex', model: 'gpt-5', prompt: 'p' })
+      const view = map.normalize('task', { engine: 'pi', model: 'gpt-5', prompt: 'p' })
       expect(nameOf(view)).toBeUndefined()
       expect((view as { subagent?: string }).subagent).toBeUndefined()
-      expect((view as { dispatch?: unknown }).dispatch).toEqual({ engine: 'codex', model: 'gpt-5' })
+      expect((view as { dispatch?: unknown }).dispatch).toEqual({ engine: 'pi', model: 'gpt-5' })
     }
-    const codexView = CodexEngineToolMap.normalize('task', {
-      engine: 'pi',
-      model: 'm',
-      prompt: 'p'
-    })
-    expect(nameOf(codexView)).toBeUndefined()
-    expect((codexView as { dispatch?: unknown }).dispatch).toEqual({ engine: 'pi', model: 'm' })
   })
 })

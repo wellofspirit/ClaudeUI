@@ -4,7 +4,6 @@
  */
 import { describe, expect, it } from 'vitest'
 import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
-import { CodexEngineToolMap } from '../CodexEngineToolMap'
 import { OpencodeEngineToolMap } from '../OpencodeEngineToolMap'
 import { PiEngineToolMap } from '../PiEngineToolMap'
 import type { EngineToolMap } from '../../../../../../shared/tool-kinds'
@@ -40,12 +39,6 @@ const ENGINES: Array<{
     map: PiEngineToolMap,
     spell: (bare) => bare,
     third: ['mcp__github__create_issue', 'mcp__github__create_issue']
-  },
-  {
-    label: 'codex',
-    map: CodexEngineToolMap,
-    spell: (bare) => bare,
-    third: ['mcp__github__create_issue', 'MCP']
   }
 ]
 
@@ -81,10 +74,9 @@ describe.each(ENGINES)('$label: first-party display names', ({ map, spell, third
 })
 
 describe('built-in tools keep their display', () => {
-  it('Claude passes built-ins through; opencode, pi and Codex prettify as before', () => {
+  it('Claude passes built-ins through; opencode and pi prettify as before', () => {
     expect(ClaudeEngineToolMap.displayName('Agent')).toBe('Agent')
     expect(OpencodeEngineToolMap.displayName('read')).toBe('Read')
     expect(PiEngineToolMap.displayName('agent')).toBe('Agent')
-    expect(CodexEngineToolMap.displayName('commandExecution')).toBe('Command')
   })
 })

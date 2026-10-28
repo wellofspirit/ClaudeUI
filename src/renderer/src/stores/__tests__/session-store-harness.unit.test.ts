@@ -51,8 +51,7 @@ async function harnesses(
     harnesses: {
       claude: entry('claude', 'ready'),
       opencode: entry('opencode', states.opencode ?? 'ready'),
-      pi: entry('pi', states.pi ?? 'ready'),
-      codex: entry('codex', states.codex ?? 'ready')
+      pi: entry('pi', states.pi ?? 'ready')
     },
     detection: { running: false },
     installs: [],
@@ -115,22 +114,16 @@ describe('createNewSession on a harness that is not installed', () => {
     expect(session.errors).toEqual([])
   })
 
-  it('keeps a missing pi and a missing Codex the same way', async () => {
-    await harnesses({ pi: 'missing', codex: 'missing' })
+  it('keeps a missing pi the same way', async () => {
+    await harnesses({ pi: 'missing' })
     useSessionStore.setState({
-      lastSelectedEngineId: 'codex' as EngineId,
-      lastSelectedModelByEngine: { codex: 'gpt-5.5' }
+      lastSelectedEngineId: 'pi' as EngineId,
+      lastSelectedModelByEngine: { pi: 'openai-codex/gpt-5.6-luna' }
     })
-    store().createNewSession('cx-missing', '/tmp/proj')
-    expect(store().sessions['cx-missing'].selectedEngineId).toBe('codex')
-    expect(store().sessions['cx-missing'].selectedModel).toBe('')
-    expect(store().sessions['cx-missing'].codexModelExplicit).toBe(false)
-    expect(store().sessions['cx-missing'].errors).toEqual([])
-
-    useSessionStore.setState({ lastSelectedEngineId: 'pi' as EngineId })
     store().createNewSession('pi-missing', '/tmp/proj')
     expect(store().sessions['pi-missing'].selectedEngineId).toBe('pi')
     expect(store().sessions['pi-missing'].selectedModel).toBe('')
+    expect(store().sessions['pi-missing'].errors).toEqual([])
   })
 
   it('still falls back to claude when opencode runs but has no usable model', async () => {
@@ -148,10 +141,10 @@ describe('createNewSession on a harness that is not installed', () => {
   })
 
   it('falls back to claude for a harness this computer cannot run', async () => {
-    await harnesses({ codex: 'unavailable' })
-    useSessionStore.setState({ lastSelectedEngineId: 'codex' as EngineId })
-    store().createNewSession('cx-here', '/tmp/proj')
-    expect(store().sessions['cx-here'].selectedEngineId).toBe('claude')
+    await harnesses({ pi: 'unavailable' })
+    useSessionStore.setState({ lastSelectedEngineId: 'pi' as EngineId })
+    store().createNewSession('pi-here', '/tmp/proj')
+    expect(store().sessions['pi-here'].selectedEngineId).toBe('claude')
   })
 })
 

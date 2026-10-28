@@ -70,11 +70,11 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
       ]
     }
   ]
-  // opencode, pi and Codex install into ClaudeUI's managed store through the
+  // opencode and pi install into ClaudeUI's managed store through the
   // app's own installer (`scripts/ensure-harness.mjs`, ADR-082 §8), which is
-  // TypeScript: bun runs it. A host without a reviewed Codex release exits 0 with
+  // TypeScript: bun runs it. A host without a reviewed release exits 0 with
   // a skip line; real failures exit non-zero and stop the target. No build target
-  // runs these: packages no longer carry opencode, pi or Codex, and development
+  // runs these: packages no longer carry opencode or pi, and development
   // gets them from `postinstall`.
   const ensureHarness = (id, update) => [
     {
@@ -94,8 +94,8 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
     }
   ]
 
-  // The CLI and the three harnesses, installed together. The members share no
-  // outputs except the harness store's `.staging` dir: the three installs
+  // The CLI and the two harnesses, installed together. The members share no
+  // outputs except the harness store's `.staging` dir: the two installs
   // share its stale-entry sweep (`store-writer.ts` cleanStaleEntries, 1 h
   // mtime guard), which is safe unless an install runs longer than an hour.
   // Every member runs to completion, so one run reports every failure.
@@ -104,8 +104,7 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
       parallel: [
         ...ensureCli(false),
         ...ensureHarness('opencode', false),
-        ...ensureHarness('pi', false),
-        ...ensureHarness('codex', false)
+        ...ensureHarness('pi', false)
       ]
     }
   ]
@@ -197,8 +196,6 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
     'ensure-opencode': [...ensureHarness('opencode', false)],
     'update-opencode': [...ensureHarness('opencode', true)],
     'ensure-pi': [...ensureHarness('pi', false)],
-    'update-pi': [...ensureHarness('pi', true)],
-    'ensure-codex': [...ensureHarness('codex', false)],
-    'update-codex': [...ensureHarness('codex', true)]
+    'update-pi': [...ensureHarness('pi', true)]
   }
 }

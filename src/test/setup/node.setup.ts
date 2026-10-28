@@ -11,7 +11,7 @@ import { join } from 'node:path'
 
 // No background harness detection (ADR-082 §3) in a test process: a boot
 // test's `startCoreServices` would otherwise probe every Claude Code,
-// opencode, pi and Codex on this machine's PATH a few seconds later. Tests of
+// opencode and pi on this machine's PATH a few seconds later. Tests of
 // the scheduler build their own (`createDetectionScheduler`).
 process.env.CLAUDEUI_DISABLE_HARNESS_DETECTION = '1'
 

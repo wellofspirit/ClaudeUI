@@ -33,7 +33,7 @@
  * on any row and no line of its own: the provider stays listed (its credential
  * exists) and its saved routes are untouched, so installing the harness brings
  * its chips back as they were. Readiness comes from the harness store, for
- * opencode, pi and Codex alike (`useEngineRuns`). A stopped opencode server is
+ * opencode and pi alike (`useEngineRuns`). A stopped opencode server is
  * not that — catalog discovery starts one.
  *
  * The group header's "+ Add provider" is declared by the page model
@@ -72,15 +72,8 @@ const ADD_EVENT = 'settings:add-provider'
 /** What the card renders from when the very first read failed. */
 const EMPTY_SNAPSHOT: ProviderRegistrySnapshot = { entries: [], opencodeInstalled: true }
 
-/**
- * Chip order, and the order the ENABLED FOR group reads in.
- *
- * Codex is LAST and is not a shared-provider route: the ChatGPT subscription
- * reaches it by vault injection (ADR-068 §1), and the registry says so on that
- * row alone. Before F14 the row chipped `opencode · pi` and read as "this
- * subscription is not available to Codex".
- */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
+/** Chip order, and the order the ENABLED FOR group reads in. */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
 
 /**
  * The row's one line: the provider's KIND (`Catalog`, `Custom endpoint · <url>`,

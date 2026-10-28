@@ -582,9 +582,9 @@ describe('Sidebar FC', () => {
 
   // Opening a session only VIEWS it: Recent is bumped by sending in it (the
   // `session:user-message` event) or a double-click, the same for every engine.
-  // A single click once moved opencode / pi / Codex rows to the top of Recent
+  // A single click once moved opencode / pi rows to the top of Recent
   // while a Claude row stayed put.
-  it.each(['claude', 'opencode', 'pi', 'codex'] as const)(
+  it.each(['claude', 'opencode', 'pi'] as const)(
     'a click on a %s session leaves Recent alone; a double-click bumps it',
     async (engineId) => {
       const empty = { messages: [], statusLine: null, lastModel: null }
@@ -898,50 +898,6 @@ describe('Sidebar FC', () => {
     expect(deleteCalls).toHaveLength(1)
     expect(deleteCalls[0][1]).toBe('del-sess')
     expect(deleteCalls[0][2]).toBe(PROJECT_KEY)
-  })
-
-  /**
-   * Codex only (ADR-066 slice G). Deleting a Codex session deletes every branch
-   * cut from it — the binary refuses to delete a thread a fork still references
-   * — so the confirmation asks main what the delete would actually remove. The
-   * answer is advisory: main recomputes it when the delete runs.
-   */
-  it('fetches the Codex delete plan for the confirmation, and only for Codex', async () => {
-    const planCalls: unknown[][] = []
-    app.bridge.ipcMain.handle('session:codex-delete-plan' as any, async (...args) => {
-      planCalls.push(args)
-      return {
-        nodes: [
-          { threadId: 'cx-root', title: 'Root', live: false, depth: 0 },
-          { threadId: 'cx-fork', title: 'Branch', live: true, depth: 1 }
-        ],
-        order: ['cx-fork', 'cx-root']
-      }
-    })
-
-    await act(async () => {
-      await renderFC()
-    })
-
-    // A Claude session asks for nothing.
-    await act(async () => {
-      viewProps.onDeleteSession(makeSessionInfo('claude-sess'))
-    })
-    expect(planCalls).toHaveLength(0)
-    expect(viewProps.deletePlan).toBeNull()
-
-    await act(async () => {
-      viewProps.onDeleteSession({ ...makeSessionInfo('cx-root'), engineId: 'codex' })
-    })
-    expect(planCalls).toHaveLength(1)
-    expect(planCalls[0][1]).toBe('cx-root')
-    expect(viewProps.deletePlan?.order).toEqual(['cx-fork', 'cx-root'])
-
-    // Closing the dialog drops the plan; the next target must not inherit it.
-    await act(async () => {
-      viewProps.onCancelDelete()
-    })
-    expect(viewProps.deletePlan).toBeNull()
   })
 
   it('deleting one session keeps the OTHER engine’s sessions (no Claude-only clobber)', async () => {
@@ -1335,19 +1291,18 @@ describe('Sidebar FC', () => {
 
   it('shows a session with no sessionEngines entry as its BIRTH engine, not Claude', async () => {
     // A session another client or the host created: `session:created` replicates
-    // its engine, but no model-bearing status has filled `sessionEngines` yet
-    // (Codex sends none before its first prompt).
+    // its engine, but no model-bearing status has filled `sessionEngines` yet.
     await act(async () => {
       await renderFC()
     })
     act(() => {
-      seed.created('remote-codex', { cwd: CWD, engineId: 'codex' })
+      seed.created('remote-pi', { cwd: CWD, engineId: 'pi' })
       seed.created('remote-claude', { cwd: CWD })
     })
 
-    expect(useSessionStore.getState().sessionEngines['remote-codex']).toBeUndefined()
+    expect(useSessionStore.getState().sessionEngines['remote-pi']).toBeUndefined()
     const rows = viewProps.augmentedDirs.flatMap((group) => group.sessions)
-    expect(rows.find((s) => s.sessionId === 'remote-codex')?.engineId).toBe('codex')
+    expect(rows.find((s) => s.sessionId === 'remote-pi')?.engineId).toBe('pi')
     expect(rows.find((s) => s.sessionId === 'remote-claude')?.engineId).toBe('claude')
   })
 

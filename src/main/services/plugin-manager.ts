@@ -136,28 +136,11 @@ export class PluginManager {
         if (this.hasListeners('session:item-delta'))
           this.fireSessionScoped('session:item-delta', [frame.routingId, frame])
         if (!frame.target.ownerToolUseId) {
-          // Both root branches are gated BEFORE the canonical read: with nobody
-          // listening the whole synthesis — lookup included — must cost nothing.
-          const wantsMessage = this.hasListeners('session:message')
-          const wantsStream = this.hasListeners('session:stream')
-          if (!wantsMessage && !wantsStream) return
-          const session = syncCore.getCanonicalState().sessions[frame.routingId]
-          if (!session) return
-          if (session.selectedEngineId === 'codex') {
-            if (wantsMessage) {
-              const message = session.messages.find((m) => m.id === frame.target.messageId)
-              if (message)
-                this.fireSessionScoped('session:message', [
-                  frame.routingId,
-                  overlayItemStreams([message], session.itemStreams)[0]
-                ])
-            }
-          } else if (frame.target.kind !== 'plan' && wantsStream) {
+          if (frame.target.kind !== 'plan' && this.hasListeners('session:stream'))
             this.fireSessionScoped('session:stream', [
               frame.routingId,
               { type: frame.target.kind, text: frame.chunk }
             ])
-          }
           return
         }
         if (frame.target.kind !== 'plan' && this.hasListeners('session:subagent-stream'))

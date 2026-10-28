@@ -13,9 +13,8 @@
  * says what it does, counted: "Set active", Remove, and turning Multiple
  * accounts on or off all re-point live sessions. Each provider has its own rule
  * — Claude cancels every live Claude session whenever the credential directory
- * moves (`invalidateLiveSessions`, ADR-015); a Codex session that follows the
- * active account leaves its host while one PINNED to an account keeps it
- * (ADR-069 §4); pi and opencode read the vended credential when they start.
+ * moves (`invalidateLiveSessions`, ADR-015); pi and opencode read the vended
+ * credential when they start.
  *
  * MOVED, NOT REWRITTEN. The writes are the ones `AccountsSetting` and
  * `ChatgptAccountsSetting` made — `account:*` for Claude's file-based accounts,
@@ -30,7 +29,6 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import claudeLogo from '../../assets/logos/claude-color.svg'
-import codexLogo from '../../assets/logos/codex-color.svg'
 import { useSessionStore } from '../../stores/session-store'
 import type { PerSessionState } from '../../stores/session-store'
 import { engineMeta } from '../../../../shared/engine-meta'
@@ -63,22 +61,14 @@ const plural = (n: number, one: string, many: string): string => (n === 1 ? one 
 /** The live sessions a credential change touches, counted from the store. */
 export interface LiveSessionCounts {
   claude: number
-  /** Live Codex sessions that follow the active account. */
-  codexFollowing: number
-  /** Live Codex sessions pinned to one account — a switch leaves them alone. */
-  codexPinned: number
 }
 
 export function countLiveSessions(sessions: Record<string, PerSessionState>): LiveSessionCounts {
-  const counts: LiveSessionCounts = { claude: 0, codexFollowing: 0, codexPinned: 0 }
+  const counts: LiveSessionCounts = { claude: 0 }
   for (const session of Object.values(sessions)) {
     // A session with no live process has nothing to disconnect.
     if (!session.sdkActive) continue
     if (session.selectedEngineId === 'claude') counts.claude++
-    else if (session.selectedEngineId === 'codex') {
-      if (session.status.codex?.pinnedAccountId) counts.codexPinned++
-      else counts.codexFollowing++
-    }
   }
   return counts
 }
@@ -90,40 +80,17 @@ export function claudeSwitchConsequence(live: number): string {
 }
 
 /**
- * What switching the ACTIVE ChatGPT account does: the Codex followers it
- * disconnects, the enabled routes that pick it up, and the pinned sessions it
- * leaves alone.
- *
- * A pin belongs to the SESSION (each Codex session decides for itself whether
- * it follows — `followCodexActiveAccount`), so pinned sessions are counted
- * whether or not per-session pinning is on right now: turning the option off
- * stops new pins, it does not unpin a running session.
+ * What switching the ACTIVE ChatGPT account does: the enabled routes that pick
+ * it up.
  *
  * pi and opencode are said to pick it up on START, not immediately: the switch
  * re-feeds both engines' auth files, but a running opencode server keeps the
  * credential it loaded (`OpencodeAuthProvider`'s feed does not recycle).
  */
-export function chatgptSwitchConsequence(
-  counts: Pick<LiveSessionCounts, 'codexFollowing' | 'codexPinned'>,
-  routes: readonly EngineId[]
-): string {
-  const n = counts.codexFollowing
-  const parts = [
-    n === 0
-      ? 'No running Codex session that follows the active account is affected.'
-      : `${n} running Codex ${plural(n, 'session', 'sessions')} that ${plural(n, 'follows', 'follow')} the active account ${plural(n, 'disconnects and resumes on its', 'disconnect and resume on their')} next message.`
-  ]
-  if (routes.length > 0) {
-    const names = routes.map((engine) => engineMeta(engine).label)
-    parts.push(`New ${names.join(' and ')} sessions use it too.`)
-  }
-  if (counts.codexPinned > 0) {
-    const p = counts.codexPinned
-    parts.push(
-      `${p} pinned Codex ${plural(p, 'session keeps its', 'sessions keep their')} account.`
-    )
-  }
-  return parts.join(' ')
+export function chatgptSwitchConsequence(routes: readonly EngineId[]): string {
+  if (routes.length === 0) return 'No running session is affected.'
+  const names = routes.map((engine) => engineMeta(engine).label)
+  return `New ${names.join(' and ')} sessions use it too.`
 }
 
 /**
@@ -193,10 +160,12 @@ function Logo({ provider }: { provider: 'anthropic' | 'chatgpt' }): React.JSX.El
   ) : (
     <span
       data-testid={`${SUBS}.logo`}
-      data-id="codex"
-      className="w-[34px] h-[34px] shrink-0 rounded-[9px] overflow-hidden flex items-center justify-center"
+      data-id="chatgpt"
+      className="w-[34px] h-[34px] shrink-0 rounded-[9px] flex items-center justify-center bg-[#10a37f]/10 border border-[#10a37f]/20"
     >
-      <img src={codexLogo} width={34} height={34} alt="" />
+      <svg width={20} height={20} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M4 5h16v11H9l-5 4V5z" stroke="#10a37f" strokeWidth={1.8} strokeLinejoin="round" />
+      </svg>
     </span>
   )
 }
@@ -828,10 +797,9 @@ function CardError({ error }: { error: string | null }): React.JSX.Element | nul
 function useLiveSessionCounts(): LiveSessionCounts {
   const key = useSessionStore((s) => {
     const c = countLiveSessions(s.sessions)
-    return `${c.claude}|${c.codexFollowing}|${c.codexPinned}`
+    return String(c.claude)
   })
-  const [claude, codexFollowing, codexPinned] = key.split('|').map(Number)
-  return { claude, codexFollowing, codexPinned }
+  return { claude: Number(key) }
 }
 
 /** Which ⋯ menu is open, section-wide — `<card>:<account>`, or none. */
@@ -1160,14 +1128,11 @@ function ChatgptCard({
   onManage: () => void
 }): React.JSX.Element {
   const openSignIn = useSessionStore((s) => s.openSignIn)
-  const live = useLiveSessionCounts()
   const { busy, error, run } = useWriter()
   const [pending, setPending] = useState<Pending>(null)
-  const [optionsOpen, setOptionsOpen] = useState(false)
 
   const accounts = entry.accounts
   const list = accounts?.list ?? []
-  const perSession = accounts?.perSession === true
   const active = list.find((account) => account.id === accounts?.activeId)
   const reauth = active?.needsReauth === true
 
@@ -1187,13 +1152,10 @@ function ChatgptCard({
     ...(opencodeOn ? ['opencode' as const] : []),
     ...(piOn ? ['pi' as const] : [])
   ]
-  // The card's copy names only the harnesses that run (ADR-082 §8): Codex
-  // first, then pi and opencode, as it always read.
-  const codexRuns = runs('codex')
-  const others = (['pi', 'opencode'] as const)
+  // The card's copy names only the harnesses that run (ADR-082 §8).
+  const users = (['pi', 'opencode'] as const)
     .filter((engine) => runs(engine))
     .map((engine) => engineMeta(engine).label)
-  const users = [...(codexRuns ? [engineMeta('codex').label] : []), ...others]
   // Removing the last account is a disconnect (ADR-082 §8, "As built (S7e)").
   const disconnectText = chatgptDisconnectText(runs)
 
@@ -1272,16 +1234,11 @@ function ChatgptCard({
   const removeSentence = (id: string): string => {
     const remaining = rows.filter((row) => row.id !== id)
     const successor = remaining[remaining.length - 1]
-    const n = live.codexFollowing
     return removeConsequence({
       active: id === accounts?.activeId,
       ...(successor ? { successor: successor.email } : {}),
       ...(disconnectText ? { lastAccount: disconnectText } : {}),
-      sessions: successor
-        ? chatgptSwitchConsequence(live, routes)
-        : n > 0
-          ? `${n} running Codex ${plural(n, 'session that follows', 'sessions that follow')} the active account ${plural(n, 'stops', 'stop')} until you sign in again.`
-          : undefined
+      ...(successor ? { sessions: chatgptSwitchConsequence(routes) } : {})
     })
   }
 
@@ -1317,7 +1274,7 @@ function ChatgptCard({
             busy={busy}
             pending={pending}
             {...menuProps(menus, entry.id, account.id)}
-            activateSentence={chatgptSwitchConsequence(live, routes)}
+            activateSentence={chatgptSwitchConsequence(routes)}
             removeSentence={removeSentence(account.id)}
             onPending={setPending}
             onActivate={() => {
@@ -1363,9 +1320,6 @@ function ChatgptCard({
 
       {users.length > 0 && (
         <EnginesRow trailing={manage}>
-          {codexRuns && (
-            <EnginePill engine="codex" on={entry.engines.codex?.enabled !== false} warn={reauth} />
-          )}
           {runs('opencode') && (
             <EnginePill
               engine="opencode"
@@ -1386,38 +1340,6 @@ function ChatgptCard({
         >
           Engines are waiting for the active account to sign in again.
         </div>
-      )}
-
-      {/* One account is not a choice to make per session, so the option that
-          configures that choice waits until there are two. It is Codex's, so
-          it waits for Codex to run too (ADR-082 §8). */}
-      {list.length > 1 && codexRuns && (
-        <OptionsFold
-          id={entry.id}
-          open={optionsOpen}
-          onOpenChange={setOptionsOpen}
-          summary={
-            perSession
-              ? 'Codex sessions can pin an account'
-              : 'All harnesses follow the active account'
-          }
-        >
-          <OptionRow
-            testid={`${SUBS}.perSession`}
-            toggleTestid={`${SUBS}.perSessionToggle`}
-            label="Pin an account per Codex session"
-            description={`When starting a Codex session you can choose its account; it keeps that account when you switch here. Applies to new sessions.${
-              others.length > 0
-                ? ` ${namesList(others)} always ${others.length > 1 ? 'follow' : 'follows'} the active account.`
-                : ''
-            }`}
-            checked={perSession}
-            disabled={busy}
-            onToggle={() =>
-              void run(() => window.api.setProviderAccountsPerSession(entry.id, !perSession))
-            }
-          />
-        </OptionsFold>
       )}
     </div>
   )

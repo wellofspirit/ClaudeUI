@@ -20,7 +20,6 @@ export type ToolKind =
   | 'search' //    glob/grep/list — Claude Glob/Grep · opencode glob/grep/list
   | 'web' //       fetch/search   — Claude WebFetch/WebSearch · opencode webfetch
   | 'image' //     picture made   — Codex imageGeneration
-  | 'sleep' //     timed wait     — Codex sleep  (lifted — routes to SleepRow)
   | 'todo' //      checklist      — Claude TodoWrite  (lifted — routes to TodoToolBlock)
   | 'task' //      subagent       — Claude Task/Agent · opencode task
   | 'plan' //      plan approval  — Claude ExitPlanMode (lifted — routes to ExitPlanModeCard)
@@ -144,7 +143,6 @@ export type ToolView =
    * a header, a chevron and an empty body would be chrome around nothing.
    */
   | { kind: 'note'; icon?: string; text: string }
-  | { kind: 'sleep'; durationMs: number }
   | { kind: 'unknown'; input: unknown }
 
 // ---------------------------------------------------------------------------

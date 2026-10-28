@@ -155,8 +155,8 @@ describe('summarizeTool — Claude equivalence guard vs getSummary', () => {
   })
 
   it('mcp: summarizeTool reads `server / tool` when the view carries them (F20)', () => {
-    // The mockup's section 2 header. `CodexEngineToolMap` splits them off
-    // `mcp__<server>__<tool>`, so this is what a Codex MCP card reads.
+    // The mockup's section 2 header: what an MCP card reads once the mapper
+    // has split `mcp__<server>__<tool>`.
     expect(
       summarizeTool('mcp', {
         kind: 'mcp',

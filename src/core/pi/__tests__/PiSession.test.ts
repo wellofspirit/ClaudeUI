@@ -5234,10 +5234,9 @@ describe('PiSession — hosted-tools/dispatch env vars at spawn (M4a+b)', () => 
     expect(description).toContain('use your own agent tool instead')
     expect(description).toContain('claude (Anthropic')
     expect(description).toContain('opencode (')
-    expect(description).toContain('codex (')
+    expect(description).not.toContain('codex (')
     expect(description).not.toContain('pi (an alternative')
     expect(description).toContain('For claude:')
-    expect(description).toContain('For codex:')
     // A follow-up is a session_message; the description no longer offers a session_id.
     expect(description).toContain(DISPATCH_FOLLOW_UP_GUIDANCE)
     expect(description).not.toContain('session_id')
@@ -5937,31 +5936,6 @@ describe('PiSession.handleHostedTool — dispatch_agent (M4b, ADR-033)', () => {
 
     expect(result.isError).toBe(true)
     expect(mockDispatch).not.toHaveBeenCalled()
-  })
-
-  it('passes engine:"codex" through to the dispatcher (the bridge advertises it and pi → codex is a dispatch target)', async () => {
-    mockDispatch.mockResolvedValue({ text: 'done', sessionId: 'thr-1' })
-    const win = new MockWindow()
-    const session = new PiSession('rid-dispatch-codex', win as never, '/cwd', {})
-    await session.run('hi')
-
-    await grantViaApproval(win, session, 'call_dispatch_codex', { engine: 'codex', prompt: 'x' })
-    const result = await hostedTool(
-      'dispatch_agent',
-      { engine: 'codex', prompt: 'x' },
-      'call_dispatch_codex'
-    )
-
-    expect(result.isError).toBeFalsy()
-    expect(mockDispatch).toHaveBeenCalledWith(
-      {
-        engine: 'codex',
-        prompt: 'x',
-        model: undefined,
-        runInBackground: true
-      },
-      expect.objectContaining({ fromEngine: 'pi' })
-    )
   })
 
   it("emit forwards to this.send (the dispatching session's own routing) — passing ctx.emit through calls window.webContents.send", async () => {

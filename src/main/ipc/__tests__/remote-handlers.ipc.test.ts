@@ -20,23 +20,6 @@ import * as os from 'os'
 import * as path from 'path'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
 
-vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
-vi.mock('../../../core/codex/model-discovery', () => ({
-  discoverCodexModels: vi.fn(async () => [])
-}))
-vi.mock('../../../core/codex/history', () => ({
-  listCodexSessions: vi.fn(async () => []),
-  loadCodexHistory: vi.fn()
-}))
-vi.mock('../../../core/auth/CodexAuthProvider', () => ({
-  codexAuthProvider: {
-    status: vi.fn(async () => ({ available: false, authenticated: false, authKind: null })),
-    loginStart: vi.fn(),
-    loginStatus: vi.fn(() => ({ status: 'idle' })),
-    loginCancel: vi.fn()
-  }
-}))
-
 // ---------------------------------------------------------------------------
 // Mocks for every service remote-handlers.ts imports.
 // ---------------------------------------------------------------------------
@@ -320,6 +303,7 @@ import {
   discoverOpencodeProviderCatalog,
   resolveOpencodeSpawnModel
 } from '../../../core/opencode/model-discovery'
+import { discoverPiModels } from '../../../core/pi/model-discovery'
 import { opencodeServerManager } from '../../../core/opencode/OpencodeServerManager'
 import { setProxyEnv } from '../../../core/sdk/proxy'
 import { setEndpointEnv } from '../../../core/sdk/endpoint-env'
@@ -329,7 +313,6 @@ import { blockUsageService } from '../../../core/services/block-usage'
 import { logger } from '../../../core/services/logger'
 import { blobStore } from '../../../core/services/blob-store'
 import { query } from '../../../core/sdk'
-import { discoverCodexModels } from '../../../core/codex/model-discovery'
 import {
   loadSessionHistory as loadClaudeHistoryMock,
   loadSessionStatusLine as loadStatusLineMock,
@@ -470,19 +453,17 @@ describe('registerRemoteHandlers', () => {
     vi.clearAllMocks()
   })
 
-  it('still discovers Codex when the unrelated Claude catalog fails', async () => {
+  it('still discovers pi when the unrelated Claude catalog fails', async () => {
     vi.mocked(query).mockImplementationOnce(() => {
       throw new Error('Claude unavailable')
     })
     const native = {
-      engineId: 'codex' as const,
-      vendorId: 'openai',
-      vendorName: 'Native OpenAI',
-      models: [
-        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' as const }
-      ]
+      engineId: 'pi' as const,
+      vendorId: 'openai-codex',
+      vendorName: 'ChatGPT',
+      models: [{ value: 'native', displayName: 'Native', description: '', engineId: 'pi' as const }]
     }
-    vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+    vi.mocked(discoverPiModels).mockResolvedValueOnce([native])
     const groups = await dispatcher.handle(makeRequest('session:get-engine-models'), remoteConn)
     expect(groups).toEqual(
       expect.arrayContaining([native, expect.objectContaining({ engineId: 'claude', models: [] })])
@@ -493,16 +474,14 @@ describe('registerRemoteHandlers', () => {
   // only that engine answers, and an id that is not an engine rejects.
   it('session:get-engine-models answers only the engine a remote client asks for', async () => {
     const native = {
-      engineId: 'codex' as const,
-      vendorId: 'openai',
-      vendorName: 'Native OpenAI',
-      models: [
-        { value: 'native', displayName: 'Native', description: '', engineId: 'codex' as const }
-      ]
+      engineId: 'pi' as const,
+      vendorId: 'openai-codex',
+      vendorName: 'ChatGPT',
+      models: [{ value: 'native', displayName: 'Native', description: '', engineId: 'pi' as const }]
     }
-    vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
+    vi.mocked(discoverPiModels).mockResolvedValueOnce([native])
     await expect(
-      dispatcher.handle(makeRequest('session:get-engine-models', 'codex'), remoteConn)
+      dispatcher.handle(makeRequest('session:get-engine-models', 'pi'), remoteConn)
     ).resolves.toEqual([native])
     expect(vi.mocked(query)).not.toHaveBeenCalled()
     await expect(
@@ -599,7 +578,7 @@ describe('registerRemoteHandlers', () => {
   })
 
   it('an answer retires the card on every client: emits session:approval-dismiss for the routing id (pi, xeng:)', async () => {
-    // pi's resolveApproval and the dispatcher's claude/pi/codex-kind cards emit
+    // pi's resolveApproval and the dispatcher's claude/pi-kind cards emit
     // nothing on a human answer, and the answering client only drops its own copy.
     await dispatcher.handle(
       makeRequest('session:approval-response', 'pi-rid', 'req-pi', 'allow'),
@@ -619,15 +598,15 @@ describe('registerRemoteHandlers', () => {
 
   it('a resolve that throws still dismisses the card and still rejects', async () => {
     sessionStub.resolveApproval.mockImplementationOnce(() => {
-      throw new Error('Stale or unknown Codex approval')
+      throw new Error('Stale or unknown approval')
     })
     await expect(
       dispatcher.handle(
-        makeRequest('session:approval-response', 'codex-rid', 'req-x', 'allow'),
+        makeRequest('session:approval-response', 'pi-rid-2', 'req-x', 'allow'),
         remoteConn
       )
-    ).rejects.toThrow('Stale or unknown Codex approval')
-    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'codex-rid', {
+    ).rejects.toThrow('Stale or unknown approval')
+    expect(win.webContents.send).toHaveBeenCalledWith('session:approval-dismiss', 'pi-rid-2', {
       requestId: 'req-x'
     })
   })
@@ -1439,7 +1418,6 @@ describe('registerRemoteHandlers', () => {
         model: 'm',
         launchMode: 'default',
         accountKey: null,
-        codexAccountId: null,
         callerRestriction: null,
         name: null,
         description: null
@@ -1733,10 +1711,9 @@ describe('registerRemoteHandlers', () => {
     // The web client marshals `invoke` args as JSON, so an OMITTED optional
     // argument arrives as an explicit `null` (Electron IPC preserves
     // `undefined`, which is why the desktop never hit this). `null` is not
-    // "unset" to the code downstream: CodexSession.validateEffort treats only
-    // `undefined` as "no effort" and threw
-    // "Codex reasoning effort is unavailable for the selected model" on every
-    // fresh Codex session created from the web client.
+    // "unset" to the code downstream: an engine that validates the effort
+    // treats only `undefined` as "no effort" and would reject every fresh
+    // session created from the web client.
     it('normalises null optional args to undefined before prepareAndCreateSession (GUARD — fails pre-fix)', async () => {
       await dispatcher.handle(
         makeRequest(
@@ -2496,28 +2473,16 @@ const PROVIDER_REGISTRY_CHANNELS = [
 const PROVIDER_ACCOUNT_CHANNELS = [
   'provider-account:list',
   'provider-account:remove',
-  'provider-account:set-per-session',
   'provider-account:switch'
 ] as const
 
 /**
- * ADR-068 §2 — the per-session ChatGPT PIN and the per-account usage it makes
- * readable. The EIGHTH deliberate widening, and the narrowest since the provider
- * rows: both declare `config`, so a base connection reaches them, and both are
- * engine CONFIGURATION rather than a security surface (ADR-056).
- *
- * `session:set-account` is `session-config`, the same capability as
- * `session:set-model` and `session:set-effort` beside it: choosing which stored
- * subscription a session bills is a run-configuration choice a phone must be
- * able to make, and the handler refuses on an engine whose
- * `capabilities.auth.perSessionAccount` is false rather than silently doing
- * nothing.
- *
- * `usage:chatgpt-limits` is a `query` joining the four `usage:*` channels the
- * phone already reaches. Token-free by construction: percentages, reset times,
- * the email the account list already carries, and nothing else.
+ * ADR-068 §2 — the per-account ChatGPT usage readout. `usage:chatgpt-limits` is
+ * a `query` joining the four `usage:*` channels the phone already reaches.
+ * Token-free by construction: percentages, reset times, the email the account
+ * list already carries, and nothing else.
  */
-const CODEX_ACCOUNT_PIN_CHANNELS = ['session:set-account', 'usage:chatgpt-limits'] as const
+const CHATGPT_LIMITS_CHANNELS = ['usage:chatgpt-limits'] as const
 
 /**
  * ADR-068 §3 (Slice 7) — device-code sign-in for ChatGPT.
@@ -2732,25 +2697,12 @@ describe('remote surface parity (phase 1 port)', () => {
         ...S4_VENDOR_CREDENTIAL_CHANNELS,
         ...PROVIDER_REGISTRY_CHANNELS,
         ...PROVIDER_ACCOUNT_CHANNELS,
-        ...CODEX_ACCOUNT_PIN_CHANNELS,
+        ...CHATGPT_LIMITS_CHANNELS,
         ...CHATGPT_DEVICE_CODE_CHANNELS,
         ...REMOTE_VIEW_CHANNELS,
         ...IDE_CHANNELS,
         ...JUDGE_MODEL_SUPPORT_CHANNELS,
         ...JUDGE_ROUTE_RESTING_CHANNELS,
-        // ADR-068 §1: the three `codex:login-*` channels are gone with the
-        // native device-code UI; the vault owns the ChatGPT identity and
-        // `provider-account:*` is how a remote client reads it.
-        'codex:auth-status',
-        // ADR-068 §6 (Slice 5a): the Codex engine page writes `config.toml`
-        // through the app-server, and a remote client edits settings exactly as
-        // the desktop one does.
-        'codex-config:read',
-        'codex-config:write',
-        'codex:recompile-rules',
-        'session:codex-approval',
-        // Read-only: what deleting a Codex session would remove (slice G).
-        'session:codex-delete-plan',
         // ADR-071 §6: every account's limits, for every vendor. `config` and a
         // query, like the two usage reads beside it — and the remote client has
         // to reach it, because the dashboard built on it is not desktop-only.

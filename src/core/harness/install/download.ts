@@ -36,10 +36,9 @@ export interface HostPolicy {
 export const NPM_REGISTRY: HostPolicy = { hosts: ['registry.npmjs.org'], redirectHosts: [] }
 
 /**
- * pi and Codex release assets: `github.com/<owner>/<repo>/releases/download/...`
+ * pi release assets: `github.com/<owner>/<repo>/releases/download/...`
  * answers 302 to its asset CDN. `release-assets.githubusercontent.com` is the
- * only host that redirect goes to (checked 2026-09-30 for pi 0.87.1 and Codex
- * 0.156.0 assets); any other target fails the download.
+ * only host that redirect goes to (checked 2026-09-30 for pi 0.87.1 assets); any other target fails the download.
  */
 export const GITHUB_RELEASES: HostPolicy = {
   hosts: ['github.com'],
@@ -63,9 +62,6 @@ export const HUGGING_FACE: HostPolicy = {
   redirectHosts: ['huggingface.co'],
   redirectHostSuffixes: ['hf.co', 'huggingface.co']
 }
-
-/** Codex's LICENSE at the pinned source commit (the manifest's `license`). */
-export const GITHUB_RAW: HostPolicy = { hosts: ['raw.githubusercontent.com'], redirectHosts: [] }
 
 /** pi's release list (upstream versions only; nothing is downloaded from it). */
 export const GITHUB_API: HostPolicy = { hosts: ['api.github.com'], redirectHosts: [] }

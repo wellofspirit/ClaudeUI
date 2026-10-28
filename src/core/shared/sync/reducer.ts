@@ -595,8 +595,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               data && 'thinkingMode' in data ? (data.thinkingMode ?? null) : base.thinkingMode,
             permissionMode: data?.permissionMode ?? base.permissionMode,
             selectedEngineId: data?.engineId ?? base.selectedEngineId,
-            selectedModel: data?.model ?? (data?.engineId === 'codex' ? '' : base.selectedModel),
-            ...(data?.engineId === 'codex' ? { codexModelExplicit: data.model !== undefined } : {}),
+            selectedModel: data?.model ?? base.selectedModel,
             sdkActive: true,
             // A resumed session's transcript arrives via seedSession (a query);
             // a fresh one has nothing to seed, so it is already complete.
@@ -761,14 +760,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       if (!session) return state
       let next = state
 
-      const idx = session.messages.findIndex(
-        (m) =>
-          m.id === message.id ||
-          (session.selectedEngineId === 'codex' &&
-            message.role === 'user' &&
-            m.role === 'user' &&
-            m.id === message.replacesMessageId)
-      )
+      const idx = session.messages.findIndex((m) => m.id === message.id)
       next = withSession(next, routingId, (current) =>
         commitMessage(current, message, undefined, undefined, idx)
       )
@@ -1061,13 +1053,6 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         // schedule (ADR-068 §4). `disconnected` returns above and must not
         // clear it: the reason the process died may be exactly this.
         ...(status.state === 'running' ? { authRequired: null } : {}),
-        ...(status.engineId === 'codex' && status.model
-          ? {
-              selectedModel: status.codex?.overrides?.model ?? status.model.modelId,
-              selectedEngineId: 'codex',
-              ...(status.codex?.overrides?.model ? { codexModelExplicit: true } : {})
-            }
-          : {}),
         ...((status.engineId === 'opencode' || status.engineId === 'pi') &&
         status.model?.engineId === status.engineId
           ? {
@@ -1080,9 +1065,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
 
       if (
         status.model &&
-        (status.engineId === 'codex' ||
-          ((status.engineId === 'opencode' || status.engineId === 'pi') &&
-            status.model.engineId === status.engineId))
+        (status.engineId === 'opencode' || status.engineId === 'pi') &&
+        status.model.engineId === status.engineId
       )
         next = {
           ...next,
@@ -1090,13 +1074,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
             ...next.sessionEngines,
             [id]: {
               engineId: status.engineId,
-              model: {
-                ...status.model,
-                modelId:
-                  status.engineId === 'codex'
-                    ? (status.codex?.overrides?.model ?? status.model.modelId)
-                    : status.model.modelId
-              }
+              model: status.model
             }
           }
         }
@@ -1128,10 +1106,9 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       return withSession(state, routingId, (s) => {
         // The retry belongs to a turn this failure actually KILLED, and the
         // canonical status is the only thing here that knows whether there was
-        // one: Codex's host fans a failed refresh to every session attached to
-        // the process (ADR-069 §8), so a session idle for hours hears about a
-        // credential it was not using, and offering to retry its last prompt
-        // offers to re-run a turn that completed. Every emitter still reads
+        // one: a session idle for hours can hear about a credential it was not
+        // using, and offering to retry its last prompt offers to re-run a turn
+        // that completed. Every emitter still reads
         // `running` at this point — each one sends this event BEFORE the
         // `sendStatus()` that reports the turn over — so a real failure keeps it.
         const retryPrompt = s.status.state === 'running' ? lastUserPrompt(s) : undefined

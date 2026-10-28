@@ -13,7 +13,7 @@
  * zoom (ADR-093).
  */
 import { useShallow } from 'zustand/react/shallow'
-import type { ContentBlock, EngineId } from '../../../../shared/types'
+import type { ContentBlock } from '../../../../shared/types'
 import { useSessionStore } from '../../stores/session-store'
 import { EngineLogo } from '../shared/EngineLogo'
 import { StatusDot, type SessionDotState } from '../Sidebar/StatusDot'
@@ -63,7 +63,8 @@ export function SessionCardView({
 }: {
   kind: SessionCardBlock['kind']
   title: string
-  engineId: EngineId
+  /** Stored on the block: may name an engine this build no longer has. */
+  engineId: string
   state: SessionCardState
   childRef: string
   /** Absent when there is nothing to open (the link failed, or this transcript is read-only). */

@@ -133,7 +133,7 @@ describe('where each model compacts', () => {
     open([
       { id: 'a', engine: 'claude', model: 'sonnet-4-5', size: 200_000 },
       { id: 'b', engine: 'claude', model: 'opus-5-5', size: 1_000_000 },
-      { id: 'c', engine: 'codex', model: 'gpt-5', size: 400_000 }
+      { id: 'c', engine: 'pi', model: 'gpt-5', size: 400_000 }
     ])
     mount({ mode: 'ask', thresholds: [70] })
     const rows = screen.getAllByTestId('ContextPressureSettings.ceiling')

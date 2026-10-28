@@ -355,14 +355,6 @@ export type ContentBlock =
       /** The started session's ref, once it has started. */
       startedRef?: string
     }
-  /**
-   * The rendered output of a code review the engine ran (Codex's
-   * `exitedReviewMode`). The one untrusted-text block that DOES go through
-   * markdown, by decision (F20): it is the model's own structured review — a
-   * numbered list with file:line citations — and reading it as a wall of plain
-   * text loses the structure that makes it usable.
-   */
-  | { type: 'review_result'; text: string }
   /** A user-attached image. The bytes live in the host's blob store (see {@link BlobRef}). */
   | { type: 'image'; mediaType: ImageMediaType; blobId: string; bytes: number; fileName?: string }
   /** A user-attached PDF. The bytes live in the host's blob store (see {@link BlobRef}). */
@@ -384,8 +376,6 @@ export interface FileAttachment {
 }
 
 export interface ChatMessage {
-  /** Native acknowledgement replaces a host-minted pending user row by identity. */
-  replacesMessageId?: string
   id: string
   role: 'user' | 'assistant' | 'system'
   content: ContentBlock[]
@@ -421,7 +411,9 @@ export interface ChatMessage {
   thinkingDurationMs?: number
 }
 
-export type EngineId = 'claude' | 'opencode' | 'pi' | 'codex'
+export const ENGINE_IDS = ['claude', 'opencode', 'pi'] as const
+
+export type EngineId = (typeof ENGINE_IDS)[number]
 
 /**
  * Who a prompt handed to `sendPrompt` speaks for. `user` (the default) is text
@@ -534,8 +526,6 @@ export interface AccountRef {
 }
 
 export interface SessionStatus {
-  /** Native Codex policy is authoritative; shared PermissionMode does not apply. */
-  codex?: import('./codex-types').CodexSessionState
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
   /** Vendor-qualified model identity. Null until the engine reports a model. */
@@ -564,7 +554,6 @@ export interface PermissionSuggestion {
 }
 
 export interface PendingApproval {
-  codex?: import('./codex-types').CodexApprovalPayload
   requestId: string
   /**
    * Set by the dispatcher when it puts back a card a parent's disconnect cleared (ADR-105
@@ -1082,8 +1071,6 @@ export interface EngineConfig {
   dispatch?: DispatchConfig
   /** pi engine-configurable settings (M3). Lives in engines/pi.json. */
   piConfig?: PiConfig
-  /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
-  codexConfig?: CodexEngineConfig
   /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
   claudeConfig?: ClaudeEngineConfig
   /**
@@ -1108,28 +1095,6 @@ export interface EngineConfig {
 export interface ClaudeEngineConfig {
   /** A Claude picker value from `supportedModels()`: an alias (`opus`, `sonnet[1m]`, …; ADR-100). */
   defaultModel?: string
-}
-
-/**
- * ClaudeUI's OWN per-engine defaults for Codex — NOT `config.toml`.
- *
- * Codex's native file already carries a `model`, and the Engines › Codex page
- * edits it through the app-server. This block is the ClaudeUI-side answer to a
- * different question: what a session STARTED FROM CLAUDEUI runs on, which is
- * carried on `turn/start` and therefore overrides whatever the working
- * directory's layers resolve to. Blank means "say nothing", which is what makes
- * the native value win — today's behaviour, and the reason neither key has a
- * fallback constant the way `piConfig.defaultModel` has `PI_DEFAULT_MODEL`.
- *
- * A value here IS an explicit choice (ADR-059): a session seeded from it carries
- * `codexModelExplicit`, so a model the catalog no longer lists banners rather
- * than silently resolving to something else.
- */
-export interface CodexEngineConfig {
-  /** Native Codex model id (`gpt-5.6-codex`), from `model/list`. */
-  defaultModel?: string
-  /** Native reasoning tier, from the selected model's `supportedReasoningEfforts`. */
-  defaultEffort?: string
 }
 
 /**
@@ -1688,8 +1653,6 @@ export interface WatchUpdate {
 }
 
 export interface ModelInfo {
-  nativeEffortOptions?: Array<{ value: string; description: string }>
-  nativeDefaultEffort?: string
   value: string
   /** Concrete model id an alias resolves to, straight off cli.js's
    *  `supportedModels()` (e.g. `default` → `claude-opus-5[1m]`). Present on
@@ -1920,16 +1883,10 @@ interface SessionAPI {
     warnings: string[]
     /**
      * Subagent transcripts the reader already resolved, by PARENT tool_use id.
-     * Codex's native children are threads on the same connection, so its reader
-     * returns them inline; Claude's live in per-agent JSONL files and are
-     * fetched separately through {@link loadSubagentHistory}.
+     * opencode's and pi's readers return them inline; Claude's live in per-agent
+     * JSONL files and are fetched separately through {@link loadSubagentHistory}.
      */
     subagentMessages?: Record<string, ChatMessage[]>
-    /**
-     * Codex only: the native reasoning tier the thread last ran at, which a
-     * cold reopen shows and resumes with. `null` when the rollout names none.
-     */
-    lastEffort?: string | null
     /**
      * The X-Agents of this session that are running now (ADR-105 §5): their task
      * records, which no transcript holds. Keyed by the launching tool_use id.
@@ -2074,12 +2031,6 @@ interface SessionAPI {
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
-  /**
-   * Pin a session to one stored vendor account, or `null` to follow the active
-   * one (ADR-068 §2). Only Codex answers it today
-   * (`capabilities.auth.perSessionAccount`); every other engine rejects.
-   */
-  setSessionAccount(routingId: string, accountId: string | null): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
@@ -2282,8 +2233,6 @@ interface SharedProviderAPI {
   switchProviderAccount(providerId: string, accountId: string): Promise<void>
   /** Forget one stored account. Removing the active one promotes the newest remaining. */
   removeProviderAccount(providerId: string, accountId: string): Promise<void>
-  /** Turn per-session account pinning on or off for a subscription provider. */
-  setProviderAccountsPerSession(providerId: string, enabled: boolean): Promise<void>
   listSharedProviders(): Promise<SharedProviderDefinition[]>
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
@@ -3672,30 +3621,6 @@ export interface ClaudeAPI
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {
-  codexApproval(
-    routingId: string,
-    requestId: string,
-    decision: import('./codex-types').CodexApprovalDecision
-  ): Promise<void>
-  codexAuthStatus(): Promise<import('./codex-types').CodexAuthStatus>
-  /**
-   * Codex's own `config.toml` plus the compiled Bash-rule status (ADR-068 §6).
-   * Read through the app-server — ClaudeUI never parses TOML.
-   */
-  readCodexConfig(): Promise<import('./codex-types').CodexConfigRead>
-  /**
-   * Apply edits to `config.toml` in ONE `config/batchWrite`. `value: null`
-   * REMOVES a key (that is what a row's Reset does). `expectedVersion` is the
-   * version the caller last read; a mismatch is reported, never clobbered.
-   */
-  writeCodexConfig(
-    edits: import('./codex-types').CodexConfigEdit[],
-    expectedVersion: string
-  ): Promise<import('./codex-types').CodexConfigWriteResult>
-  /** Recompile `$CODEX_HOME/rules/claudeui.rules` and answer its fresh status. */
-  recompileCodexRules(): Promise<import('./codex-types').CodexRulesStatus>
-  /** What deleting this Codex thread would remove: the thread and every branch cut from it. */
-  codexDeletePlan(threadId: string): Promise<import('./codex-types').CodexDeletePlan>
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
@@ -4752,7 +4677,7 @@ export interface WorktreeStatus {
 export interface LinkedWorktree {
   worktreePath: string
   repoRoot: string
-  /** Last path segment; `<4hex>/<repo>` for the Codex layout. */
+  /** Last path segment. */
   name: string
   /** Branch from the worktree's HEAD; '' when detached. */
   branch: string
@@ -4770,11 +4695,11 @@ export interface WorktreeHolder {
 export interface WorktreeInventoryEntry {
   /** Stable wire key: the normalised absolute path (names collide across roots). */
   id: string
-  /** Display name: last path segment (Codex layout: `<4hex>/<repo>`). */
+  /** Display name: last path segment. */
   name: string
   path: string
   /** By layout, display only: never a permission input. */
-  location: 'managed' | 'opencode' | 'codex' | 'other'
+  location: 'managed' | 'opencode' | 'other'
   /**
    * worktree: registered in `git worktree list` and the directory is present.
    * orphan: a directory directly under the managed root that git does not list.
@@ -4968,13 +4893,8 @@ export interface PlanComment {
 
 export interface PlanReviewData {
   planContent: string
-  /**
-   * The approval this review answers, or NULL when the plan came from an engine
-   * that has no approval gate on its plan item (Codex's native plan mode, F20).
-   * A null id means the comments are SENT AS A PROMPT instead of denied with
-   * feedback — there is nothing to deny.
-   */
-  approvalRequestId: string | null
+  /** The approval this review answers. */
+  approvalRequestId: string
   comments: PlanComment[]
 }
 

@@ -1,9 +1,8 @@
 // Launching the built ClaudeUI under Playwright for the chat-scroll bench, in one of two modes:
 //
-// - ISOLATED (default): Electron's own `-r <shim>` patches `os.homedir()` to a scratch home (the
-//   recipe from scripts/codex-render-stress.mjs — Electron ignores NODE_OPTIONS, and rewriting
-//   USERPROFILE breaks crashpad). CLAUDE_CONFIG_DIR points the spawned cli.js at the same
-//   scratch `.claude`, so a fake-endpoint turn writes its transcript there and finds no
+// - ISOLATED (default): Electron's own `-r <shim>` patches `os.homedir()` to a scratch home (Electron
+//   ignores NODE_OPTIONS, and rewriting USERPROFILE breaks crashpad). CLAUDE_CONFIG_DIR points
+//   the spawned cli.js at the same scratch `.claude`, so a fake-endpoint turn writes its transcript there and finds no
 //   credentials. Nothing of the real profile is read or written by the main process.
 // - REAL profile (`real: true`): no shim — only for live model turns, which must use the user's
 //   own sign-in in place (never a copied credential file).
@@ -57,7 +56,7 @@ export function stripCredentialEnv(env) {
 }
 
 export function prepareHome(home) {
-  for (const dir of ['.claude/projects', '.claude/ui/logs', '.codex'])
+  for (const dir of ['.claude/projects', '.claude/ui/logs'])
     mkdirSync(join(home, dir), { recursive: true })
   const shim = join(home, 'home-shim.cjs')
   writeFileSync(shim, HOME_SHIM)
@@ -103,7 +102,6 @@ export async function launchApp({
     )
     env.CLAUDEUI_TEST_HOME = home
     env.CLAUDE_CONFIG_DIR = join(home, '.claude')
-    env.CODEX_HOME = join(home, '.codex')
     env.CLAUDE_UI_LOG_DIR = join(home, '.claude', 'ui', 'logs')
   } else {
     delete env.CLAUDEUI_TEST_HOME

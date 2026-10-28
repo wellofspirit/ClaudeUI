@@ -108,8 +108,7 @@ export const SubagentMessages = memo(function SubagentMessages({
   // toolUseId, exactly as MessageBubble does for the top-level transcript.
   //
   // An approval raised inside a nested agent carries that agent's OWN inner
-  // tool-call id — a Codex child item id (`CodexSession.requestApproval`), a
-  // dispatched Claude target's `opts.toolUseId`, a pi target's
+  // tool-call id — a dispatched Claude target's `opts.toolUseId`, a pi target's
   // `payload.toolCallId` (`CrossEngineDispatcher.gatePiTargetToolCall`), an
   // opencode child's `tool.callID` — which is the same id the nested `tool_use`
   // block carries. So the match is the id and nothing else: MessageBubble's

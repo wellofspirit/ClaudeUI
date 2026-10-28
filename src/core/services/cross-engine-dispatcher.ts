@@ -19,24 +19,11 @@
  *    `.return()`-kills-the-process hazard noted on `driveClaudeTurn`).
  *  - claude/opencode → pi (M4c): one headless `pi --mode rpc` child per
  *    target plus its own loopback PiBridgeHost approval gate.
- *  - anything → CODEX (slice H, re-shaped by ADR-069 §7): one
- *    `thread/start`-created thread on the CALLER's host — no child of its own —
- *    with ClaudeUI's own permission engine answering the native approval
- *    requests that thread raises. Codex is a target AND (slice E) a source, and
- *    codex → codex is now allowed: it is one more thread on the process the
- *    caller already runs on, so the same-engine guard it used to hit has
- *    nothing left to protect. The guard stands for the other three.
  *
  * All failures come back as `isError` tool text — nothing throws across the
  * MCP boundary.
  */
-import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import {
-  isAbsolute as isAbsolutePath,
-  relative as relativePath,
-  resolve as resolvePath
-} from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
 import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import type { ServerConnection } from '../opencode/OpencodeServerManager'
@@ -140,36 +127,14 @@ import {
   type SpawnPiChildFn
 } from '../pi/pi-child-runner'
 import { collectClaudeMcpForPi, piMcpRuleKey } from '../pi/pi-mcp-bridge'
-// Codex target primitives (ADR-033 slice H — Codex as a dispatch TARGET). Same
-// one-way-edge reasoning as the opencode/pi imports above: none of these leaf
-// modules import THIS file. CodexSession.ts DOES (it is a dispatch SOURCE,
-// slice E), which is exactly why the mode->policy table and the turn-input
-// mapping live in `codex-turn-policy.ts` rather than being exported from
-// CodexSession.ts — importing that module here would be a require-cycle.
-import { CodexMethodNotFound, type CodexTransportError } from '../codex/CodexAppServerClient'
-import {
-  codexHostRegistry,
-  type CodexHostIdentity,
-  type CodexHostSource,
-  type CodexThreadConnection,
-  type CodexThreadOwner
-} from '../codex/CodexHost'
 import { harnessAvailable } from '../harness/resolve'
-import { codexHandBackSpec, codexXAgentMessageSpec } from '../codex/codex-hand-back-spec'
-import { codexModePolicy, codexTurnInput, codexTurnPolicy } from '../codex/codex-turn-policy'
-import { assertCodexProvider, selectCodexModel } from '../codex/model-selection'
-import { codexItemId, mapCodexDelta, mapCodexItem } from '../codex/event-mapper'
-import { readCodexImageView } from '../codex/codex-image-view'
-import { codexDisjointTokens } from '../codex/usage-ledger'
-import type { CodexMappedEvent } from '../codex/event-mapper'
-import { unwrapShellCommand } from '../codex/command-text'
 import {
   decideWithSource,
   sessionToolDenyRule,
   mergedClaudeRulesFor,
   PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
 } from '../pi/permission-engine'
-import type { MergedClaudeRules, PermissionDecision } from '../pi/permission-engine'
+import type { MergedClaudeRules } from '../pi/permission-engine'
 import { buildPiPathScope, withPathGuard, type PiPathScope } from '../pi/pi-path-scope'
 import {
   dispatchScratchpadKey,
@@ -177,14 +142,6 @@ import {
   scratchpadPromptArgs,
   type PiScratchpad
 } from '../pi/pi-scratchpad'
-import type { CodexMethods } from '../codex/protocol/methods'
-import type { Model } from '../codex/protocol/v2/Model'
-import type { ThreadItem } from '../codex/protocol/v2/ThreadItem'
-import type { Turn } from '../codex/protocol/v2/Turn'
-import type { TokenUsageBreakdown } from '../codex/protocol/v2/TokenUsageBreakdown'
-import type { ThreadTokenUsage } from '../codex/protocol/v2/ThreadTokenUsage'
-import type { CommandExecutionRequestApprovalParams } from '../codex/protocol/v2/CommandExecutionRequestApprovalParams'
-import { equivalentCostUsd } from '../../shared/pricing'
 import type { ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeMessageCosts } from '../opencode/message-cost'
 import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
@@ -217,8 +174,6 @@ import { buildClaudeAccountRef } from '../host'
 import { DISPATCH_TARGETS } from './dispatch-targets'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { piAuthProvider } from '../auth/PiAuthProvider'
-import { credentialSync } from '../auth/vault/CredentialSync'
-import { codexNativeIdentity } from '../auth/account-identity'
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { OPENCODE_DISPATCH_SESSION_TITLE } from '../../shared/dispatch-session'
 import {
@@ -278,8 +233,6 @@ import { isReservedXAgentName } from '../../shared/session-links'
 import {
   MESSAGE_RUN_ENDED_TEXT,
   messageNotTakenText,
-  MESSAGE_UNREVIEWED_TEXT,
-  messageBlockedText,
   X_AGENT_INPUT_FRAGMENT_LABEL,
   X_AGENT_MESSAGE_TOOL,
   xAgentInputNoteTitle,
@@ -316,12 +269,12 @@ import type {
   DispatchConfig,
   EngineConfig,
   EngineId,
-  FileDiff,
   PendingApproval,
   PermissionSuggestion,
   TaskHandback,
   ToolReviewBlock
 } from '../../shared/types'
+import { isEngineId } from '../../shared/engine-label'
 
 /**
  * Whether cross-engine dispatch is a real, honest capability for `engineId`
@@ -334,8 +287,8 @@ import type {
  *
  * One rule for every engine since ADR-082: ANY target being available makes
  * the tool honest; the ones that are not only narrow the useful list, which
- * the dispatcher's own per-request guards report. Before it, the opencode and
- * Codex branches answered `true` because Claude Code was always bundled, and
+ * the dispatcher's own per-request guards report. Before it, the opencode
+ * branch answered `true` because Claude Code was always bundled, and
  * pi's asked about pi itself. Neither holds any more: a harness is chosen,
  * installed and removed while the app runs, and a Claude Code selection can
  * resolve to nothing. Callers read this when a session's capabilities are
@@ -415,16 +368,6 @@ export interface DispatchContext {
    * gated on this being set; never fail a dispatch over it).
    */
   toolUseId?: string
-  /**
-   * The VAULT ChatGPT account the DISPATCHING session runs as (ADR-068 §2), when
-   * it is a Codex session with a per-session pin. A headless target must bill the
-   * same subscription the human's session bills — otherwise a pinned session's
-   * delegated work quietly lands on the active account instead.
-   *
-   * Absent (or null) on every other caller and on an unpinned Codex session:
-   * the target then runs as the ACTIVE account, exactly as slice 2a left it.
-   */
-  chatgptAccountId?: string | null
   /**
    * The calling SUBAGENT's own restriction (ADR-097 S9, option a): set when an
    * opencode subagent child called `dispatch_agent` (the dispatch belongs to
@@ -508,9 +451,8 @@ function labelOf(value: unknown): string | null {
 /**
  * The dispatching session's LIVE permission mode as every target path reads it
  * (ADR-088), with the legacy `full` normalised to `auto`. Sessions speak `auto`
- * today, so this is defensive — but `CODEX_TURN_POLICY` has no `full` row (a
- * `full` parent would run a Codex thread with no guardian) and `full` is not a
- * cli.js permission mode, so no target path may see it raw.
+ * today, so this is defensive — `full` is not a cli.js permission mode, so no
+ * target path may see it raw.
  */
 function liveMode(ctx: DispatchContext): string {
   const mode = ctx.getAutonomyMode()
@@ -624,76 +566,6 @@ export type PiTargetPrimitives = PiChildPrimitives
  */
 export type SpawnPiTargetFn = SpawnPiChildFn
 
-/**
- * The four native server-request methods a Codex dispatch TARGET answers
- * (ADR-033 slice H) — the same approval surface `CodexSession` handles. Its
- * `item/tool/call` is answered apart (`toolCallFromCodex`): the two tools a target is
- * started with (`hand_back`, ADR-105 §3, and `session_message` to its dispatcher, §4) and
- * nothing else.
- *
- * That narrowing is half the recursion scrub. Until ADR-069 the TRANSPORT
- * enforced it — the target owned its own process and registered only these four
- * methods, so `item/tool/call` was answered `-32601` before any handler ran. A
- * target is a thread on a SHARED host now, and the host's registered list is the
- * union its owners need, so this list is enforced by
- * `gateCodexTargetRequest` instead, which answers anything outside it with the
- * very same `-32601`. The other half is `thread/start` being sent with only
- * those `dynamicTools`, so the target has neither `dispatch_agent` nor any other hosted
- * tool to call in the first place — belt (no tool offered) and braces (no route to
- * run one if it somehow were).
- */
-const CODEX_TARGET_SERVER_METHODS = [
-  'item/commandExecution/requestApproval',
-  'item/fileChange/requestApproval',
-  'item/tool/requestUserInput',
-  'item/permissions/requestApproval'
-] as const
-
-/**
- * What `defaultAttachCodexTarget` is handed: where the thread lives, who it
- * belongs to, and which ChatGPT identity its host runs as.
- *
- * No `env` and no `serverMethods`. The host owns both — it inherits
- * `process.env` like every other Codex process, and the TRANSPORT then pins an
- * explicit `CODEX_HOME` onto whatever it inherited
- * (`CodexAppServerClient.childEnv`), so the child can never resolve a different
- * home than the one ClaudeUI computed. NEVER set `CODEX_HOME` here: an env on
- * these opts REPLACES inheritance wholesale, and the integration test already
- * points a real binary at an isolated home through its own injected attach
- * function. The registered server-method list is the union of what its owners
- * answer.
- */
-export type CodexTargetAttachOpts = {
-  cwd: string
-  label: string
-  /** Absent = never read the vault (the hermetic default). */
-  identity?: CodexHostIdentity
-} & CodexThreadOwner
-
-/**
- * Puts a dispatch target's thread on a host (ADR-069 §7). Injectable so the
- * unit suite drives a target without the real binary (mirrors
- * `SpawnClaudeQueryFn`/`SpawnPiTargetFn`) and so the integration test can point
- * it at an isolated home.
- */
-export type AttachCodexTargetFn = (opts: CodexTargetAttachOpts) => Promise<CodexThreadConnection>
-
-/**
- * The real one: the caller's host (its pin, else the active account), one more
- * thread on it. The read lease is dropped immediately — `attach` is what holds
- * the host for as long as the target lives.
- */
-const defaultAttachCodexTarget =
-  (registry: CodexHostSource): AttachCodexTargetFn =>
-  async ({ cwd, label, identity, ...owner }) => {
-    const handle = await registry.acquire({ cwd, label, ...(identity ? { identity } : {}) })
-    try {
-      return handle.host.attach(owner)
-    } finally {
-      handle.release()
-    }
-  }
-
 export interface DispatcherDeps {
   /**
    * The opencode 2.x server manager (S2). Every target takes a turn-running
@@ -725,17 +597,6 @@ export interface DispatcherDeps {
   makeJudgeTransport?: (opts: SessionJudgeOptions) => JudgeTransport
   /** Defaults to the real PiRpcClient + PiBridgeHost construction (ADR-033 M4c). */
   spawnPiTarget?: SpawnPiTargetFn
-  /** Defaults to a thread on the caller's host (ADR-033 slice H, ADR-069 §7). */
-  attachCodexTarget?: AttachCodexTargetFn
-  /**
-   * Do Codex dispatch targets run under a VAULT ChatGPT account (ADR-068 §1/§2)?
-   *
-   * False by default — a dispatcher built without it asks its hosts for NO
-   * identity and never reads the vault, which is what keeps the real-binary
-   * target integration hermetic. The singleton below turns it on, and the
-   * account asked for is then the caller's pin, else the active one.
-   */
-  codexVaultAccounts?: boolean
   /**
    * The app-wide concurrent-dispatch cap, as a THUNK: it is called at the gate
    * on every dispatch, not read once in the constructor, because the setting
@@ -759,17 +620,6 @@ export interface DispatcherDeps {
    * case never actually waits the full duration.
    */
   piAbortSettleGraceMs?: number
-  /**
-   * ADR-033 slice H: the bound on the two short waits `resolveAndRunCodex`'s
-   * give-up path (timeout/abort/stop) makes — first for an in-flight
-   * `turn/start` to hand back the turn id (without it the turn CANNOT be
-   * interrupted and would keep running headless, and the next continuation's
-   * `turn/start` would STEER that zombie rather than open a new turn — the
-   * app-server routes both through `start_or_steer_turn`), then for the
-   * `turn/interrupt` it sends to be acknowledged. Bounded so a wedged target
-   * can never hold the stop path open. Injectable for tests.
-   */
-  codexAbortSettleGraceMs?: number
   /** Clock, injectable for tests. Defaults to Date.now. */
   now?: () => number
   /**
@@ -800,22 +650,6 @@ export interface DispatcherDeps {
    * Defaults to `locateClaudeTranscript`.
    */
   locateClaudeTranscript?: (sessionId: string, cwd: string) => string | null
-  /**
-   * How long a Codex resume waits out `-32600 already has an active writer` — a
-   * released target's thread stays loaded (and locked) in the process that held it
-   * until the binary unloads it, about a minute after the last subscriber left
-   * (ADR-069 §4) — and how often it retries. Defaults to the interactive session's
-   * 75 s and 2 s.
-   */
-  codexResumeLockWindowMs?: number
-  codexResumeLockRetryMs?: number
-  /**
-   * Does a live Codex host in this process still hold `threadId`? A resume refused with
-   * `-32600` is waited out ONLY while one does (the lock is then a normal step that ends
-   * about a minute after the holder lets go); the same code also means "no rollout
-   * found", which no wait can fix (ADR-069 §4). Defaults to `codexHostRegistry.holdsThread`.
-   */
-  codexHoldsThread?: (threadId: string) => boolean
   /** Does a pi target's session directory still exist? Defaults to `fs.existsSync`. */
   piSessionDirExists?: (dir: string) => boolean
   /**
@@ -847,7 +681,7 @@ export interface DispatcherDeps {
   /** Where reports are kept (ADR-105 §3). Defaults to the operational-DB store. */
   reports?: DispatchReportStore
   /**
-   * The longest an opencode or Codex target's turn is left running after a `hand_back` call
+   * The longest an opencode target's turn is left running after a `hand_back` call
    * while the dispatcher waits for the call's own tool item to complete on the feed (an
    * interrupt that landed first would cancel the call itself). The turn ends sooner when the
    * item completes, or when the turn ends by itself. Defaults to {@link HAND_BACK_SETTLE_MS}.
@@ -940,19 +774,6 @@ export const XENG_REQUEST_PREFIX = 'xeng:'
 const EMPTY_PI_SESSION_ALLOWS: ReadonlySet<string> = new Set()
 
 /**
- * The Codex analogue of `EMPTY_PI_SESSION_ALLOWS` — a dispatch target's gate
- * has no per-session "always allow" escalation set, so 'allowForSession' is
- * handled identically to a one-off 'allow' and every request is decided fresh.
- * One shared, frozen, never-mutated Set.
- *
- * An opencode target is the same (ADR-085 S2): its 'allowForSession' replies
- * `once` like a plain 'allow' (`resolveApproval`) — never opencode's `always`,
- * whose instance-global memory would outrank the user's deny/ask rules — and
- * the dispatcher keeps no host-side session-allow set for it either.
- */
-const EMPTY_CODEX_SESSION_ALLOWS: ReadonlySet<string> = new Set()
-
-/**
  * The default app-wide dispatch cap, read fresh on EVERY dispatch call so a
  * Settings change binds the next one without an app restart — the same
  * re-read-per-call contract `loadEngineConfig(engine).dispatch` already has for
@@ -999,7 +820,7 @@ interface TurnLivenessCaps {
  * explicit `0` both mean UNLIMITED: the only things that end a dispatched turn
  * early are the user stopping it, the caller aborting it, one of these
  * user-configured caps, or `dispatch.maxCostUsd`. The previous behaviour — a
- * fixed 10 minutes for claude/pi/codex and 60/15-minute defaults for opencode —
+ * fixed 10 minutes for claude/pi and 60/15-minute defaults for opencode —
  * silently killed legitimately long agent runs, which is the bug this closes.
  */
 function resolveTurnLiveness(cfg: DispatchConfig | undefined): TurnLivenessCaps {
@@ -1034,13 +855,11 @@ function turnTimeoutText(
 }
 
 /** Aftermath clauses for `turnTimeoutText`, per direction. Claude targets die
- *  with their process; opencode/pi/codex targets survive for a continuation. */
+ *  with their process; opencode/pi targets survive for a continuation. */
 const CLAUDE_TIMEOUT_AFTERMATH = 'the target agent was aborted.'
 const OPENCODE_TIMEOUT_AFTERMATH = 'the target agent was aborted.'
 const PI_TIMEOUT_AFTERMATH =
   'the target agent was interrupted (the session survives; a fresh turn may still be dispatched against it).'
-const CODEX_TIMEOUT_AFTERMATH =
-  'the target agent was interrupted (the thread survives; a fresh turn may still be dispatched against it).'
 /** Task kinds of a Claude target's own that wake it when they end (its agents and workflows). */
 const CLAUDE_OWN_WORK_TASK_TYPES: ReadonlySet<string> = new Set([
   'local_agent',
@@ -1133,16 +952,6 @@ const TARGET_FORM_CANCEL_MESSAGE =
 const NO_SESSION_ALLOWS = new OpencodeSessionAllows()
 /** Default for `DispatcherDeps.piAbortSettleGraceMs` — see that field's doc comment. */
 const PI_ABORT_SETTLE_GRACE_MS = 3_000
-/** Default for `DispatcherDeps.codexAbortSettleGraceMs` — see that field's doc comment. */
-const CODEX_ABORT_SETTLE_GRACE_MS = 3_000
-/** `CodexSession`'s writer-lock wait on a resume (ADR-069 §4), for a released target's thread. */
-const CODEX_RESUME_LOCK_WINDOW_MS = 75_000
-const CODEX_RESUME_LOCK_RETRY_MS = 2_000
-const CODEX_RESUME_LOCK_REFUSAL = 'rpc-error--32600'
-/** Hard stop on `model/list` paging while building a Codex target's catalog
- *  (mirrors `CodexSession.start`'s identical guard against a server that pages
- *  forever). A real catalog is one page. */
-const CODEX_CATALOG_PAGE_LIMIT = 100
 
 /**
  * Bounded timeout for the BEST-EFFORT `get_session_stats` reconciliation read
@@ -1175,14 +984,14 @@ interface TargetLedgerFields {
    */
   released: boolean
   /**
-   * The target was started with the `hand_back` tool (ADR-105 §3). False for a Codex thread
+   * The target was started with the `hand_back` tool (ADR-105 §3). False for a row
    * from before it existed (a thread keeps the tool set it was started with): its run ends
    * in its last message, flagged as such.
    */
   handBack: boolean
   /**
    * The target was offered `session_message` to the session that dispatched it (ADR-105 §4): the session
-   * tools were on when it was created. The ledger does not record it, so a Codex thread resumed from its
+   * tools were on when it was created. The ledger does not record it, so a target resumed from its
    * row is taken to have it when they are on now (a thread from before B-4 has no such tool to call).
    */
   canMessage: boolean
@@ -1559,174 +1368,6 @@ interface PiTargetEntry extends TargetLedgerFields {
 }
 
 /**
- * A live Codex dispatch target (ADR-033 slice H).
- *
- * Shaped like pi (alive across turns, a single ambient notification callback
- * rather than an iterable), so there is no `driveClaudeTurn`-style pull loop and
- * no `.return()`-kills-the-process hazard — but since ADR-069 §7 it owns no
- * process at all: it is one more thread on the CALLER's host. Three things make
- * it NOT pi:
- *
- *  - EVENTS CARRY THEIR TURN ID. pi's wire has no per-event turn correlation,
- *    which is why `PiTargetEntry` needs `settled`'s RACE NOTE and a grace
- *    period on every give-up. Codex stamps `turnId` on every notification, so
- *    an abandoned turn's trailing events are recognised by id
- *    (`endedTurns`) and simply dropped — no timing window to lose.
- *  - THE APPROVAL GATE IS THE TRANSPORT'S OWN SERVER-REQUEST CHANNEL. There is
- *    no loopback bridge to own and dispose: `onServerRequest` IS the gate.
- *  - INTERRUPT NEEDS THE TURN ID. `turn/interrupt` is `{threadId, turnId}`,
- *    so a stop that lands before `turn/start` has answered must first learn
- *    the id — see `DispatcherDeps.codexAbortSettleGraceMs`.
- *
- * Like pi (and unlike Claude), an interrupt is TURN-scoped: the process and
- * thread survive, so the entry is kept alive for continuation.
- */
-interface CodexTargetEntry extends TargetLedgerFields {
-  kind: 'codex'
-  /** Resolves the turn's wait for the report's own tool call (`dynamicToolCall`) to complete. */
-  reportToolDone: (() => void) | null
-  /**
-   * The native thread id, from `thread/start`. Null only inside
-   * `createCodexTarget` before that call returns — a successfully-created
-   * entry always has it (creation throws instead of returning one without),
-   * and the entry is registered in `this.targets` under it. Typed nullable for
-   * structural parity with the other two process-backed entries.
-   */
-  sessionId: string | null
-  fromRoutingId: string
-  cwd: string
-  /** This target's view of the host it is a thread on (ADR-069 §2). */
-  connection: CodexThreadConnection
-  /** Latest dispatching context — used to forward approvals/stream events mid-turn. */
-  ctx: RunContext
-  /**
-   * The mode the thread's NATIVE policy currently runs under (ADR-088): set
-   * from `ctx.getAutonomyMode()` at creation (`thread/start`'s baseline) and
-   * REFRESHED at every `turn/start`, which sends `codexTurnPolicy(mode, roots)` so
-   * the thread follows the parent's live mode turn by turn.
-   *
-   * The gate (`decideCodexTargetRequest`) reads THIS, never the live
-   * accessor: the native half of the envelope (`approvalPolicy`/`sandbox`/
-   * `approvalsReviewer`) only changes at a turn start, so a mid-turn switch
-   * into `auto` must not make the gate allow by mode-base while the thread
-   * still runs `approvalsReviewer: 'user'` — no guardian would be reviewing.
-   * A mid-turn switch therefore binds at the next turn.
-   *
-   * Passed DIRECTLY (no translation) as `decideWithSource`'s `mode` — the
-   * shared engine natively speaks this vocabulary.
-   */
-  autonomyMode: string
-  /**
-   * The target's scope (`targetRules(...).additionalDirectories`) as of its last `turn/start`: the
-   * writable roots that turn was started with and the extra roots `insideCodexWorkspace` accepts,
-   * so the gate and the sandbox agree within a turn. Null before the first turn.
-   */
-  turnDirs: string[] | null
-  /** Resolved native model id (`thread/start`'s echo), fixed for the target's life. */
-  model: string
-  /** The latest dispatch prompt (set at every turn start) — the report review's subagent task. */
-  lastPrompt: string
-  /**
-   * ClaudeUI's judge for this target's REPORT (ADR-105 §3, slice B-3c), built on first use: Codex's own
-   * reviewer does not review dynamic-tool calls, so the report is judged by the target's own model
-   * on ClaudeUI's ChatGPT judge route. It judges nothing else.
-   */
-  reportJudge?: DispatchTargetJudge
-  /**
-   * The subscription this target's turns are billed to (ADR-071 §3), resolved
-   * ONCE at creation. Unlike opencode and pi — whose credential is read per
-   * turn off a file — a Codex target's account is decided when its thread is
-   * opened: the host it lands on IS one identity (ADR-069 §2), and a later
-   * vault change cannot move a thread that is already running.
-   */
-  account: DispatchTurnAccount
-  /** True while a turn is being driven — same busy-reject rationale as pi. */
-  busy: boolean
-  /** The turn CURRENTLY in flight, once its id is known; null when idle. */
-  turnId: string | null
-  /** Resolves with the in-flight turn's id (or null) as soon as `turn/start`
-   *  answers — the stop path's only way to interrupt a turn whose id has not
-   *  landed on `entry.turnId` yet. */
-  turnStarted: Promise<string | null>
-  /** Turn ids already settled or abandoned. A `turn/completed` for one of these
-   *  is dropped rather than allowed to settle whatever turn is in flight now. */
-  endedTurns: Set<string>
-  /**
-   * Resolver for the turn CURRENTLY in flight; null when idle. Installed by
-   * `driveCodexTurn` BEFORE `turn/start` is sent (synchronously, so no
-   * notification can arrive first), invoked EXACTLY ONCE by the `turn/completed`
-   * branch of `handleCodexTargetNotification`, by the `turn/start` rejection
-   * path, or by `onDisconnect` if the process dies mid-turn.
-   */
-  settled: ((outcome: CodexTurnOutcome) => void) | null
-  /**
-   * A late approval request from an already stopped/timed-out/aborted turn must
-   * never register a fresh pending approval on the caller. Set as the FIRST
-   * action of the give-up branch, cleared at the start of the next turn — same
-   * contract as `PiChildRunner.draining`, and belt-and-braces next to
-   * `endedTurns` (a request whose turn id we never learned still has this).
-   */
-  draining: boolean
-  /**
-   * `this.now()` at the last app-server notification addressed to this target's
-   * thread while busy — the inactivity watchdog's clock. Fed by
-   * `handleCodexTargetNotification` for every notification that passes its
-   * threadId guard (item events, deltas, usage snapshots), and refreshed by the
-   * watchdog itself while a forwarded approval is unanswered. See
-   * `startTurnWatchdog`; reset to turn start at the start of every turn.
-   */
-  lastActivityAt: number
-  /** DISTINCT tool_use ids seen in the turn CURRENTLY in flight (ADR-033 M4-B). */
-  turnToolUseIds: Set<string>
-  /** Latest CUMULATIVE thread usage (`thread/tokenUsage/updated`'s `total`) —
-   *  `last` is the last REQUEST's context, not a per-turn figure, so a turn's
-   *  own numbers are this minus `usageBaseline`. */
-  usageTotal: TokenUsageBreakdown | null
-  /** `usageTotal` as of the END of the previous turn — the baseline this turn's
-   *  delta is taken against. */
-  usageBaseline: TokenUsageBreakdown | null
-  /**
-   * A thread resumed from its ledger row carries its earlier turns in the cumulative
-   * total: the first `tokenUsage/updated` it shows becomes the baseline, and writes no
-   * spend (`CodexSession`'s `observed` thread, ADR-071 §4).
-   */
-  observeUsageBaseline: boolean
-  /** Cumulative API-rate-EQUIVALENT spend across every turn this target has run
-   *  (ADR-033 M4-C's cap). Equivalent, not a charge: a ChatGPT-subscription
-   *  turn's true cost is unknowable from here (ADR-066). */
-  cumulativeCostUsd: number
-  /** `sha256(item)` per completed item id — the same replay dedupe
-   *  `CodexSession.item` keeps, so `turn/completed`'s authoritative `turn.items`
-   *  replay re-emits only what actually changed. */
-  completedItems: Map<string, string>
-  /** First-seen timestamp per item id, so a replayed item keeps its original
-   *  one instead of jumping to now. */
-  itemTimestamps: Map<string, number>
-  activeStreamItems: Map<
-    string,
-    {
-      target: ItemStreamTarget
-      text: string
-      timestamp: number
-      ownerToolUseId: string
-      startedAt?: number
-    }
-  >
-  /**
-   * The changed-file list of each mapped `fileChange` item, by item id.
-   * `FileChangeRequestApprovalParams` carries NO changes of its own
-   * (threadId/turnId/itemId/startedAtMs/reason/grantRoot only), so this is the
-   * gate's ONLY source of the paths it must decide about — exactly the lookup
-   * `CodexSession.requestApproval` does against its own transcript.
-   */
-  fileChanges: Map<string, FileDiff[]>
-  /** Text of the most recent completed `agentMessage` — the turn's result. */
-  lastAgentText: string
-  /** Wall clock at `turn/start`, the fallback when the turn reports no duration. */
-  turnStartedAtMs: number
-}
-
-/**
  * A message accepted as a steer into a running turn (ADR-105 §4). The engine's acceptance is not an
  * answer: the model may be writing its `hand_back` call, after which the turn is ended and the
  * message was never read (or was read and never answered). The record tracks it from the wire until
@@ -1736,7 +1377,7 @@ interface CodexTargetEntry extends TargetLedgerFields {
  * next run's input (`requeueSteers`).
  */
 interface SteerRecord {
-  /** The engine's id for it: Claude's frame uuid, pi's `deliveryId`, opencode's inbox id, Codex's `clientUserMessageId`. */
+  /** The engine's id for it: Claude's frame uuid, pi's `deliveryId`, opencode's inbox id. */
   token: string
   ledgerId: string
   run: DispatchRun
@@ -1750,11 +1391,7 @@ interface SteerRecord {
   endedAt?: number
 }
 
-/** What a Codex dispatch turn settles with — see `CodexTargetEntry.settled`. */
-type CodexTurnOutcome =
-  { kind: 'ok'; text: string; durationMs: number } | { kind: 'error'; message: string }
-
-type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry | PiTargetEntry | CodexTargetEntry
+type TargetEntry = OpencodeTargetEntry | ClaudeTargetEntry | PiTargetEntry
 
 /**
  * One opencode SERVER's event feed, shared by every dispatch target on it
@@ -1810,17 +1447,6 @@ interface PiPendingApproval {
   resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
 }
 
-/** Same shape/handling as `PiPendingApproval` — a Codex target's gate also
- *  resolves a local Promise (the parked `onServerRequest`) rather than replying
- *  to a remote permission id. Its own variant, not a rename, so the other three
- *  branches stay byte-identical. */
-interface CodexPendingApproval {
-  kind: 'codex'
-  targetSessionId: string | null
-  emit: (channel: string, data: unknown) => void
-  resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
-}
-
 /**
  * A forwarded card that holds a pi/opencode target's auto-mode judge block
  * (ADR-091 §3). `resolveApproval` turns the answer into the hold's semantics
@@ -1840,7 +1466,7 @@ interface ForwardedBlockHold {
 }
 
 type PendingForwardedApproval = (
-  OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval | CodexPendingApproval
+  OpencodePendingApproval | ClaudePendingApproval | PiPendingApproval
 ) & {
   hold?: ForwardedBlockHold
   /**
@@ -1932,103 +1558,9 @@ function parseCallerRestriction(json: string | null): CallerRestriction | undefi
   return null
 }
 
-/** Narrow an unknown wire value to a plain object (mirrors CodexSession's own). */
+/** Narrow an unknown wire value to a plain object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-/**
- * The refusal shape for `method`, used when a Codex target is DRAINING (its
- * turn was already stopped/timed out/abandoned): every native request is
- * answered, never left hanging, and none of them is answered with consent.
- */
-function codexRefusal(method: string): unknown {
-  if (method === 'item/permissions/requestApproval') return { permissions: {}, scope: 'turn' }
-  if (method === 'item/tool/requestUserInput') return { answers: {} }
-  return { decision: 'decline' }
-}
-
-/** Is `target` inside `cwd` or one of `dirs` (the target's additional directories)? Same
- *  containment test `CodexSession.insideWorkspace` makes — duplicated rather than lifted because
- *  CodexSession.ts is not this slice's to refactor beyond the policy table it already exports. */
-function insideCodexWorkspace(cwd: string, dirs: readonly string[], target: string): boolean {
-  const resolved = resolvePath(cwd, target)
-  return [cwd, ...dirs].some((root) => {
-    const rel = relativePath(root, resolved)
-    return rel !== '' && !rel.startsWith('..') && !isAbsolutePath(rel)
-  })
-}
-
-/**
- * `model` measured against a user-configured dispatch allowlist, or null when
- * it passes (or when there is no allowlist / nothing to measure). Same sentence
- * the claude/opencode/pi branches produce, so one refusal reads identically
- * whichever engine the caller aimed at.
- */
-function codexModelAllowlistDenial(
-  model: string | undefined,
-  allowedModels: string[] | undefined
-): string | null {
-  if (model === undefined || !allowedModels || allowedModels.length === 0) return null
-  if (allowedModels.includes(model)) return null
-  return (
-    `Model "${model}" is not in the user-configured allowlist for codex dispatch. ` +
-    `Allowed models: ${allowedModels.join(', ')}`
-  )
-}
-
-/** Zero usage — the implicit baseline before a target's first turn. */
-const CODEX_ZERO_USAGE: TokenUsageBreakdown = {
-  totalTokens: 0,
-  inputTokens: 0,
-  cachedInputTokens: 0,
-  cacheWriteInputTokens: 0,
-  outputTokens: 0,
-  reasoningOutputTokens: 0
-}
-
-/** One turn's own tokens: the thread's cumulative `total` minus the baseline
- *  the previous turn left. Clamped at zero per field — a thread whose usage is
- *  re-reported lower (a compaction) must never produce a negative row. */
-function codexUsageDelta(
-  total: TokenUsageBreakdown | null,
-  baseline: TokenUsageBreakdown | null
-): TokenUsageBreakdown | null {
-  if (!total) return null
-  const base = baseline ?? CODEX_ZERO_USAGE
-  return {
-    totalTokens: Math.max(0, total.totalTokens - base.totalTokens),
-    inputTokens: Math.max(0, total.inputTokens - base.inputTokens),
-    cachedInputTokens: Math.max(0, total.cachedInputTokens - base.cachedInputTokens),
-    cacheWriteInputTokens: Math.max(0, total.cacheWriteInputTokens - base.cacheWriteInputTokens),
-    outputTokens: Math.max(0, total.outputTokens - base.outputTokens),
-    reasoningOutputTokens: Math.max(0, total.reasoningOutputTokens - base.reasoningOutputTokens)
-  }
-}
-
-/**
- * The API-rate equivalent of one turn's tokens, or null when the model has no
- * published price. The token mapping is Codex's, and it differs from
- * Anthropic's in a way that matters: `inputTokens` is the TOTAL prompt with
- * `cachedInputTokens`/`cacheWriteInputTokens` as SUBSETS of it (the OpenAI
- * Responses API's `input_tokens` / `input_tokens_details`), so the billable
- * base rate is what is left after both — and `reasoningOutputTokens` is a
- * subset of `outputTokens`, already counted once. Identical arithmetic to
- * `CodexSession.equivalentCost`; kept here rather than shared because that
- * method is bound to the session's own account/provider state.
- */
-function codexTurnCostUsd(model: string, delta: TokenUsageBreakdown): number | null {
-  return equivalentCostUsd('openai', model, {
-    inputTokens: Math.max(
-      0,
-      delta.inputTokens - delta.cachedInputTokens - delta.cacheWriteInputTokens
-    ),
-    outputTokens: delta.outputTokens,
-    cacheWriteTokens: delta.cacheWriteInputTokens,
-    // OpenAI publishes ONE cache-write rate; the 5m/1h split is Anthropic's.
-    cacheWrite1hTokens: 0,
-    cacheReadTokens: delta.cachedInputTokens
-  })
 }
 
 /**
@@ -2204,12 +1736,10 @@ function piTurnCost(
 //
 // WHEN each is read follows what can actually change under the target. The
 // opencode and pi helpers run PER TURN, off a credential file a sign-in can
-// rewrite between turns while the target process keeps serving. The Codex and
-// Claude helpers run ONCE at target creation (`CodexTargetEntry.account`,
-// `ClaudeTargetEntry.account`), because those targets hold their credential
-// from the moment they start: a Codex thread is pinned to the host it landed
-// on (ADR-069 §2), and a dispatched cli.js process reads the app's
-// credentials at spawn and never again.
+// rewrite between turns while the target process keeps serving. The Claude
+// helper runs ONCE at target creation (`ClaudeTargetEntry.account`), because
+// a dispatched cli.js process reads the app's credentials at spawn and never
+// again.
 
 /** The `unknown` account — a target that cannot name the account it ran under. */
 const UNKNOWN_DISPATCH_ACCOUNT: DispatchTurnAccount = {
@@ -2278,7 +1808,7 @@ function claudeDispatchAccount(): DispatchTurnAccount {
 /**
  * The vendor/model split of a recorded row's `targetModel`, parsed the way the
  * TARGET engine encodes it (`engineMeta(...).decodeModelValue`): a bare model
- * id under a fixed vendor on Claude and Codex, `<vendor>/<model>` split on the
+ * id under a fixed vendor on Claude, `<vendor>/<model>` split on the
  * first slash on opencode and pi. An engine id this build does not know —
  * impossible from the call sites, which all pass a literal or an `EngineId` —
  * yields an `unknown` vendor rather than throwing inside a usage write.
@@ -2300,7 +1830,7 @@ function claudeDispatchAccount(): DispatchTurnAccount {
  * It is wire-neutral. Every engine-facing call decodes the value again
  * (`parseModelString` for opencode, `decodeModelValue` before pi's
  * `set_model`), and decode is what both spellings already agreed on. Claude
- * and Codex encode a bare id, so for them this is the identity.
+ * encodes a bare id, so for it this is the identity.
  *
  * `ENGINE_META` rather than `engineMeta()`: an unregistered engine must read
  * back verbatim, not throw inside a dispatch.
@@ -2379,7 +1909,7 @@ function dispatchLedgerEvent(row: DispatchedTurnRecord, seq: number): UsageTurnE
       cacheWrite: row.tokens?.cacheWrite ?? 0,
       // Only the Claude target reports the 1h-TTL cache-write SUBSET (cli.js's
       // `usage.cache_creation.ephemeral_1h_input_tokens`, billed at 2× input);
-      // opencode, pi and Codex publish one cache-write rate and report none.
+      // opencode and pi publish one cache-write rate and report none.
       cacheWrite1h: row.tokens?.cacheWrite1h ?? 0,
       cacheRead: row.tokens?.cacheRead ?? 0
     },
@@ -2588,7 +2118,7 @@ class ClaudeInputChannel implements AsyncIterable<Record<string, unknown>> {
  * is a `user` message — without this it would read another agent's words as
  * the user's own authorisation. pi/opencode targets need none (ClaudeUI's
  * judge reads the PARENT transcript with a `dispatch:<engine>` subagent
- * header); Codex's guardian is left alone.
+ * header).
  */
 export const DISPATCH_PROMPT_PREAMBLE =
   'Task delegated to you by another agent acting for the user:\n\n'
@@ -2835,19 +2365,13 @@ export class CrossEngineDispatcher {
   private readonly resolveMaxConcurrent: () => number
   private readonly heartbeatMs: number
   private readonly piAbortSettleGraceMs: number
-  private readonly codexAbortSettleGraceMs: number
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
   private readonly loadUserRules: (cwd: string) => MergedClaudeRules
   private readonly spawnPiTarget: SpawnPiTargetFn
-  private readonly attachCodexTarget: AttachCodexTargetFn
-  private readonly codexVaultAccounts: boolean
   private readonly recordLedgerEvent: (event: UsageTurnEvent) => void
   /** The X-Agent ledger (ADR-105). */
   private readonly ledger: DispatchLedgerStore
   private readonly locateTranscript: (sessionId: string, cwd: string) => string | null
-  private readonly codexResumeLockWindowMs: number
-  private readonly codexResumeLockRetryMs: number
-  private readonly codexHoldsThread: (threadId: string) => boolean
   private readonly piSessionDirExists: (dir: string) => boolean
   private readonly piScratchpad: (cwd: string, key: string) => PiScratchpad | undefined
   private readonly targetCwdExists: (cwd: string) => boolean
@@ -2926,20 +2450,13 @@ export class CrossEngineDispatcher {
     this.resolveMaxConcurrent = deps.resolveMaxConcurrent ?? defaultResolveMaxConcurrent
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS
     this.piAbortSettleGraceMs = deps.piAbortSettleGraceMs ?? PI_ABORT_SETTLE_GRACE_MS
-    this.codexAbortSettleGraceMs = deps.codexAbortSettleGraceMs ?? CODEX_ABORT_SETTLE_GRACE_MS
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
     this.loadUserRules = deps.loadUserRules ?? mergedClaudeRulesFor
     this.spawnPiTarget = deps.spawnPiTarget ?? defaultSpawnPiTarget
-    this.attachCodexTarget = deps.attachCodexTarget ?? defaultAttachCodexTarget(codexHostRegistry)
-    this.codexVaultAccounts = deps.codexVaultAccounts ?? false
     this.now = deps.now ?? Date.now
     this.recordLedgerEvent = deps.recordUsageEvent ?? recordUsageEvent
     this.ledger = deps.ledger ?? dispatchLedger
     this.locateTranscript = deps.locateClaudeTranscript ?? locateClaudeTranscript
-    this.codexResumeLockWindowMs = deps.codexResumeLockWindowMs ?? CODEX_RESUME_LOCK_WINDOW_MS
-    this.codexResumeLockRetryMs = deps.codexResumeLockRetryMs ?? CODEX_RESUME_LOCK_RETRY_MS
-    this.codexHoldsThread =
-      deps.codexHoldsThread ?? ((threadId) => codexHostRegistry.holdsThread(threadId))
     this.piSessionDirExists = deps.piSessionDirExists ?? existsSync
     this.piScratchpad = deps.piScratchpad ?? ((cwd, key) => ensurePiScratchpad(cwd, key))
     this.targetCwdExists = deps.targetCwdExists ?? existsSync
@@ -3196,7 +2713,6 @@ export class CrossEngineDispatcher {
       cwd: string
       model: string
       accountKey: string | null
-      codexAccountId?: string | null
       fresh?: FreshLaunch
       /** The target was started with the `hand_back` tool. */
       handBack: boolean
@@ -3213,7 +2729,6 @@ export class CrossEngineDispatcher {
       model: spec.model,
       launchMode: liveMode(ctx),
       accountKey: spec.accountKey,
-      codexAccountId: spec.codexAccountId ?? null,
       callerRestriction: ctx.callerRestriction ? JSON.stringify(ctx.callerRestriction) : null,
       name: labelOf(spec.fresh?.name),
       description: labelOf(spec.fresh?.description),
@@ -3304,7 +2819,7 @@ export class CrossEngineDispatcher {
    *
    * Only a row whose `parent_session_id` is the CALLER's resumes. `req.sessionId` is
    * model-authored text: resuming whatever it names would let a dispatching agent reopen
-   * any Codex thread or Claude session on disk (the Codex rule, below), with no owner
+   * any harness session on disk, with no owner
    * check to refuse it. A row with an unreadable caller restriction is refused too —
    * reading it as "none" would loosen a restricted target.
    */
@@ -3396,7 +2911,7 @@ export class CrossEngineDispatcher {
    * pass the engine's allowlist as a fresh dispatch's would (refused with the same text).
    */
   private resumeModelRefusal(
-    engine: 'claude' | 'opencode' | 'pi' | 'codex',
+    engine: EngineId,
     model: string,
     cfg: DispatchConfig | undefined
   ): DispatchResult | null {
@@ -3440,7 +2955,7 @@ export class CrossEngineDispatcher {
    * A registry miss on the card (or ledger) id of a `running` row the caller owns is a row nothing
    * here runs: see {@link endPhantomRow} (it is ended, no intent is armed).
    *
-   * `opts.blockingOnly` is the parent's OWN interrupt (Esc, pi's and Codex's interrupt):
+   * `opts.blockingOnly` is the parent's OWN interrupt (Esc, pi's interrupt):
    * it ends the blocking calls the parent is waiting on and never a background run,
    * which is the user's to stop from its card.
    */
@@ -3569,7 +3084,7 @@ export class CrossEngineDispatcher {
    *  - A RUNNING X-Agent takes it as a steer into its running turn, on each engine's own path
    *    (Claude: a frame pushed into its channel under a uuid of its own, which the turn accounting
    *    ignores; pi: `/cui-deliver`, marked as agent text, appended, never woken; opencode: a steer
-   *    prompt; Codex: `turn/steer` on the live turn id).
+   *    prompt).
    *  - An idle, released, interrupted or ended-with-a-report one is resumed through the one run
    *    engine: a new run of its harness session (`findContinuation`, the cost cap, the model
    *    allowlist), in the background, with the message as its input, run n+1 of the card the X-Agent
@@ -3610,6 +3125,9 @@ export class CrossEngineDispatcher {
     if (!row) return refuse(`There is no X-Agent ${request.ledgerId}.`)
     if (this.runs.parentOf(row.parentSessionId) !== this.runs.parentOf(request.from.routingId))
       return refuse('That X-Agent belongs to another session; you can message only your own.')
+    // A row an older build wrote for an engine this one does not ship (`codex`) has no run to resume.
+    if (!isEngineId(row.engine))
+      return refuse(`X-Agent ${row.name ?? row.id} ran on an engine that is no longer supported.`)
     const framed = xAgentMessageFrame(request.from.title, request.text)
     const ctx = this.contextForRow(row)
     const stopped = (r: DispatchTargetRow): string =>
@@ -3708,8 +3226,7 @@ export class CrossEngineDispatcher {
       emit: (channel, data) => this.parents?.emit(parentId(), channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
         live()?.addDispatchedCost?.(engineId, modelId, costUsd),
-      ...(row.parentToolUseId ? { toolUseId: row.parentToolUseId } : {}),
-      chatgptAccountId: row.codexAccountId
+      ...(row.parentToolUseId ? { toolUseId: row.parentToolUseId } : {})
     }
   }
 
@@ -3845,26 +3362,6 @@ export class CrossEngineDispatcher {
           logger.info('CrossEngineDispatcher', `opencode steer refused: ${errText(err)}`)
           return refused()
         }
-      case 'codex': {
-        // `turn/steer` names the turn it expects; one that has not announced its id yet is waited for.
-        const turnId = entry.turnId ?? (await this.withinCodexGrace(entry.turnStarted)) ?? null
-        if (!turnId || !entry.sessionId || entry.draining || entry.endedTurns.has(turnId)) {
-          this.steers.delete(token)
-          return 'not-ready'
-        }
-        try {
-          await entry.connection.request('turn/steer', {
-            threadId: entry.sessionId,
-            expectedTurnId: turnId,
-            clientUserMessageId: token,
-            input: codexTurnInput(framed)
-          })
-          return 'steered'
-        } catch (err) {
-          logger.info('CrossEngineDispatcher', `codex steer refused: ${errText(err)}`)
-          return refused()
-        }
-      }
     }
   }
 
@@ -3937,7 +3434,7 @@ export class CrossEngineDispatcher {
    * one): the engine took it into the turn first → ANSWERED (the model had it in view when it wrote
    * the report); otherwise → unanswered, and, at the report, taken back from the engine so the turn
    * the report ends does not fold it in or run it afterwards. pi's deferred copy cannot be taken back
-   * (it is context only); Codex clears it on the interrupt that follows the report.
+   * (it is context only).
    */
   private settleSteers(run: DispatchRun, entry: TargetEntry | undefined, takeBack: boolean): void {
     for (const record of this.steers.values()) {
@@ -4089,12 +3586,7 @@ export class CrossEngineDispatcher {
       }
     }
     // ── Guards ────────────────────────────────────────────────────────────
-    // ADR-069 §7 lifts this for CODEX alone: a codex → codex dispatch is one more
-    // `thread/start` on the process the caller is already running on, which is
-    // what the guard existed to prevent when it meant a second app-server per
-    // dispatch. Every other engine still pays a whole server or CLI for a
-    // same-engine target and still has a native subagent of its own.
-    if (req.engine === ctx.fromEngine && req.engine !== 'codex') {
+    if (req.engine === ctx.fromEngine) {
       return {
         refused: errorResult(
           `dispatch_agent targets a different engine — this session already runs on "${ctx.fromEngine}". ` +
@@ -4102,12 +3594,7 @@ export class CrossEngineDispatcher {
         )
       }
     }
-    if (
-      req.engine !== 'opencode' &&
-      req.engine !== 'claude' &&
-      req.engine !== 'pi' &&
-      req.engine !== 'codex'
-    ) {
+    if (req.engine !== 'opencode' && req.engine !== 'claude' && req.engine !== 'pi') {
       return {
         refused: errorResult(`Dispatching into engine "${req.engine}" is not supported yet.`)
       }
@@ -4183,7 +3670,7 @@ export class CrossEngineDispatcher {
     }
     const description = labelOf(req.description)
     // Every registration marks `description` required, but an engine need not enforce its schema
-    // (a Codex dynamic tool may not): a NEW launch without one is refused here. A continuation or
+    // (a hosted tool may not): a NEW launch without one is refused here. A continuation or
     // a message to an existing X-Agent keeps the description its row already has.
     if (!description && !req.sessionId) {
       return {
@@ -4468,7 +3955,6 @@ export class CrossEngineDispatcher {
     const stop = ctx.run.stopController
     if (req.engine === 'claude') return this.resolveAndRunClaude(req, ctx, stop)
     if (req.engine === 'pi') return this.resolveAndRunPi(req, ctx, stop)
-    if (req.engine === 'codex') return this.resolveAndRunCodex(req, ctx, stop)
     return this.resolveAndRunOpencode(req, ctx, stop)
   }
 
@@ -4555,7 +4041,7 @@ export class CrossEngineDispatcher {
       }
     }
 
-    if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
+    if (pending.kind === 'claude' || pending.kind === 'pi') {
       pending.resolve(answer.decision, answer.answers)
       return true
     }
@@ -4659,27 +4145,6 @@ export class CrossEngineDispatcher {
       // if already torn down), so this is safe even if the process already
       // exited on its own (onExit already disposed the bridge host).
       entry.runner.dispose()
-    } else {
-      if (entry.ctx.toolUseId) this.sealCodexTargetItems(entry, entry.ctx.toolUseId)
-      // codex (slice H, ADR-069 §7): a target is a THREAD on the caller's
-      // host, so teardown is an interrupt and a detach — never a kill, which
-      // would take every other session on that account down with it. The
-      // native thread is left on disk (a dispatch target's thread is an
-      // ordinary Codex thread; deleting it is the user's call, not a disposal
-      // side effect) and unsubscribed, which is what lets the binary unload it
-      // and release its writer lock.
-      //
-      // A turn still in flight has to be settled HERE: the process no longer
-      // dies, so no `onDisconnect` will do it, and the dispatch would hold its
-      // run slot until the watchdog fired.
-      if (entry.sessionId && entry.turnId)
-        void entry.connection
-          .request('turn/interrupt', { threadId: entry.sessionId, turnId: entry.turnId })
-          .catch(() => {})
-      entry.connection.detach()
-      const settle = entry.settled
-      entry.settled = null
-      settle?.({ kind: 'error', message: 'the dispatching session was disposed' })
     }
   }
 
@@ -4707,8 +4172,7 @@ export class CrossEngineDispatcher {
   /**
    * End an X-Agent for good (ADR-105 §5): its process released and approvals dismissed,
    * its row `stopped` (never resumed again) and the harness's own session removed where
-   * the engine allows (opencode's session, pi's directory; Claude's transcript and
-   * Codex's thread stay). The run, if there was one, has already settled.
+   * the engine allows (opencode's session, pi's directory; Claude's transcript stays). The run, if there was one, has already settled.
    */
   private endTarget(ledgerId: string, known?: DispatchTargetRow): void {
     let row = known
@@ -5003,7 +4467,7 @@ export class CrossEngineDispatcher {
 
   /**
    * THE door of every `hand_back` call, whatever the engine delivers it through: the Claude
-   * target's own MCP server, pi's bridge, the shared opencode server, Codex's dynamic tool.
+   * target's own MCP server, pi's bridge, the shared opencode server.
    * Each passes the target the call arrived on (resolved its own way, but never from the
    * model's say-so); `undefined` is a caller that is not a dispatch target, and is refused.
    *
@@ -5042,10 +4506,7 @@ export class CrossEngineDispatcher {
   /**
    * Who reviews THIS target's report, when anyone does: only a target running in a judged auto
    * mode. pi and opencode: ClaudeUI's judge for that engine (`autoModeActive` reads the live
-   * mode and the engine's own switch). Codex: its native reviewer does not look at dynamic-tool
-   * calls (`codex-rs/core/src/tools/handlers/dynamic.rs` asks no approval), so, while the thread
-   * runs `auto` (`entry.autonomyMode`, as its other gates read it), the target's OWN model judges
-   * through ClaudeUI's judge on its ChatGPT route. Claude: cli.js's classifier decides inside the
+   * mode and the engine's own switch). Claude: cli.js's classifier decides inside the
    * process and its verdict is read off the stream (`takeBlockedClaudeReport`), not asked here.
    */
   private reviewerFor(
@@ -5069,44 +4530,9 @@ export class CrossEngineDispatcher {
         return entry.judge.autoModeActive(liveMode(entry.ctx))
           ? through(entry.judge, () => liveMode(entry.ctx))
           : undefined
-      case 'codex': {
-        // The thread's own mode (as its other gates read it), under the Codex engine's switch.
-        const judge = this.codexReportJudge(entry)
-        return judge.autoModeActive(entry.autonomyMode)
-          ? through(judge, () => entry.autonomyMode)
-          : undefined
-      }
       case 'claude':
         return undefined
     }
-  }
-
-  /** The judge of a Codex target's report: pi's ChatGPT route, the target's own model, the Codex engine's switches. */
-  private codexReportJudge(entry: CodexTargetEntry): DispatchTargetJudge {
-    entry.reportJudge ??= new DispatchTargetJudge({
-      engine: 'pi',
-      configEngine: 'codex',
-      fixedModel: () => entry.model,
-      cwd: entry.cwd,
-      routingId: () => entry.ctx.fromRoutingId,
-      // The usage row is a pi-route row: it must not name a Codex thread as a pi session.
-      sessionId: () => null,
-      model: () => entry.model,
-      emit: () => entry.ctx.emit,
-      messages: () => entry.ctx.getMessages(),
-      loadMessages: () => entry.ctx.loadMessages?.(),
-      queuedTurns: () => entry.ctx.getQueuedUserTurns?.() ?? [],
-      trajectory: () => [],
-      subagent: () => ({
-        type: 'dispatch:codex',
-        description: judgeDescription(entry.model, entry.ctx.callerRestriction),
-        prompt: entry.lastPrompt
-      }),
-      loadEngineConfig: this.deps.loadEngineConfig,
-      peekModels: () => null,
-      ...(this.deps.makeJudgeTransport ? { makeTransport: this.deps.makeJudgeTransport } : {})
-    })
-    return entry.reportJudge
   }
 
   /** Start the review of the report just accepted (a no-op for a target that is not judged). Never throws. */
@@ -5184,12 +4610,11 @@ export class CrossEngineDispatcher {
 
   /**
    * The permission mode an X-Agent runs under right now, which is its caller class for the session
-   * tools: a Claude target's process mode, a Codex thread's native-policy mode, the parent's live
+   * tools: a Claude target's process mode, the parent's live
    * mode for pi and opencode (their gates read it live).
    */
   private targetMode(entry: TargetEntry): string {
     if (entry.kind === 'claude') return entry.appliedPermissionMode
-    if (entry.kind === 'codex') return entry.autonomyMode
     return liveMode(entry.ctx)
   }
 
@@ -5221,7 +4646,7 @@ export class CrossEngineDispatcher {
       : null
   }
 
-  /** `session_message` from a pi or Codex target, answered as the engine's tool result. */
+  /** `session_message` from a pi target, answered as the engine's tool result. */
   private async xAgentMessage(
     entry: TargetEntry,
     input: Record<string, unknown>,
@@ -5252,7 +4677,7 @@ export class CrossEngineDispatcher {
    *  - A report was handed back: the report is the result, in the terminal notification
    *    (`handback: 'send'`) and, framed, as a blocking call's answer. The turn's own last
    *    text is dropped. The framed answer keeps the cost-cap note the turn appended.
-   *  - The target has no `hand_back` tool (a Codex thread from before it existed): its last
+   *  - The target has no `hand_back` tool (a target from before it existed): its last
    *    message stands in, flagged as such.
    *  - Otherwise nothing is announced: the loop nudges the agent or withholds.
    */
@@ -5310,7 +4735,7 @@ export class CrossEngineDispatcher {
   }
 
   /**
-   * After a `hand_back` call on an opencode or Codex target: how long to leave the turn
+   * After a `hand_back` call on an opencode target: how long to leave the turn
    * running. The tool result has to reach the agent before the turn is interrupted (an
    * interrupt that landed first would cancel the call), so this waits for the call's own tool
    * item to COMPLETE on the feed (`tool`); the turn may end by itself first (`turn`: nothing
@@ -7963,7 +7388,7 @@ export class CrossEngineDispatcher {
    * Read by the turn watchdog to keep an approval-PARKED turn's inactivity
    * clock rolling (see `startTurnWatchdog`). NOT scoped to any target kind: as
    * of ADR-033's 2026-09-18 amendment all four directions run on that
-   * watchdog, and a Claude/pi/codex target blocked on its gate is exactly as
+   * watchdog, and a Claude/pi target blocked on its gate is exactly as
    * silent as an opencode one blocked on `ctx.ask`. A plain scan: the map holds
    * at most a handful of live approvals. A null session id (a Claude target
    * whose `system/init` has not landed yet) can own no approval by definition.
@@ -8027,7 +7452,7 @@ export class CrossEngineDispatcher {
   /**
    * Arm one dispatch turn's liveness watchdog — the SINGLE implementation
    * shared by all four directions (ADR-033's 2026-09-18 amendment; before it
-   * only the opencode direction had one, and claude/pi/codex raced a fixed
+   * only the opencode direction had one, and claude/pi raced a fixed
    * 10-minute `setTimeout` no user could change).
    *
    * Returns a promise that resolves ONLY when one of the two configured caps
@@ -8058,7 +7483,7 @@ export class CrossEngineDispatcher {
         const now = this.now()
         // A target BLOCKED on a forwarded approval is alive but SILENT — an
         // opencode target parked on `ctx.ask` emits no session events at all
-        // (the server's keepalives carry no sessionID), and a Claude/pi/codex
+        // (the server's keepalives carry no sessionID), and a Claude/pi
         // target parked on its gate is just as quiet. The inactivity clock
         // would otherwise run out on a turn whose only fault is that its human
         // is slow, aborting it and dismissing the very card they were reading.
@@ -8083,9 +7508,8 @@ export class CrossEngineDispatcher {
   }
 
   /** Dismiss all forwarded approvals for one target (timeout/abort/dispose).
-   *  Claude/pi/codex-kind resolvers are ALSO resolved with deny — never leave a
-   *  hanging canUseTool/gate/server-request promise (ADR-033 M2 item 7,
-   *  extended to pi in M4c and to codex in slice H). */
+   *  Claude/pi-kind resolvers are ALSO resolved with deny — never leave a
+   *  hanging canUseTool/gate promise (ADR-033 M2 item 7, extended to pi in M4c). */
   private dismissPendingForTarget(targetSessionId: string): void {
     // An opencode target's asks still under judgement reply nothing once the
     // turn is stopped (ADR-088, `OpencodeTargetEntry.judging`).
@@ -8095,7 +7519,7 @@ export class CrossEngineDispatcher {
       if (pending.targetSessionId !== targetSessionId) continue
       this.takePendingApproval(key)
       pending.emit('session:approval-dismiss', { requestId: key })
-      if (pending.kind === 'claude' || pending.kind === 'pi' || pending.kind === 'codex') {
+      if (pending.kind === 'claude' || pending.kind === 'pi') {
         pending.resolve('deny')
       }
     }
@@ -9041,1509 +8465,11 @@ export class CrossEngineDispatcher {
       entry.ctx.emit('session:approval-request', approval)
     })
   }
-
-  // ── codex direction (slice H) ─────────────────────────────────────────────
-
-  /**
-   * Everything past the guards for engine:'codex' — runs with an
-   * run slot held and the Stop handle already registered (same
-   * preamble as the other three directions).
-   */
-  private async resolveAndRunCodex(
-    req: DispatchRequest,
-    ctx: RunContext,
-    stopController: AbortController
-  ): Promise<DispatchResult> {
-    // ── Model resolution ──────────────────────────────────────────────────
-    // DELIBERATELY UNLIKE the claude and pi branches, a model is NOT required
-    // here. Those two must demand one because a spawned target's actual model
-    // is unknowable until after the process is up, which would make a
-    // configured `allowedModels` unenforceable. Codex has no such problem: the
-    // catalog (`model/list`) and the user's own configured default
-    // (`config/read`) both arrive on the target's connection BEFORE any thread
-    // exists, so `createCodexTarget` resolves the model first and checks the
-    // allowlist against the RESOLVED id — the allowlist stays exactly as
-    // honest, and a user who has not configured `engines/codex.json` can still
-    // be dispatched into.
-    const dispatchCfg = this.deps.loadEngineConfig('codex').dispatch
-    const requestedModel = req.model ?? dispatchCfg?.defaultModel
-    const allowed = dispatchCfg?.allowedModels
-    // Checked HERE as well as post-resolution so an explicitly-requested model
-    // outside the allowlist is refused with the SAME bare sentence the other
-    // targets use, before a process is even spawned. The post-resolution check
-    // inside `createCodexTarget` is what covers the fall-back-to-the-catalog
-    // -default path, where there is nothing to check until the catalog lands.
-    const earlyDenial = codexModelAllowlistDenial(requestedModel, allowed)
-    if (earlyDenial) return errorResult(earlyDenial)
-
-    // ── Target resolution ─────────────────────────────────────────────────
-    let entry: CodexTargetEntry
-    if (req.sessionId) {
-      // NOT a `thread/resume` of whatever the id names. `req.sessionId` is
-      // model-authored text: resuming it blindly would let a dispatched-from agent
-      // reopen ANY Codex thread on disk — including the user's own interactive
-      // sessions — under a dispatch target's policy envelope, with no ownership
-      // check available to refuse it. Only a live entry this caller owns, or a LEDGER
-      // row this caller owns (a thread this dispatcher created for it), continues
-      // (ADR-066's caller-bound identity); `findContinuation` refuses everything else.
-      const cont = this.findContinuation(req.sessionId, ctx, 'codex')
-      if (!cont) {
-        return errorResult(
-          `Unknown dispatch session "${req.sessionId}" — it may have been disposed. ` +
-            'Start a new X-Agent with dispatch_agent.'
-        )
-      }
-      if ('live' in cont && cont.live.busy) {
-        return errorResult(
-          `Dispatch session "${req.sessionId}" is already running a turn — wait for it to finish before continuing it.`,
-          req.sessionId
-        )
-      }
-      const spent = this.continuationSpend(cont, dispatchCfg, req.sessionId, 'codex')
-      if ('text' in spent) return spent
-      const spentUsd = spent.costUsd
-      if ('row' in cont) {
-        const refusal = this.resumeModelRefusal('codex', cont.row.model, dispatchCfg)
-        if (refusal) return refusal
-      }
-      if ('live' in cont) {
-        this.bindContinuation(ctx, cont)
-        cont.live.ctx = ctx
-        entry = cont.live
-      } else {
-        try {
-          // The wait for the thread's lock ends at once on a Stop or the caller's abort.
-          this.bindContinuation(ctx, cont)
-          entry = await this.createCodexTarget(ctx, undefined, undefined, cont.row, [
-            stopController.signal,
-            ctx.run.cancelController.signal
-          ])
-        } catch (err) {
-          // A thread Codex has no rollout for will never resume; a busy host, a lost
-          // connection or a stop is worth another try.
-          if (/no rollout found/i.test(errText(err)))
-            this.ledgerSet(cont.row.id, { state: 'failed' })
-          return errorResult(
-            `Failed to resume dispatched codex agent: ${errText(err)}`,
-            req.sessionId
-          )
-        }
-        entry.cumulativeCostUsd = spentUsd
-      }
-    } else {
-      try {
-        entry = await this.createCodexTarget(ctx, requestedModel, allowed, undefined, [], req)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return errorResult(`Failed to start dispatched codex agent: ${msg}`)
-      }
-    }
-
-    const model = entry.model
-    // The report review's subagent task is the LATEST dispatch prompt (ADR-088's rule for the judge).
-    entry.lastPrompt = req.prompt
-    const turn = async (prompt: string | null): Promise<TurnReturn> => {
-      entry.busy = true
-      this.ledgerTurnState(entry, 'running')
-      entry.turnToolUseIds = new Set()
-      const turnStartedAt = this.now()
-      entry.lastActivityAt = turnStartedAt
-
-      // ── Run the turn ──────────────────────────────────────────────────────
-      const heartbeat = this.startHeartbeat(ctx)
-
-      const signal = ctx.run.cancelController.signal
-      let abortListener: (() => void) | undefined
-
-      type Raced =
-        | { kind: 'ok'; outcome: Extract<CodexTurnOutcome, { kind: 'ok' }> }
-        | { kind: 'err'; message: string }
-        | TurnTimeout
-        | { kind: 'abort' }
-        | { kind: 'stop' }
-        | { kind: 'report' }
-
-      const reportToolDone = new Promise<void>((resolve) => {
-        entry.reportToolDone = resolve
-      })
-      const turnPromise: Promise<Raced> = this.driveCodexTurn(entry, prompt as string).then(
-        (outcome): Raced =>
-          outcome.kind === 'ok'
-            ? { kind: 'ok', outcome }
-            : { kind: 'err', message: outcome.message }
-      )
-      // Turn liveness: the TARGET engine's two configured caps, unlimited unless
-      // the user set them (ADR-033's 2026-09-18 amendment).
-      // `handleCodexTargetNotification` is what bumps `entry.lastActivityAt`.
-      const caps = resolveTurnLiveness(dispatchCfg)
-      const watchdog = this.startTurnWatchdog(entry, caps, turnStartedAt, () =>
-        this.hasPendingApprovalFor(entry.sessionId)
-      )
-      const timeoutPromise: Promise<Raced> = watchdog.promise
-      const abortPromise: Promise<Raced> = signal
-        ? signal.aborted
-          ? Promise.resolve({ kind: 'abort' })
-          : new Promise((resolve) => {
-              abortListener = (): void => resolve({ kind: 'abort' })
-              signal.addEventListener('abort', abortListener, { once: true })
-            })
-        : new Promise(() => {})
-      const stopPromise: Promise<Raced> = stopController.signal.aborted
-        ? Promise.resolve({ kind: 'stop' })
-        : new Promise((resolve) => {
-            stopController.signal.addEventListener('abort', () => resolve({ kind: 'stop' }), {
-              once: true
-            })
-          })
-
-      // The agent handed its report back (ADR-105 §3): the run is over, the turn is to end.
-      const reportPromise: Promise<Raced> = ctx.run.reported.then((): Raced => ({ kind: 'report' }))
-
-      let endState: DispatchTargetState = 'idle'
-      try {
-        const raced = await Promise.race([
-          turnPromise,
-          timeoutPromise,
-          abortPromise,
-          stopPromise,
-          reportPromise
-        ])
-        let winner: Exclude<Raced, { kind: 'report' }>
-        if (raced.kind === 'report') {
-          // Let the tool result reach the agent (an interrupt first would cancel the call
-          // itself), then end the turn: the report is the result, whatever it would say next.
-          // A turn that ended by itself meanwhile needs no interrupt (and its own outcome stands).
-          const how = await this.untilReportToolDone(reportToolDone, turnPromise)
-          let ended: Raced | undefined
-          if (how === 'turn') ended = await turnPromise
-          else {
-            entry.draining = true
-            await this.interruptCodexTurn(entry)
-          }
-          winner =
-            ended?.kind === 'ok'
-              ? ended
-              : {
-                  kind: 'ok',
-                  outcome: {
-                    kind: 'ok',
-                    text: entry.lastAgentText || '(the dispatched agent returned no text)',
-                    durationMs: Math.max(0, Date.now() - entry.turnStartedAtMs)
-                  }
-                }
-        } else winner = raced
-
-        if (winner.kind === 'timeout' || winner.kind === 'abort' || winner.kind === 'stop') {
-          // FIRST and synchronously, before any RPC leaves: no approval request
-          // from this turn can then race ahead of the flag.
-          entry.draining = true
-          await this.interruptCodexTurn(entry)
-          const usage = this.accountCodexTurn(entry, ctx)
-          if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
-          const text =
-            winner.kind === 'timeout'
-              ? turnTimeoutText(winner.reason, caps, CODEX_TIMEOUT_AFTERMATH)
-              : winner.kind === 'stop'
-                ? 'Dispatch stopped by user.'
-                : 'Dispatch cancelled.'
-          const status = winner.kind === 'timeout' ? 'failed' : 'stopped'
-          ctx.run.timedOut = winner.kind === 'timeout'
-          emitDispatchNotification(ctx, entry.sessionId ?? '', status, text)
-          // Same row-vs-spend split as the pi direction: a 'stopped' turn gets no
-          // usage ROW (ADR-033 M4-B), but whatever it spent before the stop is
-          // still folded into the cap and the caller's breakdown above.
-          if (status === 'failed') {
-            this.safeRecordUsage({
-              ts: this.now(),
-              fromRoutingId: ctx.fromRoutingId,
-              targetEngine: 'codex',
-              targetModel: model,
-              targetSessionId: entry.sessionId,
-              toolUseId: ctx.toolUseId ?? null,
-              ...(usage.tokens ? { tokens: usage.tokens } : {}),
-              account: entry.account,
-              // codexTurnCostUsd is OUR table's equivalent, not a charge
-              // (ADR-066: a ChatGPT-subscription charge is unknowable here),
-              // so the ledger derives the API cost from the split above.
-              engineCostIsEquivalent: true
-            })
-          }
-          return errorResult(text, entry.sessionId ?? '')
-        }
-
-        if (winner.kind === 'err') {
-          endState = 'failed'
-          // The thread is NOT torn down: a failed turn (a refused `turn/start`, a
-          // `turn/completed` carrying an error) leaves the app-server and the
-          // thread alive, and a genuinely dead process self-diagnoses on the next
-          // continuation (`CodexAppServerClient.request` rejects `not-ready`).
-          if (entry.sessionId) this.dismissPendingForTarget(entry.sessionId)
-          const usage = this.accountCodexTurn(entry, ctx)
-          emitDispatchNotification(
-            ctx,
-            entry.sessionId ?? '',
-            'failed',
-            `Dispatched turn failed: ${winner.message}`
-          )
-          this.safeRecordUsage({
-            ts: this.now(),
-            fromRoutingId: ctx.fromRoutingId,
-            targetEngine: 'codex',
-            targetModel: model,
-            targetSessionId: entry.sessionId,
-            toolUseId: ctx.toolUseId ?? null,
-            ...(usage.tokens ? { tokens: usage.tokens } : {}),
-            account: entry.account,
-            // codexTurnCostUsd is OUR table's equivalent, not a charge
-            // (ADR-066: a ChatGPT-subscription charge is unknowable here),
-            // so the ledger derives the API cost from the split above.
-            engineCostIsEquivalent: true
-          })
-          return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
-        }
-
-        // ── Success ────────────────────────────────────────────────────────
-        const { outcome } = winner
-        const maxCostUsd = dispatchCfg?.maxCostUsd
-        const wasUnderCap = maxCostUsd === undefined || entry.cumulativeCostUsd < maxCostUsd
-        const usage = this.accountCodexTurn(entry, ctx)
-        let outText = outcome.text
-        if (maxCostUsd !== undefined && wasUnderCap && entry.cumulativeCostUsd >= maxCostUsd) {
-          outText +=
-            '\n\n[dispatch cost cap reached — further turns on this session will be rejected]'
-        }
-
-        await this.settleReview(ctx.run)
-        const done = this.finishTurn(ctx, 'codex', model, entry, entry.sessionId ?? '', {
-          finalText: outcome.text,
-          outText,
-          usage: {
-            totalTokens: usage.totalTokens ?? 0,
-            toolUses: entry.turnToolUseIds.size,
-            durationMs: outcome.durationMs
-          }
-        })
-        this.safeRecordUsage({
-          ts: this.now(),
-          fromRoutingId: ctx.fromRoutingId,
-          targetEngine: 'codex',
-          targetModel: model,
-          targetSessionId: entry.sessionId,
-          toolUseId: ctx.toolUseId ?? null,
-          ...(usage.tokens ? { tokens: usage.tokens } : {}),
-          account: entry.account,
-          // codexTurnCostUsd is OUR table's equivalent, not a charge
-          // (ADR-066: a ChatGPT-subscription charge is unknowable here),
-          // so the ledger derives the API cost from the split above.
-          engineCostIsEquivalent: true
-        })
-        return done
-      } finally {
-        if (ctx.toolUseId) this.sealCodexTargetItems(entry, ctx.toolUseId)
-        entry.reportToolDone = null
-        entry.busy = false
-        this.ledgerTurnState(entry, endState)
-        clearInterval(heartbeat)
-        watchdog.dispose()
-        if (signal && abortListener) signal.removeEventListener('abort', abortListener)
-      }
-    }
-    return this.runWithNudges(
-      ctx,
-      {
-        sessionId: () => entry.sessionId ?? '',
-        engine: 'codex',
-        toolName: HAND_BACK_TOOL,
-        cumulativeCostUsd: () => entry.cumulativeCostUsd
-      },
-      this.taskText(entry, ctx, req.prompt, HAND_BACK_TOOL),
-      turn
-    )
-  }
-
-  /** Bounded wait — `promise`, or `undefined` once the grace period elapses. */
-  private async withinCodexGrace<T>(promise: Promise<T>): Promise<T | undefined> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<undefined>((resolve) => {
-          timer = setTimeout(() => resolve(undefined), this.codexAbortSettleGraceMs)
-        })
-      ])
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
-  }
-
-  /**
-   * End the turn currently in flight on a give-up path (timeout/abort/stop) and
-   * retire it so nothing it still emits can settle a LATER turn.
-   *
-   * The turn id is the whole problem. `turn/interrupt` is `{threadId, turnId}`,
-   * and a stop can land while `turn/start` is still in flight — at which point
-   * `entry.turnId` is null and the turn cannot be named. Leaving it at that
-   * would be worse than a leaked promise: the turn keeps running headless, and
-   * the next continuation's `turn/start` would STEER that zombie instead of
-   * opening a fresh turn (the app-server routes both through
-   * `start_or_steer_turn`). So the id is waited for, BOUNDED, and so is the
-   * interrupt's own acknowledgement — `turn/interrupt` only answers once the
-   * native `TurnAborted` has landed, which is the signal that a continuation is
-   * safe; a wedged target must not hold the user's Stop open for it.
-   */
-  private async interruptCodexTurn(entry: CodexTargetEntry): Promise<void> {
-    const turnId = entry.turnId ?? (await this.withinCodexGrace(entry.turnStarted)) ?? null
-    if (turnId && entry.sessionId) {
-      entry.endedTurns.add(turnId)
-      entry.connection.abortServerRequests(entry.sessionId, turnId)
-      await this.withinCodexGrace(
-        entry.connection
-          .request('turn/interrupt', { threadId: entry.sessionId, turnId })
-          .then(() => undefined)
-          .catch(() => undefined)
-      )
-    }
-    // Belt-and-braces if the id never arrived: `draining` (already set by the
-    // caller) still refuses late approval requests, and nulling the resolver
-    // here means a stale `turn/completed` cannot settle anything.
-    entry.settled = null
-    entry.turnId = null
-  }
-
-  /**
-   * Close this turn's token/cost accounting and return what the turn spent.
-   * Shared by EVERY outcome (success, error, timeout, stop) — a
-   * turn that spent real tokens before dying still counts toward the cap and
-   * the dispatching session's own breakdown, exactly like a successful one.
-   *
-   * `thread/tokenUsage/updated` reports the thread's CUMULATIVE `total` (its
-   * `last` is the last REQUEST's context window, not a per-turn figure — see
-   * `CodexSession.emitMetering`, which uses it for exactly that), so a turn's
-   * own numbers are the delta against the baseline left by the previous turn.
-   *
-   * The USD figure is the API-rate EQUIVALENT, never a charge: a
-   * ChatGPT-subscription turn's true cost is unknowable from here (ADR-066), so
-   * this is the same number Codex's own status line shows. A model with no
-   * published price yields `null`, which means UNKNOWN and is deliberately not
-   * coerced to 0: the cap must not count a guess, and a 0 reads as a free
-   * turn. The ledger row prices the SPLIT rather than taking this figure, by
-   * the same rule as every other row. `ctx.addDispatchedCost` does take
-   * `?? 0`, because its signature is a plain number with no "unknown" and a
-   * guessed price would be worse than a missing one.
-   */
-  private accountCodexTurn(
-    entry: CodexTargetEntry,
-    ctx: DispatchContext
-  ): { totalTokens: number | null; tokens?: UsageTurnTokens } {
-    const delta = codexUsageDelta(entry.usageTotal, entry.usageBaseline)
-    entry.usageBaseline = entry.usageTotal
-    // No frame has been seen for this thread at all — the turn's tokens are
-    // UNKNOWN, which is why the split is left off the ledger row entirely
-    // rather than recorded as four zeros.
-    if (!delta) return { totalTokens: null }
-    const costUsd = codexTurnCostUsd(entry.model, delta)
-    if (costUsd !== null && costUsd > 0) {
-      entry.cumulativeCostUsd += costUsd
-      ctx.addDispatchedCost?.('codex', entry.model, costUsd)
-    }
-    return {
-      totalTokens: delta.totalTokens > 0 ? delta.totalTokens : null,
-      // A Codex turn's split is `CodexSession`'s own mapping, imported rather
-      // than restated: the row's priced API cost then cannot drift from the
-      // figure `codexTurnCostUsd` just put through the cap.
-      tokens: codexDisjointTokens(delta)
-    }
-  }
-
-  /**
-   * Which ChatGPT subscription a Codex target's turns are billed to (ADR-071
-   * §3) — the SAME account the thread is attached under, so the ledger agrees
-   * with who actually pays: the caller's pin when it has one, the vault's
-   * active account otherwise (ADR-068 §2).
-   *
-   * Without vault accounts (`codexVaultAccounts` false — every unit test, and
-   * any build that does not own Codex's credentials) the vault is not read at
-   * all and the answer is `codex:openai:native`: Codex signed in on its own,
-   * which is exactly what ADR-071 §3's native key means.
-   *
-   * The billing type is `subscription` only when the identity really is a
-   * ChatGPT one. A native sign-in is NOT assumed to be an API key: Codex's own
-   * login is usually a ChatGPT plan too, and calling it `apiKey` would put an
-   * API-equivalent figure into `billed_cost_usd` as though money had moved
-   * (ADR-030 — unknown is never dressed up as a fact).
-   */
-  private async codexDispatchAccount(accountId: string | null): Promise<DispatchTurnAccount> {
-    if (!this.codexVaultAccounts) return { ...codexNativeIdentity(), billingType: 'unknown' }
-    try {
-      const identity = await credentialSync.accountIdentity(accountId)
-      return {
-        ...identity,
-        billingType: identity.accountKey.startsWith('chatgpt:') ? 'subscription' : 'unknown'
-      }
-    } catch (err) {
-      // Never fail a dispatch over an attribution read (and never log what it
-      // was reading) — an unattributed row is the honest fallback.
-      logger.debug(
-        'CrossEngineDispatcher',
-        `codex account identity unavailable: ${err instanceof Error ? err.message : String(err)}`
-      )
-      return UNKNOWN_DISPATCH_ACCOUNT
-    }
-  }
-
-  /**
-   * Spawn the target's app-server, resolve its model against the native
-   * catalog, and open the thread its policy envelope is written into. Any
-   * failure disposes whatever was created and re-throws — `resolveAndRunCodex`
-   * turns that into a friendly isError.
-   *
-   * THE POLICY ENVELOPE (ADR-066, slice H). All three native knobs are set
-   * HERE, on `thread/start`, as the creation-time baseline — and, since
-   * ADR-088, re-sent on every `turn/start` for the parent's LIVE mode
-   * (`driveCodexTurn`; `TurnStartParams` overrides all three "for this turn and
-   * subsequent turns"). The rows come from the
-   * SAME table `CodexSession` uses (`codex-turn-policy.ts`), so a dispatched
-   * agent is policed exactly like an interactive one:
-   *
-   *   plan        -> untrusted + read-only        + reviewer 'user'
-   *   default     -> untrusted + workspace-write  + reviewer 'user'
-   *   acceptEdits -> untrusted + workspace-write  + reviewer 'user'
-   *   auto        -> on-request + workspace-write + reviewer 'auto_review'
-   *
-   * `untrusted` is what makes the three non-auto rows work for a target with no
-   * human of its own: it is the one policy the pinned binary asks before
-   * running ANYTHING, so every command and patch arrives as a server request
-   * for `gateCodexTargetRequest` to answer — under `plan` the shared engine
-   * denies every write/command outright (nothing is forwarded, nothing waits),
-   * and under `default`/`acceptEdits` an `ask` is forwarded to the CALLER's
-   * client, where a human is already watching the dispatching session. `auto`
-   * is the one row that does NOT route to us: `auto_review` answers natively
-   * and only escalations reach the gate. NEVER `never`/bypass — an autonomous
-   * mode must still be reviewed by someone, which is precisely what
-   * `auto_review` is.
-   *
-   * `dynamicTools`: only `hand_back` (ADR-105 §3) and `session_message` (§4) — the target has no
-   * `dispatch_agent` (no recursion) and no other hosted tools. See `CODEX_TARGET_SERVER_METHODS` for the
-   * transport-level half of the same scrub.
-   */
-  private async createCodexTarget(
-    ctx: RunContext,
-    requestedModel: string | undefined,
-    allowedModels: string[] | undefined,
-    resume?: DispatchTargetRow,
-    signals: ReadonlyArray<AbortSignal | undefined> = [],
-    fresh?: FreshLaunch
-  ): Promise<CodexTargetEntry> {
-    // A resumed thread lives on the host of the account it was created under (ADR-105):
-    // the row's vault account id, not the (possibly different) caller's pin now.
-    const accountId = resume ? resume.codexAccountId : (ctx.chatgptAccountId ?? null)
-    const cwd = targetCwd(ctx, resume, fresh)
-    const entry: CodexTargetEntry = {
-      kind: 'codex',
-      reportToolDone: null,
-      sessionId: null,
-      // Set once the thread exists (a new target's row needs its id).
-      ledgerId: resume?.id ?? '',
-      released: false,
-      // A thread keeps the tools it was started with: a resumed row has the tool only if it was started with it.
-      handBack: this.requireHandBack && (resume ? resume.handBack : true),
-      canMessage: sessionToolsAvailable(),
-      fromRoutingId: ctx.fromRoutingId,
-      cwd,
-      // Filled in below, once the attach resolves. The notification and gate
-      // closures capture `entry` BY REFERENCE (mirrors createPiTarget), so
-      // building them first is safe: nothing is routed to this owner before it
-      // claims a thread anyway.
-      connection: undefined as unknown as CodexThreadConnection,
-      ctx,
-      autonomyMode: liveMode(ctx),
-      turnDirs: null,
-      model: '',
-      lastPrompt: '',
-      // Replaced below, once the account behind the host is known.
-      account: UNKNOWN_DISPATCH_ACCOUNT,
-      busy: false,
-      turnId: null,
-      turnStarted: Promise.resolve(null),
-      endedTurns: new Set(),
-      settled: null,
-      draining: false,
-      lastActivityAt: 0,
-      turnToolUseIds: new Set(),
-      usageTotal: null,
-      usageBaseline: null,
-      observeUsageBaseline: !!resume,
-      cumulativeCostUsd: 0,
-      completedItems: new Map(),
-      itemTimestamps: new Map(),
-      activeStreamItems: new Map(),
-      fileChanges: new Map(),
-      lastAgentText: '',
-      turnStartedAtMs: 0
-    }
-
-    // A dispatch target bills the same subscription the caller runs on: the
-    // caller's PIN when it has one, the ACTIVE account otherwise (ADR-068 §2).
-    // Which is also which HOST it lands on, since a host IS one identity.
-    entry.account = await this.codexDispatchAccount(accountId)
-    entry.connection = await this.attachCodexTarget({
-      cwd,
-      label: 'dispatch-target',
-      ...(this.codexVaultAccounts ? { identity: { accountId } } : {}),
-      onNotification: (method, params) => this.handleCodexTargetNotification(entry, method, params),
-      onServerRequest: (method, params, context) =>
-        this.gateCodexTargetRequest(entry, method, params, context),
-      onDisconnect: (error: CodexTransportError) => {
-        // If a turn is in flight, nothing else will ever settle it — mirrors
-        // the pi target's onExit.
-        const settle = entry.settled
-        entry.settled = null
-        settle?.({ kind: 'error', message: `codex target disconnected (${error.code})` })
-      }
-    })
-
-    try {
-      if (resume) {
-        const policy = codexModePolicy(entry.autonomyMode)
-        const response = await this.resumeCodexThread(
-          entry.connection,
-          {
-            threadId: resume.harnessRef,
-            cwd,
-            model: resume.model,
-            approvalPolicy: policy.approvalPolicy,
-            sandbox: policy.sandbox,
-            approvalsReviewer: policy.approvalsReviewer,
-            excludeTurns: true
-          },
-          signals
-        )
-        assertCodexProvider(response.modelProvider)
-        if (response.thread.id !== resume.harnessRef)
-          throw new Error('Codex resumed a different native thread')
-        if (response.thread.parentThreadId)
-          throw new Error('Codex resumed a dispatch target as a native child thread')
-        entry.model = response.model
-        entry.sessionId = response.thread.id
-        entry.connection.claim(entry.sessionId)
-        this.targets.set(entry.sessionId, entry)
-        return entry
-      }
-      const { config } = await entry.connection.request('config/read', {
-        cwd,
-        includeLayers: false
-      })
-      assertCodexProvider(config.model_provider)
-      const catalog: Model[] = []
-      const cursors = new Set<string>()
-      let cursor: string | null = null
-      for (let page = 0; ; page++) {
-        if (page === CODEX_CATALOG_PAGE_LIMIT) throw new Error('Codex catalog page limit')
-        const result = await entry.connection.request('model/list', {
-          cursor,
-          limit: 100,
-          includeHidden: false
-        })
-        catalog.push(...result.data)
-        if (!result.nextCursor) break
-        if (cursors.has(result.nextCursor)) throw new Error('Codex repeated catalog cursor')
-        cursors.add(result.nextCursor)
-        cursor = result.nextCursor
-      }
-      const model = selectCodexModel(catalog, config.model, requestedModel)
-      if (model === undefined) {
-        throw new Error(
-          'Codex reported no usable model for a dispatch target. Ask the user to set ' +
-            'Settings › Cross-engine dispatch › Dispatch into › Codex (the `dispatch.defaultModel` field in ' +
-            '~/.claude/ui/engines/codex.json), or pass `model` explicitly.'
-        )
-      }
-      // The catalog-default path: `requestedModel` was undefined, so nothing
-      // was checkable until now. An explicitly requested model was already
-      // refused by `resolveAndRunCodex` before this process was spawned.
-      const denial = codexModelAllowlistDenial(model, allowedModels)
-      if (denial) throw new Error(denial)
-
-      const policy = codexModePolicy(entry.autonomyMode)
-      const response = await entry.connection.request('thread/start', {
-        cwd,
-        model,
-        approvalPolicy: policy.approvalPolicy,
-        sandbox: policy.sandbox,
-        approvalsReviewer: policy.approvalsReviewer,
-        allowProviderModelFallback: false,
-        historyMode: 'paginated',
-        // The target's tools: the report that ends its run (ADR-105 §3) and `session_message` to its
-        // dispatcher (§4). A thread keeps the tools it is started with, so only threads started with
-        // them have them.
-        ...(entry.handBack || entry.canMessage
-          ? {
-              dynamicTools: [
-                ...(entry.handBack ? [codexHandBackSpec()] : []),
-                ...(entry.canMessage ? [codexXAgentMessageSpec()] : [])
-              ]
-            }
-          : {})
-      })
-      assertCodexProvider(response.modelProvider)
-      if (response.model !== model) throw new Error('Codex silently changed the requested model')
-      if (response.thread.parentThreadId)
-        throw new Error('Codex opened a dispatch target as a native child thread')
-      entry.model = response.model
-      entry.sessionId = response.thread.id
-      // The durable record (ADR-105), as soon as the thread exists: the Codex history
-      // list skips ledger thread ids.
-      entry.ledgerId = this.recordTarget(ctx, {
-        engine: 'codex',
-        harnessRef: entry.sessionId,
-        cwd,
-        model: entry.model,
-        accountKey: entry.account.accountKey,
-        codexAccountId: accountId,
-        fresh,
-        handBack: this.requireHandBack
-      }).id
-      // Everything stamped with this thread id is this target's from here on,
-      // and nothing else is (ADR-069 §2).
-      entry.connection.claim(entry.sessionId)
-      this.targets.set(entry.sessionId, entry)
-    } catch (err) {
-      if (entry.sessionId) this.targets.delete(entry.sessionId)
-      entry.connection.detach()
-      throw err instanceof Error ? err : new Error(String(err))
-    }
-
-    return entry
-  }
-
-  /**
-   * `thread/resume` of a released target's thread, waiting out the writer lock of the
-   * process that has not let go of it yet (ADR-069 §4): the thread stays LOADED — and
-   * locked — until the binary unloads it, about a minute after its last subscriber
-   * left, and a refusal (`-32600`) meanwhile is a normal step, not a failure. Bounded
-   * by {@link DispatcherDeps.codexResumeLockWindowMs}; any other error fails at once.
-   */
-  private async resumeCodexThread(
-    connection: CodexThreadConnection,
-    params: CodexMethods['thread/resume']['params'],
-    signals: ReadonlyArray<AbortSignal | undefined>
-  ): Promise<CodexMethods['thread/resume']['result']> {
-    const deadline = Date.now() + this.codexResumeLockWindowMs
-    for (;;) {
-      try {
-        return await connection.request('thread/resume', params)
-      } catch (err) {
-        const code = isRecord(err) || err instanceof Error ? (err as { code?: unknown }).code : null
-        // `-32600` is also "no rollout found": only a live host that still holds the thread
-        // explains a lock, and only then is waiting worth it. Anything else fails at once.
-        if (
-          code !== CODEX_RESUME_LOCK_REFUSAL ||
-          !this.codexHoldsThread(params.threadId) ||
-          Date.now() >= deadline
-        )
-          throw err
-        await this.abortableDelay(this.codexResumeLockRetryMs, signals)
-      }
-    }
-  }
-
-  /** Wait `ms`, or throw the moment one of `signals` aborts (a Stop, the caller's cancel). */
-  private abortableDelay(
-    ms: number,
-    signals: ReadonlyArray<AbortSignal | undefined>
-  ): Promise<void> {
-    const live = signals.filter((signal): signal is AbortSignal => !!signal)
-    const stopped = (): Error => new Error('the dispatch was stopped while waiting for the thread')
-    if (live.some((signal) => signal.aborted)) return Promise.reject(stopped())
-    return new Promise<void>((resolve, reject) => {
-      const onAbort = (): void => {
-        clearTimeout(timer)
-        cleanup()
-        reject(stopped())
-      }
-      const cleanup = (): void =>
-        live.forEach((signal) => signal.removeEventListener('abort', onAbort))
-      const timer = setTimeout(() => {
-        cleanup()
-        resolve()
-      }, ms)
-      live.forEach((signal) => signal.addEventListener('abort', onAbort, { once: true }))
-    })
-  }
-
-  /**
-   * Send `turn/start` and await turn completion.
-   *
-   * Shaped like `PiChildRunner.runTurn`, not `driveClaudeTurn`: notifications arrive on a
-   * single ambient callback registered once for the target's lifetime, so there
-   * is nothing to pull and no `.return()` hazard. Install `entry.settled` as
-   * this promise's resolver BEFORE the request leaves (synchronously, so no
-   * notification can beat it), then let the already-running
-   * `handleCodexTargetNotification` pipeline settle it on `turn/completed`.
-   *
-   * The response's own `turn.status` is checked too: a turn that is already
-   * terminal when `turn/start` answers has had its `turn/completed` either
-   * delivered (in which case `entry.settled` is already null and the check is a
-   * no-op) or folded into the response, and settling from here is the only
-   * thing that would ever settle it.
-   *
-   * The native policy is sent on EVERY turn (`codexTurnPolicy(mode, roots)` — the
-   * same call `CodexSession` makes; `turn/start` overrides it "for this turn
-   * and subsequent turns"), so the thread follows the parent's LIVE mode at
-   * each turn start (ADR-088 ruling 3). `thread/start` still carries the
-   * creation-time baseline. `entry.autonomyMode` is refreshed to the mode sent
-   * here — the mode the gate decides by (see that field: a mid-turn switch
-   * binds at the next turn).
-   */
-  private driveCodexTurn(entry: CodexTargetEntry, prompt: string): Promise<CodexTurnOutcome> {
-    const mode = liveMode(entry.ctx)
-    entry.autonomyMode = mode
-    // The scope this turn starts with: the sandbox's writable roots (absolute, existing ones only)
-    // and, until the next turn, the gate's extra roots (`insideCodexWorkspace`).
-    const dirs = this.targetRules(
-      entry.cwd,
-      entry.ctx.cwd,
-      entry.ctx.callerRestriction
-    ).additionalDirectories
-    entry.turnDirs = dirs
-    entry.draining = false
-    entry.turnStartedAtMs = Date.now()
-    entry.lastAgentText = ''
-    return new Promise<CodexTurnOutcome>((resolve) => {
-      entry.settled = resolve
-      let announceTurnId: (id: string | null) => void = () => {}
-      entry.turnStarted = new Promise<string | null>((r) => {
-        announceTurnId = r
-      })
-      entry.connection
-        .request('turn/start', {
-          threadId: entry.sessionId!,
-          clientUserMessageId: uuidv4(),
-          input: codexTurnInput(prompt),
-          ...codexTurnPolicy(mode, existingDirectories(dirs, 'CrossEngineDispatcher'))
-        })
-        .then(
-          (result) => {
-            announceTurnId(result.turn.id)
-            if (!entry.endedTurns.has(result.turn.id)) entry.turnId = result.turn.id
-            if (result.turn.status !== 'inProgress') this.settleCodexTurn(entry, result.turn)
-          },
-          (err) => {
-            announceTurnId(null)
-            if (entry.settled === resolve) {
-              entry.settled = null
-              resolve({
-                kind: 'error',
-                message: err instanceof Error ? err.message : String(err)
-              })
-            }
-          }
-        )
-    })
-  }
-
-  /** Retire `turn` and settle the dispatch waiting on it (exactly once). */
-  private settleCodexTurn(entry: CodexTargetEntry, turn: Turn): void {
-    if (entry.endedTurns.has(turn.id)) return
-    entry.endedTurns.add(turn.id)
-    // The authoritative replay: `turn.items` is the turn's final item list, and
-    // re-running it through the fingerprint dedupe is what fills in anything
-    // that only ever arrived as an `item/started` (mirrors
-    // `CodexSession.finishTurn`).
-    for (const item of turn.items ?? [])
-      this.handleCodexTargetItem(entry, turn.id, item, true, true)
-    if (entry.turnId === turn.id) entry.turnId = null
-    const settle = entry.settled
-    entry.settled = null
-    if (!settle) return
-    if (turn.status === 'failed') {
-      settle({ kind: 'error', message: turn.error?.message ?? 'the dispatched turn failed' })
-      return
-    }
-    settle({
-      kind: 'ok',
-      text: entry.lastAgentText || '(the dispatched agent returned no text)',
-      durationMs: turn.durationMs ?? Math.max(0, Date.now() - entry.turnStartedAtMs)
-    })
-  }
-
-  /**
-   * The target's single ambient notification callback.
-   *
-   * Notifications for ANY other thread id are dropped. A dispatch target is
-   * offered no `dispatch_agent` and no hosted tools beyond its own two, but Codex's collaboration
-   * tools are NATIVE, so a target can still spawn a child thread of its own;
-   * its items would arrive here stamped with the CHILD's `threadId`. Rendering
-   * a grandchild's transcript inside the caller's TaskCard has no home in the
-   * renderer's subagent model (one dispatch = one card), so the child runs
-   * natively and unwatched rather than half-shown. Its approval requests are
-   * refused for the same reason — see `gateCodexTargetRequest`.
-   */
-  private handleCodexTargetNotification(
-    entry: CodexTargetEntry,
-    method: string,
-    value: unknown
-  ): void {
-    if (!isRecord(value) || !entry.sessionId || value.threadId !== entry.sessionId) return
-    // Proof of life for the inactivity watchdog: ANY notification addressed to
-    // this thread counts (see CodexTargetEntry.lastActivityAt).
-    entry.lastActivityAt = this.now()
-    if (method === 'turn/started' && isRecord(value.turn) && typeof value.turn.id === 'string') {
-      if (!entry.endedTurns.has(value.turn.id)) entry.turnId = value.turn.id
-      // A turn nobody asked for (no run in flight) after a message was sent for a run that is over:
-      // ended at once, the message is sent again as a run.
-      if (this.hasStraySteers(entry.ledgerId) && entry.sessionId) {
-        logger.info('CrossEngineDispatcher', `codex target ${entry.sessionId}: stray turn ended`)
-        void entry.connection
-          .request('turn/interrupt', { threadId: entry.sessionId, turnId: value.turn.id })
-          .catch(() => {})
-      }
-      return
-    }
-    if (method === 'thread/tokenUsage/updated' && isRecord(value.tokenUsage)) {
-      entry.usageTotal = (value.tokenUsage as ThreadTokenUsage).total
-      // A resumed thread shows its earlier turns' totals first: that is history, the
-      // baseline, not this turn's work.
-      if (entry.observeUsageBaseline) {
-        entry.observeUsageBaseline = false
-        entry.usageBaseline = entry.usageTotal
-      }
-      return
-    }
-    if (method === 'turn/completed' && isRecord(value.turn)) {
-      this.settleCodexTurn(entry, value.turn as Turn)
-      return
-    }
-    if (typeof value.turnId !== 'string') return
-    const turnId = value.turnId
-    if (entry.endedTurns.has(turnId)) return
-    if (method === 'item/started' || method === 'item/completed') {
-      if (!isRecord(value.item) || typeof value.item.id !== 'string') return
-      this.handleCodexTargetItem(
-        entry,
-        turnId,
-        value.item as ThreadItem,
-        method === 'item/completed'
-      )
-      return
-    }
-    if (typeof value.itemId === 'string' && typeof value.delta === 'string') {
-      for (const event of mapCodexDelta(method, {
-        threadId: entry.sessionId,
-        turnId,
-        itemId: value.itemId,
-        delta: value.delta
-      }))
-        this.forwardCodexTargetEvent(
-          entry,
-          event,
-          codexItemId(entry.sessionId, turnId, value.itemId)
-        )
-    }
-  }
-
-  /**
-   * Map one thread item and forward what it produces, with the same
-   * fingerprint dedupe `CodexSession.item` keeps so the authoritative
-   * `turn/completed` replay re-emits only what actually changed.
-   */
-  private handleCodexTargetItem(
-    entry: CodexTargetEntry,
-    turnId: string,
-    item: ThreadItem,
-    completed: boolean,
-    authoritative = false
-  ): void {
-    if (!entry.sessionId) return
-    // A steer the thread took into the turn comes back as the user message that carries its id.
-    if (item.type === 'userMessage' && item.clientId) this.noteSteerConsumed(item.clientId)
-    const id = codexItemId(entry.sessionId, turnId, item.id)
-    const fingerprint = completed
-      ? createHash('sha256').update(JSON.stringify(item)).digest('hex')
-      : undefined
-    if (
-      entry.completedItems.has(id) &&
-      (!authoritative || entry.completedItems.get(id) === fingerprint)
-    )
-      return
-    if (fingerprint !== undefined) entry.completedItems.set(id, fingerprint)
-    // The turn's result text is the LAST completed `agentMessage`.
-    if (item.type === 'agentMessage' && completed) entry.lastAgentText = item.text
-    // The report's own call has completed: the agent has its answer, the turn may end. Only the
-    // call that was ACCEPTED (an earlier, refused one completing says nothing).
-    if (
-      item.type === 'dynamicToolCall' &&
-      completed &&
-      item.tool === HAND_BACK_TOOL &&
-      item.id === entry.ctx.run.report?.callId
-    )
-      entry.reportToolDone?.()
-    const timestamp = entry.itemTimestamps.get(id) ?? Date.now()
-    entry.itemTimestamps.set(id, timestamp)
-    const streamable =
-      item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan'
-    if (item.type === 'plan' && !completed && item.text && entry.ctx.toolUseId) {
-      this.appendCodexTargetItem(entry, id, { type: 'plan', text: item.text }, entry.ctx.toolUseId)
-      return
-    }
-    // `imageView` carries a PATH and no bytes: its (empty) mapped result is held
-    // back and replaced by ONE result carrying the file once it is read — the
-    // subagent-tool-result reducer appends rather than keeping the first, so
-    // forwarding both would show the empty one beside the picture. Mirrors
-    // `CodexSession.item`.
-    const deferredRead = completed && item.type === 'imageView'
-    for (const event of mapCodexItem(entry.sessionId, turnId, item, completed, timestamp)) {
-      if (deferredRead && event.kind === 'toolResult') continue
-      // Taken from the MAPPED block rather than re-deriving it from
-      // `item.changes`, so the gate decides about exactly the paths the caller
-      // was shown. `FileChangeRequestApprovalParams` carries no changes at all,
-      // which makes this the gate's only source for them.
-      if (event.kind === 'message') {
-        for (const block of event.message.content) {
-          if (
-            block.type === 'tool_use' &&
-            block.toolName === 'fileChange' &&
-            Array.isArray(block.toolInput?.files)
-          )
-            entry.fileChanges.set(block.toolUseId, block.toolInput.files as FileDiff[])
-        }
-      }
-      this.forwardCodexTargetEvent(entry, event, undefined, streamable && completed)
-    }
-    // Not awaited: the read is best-effort and must not stall the notification pump.
-    if (completed && item.type === 'imageView')
-      void this.attachCodexTargetImageView(entry, id, item.path)
-  }
-
-  /** The ONE result a Codex target's completed `imageView` gets — the bytes when the file could be read, none otherwise. */
-  private async attachCodexTargetImageView(
-    entry: CodexTargetEntry,
-    toolUseId: string,
-    path: string
-  ): Promise<void> {
-    const image = await readCodexImageView(path)
-    // Disposed while the file was read: nothing is listening for this target.
-    if (!entry.sessionId || this.targets.get(entry.sessionId) !== entry) return
-    this.forwardCodexTargetEvent(entry, {
-      kind: 'toolResult',
-      toolUseId,
-      result: '',
-      isError: false,
-      ...(image ? { images: [image] } : {})
-    })
-  }
-
-  /**
-   * Forward a Codex target's live turn output as engine-neutral subagent
-   * events — byte-matches `forwardPiChildStream`'s payload shapes, which are
-   * themselves the Claude/opencode ones. `commandDelta` is skipped: the
-   * caller's TaskCard does not stream a dispatch target's raw bash output, same
-   * as every other direction.
-   */
-  private forwardCodexTargetEvent(
-    entry: CodexTargetEntry,
-    event: CodexMappedEvent,
-    nativeMessageId?: string,
-    forceItemSeal = false
-  ): void {
-    const toolUseId = entry.ctx.toolUseId
-    if (!toolUseId) return
-    switch (event.kind) {
-      case 'message':
-        collectToolUseIds(event.message, entry.turnToolUseIds)
-        if (!this.sealCodexTargetItem(entry, event.message, toolUseId, forceItemSeal))
-          entry.ctx.emit('session:subagent-message', { toolUseId, message: event.message })
-        break
-      case 'stream':
-        if (nativeMessageId)
-          this.appendCodexTargetItem(entry, nativeMessageId, event.delta, toolUseId)
-        break
-      case 'planDelta':
-        if (nativeMessageId)
-          this.appendCodexTargetItem(
-            entry,
-            nativeMessageId,
-            { type: 'plan', text: event.delta },
-            toolUseId
-          )
-        break
-      case 'toolResult':
-        entry.ctx.emit('session:subagent-tool-result', {
-          toolUseId,
-          toolResultToolUseId: event.toolUseId,
-          result: event.result,
-          isError: event.isError,
-          ...(event.fileDiffs ? { fileDiffs: event.fileDiffs } : {}),
-          ...(event.images ? { images: event.images } : {})
-        })
-        break
-      case 'commandDelta':
-        break
-    }
-  }
-
-  private appendCodexTargetItem(
-    entry: CodexTargetEntry,
-    messageId: string,
-    delta: { type: 'text' | 'thinking' | 'plan'; text: string },
-    ownerToolUseId: string
-  ): void {
-    if (!delta.text || entry.completedItems.has(messageId)) return
-    const key = JSON.stringify([ownerToolUseId, messageId, delta.type])
-    let active = entry.activeStreamItems.get(key)
-    if (!active) {
-      const target: ItemStreamTarget = {
-        messageId,
-        blockIndex: 0,
-        kind: delta.type,
-        ownerToolUseId
-      }
-      active = {
-        target,
-        text: '',
-        timestamp: entry.itemTimestamps.get(messageId) ?? Date.now(),
-        ownerToolUseId,
-        ...(delta.type === 'thinking' ? { startedAt: Date.now() } : {})
-      }
-      entry.activeStreamItems.set(key, active)
-      entry.ctx.emit('session:item-open', {
-        target,
-        ...(active.startedAt === undefined ? {} : { startedAt: active.startedAt }),
-        message: {
-          id: messageId,
-          role: 'assistant',
-          content: [
-            delta.type === 'plan'
-              ? {
-                  type: 'tool_use',
-                  toolUseId: messageId,
-                  toolName: 'plan',
-                  toolInput: { plan: '' }
-                }
-              : delta.type === 'thinking'
-                ? { type: 'thinking', text: '' }
-                : { type: 'text', text: '' }
-          ],
-          timestamp: active.timestamp
-        }
-      })
-    }
-    active.text += delta.text
-    entry.ctx.emit('session:item-delta', { target: active.target, chunk: delta.text })
-  }
-
-  private sealCodexTargetItem(
-    entry: CodexTargetEntry,
-    message: ChatMessage,
-    ownerToolUseId: string,
-    forceItemSeal = false
-  ): boolean {
-    const matches = [...entry.activeStreamItems].filter(
-      ([, active]) =>
-        active.ownerToolUseId === ownerToolUseId && active.target.messageId === message.id
-    )
-    if (!matches.length) {
-      if (forceItemSeal) {
-        entry.ctx.emit('session:item-seal', { ownerToolUseId, message })
-        return true
-      }
-      return false
-    }
-    for (const [key, active] of matches) {
-      let sealed = message
-      if (active.target.kind === 'thinking' && active.startedAt !== undefined) {
-        sealed = {
-          ...message,
-          content: message.content.map((block, index) =>
-            index === active.target.blockIndex && block.type === 'thinking'
-              ? { ...block, durationMs: Math.max(0, Date.now() - active.startedAt!) }
-              : block
-          )
-        }
-      }
-      entry.ctx.emit('session:item-seal', {
-        ownerToolUseId,
-        target: active.target,
-        message: sealed
-      })
-      entry.activeStreamItems.delete(key)
-    }
-    return true
-  }
-
-  private sealCodexTargetItems(entry: CodexTargetEntry, ownerToolUseId: string): void {
-    for (const [key, active] of entry.activeStreamItems) {
-      if (active.ownerToolUseId !== ownerToolUseId) continue
-      entry.ctx.emit('session:item-seal', {
-        ownerToolUseId,
-        message: {
-          id: active.target.messageId,
-          role: 'assistant',
-          content: [
-            active.target.kind === 'plan'
-              ? {
-                  type: 'tool_use',
-                  toolUseId: active.target.messageId,
-                  toolName: 'plan',
-                  toolInput: { plan: active.text }
-                }
-              : active.target.kind === 'thinking'
-                ? {
-                    type: 'thinking',
-                    text: active.text,
-                    ...(active.startedAt !== undefined
-                      ? { durationMs: Math.max(0, Date.now() - active.startedAt) }
-                      : {})
-                  }
-                : { type: 'text', text: active.text }
-          ],
-          timestamp: active.timestamp
-        }
-      })
-      entry.activeStreamItems.delete(key)
-    }
-  }
-
-  /**
-   * `item/tool/call` on a Codex target: it was started with `hand_back` and `session_message` (to its
-   * dispatcher), nothing else. Anything else keeps getting the `-32601` the host answered before the
-   * target had a tool.
-   */
-  private async toolCallFromCodex(
-    entry: CodexTargetEntry,
-    value: unknown,
-    context: { id: unknown; signal: AbortSignal }
-  ): Promise<unknown> {
-    if (isRecord(value) && value.tool === X_AGENT_MESSAGE_TOOL && entry.canMessage)
-      return this.messageFromCodex(entry, value, context)
-    return this.handBackFromCodex(entry, value, context)
-  }
-
-  /**
-   * A Codex target's `session_message`. Codex's own reviewer does not see dynamic-tool calls
-   * (`codex-rs/core/src/tools/handlers/dynamic.rs` asks no approval), so, while the thread runs `auto`,
-   * the target's own model judges the message through ClaudeUI's judge on its ChatGPT route BEFORE
-   * it is delivered (the report judge, framed as a message to the spawning agent): allow delivers,
-   * a block refuses the send with the reason, and a review that could not run refuses it too (fail
-   * closed: the report path, `hand_back`, is reviewed or noted). Outside auto it is delivered unasked.
-   * The judge's request is aborted when the call is abandoned or the run stops.
-   */
-  private async messageFromCodex(
-    entry: CodexTargetEntry,
-    value: Record<string, unknown>,
-    context: { id: unknown; signal: AbortSignal }
-  ): Promise<unknown> {
-    // The guards of `handBackFromCodex`: this thread's own live turn, a call id, no namespace.
-    if (entry.draining || context.signal.aborted || !entry.sessionId || value.namespace != null)
-      throw new CodexMethodNotFound()
-    if (
-      value.threadId !== entry.sessionId ||
-      typeof value.turnId !== 'string' ||
-      value.turnId !== entry.turnId ||
-      entry.endedTurns.has(value.turnId) ||
-      typeof value.callId !== 'string'
-    )
-      throw new Error('Codex session_message call has no live owning dispatch turn')
-    const args = isRecord(value.arguments) ? value.arguments : {}
-    const answer = (text: string, isError: boolean): unknown => ({
-      contentItems: [{ type: 'inputText', text }],
-      success: !isError
-    })
-    // The user's deny rule for the tool (written for Claude's spelling of it) holds here as it does
-    // for the other engines' targets, in every mode and BEFORE the judge: a Codex target's dynamic
-    // tool call never reaches the approval ladder (ADR-085 §3, ADR-105 §4).
-    const denied = sessionToolDenyRule(
-      X_AGENT_MESSAGE_TOOL,
-      args,
-      this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
-      entry.cwd
-    )
-    if (denied) return answer(`Denied by permission rule: ${denied}`, true)
-    // A run that is over takes no message: refused here, before a paid review of it (the service
-    // refuses it too, with the same words, for the engines that have no judge in front).
-    const over = this.xAgentMessageRefusal(entry)
-    if (over) return answer(over, true)
-    const message = typeof args.message === 'string' ? args.message : ''
-    const judge = this.codexReportJudge(entry)
-    if (message.trim() !== '' && judge.autoModeActive(entry.autonomyMode)) {
-      const run = entry.ctx.run
-      const review = await judge.reviewAgentMessage(message, {
-        currentMode: () => entry.autonomyMode,
-        stillPending: () =>
-          !context.signal.aborted &&
-          !run.stopController.signal.aborted &&
-          !run.cancelController.signal.aborted,
-        signal: AbortSignal.any([
-          context.signal,
-          run.stopController.signal,
-          run.cancelController.signal
-        ]),
-        permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
-      })
-      if (review.kind === 'block') return answer(messageBlockedText(review.reason), true)
-      if (review.kind !== 'allow') return answer(MESSAGE_UNREVIEWED_TEXT, true)
-    }
-    const sent = await this.xAgentMessage(entry, args, value.callId)
-    return answer(sent.text, sent.isError)
-  }
-
-  /**
-   * `item/tool/call` for `hand_back` on a Codex target.
-   * The same guards as `CodexSession.hostedToolCall`: this target's own thread (a native
-   * child thread it spawned is refused), its live turn, a call id, no namespace. Anything
-   * else keeps getting the `-32601` the host answered before the target had a tool.
-   */
-  private async handBackFromCodex(
-    entry: CodexTargetEntry,
-    value: unknown,
-    context: { id: unknown; signal: AbortSignal }
-  ): Promise<unknown> {
-    if (
-      !entry.handBack ||
-      entry.draining ||
-      context.signal.aborted ||
-      !entry.sessionId ||
-      !isRecord(value) ||
-      value.tool !== HAND_BACK_TOOL ||
-      value.namespace != null
-    )
-      throw new CodexMethodNotFound()
-    if (
-      value.threadId !== entry.sessionId ||
-      typeof value.turnId !== 'string' ||
-      value.turnId !== entry.turnId ||
-      entry.endedTurns.has(value.turnId) ||
-      typeof value.callId !== 'string'
-    )
-      throw new Error('Codex hand_back call has no live owning dispatch turn')
-    const args = isRecord(value.arguments) ? value.arguments : {}
-    const answer = this.receiveHandBack(entry, args.report, value.callId)
-    return { contentItems: [{ type: 'inputText', text: answer.text }], success: !answer.isError }
-  }
-
-  /**
-   * Answer one native approval request on behalf of a target that has no human
-   * of its own — the Codex equivalent of `gatePiTargetToolCall`, and a
-   * deliberately narrowed copy of `CodexSession.requestApproval`'s gating half.
-   *
-   * The shared permission engine runs FIRST, against `entry.autonomyMode` —
-   * the mode the thread's native policy runs under THIS turn (refreshed at
-   * every turn start, ADR-088; never the live accessor, see that field) —
-   * with the user's DENY and ASK rules only (ADR-085 §3) and an
-   * empty session-allow set: a dispatched target does not inherit the user's
-   * allow rules or their "allow for this session" clicks (same reasoning as
-   * the pi target's gate). Only an `ask` ever reaches a human, and it reaches the CALLER's
-   * client, bound to the target ITEM's own id — `FloatingApproval
-   * .useUnmatchedApprovals` matches a `PendingApproval.toolUseId` against
-   * TOP-LEVEL message tool_use ids only, and a target's inner ids live in the
-   * subagent bucket, so an inner id is what makes the card render (floating).
-   *
-   * A user deny rule refuses (with the rule) and a user ask rule asks, in
-   * EVERY mode — both rungs precede the mode base — except that in plan mode a
-   * write or a command that is not plan-read-only is refused before the ask
-   * rule (ADR-085 ruling 7, `planModeOutranksRules`). Past them, per mode:
-   *  - plan: `planModeBaseDecision` DENIES every write and every command that
-   *    is not plan-read-only (`isPlanReadOnlyCommand`). Nothing is forwarded and nothing waits — which is the
-   *    whole point for a target with no human: a read-only dispatch cannot
-   *    park forever on a question.
-   *  - default / acceptEdits: reads and searches allow; the rest asks, and the
-   *    ask is forwarded to the caller.
-   *  - auto: gates as `default`, like `CodexSession.gate`. The thread runs
-   *    `approvalsReviewer: 'auto_review'`, so the native reviewer has already
-   *    approved everything it was willing to and the only requests that reach
-   *    this gate are the ones it ESCALATED — and escalations belong to the
-   *    caller's human, never to a silent mode-base allow. It is also why `auto`
-   *    never maps to `never`/bypass: the native reviewer, not nobody, decides
-   *    first. A user ask rule still asks the caller's human.
-   *
-   * `suggestions` ("always allow" checkboxes) are deliberately omitted, same as
-   * the pi target: they would write allow rules to the shared permission
-   * files, whose allow tier this gate deliberately does not read.
-   */
-  private gateCodexTargetRequest(
-    entry: CodexTargetEntry,
-    method: string,
-    value: unknown,
-    context: { id: unknown; signal: AbortSignal }
-  ): Promise<unknown> {
-    if (method === 'item/tool/call') return this.toolCallFromCodex(entry, value, context)
-    if (
-      !CODEX_TARGET_SERVER_METHODS.includes(method as (typeof CODEX_TARGET_SERVER_METHODS)[number])
-    )
-      // The transport used to refuse this for us (the target's own process
-      // registered these four methods and nothing else). On a shared host the
-      // registered list is the union its owners need, so the scrub is made here
-      // — with the SAME `-32601` an unregistered method earns, which is what
-      // `item/tool/call` must keep getting outside the two tools of a target
-      // (`toolCallFromCodex`): a dispatch target has no other hosted tool and no
-      // `dispatch_agent`.
-      return Promise.reject(new CodexMethodNotFound())
-    if (entry.draining) return Promise.resolve(codexRefusal(method))
-    if (
-      !entry.sessionId ||
-      context.signal.aborted ||
-      !isRecord(value) ||
-      // A native CHILD thread this target spawned raised it. Its transcript is
-      // not shown (see handleCodexTargetNotification), so there is no card for
-      // a card-bound approval to attach to and no honest way to describe what
-      // is being asked about — refuse rather than forward something blind.
-      value.threadId !== entry.sessionId ||
-      typeof value.turnId !== 'string' ||
-      typeof value.itemId !== 'string' ||
-      entry.endedTurns.has(value.turnId)
-    )
-      return Promise.reject(new Error('Codex request has no live owning dispatch turn'))
-
-    if (method === 'item/permissions/requestApproval') {
-      // Native permission-profile GRANTS are never made on a dispatch target's
-      // behalf: they widen what the sandbox allows for the rest of the thread,
-      // which is not something a caller's one-off approval can meaningfully
-      // consent to. Answered with an empty grant (the same refusal
-      // CodexSession makes), not an error, so the turn continues.
-      return Promise.resolve({ permissions: {}, scope: 'turn' })
-    }
-    if (method === 'item/tool/requestUserInput') {
-      // There is no question UI across a dispatch: the caller's approval card
-      // carries a decision, not free-text answers, and no other target
-      // direction forwards questions either. Answered empty so the tool can
-      // proceed (or give up) rather than left hanging.
-      return Promise.resolve({ answers: {} })
-    }
-
-    const itemId = codexItemId(entry.sessionId, value.turnId, value.itemId)
-    let toolName: string
-    let input: Record<string, unknown>
-    let gated: Array<{ tool: string; input: Record<string, unknown>; path?: string }>
-    if (method === 'item/commandExecution/requestApproval') {
-      const params = value as unknown as CommandExecutionRequestApprovalParams
-      const rawCommand = params.command ?? ''
-      // Codex wraps every model command in the user's login shell, so the wire
-      // string is `/bin/zsh -lc <script>`. Gating that verbatim would make a
-      // `Bash(rm -rf:*)` deny rule dead on this engine.
-      const command = unwrapShellCommand(rawCommand)
-      toolName = 'commandExecution'
-      input = {
-        command,
-        ...(command === rawCommand ? {} : { rawCommand }),
-        cwd: params.cwd ?? ''
-      }
-      gated = [{ tool: 'bash', input: { command } }]
-    } else if (method === 'item/fileChange/requestApproval') {
-      toolName = 'fileChange'
-      const files = entry.fileChanges.get(itemId) ?? []
-      input = { files }
-      gated = files.map((file) => ({
-        // `add` is a Write; update/move/delete edit a file that already exists
-        // — the same split Claude's own Write/Edit tools make.
-        tool: file.changeType === 'add' ? 'write' : 'edit',
-        input: { path: file.path },
-        path: file.path
-      }))
-    } else return Promise.reject(new Error('Unsupported Codex server request'))
-
-    const verdict = this.decideCodexTargetRequest(entry, gated)
-    if (verdict.decision === 'allow') return Promise.resolve({ decision: 'accept' })
-    if (verdict.decision === 'deny') {
-      // Neither native response type has a reason field, so a denial would be
-      // invisible to the caller's human without this line — the same
-      // visibility choice `PiChildRunner` makes for a target error.
-      if (entry.ctx.toolUseId) {
-        entry.ctx.emit('session:subagent-message', {
-          toolUseId: entry.ctx.toolUseId,
-          message: {
-            id: uuidv4(),
-            role: 'assistant',
-            content: [{ type: 'text', text: `[denied: ${verdict.reason}]` }],
-            timestamp: Date.now()
-          }
-        })
-      }
-      // `decline` is honoured on both request kinds even though it never
-      // appears in `availableDecisions` (docs/codex-spike.md, "Other
-      // observations"), so that list is deliberately not consulted.
-      return Promise.resolve({ decision: 'decline' })
-    }
-
-    return new Promise((resolve) => {
-      const requestId = XENG_REQUEST_PREFIX + uuidv4()
-      const approval: PendingApproval = { requestId, toolUseId: itemId, toolName, input }
-      this.pendingApprovals.set(requestId, {
-        kind: 'codex',
-        targetSessionId: entry.sessionId,
-        emit: entry.ctx.emit,
-        card: approval,
-        resolve: (decision) => {
-          const allow = decision === 'allow' || decision === 'allowForSession'
-          // 'allowForSession' is treated as a one-off 'allow': a dispatch
-          // target never persists an escalation, matching every other
-          // direction's gate (and why `sessionAllows` above is empty).
-          resolve({ decision: allow ? 'accept' : 'decline' })
-        }
-      })
-      entry.ctx.emit('session:approval-request', approval)
-    })
-  }
-
-  /**
-   * Collapse the shared engine's verdicts over every action ONE native request
-   * covers (a command, or every file in one patch): any deny denies, else any
-   * ask asks, else allow. A request with nothing resolvable to gate ASKS —
-   * never allows.
-   */
-  private decideCodexTargetRequest(
-    entry: CodexTargetEntry,
-    gated: Array<{ tool: string; input: Record<string, unknown>; path?: string }>
-  ): { decision: PermissionDecision; reason?: string } {
-    if (gated.length === 0) return { decision: 'ask' }
-    const rules = this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
-    const engineCtx = {
-      // `auto` gates as `default` — the interactive rule (`CodexSession.gate()`):
-      // under `auto_review` the native guardian has already approved everything
-      // it was willing to, so whatever reaches this gate is what it ESCALATED,
-      // and escalations belong to the human, never to a silent mode-base allow.
-      mode: entry.autonomyMode === 'auto' ? 'default' : entry.autonomyMode,
-      rules,
-      sessionAllows: EMPTY_CODEX_SESSION_ALLOWS,
-      cwd: entry.cwd
-    }
-    let decision: PermissionDecision = 'allow'
-    for (const item of gated) {
-      const verdict = decideWithSource(item.tool, item.input, engineCtx)
-      let step = verdict.decision
-      // The same composition-seam narrowing `CodexSession.gate` makes, for the
-      // same reason: `acceptEdits`' mode base allows fileEdit/fileWrite
-      // unconditionally, which on this engine would silently apply a patch
-      // ANYWHERE on disk, while Codex's own workspaceWrite sandbox draws the
-      // line at the workspace. A mode-base allow outside cwd is downgraded to a
-      // human ask. (Only mode-base verdicts — a target's allow tier is empty,
-      // so mode-base is the only rung that can allow here at all.)
-      if (
-        step === 'allow' &&
-        verdict.source === 'mode-base' &&
-        item.path !== undefined &&
-        !insideCodexWorkspace(entry.cwd, entry.turnDirs ?? rules.additionalDirectories, item.path)
-      )
-        step = 'ask'
-      if (step === 'deny')
-        return {
-          decision: 'deny',
-          reason:
-            verdict.source === 'deny-rule'
-              ? `Denied by permission rule: ${verdict.rule}`
-              : entry.autonomyMode === 'plan'
-                ? PLAN_MODE_DENY_REASON_NO_EXIT_TOOL
-                : 'Denied by dispatch autonomy mode'
-        }
-      if (step === 'ask') decision = 'ask'
-    }
-    return { decision }
-  }
 }
 
 export const crossEngineDispatcher = new CrossEngineDispatcher({
   serverManager: opencodeServerManager,
   makeClient: (conn) => new OpencodeClient(conn),
   loadEngineConfig,
-  codexVaultAccounts: true,
   requireHandBack: true
 })

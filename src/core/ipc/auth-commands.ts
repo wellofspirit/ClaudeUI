@@ -433,11 +433,10 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       capability: 'config',
       kind: 'query',
       handler: safeHandler(async (providerId: string): Promise<SharedProviderAccountList> => {
-        const definition = accountProvider(providerId)
+        accountProvider(providerId)
         const status = await credentialSync.getStatus()
         return {
           activeId: status.activeId,
-          perSession: definition.accounts?.perSession === true,
           // Field-picked rather than passed through: the status is the vault's
           // shape, and only these fields are ever allowed across a wire.
           accounts: status.accounts.map(
@@ -469,15 +468,6 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       handler: safeHandler(async (providerId: string, id: string): Promise<void> => {
         accountProvider(providerId)
         await credentialSync.removeAccount(id)
-      })
-    },
-    {
-      channel: 'provider-account:set-per-session',
-      capability: 'config',
-      kind: 'command',
-      handler: safeHandler(async (providerId: string, enabled: boolean): Promise<void> => {
-        accountProvider(providerId)
-        await sharedProviderService.setAccountsPerSession(providerId, enabled)
       })
     },
     {

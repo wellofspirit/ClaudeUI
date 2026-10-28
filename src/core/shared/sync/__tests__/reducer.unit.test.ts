@@ -1282,7 +1282,7 @@ describe('reducer — cost + metering REPLACE, never accumulate (invariant 6)', 
     // coerced (`?? 0`) would launder the former into the latter on every hop.
     const s = fold([
       created(),
-      ['session:status', 'rid', status({ engineId: 'codex', totalCostUsd: null })],
+      ['session:status', 'rid', status({ engineId: 'pi', totalCostUsd: null })],
       ['session:status-line', 'rid', line(null)]
     ])
     expect(s.sessions['rid'].status.totalCostUsd).toBeNull()

@@ -249,11 +249,10 @@ export type CallerCwdResolver = (callerSessionId: string | undefined) => Promise
  */
 function buildDispatchAgentInputSchema(
   modelHintShort: string,
-  piModelHintShort: string,
-  codexModelHintShort: string
+  piModelHintShort: string
 ): Record<string, z.ZodTypeAny> {
   return {
-    engine: z.enum(['claude', 'pi', 'codex']).describe('Target engine to dispatch to'),
+    engine: z.enum(['claude', 'pi']).describe('Target engine to dispatch to'),
     prompt: z.string().describe('Task for the dispatched agent'),
     model: z
       .string()
@@ -261,7 +260,7 @@ function buildDispatchAgentInputSchema(
       .describe(
         'Target model id (format depends on the target engine — must be user-allowed). Omit for ' +
           `that engine's configured default. For claude: a Claude alias (e.g. "haiku", "sonnet") — ` +
-          `${modelHintShort} For pi: ${piModelHintShort} For codex: ${codexModelHintShort}`
+          `${modelHintShort} For pi: ${piModelHintShort}`
       ),
     name: z.string().optional().describe(DISPATCH_NAME_PARAM),
     description: z.string().describe(DISPATCH_DESCRIPTION_PARAM),
@@ -431,14 +430,6 @@ export function createOpencodeHostedToolsServer(
     allowedModels: piDispatchCfg?.allowedModels,
     defaultModel: piDispatchCfg?.defaultModel
   })
-  // codex (ADR-033 slice H) — a THIRD independent snapshot alongside the two
-  // above, same snapshot-at-spawn caveat.
-  const codexDispatchCfg = loadEngineConfig('codex').dispatch
-  const codexModelHint = describeDispatchModels({
-    targetEngine: 'codex',
-    allowedModels: codexDispatchCfg?.allowedModels,
-    defaultModel: codexDispatchCfg?.defaultModel
-  })
 
   if (deps.listModels) {
     const listModels = deps.listModels
@@ -475,20 +466,17 @@ export function createOpencodeHostedToolsServer(
     'dispatch_agent',
     {
       description: dispatchAgentDescription({
-        targets: ['claude', 'pi', 'codex'],
+        targets: ['claude', 'pi'],
         ownSubagentTool: OWN_SUBAGENT_TOOL.opencode,
         hints: joinDispatchHints([
           { targetEngine: 'claude', long: modelHint.long },
-          { targetEngine: 'pi', long: piModelHint.long },
-          { targetEngine: 'codex', long: codexModelHint.long }
+          { targetEngine: 'pi', long: piModelHint.long }
         ])
       }),
       // Loose: the removed `session_id` is not declared (the model must not see it) but a call
       // that still sends one must reach the handler for its guiding error; a plain raw shape
       // would strip it. `tools/list` shows only the declared keys either way.
-      inputSchema: z.looseObject(
-        buildDispatchAgentInputSchema(modelHint.short, piModelHint.short, codexModelHint.short)
-      )
+      inputSchema: z.looseObject(buildDispatchAgentInputSchema(modelHint.short, piModelHint.short))
     },
     async (
       args: Record<string, unknown>,
@@ -505,7 +493,7 @@ export function createOpencodeHostedToolsServer(
         __xeng_caller_session,
         __xeng_call_id
       } = args as {
-        engine: 'claude' | 'pi' | 'codex'
+        engine: 'claude' | 'pi'
         prompt: string
         model?: string
         name?: string

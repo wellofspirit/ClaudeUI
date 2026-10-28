@@ -16,7 +16,7 @@
  * `core/auth/vault/codex-oauth.ts`). Pre-parsing here would fork that rule.
  *
  * Two variants, because two vendors return the code differently:
- *  - `url`  — Codex/opencode: the redirect lands on a dead `localhost:1455`
+ *  - `url`  — ChatGPT/opencode: the redirect lands on a dead `localhost:1455`
  *             page whose ADDRESS BAR holds the code (mockup state 2);
  *  - `code` — Claude: claude.ai displays the code on the page (mockup state 3).
  *

@@ -4,12 +4,13 @@
 **Supersedes:** [ADR-066](adr-066_codex-fourth-engine.md) §"Phase-1 permissions are native, not shared Auto". The rest of ADR-066 stands.
 **Re-includes Codex in:** [ADR-022](adr-022_opencode-permission-mapping.md) (one rule set for every harness) and [ADR-050](adr-050_auto-mode-as-the-default-autonomy.md) (Auto as the default autonomy).
 **Relates to:** [ADR-023](adr-023_opencode-automode-classifier.md) (ClaudeUI's own judge, which Codex does not use), [ADR-076](adr-076_claude-automode-verdict-on-the-wire.md) (amends §F18: Claude reaches the same parity), [ADR-030](adr-030_capability-honesty.md), [ADR-035](adr-035_pi-engine-backend.md) (the pi evaluator this reuses)
+**Retired 2026-10-28:** the Codex engine was removed; the shared permission model it extended to Codex still governs claude, opencode and pi, and ADR-068's ChatGPT vault identity remains in use by pi, opencode and the judge.
 
 ## Context
 
 ADR-066 shipped Codex with its native approval policy, sandbox and reviewer exposed as a per-session pill, and deferred parity with ClaudeUI's permission modes and Claude-style rules. The owner then asked for the opposite: drop the native controls and make Codex behave like the other three engines under one policy, keeping Codex's own judge for Auto mode where ours cannot be mapped.
 
-Two evidence sources fixed the design. A repo-resident probe against the pinned 0.154.0 binary (`src/integration/codex/codex-policy-probe.integration.test.ts`, findings in [codex-spike.md](../codex-spike.md) §"Native approval surface probe") established what each `(approvalPolicy, sandboxPolicy)` pair routes to the client. The Codex source at tag `rust-v0.154.0` (checked out under `.cache/codex-src/`, not vendored) explained why.
+Two evidence sources fixed the design. A repo-resident probe against the pinned 0.154.0 binary (`src/integration/codex/codex-policy-probe.integration.test.ts`, findings in `docs/codex-spike.md` (deleted 2026-10-28) §"Native approval surface probe") established what each `(approvalPolicy, sandboxPolicy)` pair routes to the client. The Codex source at tag `rust-v0.154.0` (checked out under `.cache/codex-src/`, not vendored) explained why.
 
 What the binary does:
 

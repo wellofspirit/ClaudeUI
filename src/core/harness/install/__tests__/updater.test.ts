@@ -35,8 +35,7 @@ vi.mock('../../../services/logger', () => ({
 const TESTED: UpdateInputs['tested'] = {
   claude: '2.1.280',
   opencode: '1.18.32',
-  pi: '0.87.4',
-  codex: '0.156.0'
+  pi: '0.87.4'
 }
 
 function inputs(patch: Partial<UpdateInputs>): UpdateInputs {
@@ -117,34 +116,6 @@ describe('computeUpdates', () => {
           },
           installed: { opencode: ['1.18.35'], pi: ['0.87.1'] },
           latest: { opencode: '1.18.41' }
-        })
-      )
-    ).toEqual([])
-  })
-
-  it('Codex counts for Tested, its one choice: a release that moves the pin offers it', () => {
-    const codex = (installed: string[], selection = managed('tested')) =>
-      computeUpdates(inputs({ selections: { codex: selection }, installed: { codex: installed } }))
-    expect(codex(['0.150.0'])).toEqual([
-      { id: 'codex', from: '0.150.0', to: '0.156.0', choice: 'tested' }
-    ])
-    // A selection without a version is Tested.
-    expect(codex(['0.150.0'], { source: 'managed' })).toEqual([
-      { id: 'codex', from: '0.150.0', to: '0.156.0', choice: 'tested' }
-    ])
-    expect(codex(['0.150.0', '0.156.0'])).toEqual([])
-    // Nothing installed is a first install, not an update; System updates itself.
-    expect(codex([])).toEqual([])
-    expect(codex(['0.150.0'], { source: 'system', version: 'tested' })).toEqual([])
-  })
-
-  it('Codex never follows Latest, even saved as Latest', () => {
-    expect(
-      computeUpdates(
-        inputs({
-          selections: { codex: managed('latest') },
-          installed: { codex: ['0.150.0'] },
-          latest: { codex: '0.160.0' }
         })
       )
     ).toEqual([])
@@ -237,11 +208,9 @@ describe('the check', () => {
     const { updater, latestVersion } = setup({
       selections: {
         opencode: managed('latest'),
-        pi: managed('latest'),
-        // Codex has no Latest: upstream is never asked for it.
-        codex: managed('latest')
+        pi: managed('latest')
       },
-      store: { opencode: ['1.18.40'], pi: [], codex: ['0.156.0'] }
+      store: { opencode: ['1.18.40'], pi: [] }
     })
     await updater.check('boot')
     expect(latestVersion.mock.calls.map(([id]) => id)).toEqual(['opencode'])
@@ -438,7 +407,7 @@ describe('Automatically', () => {
     await updater.idle()
     expect(install).toHaveBeenCalledWith('pi', '0.87.4')
     // Every updatable harness is nudged for the mode itself.
-    expect(changes[0]).toEqual(['opencode', 'pi', 'codex'])
+    expect(changes[0]).toEqual(['opencode', 'pi'])
   })
 })
 

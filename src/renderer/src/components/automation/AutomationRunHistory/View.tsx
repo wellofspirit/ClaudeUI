@@ -142,12 +142,7 @@ export function AutomationRunHistoryView({
             <ImageGalleryProvider messages={runMessages ?? []}>
               <DiagramGalleryProvider messages={runMessages ?? []}>
                 {runMessages?.map((msg, idx) => (
-                  <MessageBubble
-                    key={msg.id || idx}
-                    message={msg}
-                    pendingApprovals={[]}
-                    isLastAssistant={false}
-                  />
+                  <MessageBubble key={msg.id || idx} message={msg} pendingApprovals={[]} />
                 ))}
               </DiagramGalleryProvider>
             </ImageGalleryProvider>

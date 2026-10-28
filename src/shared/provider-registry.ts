@@ -235,7 +235,6 @@ export interface ProviderAccountSummary extends SharedProviderAccountSummary {
 /** The accounts half of one shared subscription row. */
 export interface ProviderAccounts {
   activeId: string | null
-  perSession: boolean
   list: ProviderAccountSummary[]
 }
 

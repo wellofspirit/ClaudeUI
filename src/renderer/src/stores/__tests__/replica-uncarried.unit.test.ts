@@ -374,19 +374,6 @@ describe('the shared history loader, per engine', () => {
     expect(await loadSessionIntoStore(GONE_INFO, { isCurrent: () => false })).toBe('skipped')
     expect(store().sessions['gone']).toBeUndefined()
   })
-
-  it('codex: a failed read is reported through the caller and replaces nothing', async () => {
-    loadSessionHistory.mockRejectedValue(new Error('app-server down'))
-    const onCodexError = vi.fn()
-    const info: SessionInfo = { ...GONE_INFO, sessionId: 'cx-1', engineId: 'codex' }
-
-    const loaded = await loadSessionIntoStore(info, { isCurrent: () => true, onCodexError })
-
-    expect(loaded).toBe('skipped')
-    expect(onCodexError).toHaveBeenNthCalledWith(1, null)
-    expect(onCodexError).toHaveBeenLastCalledWith(expect.stringContaining('Codex history'))
-    expect(store().sessions['cx-1']).toBeUndefined()
-  })
 })
 
 describe('the click path after an abandoned reload', () => {

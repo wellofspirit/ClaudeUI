@@ -55,10 +55,6 @@ export type NonUserOutcome = 'started' | 'queued' | 'unavailable'
  * are gated behind `capabilities` flags.
  */
 export interface ISession {
-  resolveCodexApproval?(
-    requestId: string,
-    decision: import('../../shared/codex-types').CodexApprovalDecision
-  ): void
   readonly engineId: EngineId
   readonly routingId: string
   readonly cwd: string
@@ -227,20 +223,11 @@ export interface ISession {
    * `services/voice-relay.ts`, which starts the server through this.
    *
    * `startFields` ride on `voice_start` beside the language: the on-device server
-   * (opencode, pi, Codex — ADR-101) needs its per-spawn `token` there; cli.js's
+   * (opencode, pi — ADR-101) needs its per-spawn `token` there; cli.js's
    * own server (Claude) takes none.
    */
   voiceStartServer?(): Promise<{ port: number; startFields?: Record<string, unknown> }>
   voiceStopServer?(): Promise<void>
-
-  /**
-   * Pin this session to one stored vendor account, or `null` to follow the
-   * globally active one (ADR-068 §2). Gated by
-   * `capabilities.auth.perSessionAccount` — Codex only today; the channel
-   * refuses on every other engine rather than relying on the optional call, so
-   * a client gets a reason instead of silence.
-   */
-  setAccount?(accountId: string | null): Promise<void>
 
   /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
   setEffort?(effort: string): void | Promise<void>
@@ -309,18 +296,6 @@ export interface ISession {
    * launching call carried.
    */
   getAutonomyMode?(): string
-
-  /**
-   * The provider-wide ACTIVE account changed to `activeAccountId` (null = none).
-   *
-   * Optional: only an engine whose sessions share ONE process per account has
-   * anything to do here. Codex implements it (ADR-069 §4) — a session that
-   * follows the active account leaves the host it was on and continues on the
-   * new account's at its next prompt, while a pinned session is untouched.
-   * opencode recycles its servers through its own auth provider instead
-   * (ADR-047), and Claude and pi carry their credential per process.
-   */
-  followActiveAccount?(activeAccountId: string | null): Promise<void>
 
   /**
    * Ask a one-off question outside the main conversation history (the `/btw`

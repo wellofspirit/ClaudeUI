@@ -115,26 +115,6 @@ function entries(): Record<HarnessId, HarnessStateEntry> {
       },
       managed: [],
       installable: true
-    },
-    codex: {
-      id: 'codex',
-      manifest: { tested: '0.156.0', floor: '0.156.0', ceiling: '1.0.0' },
-      selection: { source: 'managed', version: 'tested' },
-      resolved: {
-        source: 'managed',
-        version: '0.156.0',
-        path: '/opt/store/codex/0.156.0/codex',
-        available: true
-      },
-      system: {
-        detectedAt: '2026-09-30T00:00:00.000Z',
-        installs: [],
-        choice: { kind: 'fallback', reason: 'No Codex found on this computer' }
-      },
-      managed: [
-        { version: '0.156.0', verified: 'reviewed', installedAt: '2026-09-29T00:00:00.000Z' }
-      ],
-      installable: true
     }
   }
 }
@@ -230,7 +210,7 @@ function piWants(version: string): HarnessStateSnapshot {
 }
 
 async function loaded(): Promise<void> {
-  await waitFor(() => expect(screen.getAllByTestId('HarnessRow')).toHaveLength(4))
+  await waitFor(() => expect(screen.getAllByTestId('HarnessRow')).toHaveLength(3))
 }
 
 const progress = (patch: Partial<HarnessInstallProgress>): HarnessInstallProgress => ({
@@ -258,8 +238,7 @@ describe('rows', () => {
     expect(screen.getAllByTestId('HarnessRow').map((el) => el.dataset.id)).toEqual([
       'claude',
       'opencode',
-      'pi',
-      'codex'
+      'pi'
     ])
     // Claude Code: Bundled | System, the bundled version locked.
     expect(within(row('claude')).getByTestId('HarnessRow.source')).toHaveAttribute(
@@ -277,11 +256,6 @@ describe('rows', () => {
       'Tested · 1.18.32'
     )
     expect(within(row('pi')).getByTestId('HarnessRow.version')).toBeInTheDocument()
-    // Codex: ClaudeUI locked to the pin.
-    expect(within(row('codex')).getByTestId('HarnessRow.lockedVersion')).toHaveTextContent(
-      '0.156.0'
-    )
-    expect(within(row('codex')).queryByTestId('HarnessRow.version')).toBeNull()
   })
 
   it('describes each row in ONE line for the active side, the path only in its title', async () => {
@@ -295,7 +269,6 @@ describe('rows', () => {
     expect(claude).not.toHaveTextContent('/opt')
     expect(claude.getAttribute('title')).toContain('/opt/claudeui/vendor/claude-cli/bun-claude')
     expect(line('opencode')).toHaveTextContent("ClaudeUI's copy · 1.18.32")
-    expect(line('codex')).toHaveTextContent('Exact version this ClaudeUI release speaks · 0.156.0')
     // The System reason is not a row line.
     expect(claude).not.toHaveTextContent('older than')
   })
@@ -319,7 +292,6 @@ describe('rows', () => {
     expect(sourceOption('pi', 'system')).toHaveAttribute('aria-disabled', 'true')
     expect(sourceOption('pi', 'system')).toHaveAttribute('title', 'No pi found on this computer')
     expect(within(row('pi')).queryByTestId('HarnessRow.detectedToggle')).toBeNull()
-    expect(sourceOption('codex', 'system')).toHaveAttribute('aria-disabled', 'true')
     // A disabled radio does nothing when clicked.
     fireEvent.click(sourceOption('claude', 'system'))
     expect(api.setHarnessSelection).not.toHaveBeenCalled()
@@ -617,7 +589,7 @@ describe('the progress pill', () => {
 
   it('the snapshot’s installs show on the first read', async () => {
     api.harnessState.mockResolvedValue(
-      snapshot({ installs: [progress({ id: 'codex', version: '0.156.0', phase: 'verifying' })] })
+      snapshot({ installs: [progress({ id: 'opencode', version: '1.18.32', phase: 'verifying' })] })
     )
     renderPage()
     await loaded()

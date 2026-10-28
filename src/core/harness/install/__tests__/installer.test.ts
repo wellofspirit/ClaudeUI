@@ -34,7 +34,6 @@ import {
 
 const WIN = process.platform === 'win32'
 const exe = (base: string): string => (WIN ? `${base}.exe` : base)
-const HOST = `${process.platform}-${process.arch}`
 
 let tmp: string
 let store: string
@@ -560,99 +559,6 @@ describe('pi', () => {
     expect(storeState()).toEqual({ versions: [], staging: [], trash: [] })
     expect(fs.existsSync(path.join(store, 'escape'))).toBe(false)
     expect(fs.existsSync(path.join(tmp, 'escape'))).toBe(false)
-  })
-})
-
-// ── Codex ─────────────────────────────────────────────────────────────────────
-
-const CODEX = harnessManifest('codex')
-const CODEX_HOST = Object.hasOwn(CODEX.platforms, HOST)
-
-function codexFixture(
-  opts: { archiveSha?: string; binarySha?: string; licenseSha?: string; extraMember?: boolean } = {}
-): { f: FakeFetch; manifest: HarnessManifest } {
-  const members = {
-    [exe('codex')]: 'codex-test-member',
-    [exe('codex-code-mode-host')]: 'host-test-member'
-  }
-  const binaries: Record<string, unknown> = {}
-  const routes: Record<string, { body: Buffer | string } | { redirect: string }> = {}
-  for (const [name, member] of Object.entries(members)) {
-    const body = Buffer.from(`${name} body`)
-    const entries = [tarEntry(member, body, { mode: 0o755 })]
-    if (opts.extraMember) entries.push(tarEntry('extra', 'x'))
-    const archive = tgz(entries)
-    binaries[name] = {
-      member,
-      archiveSha256: opts.archiveSha ?? sha256(archive),
-      binarySha256: opts.binarySha ?? sha256(body)
-    }
-    const url = `https://github.com/openai/codex/releases/download/rust-v${CODEX.tested}/${member}.tar.gz`
-    routes[url] = { redirect: cdn(`${member}.tar.gz`) }
-    routes[cdn(`${member}.tar.gz`)] = { body: archive }
-  }
-  const license = 'Apache License'
-  routes[(CODEX as unknown as { license: string }).license] = { body: license }
-  const manifest = {
-    ...CODEX,
-    licenseSha256: opts.licenseSha ?? sha256(license),
-    platforms: { [HOST]: { binaries } }
-  } as HarnessManifest
-  return { f: fakeFetch(routes), manifest }
-}
-
-describe.skipIf(!CODEX_HOST)('Codex', () => {
-  it('installs both binaries and the LICENSE, reviewed', async () => {
-    const fx = codexFixture()
-    const probe = okProbe(CODEX.tested)
-    const result = await installerFor(fx, CODEX.tested, { probe: probe.probe }).installHarness(
-      'codex',
-      'tested'
-    )
-    expect(result).toEqual({
-      status: 'installed',
-      id: 'codex',
-      version: CODEX.tested,
-      verified: 'reviewed'
-    })
-    const dir = path.join(store, 'codex', CODEX.tested)
-    expect(fs.readdirSync(dir).sort()).toEqual(
-      [exe('codex'), exe('codex-code-mode-host'), 'LICENSE', 'install.json'].sort()
-    )
-    expect(probe.calls[0].command.endsWith(exe('codex'))).toBe(true)
-  })
-
-  it('refuses any version but the pin, without a request', async () => {
-    const fx = codexFixture()
-    const installer = installerFor(fx, CODEX.tested, {
-      latestVersion: async () => untested(CODEX.tested)
-    })
-    for (const version of ['latest', untested(CODEX.tested)]) {
-      const result = await installer.installHarness('codex', version)
-      expect(result.status === 'failed' && result.reason).toMatch(/locked to/)
-    }
-    expect(fx.f.calls).toEqual([])
-  })
-
-  it.each([
-    [
-      'archive digest',
-      { archiveSha: 'e'.repeat(64) },
-      /tar\.gz SHA-256 \w+ does not match the reviewed e{64}/
-    ],
-    ['binary digest', { binarySha: 'e'.repeat(64) }, /does not match the reviewed e{64}/],
-    ['LICENSE digest', { licenseSha: 'e'.repeat(64) }, /LICENSE SHA-256/]
-  ])('fails on a mismatched %s, leaving nothing behind', async (_label, opts, reason) => {
-    const fx = codexFixture(opts)
-    const result = await installerFor(fx, CODEX.tested).installHarness('codex', 'tested')
-    expect(result.status === 'failed' && result.reason).toMatch(reason)
-    expect(storeState()).toEqual({ versions: [], staging: [], trash: [] })
-  })
-
-  it('refuses an archive with more than its one member', async () => {
-    const fx = codexFixture({ extraMember: true })
-    const result = await installerFor(fx, CODEX.tested).installHarness('codex', 'tested')
-    expect(result.status === 'failed' && result.reason).toMatch(/does not hold exactly/)
   })
 })
 

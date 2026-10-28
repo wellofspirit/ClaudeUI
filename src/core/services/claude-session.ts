@@ -160,7 +160,7 @@ import { isSessionToolName, sessionToolsGuidance } from '../../shared/session-to
  */
 const CROSS_ENGINE_DISPATCH_SECTION = dispatchAgentPromptSection({
   toolName: 'mcp__claude-ui-collab__dispatch_agent',
-  targets: ['opencode', 'pi', 'codex'],
+  targets: ['opencode', 'pi'],
   ownSubagentTool: OWN_SUBAGENT_TOOL.claude
 })
 
@@ -1862,8 +1862,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    * Claude is the one engine whose auto-mode judge we do not run ourselves: the
    * two-stage classifier lives inside cli.js, so this frame is the ONLY way its
    * verdict reaches a card. Without it an auto-mode block showed up as a bare
-   * `is_error` tool_result with no reason and no reviewer — where pi, opencode
-   * and Codex all render a verdict. cli.js emits no frame for an allow.
+   * `is_error` tool_result with no reason and no reviewer — where pi and opencode
+   * both render a verdict. cli.js emits no frame for an allow.
    *
    * Which block a frame becomes — a verdict or a denial — is decided entirely by
    * `permissionDecisionBlock` in `claude-permission-decision.ts`, which owns the

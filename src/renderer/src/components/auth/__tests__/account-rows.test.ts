@@ -33,7 +33,6 @@ const claude = (over: Partial<AccountsState>): AccountsState => ({
 
 const vault = (over: Partial<SharedProviderAccountList>): SharedProviderAccountList => ({
   activeId: 'v1',
-  perSession: true,
   accounts: [
     { id: 'v1', email: 'one@example.com', planType: 'pro', expiresAt: 0, needsReauth: false }
   ],

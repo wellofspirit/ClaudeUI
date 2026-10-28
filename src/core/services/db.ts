@@ -21,7 +21,6 @@
  */
 
 import * as fs from 'fs'
-import { parseCodexSettings } from '../codex/settings'
 import * as path from 'path'
 import * as os from 'os'
 import { getSqliteDriver, setDbOpenProbe, type SqliteDatabase } from './sqlite-driver'
@@ -38,6 +37,7 @@ import type {
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { displayCostFromRow } from '../../shared/cost-rule'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
+import { isEngineId } from '../../shared/engine-label'
 import { logger } from './logger'
 import { capReport } from '../../shared/handback-frame'
 
@@ -146,13 +146,6 @@ export type Db = SqliteDatabase
 export interface SessionMeta {
   engineId: EngineId
   model?: ModelRef
-  /** Tokens the session's native context last held (v24). Codex only, so far:
-   *  it is the one engine whose context meter cannot be recomputed from a
-   *  history read. Absent on a write MERGES — see {@link setSessionMeta}. */
-  contextUsed?: number | null
-  /** The model's context window in tokens at that moment (v24), null/absent
-   *  when the engine never reported one. */
-  contextWindow?: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -1630,6 +1623,84 @@ export const MIGRATIONS: Migration[] = [
     up(db) {
       db.exec('ALTER TABLE dispatch_target ADD COLUMN parent_cwd TEXT')
     }
+  },
+  {
+    // The Codex engine was removed. Its sessions can no longer be opened or driven, so every
+    // row that points at one is settled the way a session delete settles it (session-links
+    // `onSessionRemoved`, `deleteSessionMeta`, `deleteSessionInbox`, `clearSessionRefIds`):
+    //   - `session_meta` and the inbox rows aimed at them go;
+    //   - their `session_ref` rows stay with both ids cleared (links still name them, and a
+    //     card keeps rendering them as Codex history), and the `live`/`starting` links through
+    //     them end (an own link that never started fails);
+    //   - a pending proposal that would start a Codex session is dismissed;
+    //   - a Codex X-Agent (or one with a Codex parent) that is not `stopped` is stopped, so no
+    //     message ever reaches a launch path that has no Codex branch;
+    //   - the Codex-only tables lose their ROWS.
+    // Tables and columns stay (`codex_session_overrides`, `codex_forks`,
+    // `dispatch_target.codex_account_id`): another build may share this file (a dev build beside
+    // the packaged app, `claudeui-server` beside the desktop) and still names them. Usage,
+    // dispatched-usage, audit and report history is history and is not touched.
+    version: 41,
+    up(db) {
+      const now = Date.now()
+      const exists = (table: string): boolean =>
+        db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !==
+        undefined
+
+      if (exists('session_inbox')) {
+        db.exec(`
+          DELETE FROM session_inbox
+           WHERE target IN (SELECT session_id FROM session_meta WHERE engine_id = 'codex')
+              OR target IN (SELECT routing_id FROM session_ref
+                             WHERE engine = 'codex' AND routing_id IS NOT NULL);
+        `)
+      }
+      if (exists('session_ref') && exists('session_link')) {
+        db.prepare(
+          `UPDATE session_link
+              SET state = CASE WHEN state = 'starting' THEN 'failed' ELSE 'ended' END,
+                  updated_at = ?
+            WHERE child_ref IN (SELECT ref FROM session_ref WHERE engine = 'codex')
+              AND state NOT IN ('ended', 'failed')`
+        ).run(now)
+        db.prepare(
+          `UPDATE session_link SET state = 'ended', updated_at = ?
+            WHERE parent_ref IN (SELECT ref FROM session_ref WHERE engine = 'codex')
+              AND state IN ('live', 'starting')`
+        ).run(now)
+        db.exec(
+          "UPDATE session_ref SET session_id = NULL, routing_id = NULL WHERE engine = 'codex'"
+        )
+      }
+      if (exists('session_proposal')) {
+        const pending = db
+          .prepare("SELECT id, placement FROM session_proposal WHERE state = 'pending'")
+          .all() as Array<{ id: string; placement: string }>
+        for (const row of pending) {
+          let engine: unknown
+          try {
+            engine = (JSON.parse(row.placement) as { engine?: unknown } | null)?.engine
+          } catch {
+            continue
+          }
+          if (engine !== 'codex') continue
+          db.prepare(
+            "UPDATE session_proposal SET state = 'dismissed', dismiss_reason = 'engine-removed' WHERE id = ?"
+          ).run(row.id)
+        }
+      }
+      if (exists('dispatch_target')) {
+        db.exec(`
+          UPDATE dispatch_target
+             SET state = 'stopped', owner_pid = NULL, owner_boot = NULL
+           WHERE (engine = 'codex' OR parent_engine = 'codex') AND state <> 'stopped';
+        `)
+      }
+      db.exec("DELETE FROM session_meta WHERE engine_id = 'codex'")
+      for (const table of ['codex_session_overrides', 'codex_forks']) {
+        if (exists(table)) db.exec(`DELETE FROM ${table}`)
+      }
+    }
   }
 ]
 
@@ -1780,23 +1851,17 @@ interface SessionMetaRow {
   engine_id: string
   vendor_id: string | null
   model_id: string | null
-  context_used: number | null
-  context_window: number | null
   updated_at: number
 }
 
-function rowToMeta(row: SessionMetaRow): SessionMeta {
-  const engineId: EngineId =
-    row.engine_id === 'opencode' || row.engine_id === 'pi' || row.engine_id === 'codex'
-      ? row.engine_id
-      : 'claude'
-  // Spread only when read: this map is also the renderer's `sessionEngines`
-  // payload, and a session that never metered should not carry two null keys
-  // into it (nor round-trip them back through `saveSessionConfig`).
-  const context = {
-    ...(row.context_used != null ? { contextUsed: row.context_used } : {}),
-    ...(row.context_window != null ? { contextWindow: row.context_window } : {})
-  }
+/**
+ * The row as a {@link SessionMeta}, or undefined for an engine this build does not
+ * ship (a `codex` row an older build sharing the file wrote after v41, or a newer
+ * build's engine): such a row is filtered, never coerced into a Claude session.
+ */
+function rowToMeta(row: SessionMetaRow): SessionMeta | undefined {
+  if (!isEngineId(row.engine_id)) return undefined
+  const engineId = row.engine_id
   if (row.model_id != null) {
     return {
       engineId,
@@ -1806,11 +1871,10 @@ function rowToMeta(row: SessionMetaRow): SessionMeta {
         // have no persisted vendor, so fall back to the engine's historical default.
         vendorId: row.vendor_id ?? engineMeta(engineId).defaultVendorId,
         modelId: row.model_id
-      },
-      ...context
+      }
     }
   }
-  return { engineId, ...context }
+  return { engineId }
 }
 
 // ---------------------------------------------------------------------------
@@ -1828,193 +1892,30 @@ export function getSessionMeta(sessionId: string): SessionMeta | undefined {
   return row ? rowToMeta(row) : undefined
 }
 
-/** Explicit accepted native choices, independent of client-projected session_meta deletion. */
-export function getCodexSessionOverrides(sessionId: string, db: Db = getDb()): unknown {
-  const row = db
-    .prepare('SELECT settings_json FROM codex_session_overrides WHERE session_id = ?')
-    .get(sessionId) as { settings_json: string } | undefined
-  if (!row) return undefined
-  try {
-    return JSON.parse(row.settings_json)
-  } catch {
-    throw new Error('Saved Codex session overrides are invalid')
-  }
-}
-
-export function setCodexSessionOverrides(
-  sessionId: string,
-  settings: import('../../shared/codex-types').CodexSettings,
-  db: Db = getDb()
-): void {
-  const parsed = parseCodexSettings(settings)
-  db.prepare(
-    `INSERT INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)
-    ON CONFLICT(session_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at`
-  ).run(sessionId, JSON.stringify(parsed), Date.now())
-}
-
-export function ensureCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
-  db.prepare(
-    'INSERT OR IGNORE INTO codex_session_overrides (session_id, settings_json, updated_at) VALUES (?, ?, ?)'
-  ).run(sessionId, '{}', Date.now())
-}
-
-export function hasCodexSessionOverrides(sessionId: string, db: Db = getDb()): boolean {
-  return (
-    db.prepare('SELECT 1 FROM codex_session_overrides WHERE session_id = ?').get(sessionId) !==
-    undefined
-  )
-}
-
-export function deleteCodexSessionOverrides(sessionId: string, db: Db = getDb()): void {
-  db.prepare('DELETE FROM codex_session_overrides WHERE session_id = ?').run(sessionId)
-}
-
-// ---------------------------------------------------------------------------
-// Codex lineage cache (v16 table, generalised in v17) — see that migration's
-// comment for the why.
-// ---------------------------------------------------------------------------
-
-/** One registered branch: the forked thread and the thread it was cut from. */
-export interface CodexFork {
-  threadId: string
-  forkedFromId: string | null
-}
-
-/**
- * One cached thread: its lineage, and the native `updatedAt` that lineage was
- * read at.
- *
- * `forkedFromId === null` is a root, a thread whose source cannot be learned,
- * or an id the binary has twice refused — see the v17 migration. `verifiedAt`
- * is what makes the launch scan incremental: a listed thread whose `updatedAt`
- * still equals it needs no `thread/read` at all. `null` means the row has never
- * been verified (a v16 row, or a confirmed-gone id).
- */
-export interface CodexLineage extends CodexFork {
-  verifiedAt: number | null
-}
-
-/**
- * Record a `thread/fork` result. First registration wins — a later resume of
- * the same branch must not rewrite its lineage or duplicate the row.
- *
- * The row it writes is UNVERIFIED (`verified_at` null): ClaudeUI learned this
- * lineage from the fork call, not from a `thread/read`, so the next scan reads
- * the thread once and fills in the `updatedAt` that stops it reading it again.
- */
-export function registerCodexFork(
-  threadId: string,
-  forkedFromId: string | null,
-  db: Db = getDb()
-): void {
-  if (!threadId) return
-  db.prepare(
-    'INSERT OR IGNORE INTO codex_forks (thread_id, forked_from_id, created_at) VALUES (?, ?, ?)'
-  ).run(threadId, forkedFromId, Date.now())
-}
-
-/**
- * Record what a `thread/read` said about one thread — the LINEAGE SCAN's only
- * writer.
- *
- * Unlike {@link registerCodexFork} this REPLACES what the row held: the read is
- * the authority (a fork registered at mint time carries no `verifiedAt`, and a
- * thread the binary has twice refused becomes `(null, null)` — a tombstone that
- * is not a branch, is not listed, and is never read again unless the native
- * listing carries it once more).
- */
-export function recordCodexLineage(
-  threadId: string,
-  forkedFromId: string | null,
-  verifiedAt: number | null,
-  db: Db = getDb()
-): void {
-  if (!threadId) return
-  db.prepare(
-    `INSERT INTO codex_forks (thread_id, forked_from_id, created_at, verified_at, lineage_checked_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(thread_id) DO UPDATE SET
-       forked_from_id     = excluded.forked_from_id,
-       verified_at        = excluded.verified_at,
-       lineage_checked_at = excluded.lineage_checked_at`
-  ).run(threadId, forkedFromId, Date.now(), verifiedAt, Date.now())
-}
-
-/**
- * Every cached BRANCH, oldest first: the rows the sidebar's unlisted-fork read
- * and every delete plan are built from.
- *
- * Rows with no lineage are excluded here rather than at the call sites, because
- * "not a branch of anything" is the one thing a root, an unknowable source and
- * a tombstone have in common, and no reader of this function wants any of them.
- */
-export function listCodexForks(db: Db = getDb()): CodexFork[] {
-  return (
-    db
-      .prepare(
-        `SELECT thread_id, forked_from_id FROM codex_forks
-         WHERE forked_from_id IS NOT NULL AND forked_from_id <> thread_id
-         ORDER BY created_at, thread_id`
-      )
-      .all() as Array<{ thread_id: string; forked_from_id: string | null }>
-  ).map((row) => ({ threadId: row.thread_id, forkedFromId: row.forked_from_id }))
-}
-
-/** Every cached thread, branch or not — the scan's "what do I already know?". */
-export function listCodexLineage(db: Db = getDb()): CodexLineage[] {
-  return (
-    db
-      .prepare(
-        'SELECT thread_id, forked_from_id, verified_at FROM codex_forks ORDER BY created_at, thread_id'
-      )
-      .all() as Array<{
-      thread_id: string
-      forked_from_id: string | null
-      verified_at: number | null
-    }>
-  ).map((row) => ({
-    threadId: row.thread_id,
-    forkedFromId: row.forked_from_id,
-    verifiedAt: row.verified_at
-  }))
-}
-
-/** Forget one thread entirely — for a thread ClaudeUI has just deleted. */
-export function deleteCodexFork(threadId: string, db: Db = getDb()): void {
-  db.prepare('DELETE FROM codex_forks WHERE thread_id = ?').run(threadId)
-}
-
 /**
  * Insert or replace session metadata for a session ID.
  *
  * The engine and the model are REPLACED — the caller that writes them always
- * knows the whole answer. The two context columns (v24) are MERGED instead:
- * they are written by the metering path and by nothing else, so a model write
- * from the sidebar's adoption pass or from the renderer's config round-trip
- * must leave the session's last context reading where it is. The cost of that
- * is that a reading cannot be cleared back to NULL, which nothing needs.
+ * knows the whole answer. The two context columns (v24) belong to the removed
+ * Codex engine's meter: they stay in the schema, are never written, and an
+ * existing reading is left where it is.
  */
 export function setSessionMeta(sessionId: string, meta: SessionMeta): void {
   const db = getDb()
   db.prepare(
     `INSERT INTO session_meta
-       (session_id, engine_id, vendor_id, model_id, context_used, context_window, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+       (session_id, engine_id, vendor_id, model_id, updated_at)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
-       engine_id      = excluded.engine_id,
-       vendor_id      = excluded.vendor_id,
-       model_id       = excluded.model_id,
-       context_used   = COALESCE(excluded.context_used, session_meta.context_used),
-       context_window = COALESCE(excluded.context_window, session_meta.context_window),
-       updated_at     = excluded.updated_at`
+       engine_id  = excluded.engine_id,
+       vendor_id  = excluded.vendor_id,
+       model_id   = excluded.model_id,
+       updated_at = excluded.updated_at`
   ).run(
     sessionId,
     meta.engineId,
     meta.model?.vendorId ?? null,
     meta.model?.modelId ?? null,
-    meta.contextUsed ?? null,
-    meta.contextWindow ?? null,
     Date.now()
   )
 }
@@ -2602,7 +2503,7 @@ export function sessionProposalStartedRef(ref: string, db: Db = getDb()): boolea
  * `stopped` ended on purpose (a card Stop, a deleted parent); `failed` the last turn or resume failed —
  * it may be retried, and only `stopped` is never resumed. A resume that failed for a
  * transient reason (a busy host, a spawn error) leaves the previous state; only one that
- * cannot succeed (the transcript, session directory, opencode session or Codex rollout
+ * cannot succeed (the transcript, session directory, opencode session
  * is gone) writes `failed`.
  */
 export type DispatchTargetState = 'running' | 'idle' | 'interrupted' | 'stopped' | 'failed'
@@ -2612,7 +2513,7 @@ export interface DispatchTargetRow {
   /** Its ClaudeUI ref (`s-xxxxxx`). */
   id: string
   engine: EngineId
-  /** The engine's own session id (Claude's `--session-id` uuid, pi's, opencode's, Codex's thread). */
+  /** The engine's own session id (Claude's `--session-id` uuid, pi's, opencode's thread). */
   harnessRef: string
   /** The dispatching session's durable id; moves with `SessionManager.rekey`. */
   parentSessionId: string
@@ -2629,8 +2530,6 @@ export interface DispatchTargetRow {
   /** The parent's autonomy mode at launch. */
   launchMode: string
   accountKey: string | null
-  /** The vault account whose Codex host the thread lives on (null = the active one). */
-  codexAccountId: string | null
   /** JSON of the ADR-097 S9 caller restriction the target was created with. */
   callerRestriction: string | null
   name: string | null
@@ -2663,7 +2562,6 @@ interface DispatchTargetDbRow {
   model: string
   launch_mode: string
   account_key: string | null
-  codex_account_id: string | null
   caller_restriction: string | null
   name: string | null
   description: string | null
@@ -2696,7 +2594,6 @@ function dispatchTargetRow(row: DispatchTargetDbRow): DispatchTargetRow {
     model: row.model,
     launchMode: row.launch_mode,
     accountKey: row.account_key,
-    codexAccountId: row.codex_account_id,
     callerRestriction: row.caller_restriction,
     name: row.name,
     description: row.description,
@@ -2729,9 +2626,9 @@ export function insertDispatchTarget(
     .prepare(
       `INSERT OR IGNORE INTO dispatch_target
          (id, engine, harness_ref, parent_session_id, parent_engine, parent_tool_use_id, cwd,
-          parent_cwd, model, launch_mode, account_key, codex_account_id, caller_restriction, name,
+          parent_cwd, model, launch_mode, account_key, caller_restriction, name,
           description, hand_back, state, created_at, last_active_at, owner_pid, owner_boot)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -2745,7 +2642,6 @@ export function insertDispatchTarget(
       row.model,
       row.launchMode,
       row.accountKey,
-      row.codexAccountId,
       row.callerRestriction,
       row.name,
       row.description,
@@ -3115,12 +3011,12 @@ export function dispatchReportCount(targetId: string, db: Db = getDb()): number 
  * Return all session metadata as a Record mapping sessionId → SessionMeta.
  * Mirrors the shape of UISessionConfig.sessionEngines.
  */
-export function allSessionMeta(): Record<string, SessionMeta> {
-  const db = getDb()
+export function allSessionMeta(db: Db = getDb()): Record<string, SessionMeta> {
   const rows = db.prepare('SELECT * FROM session_meta').all() as SessionMetaRow[]
   const result: Record<string, SessionMeta> = {}
   for (const row of rows) {
-    result[row.session_id] = rowToMeta(row)
+    const meta = rowToMeta(row)
+    if (meta) result[row.session_id] = meta
   }
   return result
 }
@@ -3129,11 +3025,10 @@ export function allSessionMeta(): Record<string, SessionMeta> {
  * Ids of the rows that name Claude AND carry no context reading — the only rows the
  * orphan prune ({@link pruneOrphanClaudeSessionMeta}) may consider.
  *
- * Read from the raw column, not through {@link allSessionMeta}: `rowToMeta` clamps
- * an engine this build does not know (a newer build's, after a downgrade) to
- * `claude`, and a clamped row must never look like a Claude one here. The context
- * filter is a belt, not a proof of anything: only CodexSession writes a context
- * reading (v24), so a Claude row never has one today and the filter excludes none.
+ * Read from the raw column, not through {@link allSessionMeta}, which hides the rows
+ * of an engine this build does not know. The context filter is a belt, not a proof
+ * of anything: a Claude row never carries a context reading today (v24) and the
+ * filter excludes none.
  */
 export function claudeUnmeteredSessionIds(db: Db = getDb()): string[] {
   const rows = db
@@ -3170,27 +3065,14 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
   if (existing) {
     db.prepare(
       `INSERT INTO session_meta
-         (session_id, engine_id, vendor_id, model_id, context_used, context_window, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (session_id, engine_id, vendor_id, model_id, updated_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
-         engine_id      = excluded.engine_id,
-         vendor_id      = excluded.vendor_id,
-         model_id       = excluded.model_id,
-         context_used   = COALESCE(excluded.context_used, session_meta.context_used),
-         context_window = COALESCE(excluded.context_window, session_meta.context_window),
-         updated_at     = excluded.updated_at`
-      // The rekey CARRIES the context reading: it is the same session under a
-      // new id, and dropping it would blank the meter of a session that has
-      // already metered a turn.
-    ).run(
-      newId,
-      existing.engine_id,
-      existing.vendor_id,
-      existing.model_id,
-      existing.context_used,
-      existing.context_window,
-      Date.now()
-    )
+         engine_id  = excluded.engine_id,
+         vendor_id  = excluded.vendor_id,
+         model_id   = excluded.model_id,
+         updated_at = excluded.updated_at`
+    ).run(newId, existing.engine_id, existing.vendor_id, existing.model_id, Date.now())
     db.prepare('DELETE FROM session_meta WHERE session_id = ?').run(oldId)
   } else if (fallback) {
     setSessionMeta(newId, fallback)
@@ -3203,7 +3085,7 @@ export function renameSessionMeta(oldId: string, newId: string, fallback?: Sessi
  * Move a session's metadata row to its post-rekey id, on the HOST (the rekey
  * itself is core's — `SessionManager.rekey`). Unlike {@link renameSessionMeta} it
  * never mints a default row, and it never overwrites one that already exists at
- * `newId`: a row there was written by the engine under its stable id (Codex does,
+ * `newId`: a row there was written by the engine under its stable id (an engine may,
  * with the model it actually runs) and is the more specific of the two, so the
  * old row is just dropped. A no-op when `oldId` has no row.
  */
@@ -3245,13 +3127,9 @@ export function importSessionEnginesOnce(
 
   for (const [sessionId, entry] of entries) {
     // Do not infer recovery of previously clamped rows from model names.
-    const engineId: EngineId =
-      entry.engineId === 'claude' ||
-      entry.engineId === 'opencode' ||
-      entry.engineId === 'pi' ||
-      entry.engineId === 'codex'
-        ? (entry.engineId as EngineId)
-        : 'claude'
+    // A removed engine's entry (`codex`) is skipped, not clamped into a Claude row.
+    if (entry.engineId === 'codex') continue
+    const engineId: EngineId = isEngineId(entry.engineId) ? entry.engineId : 'claude'
 
     insert.run(
       sessionId,
@@ -3752,32 +3630,6 @@ export function latestAccountLabels(): Map<string, string> {
     if (!labels.has(row.account_key)) labels.set(row.account_key, row.account_label)
   }
   return labels
-}
-
-/**
- * Every ledger row a Codex thread is answerable for: its own turns, plus the
- * turns of the children it spawned (ADR-071 §2, S1e).
- *
- * A child files its row under its OWN native thread id, so `session_id` cannot
- * find it from the root — `parent_routing_id` is the join, and for Codex the
- * routing id, the sidebar session id and the native thread id are the same
- * string (`adoptThread`), which is what makes one parameter enough for both
- * halves. Served by `idx_usage_event_session` and `idx_usage_event_parent_routing`.
- *
- * Rows of EVERY origin that matches come back, dispatch included: the caller
- * decides what belongs in a sum and what is only a breakdown row.
- */
-export function usageEventsForCodexThread(threadId: string): UsageEventRow[] {
-  const db = getDb()
-  const rows = db
-    .prepare(
-      `SELECT * FROM usage_event
-        WHERE engine_id = 'codex'
-          AND (session_id = ? OR (origin = 'child' AND parent_routing_id = ?))
-        ORDER BY ts ASC`
-    )
-    .all(threadId, threadId) as UsageEventDbRow[]
-  return rows.map(rowToUsageEvent)
 }
 
 /** Count usage events (used in tests + reconciler diagnostics). */

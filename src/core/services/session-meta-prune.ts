@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { claudeUnmeteredSessionIds, deleteSessionMeta, hasCodexSessionOverrides } from './db'
+import { claudeUnmeteredSessionIds, deleteSessionMeta } from './db'
 import { logger } from './logger'
 import { loadSessionConfig, sessionConfigIsReadable } from './ui-config'
 
@@ -89,11 +89,10 @@ export function claudeSessionsWithNoRecord(
  * The criterion is deliberately narrow — a row is removed only when ALL hold:
  *
  *  1. its `engine_id` is exactly `claude` (the other engines keep their sessions in
- *     stores this cannot read without a running server — opencode, Codex — or whose
+ *     stores this cannot read without a running server — opencode — or whose
  *     location is user-configurable — pi — so "no record" is not provable for them);
- *  2. it carries no context reading and no Codex override row (a belt: only
- *     CodexSession writes a context reading, so today this filters nothing for a
- *     Claude row — it only keeps the prune from ever touching one that gains one);
+ *  2. it carries no context reading (a belt: a Claude row has none today, so this
+ *     filters nothing — it only keeps the prune from ever touching one that gains one);
  *  3. no `<id>.jsonl` exists in ANY project dir under `~/.claude/projects` (a real
  *     historical session always has one — it is what the sidebar lists);
  *  4. nothing in `sessions.json` still mentions the id (recents, pins, hidden, a
@@ -111,7 +110,7 @@ export function claudeSessionsWithNoRecord(
  * ran; a live session re-writes its row from the renderer's map on its next save.
  */
 export function pruneOrphanClaudeSessionMeta(projectsDir: string = claudeProjectsDir()): string[] {
-  const candidates = claudeUnmeteredSessionIds().filter((id) => !hasCodexSessionOverrides(id))
+  const candidates = claudeUnmeteredSessionIds()
   const orphans = claudeSessionsWithNoRecord(candidates, projectsDir, 'pruning nothing')
   for (const id of orphans) deleteSessionMeta(id)
   if (orphans.length > 0) {

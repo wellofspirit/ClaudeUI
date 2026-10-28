@@ -50,11 +50,11 @@ describe('watchHarnessArrivals (ADR-082 §8, S7d)', () => {
   })
 
   it('ignores a harness it does not watch', () => {
-    const r = resolver({ codex: false })
+    const r = resolver({ opencode: false })
     const arrived = vi.fn()
     watchHarnessArrivals(['pi'], arrived, r.deps)
-    r.runs.codex = true
-    r.change('codex')
+    r.runs.opencode = true
+    r.change('opencode')
     expect(arrived).not.toHaveBeenCalled()
   })
 })

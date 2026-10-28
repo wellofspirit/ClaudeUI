@@ -5,9 +5,8 @@
  * folded Options. What is pinned here is what a screenshot cannot check:
  *
  *  · the switch CONSEQUENCE — counted from the live sessions in the store, per
- *    provider's own rule (Claude: every live Claude session; ChatGPT: the Codex
- *    sessions that follow the active account, the routes that switch too, and
- *    the pinned sessions that do not);
+ *    provider's own rule (Claude: every live Claude session; ChatGPT: the
+ *    routes that switch too);
  *  · every write lands on the channel the retired account panes used
  *    (`account:*`, `provider-account:*`), and only after its inline confirm;
  *  · the Anthropic card with Multiple accounts OFF still shows who you are, and
@@ -51,7 +50,6 @@ const anthropic: ProviderEntry = {
 
 const twoChatgpt: ProviderAccounts = {
   activeId: 'acc-1',
-  perSession: false,
   list: [
     {
       id: 'acc-1',
@@ -76,8 +74,7 @@ const chatgpt: ProviderEntry = {
   subscription: true,
   engines: {
     opencode: { enabled: true, native: true, providerId: 'openai' },
-    pi: { enabled: true, native: true, providerId: 'openai-codex' },
-    codex: { enabled: true }
+    pi: { enabled: true, native: true, providerId: 'openai-codex' }
   },
   accounts: twoChatgpt,
   piBuiltinId: 'openai-codex'
@@ -114,18 +111,15 @@ const claudeAccounts = (over: Partial<AccountsState> = {}): AccountsState => ({
   ...over
 })
 
-/** A live (process-backed) session on `engine`, optionally pinned to a Codex account. */
-function live(engine: EngineId, pinnedAccountId: string | null = null): PerSessionState {
+/** A live (process-backed) session on `engine`. */
+function live(engine: EngineId): PerSessionState {
   return {
     ...EMPTY_SESSION_STATE,
     sdkActive: true,
     selectedEngineId: engine,
     status: {
       ...EMPTY_SESSION_STATE.status,
-      engineId: engine,
-      ...(engine === 'codex'
-        ? { codex: { pinnedAccountId } as NonNullable<PerSessionState['status']['codex']> }
-        : {})
+      engineId: engine
     }
   }
 }
@@ -168,7 +162,6 @@ beforeEach(async () => {
   })
   stub('provider-account:switch')
   stub('provider-account:remove')
-  stub('provider-account:set-per-session')
   // The Engines row's counts come from the curation reads; the sheet's too.
   app.bridge.ipcMain.handle('session:get-opencode-provider-models', async () => [
     { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
@@ -274,7 +267,9 @@ describe('the section', () => {
   it('the logos are decorative — the provider name is right beside them', async () => {
     await renderSection()
     for (const logo of screen.getAllByTestId('SubscriptionsSection.logo')) {
-      expect(logo.querySelector('img')).toHaveAttribute('alt', '')
+      const img = logo.querySelector('img')
+      if (img) expect(img).toHaveAttribute('alt', '')
+      else expect(logo.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
     }
   })
 })
@@ -301,7 +296,7 @@ describe('Anthropic', () => {
       sessions: {
         s1: live('claude'),
         s2: live('claude'),
-        s3: live('codex'),
+        s3: live('pi'),
         // Not live: no process, nothing to disconnect.
         s4: { ...EMPTY_SESSION_STATE, selectedEngineId: 'claude' }
       }
@@ -575,7 +570,7 @@ describe('ChatGPT', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     await renderSection()
     const gpt = card('chatgpt')
-    expect(byId(gpt, 'SubscriptionsSection.logo', 'codex')).toBeInTheDocument()
+    expect(byId(gpt, 'SubscriptionsSection.logo', 'chatgpt')).toBeInTheDocument()
     expect(within(gpt).getByTestId('SubscriptionsSection.cardStatus')).toHaveTextContent(
       'Connected'
     )
@@ -586,17 +581,11 @@ describe('ChatGPT', () => {
     expect(writeText).toHaveBeenCalledWith('f99404d9-cb7e-4a1f-9e0b-2c55e1d7a3b0')
   })
 
-  it('Set active counts the Codex FOLLOWERS and the pinned sessions that stay', async () => {
-    useSessionStore.setState({
-      sessions: { s1: live('codex'), s2: live('codex'), s3: live('codex', 'acc-1') }
-    })
+  it('Set active names the routes that pick the account up', async () => {
     await renderSection()
     await click(byId(account('acc-2'), 'SubscriptionsSection.setActive', 'acc-2'))
     const consequence = within(account('acc-2')).getByTestId('SubscriptionsSection.consequence')
-    // A pin belongs to the session: counted even with per-session pinning off.
-    expect(consequence).toHaveTextContent(
-      '2 running Codex sessions that follow the active account disconnect and resume on their next message. New opencode and pi sessions use it too. 1 pinned Codex session keeps its account.'
-    )
+    expect(consequence).toHaveTextContent('New opencode and pi sessions use it too.')
     await click(within(account('acc-2')).getByTestId('SubscriptionsSection.confirmActivate'))
     expect(sent('provider-account:switch')).toEqual([['chatgpt', 'acc-2']])
   })
@@ -645,7 +634,7 @@ describe('ChatGPT', () => {
     await click(menuItem(account('acc-1'), 'remove'))
     const confirm = within(account('acc-1')).getByTestId('SubscriptionsSection.confirm')
     expect(confirm).toHaveTextContent(
-      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
+      'ClaudeUI’s ChatGPT sign-in is removed from pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
     )
     expect(confirm).not.toHaveTextContent('Another account')
   })
@@ -691,7 +680,7 @@ describe('ChatGPT', () => {
     })
   })
 
-  it('the Engines row: Codex, then each route with its curation count, dim "off" when off', async () => {
+  it('the Engines row: each route with its curation count, dim "off" when off', async () => {
     withChatgpt({ engines: { ...chatgpt.engines, pi: { enabled: false } } })
     await renderSection()
     const engines = within(card('chatgpt')).getByTestId('SubscriptionsSection.engines')
@@ -700,7 +689,7 @@ describe('ChatGPT', () => {
       within(engines)
         .getAllByTestId('SubscriptionsSection.enginePill')
         .map((el) => el.dataset.id)
-    ).toEqual(['codex', 'opencode', 'pi'])
+    ).toEqual(['opencode', 'pi'])
     await vi.waitFor(() => expect(pill('opencode')).toHaveTextContent('opencode1 of 3'))
     expect(pill('pi')).toHaveAttribute('data-on', 'false')
     expect(pill('pi')).toHaveTextContent('off')
@@ -732,25 +721,6 @@ describe('ChatGPT', () => {
         .getAllByTestId('ProviderSheet.group')
         .map((el) => el.dataset.id)
     ).not.toContain('credential')
-  })
-
-  it('per-session pinning is an Option, written through the vault — once there are two accounts', async () => {
-    await renderSection()
-    const gpt = card('chatgpt')
-    expect(within(gpt).getByTestId('SubscriptionsSection.optionsSummary')).toHaveTextContent(
-      'All harnesses follow the active account'
-    )
-    const toggle = within(gpt).getByTestId('SubscriptionsSection.perSessionToggle')
-    expect(toggle).toHaveAccessibleName('Pin an account per Codex session')
-    await click(toggle)
-    expect(sent('provider-account:set-per-session')).toEqual([['chatgpt', true]])
-    cleanup()
-
-    withChatgpt({ accounts: { ...twoChatgpt, list: [twoChatgpt.list[0]] } })
-    await renderSection()
-    expect(
-      within(card('chatgpt')).queryByTestId('SubscriptionsSection.perSessionToggle')
-    ).not.toBeInTheDocument()
   })
 
   it('not signed in: the card body is one "Sign in with ChatGPT"', async () => {
@@ -789,16 +759,14 @@ describe('ChatGPT', () => {
 // ── The wording, on its own ──────────────────────────────────────────
 
 describe('consequences', () => {
-  it('counts only live sessions, and splits Codex by pin', () => {
+  it('counts only live sessions, and only Claude’s', () => {
     expect(
       countLiveSessions({
         a: live('claude'),
-        b: live('codex'),
-        c: live('codex', 'acc-9'),
-        d: { ...EMPTY_SESSION_STATE, selectedEngineId: 'codex' },
-        e: live('opencode')
+        b: { ...EMPTY_SESSION_STATE, selectedEngineId: 'claude' },
+        c: live('opencode')
       })
-    ).toEqual({ claude: 1, codexFollowing: 1, codexPinned: 1 })
+    ).toEqual({ claude: 1 })
   })
 
   it('switching reads naturally at 0, 1 and many', () => {
@@ -806,13 +774,9 @@ describe('consequences', () => {
     expect(claudeSwitchConsequence(1)).toBe(
       '1 running Claude session disconnects and resumes on its next message.'
     )
-    expect(chatgptSwitchConsequence({ codexFollowing: 0, codexPinned: 0 }, [])).toBe(
-      'No running Codex session that follows the active account is affected.'
-    )
-    expect(
-      chatgptSwitchConsequence({ codexFollowing: 0, codexPinned: 2 }, ['opencode', 'pi'])
-    ).toBe(
-      'No running Codex session that follows the active account is affected. New opencode and pi sessions use it too. 2 pinned Codex sessions keep their account.'
+    expect(chatgptSwitchConsequence([])).toBe('No running session is affected.')
+    expect(chatgptSwitchConsequence(['opencode', 'pi'])).toBe(
+      'New opencode and pi sessions use it too.'
     )
   })
 

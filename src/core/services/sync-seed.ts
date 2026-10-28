@@ -40,7 +40,6 @@ import { sweepOrphanDispatchTargets } from './dispatch-target-end'
 import { loadClaudePermissions } from './claude-settings'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
-import { mergeEngineIntoDirectories } from '../../shared/directory-merge'
 import { mergeOpencodeIntoDirectories, mergePiIntoDirectories } from '../../shared/directory-merge'
 import { emitEvent } from './sync-host'
 import { syncCore } from './sync-host'
@@ -81,20 +80,12 @@ export async function listAllDirectories(): Promise<DirectoryGroup[]> {
   } catch (err) {
     logger.debug(LOG_SOURCE, `pi session list unavailable: ${String(err)}`)
   }
-  try {
-    const codexInfos = await historyFor('codex').list()
-    // Guarded like opencode and pi above: the merge PRUNES session-less groups,
-    // so running it with an empty listing deletes them instead of doing nothing.
-    if (codexInfos.length > 0) merged = mergeEngineIntoDirectories(merged, codexInfos, 'codex')
-  } catch {
-    logger.debug(LOG_SOURCE, 'Native Codex session list unavailable')
-  }
   return markLinkedWorktrees(merged)
 }
 
 /**
  * Mark every group whose cwd IS a linked git worktree (any engine, any layout: the managed
- * `.claude/worktrees`, opencode's data dir, `~/.codex/worktrees`). Filesystem facts only, no git
+ * `.claude/worktrees`, opencode's data dir). Filesystem facts only, no git
  * spawn, positive hits cached by `linkedWorktreeOf`. The marker rides the replicated listing, so
  * every client draws the same worktree rows without a second map; a removal's directories refresh
  * (after `forgetLinkedWorktrees`) clears it.

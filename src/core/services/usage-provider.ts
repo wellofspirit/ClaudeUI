@@ -52,7 +52,7 @@ import {
   type RemoteCreditRow,
   type RemoteLimitRow
 } from './db'
-import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { chatgptRateLimits } from '../shared-providers/chatgpt-rate-limits'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { buildClaudeAccountRef, hostAccountsDir } from '../host'
 import { getSecurestorageEnv } from '../sdk/securestorage-env'

@@ -633,7 +633,7 @@ function seedTypeRows(): void {
     mk(
       'tu-dispatch-named',
       'e1',
-      { engine: 'codex', name: 'e1', description: 'Implement E1', prompt: 'build it' },
+      { engine: 'pi', name: 'e1', description: 'Implement E1', prompt: 'build it' },
       'mcp__claude-ui-collab__dispatch_agent'
     )
   ]
@@ -703,7 +703,7 @@ describe('the type tile in the agent list (ADR-094)', () => {
       const name = byTestId(row, 'AgentRow.name')
       const engine = byTestId(row, 'AgentRow.engine')
       expect(name.innerText).toBe('e1')
-      expect(engine.innerText).toBe('codex')
+      expect(engine.innerText).toBe('pi')
       // The name's width floor must not open a gap between a short name's TEXT and its
       // engine word (the box can be wider than the text, so measure the text itself).
       const range = document.createRange()

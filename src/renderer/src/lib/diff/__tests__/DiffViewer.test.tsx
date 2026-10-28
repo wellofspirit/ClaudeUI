@@ -227,13 +227,11 @@ describe('DiffViewer', () => {
     })
   })
   /**
-   * The exact strings `src/core/codex/event-mapper.ts` builds for a native
-   * `fileChange` — the parser has to accept them, or the card reads "No changes"
-   * (which is what it did while the mapper passed Codex's raw file content
-   * through as the patch). Kept as literals so a change on either side has to be
-   * made on both.
+   * Patches an engine's event mapper builds for a native file change — a wrapped
+   * add under `--- /dev/null` — which the parser has to accept, or the card
+   * reads "No changes".
    */
-  describe('Codex file-change patches', () => {
+  describe('wrapped file-change patches', () => {
     it('renders a wrapped add as a pure add, not "No changes"', () => {
       const patch = [
         '--- /dev/null',

@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { planClaudeProjectDelete } from '../claude-project-delete'
-import type { DirectoryGroup, SessionInfo } from '../types'
+import type { DirectoryGroup, EngineId, SessionInfo } from '../types'
 
 const HOME = '-repo'
 const WT = '-repo--claude-worktrees-wt'
@@ -70,10 +70,11 @@ describe('planClaudeProjectDelete', () => {
     const dirs = [
       group(HOME, [
         session('a', HOME, 'claude'),
-        // Not Claude files: deleted through their own engines, never unlinked here.
+        // Not Claude files: deleted through their own engines, never unlinked here (the
+        // last is a row an older build left for an engine this build no longer ships).
         session('oc', WT, 'opencode'),
         session('pi', WT, 'pi'),
-        session('cx', WT, 'codex')
+        session('cx', WT, 'codex' as EngineId)
       ]),
       // An opencode row keyed to HOME from another group does not make HOME "shared".
       group(WT, [session('oc-wt', HOME, 'opencode')])

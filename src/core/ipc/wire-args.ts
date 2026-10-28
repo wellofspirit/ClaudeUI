@@ -47,7 +47,7 @@
  *    which rejects an explicit `null`.
  *
  * Deliberately NOT applied where `null` is a MEANINGFUL value the caller sent
- * on purpose — `session:set-account`, `session:set-reasoning-variant`,
+ * on purpose — `session:set-reasoning-variant`,
  * `usage:set-account-filter`, `webauthn:rename` all declare `T | null` and mean
  * "clear it" by it — nor where the parameter is only tested for truthiness and
  * `null` already reads as the omitted case (`session:stop-task`'s `isDispatch`,

@@ -18,6 +18,7 @@
 import type { ISession } from '../providers/ISession'
 import type { CanonicalState } from '../shared/sync/state'
 import type { EngineId } from '../../shared/types'
+import { isEngineId } from '../../shared/engine-label'
 import type { DispatchTargetRow } from './dispatch-target-ledger'
 import type {
   HolderSources,
@@ -130,7 +131,8 @@ export function createHolderSources(deps: LiveHolderDeps): HolderSources {
         })
       }
       for (const row of rows.values()) {
-        if (liveIds.has(row.id) || row.state === 'stopped') continue
+        // A row naming an engine this build does not ship holds nothing.
+        if (liveIds.has(row.id) || row.state === 'stopped' || !isEngineId(row.engine)) continue
         out.push({
           id: row.id,
           engine: row.engine,

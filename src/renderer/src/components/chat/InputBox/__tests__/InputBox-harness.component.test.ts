@@ -77,7 +77,7 @@ function entry(id: HarnessId, available: boolean): HarnessStateEntry {
 function snapshot(missing: HarnessId[] = []): HarnessStateSnapshot {
   const of = (id: HarnessId): HarnessStateEntry => entry(id, !missing.includes(id))
   return {
-    harnesses: { claude: of('claude'), opencode: of('opencode'), pi: of('pi'), codex: of('codex') },
+    harnesses: { claude: of('claude'), opencode: of('opencode'), pi: of('pi') },
     detection: { running: false },
     installs: [],
     updates: { mode: 'ask', available: [], status: { running: false, results: [] } },
@@ -256,8 +256,7 @@ describe('InputBox on a harness that does not run', () => {
   it.each([
     ['claude', 'Ask Claude anything, / for commands'],
     ['opencode', 'Ask opencode anything, / for commands'],
-    ['pi', 'Ask pi anything, / for commands'],
-    ['codex', 'Ask Codex anything']
+    ['pi', 'Ask pi anything, / for commands']
   ] as const)('the placeholder names the session’s harness: %s', async (engine, text) => {
     // Missing, so opencode keeps its engine (no model to fall back from).
     await sessionOn(engine, engine === 'claude' ? [] : [engine])

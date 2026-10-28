@@ -8,7 +8,6 @@
  * "the binary changed" or "it did not" without a filesystem.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { HarnessId } from '../../../shared/harness-types'
 
 const { mockRequest, MockPiRpcClient } = vi.hoisted(() => {
   const mockRequest = vi.fn()
@@ -60,7 +59,7 @@ let resolved: Record<string, string>
 let stop: () => void = () => {}
 
 beforeEach(() => {
-  resolved = { pi: 'pi 0.87.1', opencode: 'opencode 1.18.32', codex: 'codex', claude: 'claude' }
+  resolved = { pi: 'pi 0.87.1', opencode: 'opencode 1.18.32', claude: 'claude' }
   mockRequest.mockReset()
   invalidatePiModelCache()
 })
@@ -124,10 +123,8 @@ describe('startCatalogInvalidation', () => {
     const opencode = vi.fn()
     start({ pi, opencode })
 
-    for (const id of ['codex', 'claude'] as HarnessId[]) {
-      resolved[id] = `${id} next`
-      invalidateHarness(id)
-    }
+    resolved.claude = 'claude next'
+    invalidateHarness('claude')
     expect(pi).not.toHaveBeenCalled()
     expect(opencode).not.toHaveBeenCalled()
   })

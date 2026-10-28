@@ -3,7 +3,7 @@
  * `getEngineModels(engineId)` request per engine, each filling only its own
  * slice of `availableModels` (engine-models.ts). Guards the bug it replaced: a
  * single all-engine reply waited for the slowest probe, so a pi probe running
- * to its 15s timeout hid Claude's, opencode's and Codex's models with it.
+ * to its 15s timeout hid Claude's and opencode's models with it.
  *
  * The `session:get-engine-models` handler answers like main: per engine when
  * asked for one, and — asked for none — one reply after every engine answered.
@@ -47,7 +47,7 @@ vi.mock('../../../../hooks/useFileMention', () => ({
 vi.mock('../../../../hooks/useIsMobile', () => ({ useIsMobile: () => false }))
 
 const ROUTE = 'engine-models-route'
-const ENGINES: EngineId[] = ['claude', 'opencode', 'pi', 'codex']
+const ENGINES: EngineId[] = ['claude', 'opencode', 'pi']
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -124,14 +124,12 @@ describe('InputBox model catalog, per engine', () => {
 
   it("a pi probe that never answers holds back no other engine's models", async () => {
     answer = async (id) =>
-      id === 'pi'
-        ? never()
-        : [group(id, { claude: 'opus', opencode: 'oc/a', codex: 'gpt' }[id] as string)]
+      id === 'pi' ? never() : [group(id, { claude: 'opus', opencode: 'oc/a' }[id] as string)]
 
     await mount()
 
     expect(requests).toEqual(ENGINES)
-    expect(shown()).toEqual(['claude:opus', 'opencode:oc/a', 'codex:gpt'])
+    expect(shown()).toEqual(['claude:opus', 'opencode:oc/a'])
   })
 
   it('keeps the engine order whatever order the answers arrive in', async () => {
@@ -141,16 +139,11 @@ describe('InputBox model catalog, per engine', () => {
     answer = (id) => pending[id].promise
     await mount()
 
-    for (const id of ['codex', 'pi', 'opencode', 'claude'] as const) {
+    for (const id of ['pi', 'opencode', 'claude'] as const) {
       await act(async () => pending[id].resolve([group(id, `${id}-model`)]))
     }
 
-    expect(shown()).toEqual([
-      'claude:claude-model',
-      'opencode:opencode-model',
-      'pi:pi-model',
-      'codex:codex-model'
-    ])
+    expect(shown()).toEqual(['claude:claude-model', 'opencode:opencode-model', 'pi:pi-model'])
   })
 
   it("an answer carrying other engines' groups fills only its own slice", async () => {

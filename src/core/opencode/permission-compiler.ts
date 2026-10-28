@@ -1,11 +1,5 @@
 import type { PermissionSuggestion } from '../../shared/types'
 import { loadClaudePermissions, saveClaudePermissions } from '../services/claude-settings'
-// Import cycle by construction: `rules-sync` needs THIS module's
-// `parseClaudeRule` to read a Claude rule, and this module needs its writer to
-// keep the generated Codex rule file in step with a persisted "always allow".
-// Both directions are call-time only (no top-level use of the other module), so
-// ESM's live bindings resolve it whichever module is evaluated first.
-import { syncCodexRulesFile } from '../codex/rules-sync'
 import { logger } from '../services/logger'
 
 /**
@@ -232,13 +226,13 @@ export function suggestionDestinationToScope(
 
 /**
  * Write "always allow" suggestions to the shared Claude permission store — the
- * ONE copy behind `CodexSession`, `PiSession` and `OpencodeSession`, which all
+ * ONE copy behind `PiSession` and `OpencodeSession`, which both
  * answer an approval the same way: group the suggested rules by the scope their
  * `destination` maps to, then merge each group into that scope's allow list.
  *
  * Destinations with no on-disk scope (`session`, `cliArg`) are skipped — those
  * are the engines' own in-memory grants (opencode's host session-allow set,
- * `session-allows.ts`; Codex's `sessionAllows`), already applied by the caller.
+ * `session-allows.ts`), already applied by the caller.
  *
  * Returns whether any scope was written, so a caller holding a cached rules
  * merge (PiSession) knows to invalidate it and honour the new rule on its very
@@ -268,8 +262,6 @@ export function persistAllowSuggestions(
       const allow = new Set(perms.allow)
       for (const rule of ruleStrings) allow.add(rule)
       saveClaudePermissions(scope, { ...perms, allow: [...allow] }, cwd)
-      // Only the user scope feeds the generated Codex execpolicy file.
-      if (scope === 'user') syncCodexRulesFile()
     }
     return byScope.size > 0
   } catch (err) {

@@ -388,7 +388,7 @@ export const SessionItem = memo(function SessionItem({
                 </svg>
               </span>
             )}
-            {onToggleWatch && !isSdkActive && info.engineId !== 'codex' && (
+            {onToggleWatch && !isSdkActive && (
               <span
                 data-testid="SessionItem.toggleWatch"
                 onClick={(e) => {
@@ -438,7 +438,6 @@ export const SessionItem = memo(function SessionItem({
               menu.close()
               onAutoRename?.()
             }}
-            disabled={info.engineId === 'codex'}
             className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
           >
             Auto rename
@@ -448,7 +447,6 @@ export const SessionItem = memo(function SessionItem({
               menu.close()
               setPermissionsOpen(true)
             }}
-            disabled={info.engineId === 'codex'}
             className="w-full text-left px-3 py-1.5 text-[13px] text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-default"
           >
             Edit permissions

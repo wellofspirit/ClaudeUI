@@ -51,7 +51,6 @@ const CLAUDE_ACCOUNTS = {
 
 const CHATGPT_ACCOUNTS = {
   activeId: 'v1',
-  perSession: true,
   accounts: [
     { id: 'v1', email: 'one@example.com', planType: 'pro', expiresAt: 0, needsReauth: false },
     { id: 'v2', email: 'two@example.com', planType: 'plus', expiresAt: 0, needsReauth: false }
@@ -368,28 +367,26 @@ describe('SignInDialog — ChatGPT', () => {
     // ADR-070 §5: "Signed in as …" is a check and the address.
     expect(screen.getByTestId('SignInDialog.signedIn')).toHaveTextContent('one@example.com')
     expect(done).not.toHaveTextContent('Signed in as')
-    // One CHIP per enabled route, plus Codex — which is fed by injection, not by
-    // a route, and only on its next request. Three sentences became one row
+    // One CHIP per enabled route. Three sentences became one row
     // (ADR-070 §5 rule 5); the per-engine testids did not move.
     expect(
       screen.getAllByTestId('SignInDialog.fanOut').map((el) => el.getAttribute('data-id'))
-    ).toEqual(['pi', 'codex'])
+    ).toEqual(['pi'])
     expect(done).not.toHaveTextContent('picks it up on its next server start')
-    expect(done).toHaveTextContent('next request')
   })
 
   it('the header names the engines the credential feeds, derived from the routes', async () => {
     installApi('darwin')
     await open({ providerId: 'chatgpt', mode: 'reauth' })
     // The SAME derivation the done state's fan-out uses: pi's route is on,
-    // opencode's is off, and Codex is unconditional (ADR-068 §1).
+    // opencode's is off.
     expect(
       screen.getAllByTestId('SignInDialog.engineChip').map((el) => el.getAttribute('data-id'))
-    ).toEqual(['pi', 'codex'])
+    ).toEqual(['pi'])
     // The blurb it replaces is gone — a caption nobody re-reads on the fourth
     // sign-in (ADR-070 §5 rule 1).
     const dialog = screen.getByTestId('SignInDialog')
-    expect(dialog).not.toHaveTextContent('shared with pi, opencode and Codex')
+    expect(dialog).not.toHaveTextContent('shared with pi and opencode')
     expect(dialog).not.toHaveTextContent('Sign in to ChatGPT')
   })
 })
@@ -477,14 +474,16 @@ describe('SignInDialog — ChatGPT device code', () => {
   it('a device-code failure renders through the outcome notice', async () => {
     installApi('web', {
       vendorAuthDeviceCodeStart: vi.fn(async () => {
-        throw new Error('device code login is not enabled for this Codex server.')
+        throw new Error('device code login is not enabled for this server.')
       })
     })
     await open({ providerId: 'chatgpt', mode: 'reauth' })
     await act(async () => {
       fireEvent.click(screen.getByTestId('SignInDialog.reauth'))
     })
-    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent('not enabled for this Codex')
+    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent(
+      'not enabled for this server'
+    )
   })
 })
 
@@ -527,7 +526,7 @@ describe('SignInDialog — on a phone (390px)', () => {
 // These assert the DRIVER, not the markup: "no `window.api` call happened" is
 // the only form of this that a rendering change cannot quietly satisfy.
 describe('SignInDialog — the confirm before the browser', () => {
-  const NO_CHATGPT_ACCOUNTS = { activeId: null, perSession: true, accounts: [] }
+  const NO_CHATGPT_ACCOUNTS = { activeId: null, accounts: [] }
   const ONE_CLAUDE_ACCOUNT = {
     ...CLAUDE_ACCOUNTS,
     enabled: false,
@@ -738,7 +737,7 @@ describe('SignInDialog — the confirm before the browser', () => {
 // nobody was requesting. Cancel now always lands on the chooser, and the chooser
 // answers for an empty list.
 describe('SignInDialog — Cancel with nothing to choose between', () => {
-  const NO_CHATGPT_ACCOUNTS = { activeId: null, perSession: true, accounts: [] }
+  const NO_CHATGPT_ACCOUNTS = { activeId: null, accounts: [] }
 
   it('web ChatGPT with no account: Cancel returns to a chooser that says so', async () => {
     installApi('web', { listProviderAccounts: vi.fn(async () => NO_CHATGPT_ACCOUNTS) })
@@ -1076,7 +1075,7 @@ describe('SignInDialog — an error can never be silently dropped', () => {
   it('does not print the same failure twice when the flow already shows it', async () => {
     installApi('web', {
       vendorAuthDeviceCodeStart: vi.fn(async () => {
-        throw new Error('device code login is not enabled for this Codex server.')
+        throw new Error('device code login is not enabled for this server.')
       })
     })
     await open({ providerId: 'chatgpt', mode: 'reauth' })
@@ -1085,7 +1084,9 @@ describe('SignInDialog — an error can never be silently dropped', () => {
     })
     // `authorizeVendorDeviceCode` parks the message on `vendorOAuth` AND returns
     // it, so the outcome notice owns it and the body error row stands down.
-    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent('not enabled for this Codex')
+    expect(screen.getByTestId('OAuthOutcomeNotice')).toHaveTextContent(
+      'not enabled for this server'
+    )
     expect(screen.queryByTestId('SignInDialog.error')).toBeNull()
   })
 
@@ -1215,9 +1216,8 @@ describe('SignInDialog — provider-list mode', () => {
       AUTH_ISSUE_NAME.expired
     )
     // `blocks` is route-dependent (ADR-030) — with no route enabled the ChatGPT
-    // credential only blocks Codex.
+    // credential blocks nothing, so its row names no engine.
     expect(screen.getAllByTestId('SignInDialog.issueBlocks').map((el) => el.textContent)).toEqual([
-      'Codex',
       'opencode'
     ])
   })

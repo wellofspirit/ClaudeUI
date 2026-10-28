@@ -193,16 +193,12 @@ describe('CredentialSync.removeAccount', () => {
     )
     const pi = fakeTarget()
     const opencode = fakeOpencodeTarget()
-    const onActiveAccountChanged = vi.fn()
-    const sync = new CredentialSync({ vault, onActiveAccountChanged })
+    const sync = new CredentialSync({ vault })
     sync.configure({ pi: pi.target, opencode: opencode.target })
 
     await sync.removeAccount(active.id)
 
     await expect(vault.getActiveAccountId(CHATGPT_PROVIDER_ID)).resolves.toBe(newer.id)
-    // The engines were re-pointed, so opencode must drop the in-process
-    // credential it is still holding for the removed account (ADR-047).
-    expect(onActiveAccountChanged).toHaveBeenCalledTimes(1)
     expect(pi.feed).toHaveBeenCalledWith(
       'openai-codex',
       expect.objectContaining({ refresh: 'fake-rb' })
@@ -221,8 +217,7 @@ describe('CredentialSync.removeAccount', () => {
     // Both engines hold the copy ClaudeUI vended (S7e: only that one goes).
     const pi = fakeTarget(cred())
     const opencode = fakeOpencodeTarget()
-    const onActiveAccountChanged = vi.fn()
-    const sync = new CredentialSync({ vault, onActiveAccountChanged })
+    const sync = new CredentialSync({ vault })
     sync.configure({ pi: pi.target, opencode: opencode.target })
 
     await sync.removeAccount(only.id)
@@ -231,9 +226,6 @@ describe('CredentialSync.removeAccount', () => {
     expect(pi.remove).toHaveBeenCalledWith('openai-codex')
     expect(opencode.remove).toHaveBeenCalledWith('openai')
     expect(pi.feed).not.toHaveBeenCalled()
-    // Nothing left to vend: opencode must drop the credential it holds, so the
-    // hook fires on this path too.
-    expect(onActiveAccountChanged).toHaveBeenCalledTimes(1)
     sync.stop()
   })
 
@@ -245,8 +237,7 @@ describe('CredentialSync.removeAccount', () => {
       cred({ ws: 'ws-b', refresh: 'fake-rb' })
     )
     const pi = fakeTarget()
-    const onActiveAccountChanged = vi.fn()
-    const sync = new CredentialSync({ vault, onActiveAccountChanged })
+    const sync = new CredentialSync({ vault })
     sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
 
     await sync.removeAccount(other.id)
@@ -254,24 +245,21 @@ describe('CredentialSync.removeAccount', () => {
     await expect(vault.getActiveAccountId(CHATGPT_PROVIDER_ID)).resolves.toBe(active.id)
     expect(pi.feed).not.toHaveBeenCalled()
     expect(pi.remove).not.toHaveBeenCalled()
-    // Nothing the engines hold changed, so recycling opencode would be churn.
-    expect(onActiveAccountChanged).not.toHaveBeenCalled()
     sync.stop()
   })
 })
 
 describe('CredentialSync.switchActiveAccount', () => {
-  it('re-vends both engine stores from the new active credential and rings the hook', async () => {
+  it('re-vends both engine stores from the new active credential', async () => {
     const vault = new AuthVault()
     await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
     const target = await vault.upsertAccount(
       CHATGPT_PROVIDER_ID,
       cred({ ws: 'ws-b', access: 'fake-b', refresh: 'fake-rb', expires: FUTURE })
     )
-    const onActiveAccountChanged = vi.fn()
     const pi = fakeTarget()
     const opencode = fakeOpencodeTarget()
-    const sync = new CredentialSync({ vault, onActiveAccountChanged })
+    const sync = new CredentialSync({ vault })
     sync.configure({ pi: pi.target, opencode: opencode.target })
 
     await sync.switchActiveAccount(target.id)
@@ -285,7 +273,6 @@ describe('CredentialSync.switchActiveAccount', () => {
       'openai',
       expect.objectContaining({ refresh: 'fake-rb' })
     )
-    expect(onActiveAccountChanged).toHaveBeenCalledTimes(1)
     sync.stop()
   })
 

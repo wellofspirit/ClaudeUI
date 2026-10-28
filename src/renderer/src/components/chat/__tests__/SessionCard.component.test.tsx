@@ -6,7 +6,7 @@
  * states pinned here.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { EMPTY_SESSION_STATE, useSessionStore } from '../../../stores/session-store'
 import { MessageBubble } from '../MessageBubble'
 import { SessionCardView } from '../SessionCard'
@@ -21,7 +21,7 @@ const BLOCK = {
   childRef: 's-kid111',
   kind: 'started' as const,
   title: 'Fix the flaky test',
-  engineId: 'codex' as const
+  engineId: 'pi' as const
 }
 const card: ChatMessage = {
   id: 'session-card-s-kid111',
@@ -69,7 +69,7 @@ function setWorld(opts: {
 }
 
 function renderCard(): void {
-  render(<MessageBubble message={card} pendingApprovals={[]} isLastAssistant={false} />)
+  render(<MessageBubble message={card} pendingApprovals={[]} />)
 }
 const state = (): string => screen.getByTestId('SessionCard').getAttribute('data-state') ?? ''
 
@@ -140,7 +140,6 @@ describe('SessionCard', () => {
       <MessageBubble
         message={{ ...card, content: [{ ...BLOCK, title: '' }] }}
         pendingApprovals={[]}
-        isLastAssistant={false}
       />
     )
     expect(screen.getByTestId('SessionCard.title').textContent).toBe('Session s-kid111')
@@ -271,5 +270,19 @@ describe('SessionLinkBar — continued in / from', () => {
     expect(
       screen.getAllByTestId('SessionLinkBar.into').map((el) => el.getAttribute('data-id'))
     ).toEqual(['kid-1', 'kid-2'])
+  })
+})
+
+describe('SessionCard — an engine this build no longer has', () => {
+  it('renders a stored `codex` card with a generic mark instead of throwing', () => {
+    setWorld({ session: child({ status: { state: 'idle' } as SessionStatus }) })
+    const historic: ChatMessage = {
+      ...card,
+      content: [{ ...BLOCK, engineId: 'codex' as never }]
+    }
+    expect(() => render(<MessageBubble message={historic} pendingApprovals={[]} />)).not.toThrow()
+    const mark = within(screen.getByTestId('SessionCard')).getByTestId('EngineLogo')
+    expect(mark.getAttribute('data-engine')).toBe('codex')
+    expect(mark.getAttribute('aria-label')).toBe('Codex (removed)')
   })
 })

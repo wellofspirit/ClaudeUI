@@ -1,5 +1,5 @@
 /**
- * Web kind body — Codex `webSearch` · Claude `WebSearch`/`WebFetch` · opencode
+ * Web kind body — Claude `WebSearch`/`WebFetch` · opencode
  * `websearch`/`webfetch`.
  *
  * Replaces the JSON dump `GenericBody` gave every one of them (F20). The action

@@ -1001,39 +1001,6 @@ describe('TaskCard — the model chip follows the model tier', () => {
     expect(chip().className).toContain('text-text-secondary')
   })
 
-  it('uses the parent session’s model on Codex, below the requested one', () => {
-    useSessionStore.setState((state) => ({
-      sessions: {
-        ...state.sessions,
-        [ROUTE]: {
-          ...state.sessions[ROUTE],
-          status: {
-            ...state.sessions[ROUTE].status,
-            engineId: 'codex',
-            model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-6-sol' }
-          }
-        }
-      }
-    }))
-    const { unmount } = render(
-      <TaskCard
-        block={makeTaskBlock()}
-        view={withView({ subagent: undefined, model: undefined })}
-      />
-    )
-    expect(chip().textContent).toBe('gpt-6-sol')
-    expect(chip().getAttribute('data-model-tier')).toBe('high')
-    unmount()
-    render(
-      <TaskCard
-        block={makeTaskBlock()}
-        view={withView({ subagent: undefined, model: 'gpt-6-luna' })}
-      />
-    )
-    expect(chip().textContent).toBe('gpt-6-luna')
-    expect(chip().getAttribute('data-model-tier')).toBe('low')
-  })
-
   describe('a cross-engine dispatch', () => {
     const dispatchBlock = makeTaskBlock({
       toolUseId: 'toolu_dispatch_tier',
@@ -1232,13 +1199,13 @@ describe('TaskCard — the type chip', () => {
     expect(chip.className).not.toMatch(/bg-agent-|text-agent-/)
   })
 
-  it('is the muted bot alone for an agent with no type (a Codex spawn)', () => {
+  it('is the muted bot alone for an agent with no type (an opencode spawn)', () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
         [ROUTE]: {
           ...state.sessions[ROUTE],
-          status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+          status: { ...state.sessions[ROUTE].status, engineId: 'opencode' }
         }
       }
     }))

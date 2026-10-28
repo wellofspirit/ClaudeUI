@@ -36,7 +36,7 @@ import {
   type InputBoxViewProps,
   type ModelDisplay
 } from '../View'
-import { bootstrapPermissionMode, useSessionStore } from '../../../../stores/session-store'
+import { useSessionStore } from '../../../../stores/session-store'
 
 const baseModel: ModelDisplay = {
   value: 'claude-opus-4-7',
@@ -101,59 +101,6 @@ function makeProps(overrides: Partial<InputBoxViewProps> = {}): InputBoxViewProp
     ...overrides
   }
 }
-
-describe('Codex under the shared permission model', () => {
-  it('follows the global autonomy default, auto included', () => {
-    for (const defaultPermissionMode of ['auto', 'acceptEdits', 'plan'] as const) {
-      expect(
-        bootstrapPermissionMode({ ...useSessionStore.getState(), defaultPermissionMode }, 'codex')
-      ).toBe(defaultPermissionMode)
-    }
-  })
-  it.each([false, true])(
-    'shows the shared mode tab and no native policy pill, mobile=%s',
-    (isMobile) => {
-      render(
-        <InputBoxView
-          {...makeProps({
-            isMobile,
-            selectedEngineId: 'codex',
-            permissionMode: 'auto',
-            showModePicker: true
-          })}
-        />
-      )
-      expect(screen.queryByTestId('CodexPolicyPill')).not.toBeInTheDocument()
-      if (!isMobile) expect(screen.getByText('Auto ⏵⏵')).toBeInTheDocument()
-      else expect(screen.getByTestId('MobileConfigSheet.trigger')).toBeInTheDocument()
-    }
-  )
-  it('offers the engine-native effort tiers in place of the Claude ladder', () => {
-    const onSelectEffort = vi.fn()
-    render(
-      <InputBoxView
-        {...makeProps({
-          onSelectEffort,
-          selectedEngineId: 'codex',
-          effort: 'high',
-          effortSupported: true,
-          allowedEffortLevels: [],
-          nativeEffortOptions: [
-            { value: 'high', description: 'High' },
-            { value: 'ultra', description: 'Native ultra' }
-          ]
-        })}
-      />
-    )
-    const dropdown = openPickerDropdown('Effort level')
-    expect(dropdown.getByRole('button', { name: /ultra/ })).not.toBeDisabled()
-    expect(dropdown.getByRole('button', { name: /Native ultra/ })).toBeInTheDocument()
-    // The fixed Claude ladder is gone, not merged in.
-    expect(dropdown.queryByRole('button', { name: /^xhigh$/i })).not.toBeInTheDocument()
-    fireEvent.click(dropdown.getByRole('button', { name: /ultra/ }))
-    expect(onSelectEffort).toHaveBeenCalledWith('ultra')
-  })
-})
 
 beforeEach(() => {
   // The View renders a StatusLine sub-component that reads from the store.

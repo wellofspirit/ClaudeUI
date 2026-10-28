@@ -65,14 +65,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     // The jsdom harness is not the real-app harness: nothing here reads
     // `window.__claudeuiVerifier`, and tests reach the store directly.
     verifierHooks: false,
-    codexApproval: (id, requestId, decision) =>
-      unwrap('session:codex-approval', id, requestId, decision),
-    codexAuthStatus: () => unwrap('codex:auth-status'),
-    readCodexConfig: () => unwrap('codex-config:read'),
-    writeCodexConfig: (edits, expectedVersion) =>
-      unwrap('codex-config:write', edits, expectedVersion),
-    recompileCodexRules: () => unwrap('codex:recompile-rules'),
-    codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
     createSession: (
       routingId,
@@ -190,8 +182,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
     setModel: (routingId, model) => ipcRenderer.invoke('session:set-model', routingId, model),
     setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
-    setSessionAccount: (routingId, accountId) =>
-      ipcRenderer.invoke('session:set-account', routingId, accountId),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
     setReasoningVariant: (routingId, variant) =>
@@ -486,8 +476,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       unwrap('provider-account:switch', providerId, accountId),
     removeProviderAccount: (providerId, accountId) =>
       unwrap('provider-account:remove', providerId, accountId),
-    setProviderAccountsPerSession: (providerId, enabled) =>
-      unwrap('provider-account:set-per-session', providerId, enabled),
     listSharedProviders: () => unwrap('shared-provider:list'),
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),

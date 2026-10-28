@@ -32,10 +32,7 @@
  * This service refreshes EVERY stored account on its own timer (a background
  * account's refresh token dies on its own clock), but vends only the ACTIVE one
  * to pi and opencode, whose auth stores hold a single Codex entry each. Switching
- * re-vends both and rings `onActiveAccountChanged` so the boot seam can move the
- * sessions that follow the active account off the Codex host they were on
- * (ADR-069 §4) without this module importing a session. Reconcile-on-start and the
- * fs-watch adoption still operate on the ACTIVE account alone: an engine store
+ * re-vends both. Reconcile-on-start and the fs-watch adoption still operate on the ACTIVE account alone: an engine store
  * holds the credential WE vended, so a rotation found there belongs to that
  * account and to no other. A `VaultLike` with no account methods is driven
  * exactly as before — one credential, one timer.
@@ -241,14 +238,6 @@ export interface CredentialSyncDeps {
   watchDebounceMs?: number
   getEnabledRoutes?: () => CodexEnabledRoutes
   /**
-   * Rung AFTER the active account changed and both engine stores were re-fed.
-   * The boot seam wires it (`core/boot/core-services.ts`) without this module
-   * importing a session or an engine; the default is a no-op. Codex's hosts are
-   * the one consumer today (ADR-069 §4) — opencode recycles from its own auth
-   * provider's mutation points instead (ADR-047).
-   */
-  onActiveAccountChanged?: () => void | Promise<void>
-  /**
    * Rung once AFTER a ChatGPT login has been applied — the one post-completion
    * tail every login path runs ({@link CredentialSync.applyCompletedLogin}), so
    * the desktop loopback, the ADR-057 paste-back and the Slice-7 device code all
@@ -257,7 +246,7 @@ export interface CredentialSyncDeps {
    * INJECTED rather than an `emitEvent` import (ADR-070 §2): this class is
    * unit-tested with almost nothing mocked, and importing `sync-host` would drag
    * the service graph into those tests. Same posture, same boot seam and same
-   * no-op default as {@link CredentialSyncDeps.onActiveAccountChanged} above.
+   * no-op default as {@link CredentialSyncDeps.harnessRuns} below.
    *
    * A throw is caught and logged, never propagated: by the time this rings, the
    * credential is stored and vended, so failing the login would be a lie.
@@ -316,14 +305,14 @@ export interface CredentialAccountStatus {
 }
 
 /**
- * What ONE Codex process is injected with (ADR-068 §1). The ONLY shape in this
+ * What one direct ChatGPT backend call is made with (ADR-068 §1). The ONLY shape in this
  * module that carries token material across its boundary — see
  * {@link CredentialSync.injectionTokenFor}.
  */
 export interface CodexInjectionToken {
-  /** The ChatGPT access token (a JWT). Never logged, never persisted by Codex. */
+  /** The ChatGPT access token (a JWT). Never logged. */
   accessToken: string
-  /** The workspace id Codex keys the account on (`chatgpt_account_id`). */
+  /** The workspace id the backend keys the account on (`chatgpt_account_id`). */
   chatgptAccountId: string
   chatgptPlanType: string | null
   /** The VAULT account id this token came from — not the workspace id. */
@@ -418,7 +407,6 @@ export class CredentialSync {
    * every path that learns the active id refreshes it.
    */
   private activeKey: string = LEGACY_ACCOUNT_KEY
-  private onActiveAccountChanged: () => void | Promise<void>
   private onCredentialStored: (accountId: string | undefined) => void
   private harnessRuns: (engine: EngineKey) => boolean
   private fedTokens: FedTokenHistory
@@ -442,27 +430,23 @@ export class CredentialSync {
     this.watchDebounceMs = deps.watchDebounceMs ?? DEFAULT_WATCH_DEBOUNCE_MS
     this.getEnabledRoutes = deps.getEnabledRoutes ?? (() => ({ pi: true, opencode: true }))
     this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
-    this.onActiveAccountChanged = deps.onActiveAccountChanged ?? ((): void => {})
     this.onCredentialStored = deps.onCredentialStored ?? ((): void => {})
     this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
     this.fedTokens = deps.fedTokens ?? memoryFedTokenHistory()
   }
 
   /**
-   * Wire the engine feed targets and the account-switch hook in from the
-   * composition roots. Safe to call more than once (e.g. hot-reload), and
+   * Wire the engine feed targets in from the composition roots. Safe to call more than once (e.g. hot-reload), and
    * ADDITIVE: every field is optional and an absent one leaves what is already
    * wired alone, because the wiring comes from two places — the desktop's
    * provider registrar supplies the two feed targets (`register-auth-providers
    * .ts`, which is the only module that may import both those providers and
-   * this one), while the Electron-free boot seam supplies the switch hook,
-   * which needs the session graph.
+   * this one), while the Electron-free boot seam supplies the rest.
    */
   configure(targets: {
     pi?: CodexFeedTarget
     opencode?: OpencodeChatgptTarget
     getEnabledRoutes?: () => CodexEnabledRoutes
-    onActiveAccountChanged?: () => void | Promise<void>
     onCredentialStored?: (accountId: string | undefined) => void
     harnessRuns?: (engine: EngineKey) => boolean
     fedTokens?: FedTokenHistory
@@ -473,7 +457,6 @@ export class CredentialSync {
       this.getEnabledRoutes = targets.getEnabledRoutes
       this.hasConfiguredRoutePolicy = true
     }
-    if (targets.onActiveAccountChanged) this.onActiveAccountChanged = targets.onActiveAccountChanged
     if (targets.onCredentialStored) this.onCredentialStored = targets.onCredentialStored
     if (targets.harnessRuns) this.harnessRuns = targets.harnessRuns
     if (targets.fedTokens) this.fedTokens = targets.fedTokens
@@ -811,10 +794,7 @@ export class CredentialSync {
   }
 
   /**
-   * Make `id` the active account: vend it to both engines, then ring the hook so
-   * the boot seam can act on the switch (ADR-069 §4 — every Codex session that
-   * FOLLOWS the active account leaves the host it was on and continues on the
-   * new account's at its next prompt; a pinned session is untouched).
+   * Make `id` the active account and vend it to both engines.
    */
   async switchActiveAccount(id: string): Promise<void> {
     if (!this.vault.setActiveAccount || !this.vault.listAccounts) {
@@ -827,7 +807,6 @@ export class CredentialSync {
       await this.feedAll(account.credential)
       this.scheduleRefresh(id, account.credential)
     }
-    await this.onActiveAccountChanged()
   }
 
   /**
@@ -860,10 +839,6 @@ export class CredentialSync {
     if (promoted) {
       await this.feedAll(promoted.credential)
       this.scheduleRefresh(promoted.id, promoted.credential)
-      // What the engines are vended just changed, exactly as it does on a
-      // switch, so opencode has to drop the credential it is still holding in
-      // process for the account that is gone (ADR-047).
-      await this.onActiveAccountChanged()
       return
     }
     await Promise.all(
@@ -876,10 +851,6 @@ export class CredentialSync {
         )
       )
     )
-    // Same reason on the empty path, and more sharply: ClaudeUI's copies are out
-    // of the engine files, but a running opencode server would keep serving the
-    // deleted credential.
-    await this.onActiveAccountChanged()
   }
 
   cancelLogin(): void {
@@ -1013,28 +984,22 @@ export class CredentialSync {
   /**
    * **The one method on this class that returns TOKEN MATERIAL.** Everything
    * else here is deliberately token-free (`getStatus`, and the
-   * `provider-account:*` commands built on it); this exists because Codex is fed
-   * by INJECTION rather than by file (ADR-068 §1) and the host has to hand the
-   * app-server an access token over the wire.
+   * `provider-account:*` commands built on it); this exists because the
+   * auto-mode judge route and the ChatGPT usage-limits read call ChatGPT's
+   * backend directly with the vaulted access token (ADR-068 §1).
    *
    * Nothing in it logs, and its result must never reach a log line, an IPC
-   * result or a snapshot. The two callers are the inject and refresh halves of
-   * `codex-auth-hook.ts`.
+   * result or a snapshot. The callers are `automode/judge-route.ts` and
+   * `shared-providers/chatgpt-rate-limits.ts`.
    *
    * `accountId` null means the ACTIVE account. Returns null when the vault holds
    * no credential for that account, or when the credential carries no workspace
-   * id: `account/login/start {type:'chatgptAuthTokens'}` REQUIRES
-   * `chatgptAccountId`, so a workspace-less credential cannot be injected at all
-   * and the process is left on whatever Codex's own store holds.
+   * id: the backend requires a `ChatGPT-Account-Id`, so a workspace-less
+   * credential cannot be used at all.
    *
-   * `refreshMarginMs` decides how eagerly it refreshes first:
-   *
-   *  - at INJECT time the default {@link REFRESH_MARGIN_MS} applies, so a
-   *    process never starts on a token that is about to die mid-turn;
-   *  - the REFRESH server request passes 0, because Codex gives the host 10
-   *    seconds to answer and a cached-but-still-valid token is the answer it
-   *    wants (ADR-068 §1). Only a genuinely expired credential is worth a
-   *    network round trip there.
+   * `refreshMarginMs` decides how eagerly it refreshes first: the default
+   * {@link REFRESH_MARGIN_MS} keeps a caller from starting on a token about to
+   * die mid-request; 0 refreshes only a genuinely expired credential.
    *
    * The refresh goes through the same per-account single-flight as every
    * scheduled one, so two processes starting at once cause ONE token request.

@@ -34,7 +34,7 @@ Each of these cost a session hours, most of them more than once.
   is the filter's. Commits landed on red gates four times this way. Use `scripts/gates.sh`, or run
   the gate, then read its saved output.
 - **Skipped is not passed.** Integration suites skip without their env flag
-  (`OPENCODE_V2_INTEGRATION`, `PI_INTEGRATION_TESTS`, `CODEX_INTEGRATION`,
+  (`OPENCODE_V2_INTEGRATION`, `PI_INTEGRATION_TESTS`,
   `CLAUDE_INTEGRATION_TESTS`), when HOME is redirected away from a credential, or when the engine is
   not in the managed store. Read the skip count.
 - **An expired default login looks like a patch break**: every live test fails at its first "used

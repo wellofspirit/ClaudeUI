@@ -139,7 +139,6 @@ export function makeRunContext(opts: {
     addDispatchedCost: (engineId, modelId, costUsd) =>
       live()?.addDispatchedCost?.(engineId, modelId, costUsd),
     ...(base.toolUseId !== undefined ? { toolUseId: base.toolUseId } : {}),
-    ...(base.chatgptAccountId !== undefined ? { chatgptAccountId: base.chatgptAccountId } : {}),
     ...(base.callerRestriction ? { callerRestriction: base.callerRestriction } : {}),
     run
   }

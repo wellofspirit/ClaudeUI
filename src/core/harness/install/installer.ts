@@ -6,8 +6,7 @@
  *
  * - `tested` is the manifest's version and is checked against the digests
  *   reviewed into this repo (`verified: 'reviewed'`). Any other version is
- *   checked only against the publisher's hash (`publisher`). Codex installs
- *   only its tested version. A version outside [floor, ceiling) is refused.
+ *   checked only against the publisher's hash (`publisher`). A version outside [floor, ceiling) is refused.
  * - An already valid install satisfies the request without a download.
  * - One install per (harness, version) at a time: concurrent requests share
  *   it. At most two installs run at once; others wait (`resolving`).
@@ -86,8 +85,7 @@ export interface Installer {
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
+  pi: 'pi'
 }
 
 interface Job {
@@ -171,11 +169,6 @@ export function createInstaller(deps: InstallerDeps = {}): Installer {
       version = found
     }
     if (!HARNESS_VERSION_RE.test(version)) return { reason: `${version} is not a version` }
-    if (id === 'codex' && version !== manifest.tested) {
-      return {
-        reason: `ClaudeUI's Codex is locked to ${manifest.tested}; ${version} cannot be installed`
-      }
-    }
     if (compareVersions(version, manifest.floor) < 0) {
       return { reason: `${label} ${version} is older than ${manifest.floor}, the oldest supported` }
     }

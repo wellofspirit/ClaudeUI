@@ -220,7 +220,7 @@ What that replaced: ~45 `ClaudeAPI.onFoo(cb)` members implemented TWICE — by t
 
 - `src/core` must not import Electron (lint-enforced); desktop-only behavior hangs off a host-adapter interface.
 - **Admin, AS BUILT (S3):** settings are **DB-resident and web-editable**, not files. The CLI surface is deliberately tiny and covers only what a setting cannot: BOOTSTRAP (`--port`, `--bind`, `--tls` as a tri-state where an absent flag leaves the persisted mode alone) and the HOST ANCHOR (`--disable-auth`, which warns on every start, `show-link`, and `set-password` — the stdin-only break-glass provisioning that makes [security.md](security.md) §Headless bootstrap chain step 4 reachable on a box with no connection yet; it provisions but never clears). Everything else — passkeys, the break-glass password, step-up tiers, the terminal toggle, audit retention — is edited from the web UI once you are connected (`src/server/cli.ts`'s help text is the surface of record). First-boot enrollment is a console-printed one-time URL, re-printed on every start until a credential exists (`src/server/first-boot.ts`; [security.md](security.md) §Headless bootstrap chain). The as-built "desktop-only channels" concept is replaced by the `admin`/`host` capabilities — a headless deployment has no desktop.
-- **Vendor OAuth on a browserless server — LANDED (ADR-057).** The design session happened and its answer is _the host exchanges, the browser returns the code by paste_: the host always holds the PKCE verifier and performs the token exchange, while consent and the return of the authorization CODE work from any browser. Claude rides cli.js's existing `manualUrl` (and `AuthManager.signIn({remote})` derives "do not open the host browser" from `connection.identity.method`); the Codex vault accepts a pasted callback URL, query fragment or bare code; opencode's `code` method works unchanged while its `auto` method is refused remotely with an actionable message. Backend `a30286c`, the shared `OAuthPasteBackFlow` UI `3f84331`.
+- **Vendor OAuth on a browserless server — LANDED (ADR-057).** The design session happened and its answer is _the host exchanges, the browser returns the code by paste_: the host always holds the PKCE verifier and performs the token exchange, while consent and the return of the authorization CODE work from any browser. Claude rides cli.js's existing `manualUrl` (and `AuthManager.signIn({remote})` derives "do not open the host browser" from `connection.identity.method`); the ChatGPT vault accepts a pasted callback URL, query fragment or bare code; opencode's `code` method works unchanged while its `auto` method is refused remotely with an actionable message. Backend `a30286c`, the shared `OAuthPasteBackFlow` UI `3f84331`.
 
 ## Migration phases
 
@@ -526,7 +526,7 @@ line is a named next step with the reason it is not phase-4 work.
   session concluded against vault sync and device codes: every vendor's `redirect_uri` is
   fixed by a client registration we do not own, so no ClaudeUI-hosted redirect is
   possible. The answer is **the host exchanges, the browser pastes the code back** —
-  Claude via cli.js's `manualUrl`, the Codex vault via a pasted callback URL / query
+  Claude via cli.js's `manualUrl`, the ChatGPT vault via a pasted callback URL / query
   fragment / bare code, opencode's `code` method unchanged and its `auto` method refused
   remotely with an actionable message. Backend `a30286c`; the shared `OAuthPasteBackFlow`
   UI `3f84331`. Normative record: [security.md](security.md) §"The vendor-credential
@@ -727,7 +727,7 @@ background reconnect catches up without a `sync-full`.
   the per-model starting effort still applies and every client derives it from the
   replicated settings (Claude: `modelEffortDefaults`, keyed by `claudeEffortKey`; pi:
   `engineEffortDefaults.pi`, keyed by the model value — kept apart so a pi model embedding
-  a Claude id cannot hit a Claude row; opencode and Codex remember none); at spawn that
+  a Claude id cannot hit a Claude row; opencode remembers none); at spawn that
   effort becomes the session's own. Freezing is the intent: a later change to the
   per-model value (the composer's effort pick also rewrites it, "remembered per
   model") affects only sessions that have not started, and every replica shows what the
@@ -736,7 +736,7 @@ background reconnect catches up without a `sync-full`.
   against the current per-model value, which is also what it is respawned with. A model
   switch on a session that has not started (no process, no thread id) clears the effort
   so the new model's starting effort applies; a started or running one keeps its
-  (coerced) effort, as the live process does. Codex's native tiers are out of scope:
+  (coerced) effort, as the live process does. Native effort tiers are out of scope:
   they use the live `session:set-effort` setter. Still open:
   `session:set-reasoning-variant` has a main-side setter, but `session:config-changed`
   is dropped when no live session exists (the R5 gate in `handlers-core.ts` — a

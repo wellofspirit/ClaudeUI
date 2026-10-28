@@ -104,10 +104,6 @@ vi.mock('../../shared-providers/opencode-claims', () => claimMocks)
 vi.mock('../host-anchor', () => ({
   createHostAnchor: vi.fn(() => ({ reconcileAndAutostart: vi.fn(async () => {}) }))
 }))
-vi.mock('../../codex/rules-sync', () => ({
-  armCodexRulesSync: vi.fn(),
-  syncCodexRulesFile: vi.fn(() => ({ wrote: false, path: '/fixture/claudeui.rules', skipped: [] }))
-}))
 
 beforeEach(() => {
   vi.clearAllMocks()

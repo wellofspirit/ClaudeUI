@@ -22,8 +22,7 @@ import {
 const TESTED: Record<HarnessId, string> = {
   claude: '2.1.280',
   opencode: '1.18.32',
-  pi: '0.87.4',
-  codex: '0.156.0'
+  pi: '0.87.4'
 }
 
 function entry(id: HarnessId, patch: Partial<HarnessStateEntry> = {}): HarnessStateEntry {
@@ -65,8 +64,7 @@ function snapshot(
     harnesses: {
       claude: entry('claude', patch.claude),
       opencode: entry('opencode', patch.opencode),
-      pi: entry('pi', patch.pi),
-      codex: entry('codex', patch.codex)
+      pi: entry('pi', patch.pi)
     },
     detection: { running: false },
     installs: [],
@@ -103,7 +101,7 @@ describe('harnessReadiness', () => {
   })
 
   it('is unavailable-here when ClaudeUI cannot install it, or an override names something that cannot run', () => {
-    expect(harnessReadiness(snapshot({ codex: { ...MISSING, installable: false } }), 'codex')).toBe(
+    expect(harnessReadiness(snapshot({ pi: { ...MISSING, installable: false } }), 'pi')).toBe(
       'unavailable-here'
     )
     expect(
@@ -193,29 +191,29 @@ describe('harnessBannerState', () => {
   })
 
   it('offers no install for a selected version that is installed yet cannot run', () => {
-    // Codex installed at the pin, but without its code-mode host: an install
+    // pi installed at the pin, but missing a file it needs: an install
     // would be satisfied by what is there and change nothing.
     const s = snapshot({
-      codex: { resolved: { ...MISSING.resolved!, path: '/store/codex', reason: undefined } }
+      pi: { resolved: { ...MISSING.resolved!, path: '/store/pi', reason: undefined } }
     })
-    expect(harnessReadiness(s, 'codex')).toBe('missing')
-    expect(harnessBannerState(s, 'codex', [], true)).toEqual({
+    expect(harnessReadiness(s, 'pi')).toBe('missing')
+    expect(harnessBannerState(s, 'pi', [], true)).toEqual({
       kind: 'unavailable-here',
-      reason: 'Codex is installed but cannot run'
+      reason: 'pi is installed but cannot run'
     })
   })
 
   it('names why a harness cannot run here, with nothing to click', () => {
     const s = snapshot({
-      codex: {
+      pi: {
         ...MISSING,
         installable: false,
-        resolved: { ...MISSING.resolved!, reason: 'Codex is not available for win32-arm64' }
+        resolved: { ...MISSING.resolved!, reason: 'pi is not available for win32-arm64' }
       }
     })
-    expect(harnessBannerState(s, 'codex', [], true)).toEqual({
+    expect(harnessBannerState(s, 'pi', [], true)).toEqual({
       kind: 'unavailable-here',
-      reason: 'Codex is not available for win32-arm64'
+      reason: 'pi is not available for win32-arm64'
     })
   })
 })
@@ -235,18 +233,18 @@ describe('upgradeSheetRows', () => {
 
   it('lists each candidate with the version its install fetches and its session count', () => {
     const s = snapshot(
-      { opencode: MISSING, codex: MISSING },
+      { opencode: MISSING, pi: MISSING },
       {
         pending: true,
         candidates: [
           { id: 'opencode', sessions: 14 },
-          { id: 'codex', sessions: 1 }
+          { id: 'pi', sessions: 1 }
         ]
       }
     )
     expect(upgradeSheetRows(s)).toEqual([
       { id: 'opencode', version: '1.18.32', request: '1.18.32', sessions: 14 },
-      { id: 'codex', version: '0.156.0', request: '0.156.0', sessions: 1 }
+      { id: 'pi', version: '0.87.4', request: '0.87.4', sessions: 1 }
     ])
     expect(sessionCountLabel(14)).toBe('14 sessions')
     expect(sessionCountLabel(1)).toBe('1 session')

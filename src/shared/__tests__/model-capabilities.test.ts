@@ -45,25 +45,21 @@ import {
   OPENCODE_ENGINE_CAPABILITIES,
   CLAUDE_ENGINE_CAPABILITIES,
   PI_ENGINE_CAPABILITIES,
-  CODEX_ENGINE_CAPABILITIES,
-  resolveCodexCapabilities,
   piModelCapabilities,
   resolvePiCapabilitiesFromModel
 } from '../model-capabilities'
 
 describe('engine voice capability (ADR-101 §8)', () => {
   it('is on for every engine in the static table — the host narrows it per platform', () => {
-    // opencode, pi and Codex transcribe on-device; Claude uses cli.js's server.
+    // opencode and pi transcribe on-device; Claude uses cli.js's server.
     expect(CLAUDE_ENGINE_CAPABILITIES.voice).toBe(true)
     expect(OPENCODE_ENGINE_CAPABILITIES.voice).toBe(true)
     expect(PI_ENGINE_CAPABILITIES.voice).toBe(true)
-    expect(CODEX_ENGINE_CAPABILITIES.voice).toBe(true)
   })
 
   it('reaches the resolved capabilities of the on-device engines', () => {
     expect(resolveOpencodeCapabilitiesFromModel().voice).toBe(true)
     expect(resolvePiCapabilitiesFromModel().voice).toBe(true)
-    expect(resolveCodexCapabilities().voice).toBe(true)
   })
 })
 
@@ -1117,17 +1113,16 @@ describe('resolveDesiredEffort / resolveSpawnEffort — the one effort ladder', 
       ).toBe(modelDefaultEffort(piRow))
     })
   })
-  it('opencode and Codex remember nothing: neither reads either map', () => {
+  it('opencode remembers nothing: it reads neither map', () => {
     const row = { value: 'x/y', supportsEffort: true }
     const saved: EffortDefaultsSlice = {
-      engineEffortDefaults: { opencode: { 'x/y': 'low' }, codex: { 'x/y': 'low' } }
+      engineEffortDefaults: { opencode: { 'x/y': 'low' } }
     }
-    for (const engineId of ['opencode', 'codex'])
-      expect(
-        resolveDesiredEffort(
-          args({ engineId, modelInfo: row, engineModels: [row], effortDefaults: saved })
-        )
-      ).toBe(modelDefaultEffort(row))
+    expect(
+      resolveDesiredEffort(
+        args({ engineId: 'opencode', modelInfo: row, engineModels: [row], effortDefaults: saved })
+      )
+    ).toBe(modelDefaultEffort(row))
   })
   it('spawn effort clamps a saved value the model does not offer', () => {
     const noMax = { ...OPUS, supportedEffortLevels: ['low', 'medium', 'high'] as const }
@@ -1164,7 +1159,7 @@ describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () 
 
   it('only claude and pi remember', () => {
     expect(['claude', 'pi', undefined].map(engineRemembersEffort)).toEqual([true, true, true])
-    expect(['opencode', 'codex'].map(engineRemembersEffort)).toEqual([false, false])
+    expect(['opencode'].map(engineRemembersEffort)).toEqual([false])
   })
   it('claude writes modelEffortDefaults under claudeEffortKey, moving a legacy key', () => {
     const settings = { modelEffortDefaults: { 'claude-opus-5-5': 'low' } } as const
@@ -1183,9 +1178,8 @@ describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () 
     })
     expect(patch && 'modelEffortDefaults' in patch).toBe(false)
   })
-  it('writes nothing for opencode, codex, or a model not in the catalog', () => {
+  it('writes nothing for opencode, or a model not in the catalog', () => {
     expect(rememberEffortPatch({}, 'opencode', PI, [PI], 'low')).toBeUndefined()
-    expect(rememberEffortPatch({}, 'codex', PI, [PI], 'low')).toBeUndefined()
     expect(rememberEffortPatch({}, 'pi', undefined, [], 'low')).toBeUndefined()
     expect(rememberEffortPatch({}, 'claude', null, [], 'low')).toBeUndefined()
   })

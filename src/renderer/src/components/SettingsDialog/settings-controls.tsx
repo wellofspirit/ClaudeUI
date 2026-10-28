@@ -104,11 +104,9 @@ export interface SettingRowProps {
   /**
    * Outlined chip(s) after the label — which engines the setting reaches.
    *
-   * A LIST because one store can feed more than one engine: the Claude
-   * permission rules are also compiled into Codex's execpolicy file (ADR-067),
-   * so that row is honestly two chips, not a Claude-only row with a sentence
-   * about Codex. Each chip keeps its own `data-id`, so an assertion written
-   * against the single-engine form still resolves.
+   * A LIST because one store can feed more than one engine. Each chip keeps
+   * its own `data-id`, so an assertion written against the single-engine form
+   * still resolves.
    */
   engine?: EngineId | readonly EngineId[]
   appliesOn?: AppliesOn

@@ -40,8 +40,6 @@ const defaults = (patch: Partial<EngineDefaultModels> = {}): EngineDefaultModels
   opencodeDefaultModelConfigured: false,
   piDefaultModel: 'openai-codex/gpt-5.6-luna',
   piDefaultModelConfigured: false,
-  codexDefaultModel: '',
-  codexDefaultModelConfigured: false,
   claudeDefaultModel: '',
   claudeDefaultModelConfigured: false,
   ...patch
@@ -166,7 +164,7 @@ describe('createNewSession — claude default model', () => {
 
 describe('setSelectedEngine — switching TO claude', () => {
   it("unset lands on 'default', as before", () => {
-    useSessionStore.setState({ lastSelectedEngineId: 'codex' as EngineId })
+    useSessionStore.setState({ lastSelectedEngineId: 'pi' as EngineId })
     mirrorStoreIntoReplica()
     store().createNewSession('c-5', '/tmp/proj')
     useSessionStore.setState({ activeSessionId: 'c-5' })
@@ -177,7 +175,7 @@ describe('setSelectedEngine — switching TO claude', () => {
 
   it('an orphaned configured default leaves the picker unset and banners it', () => {
     useSessionStore.setState({
-      lastSelectedEngineId: 'codex' as EngineId,
+      lastSelectedEngineId: 'pi' as EngineId,
       claudeDefaultModel: 'claude-opus-4-7',
       claudeDefaultModelConfigured: true
     })

@@ -1,5 +1,5 @@
 /**
- * MCP kind body — Codex `mcpToolCall` · Claude `mcp__<server>__<tool>`.
+ * MCP kind body — Claude `mcp__<server>__<tool>`.
  *
  * Replaces the JSON dump `GenericBody` gave both (F20). The header splits the
  * server from the tool when the name carries both halves, and shows a

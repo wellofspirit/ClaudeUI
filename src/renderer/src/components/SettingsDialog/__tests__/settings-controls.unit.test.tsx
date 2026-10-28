@@ -44,13 +44,12 @@ describe('SettingRow', () => {
   })
 
   it('renders ONE chip per engine when a row reaches several (Slice 5b)', () => {
-    // The Claude permission rules are also compiled into Codex's execpolicy
-    // file (ADR-067), so that row is honestly two chips. Each keeps its own
+    // A row fed by one store can reach several engines. Each chip keeps its own
     // `data-id`, which is what an assertion written for the single form reads.
-    render(<SettingRow label="Permission rules" engine={['claude', 'codex']} />)
+    render(<SettingRow label="Trust lists" engine={['opencode', 'pi']} />)
     const chips = screen.getAllByTestId('SettingRow.engine')
-    expect(chips.map((c) => c.getAttribute('data-id'))).toEqual(['claude', 'codex'])
-    expect(chips.map((c) => c.textContent)).toEqual(['Claude', 'Codex'])
+    expect(chips.map((c) => c.getAttribute('data-id'))).toEqual(['opencode', 'pi'])
+    expect(chips.map((c) => c.textContent)).toEqual(['opencode', 'pi'])
   })
 
   it('renders the engine chip and the applies-later badge, and NO changed dot', () => {

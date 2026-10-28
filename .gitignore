@@ -17,11 +17,10 @@ bin/
 # Old bun-claude binaries a running process held (renamed aside by ensure-cli,
 # swept by the next run) — scripts/lib/vendor-swap.mjs.
 /vendor/.claude-cli-trash/
-# Engine binaries vendored before ADR-082 §8 (opencode, pi and Codex now install
+# Engine binaries vendored before ADR-082 §8 (opencode and pi now install
 # into ~/.claude/ui/harnesses); still ignored for older checkouts.
 /vendor/opencode-cli/
 /vendor/pi-cli/
-/vendor/codex-cli/
 # Engine source checkouts (vendor/<engine>-src/, at the tag of the engine's
 # tested version) for reading upstream behavior — see CLAUDE.md.
 /vendor/*-src/

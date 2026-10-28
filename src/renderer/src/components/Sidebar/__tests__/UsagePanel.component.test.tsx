@@ -344,7 +344,7 @@ describe('UsagePanel — ChatGPT credits', () => {
   })
 
   /**
-   * A member's monthly allowance (Codex `individualLimit`) is the number a
+   * A member's monthly allowance (ChatGPT `individualLimit`) is the number a
    * credits plan is acted on, so it gets a bar - and the bare "Credits
    * available" beside it would only repeat that the workspace has credits.
    */
