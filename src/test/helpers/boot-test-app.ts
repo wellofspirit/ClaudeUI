@@ -282,7 +282,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitGetStatus: (cwd) => unwrap('git:status', cwd),
     gitGetBranches: (cwd) => unwrap('git:branches', cwd),
     gitCheckout: (cwd, branch) => unwrap('git:checkout', cwd, branch),
-    gitCreateBranch: (cwd, name) => unwrap('git:create-branch', cwd, name),
+    gitCreateBranch: (cwd, name, base) => unwrap('git:create-branch', cwd, name, base),
     gitGetFilePatch: (cwd, filePath, staged, ignoreWhitespace) =>
       unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
     gitGetFileContents: (cwd, filePath, staged) =>
@@ -295,7 +295,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitCommit: (cwd, message) => unwrap('git:commit', cwd, message),
     gitPush: (cwd) => unwrap('git:push', cwd),
     gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
-    gitPull: (cwd) => unwrap('git:pull', cwd),
+    gitPull: (cwd, mode) => unwrap('git:pull', cwd, mode),
+    gitStashPush: (cwd) => unwrap('git:stash-push', cwd),
+    gitStashRestore: (cwd, sha) => unwrap('git:stash-restore', cwd, sha),
     gitFetch: (cwd) => unwrap('git:fetch', cwd),
     watchGit: (cwds) => unwrap('git:watch', { cwds }),
 

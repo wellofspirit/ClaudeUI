@@ -60,6 +60,8 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     push: vi.fn(async () => {}),
     pushWithUpstream: vi.fn(async () => {}),
     pull: vi.fn(async () => ({ ok: true })),
+    stashPush: vi.fn(async () => {}),
+    stashRestore: vi.fn(async () => {}),
     fetch: vi.fn(async () => {}),
     startPolling: vi.fn(),
     stopPolling: vi.fn()
@@ -800,7 +802,9 @@ describe('session.ipc', () => {
       ['git:stage-file', ['/tmp/r', 'a.ts']],
       ['git:commit', ['/tmp/r', 'msg']],
       ['git:push', ['/tmp/r']],
-      ['git:pull', ['/tmp/r']]
+      ['git:pull', ['/tmp/r']],
+      ['git:stash-push', ['/tmp/r']],
+      ['git:stash-restore', ['/tmp/r', 'a'.repeat(40)]]
     ])('%s is registered', async (channel, args) => {
       const res = await harness.call<any>(channel, ...args)
       expect(res).toHaveProperty('ok', true)

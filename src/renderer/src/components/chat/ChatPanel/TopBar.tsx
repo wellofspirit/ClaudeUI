@@ -4,12 +4,12 @@ import { findSessionInfo } from '../../../lib/session-history-load'
 import { useSidebarCollapsed } from '../../SessionView'
 import { WindowControls } from '../../WindowControls'
 import {
+  BRANCH_MARK,
+  GitBranchPill,
   WORKTREE_MARK,
-  WorktreePill,
-  WorktreePopover,
-  useWorktreePillName
-} from '../../git/WorktreePill'
-import { BRANCH_MARK, GitBranchPill, useBranchPillName } from '../../git/GitBranchPill'
+  useBranchPillName,
+  useIsWorktreeSession
+} from '../../git/GitBranchPill'
 import { GitBranchDropdown } from '../../git/GitBranchDropdown'
 import { GitChangesPill } from '../../git/GitChangesPill'
 import { AgentPill } from '../../agents/AgentPill'
@@ -288,9 +288,9 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const overflowRef = useRef<HTMLDivElement>(null)
   const overflowButtonRef = useRef<HTMLButtonElement>(null)
   /** Which tier-1 panel the ⋯ opened, if any — the pills' own, not a copy. */
-  const [gitPopover, setGitPopover] = useState<'branch' | 'worktree' | null>(null)
+  const [branchOpen, setBranchOpen] = useState(false)
   const branchName = useBranchPillName()
-  const worktreeName = useWorktreePillName()
+  const isWorktreeSession = useIsWorktreeSession()
   /** The typed IDE refusal currently being explained, or null. */
   const [ideDialog, setIdeDialog] = useState<{
     reason: IdeUnavailableReason
@@ -521,27 +521,18 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
         available: !!cwd,
         onSelect: () => setPermissionsOpen(true)
       },
-      // Tier 1 is menu-ONLY: the pills are their own bar form, and they are not
-      // inert state — the worktree pill copies a path and the branch pill is
-      // the app's only fetch / pull / push / switch surface, which tier 1 took
-      // away between 768 and 1000 with nowhere to reach it.
-      {
-        id: 'worktree',
-        tier: 1,
-        label: `Worktree: ${worktreeName ?? ''}`,
-        menuTestId: 'TopBar.overflowMenuWorktree',
-        menuIcon: strokeIcon(13, WORKTREE_MARK),
-        available: worktreeName !== null,
-        onSelect: () => setGitPopover('worktree')
-      },
+      // Tier 1 is menu-ONLY: the branch pill (which is also the worktree pill,
+      // wearing the worktree mark) is its own bar form, and it is not inert
+      // state — it is the app's only fetch / pull / push / switch surface, which
+      // tier 1 took away between 768 and 1000 with nowhere to reach it.
       {
         id: 'branch',
         tier: 1,
         label: `Branch: ${branchName ?? ''}`,
         menuTestId: 'TopBar.overflowMenuBranch',
-        menuIcon: strokeIcon(13, BRANCH_MARK),
+        menuIcon: strokeIcon(13, isWorktreeSession ? WORKTREE_MARK : BRANCH_MARK),
         available: branchName !== null,
-        onSelect: () => setGitPopover('branch')
+        onSelect: () => setBranchOpen(true)
       }
     ]
     return all.filter((control) => control.available)
@@ -556,7 +547,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
     ideAvailability,
     handleOpenVSCode,
     branchName,
-    worktreeName
+    isWorktreeSession
   ])
 
   /** Does any tier-1 control have a row? That is what decides how early the ⋯
@@ -593,14 +584,14 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   // still mounted — and narrowing back would re-reveal a menu nobody opened.
   // Closing beats tracking the width: the bar takes no measurement of its own.
   useEffect(() => {
-    if (!overflowOpen && !gitPopover) return
+    if (!overflowOpen && !branchOpen) return
     const onResize = (): void => {
       setOverflowOpen(false)
-      setGitPopover(null)
+      setBranchOpen(false)
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [overflowOpen, gitPopover])
+  }, [overflowOpen, branchOpen])
 
   const infoMouseEnter = useCallback(() => {
     if (infoLeaveTimer.current) clearTimeout(infoLeaveTimer.current)
@@ -1101,18 +1092,15 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
               {control.bar.content}
             </button>
           ))}
-          {/* TIER 1 — the first 344px the bar gives back. Both pills are
-              ACTIONS, not inert state: `GitBranchPill` opens the app's only
-              fetch / pull / push / switch dropdown and `WorktreePill` copies a
-              path — which is why each has a ⋯ row above, and why the ⋯ button
-              now arrives with this tier rather than waiting for tier 2 (owner
-              ruling, 2026-09-19: 768–1000 could otherwise reach none of them).
-              `contents` rather than a wrapper box, because both pills render
-              null outside a repo / worktree and a wrapper would leave an empty
-              flex item behind, paying the cluster's 12px gap for nothing. */}
-          <div className={`contents ${TIER1_HIDE}`}>
-            <WorktreePill />
-          </div>
+          {/* TIER 1 — the first bar width this tier gives back. The pill is an
+              ACTION, not inert state: `GitBranchPill` opens the app's only
+              fetch / pull / push / switch dropdown (and names the worktree in a
+              worktree session) — which is why it has a ⋯ row above, and why the
+              ⋯ button now arrives with this tier rather than waiting for tier 2
+              (owner ruling, 2026-09-19: 768–1000 could otherwise reach none of
+              them). `contents` rather than a wrapper box, because the pill
+              renders null outside a repo and a wrapper would leave an empty flex
+              item behind, paying the cluster's 12px gap for nothing. */}
           <div className={`contents ${TIER1_HIDE}`}>
             <GitBranchPill />
           </div>
@@ -1173,21 +1161,12 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
                   ))}
                 </div>
               )}
-              {/* The pills' OWN panels, opened from the rows that stand in for
-                  them — not a second copy, so a fix to either reaches both
-                  surfaces. `align="right"` is the only difference: hung off the
-                  ⋯ they follow the menu to the bar's right edge. */}
-              {gitPopover === 'branch' && (
+              {/* The pill's OWN panel, opened from the row that stands in for
+                  it — not a second copy, so a fix reaches both surfaces. */}
+              {branchOpen && (
                 <GitBranchDropdown
-                  onClose={() => setGitPopover(null)}
+                  onClose={() => setBranchOpen(false)}
                   anchorRef={overflowButtonRef}
-                />
-              )}
-              {gitPopover === 'worktree' && (
-                <WorktreePopover
-                  align="right"
-                  anchorRef={overflowButtonRef}
-                  onClose={() => setGitPopover(null)}
                 />
               )}
             </div>

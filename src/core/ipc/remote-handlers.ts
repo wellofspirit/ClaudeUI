@@ -1303,7 +1303,8 @@ export function registerRemoteHandlers(
     channel: 'git:create-branch',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, name: string) => withGit(cwd, (s) => s.createBranch(name))
+    handler: async (cwd: string, name: string, base?: string | null) =>
+      withGit(cwd, (s) => s.createBranch(name, base))
   })
   handleRemote({
     channel: 'git:file-patch',
@@ -1371,7 +1372,19 @@ export function registerRemoteHandlers(
     channel: 'git:pull',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string) => withGit(cwd, (s) => s.pull())
+    handler: async (cwd: string, mode?: 'merge' | 'rebase') => withGit(cwd, (s) => s.pull(mode))
+  })
+  handleRemote({
+    channel: 'git:stash-push',
+    capability: 'git',
+    kind: 'command',
+    handler: async (cwd: string) => withGit(cwd, (s) => s.stashPush())
+  })
+  handleRemote({
+    channel: 'git:stash-restore',
+    capability: 'git',
+    kind: 'command',
+    handler: async (cwd: string, sha: string) => withGit(cwd, (s) => s.stashRestore(sha))
   })
   handleRemote({
     channel: 'git:fetch',

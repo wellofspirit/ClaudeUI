@@ -1242,6 +1242,8 @@ describe('registerRemoteHandlers', () => {
         'git:push',
         'git:push-with-upstream',
         'git:pull',
+        'git:stash-push',
+        'git:stash-restore',
         'git:fetch',
         // Live watching: previously unregistered web no-ops, which is why the
         // remote client's gitStatus stayed null and its changes pill never
@@ -2084,6 +2086,8 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'git:push-with-upstream',
   'git:stage-all',
   'git:stage-file',
+  'git:stash-push',
+  'git:stash-restore',
   'git:status',
   'git:watch',
   'git:unstage-all',
