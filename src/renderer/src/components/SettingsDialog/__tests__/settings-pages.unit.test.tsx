@@ -249,7 +249,10 @@ describe('PAGES structure', () => {
   })
 
   it('byEngine groups list their engines in claude → opencode → pi order', () => {
-    expect(enginesOf(pageOf('sessions').groups.find((g) => g.id === 'judge')!)).toEqual(['opencode', 'pi'])
+    expect(enginesOf(pageOf('sessions').groups.find((g) => g.id === 'judge')!)).toEqual([
+      'opencode',
+      'pi'
+    ])
     expect(enginesOf(pageOf('models').groups.find((g) => g.id === 'defaults')!)).toEqual([
       'claude',
       'opencode',
