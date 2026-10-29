@@ -39,7 +39,7 @@ function snapshot(
   const of = (id: HarnessId): HarnessStateEntry =>
     entry(id, revisions[id] ?? `${id}-r1`, !missing.includes(id))
   return {
-    harnesses: { claude: of('claude'), opencode: of('opencode'), pi: of('pi'), codex: of('codex') },
+    harnesses: { claude: of('claude'), opencode: of('opencode'), pi: of('pi') },
     detection: { running: false },
     installs: [],
     updates: { mode: 'ask', available: [], status: { running: false, results: [] } },
@@ -111,7 +111,7 @@ describe('harnessStore.followRunChanges', () => {
     const off = harnessStore.subscribe(() => {})
     await read(snapshot())
     off()
-    await read(snapshot({ codex: 'codex-r2' }))
-    expect(follower).toHaveBeenCalledWith(['codex'])
+    await read(snapshot({ pi: 'pi-r2' }))
+    expect(follower).toHaveBeenCalledWith(['pi'])
   })
 })

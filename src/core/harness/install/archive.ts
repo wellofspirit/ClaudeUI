@@ -1,10 +1,9 @@
 /**
  * Dependency-free archive extraction for harness installs (ADR-082 §4): tar
- * inside gzip (opencode's npm tarball, Codex's per-binary assets, pi on macOS
+ * inside gzip (opencode's npm tarball, pi on macOS
  * and Linux) and zip (pi on Windows). Ported from the readers in
- * `scripts/ensure-*.mjs`, streaming instead of buffering whole archives: a
- * Codex binary unpacks to ~300 MB, which should not sit in the main process's
- * heap.
+ * `scripts/ensure-*.mjs`, streaming instead of buffering whole archives, which
+ * should not sit in the main process's heap.
  *
  * Every entry of the archive is checked, including entries that are skipped,
  * and one bad entry fails the whole archive:

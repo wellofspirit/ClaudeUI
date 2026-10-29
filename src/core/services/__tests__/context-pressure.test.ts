@@ -193,8 +193,8 @@ describe('when it acts', () => {
 
   it('never arms on a window of size 0', async () => {
     setMode('ask')
-    const sid = makeSession('codex')
-    run(sid, 'codex')
+    const sid = makeSession('pi')
+    run(sid, 'pi')
     usage(sid, 0, 0)
     emitEvent('session:status-line', [
       sid,
@@ -203,7 +203,7 @@ describe('when it acts', () => {
         usedPercentage: null
       } as unknown as StatusLineData
     ])
-    idle(sid, 'codex')
+    idle(sid, 'pi')
     await flush()
     expect(banner(sid)).toBeNull()
     expect(sent).toHaveLength(0)
@@ -331,8 +331,7 @@ describe('ask mode', () => {
     const cases: [EngineId, string][] = [
       ['claude', 'mcp__claude-ui-sessions__session_hand_off'],
       ['opencode', 'claudeui_session_hand_off'],
-      ['pi', 'session_hand_off'],
-      ['codex', 'session_hand_off']
+      ['pi', 'session_hand_off']
     ]
     for (const [engine, tool] of cases) {
       const sid = makeSession(engine)

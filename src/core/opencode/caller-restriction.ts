@@ -9,8 +9,8 @@
  * target). The target therefore also gets the calling agent's own deny and ask
  * rules, as Claude-form rules (`Bash(...)`, `Edit(//abs/**)`, `WebFetch`,
  * `mcp__server`, …): the one vocabulary every target engine already compiles
- * the user's deny/ask tiers from (ADR-085 §3) — Claude's `--settings`, pi's and
- * Codex's permission engine, opencode's `compileClaudeRulesV2`.
+ * the user's deny/ask tiers from (ADR-085 §3) — Claude's `--settings`, pi's
+ * permission engine, opencode's `compileClaudeRulesV2`.
  *
  * Semantics: the agent's own rules evaluated ALONE are a floor (the
  * `claudeui-xeng` plugin's child-agent floor, ADR-097 §3): last match wins, no

@@ -100,7 +100,7 @@ COMMANDS
                        (--addon <sherpa-onnx-node dir> --model <model dir>
                        [--threads <n>], CLAUDEUI_VOICE_TOKEN in the
                        environment). The server starts it itself when an
-                       opencode, pi or Codex session uses voice input; it
+                       opencode or pi session uses voice input; it
                        exits when its stdin closes. Not meant to be run by
                        hand.
 

@@ -22,15 +22,13 @@ const model = (engineId: EngineId, value: string): ModelInfo => ({
   displayName: value,
   description: '',
   engineId,
-  vendorId: engineId === 'codex' ? 'openai' : 'anthropic'
+  vendorId: 'anthropic'
 })
 
 const CATALOG: ModelInfo[] = [
   model('claude', 'default'),
   model('claude', 'sonnet'),
-  model('claude', 'haiku'),
-  model('codex', 'gpt-5.6-codex'),
-  model('codex', 'gpt-5.6-codex-mini')
+  model('claude', 'haiku')
 ]
 
 function setup(opts: {
@@ -72,9 +70,6 @@ beforeEach(() => {
     availableModels: CATALOG,
     claudeDefaultModel: '',
     claudeDefaultModelConfigured: false,
-    codexDefaultModel: '',
-    codexDefaultModelConfigured: false,
-    codexDefaultEffort: '',
     terminalGroups: {},
     activeView: { type: 'chat' }
   })
@@ -134,38 +129,5 @@ describe('createNewSession — which model a new session starts on', () => {
     setup({ engine: 'claude', mode: 'configured-default', sticky: { claude: 'haiku' } })
     store().createNewSession('c-2', '/tmp/proj')
     expect(store().sessions['c-2']?.selectedModel).toBe('default')
-  })
-
-  it('Codex: the explicit flag follows what actually seeded', () => {
-    // Sticky wins → explicit (a model the user chose).
-    setup({ engine: 'codex', sticky: { codex: 'gpt-5.6-codex-mini' } })
-    store().createNewSession('cx-1', '/tmp/proj')
-    expect(store().sessions['cx-1']?.selectedModel).toBe('gpt-5.6-codex-mini')
-    expect(store().sessions['cx-1']?.codexModelExplicit).toBe(true)
-
-    // Configured default ignores the pick; nothing configured → the catalog
-    // head, NOT explicit, so Codex's own layers decide.
-    setup({ engine: 'codex', mode: 'configured-default', sticky: { codex: 'gpt-5.6-codex-mini' } })
-    store().createNewSession('cx-2', '/tmp/proj')
-    expect(store().sessions['cx-2']?.selectedModel).toBe('gpt-5.6-codex')
-    expect(store().sessions['cx-2']?.codexModelExplicit).toBe(false)
-
-    // …and a CONFIGURED Codex default seeds, explicit.
-    setup({
-      engine: 'codex',
-      mode: 'configured-default',
-      sticky: { codex: 'gpt-5.6-codex' },
-      patch: { codexDefaultModel: 'gpt-5.6-codex-mini', codexDefaultModelConfigured: true }
-    })
-    store().createNewSession('cx-3', '/tmp/proj')
-    expect(store().sessions['cx-3']?.selectedModel).toBe('gpt-5.6-codex-mini')
-    expect(store().sessions['cx-3']?.codexModelExplicit).toBe(true)
-  })
-
-  it("Codex: a sticky pick gone from the catalog is not a stale-default error under 'configured-default'", () => {
-    setup({ engine: 'codex', mode: 'configured-default', sticky: { codex: 'gpt-4.1-codex' } })
-    store().createNewSession('cx-4', '/tmp/proj')
-    expect(store().sessions['cx-4']?.selectedModel).toBe('gpt-5.6-codex')
-    expect(store().sessions['cx-4']?.errors).toEqual([])
   })
 })

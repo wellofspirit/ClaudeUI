@@ -5,7 +5,7 @@
  * two commands, and the row of the session it started.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { EMPTY_SESSION_STATE, useSessionStore } from '../../../stores/session-store'
 import { MessageBubble } from '../MessageBubble'
 import {
@@ -21,7 +21,7 @@ import type { ProposalPlacement } from '../../../../../shared/session-proposals'
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
 
 const PLACEMENT: ProposalPlacement = {
-  engine: 'codex',
+  engine: 'pi',
   model: 'gpt-5',
   effort: 'high',
   permission_mode: 'acceptEdits',
@@ -71,7 +71,7 @@ afterEach(() => {
 })
 
 const mount = (b: Block): ReturnType<typeof render> =>
-  render(<MessageBubble message={message(b)} pendingApprovals={[]} isLastAssistant={false} />)
+  render(<MessageBubble message={message(b)} pendingApprovals={[]} />)
 const state = (): string | null => screen.getByTestId('ProposalCard').getAttribute('data-state')
 
 describe('ProposalCard states', () => {
@@ -81,7 +81,7 @@ describe('ProposalCard states', () => {
     expect(screen.getByTestId('ProposalCard.title').textContent).toBe('Fix the flaky test')
     expect(screen.getByTestId('ProposalCard.state').textContent).toBe('Proposed')
     expect(screen.getByTestId('ProposalCard.placement').textContent).toBe(
-      'codex · model gpt-5 · effort high · acceptEdits mode · /work/demo/sub'
+      'pi · model gpt-5 · effort high · acceptEdits mode · /work/demo/sub'
     )
     expect(screen.getByTestId('ProposalCard.expiry').textContent).toBe('Expires in 6 days')
     expect(screen.getByTestId('ProposalCard.startGrouped')).not.toBeDisabled()
@@ -127,7 +127,7 @@ describe('ProposalCard states', () => {
 
   it('a placement in the proposer’s own directory does not repeat it', () => {
     expect(placementParts({ ...PLACEMENT, cwd: '/work/demo' }, '/work/demo')).toEqual([
-      'codex',
+      'pi',
       'model gpt-5',
       'effort high',
       'acceptEdits mode'
@@ -327,5 +327,16 @@ describe('ProposalCard commands', () => {
     expect(screen.getByTestId('ProposalCard.startGrouped')).toBeDisabled()
     expect(screen.getByTestId('ProposalCard.startStandalone')).toBeDisabled()
     expect(screen.getByTestId('ProposalCard.dismiss')).toBeDisabled()
+  })
+})
+
+describe('ProposalCard — an engine this build no longer has', () => {
+  it('renders a stored `codex` placement with a generic mark instead of throwing', () => {
+    const historic = block({ placement: { ...PLACEMENT, engine: 'codex' as never } })
+    expect(() => mount(historic)).not.toThrow()
+    const mark = within(screen.getByTestId('ProposalCard')).getByTestId('EngineLogo')
+    expect(mark.getAttribute('data-engine')).toBe('codex')
+    expect(mark.getAttribute('aria-label')).toBe('Codex (removed)')
+    expect(screen.getByTestId('ProposalCard.placement').textContent).toContain('codex')
   })
 })

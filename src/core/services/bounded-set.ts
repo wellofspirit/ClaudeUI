@@ -4,8 +4,7 @@ export const BOUNDED_SET_DEFAULT_CAP = 512
 /**
  * Insertion-ordered set that evicts its OLDEST member once `cap` is exceeded.
  *
- * For guards that only ever have to answer for the recent past (ended Codex turns,
- * uuids a Claude session sent or already looked up): a member old enough to fall out
+ * For guards that only ever have to answer for the recent past (uuids a Claude session sent or already looked up): a member old enough to fall out
  * of the window cannot matter again, so eviction costs nothing and the set stops
  * growing for the life of a long-lived session.
  */

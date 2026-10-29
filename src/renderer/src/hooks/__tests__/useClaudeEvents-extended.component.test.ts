@@ -1801,9 +1801,12 @@ describe('useClaudeEvents extended component tests', () => {
         expect(body).not.toContain('dispatch:')
       })
 
-      it('an X-Agent hand_back ask', () => {
-        const body = ask('dispatch:hand_back', 'dispatch:codex')
-        expect(body).toContain('Hand back needs approval')
+      it('an X-Agent hand_back ask, spelled bare by pi and claudeui_-prefixed by opencode', () => {
+        expect(ask('dispatch:hand_back', 'dispatch:pi')).toContain('Hand back needs approval')
+        notified.mockClear()
+        expect(ask('dispatch:claudeui_hand_back', 'dispatch:opencode')).toContain(
+          'Hand back needs approval'
+        )
       })
 
       it('a Claude X-Agent’s mcp__ ask is read by the Claude map', () => {
@@ -1812,27 +1815,13 @@ describe('useClaudeEvents extended component tests', () => {
         expect(body).not.toContain('mcp__')
       })
 
-      // Codex's map collapses every `mcp__…` name to the kind word "MCP": a first-party tool
-      // keeps its label, a third-party one must still say which tool it asks to run.
+      // A first-party tool keeps its label; a third-party one must say which tool it asks to run.
       it('a third-party MCP tool names its server and tool, on every engine', () => {
-        for (const engine of ['claude', 'codex', 'pi', 'opencode'] as const) {
+        for (const engine of ['claude', 'pi', 'opencode'] as const) {
           notified.mockClear()
           const body = ask('mcp__github__create_issue', undefined, engine)
           expect(body).toContain('github / create_issue needs approval')
         }
-      })
-
-      it('a Codex parent’s first-party tool keeps its label, in either spelling', () => {
-        for (const wire of ['dispatch_agent', 'mcp__claude-ui-collab__dispatch_agent']) {
-          notified.mockClear()
-          expect(ask(wire, undefined, 'codex')).toContain('X-Agent needs approval')
-        }
-      })
-
-      it('a Codex X-Agent’s forwarded third-party MCP ask names its server and tool', () => {
-        const body = ask('dispatch:mcp__github__create_issue', 'dispatch:codex', 'claude')
-        expect(body).toContain('github / create_issue needs approval')
-        expect(body).not.toContain('dispatch:')
       })
     })
 
@@ -2130,7 +2119,6 @@ describe('useClaudeEvents extended component tests', () => {
     it('chatgpt re-reads the VAULT account list, so a second client is not stale', async () => {
       const VAULT = {
         activeId: 'v1',
-        perSession: false,
         accounts: [{ id: 'v1', email: 'vault@example.com', expiresAt: 0, needsReauth: false }]
       }
       useSessionStore.setState({ providerAccounts: null })
@@ -2152,7 +2140,6 @@ describe('useClaudeEvents extended component tests', () => {
     it('tolerates an accountId on the payload without changing what it reads', async () => {
       const listProviderAccounts = vi.fn(async () => ({
         activeId: 'v1',
-        perSession: false,
         accounts: []
       }))
       const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))

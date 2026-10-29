@@ -6,7 +6,7 @@
  *
  * SAFETY: every refresh in this file goes through an INJECTED
  * `refreshAccessToken` fake (`CredentialSyncDeps.refreshAccessToken`) — none
- * of these tests construct the real codex-oauth.ts `refreshAccessToken` or
+ * of these tests construct the real chatgpt-oauth.ts `refreshAccessToken` or
  * reach auth.openai.com. The vault itself is a plain in-memory `VaultLike`
  * fake (see `makeFakeVault`) — no real AuthVault, no real `~/.claude/ui`.
  *
@@ -31,16 +31,16 @@ import {
   MAX_TRANSIENT_RETRIES,
   GIVE_UP_BACKOFF_BASE_MS,
   type VaultLike,
-  type CodexFeedTarget,
-  type CodexCredentialInput,
-  type CodexEntrySnapshot
+  type ChatgptFeedTarget,
+  type ChatgptCredentialInput,
+  type ChatgptEntrySnapshot
 } from '../../../../core/auth/vault/CredentialSync'
 import type { FSWatcher } from 'node:fs'
 import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
 
 /** Unexpired: opencode 2.x is never vended an expired token (ADR-097 §5). */
 const FUTURE = Date.now() + 24 * 60 * 60 * 1000
-import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -74,17 +74,17 @@ function makeFakeVault(initial: VaultCredential | null): {
   return { vault, save, state }
 }
 
-/** A pure-spy CodexFeedTarget — no real files. Used for scheduler/feedAll orchestration tests. */
+/** A pure-spy ChatgptFeedTarget — no real files. Used for scheduler/feedAll orchestration tests. */
 function fakeFeedTarget(): {
-  target: CodexFeedTarget
+  target: ChatgptFeedTarget
   feed: ReturnType<typeof vi.fn>
   read: ReturnType<typeof vi.fn>
   remove: ReturnType<typeof vi.fn>
 } {
-  const feed = vi.fn(async (_vendorId: string, _cred: CodexCredentialInput) => {})
+  const feed = vi.fn(async (_vendorId: string, _cred: ChatgptCredentialInput) => {})
   const read = vi.fn(async (_vendorId: string) => null)
   const remove = vi.fn(async (_vendorId: string) => {})
-  const target: CodexFeedTarget = {
+  const target: ChatgptFeedTarget = {
     // Deliberately a non-existent path — startWatcher() no-ops when the
     // parent dir doesn't exist, so these orchestration-only tests never spin
     // up a real fs.watch.
@@ -96,12 +96,12 @@ function fakeFeedTarget(): {
   return { target, feed, read, remove }
 }
 
-/** A real, file-backed CodexFeedTarget — used for the fs-watch resync tests. */
+/** A real, file-backed ChatgptFeedTarget — used for the fs-watch resync tests. */
 function makeRealFeedTarget(filePath: string): {
-  target: CodexFeedTarget
+  target: ChatgptFeedTarget
   feed: ReturnType<typeof vi.fn>
 } {
-  const feed = vi.fn(async (vendorId: string, cred: CodexCredentialInput) => {
+  const feed = vi.fn(async (vendorId: string, cred: ChatgptCredentialInput) => {
     let file: Record<string, unknown> = {}
     try {
       file = JSON.parse(readFileSync(filePath, 'utf-8'))
@@ -112,7 +112,7 @@ function makeRealFeedTarget(filePath: string): {
     mkdirSync(dirname(filePath), { recursive: true })
     writeFileSync(filePath, JSON.stringify(file))
   })
-  const target: CodexFeedTarget = {
+  const target: ChatgptFeedTarget = {
     authFilePath: () => filePath,
     feedOauthCredential: feed,
     removeVendorAuth: vi.fn(async () => {}),
@@ -577,7 +577,7 @@ describe('CredentialSync route policy', () => {
 
   /**
    * GUARD — the signal names WHICH account was stored, in the vault-account
-   * id-space `session:auth-required` reports (`CodexInjectionToken.vaultAccountId`
+   * id-space `session:auth-required` reports (`ChatgptInjectionToken.vaultAccountId`
    * is the same `key` this hands over). Without it, adding ChatGPT account B
    * announced "chatgpt works now" and the reducer cleared every session broken
    * on account A.
@@ -789,7 +789,7 @@ describe('CredentialSync route policy', () => {
     expect(emptyPi.remove).not.toHaveBeenCalled()
   })
 
-  it('preserves a user-created disabled-route Codex credential when the vault is empty (M-AT3 guard)', async () => {
+  it('preserves a user-created disabled-route ChatGPT credential when the vault is empty (M-AT3 guard)', async () => {
     // User ran `pi /login` themselves; ClaudeUI never connected ChatGPT.
     const pi = fakeFeedTarget()
     pi.read.mockResolvedValue({
@@ -804,7 +804,7 @@ describe('CredentialSync route policy', () => {
     })
     sync.configure({ pi: pi.target, opencode: opencode.target })
     await sync.start()
-    // Pre-fix start() unconditionally removed the disabled route's codex entry.
+    // Pre-fix start() unconditionally removed the disabled route's ChatGPT entry.
     expect(pi.remove).not.toHaveBeenCalled()
     sync.stop()
   })
@@ -1028,11 +1028,11 @@ describe('CredentialSync.disconnectChatgpt', () => {
       refresh: 'r',
       expires: 1
     })
-    let resolveRead: ((snapshot: CodexEntrySnapshot) => void) | undefined
+    let resolveRead: ((snapshot: ChatgptEntrySnapshot) => void) | undefined
     const pi = fakeFeedTarget()
     pi.read.mockImplementationOnce(
       () =>
-        new Promise<CodexEntrySnapshot>((resolve) => {
+        new Promise<ChatgptEntrySnapshot>((resolve) => {
           resolveRead = resolve
         })
     )
@@ -1323,7 +1323,7 @@ describe('CredentialSync — refresh scheduler', () => {
       expires: now + 1000
     })
     const refreshAccessToken = vi.fn(async () => {
-      // The real RFC 6749 §5.2 revocation shape codex-oauth.ts now surfaces.
+      // The real RFC 6749 §5.2 revocation shape chatgpt-oauth.ts now surfaces.
       throw new Error('Token refresh failed: 400 - {"error":"invalid_grant"}')
     })
     const sync = new CredentialSync({ vault, refreshAccessToken })
@@ -1578,8 +1578,8 @@ describe('CredentialSync.start — reconcile across vault + engine stores', () =
   })
 
   /** A fakeFeedTarget whose readOauthEntry returns a preset snapshot (or null). */
-  function readableTarget(snapshot: CodexEntrySnapshot | null): {
-    target: CodexFeedTarget
+  function readableTarget(snapshot: ChatgptEntrySnapshot | null): {
+    target: ChatgptFeedTarget
     feed: ReturnType<typeof vi.fn>
   } {
     const { target, feed, read } = fakeFeedTarget()
@@ -1985,8 +1985,8 @@ describe('CredentialSync — fs-watch resync', () => {
 
 describe('CredentialSync.feedAll — engine rotation clobber guard (M-AT1)', () => {
   /** A fakeFeedTarget whose readOauthEntry resolves to a preset snapshot (or null). */
-  function readable(snapshot: CodexEntrySnapshot | null): {
-    target: CodexFeedTarget
+  function readable(snapshot: ChatgptEntrySnapshot | null): {
+    target: ChatgptFeedTarget
     feed: ReturnType<typeof vi.fn>
     read: ReturnType<typeof vi.fn>
   } {

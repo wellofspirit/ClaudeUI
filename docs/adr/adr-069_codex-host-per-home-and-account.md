@@ -4,6 +4,7 @@
 **Supersedes:** [ADR-066](adr-066_codex-fourth-engine.md) §"Decision" process-model sentences ("One app-server child belongs to each root session and carries its native child threads" and "A separate, minimal service-client lifecycle may serve catalog, history, and auth operations"), and the 2026-09-13 ruling 11(c) recorded in `docs/codex-integration-handoff.md` ("keep one app-server per root session; at about 52 MB idle per process the shared-process redesign is not worth it")
 **Amends:** [ADR-068](adr-068_chatgpt-identity-vault-owned-codex-injection.md) §1 (token injection is per HOST, one identity per process, unchanged in mechanism), [ADR-033](adr-033_cross-engine-dispatch.md) (a Codex dispatch target becomes a thread on the caller's host, not a process)
 **Relates to:** ADR-045 (a host's death is the opencode server's death: every session on it goes `disconnected`), ADR-047 (opencode recycles on account switch; Codex hosts now do the same), ADR-067 (policy stays per thread; nothing here changes the permission model), ADR-030 (capability honesty)
+**Retired 2026-10-28:** the Codex engine was removed; ADR-068's ChatGPT vault identity remains in use by pi, opencode and the judge.
 
 ## Context
 

@@ -4,8 +4,6 @@ pnpm-lock.yaml
 LICENSE.md
 tsconfig.json
 tsconfig.*.json
-# Exact output from the pinned Codex generator, checked by check-codex-protocol.
-src/core/codex/protocol/
 # Exact output from the pinned opencode generator, checked by check-opencode-protocol
 # (events.ts beside them is hand-written and formatted normally).
 src/core/opencode/protocol-v2/openapi.ts

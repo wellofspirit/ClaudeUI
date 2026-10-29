@@ -55,7 +55,7 @@ import { logger } from '../services/logger'
 import { writeJsonAtomic } from '../services/write-json-atomic'
 import { logSafeError } from '../services/redact-secrets'
 import { accountIdentityFromAuthEntry } from '../auth/account-identity'
-import { extractAccountId, parseJwtClaims } from '../auth/vault/codex-oauth'
+import { extractAccountId, parseJwtClaims } from '../auth/vault/chatgpt-oauth'
 import type { AccountIdentity } from '../../shared/account-key'
 import { nativeAccountKey } from '../../shared/account-key'
 

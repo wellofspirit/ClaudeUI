@@ -141,7 +141,6 @@ it('seeds the live thinking timer from the item open, not from the message', () 
       <MessageBubble
         message={thinker}
         pendingApprovals={[]}
-        isLastAssistant={true}
         activeThinking={[{ index: 1, startedAt: 95_000 }]}
       />
     )
@@ -149,12 +148,7 @@ it('seeds the live thinking timer from the item open, not from the message', () 
 
     // Without a measured start the old behaviour stands: the message timestamp.
     rerender(
-      <MessageBubble
-        message={thinker}
-        pendingApprovals={[]}
-        isLastAssistant={true}
-        activeThinking={[{ index: 1 }]}
-      />
+      <MessageBubble message={thinker} pendingApprovals={[]} activeThinking={[{ index: 1 }]} />
     )
     expect(screen.getByTestId('ThinkingBlock.toggle').textContent).toContain('(60s)')
   } finally {

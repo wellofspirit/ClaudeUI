@@ -196,7 +196,7 @@ describe('the fold projects into the store', () => {
 
   describe('a session whose cwd is a linked worktree (marker on the directory listing)', () => {
     const linked = {
-      worktreePath: 'C:/Users/me/.codex/worktrees/ab12/repo',
+      worktreePath: 'C:/Users/me/.local/share/opencode/worktree/ab12/repo',
       repoRoot: 'C:/Users/me/repo',
       name: 'ab12/repo',
       branch: ''
@@ -206,7 +206,7 @@ describe('the fold projects into the store', () => {
     ]
 
     it('projects a synthesised worktree info, matched across separators and drive-letter case', () => {
-      seed.created('r1', { cwd: 'c:\\users\\me\\.codex\\worktrees\\ab12\\repo' })
+      seed.created('r1', { cwd: 'c:\\users\\me\\.local\\share\\opencode\\worktree\\ab12\\repo' })
       expect(store().sessions['r1'].worktreeInfo).toBeNull()
       seed.directories(listing(linked.worktreePath))
       expect(store().sessions['r1'].worktreeInfo).toMatchObject({

@@ -36,7 +36,7 @@ describe('config:list-agent-types', () => {
   })
 
   it('answers the catalog for each engine, passing the cwd through', async () => {
-    for (const engine of ['claude', 'opencode', 'pi', 'codex']) {
+    for (const engine of ['claude', 'opencode', 'pi']) {
       expect(await invoke(engine, '/repo/app')).toEqual({
         ok: true,
         data: [{ type: `${engine}-type`, source: 'builtin' }]
@@ -55,7 +55,7 @@ describe('config:list-agent-types', () => {
   })
 
   it('refuses an unknown engine, including a path-shaped one, before the catalog is read', async () => {
-    for (const bad of ['gemini', '', '../claude', 'constructor', undefined]) {
+    for (const bad of ['gemini', 'codex', '', '../claude', 'constructor', undefined]) {
       expect(await invoke(bad, '/repo/app')).toMatchObject({ ok: false })
     }
     expect(catalog.listAgentTypesChecked).not.toHaveBeenCalled()

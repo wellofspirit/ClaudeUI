@@ -5,11 +5,10 @@
  * unknown tool.
  *
  * Bare names cannot collide with another MCP tool: pi sanitises MCP tools to
- * `mcp__server__tool` and Codex MCP calls carry a namespace, so only opencode needs the
+ * `mcp__server__tool` so only opencode needs the
  * `claudeui_` prefix guard (its MCP actions are `server_tool`).
  */
 import { describe, expect, it } from 'vitest'
-import { CodexEngineToolMap } from '../CodexEngineToolMap'
 import { OpencodeEngineToolMap } from '../OpencodeEngineToolMap'
 import { PiEngineToolMap } from '../PiEngineToolMap'
 import { piToolKind } from '../../../../../../core/pi/permission-engine'
@@ -18,8 +17,7 @@ import type { EngineToolMap } from '../../../../../../shared/tool-kinds'
 
 const ENGINES: Array<{ label: string; map: EngineToolMap; spell: (name: string) => string }> = [
   { label: 'opencode', map: OpencodeEngineToolMap, spell: (name) => `claudeui_${name}` },
-  { label: 'pi', map: PiEngineToolMap, spell: (name) => name },
-  { label: 'codex', map: CodexEngineToolMap, spell: (name) => name }
+  { label: 'pi', map: PiEngineToolMap, spell: (name) => name }
 ]
 
 describe.each(ENGINES)('$label tool map: the session tools', ({ map, spell }) => {

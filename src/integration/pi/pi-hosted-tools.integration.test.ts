@@ -52,7 +52,7 @@ const SKIP = !process.env.PI_INTEGRATION_TESTS
 const MODEL = { provider: 'openai-codex', modelId: 'gpt-5.6-luna' }
 
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
-function hasCodexCredentials(): boolean {
+function hasChatgptCredentials(): boolean {
   try {
     const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent')
     const raw = readFileSync(join(agentDir, 'auth.json'), 'utf-8')
@@ -66,7 +66,7 @@ function hasCodexCredentials(): boolean {
 // Evaluated once at collection time so every `it`/describe.skipIf below can
 // gate on it — "skip gracefully" even when PI_INTEGRATION_TESTS=1 is set.
 const BINARY_MISSING = !locatePiBinary()
-const CREDENTIALS_MISSING = !hasCodexCredentials()
+const CREDENTIALS_MISSING = !hasChatgptCredentials()
 
 /** Find the render_mermaid toolResult message in a batch of raw wire events (loose-typed — see pi-rpc.integration.test.ts's identical precedent for why this file doesn't fight PiEvent's discriminated union in test code). */
 function findMermaidToolResult(

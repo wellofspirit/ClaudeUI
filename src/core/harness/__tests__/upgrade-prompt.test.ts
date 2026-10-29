@@ -40,8 +40,7 @@ function harnesses(
   return {
     claude: entry('claude', patch.claude),
     opencode: entry('opencode', patch.opencode),
-    pi: entry('pi', patch.pi),
-    codex: entry('codex', patch.codex)
+    pi: entry('pi', patch.pi)
   }
 }
 
@@ -54,10 +53,9 @@ const RUNNING = {
 
 describe('upgradeCandidates', () => {
   it('offers each harness with sessions that nothing runs for, in harness order, with its count', () => {
-    expect(upgradeCandidates(harnesses(), { codex: 2, opencode: 14, pi: 3 })).toEqual([
+    expect(upgradeCandidates(harnesses(), { opencode: 14, pi: 3 })).toEqual([
       { id: 'opencode', sessions: 14 },
-      { id: 'pi', sessions: 3 },
-      { id: 'codex', sessions: 2 }
+      { id: 'pi', sessions: 3 }
     ])
   })
 
@@ -98,8 +96,8 @@ describe('upgradeCandidates', () => {
   })
 
   it('skips a harness ClaudeUI cannot install on this host', () => {
-    const all = harnesses({ codex: { installable: false } })
-    expect(upgradeCandidates(all, { codex: 4, pi: 1 })).toEqual([{ id: 'pi', sessions: 1 }])
+    const all = harnesses({ opencode: { installable: false } })
+    expect(upgradeCandidates(all, { opencode: 4, pi: 1 })).toEqual([{ id: 'pi', sessions: 1 }])
   })
 })
 
@@ -107,13 +105,6 @@ describe('harnessInstallable', () => {
   it('is never true for Claude Code, which is bundled', () => {
     expect(harnessInstallable('claude', 'win32', 'x64')).toBe(false)
     expect(harnessInstallable('claude', 'darwin', 'arm64')).toBe(false)
-  })
-
-  it('follows the reviewed Codex hosts', () => {
-    expect(harnessInstallable('codex', 'win32', 'x64')).toBe(true)
-    expect(harnessInstallable('codex', 'darwin', 'arm64')).toBe(true)
-    expect(harnessInstallable('codex', 'win32', 'arm64')).toBe(false)
-    expect(harnessInstallable('codex', 'darwin', 'x64')).toBe(false)
   })
 
   it('follows the manifest for opencode (Windows on arm64 runs the x64 build) and pi', () => {

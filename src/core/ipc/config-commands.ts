@@ -444,7 +444,7 @@ function worktreeHolderSources(manager: SessionManager): HolderSources {
 /**
  * Drop the recorded worktree entries of removed directories, server-side, and tell every client.
  * Nothing else: the quit-time removal uses exactly this, because re-listing the directories
- * would reach for a Codex app-server after the teardown.
+ * would reach for an engine process after the teardown.
  */
 export function forgetEntriesQuiet(worktreePaths: string[]): void {
   forgetWorktreeEntries(worktreePaths, (channel, args) => emitEvent(channel, args))

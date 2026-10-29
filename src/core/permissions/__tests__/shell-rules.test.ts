@@ -771,7 +771,7 @@ describe('allowCovers — lenient', () => {
   })
 
   it('an "always allow" rule minted from a compound command still matches that command', () => {
-    // pi and Codex suggest `Bash(<whole command>:*)`; only the identical command is covered by it.
+    // pi suggests `Bash(<whole command>:*)`; only the identical command is covered by it.
     const minted = 'Bash(ls && git log $(cat ref):*)'
     expect(covers('ls   &&  git log $(cat ref)', [minted])).toBeDefined()
     expect(covers('ls && git log $(cat ref) && rm -rf x', [minted])).toBeUndefined()
@@ -918,7 +918,7 @@ describe('isCarvedOut', () => {
     expect(isCarvedOut('Bash(git push origin main)', denyAsk)).toBeUndefined()
   })
 
-  it("'program' strength (Codex): any deny/ask rule for the same program carves it out", () => {
+  it("'program' strength: any deny/ask rule for the same program carves it out", () => {
     const program = { strength: 'program' as const }
     // `docker compose run web` hits the ask, so an emitted allow would skip it.
     expect(isCarvedOut('Bash(docker compose:*)', denyAsk)).toBeUndefined()

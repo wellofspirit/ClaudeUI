@@ -245,7 +245,6 @@ export function mirrorStoreIntoReplica(): void {
         sdkActive: s.sdkActive,
         selectedEngineId: s.selectedEngineId,
         selectedModel: s.selectedModel,
-        ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
         seeded: true
       },
       { create: true }

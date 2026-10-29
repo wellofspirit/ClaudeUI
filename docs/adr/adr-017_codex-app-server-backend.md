@@ -2,6 +2,7 @@
 
 **Status:** Superseded by [ADR-019](adr-019_opencode-engine-backend.md) (opencode engine backend)
 **Date:** 2026-06-17
+**Retired 2026-10-28:** the Codex engine was removed; ADR-068's ChatGPT vault identity remains in use by pi, opencode and the judge.
 
 **Current replacement:** [ADR-066](adr-066_codex-fourth-engine.md) plans Codex as a fourth engine. This ADR remains historical and superseded; its old paths, auth choice, and shared permission mappings are not the new implementation contract.
 

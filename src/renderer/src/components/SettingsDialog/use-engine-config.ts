@@ -5,20 +5,17 @@
  * settings pane that writes an `engines/<engine>.json` file reads and edits
  * through, instead of holding its own copy.
  *
- * Consumers (four, over two files):
+ * Consumers (two, over two files):
  *
- *  · Codex › Models & providers › Default models — `CodexDefaultsSection`
- *    (settings-sections.tsx), which writes `codexConfig`;
- *  · Dispatch › "Dispatch into" and "Limits" for claude / opencode / pi / codex
+ *  · Dispatch › "Dispatch into" and "Limits" for claude / opencode / pi
  *    — `DispatchIntoSection` / `DispatchLimitsSection` (settings-sections.tsx),
  *    which write `dispatch`;
  *  · pi › Models & thinking › the ClaudeUI half — `PiSessionDefaultModel`
  *    (PiConfigPanes.tsx), which writes `piConfig`.
  *
- * It lives in its own module rather than in settings-sections.tsx for the same
- * reason `use-engine-installed.ts` does: settings-sections.tsx IMPORTS
- * PiConfigPanes.tsx, so a pi pane reaching back into it would close an import
- * cycle.
+ * It lives in its own module rather than in settings-sections.tsx because
+ * settings-sections.tsx IMPORTS PiConfigPanes.tsx, so a pi pane reaching back
+ * into it would close an import cycle.
  *
  * ## Why a shared external store and not a hook-local `useState`
  *
@@ -113,9 +110,8 @@ function dispatchSnapshot(engineId: EngineId): EngineConfig | null {
  * Merge a patch into the engine's config and persist the WHOLE file.
  *
  * The top-level entry point, because `dispatch` is not the only block edited
- * through this store any more: Codex's Default-models segment writes
- * `codexConfig` into the same `engines/codex.json`, pi's writes `piConfig` into
- * `engines/pi.json`, and `saveEngineConfig` replaces the file with whatever it
+ * through this store any more: pi's Default-models segment writes `piConfig`
+ * into `engines/pi.json`, and `saveEngineConfig` replaces the file with whatever it
  * is handed. Two panes holding two copies is exactly the data loss the module
  * comment above describes.
  *

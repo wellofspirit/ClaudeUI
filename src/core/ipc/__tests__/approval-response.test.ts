@@ -82,14 +82,14 @@ describe('answerApproval', () => {
   it('a resolve that throws still dismisses and still rejects to the caller (A3)', () => {
     const session = {
       resolveApproval: vi.fn(() => {
-        throw new Error('Stale or unknown Codex approval')
+        throw new Error('Stale or unknown approval')
       })
     }
-    expect(() => answerApproval(managerWith(session), 'codex-rid', 'req-3', 'allow')).toThrow(
-      'Stale or unknown Codex approval'
+    expect(() => answerApproval(managerWith(session), 'pi-rid', 'req-3', 'allow')).toThrow(
+      'Stale or unknown approval'
     )
     expect(emitEvent).toHaveBeenCalledWith('session:approval-dismiss', [
-      'codex-rid',
+      'pi-rid',
       { requestId: 'req-3' }
     ])
   })
@@ -97,10 +97,10 @@ describe('answerApproval', () => {
   it('a malformed answer to a still-parked request keeps the card but still rejects (A3b)', () => {
     const session = {
       resolveApproval: vi.fn(() => {
-        throw new ApprovalAnswerRejected('Missing Codex question answer')
+        throw new ApprovalAnswerRejected('Missing question answer')
       })
     }
-    expect(() => answerApproval(managerWith(session), 'codex-rid', 'req-q', 'allow', {})).toThrow(
+    expect(() => answerApproval(managerWith(session), 'pi-rid', 'req-q', 'allow', {})).toThrow(
       ApprovalAnswerRejected
     )
     expect(emitEvent).not.toHaveBeenCalled()

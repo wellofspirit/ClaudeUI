@@ -7,7 +7,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { nativeAccountKey } from '../../../shared/account-key'
 import type { SharedProviderDefinition, SharedProviderModel } from '../../../shared/shared-provider'
 import type { OpencodeCatalogModel } from '../../../shared/types'
-import type { CodexInjectionToken } from '../../auth/vault/CredentialSync'
+import type { ChatgptInjectionToken } from '../../auth/vault/CredentialSync'
 import type { PiModel } from '../../pi/pi-protocol'
 import { apiKeyAccountKey } from '../../services/account-key-hash'
 import { chatgptProvider } from '../../shared-providers/SharedProviderRepository'
@@ -31,24 +31,24 @@ function fakeJwt(claims: Record<string, unknown>): string {
   return `${header}.${payload}.tok-test-signature`
 }
 
-const TOKEN: CodexInjectionToken = {
+const TOKEN: ChatgptInjectionToken = {
   accessToken: fakeJwt({ chatgpt_account_id: 'ws-test' }),
   chatgptAccountId: 'ws-test',
   chatgptPlanType: 'plus',
   vaultAccountId: 'vault-acct-test'
 }
-const FRESH_TOKEN: CodexInjectionToken = {
+const FRESH_TOKEN: ChatgptInjectionToken = {
   ...TOKEN,
   accessToken: fakeJwt({ chatgpt_account_id: 'ws-test', fresh: true })
 }
 /** A second signed-in ChatGPT account (the fallback judge's), with its own refreshed token. */
-const BIZ_TOKEN: CodexInjectionToken = {
+const BIZ_TOKEN: ChatgptInjectionToken = {
   accessToken: fakeJwt({ chatgpt_account_id: 'ws-biz' }),
   chatgptAccountId: 'ws-biz',
   chatgptPlanType: 'business',
   vaultAccountId: 'vault-acct-biz'
 }
-const BIZ_FRESH_TOKEN: CodexInjectionToken = {
+const BIZ_FRESH_TOKEN: ChatgptInjectionToken = {
   ...BIZ_TOKEN,
   accessToken: fakeJwt({ chatgpt_account_id: 'ws-biz', fresh: true })
 }
@@ -114,12 +114,12 @@ function fakeDeps(
   opts: {
     definitions?: SharedProviderDefinition[]
     keys?: Record<string, string>
-    token?: CodexInjectionToken | null
-    freshToken?: CodexInjectionToken | null
+    token?: ChatgptInjectionToken | null
+    freshToken?: ChatgptInjectionToken | null
     /** Named vault accounts' tokens, as `injectionTokenFor(accountId)` answers; absent id → null (gone). */
     accounts?: Record<
       string,
-      { token: CodexInjectionToken | null; fresh?: CodexInjectionToken | null }
+      { token: ChatgptInjectionToken | null; fresh?: ChatgptInjectionToken | null }
     >
     opencode?: Record<string, OpencodeCatalogModel[]>
     pi?: PiModel[]

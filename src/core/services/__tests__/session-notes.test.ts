@@ -158,8 +158,7 @@ describe('turn-end edge', () => {
   it.each<[EngineId, string]>([
     ['claude', 'init idle, then running → result → idle'],
     ['opencode', 'running repeated while parts stream, then idle'],
-    ['pi', 'running → idle'],
-    ['codex', 'running → idle with no session:result at all']
+    ['pi', 'running → idle']
   ])('%s (%s): one note per turn, at the running → idle edge', async (engine) => {
     const p = makeParent(true)
     const c = makeChild(p.id, { engine })

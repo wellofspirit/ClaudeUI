@@ -330,8 +330,7 @@ export function formatHourLabel(hourUtc: number): string {
 
 /**
  * A credit amount as a person reads it: whole credits, thousands grouped —
- * `25,000`. Rounded the way Codex's own `/status` rounds it, so the two never
- * disagree about the same allowance. Hand-rolled for the reason this file's
+ * `25,000`. Whole credits. Hand-rolled for the reason this file's
  * clock is: the dashboard is English by design, and `Intl` would bring a locale.
  */
 export function formatCreditAmount(amount: number): string {

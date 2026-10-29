@@ -13,13 +13,11 @@ import { ExitPlanModeCard } from './ExitPlanModeCard'
 import { AskUserQuestionBlock } from './AskUserQuestionBlock'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TodoToolBlock } from './TodoToolBlock'
-import { SleepRow } from './SleepRow'
 import { ToolNoteRow } from './ToolNoteRow'
 import { ContextNoteBlock } from './ContextNoteBlock'
 import { PeerHoldRow } from './PeerHoldRow'
 import { SessionCard } from './SessionCard'
 import { ProposalCard } from './ProposalCard'
-import { ReviewResultCard } from './ReviewResultCard'
 import { TaskCard } from './TaskCard'
 import { hasDispatchBehindCall, isQueuedDispatchCall } from './task-state'
 import { hostedMcpKind } from '../../../../shared/tool-kinds'
@@ -64,10 +62,6 @@ function renderToolBlock(
   // (a plan, a question, a todo list), and none of them is an action a judge
   // gates.
   decision?: ToolReviewBlock | PermissionDenialBlock,
-  // Whether this block is on the LAST assistant message — read only by the plan
-  // card, whose no-approval action set (Codex, F20) belongs to the latest plan
-  // and to no earlier one.
-  isLastAssistant = false,
   // The call waits for an earlier call of its own message (cli.js runs a first-party MCP
   // call exclusively): only the task card says so.
   queued = false
@@ -80,15 +74,7 @@ function renderToolBlock(
 
   // Lifted interaction components — consume the neutral view, not block.toolInput.
   if (kind === 'plan' && view.kind === 'plan') {
-    return (
-      <ExitPlanModeCard
-        key={key}
-        block={block}
-        view={view}
-        approval={approval}
-        isLatest={isLastAssistant}
-      />
-    )
+    return <ExitPlanModeCard key={key} block={block} view={view} approval={approval} />
   }
   if (kind === 'question' && view.kind === 'question') {
     return (
@@ -103,9 +89,6 @@ function renderToolBlock(
   }
   if (kind === 'todo' && view.kind === 'todo') {
     return <TodoToolBlock key={key} block={block} result={result} view={view} />
-  }
-  if (kind === 'sleep' && view.kind === 'sleep') {
-    return <SleepRow key={key} block={block} result={result} view={view} />
   }
   if (kind === 'note' && view.kind === 'note') {
     return (
@@ -177,7 +160,6 @@ const EMPTY_ACTIVE_THINKING: ReadonlyArray<{ index: number; startedAt?: number }
 interface MessageBubbleProps {
   message: ChatMessage
   pendingApprovals: PendingApproval[]
-  isLastAssistant: boolean
   /**
    * The message's currently-streaming thinking slots, each with the item's own
    * start clock when the engine measured one (`ActiveItemStream.startedAt`).
@@ -189,7 +171,6 @@ interface MessageBubbleProps {
 export const MessageBubble = memo(function MessageBubble({
   message,
   pendingApprovals,
-  isLastAssistant,
   activeThinking = EMPTY_ACTIVE_THINKING
 }: MessageBubbleProps): React.JSX.Element {
   // Hooks must run unconditionally — declared before the role-based early returns.
@@ -239,9 +220,8 @@ export const MessageBubble = memo(function MessageBubble({
               <ApiErrorBlock key={i} block={block} />
             )
           }
-          // Context an ENGINE injected into the model's prompt — Codex hook
-          // fragments today. Verbatim, never markdown (the fragments are
-          // third-party text).
+          // Context an ENGINE injected into the model's prompt. Verbatim, never
+          // markdown (the fragments are third-party text).
           if (block.type === 'context_note') {
             return <ContextNoteBlock key={i} block={block} />
           }
@@ -257,14 +237,8 @@ export const MessageBubble = memo(function MessageBubble({
           if (block.type === 'proposal_card') {
             return <ProposalCard key={i} block={block} />
           }
-          // A code review's findings. The one untrusted-text block that DOES go
-          // through markdown, by decision (F20) — see ReviewResultCard.
-          if (block.type === 'review_result') {
-            return <ReviewResultCard key={i} block={block} />
-          }
-          // A bare notice the engine wants in the transcript — Codex's `auto`
-          // guardian decisions are the current producer. Rendered VERBATIM and
-          // never through the markdown pipeline: the text can quote a
+          // A bare notice the engine wants in the transcript. Rendered VERBATIM
+          // and never through the markdown pipeline: the text can quote a
           // model-authored rationale from a reviewer thread the user never saw.
           if (block.type === 'text') {
             return (
@@ -517,7 +491,6 @@ export const MessageBubble = memo(function MessageBubble({
             approval,
             index,
             decision,
-            isLastAssistant,
             isQueuedCall(block)
           )
         }
@@ -538,7 +511,6 @@ export const MessageBubble = memo(function MessageBubble({
                 approval,
                 index,
                 decision,
-                isLastAssistant,
                 isQueuedCall(block)
               )
             })}
@@ -792,7 +764,7 @@ function ApiErrorBlock({
  * replacing `AuthErrorBlock`.
  *
  * Every engine emits this block now (`api_error` / `errorType:
- * 'authentication'`), so the failure is anchored where it happened on all four
+ * 'authentication'`), so the failure is anchored where it happened on every engine
  * instead of Claude having history and the rest a floating card that vanished.
  *
  * THREE LIFETIMES, read off the session's `authRequired` (ADR-070 §2), because

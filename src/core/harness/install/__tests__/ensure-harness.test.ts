@@ -1,9 +1,9 @@
 /**
  * @vitest-environment node
  *
- * `bun run ensure-{opencode,pi,codex}` / `update-*` (`scripts/ensure-harness.mjs`,
+ * `bun run ensure-{opencode,pi}` / `update-*` (`scripts/ensure-harness.mjs`,
  * ADR-082 §8): a thin wrapper over the app's installer. Its own logic is the
- * arguments, the Codex host skip, `update-*`'s move-aside, and the exit code;
+ * arguments, the unsupported-host skip, `update-*`'s move-aside, and the exit code;
  * the installer is replaced here, so nothing downloads.
  */
 import { describe, expect, it, vi } from 'vitest'
@@ -95,9 +95,9 @@ describe('ensureHarness', () => {
         throw busy
       })
     })
-    expect(await ensureHarness('codex', ['--force'], deps)).toBe(1)
+    expect(await ensureHarness('pi', ['--force'], deps)).toBe(1)
     expect(deps.install).not.toHaveBeenCalled()
-    expect(err[0]).toMatch(/Codex 1\.2\.3 could not be moved aside and was left as it is \(EPERM\)/)
+    expect(err[0]).toMatch(/pi 1\.2\.3 could not be moved aside and was left as it is \(EPERM\)/)
   })
 
   it('exits 1 with the installer reason on a failed install', async () => {
@@ -113,12 +113,12 @@ describe('ensureHarness', () => {
     expect(err).toEqual(['[ensure-pi] the reviewed digest did not match'])
   })
 
-  it('skips Codex with one line and exit 0 on a host without a reviewed release', async () => {
+  it('skips a harness with one line and exit 0 on a host without a reviewed release', async () => {
     const { deps, out } = harness({ hostSupported: vi.fn(() => false) })
-    expect(await ensureHarness('codex', [], deps)).toBe(0)
+    expect(await ensureHarness('pi', [], deps)).toBe(0)
     expect(deps.install).not.toHaveBeenCalled()
     expect(out).toHaveLength(1)
-    expect(out[0]).toMatch(/^\[ensure-codex\] skipped: Codex has no reviewed release for /)
+    expect(out[0]).toMatch(/^\[ensure-pi\] skipped: pi has no reviewed release for /)
   })
 
   it('exits 2 on an unknown argument or a harness with no managed copy', async () => {

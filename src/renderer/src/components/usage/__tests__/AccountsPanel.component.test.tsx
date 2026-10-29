@@ -387,7 +387,7 @@ describe('AccountsPanel — reading state', () => {
   })
 
   /**
-   * A member's monthly allowance (Codex `individualLimit`) is one more meter on
+   * A member's monthly allowance (ChatGPT `individualLimit`) is one more meter on
    * the row, with its amounts drawn at every width - "how many have I spent" is
    * what a credits plan's row is read for.
    */

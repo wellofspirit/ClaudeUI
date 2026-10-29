@@ -1,6 +1,6 @@
 /**
  * The worktree pill popover for a session that is only MARKED as a linked worktree (no recorded
- * entry): the projection synthesises the info, and a detached worktree (opencode, Codex) has no
+ * entry): the projection synthesises the info, and a detached worktree (opencode) has no
  * branch row to show.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -32,7 +32,7 @@ describe('WorktreePopover', () => {
   it('hides the branch row for a detached worktree', () => {
     seed(
       worktreeInfoFromLinked({
-        worktreePath: '/home/me/.codex/worktrees/ab12/repo',
+        worktreePath: '/home/me/.local/share/opencode/worktree/ab12/repo',
         repoRoot: '/home/me/repo',
         name: 'ab12/repo',
         branch: ''

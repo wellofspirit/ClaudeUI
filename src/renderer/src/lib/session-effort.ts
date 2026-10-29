@@ -53,11 +53,10 @@ export function catalogFor(
 }
 
 /**
- * The effort a NON-NATIVE (Claude / opencode / pi) session spawns with — the
+ * The effort a (Claude / opencode / pi) session spawns with — the
  * same value the composer pill shows, which calls this too with the same
  * inputs, so the two cannot disagree (a model missing from the catalog resolves
- * the same for both). Never call this for Codex: its tiers are the engine's own,
- * and a pick is gated on the model's published catalog instead.
+ * the same for both).
  */
 export function sessionSpawnEffort(state: EffortState, session: EffortSession): EffortLevel {
   const { modelInfo, engineModels } = catalogFor(state, session)
@@ -77,7 +76,7 @@ export function sessionSpawnEffort(state: EffortState, session: EffortSession): 
  * writer twin of the resolver's read). Pass it to `updateSettings`, so a pick
  * shows up in the Settings table (Claude) and the next session on the model
  * starts there. `undefined` — write nothing — for an engine that does not remember
- * (opencode, Codex) or a model not in the catalog (not loaded yet / curated away).
+ * (opencode) or a model not in the catalog (not loaded yet / curated away).
  */
 export function rememberedEffortPatch(
   state: EffortState,
@@ -116,15 +115,14 @@ export function rememberedEffortPatch(
  * so a later change to the per-model value affects only sessions not yet started.
  *
  * `thinkingMode` is the RAW pick (`null` = unset): there is no per-model thinking
- * default to freeze. Codex returns `undefined`: its tiers are native, applied
- * over a live setter, and a pick the catalog does not publish is dropped at spawn.
+ * default to freeze.
  */
 export function spawnAnnouncement(
   state: EffortState,
   session: (EffortSession & { thinkingMode: string | null }) | undefined,
   spawnEffort?: string
 ): { effort?: string | null; thinkingMode: string | null } | undefined {
-  if (!session || session.selectedEngineId === 'codex') return undefined
+  if (!session) return undefined
   const { modelInfo } = catalogFor(state, session)
   const thinkingMode = session.thinkingMode ?? null
   // Unknown model: omit the key (an `undefined` value would survive Electron's

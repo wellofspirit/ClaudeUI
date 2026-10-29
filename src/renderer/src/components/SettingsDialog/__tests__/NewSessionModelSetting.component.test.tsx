@@ -30,10 +30,10 @@ describe('"New sessions start on"', () => {
       engine,
       items![0]
     ])
-    expect(firsts.map(([engine]) => engine)).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(firsts.map(([engine]) => engine)).toEqual(['claude', 'opencode', 'pi'])
     const [first] = firsts.map(([, item]) => item)
     for (const [, item] of firsts) {
-      // The SAME object on every segment — one row, not four copies.
+      // The SAME object on every segment — one row, not three copies.
       expect(item).toBe(first)
     }
     expect((first as { key: string }).key).toBe('newSessionModel')

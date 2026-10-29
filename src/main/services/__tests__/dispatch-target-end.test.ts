@@ -37,7 +37,6 @@ const row = (over: Partial<DispatchTargetRow> = {}): DispatchTargetRow => ({
   model: 'm',
   launchMode: 'default',
   accountKey: null,
-  codexAccountId: null,
   callerRestriction: null,
   name: null,
   description: null,
@@ -83,7 +82,7 @@ describe('removeHarnessState', () => {
 
   it('only a pi row asks for a scratchpad removal', async () => {
     const removeScratchpad = vi.fn()
-    for (const engine of ['claude', 'codex', 'opencode'] as const)
+    for (const engine of ['claude', 'opencode'] as const)
       await removeHarnessState(row({ engine }), {
         home,
         removeScratchpad,
@@ -106,11 +105,13 @@ describe('removeHarnessState', () => {
     expect(del).toHaveBeenCalledWith('ses_1')
   })
 
-  it('leaves a Claude transcript and a Codex thread alone', async () => {
+  it('leaves a Claude transcript alone', async () => {
     const del = vi.fn(async () => {})
     const rm = vi.fn(async () => {})
-    for (const engine of ['claude', 'codex'] as const)
-      await removeHarnessState(row({ engine }), { deleteOpencodeSession: del, removeDir: rm })
+    await removeHarnessState(row({ engine: 'claude' }), {
+      deleteOpencodeSession: del,
+      removeDir: rm
+    })
     expect(del).not.toHaveBeenCalled()
     expect(rm).not.toHaveBeenCalled()
   })
@@ -178,10 +179,9 @@ describe('sweepOrphanDispatchTargets', () => {
     const t = setup(
       [
         row({ id: 's-oc0001', parentSessionId: 'oc-parent', parentEngine: 'opencode' }),
-        row({ id: 's-pi0001', parentSessionId: 'pi-parent', parentEngine: 'pi' }),
-        row({ id: 's-cx0001', parentSessionId: 'cx-parent', parentEngine: 'codex' })
+        row({ id: 's-pi0001', parentSessionId: 'pi-parent', parentEngine: 'pi' })
       ],
-      ['oc-parent', 'pi-parent', 'cx-parent']
+      ['oc-parent', 'pi-parent']
     )
     expect(t.ended).toBe(0)
     expect(t.update).not.toHaveBeenCalled()

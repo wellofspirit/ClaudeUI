@@ -57,7 +57,7 @@ describe('session_inbox', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(40)
+      expect(older.pragma('user_version', { simple: true })).toBe(41)
     } finally {
       older.close()
     }

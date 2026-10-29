@@ -4,7 +4,7 @@
  * A session's idle timer is held while the session owns a RUNNING X-Agent (ADR-105 §3):
  * the timer's `cancel()` would drop the session object the run reports into. The dispatcher
  * arms it again through `rearmIdleTimer()` when the last run ends. `BaseSession` carries the
- * rule for Codex (which inherits it) and is what Claude, opencode and pi override around.
+ * rule that Claude, opencode and pi override around.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -28,7 +28,7 @@ import { startRunningDispatch } from '../../../test/helpers/running-dispatch'
 const cancel = vi.hoisted(() => vi.fn())
 
 class ProbeSession extends BaseSession {
-  readonly engineId: EngineId = 'codex'
+  readonly engineId: EngineId = 'pi'
   readonly capabilities = {} as ResolvedCapabilities
   busy = false
   live = true

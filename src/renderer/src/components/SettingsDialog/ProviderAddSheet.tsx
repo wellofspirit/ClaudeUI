@@ -75,8 +75,8 @@ import {
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderAddSheet'
 
-/** pi's auth.json key for the Codex (ChatGPT) credential — CredentialSync.PI_CODEX_VENDOR_ID. */
-const CODEX_VENDOR_ID = 'openai-codex'
+/** pi's auth.json key for the ChatGPT credential — CredentialSync.PI_CHATGPT_VENDOR_ID. */
+const PI_CHATGPT_VENDOR_ID = 'openai-codex'
 
 /** How many catalog rows render before the "refine your search" line. */
 const CATALOG_LIMIT = 60
@@ -179,7 +179,7 @@ export function ProviderAddSheet({
 
   /** The vault owns the native ids its routes resolve to — never offer those. */
   const managed = useMemo(() => {
-    const owned = { opencode: new Set<string>(), pi: new Set<string>([CODEX_VENDOR_ID]) }
+    const owned = { opencode: new Set<string>(), pi: new Set<string>([PI_CHATGPT_VENDOR_ID]) }
     for (const definition of definitions) {
       // The definition's own id always (a catalog provider with its routes off
       // is still set up), and the native id each ENABLED route delivers to.

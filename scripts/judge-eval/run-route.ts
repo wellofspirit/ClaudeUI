@@ -11,7 +11,7 @@ import { capsFor } from '../../src/core/automode/judge-http/caps'
 import type { ResolvedJudgeRoute } from '../../src/core/automode/judge-http/types'
 import type { JudgeRouteDeps } from '../../src/core/automode/judge-route'
 import type { VaultAccount } from '../../src/core/auth/vault/AuthVault'
-import type { CodexInjectionToken } from '../../src/core/auth/vault/CredentialSync'
+import type { ChatgptInjectionToken } from '../../src/core/auth/vault/CredentialSync'
 
 /** Sent to opencode's hosted inference so its operators can tell the eval apart. */
 export const ZEN_CLIENT_HEADER = 'ClaudeUI-judge-eval'
@@ -167,7 +167,7 @@ export function pickChatgptAccount(
  * when the account is not a workspace-bound OAuth login or its access token has
  * expired (the eval reports that as a judge error rather than refreshing).
  */
-export function readOnlyTokenOf(account: VaultAccount, now: number): CodexInjectionToken | null {
+export function readOnlyTokenOf(account: VaultAccount, now: number): ChatgptInjectionToken | null {
   if (
     account.credential.type !== 'oauth' ||
     !account.accountId ||

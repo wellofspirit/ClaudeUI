@@ -65,8 +65,7 @@ import { LastPickNote, NewSessionModelSetting } from './NewSessionModelSetting'
 import { ClaudeEndpointSection, ClaudeModelMappingSection } from './ClaudeEndpointSettings'
 import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
-import { useEngineInstalled } from './use-engine-installed'
-import { useDispatchConfig, useDispatchModels, useEngineConfigObject } from './use-engine-config'
+import { useDispatchConfig, useDispatchModels } from './use-engine-config'
 import {
   OpencodeSessionBehaviorSection,
   OpencodeToolOutputSection,
@@ -76,20 +75,6 @@ import {
   OpencodeDiagnosticsSection,
   OpencodeManagedKeysSection
 } from './OpencodeConfigPanes'
-import {
-  CodexAgentsSection,
-  CodexAutoReviewSection,
-  CodexContextSection,
-  CodexHistorySection,
-  CodexInstructionsSection,
-  CodexManagedSection,
-  CodexMcpSection,
-  CodexModelBehaviorSection,
-  CodexRawConfigSection,
-  CodexSandboxSection,
-  CodexShellEnvSection,
-  CodexToolsSection
-} from './CodexConfigPanes'
 import {
   PiSessionBehaviorSection,
   PiModelsSection,
@@ -263,24 +248,10 @@ function ProxyTestButton({ proxy }: { proxy: ProxySettings }): React.JSX.Element
 
 // ── Global Permissions summary (rendered inside SettingsDialog) ──────
 
-/**
- * Which engines the user's Claude permission rules actually reach.
- *
- * Codex only when its binary is present: `syncCodexRulesFile` refuses to compile
- * anything without one (`codexBinaryAvailable()` in rules-sync.ts), so claiming
- * the chip on a machine with no Codex would advertise a file that is never
- * written. Declared out here so the array identity is stable across renders.
- */
-const CLAUDE_ONLY_RULE_ENGINES: readonly EngineId[] = ['claude']
-const CLAUDE_AND_CODEX_RULE_ENGINES: readonly EngineId[] = ['claude', 'codex']
-
 function GlobalPermissionsSummary(): React.JSX.Element {
   const [perms, setPerms] = useState<ClaudePermissions | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const cwd = useActiveSession((s) => s.cwd)
-  // `null` while the probe is in flight — the Claude-only form until it answers,
-  // so a slow round trip never flashes a Codex chip at a machine without it.
-  const codexInstalled = useEngineInstalled('codex') === true
 
   useEffect(() => {
     window.api
@@ -313,23 +284,10 @@ function GlobalPermissionsSummary(): React.JSX.Element {
         testid="GlobalPermissionsSummary"
         label="Permission rules"
         description={summary}
-        // Two chips when Codex is there, because these rules really do reach
-        // two engines (ADR-067): the USER-scope Bash rules are compiled into
-        // Codex's own execpolicy file, where a deny becomes a `forbidden` prefix
-        // and an allow skips the ask. PROJECT-scope rules are not compiled — the
-        // file is global to the user config layer, so one project's allows would
-        // leak into every other, which is what the row below says.
-        engine={codexInstalled ? CLAUDE_AND_CODEX_RULE_ENGINES : CLAUDE_ONLY_RULE_ENGINES}
+        engine="claude"
         action="Edit rules"
         onAction={() => setDialogOpen(true)}
       />
-      {codexInstalled && (
-        <SettingRow
-          testid="GlobalPermissionsSummary.codexRules"
-          dimmed
-          description="Your user-scope Bash rules are also compiled into ~/.codex/rules/claudeui.rules, so a deny blocks the command in every Codex mode. Project-scope rules are not compiled."
-        />
-      )}
       <PermissionsDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
@@ -405,8 +363,7 @@ export function AutonomyModePicker(): React.JSX.Element {
 // groups on shared pages and greys its dispatch target (`segmentOptions`,
 // `visibleGroups` in settings-pages.tsx), so these bodies mount only for a
 // harness that runs. That reads the harness store's readiness, which never
-// spawns anything. (`useEngineInstalled`, from ./use-engine-installed, is left
-// to the permissions summary's Codex chip.)
+// spawns anything.
 
 // ── opencode auto-mode (Full) LLM gatekeeper settings (ADR-023) ──────
 
@@ -1199,7 +1156,7 @@ function DispatchLimitsSection({
 //
 // Dispatch INTO Claude can only be CALLED from another engine, and since
 // ADR-082 §8 every other harness is installed separately — so the Claude target
-// is selectable only while one of opencode, pi or Codex runs (ADR-030/ADR-033
+// is selectable only while one of opencode or pi runs (ADR-030/ADR-033
 // M4-A: no possible caller means the config has nothing to configure), and each
 // other target only while it runs itself. The page's segment greys the rest
 // (`segmentOptions`, settings-pages.tsx), so these bodies never ask.
@@ -1253,26 +1210,6 @@ export function PiDispatchLimitsSection(): React.JSX.Element {
   return <DispatchLimitsSection engineId="pi" testid="PiDispatchSection" />
 }
 
-/**
- * Codex as a dispatch TARGET (ADR-068 §6, Slice 5b). `resolveAndRunCodex` has
- * read `engines/codex.json#dispatch` — `defaultModel`, `allowedModels`,
- * `maxCostUsd` — since ADR-033 slice H; only the pane was missing, which is why
- * `DISPATCH_CALLERS.codex` still said "unsupported".
- */
-export function CodexDispatchIntoSection(): React.JSX.Element {
-  return (
-    <DispatchIntoSection
-      engineId="codex"
-      testid="CodexDispatchSection"
-      noModelsMessage="No Codex models detected."
-    />
-  )
-}
-
-export function CodexDispatchLimitsSection(): React.JSX.Element {
-  return <DispatchLimitsSection engineId="codex" testid="CodexDispatchSection" />
-}
-
 // ── Whole-direction compositions ─────────────────────────────────────
 //
 // One direction's two halves, in page order. The dialog mounts the halves
@@ -1304,139 +1241,6 @@ export function PiDispatchSection(): React.JSX.Element {
       <PiDispatchIntoSection />
       <PiDispatchLimitsSection />
     </>
-  )
-}
-
-// ── Codex session defaults (Models & providers › Default models) ─────
-//
-// ClaudeUI's OWN default for a Codex session, NOT `config.toml`. Codex already
-// resolves a `model` from its own layers for the working directory; this is what
-// ClaudeUI names on `turn/start`, which wins over that. Blank therefore means
-// "say nothing", and that is what keeps the native value in charge — the
-// behaviour every Codex session had before this pane existed (ADR-068 §6).
-//
-// It writes `codexConfig` into the SAME `engines/codex.json` the Dispatch page's
-// two cards write `dispatch` into, so it shares their config object rather than
-// holding its own copy (ADR-065 § "two panes over one config"). With separate
-// copies, a settings SEARCH — which mounts live panes from several pages at once
-// — would let whichever saved second erase the other's block.
-
-/** The empty row of the Codex model picker: no ClaudeUI opinion at all. */
-const CODEX_MODEL_DEFAULT_LABEL = "Default (Codex's own configured model)"
-/** The empty row of the effort select. */
-const CODEX_EFFORT_DEFAULT_LABEL = "Default (the model's own tier)"
-
-/**
- * The native reasoning tiers to offer.
- *
- * Per MODEL when a default model is chosen — Codex validates the effort against
- * the model's `supportedReasoningEfforts` at thread start and REFUSES a tier it
- * does not publish, so offering another model's tiers here would configure a
- * session that cannot start. With no model chosen the union is the honest set:
- * the session could run on any of them.
- */
-function codexEffortOptions(models: ModelInfo[], selected: string): string[] {
-  const scope = selected ? models.filter((m) => m.value === selected) : models
-  return [...new Set(scope.flatMap((m) => (m.nativeEffortOptions ?? []).map((o) => o.value)))]
-}
-
-export function CodexDefaultsSection(): React.JSX.Element {
-  const { engineCfg, update } = useEngineConfigObject('codex')
-  const models = useDispatchModels('codex')
-  const testid = 'CodexDefaultsSection'
-
-  const loading = dispatchLoadingRow(testid, engineCfg !== null)
-  if (loading) return loading
-
-  const codexConfig = engineCfg?.codexConfig ?? {}
-  const defaultModel = codexConfig.defaultModel ?? ''
-  const defaultEffort = codexConfig.defaultEffort ?? ''
-  const efforts = codexEffortOptions(models, defaultModel)
-
-  // Both keys live in one block, so one writer — a partial write of `codexConfig`
-  // would drop the sibling key.
-  const save = (patch: { defaultModel?: string; defaultEffort?: string }): void => {
-    const next = { ...codexConfig, ...patch }
-    update({
-      codexConfig: {
-        ...(next.defaultModel ? { defaultModel: next.defaultModel } : {}),
-        ...(next.defaultEffort ? { defaultEffort: next.defaultEffort } : {})
-      }
-    })
-    // Mirror into the store so sessions created later in THIS app run pick the
-    // change up without a restart — the same rule `setPiDefaultModel` follows.
-    useSessionStore.getState().setCodexDefaults({
-      ...(patch.defaultModel !== undefined ? { model: patch.defaultModel } : {}),
-      ...(patch.defaultEffort !== undefined ? { effort: patch.defaultEffort } : {})
-    })
-  }
-
-  // A tier the chosen model does not publish would make every new session fail
-  // at `thread/start`, so it is surfaced rather than silently dropped.
-  const effortOrphaned = !!defaultEffort && efforts.length > 0 && !efforts.includes(defaultEffort)
-
-  return (
-    <div data-testid={testid} className="divide-y divide-border/55">
-      <div>
-        <SettingRow
-          testid={`${testid}.defaultModelRow`}
-          label="Default model"
-          description={
-            <>
-              The model new Codex sessions start with. Unset lets Codex pick from its own config for
-              the working directory.
-              <LastPickNote />
-            </>
-          }
-          keyText="engines/codex.json · codexConfig.defaultModel"
-          modified={defaultModel !== ''}
-          onReset={() => save({ defaultModel: '' })}
-        >
-          <span data-testid={`${testid}.defaultModel`} data-value={defaultModel}>
-            <ModelPicker
-              variant="field"
-              placement="down"
-              emptyOption={{ label: CODEX_MODEL_DEFAULT_LABEL }}
-              models={toModelDisplays(models)}
-              selectedModel={selectedModelDisplay(models, defaultModel, CODEX_MODEL_DEFAULT_LABEL)}
-              onSelectModel={(v) => save({ defaultModel: v })}
-            />
-          </span>
-        </SettingRow>
-        <StaleModelNotice testid={`${testid}.defaultModel`} models={models} value={defaultModel} />
-      </div>
-
-      <SettingRow
-        testid={`${testid}.defaultEffortRow`}
-        label="Reasoning effort"
-        description="The native tier new Codex sessions start on. Only the tiers the chosen model publishes are offered."
-        keyText="engines/codex.json · codexConfig.defaultEffort"
-        modified={defaultEffort !== ''}
-        onReset={() => save({ defaultEffort: '' })}
-      >
-        <SelectField
-          testid={`${testid}.defaultEffort`}
-          dataId="codexConfig.defaultEffort"
-          value={defaultEffort}
-          options={[
-            { value: '', label: CODEX_EFFORT_DEFAULT_LABEL },
-            ...efforts.map((value) => ({
-              value,
-              label: value.charAt(0).toUpperCase() + value.slice(1)
-            }))
-          ]}
-          onChange={(v) => save({ defaultEffort: v })}
-        />
-      </SettingRow>
-
-      {effortOrphaned && (
-        <SettingRow
-          testid={`${testid}.staleEffort`}
-          label={`"${defaultEffort}" is not a tier ${defaultModel} publishes, so new sessions would be refused at thread start. Pick one of: ${efforts.join(', ')}.`}
-          labelClassName="text-warning"
-        />
-      )}
-    </div>
   )
 }
 
@@ -2492,7 +2296,7 @@ export const SECTIONS: Section[] = [
         key: 'voiceModel',
         label: 'On-device speech model',
         keywords:
-          'voice speech model download install remove on-device local offline parakeet opencode pi codex',
+          'voice speech model download install remove on-device local offline parakeet opencode pi',
         render: () => <VoicePackSetting />
       },
       {
@@ -2686,7 +2490,7 @@ export const SECTIONS: Section[] = [
         key: 'subscriptions',
         label: 'Subscriptions',
         keywords:
-          'subscription anthropic claude chatgpt openai codex account accounts login sign in switch active multi multiple keychain plaintext credentials workspace organisation organization per-session pin engines',
+          'subscription anthropic claude chatgpt openai account accounts login sign in switch active multi multiple keychain plaintext credentials workspace organisation organization per-session pin engines',
         render: () => <SubscriptionsSection />
       }
     ]
@@ -4125,412 +3929,6 @@ export const SECTIONS: Section[] = [
         keywords:
           'pi config raw json settings theme tuiMode fullscreen markdown terminal keybindings externalEditor enabledModels warnings defaultProvider defaultThinkingLevel advanced',
         render: () => <PiRawConfigSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-model',
-    label: 'Model behaviour',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexModelBehavior',
-        label: 'Model behaviour',
-        keywords:
-          'codex model_reasoning_summary model_verbosity plan_mode_reasoning_effort service_tier personality review_model reasoning summary verbosity effort tier tone reviewer',
-        render: () => <CodexModelBehaviorSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-context',
-    label: 'Context & compaction',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <polygon points="12 2 2 7 12 12 22 7 12 2" />
-        <polyline points="2 17 12 22 22 17" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexContext',
-        label: 'Context & compaction',
-        keywords:
-          'codex model_context_window model_auto_compact_token_limit scope tool_output_token_limit project_doc_max_bytes project_doc_fallback_filenames compact_prompt AGENTS.md compaction context window tokens',
-        render: () => <CodexContextSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-instructions',
-    label: 'Instructions',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-        <polyline points="14 2 14 8 20 8" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexInstructions',
-        label: 'Instructions',
-        keywords:
-          'codex instructions developer_instructions include_environment_context include_permissions_instructions include_collaboration_mode_instructions include_apps_instructions system prompt',
-        render: () => <CodexInstructionsSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-sandbox',
-    label: 'Workspace sandbox',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexSandbox',
-        label: 'Workspace sandbox',
-        keywords:
-          'codex sandbox_workspace_write network_access writable_roots exclude_tmpdir_env_var exclude_slash_tmp allow_login_shell project_root_markers windows sandbox private desktop',
-        render: () => <CodexSandboxSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-shell',
-    label: 'Shell environment',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <polyline points="4 17 10 11 4 5" />
-        <line x1="12" y1="19" x2="20" y2="19" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexShellEnv',
-        label: 'Shell environment',
-        keywords:
-          'codex shell_environment_policy inherit ignore_default_excludes exclude include_only environment variables secrets',
-        render: () => <CodexShellEnvSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-tools',
-    label: 'Tools & search',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M14.7 6.3a4 4 0 01-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 015.4-5.4z" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexTools',
-        label: 'Tools & search',
-        keywords:
-          'codex web_search update_plan experimental_request_user_input browser_use computer_use features background_terminal_max_timeout hosted tools',
-        render: () => <CodexToolsSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-agents',
-    label: 'Native agents',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M23 21v-2a4 4 0 00-3-3.87" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexAgents',
-        label: 'Native agents',
-        keywords:
-          'codex agents enabled max_concurrent_threads_per_session max_depth default_subagent_model default_subagent_reasoning_effort subagent multi-agent',
-        render: () => <CodexAgentsSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-mcp',
-    label: 'MCP servers',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M9 2v6M15 2v6" />
-        <path d="M6 8h12v4a6 6 0 01-12 0z" />
-        <path d="M12 18v4" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexMcp',
-        label: 'MCP servers',
-        keywords:
-          'codex mcp mcp_servers inherited claude mcp_optional_startup_grace_ms tools servers',
-        render: () => <CodexMcpSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-history',
-    label: 'History & privacy',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <circle cx="12" cy="12" r="10" />
-        <polyline points="12 6 12 12 16 14" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexHistory',
-        label: 'History & privacy',
-        keywords:
-          'codex history persistence analytics feedback thread_unload_delay_secs privacy telemetry',
-        render: () => <CodexHistorySection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-managed',
-    label: 'Managed keys',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <rect x="4" y="10" width="16" height="10" rx="2" />
-        <path d="M8 10V7a4 4 0 018 0v3" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexManaged',
-        label: 'Managed keys',
-        keywords:
-          'codex model_provider check_for_update_on_startup approval_policy sandbox_mode approvals_reviewer profile rules claudeui.rules execpolicy recompile managed locked',
-        render: () => <CodexManagedSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-config-raw',
-    label: 'Raw config',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexRawConfig',
-        label: 'Raw config (config.toml)',
-        keywords:
-          'codex config.toml raw hooks plugins marketplaces skills otel notify model_providers profiles projects mcp_oauth apps memories goals file_opener advanced',
-        render: () => <CodexRawConfigSection />
-      }
-    ]
-  },
-  // ── Codex on the TOPIC pages (ADR-068 §6, Slice 5b) ────────────────
-  //
-  // Three sections that are not the Codex engine page: the Codex segment of
-  // Default models, of Cross-engine dispatch, and of the Auto-mode judge. They
-  // live here rather than on the Codex page because a user configuring "default
-  // models" is comparing engines, not visiting one — which is the whole reason
-  // ADR-065 made those cards per-engine segments.
-  {
-    id: 'codex-models',
-    label: 'Default model',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <ellipse cx="12" cy="5" rx="9" ry="3" />
-        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexModels',
-        label: 'Default model & effort',
-        keywords:
-          'codex default model reasoning effort tier codexConfig defaultModel defaultEffort engines/codex.json native',
-        render: () => <CodexDefaultsSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-dispatch',
-    label: 'Cross-engine dispatch',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M17 3l4 4-4 4" />
-        <path d="M21 7H9a4 4 0 00-4 4v1" />
-        <path d="M7 21l-4-4 4-4" />
-        <path d="M3 17h12a4 4 0 004-4v-1" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexDispatch',
-        label: 'Cross-engine dispatch',
-        keywords:
-          'codex dispatch cross engine agent delegate model allowlist default target incoming',
-        render: () => <CodexDispatchIntoSection />
-      },
-      {
-        key: 'codexDispatchLimits',
-        label: 'Dispatch limits',
-        keywords: 'codex dispatch cost cap budget usd limit',
-        render: () => <CodexDispatchLimitsSection />
-      }
-    ]
-  },
-  {
-    id: 'codex-automode',
-    label: 'Auto mode',
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-        <path d="M9 12l2 2 4-4" />
-      </svg>
-    ),
-    items: [
-      {
-        key: 'codexAutoMode',
-        label: 'Guardian policy',
-        keywords:
-          'codex auto mode guardian auto_review policy reviewer judge native approvals_reviewer permission',
-        render: () => <CodexAutoReviewSection />
       }
     ]
   }

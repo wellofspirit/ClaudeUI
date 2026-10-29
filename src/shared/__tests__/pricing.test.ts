@@ -378,12 +378,12 @@ describe('equivalentCostUsd — openai pricing', () => {
 })
 
 // ---------------------------------------------------------------------------
-// The models Codex's own catalog offers (ADR-066). Both sources are quoted in
+// The OpenAI models ChatGPT subscriptions offer (ADR-066). Both sources are quoted in
 // OPENAI_PRICING; these pin every published column so a bad edit shows up as a
 // wrong cost rather than as a plausible one.
 // ---------------------------------------------------------------------------
 
-describe('equivalentCostUsd — the Codex catalog models', () => {
+describe('equivalentCostUsd — the ChatGPT catalog models', () => {
   const rates: Array<[string, number, number, number, number]> = [
     // model, input, cached input, cache write, output — all per MTok
     ['gpt-6-astra', 10, 1, 12.5, 50],
@@ -408,7 +408,7 @@ describe('equivalentCostUsd — the Codex catalog models', () => {
       )
     })
 
-  // Codex's hidden models have no published price. A guess would be worse than
+  // The hidden models have no published price. A guess would be worse than
   // "unknown", so the lookup must stay null for them.
   for (const model of ['gpt-daybreak-blue-latest', 'gpt-daybreak-red-latest', 'codex-auto-review'])
     it(`${model}: unpriced → null`, () => {

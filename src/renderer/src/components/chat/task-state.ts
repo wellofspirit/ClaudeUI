@@ -86,7 +86,7 @@ export interface TaskLifecycleState {
  * The ADR-040 predicate, unchanged in behaviour.
  *
  * The `isBackground ? !notification : !hasResult` fallback is deliberate and
- * load-bearing: opencode and pi child sessions, Codex agents, cross-engine
+ * load-bearing: opencode and pi child sessions, cross-engine
  * dispatch cards and every historical transcript emit no `task_started` at all,
  * so they have no `hasActiveTask` record and must keep the pre-ADR-040
  * heuristic exactly. A lifecycle record only ever ADDS running-ness.

@@ -64,8 +64,7 @@ export function versionAccepted(id: HarnessId, version: string): boolean {
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
+  pi: 'pi'
 }
 
 /**

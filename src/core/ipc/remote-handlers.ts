@@ -1,6 +1,5 @@
 import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
-import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import type { ProgressReporter } from '../../shared/remote-protocol'
 import * as os from 'os'
@@ -60,7 +59,7 @@ import {
 import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
-import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { chatgptRateLimits } from '../shared-providers/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
 import {
@@ -80,7 +79,6 @@ import type {
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { answerApproval } from './approval-response'
-import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { getCliVersion } from '../sdk/harness'
 import { listAllDirectories } from '../services/sync-seed'
@@ -150,7 +148,6 @@ import {
   askSideQuestion,
   setPermissionMode,
   setEffort,
-  setAccount,
   setThinkingMode,
   setModel,
   setReasoningVariant,
@@ -167,7 +164,6 @@ import {
   listPlaces,
   deleteSession,
   deleteProject,
-  codexDeletePlanFor,
   clearConversation,
   judgeModelSupport,
   judgeRouteResting,
@@ -625,18 +621,6 @@ export function registerRemoteHandlers(
     handler: async (routingId: string, effort: string) => setEffort(manager, routingId, effort)
   })
 
-  // ADR-068 §2 — the per-session vendor account pin. `session-config` like the
-  // two above: choosing which stored subscription a session bills is session
-  // configuration, and the phone manages the same accounts the desktop does.
-  handleRemote({
-    channel: 'session:set-account',
-    capability: 'session-config',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: async (routingId: string, accountId: string | null) =>
-      setAccount(manager, routingId, accountId)
-  })
-
   handleRemote({
     channel: 'session:set-thinking-mode',
     capability: 'session-config',
@@ -665,7 +649,7 @@ export function registerRemoteHandlers(
     handler: async () => claudeSupportedModels()
   })
 
-  // Cross-engine model catalog (Claude + opencode + pi + Codex, or one engine's
+  // Cross-engine model catalog (Claude + opencode + pi, or one engine's
   // share of it) for the model picker: the same `listEngineModels` as
   // session.ipc.ts's, minus the desktop-only auth-source reporting side effects
   // of its Claude read. It validates the client's engine id.
@@ -840,8 +824,6 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, title: string) => {
-      if (getSessionMeta(sessionId)?.engineId === 'codex')
-        throw new Error('Codex titles must not be written to Claude transcript files')
       // LOW-RW3: reachable by any token-holding remote client. Without this,
       // projectKey='../..' + a crafted sessionId appends attacker-controlled
       // JSON to an arbitrary *.jsonl on the host. Mirrors the desktop handler
@@ -1007,15 +989,6 @@ export function registerRemoteHandlers(
     handler: async (projectKey: string) => {
       await deleteProject(manager, projectKey)
     }
-  })
-
-  // The desktop twin in session.ipc.ts carries the reasoning; the two must
-  // agree on capability and kind or the registry throws.
-  handleRemote({
-    channel: 'session:codex-delete-plan',
-    capability: 'chat',
-    kind: 'query',
-    handler: async (threadId: string) => codexDeletePlanFor(manager, threadId)
   })
 
   // -------------------------------------------------------------------------
@@ -1938,7 +1911,6 @@ export function registerRemoteHandlers(
   for (const cmd of authCommands(resolvedAuthDeps)) {
     handleRemote(cmd)
   }
-  for (const command of codexCommands(manager)) handleRemote(command)
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)
 }

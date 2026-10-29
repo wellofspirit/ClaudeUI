@@ -15,9 +15,8 @@
  *  2. the account-switch listener was already subscribed when the boot-time
  *     apply landed, so every launch fired a second, pointless `fetch()`.
  *
- * The graph around `startCoreServices` is mocked the way
- * `codex/__tests__/rules-sync-wiring.test.ts` mocks it: the subject is the
- * ORDER of two calls, not anything either of them does.
+ * The graph around `startCoreServices` is mocked: the subject is the ORDER of two
+ * calls, not anything either of them does.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -86,10 +85,6 @@ vi.mock('../../shared-providers', () => ({
 }))
 vi.mock('../host-anchor', () => ({
   createHostAnchor: vi.fn(() => ({ reconcileAndAutostart: vi.fn(async () => {}) }))
-}))
-vi.mock('../../codex/rules-sync', () => ({
-  armCodexRulesSync: vi.fn(),
-  syncCodexRulesFile: vi.fn(() => ({ wrote: false, path: '/fixture/claudeui.rules', skipped: [] }))
 }))
 
 beforeEach(() => {

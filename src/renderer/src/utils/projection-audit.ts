@@ -2,7 +2,7 @@
  * Render-loss detector — audit the projection at every turn end (F4).
  *
  * Two of twenty real-turn desktop drives on 2026-09-12 (first turn of a new
- * Codex session, test suites running concurrently) rendered only the user bubble
+ * session, test suites running concurrently) rendered only the user bubble
  * and a spinner while core's canonical held every message. Which renderer layer
  * lost them — the fold, or the projection — was never captured, because by the
  * time anyone looked the app had moved on. This module makes the next occurrence
@@ -255,7 +255,7 @@ function observeStatus(channel: string, args: unknown[]): void {
       return
     }
     // Only the FIRST `running` of a turn takes the baseline. Later ones inside
-    // the same turn (a status echo, the status that carries a Codex rekey) must
+    // the same turn (a status echo, the status that carries a rekey) must
     // not move it, or a resync between turn start and rekey is never attributed.
     if (!resyncBaselines.has(id)) resyncBaselines.set(id, getSyncResyncCount())
     return
@@ -279,7 +279,7 @@ function observeStatus(channel: string, args: unknown[]): void {
 /**
  * Move a session's pending audit and resync baseline onto the id a rekey just
  * gave it — the detector's own version of the view carry-over the replica does.
- * Without it the first Codex turn of every session loses its baseline (recorded
+ * Without it the first turn of every session loses its baseline (recorded
  * under the minted routing id) and the audit could neither attribute a resync to
  * that turn nor decline to.
  */

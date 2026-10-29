@@ -218,12 +218,6 @@ export function ChatPanel(): React.JSX.Element {
     ]
   )
   const estimateHeight = useMessageHeightEstimator(columnWidth, estimateOptions)
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant') return messages[i].id
-    }
-    return null
-  }, [messages])
   // An evicted entry is empty because its transcript is not in memory, not because
   // the conversation is — the disk read that fills it is in flight or was
   // abandoned (ADR-087 §2). `WelcomeState` there would present an existing
@@ -381,7 +375,6 @@ export function ChatPanel(): React.JSX.Element {
                           <MessageBubble
                             message={msg}
                             pendingApprovals={pendingApprovals}
-                            isLastAssistant={msg.id === lastAssistantId}
                             activeThinking={activeThinkingByMessage.get(msg.id)}
                           />
                         </div>

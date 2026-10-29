@@ -1048,7 +1048,7 @@ type GuardDecision =
  *    changed — the landing, a link appearing or going, the scope class — while a human sat on the
  *    card, the call is denied (R15) instead of running against a path nobody approved.
  *
- * Passes every other call through untouched. No scope = no guard (Codex, other engines).
+ * Passes every other call through untouched. No scope = no guard (other engines).
  */
 export async function withPathGuard<D extends GuardDecision>(
   toolName: string,

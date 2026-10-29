@@ -64,7 +64,7 @@ to `--out` (default `.cache/screenshots/app.png`), then prints JSON:
   "screenshot": "...",
   "headless": true,
   "windowTitle": "ClaudeUI",
-  "needle": "Codex",
+  "needle": "ClaudeUI",
   "needleVisibleInDom": 0,
   "needleInRawHtml": 0,
   "consoleErrors": []
@@ -175,7 +175,7 @@ Assert the structure (`--assert-testid`, `--eval`) before reading the PNG, as ev
 CSS, `role=button[name="..."]`. Chain them to reach a view:
 
 ```
-# Welcome screen (no session): no Codex provider toggle should appear
+# Welcome screen (no session)
 node scripts/app-shot.mjs --out .cache/screenshots/welcome.png
 
 # Full Settings dialog nav (gear → All Settings)
@@ -307,15 +307,6 @@ Learned verifying cross-client approval dismiss and dispatch-target scope.
   Name each fixture file uniquely (`VERIFY_<x>.txt`) to attribute judge calls; the
   action under review is the last command after the judge text's final "Proposed next
   action" block.
-- **Codex without a provider**: copy the managed store's `codex/<version>` into the
-  scratch store and RESTART the app (Codex is detected at boot), point it at a localhost
-  fixture provider with a fixture key, and use a catalog model id (`gpt-5.5`). The
-  sandbox the binary actually ran is in the rollout's `turn_context.sandbox_policy`
-  (`<CODEX_HOME>/sessions/**/rollout-*.jsonl`); approval decisions in
-  `<CODEX_HOME>/logs_2.sqlite` (`FileChangeRequestApproval … Accept|Decline`).
-  `request_user_input` fires only in plan mode and Codex forces `isOther`, so only the
-  missing-answer rejections are reachable live. An accepted `apply_patch` may stall
-  against a fixture provider on Windows: interrupt the session after the decision.
 - **pi's bash strips backslashes** (`cat D:\x` becomes `D:x`): use forward slashes in
   pi commands.
 
@@ -390,7 +381,7 @@ Learned verifying the opencode subagent parity arc (ADR-111).
 - **Nesting**: opencode's built-in `general` and `explore` deny `subagent`, so a grandchild needs a custom agent
   that allows it plus `experimental.subagent_depth` ≥ 2 (the first child request may still offer `subagent`
   before ClaudeUI's child ruleset lands).
-- **An opencode dispatch target needs a pi (or Claude/Codex) parent**: opencode's dispatch tool cannot target
+- **An opencode dispatch target needs a pi (or Claude) parent**: opencode's dispatch tool cannot target
   opencode. Copy the managed `pi/<version>` into the scratch store, restart, `reloadEngineModels('pi')`, and set
   BOTH engines' `autoMode.judgeModel`.
 - **Backslashes are halved** on their way through the shell tool: a `\d` in a `sed` or `bash -c` argument arrives as
@@ -537,9 +528,6 @@ Learned verifying the worktree cleanup (ADR-112).
     kill that PID only.
   - Cancel a live holder by the holder id from `inventoryWorktrees(...).entries[].holders[]`,
     not the routing id: Claude rekeys after its first spawn.
-- **Codex without auth.** Copy `~/.claude/ui/harnesses/codex/<tested>` into the scratch
-  store. The shared host then spawns and logs
-  `app-server spawned: … cwd=<home>`.
 - **Claude turns without a provider.** Use a local `/v1/messages` SSE stand-in (see the
   judge stand-in section) set via `saveVendorConfig('anthropic', {endpoint: {enabled,
 baseUrl, authToken}})`.

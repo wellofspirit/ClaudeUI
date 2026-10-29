@@ -1,6 +1,5 @@
 import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
-import { codexCommands, CODEX_CHANNELS } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import * as path from 'path'
 import * as os from 'os'
@@ -55,7 +54,7 @@ import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
 import { gitWatchRegistry } from '../services/git-watch-registry'
 import { usageFetcher } from '../services/usage-fetcher'
-import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { chatgptRateLimits } from '../shared-providers/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
 import {
@@ -67,7 +66,6 @@ import { serviceSession } from '../services/service-session'
 import { blockUsageService } from '../services/block-usage'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { answerApproval } from './approval-response'
-import { getSessionMeta } from '../services/db'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { sharedProviderService } from '../shared-providers'
 import { decorateSharedProviderClaims } from '../shared-providers/opencode-claims'
@@ -137,7 +135,6 @@ import {
   askSideQuestion,
   setPermissionMode,
   setEffort,
-  setAccount,
   setThinkingMode,
   setModel,
   setReasoningVariant,
@@ -154,7 +151,6 @@ import {
   listPlaces,
   deleteSession,
   deleteProject,
-  codexDeletePlanFor,
   clearConversation,
   judgeModelSupport,
   judgeRouteResting,
@@ -295,7 +291,6 @@ const SESSION_IPC_CHANNELS = [
   'session:set-permission-mode',
   'session:set-model',
   'session:set-effort',
-  'session:set-account',
   'session:set-reasoning-variant',
   'session:get-models',
   'session:get-engine-models',
@@ -313,7 +308,6 @@ const SESSION_IPC_CHANNELS = [
   'session:get-session-log-path',
   'session:delete-session',
   'session:delete-project',
-  'session:codex-delete-plan',
   'session:clear-conversation',
   'session:list-directories',
   'session:list-opencode',
@@ -443,7 +437,6 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // a test; production boots core exactly once).
   unbindDesktopChannels([
     ...SESSION_IPC_CHANNELS,
-    ...CODEX_CHANNELS,
     ...USAGE_HUB_CHANNELS,
     ...OPENROUTER_CHANNELS,
     ...HARNESS_CHANNELS,
@@ -470,7 +463,6 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     sendPrompt: (routingId, prompt, options) =>
       sendPrompt(manager, routingId, prompt, undefined, options)
   })
-  for (const command of codexCommands(manager)) handleIpc(command)
 
   // The volatile lane's subscription verb (phase 5 S1). Same declaration the
   // remote transport registers — see `ipc/stream-watch.ts`.
@@ -757,7 +749,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   })
 
   // Voice input handlers (gated by capabilities.voice: Claude on a binary
-  // carrying the voice-server patch; opencode, pi and Codex on a host the
+  // carrying the voice-server patch; opencode and pi on a host the
   // on-device speech pack supports, ADR-101).
   //
   // The microphone is the RENDERER's (`renderer/src/lib/voice/`): these two verbs
@@ -820,17 +812,6 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'command',
     sessionIdArg: 0,
     handler: (routingId: string, effort: string) => setEffort(manager, routingId, effort)
-  })
-
-  // ADR-068 §2 — the per-session vendor account pin. Engine-neutral channel,
-  // refused by `setAccount` on an engine without `auth.perSessionAccount`.
-  handleIpc({
-    channel: 'session:set-account',
-    capability: 'session-config',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: (routingId: string, accountId: string | null) =>
-      setAccount(manager, routingId, accountId)
   })
 
   handleIpc({
@@ -972,8 +953,6 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, title: string) => {
-      if (getSessionMeta(sessionId)?.engineId === 'codex')
-        throw new Error('Codex titles must not be written to Claude transcript files')
       // LOW-RW3: both identifiers are caller-supplied and interpolated straight
       // into a path — a `..`/separator segment would append attacker-controlled
       // JSON to any *.jsonl on disk. Same check as deleteSessionFiles(); the
@@ -1016,16 +995,6 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: safeHandler(async (projectKey: string) => {
       await deleteProject(manager, projectKey)
     })
-  })
-
-  // READ-ONLY, and `chat` for the same reason the delete itself is (ADR-056):
-  // it describes which CONVERSATIONS a delete would remove. Codex only — no
-  // other engine's delete takes more than the session the user clicked.
-  handleIpc({
-    channel: 'session:codex-delete-plan',
-    capability: 'chat',
-    kind: 'query',
-    handler: safeHandler(async (threadId: string) => codexDeletePlanFor(manager, threadId))
   })
 
   handleIpc({
@@ -1290,7 +1259,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: (): string | null => locatePiDisplayPath()
   })
-  // Read-only Codex (ChatGPT) auth-vault status for Settings › pi's "Connect
+  // Read-only ChatGPT auth-vault status for Settings › pi's "Connect
   // ChatGPT" UI (M6c) — mirrors 'pi:binary-path''s registration shape exactly.
   // Never returns token material; see CredentialSync.getStatus().
   handleIpc({

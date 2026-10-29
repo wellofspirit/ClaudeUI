@@ -17,15 +17,14 @@ import {
 } from '../agent-type-colors'
 import type { EngineId } from '../types'
 
-const ENGINES: EngineId[] = ['claude', 'opencode', 'pi', 'codex']
+const ENGINES: EngineId[] = ['claude', 'opencode', 'pi']
 
 describe('the default type has no tile', () => {
-  it('is general-purpose / general / general-purpose / default per engine', () => {
+  it('is general-purpose / general / general-purpose per engine', () => {
     expect(DEFAULT_SUBAGENT_TYPE).toEqual({
       claude: 'general-purpose',
       opencode: 'general',
-      pi: 'general-purpose',
-      codex: 'default'
+      pi: 'general-purpose'
     })
   })
 
@@ -34,13 +33,11 @@ describe('the default type has no tile', () => {
     expect(isDefaultSubagentType('claude', ' General-Purpose ')).toBe(true)
     expect(isDefaultSubagentType('pi', 'general-purpose')).toBe(true)
     expect(isDefaultSubagentType('opencode', 'general')).toBe(true)
-    expect(isDefaultSubagentType('codex', 'default')).toBe(true)
   })
 
   it('does not cross engines: opencode `general` is a custom type on Claude', () => {
     expect(isDefaultSubagentType('claude', 'general')).toBe(false)
     expect(isDefaultSubagentType('opencode', 'general-purpose')).toBe(false)
-    expect(isDefaultSubagentType('codex', 'general-purpose')).toBe(false)
     for (const engine of ENGINES) expect(isDefaultSubagentType(engine, 'Explore')).toBe(false)
   })
 
@@ -318,7 +315,7 @@ describe('withAgentColorOverride', () => {
   })
 
   it('clearing from nothing is nothing', () => {
-    expect(withAgentColorOverride(undefined, 'codex', 'worker', undefined)).toBeUndefined()
+    expect(withAgentColorOverride(undefined, 'pi', 'worker', undefined)).toBeUndefined()
   })
 })
 

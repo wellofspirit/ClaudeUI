@@ -13,7 +13,7 @@ describe('modelTier', () => {
     ['opus', 'high'],
     ['sonnet[1m]', 'mid'],
     ['haiku', 'low'],
-    // Codex and pi ids
+    // ChatGPT and pi ids
     ['gpt-6-sol', 'high'],
     ['gpt-6.1-sol', 'high'],
     ['gpt-5.6-sol', 'high'],

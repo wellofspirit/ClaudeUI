@@ -42,9 +42,7 @@ const chatgpt: ProviderEntry = {
   subscription: true,
   engines: {
     opencode: { enabled: true, native: true, providerId: 'openai' },
-    pi: { enabled: true, native: true, providerId: 'openai-codex' },
-    // Fed by vault injection, not by a route (ADR-068 §1) — F14 projects it.
-    codex: { enabled: true }
+    pi: { enabled: true, native: true, providerId: 'openai-codex' }
   },
   detail: 'ChatGPT subscription · shared with pi and opencode',
   // Its ENABLED pi route lands on a vendor pi ships, so the row can override it.
@@ -223,7 +221,6 @@ beforeEach(async () => {
   stub('shared-provider:disconnect')
   stub('provider-account:switch')
   stub('provider-account:remove')
-  stub('provider-account:set-per-session')
   stub('shared-provider:remove')
   stub('session:set-opencode-provider-disabled')
   stub('session:remove-opencode-provider')
@@ -309,25 +306,13 @@ describe('ENABLED FOR', () => {
     expect(engineToggle('claude')).toHaveAttribute('aria-pressed', 'false')
   })
 
-  it('carries a read-only Codex row saying the account is not chosen per engine', async () => {
-    // Codex is injection, not a route (ADR-068 §1): there is nothing to toggle,
-    // and a row that offered one would promise a switch the vault does not have.
+  it('has an engine row for each harness the provider reaches, and none for a removed Codex', async () => {
     await openSheet('chatgpt')
-    expect(engineRow('codex')).toHaveTextContent('Codex always uses the active ChatGPT account')
-    // The Accounts page is gone: pinning lives on the ChatGPT card (ADR-074 §7).
-    expect(engineRow('codex')).toHaveTextContent(
-      'per-session pinning is in the ChatGPT card’s Options'
-    )
-    expect(
-      screen.queryAllByTestId('ProviderSheet.engineToggle').map((el) => el.dataset.id)
-    ).not.toContain('codex')
-  })
-
-  it('shows no Codex row on a provider the vault does not inject into Codex', async () => {
-    await openSheet('ollama-local')
-    expect(screen.getAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)).not.toContain(
-      'codex'
-    )
+    expect(screen.getAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)).toEqual([
+      'claude',
+      'opencode',
+      'pi'
+    ])
   })
 
   it('a shared route toggles through set-route, per harness, with no confirm', async () => {
@@ -390,7 +375,7 @@ describe('ENABLED FOR', () => {
   })
 
   it('has no row, pill or curation for a harness that does not run, until it runs (ADR-082 §8)', async () => {
-    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi', 'codex']))
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['pi']))
     const rows = (): (string | undefined)[] =>
       screen.queryAllByTestId('ProviderSheet.engine').map((el) => el.dataset.id)
     const pills = (): (string | undefined)[] =>
@@ -409,8 +394,8 @@ describe('ENABLED FOR', () => {
     await act(async () => {
       await harnessStore.refresh()
     })
-    expect(rows()).toEqual(['claude', 'opencode', 'pi', 'codex'])
-    expect(pills()).toEqual(['codex', 'opencode', 'pi'])
+    expect(rows()).toEqual(['claude', 'opencode', 'pi'])
+    expect(pills()).toEqual(['opencode', 'pi'])
     expect(sent('shared-provider:set-route')).toEqual([])
   })
 
@@ -453,9 +438,7 @@ describe('ENABLED FOR', () => {
   })
 
   it('the ChatGPT card draws no empty Harnesses box: Manage sits with its other actions', async () => {
-    app.bridge.ipcMain.handle('harness:state', async () =>
-      harnessSnapshot(['opencode', 'pi', 'codex'])
-    )
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
     render(<SubscriptionsSection />)
     await waitFor(() => expect(screen.getByTestId('SubscriptionsSection.manage')).toBeTruthy())
     await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
@@ -469,7 +452,8 @@ describe('ENABLED FOR', () => {
     await click(within(actions).getByTestId('SubscriptionsSection.manage'))
     expect(screen.getByTestId('ProviderSheet')).toHaveAttribute('data-id', 'chatgpt')
 
-    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
+    // pi comes back: its route (enabled) gives the row a pill.
+    app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode']))
     await act(async () => {
       await harnessStore.refresh()
     })
@@ -484,7 +468,6 @@ describe('ENABLED FOR', () => {
   describe('the ChatGPT card and sheet name only harnesses that run (ADR-082 §8)', () => {
     const twoAccounts: ProviderEntry['accounts'] = {
       activeId: 'acc-1',
-      perSession: false,
       list: [
         { id: 'acc-1', email: 'first@example.com', accountId: 'ws-1', planType: 'pro' },
         { id: 'acc-2', email: 'second@example.com', accountId: 'ws-2', planType: 'plus' }
@@ -503,37 +486,9 @@ describe('ENABLED FOR', () => {
       return byId(document.body, 'SubscriptionsSection.card', 'chatgpt')
     }
 
-    it('the Options fold waits for Codex; its copy names the routes that run', async () => {
-      withChatgpt({ accounts: twoAccounts })
-      let gpt = await renderCard(['codex', 'opencode', 'pi'])
-      await waitFor(() =>
-        expect(within(gpt).queryByTestId('SubscriptionsSection.options')).toBeNull()
-      )
-      expect(gpt.textContent).not.toMatch(/follow the active account/)
-      cleanup()
-      harnessStore.resetForTests()
-
-      // Codex alone: the option is there, and names no route that does not run.
-      gpt = await renderCard(['opencode', 'pi'])
-      await waitFor(() =>
-        expect(within(gpt).getByTestId('SubscriptionsSection.optionsSummary')).toBeTruthy()
-      )
-      const option = within(gpt).getByTestId('SubscriptionsSection.perSession')
-      expect(option.textContent).not.toMatch(/pi|opencode/)
-      cleanup()
-      harnessStore.resetForTests()
-
-      gpt = await renderCard(['pi'])
-      await waitFor(() =>
-        expect(within(gpt).getByTestId('SubscriptionsSection.perSession')).toHaveTextContent(
-          'opencode always follows the active account.'
-        )
-      )
-    })
-
     it('signed out, the subtitle and the sign-in line name only harnesses that run', async () => {
       withChatgpt({ credential: 'none', accounts: undefined })
-      let gpt = await renderCard(['codex', 'opencode', 'pi'])
+      let gpt = await renderCard(['opencode', 'pi'])
       await waitFor(() =>
         expect(within(gpt).getByTestId('SubscriptionsSection.signInNote')).toHaveTextContent(/^$/)
       )
@@ -542,7 +497,7 @@ describe('ENABLED FOR', () => {
       cleanup()
       harnessStore.resetForTests()
 
-      gpt = await renderCard(['codex'])
+      gpt = await renderCard([])
       await waitFor(() =>
         expect(within(gpt).getByTestId('SubscriptionsSection.signInNote')).toHaveTextContent(
           'Sign in once; pi and opencode both use the same account.'
@@ -554,7 +509,7 @@ describe('ENABLED FOR', () => {
 
     it('with no harness running, removing the last account names none', async () => {
       withChatgpt({ accounts: { ...twoAccounts, list: [twoAccounts.list[0]] } })
-      const gpt = await renderCard(['codex', 'opencode', 'pi'])
+      const gpt = await renderCard(['opencode', 'pi'])
       await waitFor(() =>
         expect(within(gpt).queryByTestId('SubscriptionsSection.engines')).toBeNull()
       )
@@ -581,13 +536,13 @@ describe('ENABLED FOR', () => {
       )
       await waitFor(() =>
         expect(within(row).getByTestId('SubscriptionsSection.confirm')).toHaveTextContent(
-          'ClaudeUI’s ChatGPT sign-in is removed from Codex and opencode. Where ChatGPT is switched off for opencode, a sign-in made there directly stays.'
+          'ClaudeUI’s ChatGPT sign-in is removed from opencode. Where ChatGPT is switched off for opencode, a sign-in made there directly stays.'
         )
       )
     })
 
     it('the sheet’s armed Disconnect says what each running harness keeps (S7e)', async () => {
-      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['codex']))
+      app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot())
       await openSheet('chatgpt')
       await waitFor(() => expect(harnessStore.getState().snapshot).not.toBeNull())
       expect(screen.queryByTestId('ProviderSheet.disconnectNote')).toBeNull()
@@ -699,7 +654,6 @@ describe('CREDENTIAL', () => {
 describe('a subscription’s sheet', () => {
   const twoAccounts = {
     activeId: 'acc-1',
-    perSession: false,
     list: [
       { id: 'acc-1', email: 'daniel@example.com', accountId: 'ws-11112222', planType: 'pro' },
       { id: 'acc-2', email: 'work@example.com', accountId: 'ws-33334444', planType: 'business' }

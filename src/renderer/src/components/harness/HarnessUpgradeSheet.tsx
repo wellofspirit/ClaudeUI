@@ -66,8 +66,8 @@ function Sheet({ rows }: { rows: UpgradeSheetRow[] }): React.JSX.Element {
           Install the harnesses you use
         </h3>
         <p className="mt-1 text-[12.5px] leading-5 text-text-secondary">
-          ClaudeUI no longer ships opencode, pi and Codex. It downloads ClaudeUI&apos;s tested
-          copies from their official releases and checks each one against a reviewed digest.
+          ClaudeUI no longer ships opencode and pi. It downloads ClaudeUI&apos;s tested copies from
+          their official releases and checks each one against a reviewed digest.
         </p>
         <div className="mt-4 space-y-1">
           {rows.map((row) => (

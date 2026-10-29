@@ -72,11 +72,7 @@ function authBlockMessage(
 function renderRow(errorMessage?: string, providerId?: string): ReturnType<typeof render> {
   return render(
     <TranscriptSessionProvider value={ROUTING_ID}>
-      <MessageBubble
-        message={authBlockMessage(errorMessage, providerId)}
-        pendingApprovals={[]}
-        isLastAssistant={false}
-      />
+      <MessageBubble message={authBlockMessage(errorMessage, providerId)} pendingApprovals={[]} />
     </TranscriptSessionProvider>
   )
 }
@@ -87,11 +83,7 @@ function renderRow(errorMessage?: string, providerId?: string): ReturnType<typeo
  */
 function renderInHistory(errorMessage?: string, providerId?: string): ReturnType<typeof render> {
   return render(
-    <MessageBubble
-      message={authBlockMessage(errorMessage, providerId)}
-      pendingApprovals={[]}
-      isLastAssistant={false}
-    />
+    <MessageBubble message={authBlockMessage(errorMessage, providerId)} pendingApprovals={[]} />
   )
 }
 
@@ -168,7 +160,7 @@ describe('AuthTranscriptRow — broken', () => {
       authRequired: {
         providerId: 'chatgpt',
         accountId: 'acct-1',
-        message: 'ChatGPT rejected the credential Codex runs under.',
+        message: 'ChatGPT rejected the credential pi runs under.',
         retryPrompt: 'refactor the dispatcher'
       }
     })
@@ -223,7 +215,7 @@ describe('AuthTranscriptRow — broken', () => {
     renderRow('')
     fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
     expect(screen.getByTestId('AuthTranscriptRow.message')).toHaveTextContent(
-      'ChatGPT rejected the credential Codex runs under.'
+      'ChatGPT rejected the credential pi runs under.'
     )
   })
 
@@ -253,7 +245,7 @@ describe('AuthTranscriptRow — resolved, retry owed', () => {
       authRequired: {
         providerId: 'chatgpt',
         accountId: 'acct-1',
-        message: 'ChatGPT rejected the credential Codex runs under.',
+        message: 'ChatGPT rejected the credential pi runs under.',
         retryPrompt: 'refactor the dispatcher',
         resolved: true
       }
@@ -272,7 +264,6 @@ describe('AuthTranscriptRow — resolved, retry owed', () => {
     useSessionStore.setState({
       providerAccounts: {
         activeId: 'acct-1',
-        perSession: false,
         accounts: [{ id: 'acct-1', email: 'user@example.com', expiresAt: 0, needsReauth: false }]
       }
     })
@@ -412,7 +403,7 @@ describe('AuthTranscriptRow — a row acts only for the provider it names', () =
       authRequired: {
         providerId: 'chatgpt',
         accountId: 'acct-1',
-        message: 'ChatGPT rejected the credential Codex runs under.',
+        message: 'ChatGPT rejected the credential pi runs under.',
         retryPrompt: 'refactor the dispatcher'
       }
     })
@@ -435,7 +426,7 @@ describe('AuthTranscriptRow — a row acts only for the provider it names', () =
     fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
     const disclosed = screen.getByTestId('AuthTranscriptRow.message')
     expect(disclosed).toHaveTextContent('API Error: 401 invalid authentication')
-    expect(disclosed.textContent).not.toContain('Codex runs under')
+    expect(disclosed.textContent).not.toContain('pi runs under')
   })
 
   it('the matching row keeps the live lifetime and the action', () => {
@@ -461,7 +452,7 @@ describe('AuthTranscriptRow — a row acts only for the provider it names', () =
     renderRow('', 'chatgpt')
     fireEvent.click(screen.getByTestId('AuthTranscriptRow.disclose'))
     expect(screen.getByTestId('AuthTranscriptRow.message')).toHaveTextContent(
-      'ChatGPT rejected the credential Codex runs under.'
+      'ChatGPT rejected the credential pi runs under.'
     )
   })
 })

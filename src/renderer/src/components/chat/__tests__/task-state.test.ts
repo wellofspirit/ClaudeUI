@@ -70,7 +70,7 @@ describe('deriveTaskState', () => {
   })
 
   it('a foreground task without a lifecycle record falls back to the result', () => {
-    // The legacy heuristic, load-bearing for opencode / pi / Codex children.
+    // The legacy heuristic, load-bearing for opencode / pi children.
     expect(deriveTaskState({ ...base }).isRunning).toBe(true)
     expect(deriveTaskState({ ...base, hasResult: true }).isRunning).toBe(false)
   })

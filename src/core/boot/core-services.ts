@@ -51,16 +51,12 @@ import { opencodeServerManager } from '../opencode/OpencodeServerManager'
 import { onOpencodeConfigWritten } from '../opencode/opencode-config'
 import { scheduleOpencodeConfigReload } from '../opencode/opencode-config-reload'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
-import { armCodexRulesSync, syncCodexRulesFile } from '../codex/rules-sync'
-import { followCodexActiveAccount } from '../codex/codex-account-switch'
-import { scanCodexLineage } from '../codex/history'
-import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { fedTokenHistory } from '../auth/vault/fed-token-history'
 import { opencodeCredentialStore } from '../opencode/opencode-credentials'
 import { fileSlotMemory } from '../opencode/credential-store'
 import { setOpencodeAuthHooks } from '../opencode/opencode-auth-hooks'
-import { OPENCODE_CODEX_VENDOR_ID } from '../auth/vault/CredentialSync'
+import { OPENCODE_CHATGPT_VENDOR_ID } from '../auth/vault/CredentialSync'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { addHostObserver, emitEvent, syncCore } from '../services/sync-host'
@@ -275,39 +271,16 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // headless `claudeui-server`) reaches this line just the same.
   usageFetcher.startPolling()
 
-  // ACTIVE-account switch -> the Codex sessions that follow it (ADR-069 §4).
-  // Here rather than in `register-auth-providers.ts` (which wires the two engine
-  // FEED targets) for two reasons: the session graph is what this needs and it
-  // exists only at this point, and `claudeui-server` never imports that
-  // registrar, so a headless host would silently keep every follower on the old
-  // account's host. `configure()` is additive, so this adds the hook without
-  // disturbing the feed targets the desktop registrar has already wired.
-  //
-  // Reads the active id back from the vault rather than taking it as an
-  // argument: the hook fires for a switch AND for the removal of the active
-  // account (which promotes another), and the status is the one answer that is
-  // right for both.
   credentialSync.configure({
-    onActiveAccountChanged: async () => {
-      const activeId = await credentialSync
-        .getStatus()
-        .then((status) => status.activeId)
-        .catch(() => undefined)
-      // An unreadable vault is not a licence to guess: `null` here would read as
-      // "no account is active" and move every follower off its host for nothing.
-      if (activeId === undefined) return
-      await followCodexActiveAccount(sessionManager, activeId)
-    },
     // A stored ChatGPT credential -> the ONE resolution signal (ADR-070 §2),
     // replicated so a sign-in taken here clears the owed sign-in on every other
-    // client too. Wired at the SAME seam as the hook above, for the same reason:
-    // `CredentialSync` must not import `sync-host` (its unit tests mock almost
-    // nothing and would pull in the whole service graph), and both hosts need it.
+    // client too. Wired here because `CredentialSync` must not import
+    // `sync-host` (its unit tests mock almost nothing and would pull in the
+    // whole service graph), and both hosts need it.
     //
     // The account id rides along so the fan-out is narrowed to the credential
-    // that was actually stored: it is the vault key, the same id-space Codex
-    // puts on `session:auth-required`, so adding account B leaves the sessions
-    // broken on account A owing their sign-in.
+    // that was actually stored: it is the vault key, so adding account B leaves
+    // the sessions broken on account A owing their sign-in.
     onCredentialStored: (accountId) =>
       emitEvent('provider:auth-resolved', [
         { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
@@ -346,9 +319,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   })
   setOpencodeAuthHooks({
     beforeTurn: async (providerID) =>
-      providerID === OPENCODE_CODEX_VENDOR_ID ? credentialSync.opencodeTurnGate() : null,
+      providerID === OPENCODE_CHATGPT_VENDOR_ID ? credentialSync.opencodeTurnGate() : null,
     authFailed: (providerID) => {
-      if (providerID === OPENCODE_CODEX_VENDOR_ID) void credentialSync.opencodeAuthFailed()
+      if (providerID === OPENCODE_CHATGPT_VENDOR_ID) void credentialSync.opencodeAuthFailed()
     }
   })
 
@@ -366,18 +339,6 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // out of the database itself rather than taking it as an option, so the one
   // answer serves both hosts and a `usage-hub:configure` can re-arm it in place.
   usageHubClient.start()
-
-  // Recompile the user's Bash permission rules into `$CODEX_HOME/rules/
-  // claudeui.rules` (see `codex/rules-sync.ts`). Here rather than in either
-  // host's entrypoint because BOTH deployments must do it, and after the
-  // session graph because that is where the settings the compiler reads are
-  // already resolved. Synchronous and cheap — one stat, one read, a hash
-  // compare — and it swallows its own failures, so boot cannot be blocked by a
-  // rule file. `armCodexRulesSync` is what permits the OTHER two triggers
-  // (a permission save, a Codex spawn prep) to touch the user's own
-  // `$CODEX_HOME` at all — see that module's `defaultHomeArmed`.
-  armCodexRulesSync()
-  syncCodexRulesFile()
 
   // A harness install, uninstall, selection change or update replaces the
   // binary pi's and opencode's model discovery asked, so their catalogs go with
@@ -443,33 +404,6 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       void sweepVoicePackStore()
     }
   })
-
-  // Learn what every Codex thread is a branch OF, once per launch, alongside the
-  // Claude session scan the line above sits next to (`registerSessionIpc` seeds
-  // canonical and starts the directory walk; this hangs off that same moment).
-  //
-  // Detached and best-effort: it spawns an app-server, lists the threads and
-  // reads the metadata of the ones whose lineage the cache (db v17) does not
-  // already know — a handful on the first launch, usually none on the next — so
-  // it must never be on boot's critical path, and a machine with no Codex
-  // installed returns immediately. What it buys is a delete plan that is a
-  // synchronous cache read instead of a sweep of every Codex session
-  // (`codex/history.ts` `scanCodexLineage`). The refresh runs only when the scan
-  // actually learned something, because that is when a branch may have appeared
-  // in — or fallen out of — the sidebar's listing.
-  void (async () => {
-    try {
-      const { read, learned } = await scanCodexLineage()
-      if (read || learned)
-        logger.info('main', `Codex lineage scan: ${read} thread(s) read, ${learned} learned`)
-      if (learned) await refreshCanonicalDirectories()
-    } catch (err) {
-      logger.warn(
-        'main',
-        `Codex lineage scan failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-  })()
 
   // A harness that ARRIVES — pi or opencode goes from not running to running:
   // an install, a selection change, a finished detection — gets what ClaudeUI

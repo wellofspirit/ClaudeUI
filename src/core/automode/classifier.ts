@@ -337,7 +337,7 @@ function renderProseEntry(label: 'User' | 'Assistant', text: string): string {
  * forge a turn.
  *
  * `role: 'system'` messages are skipped whole, whatever they carry: system rows
- * are engine/host notes (compaction, API errors, Codex guardian notices,
+ * are engine/host notes (compaction, API errors,
  * host-injected agent messages such as a pi task notification, ADR-089 S3) and
  * never a human turn, so none may become a `User:` line or the user's consent.
  *

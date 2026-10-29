@@ -40,7 +40,7 @@ them wins. A recording failure is logged and swallowed; metering never fails a t
 A row carries what the turn was (`engine_id`, `vendor_id`, `model_id`, the five token counts), what
 it was worth (`equiv_cost_usd` and `engine_cost_usd` as the raw inputs, `api_cost_usd` and
 `billed_cost_usd` as the two resolved figures), and who ran it (`account_key`, `account_label`,
-`billing_type`). `origin` is `session`, `child` for a native subagent or a Codex child thread,
+`billing_type`). `origin` is `session`, `child` for a native subagent,
 `dispatch`, or `judge` for an auto-mode judge call ClaudeUI made itself (ADR-081), and
 `parent_routing_id` names the spawning, dispatching or judged session for the last three.
 Migration v18 added those seven columns; `SessionManager.rekey()` renames `parent_routing_id` with
@@ -50,10 +50,8 @@ Token conventions differ per engine on purpose, and a reader cannot tell from th
 `reasoning` into the output count, in `OpencodeSession` and in `usage-reconciler.ts` alike, because
 every provider it meters this way bills reasoning as output and `info.cost` already includes it. pi
 does not: its rows carry the engine's own split, and the fold happens only inside
-`src/core/pi/message-cost.ts` when our table has to price a turn pi reported as zero. Codex needs no
-fold, because `reasoningOutputTokens` is already a subset of `outputTokens` on its wire;
-`codexDisjointTokens` in `src/core/codex/usage-ledger.ts` is the one place its nested counts become
-the disjoint ones a price and a row want.
+`src/core/pi/message-cost.ts` when our table has to price a turn pi reported as zero. Rows from the
+removed Codex engine (2026-10-28) are kept as recorded.
 
 The two costs come from `resolveCosts` in `src/shared/cost-rule.ts`, applied once at write time by
 `rowCosts`. Under a subscription the bill is zero and the display figure is the equivalent; under an
@@ -73,9 +71,9 @@ over a domain-separated prefix (`src/core/services/account-key-hash.ts`, pinned 
 `<engine>:<vendor>:native` for credentials an engine holds that we cannot identify. opencode and pi
 need no patch: `src/core/auth/account-identity.ts` reads the identity out of the engine's own
 `auth.json`, returns the key and the label and nothing else, and caches on the file's path, mtime and
-size so a sign-in between turns attributes each turn to the account that ran it. Codex resolves its
-key through `CodexAuthHook.accountIdentity`, which gives the same `chatgpt:` key for the same
-subscription, so spend through any of the three engines lands on one account.
+size so a sign-in between turns attributes each turn to the account that ran it. A ChatGPT
+subscription yields the same `chatgpt:` key on every engine, so spend through opencode and pi lands
+on one account.
 
 `unknown` is the bucket, not an account. It holds history from before attribution, rows whose account
 nothing on disk can name, and Claude turns from sessions this app did not spawn while several account
@@ -100,8 +98,7 @@ per-file parse (`parseJsonlFile`, which also feeds the watcher, the scans and th
 reconciler) skips any session id in the dispatch ledger (`dispatch_target`, through
 `isDispatchTargetSession`) for the same reason, subagent files of that session included; the
 history lists skip the same ids. The judge's review of an X-Agent's `hand_back` report is a judge row under the
-dispatching session (not counted in `dispatch.maxCostUsd`); a Codex target's review is filed under engine `pi`,
-route `openai-codex`, with no session id.
+dispatching session (not counted in `dispatch.maxCostUsd`).
 
 Judge calls are ledger rows too. ClaudeUI makes the opencode and pi auto-mode judge's model call
 itself (ADR-081), so no engine meters it; the transport hands each call's usage to
@@ -185,7 +182,7 @@ credentials for, not only the active one. The Claude provider reads the active a
 provider maps `ChatgptRateLimitStore`'s snapshot, resolving each vault account's identity through
 `CredentialSync.accountIdentity`. A ChatGPT credits plan (a business workspace) has no window: its
 reading carries `credits` (unlimited, and a balance usually withheld from a member) and `creditLimit`,
-the member's monthly allowance from Codex's `individualLimit` (used, limit, percent left, reset). The
+the member's monthly allowance from the ChatGPT backend's `individualLimit` (used, limit, percent left, reset). The
 allowance is drawn as a meter, never sampled and never a window kind. A provider that throws yields nothing rather than blanking the
 others, and a per-account failure travels as `state` on that account.
 
@@ -298,10 +295,9 @@ history already on disk is re-read under the new rule and the hub deduplicates w
 `client.ts` runs the pass. A push sends batches of at most 500 events, advancing the cursor only after
 the hub has taken a batch, then the queued limit readings with the newest credit reading per account
 beside them. Credit readings reach the client through `credit-readings.ts`, which the ChatGPT store
-publishes each account's merged credits to, dated by the last FULL read (`account/rateLimits/read`)
-and never by a live turn's push: Codex builds a push from response headers with no allowance and
-copies the previous one forward, so dating that copy by the push would let it overwrite another
-machine's newer reading on the hub, whose rule is newest-wins. Until a full read has happened in this
+publishes each account's merged credits to, dated by the last read of the ChatGPT
+usage endpoint, so a copied-forward reading can never overwrite another machine's newer one on the
+hub, whose rule is newest-wins. Until a read has happened in this
 process nothing is relayed, and a reading identical to the last published one (its instant included)
 is not published again. On a relayed row the credits carry their own source (`creditSource`,
 `creditObservedAt`), because the two relays are separate. An empty events array is a valid request
@@ -507,7 +503,7 @@ deletions; it is moot as built, because the hub folds its own buckets from the e
   [ADR-034](../adr/adr-034_session-time-and-cost-accounting.md): dispatched spend, and what a session
   headline means.
 - [ADR-068](../adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md) and
-  [ADR-069](../adr/adr-069_codex-host-per-home-and-account.md): ChatGPT accounts and their hosts.
+  [ADR-069](../adr/adr-069_codex-host-per-home-and-account.md) (retired with the Codex engine): ChatGPT accounts.
 - [persistence.md](persistence.md) for the operational database, [sync-core.md](sync-core.md) for the
   event channels the dashboard listens on, [remote.md](remote.md) and [security.md](security.md) for
   the transport and the capability the `usage:*` and `usage-hub:*` channels sit at.

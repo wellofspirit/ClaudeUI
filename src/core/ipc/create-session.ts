@@ -55,14 +55,12 @@ export interface CreateSessionArgs {
  *
  * Until now the registry row was written only by the CREATING client's own save,
  * so a session created by anything else — a remote `session:create`, which has no
- * `createNewSession` behind it — had no row until a model-bearing `session:status`
- * (Codex starts lazily and sends none before the first prompt). Every other
- * client then rendered it as Claude, and its next registry save could not tell
+ * `createNewSession` behind it — had no row until a model-bearing `session:status`.
+ * Every other client then rendered it as Claude, and its next registry save could not tell
  * "unknown to me" from "gone" (see `saveSessionConfig`).
  *
  * INSERT-if-absent: a respawn or a resume already has a row, and it may carry the
- * user's own later model pick, which the spawn model must not overwrite. Codex's
- * model is left off — `CodexSession` records the one it actually runs. The row
+ * user's own later model pick, which the spawn model must not overwrite. The row
  * reaches the clients through the registry broadcast, built on canonical's own map
  * so only this session's entry is added. Best-effort, like the other host-side
  * bookkeeping: a DB hiccup must never fail the spawn.
@@ -75,10 +73,9 @@ function recordBirthIdentity(
   try {
     let meta = getSessionMeta(routingId)
     if (!meta) {
-      const model: ModelRef | undefined =
-        engineId !== 'codex' && resolvedModel
-          ? engineMeta(engineId).decodeModelValue(resolvedModel)
-          : undefined
+      const model: ModelRef | undefined = resolvedModel
+        ? engineMeta(engineId).decodeModelValue(resolvedModel)
+        : undefined
       meta = { engineId, ...(model ? { model } : {}) }
       setSessionMeta(routingId, meta)
     }
@@ -139,8 +136,7 @@ export async function prepareAndCreateSession(
     resumeSessionId,
     permissionMode,
     model: resolvedModel,
-    // Claude's own sandbox feature, unrelated to Codex's native sandbox policy.
-    sandboxConfig: resolvedEngineId === 'codex' ? undefined : engineCfg.sandbox,
+    sandboxConfig: engineCfg.sandbox,
     thinkingMode,
     resumeSessionAt,
     forkSession

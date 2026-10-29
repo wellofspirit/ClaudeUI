@@ -4,7 +4,6 @@ import { useSessionStore } from '../../stores/session-store'
 import type { DirectoryGroup, EngineId, SessionInfo, WorktreeInfo } from '../../../../shared/types'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
-import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
 import { isCreatedWorktree } from '../../../../shared/linked-worktree'
@@ -28,17 +27,6 @@ type SidebarSessionData = {
   selectedEngineId: EngineId
 }
 
-function isCodexSession(sessionId: string): boolean {
-  const state = useSessionStore.getState()
-  return (
-    state.sessions[sessionId]?.selectedEngineId === 'codex' ||
-    state.sessionEngines[sessionId]?.engineId === 'codex' ||
-    state.directories.some((group) =>
-      group.sessions.some((info) => info.sessionId === sessionId && info.engineId === 'codex')
-    )
-  )
-}
-
 /**
  * A session that is in memory but not on disk yet (never spawned, or its
  * transcript not listed yet), as a sidebar row. Its harness comes from
@@ -47,7 +35,7 @@ function isCodexSession(sessionId: string): boolean {
  * first spawn failed showed Claude's logo in Recent (ADR-082 S7b).
  *
  * A session another client or the host created has no `sessionEngines` entry until
- * a model-bearing status arrives (Codex sends none before its first prompt); its
+ * a model-bearing status arrives; its
  * birth engine, replicated on `session:created`, stands in until then.
  */
 function inMemorySessionInfo(
@@ -170,8 +158,6 @@ export function Sidebar({
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [showHidden, setShowHidden] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
-  const [deletePlan, setDeletePlan] = useState<CodexDeletePlan | null>(null)
-  const [historyError, setHistoryError] = useState<string | null>(null)
 
   const hiddenSessionSet = useMemo(() => new Set(hiddenSessionIds), [hiddenSessionIds])
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
@@ -197,7 +183,6 @@ export function Sidebar({
   const applyTitle = useCallback(
     (sessionId: string, title: string) => {
       setCustomTitle(sessionId, title)
-      if (isCodexSession(sessionId)) return
       const projectKey = findProjectKey(sessionId)
       if (projectKey && title) {
         window.api.writeCustomTitle(sessionId, projectKey, title)
@@ -209,10 +194,6 @@ export function Sidebar({
   const handleRename = useCallback(
     async (sessionId: string, newTitle: string) => {
       setRenamingKey(null)
-      if (!newTitle.trim() && isCodexSession(sessionId)) {
-        setCustomTitle(sessionId, '')
-        return
-      }
       if (newTitle.trim()) {
         applyTitle(sessionId, newTitle.trim())
         return
@@ -352,7 +333,7 @@ export function Sidebar({
 
     // Navigate first (ADR-102): a placeholder entry renders the loading view while
     // the transcript is read, instead of the sidebar sitting dead for seconds. The
-    // per-engine load (opencode / pi / codex / Claude + subagent files) is shared
+    // per-engine load (opencode / pi / Claude + subagent files) is shared
     // with the post-hydrate reload of the active session.
     const replace = replaceOnClick(inMemory)
     beginTranscriptPlaceholder(info)
@@ -363,7 +344,6 @@ export function Sidebar({
     // entry stays evicted so the next click retries. A failure shows Retry.
     await loadClickedSession(info, {
       isCurrent: () => selectionTarget.current === routingId,
-      onCodexError: setHistoryError,
       replace
     })
   }
@@ -530,31 +510,6 @@ export function Sidebar({
     [directories]
   )
 
-  /**
-   * What deleting the pending CODEX target would actually remove.
-   *
-   * Only Codex has a plan: its native delete is refused while a fork still
-   * references the thread's history, so a branched session is a subtree delete
-   * and the confirmation has to say so before the user agrees to it. The answer
-   * is advisory — main recomputes the plan when the delete runs and never
-   * trusts this copy — and a failed query just leaves the plain confirmation
-   * standing rather than blocking the delete.
-   */
-  useEffect(() => {
-    setDeletePlan(null)
-    if (deleteTarget?.kind !== 'session' || deleteTarget.engineId !== 'codex') return
-    let current = true
-    void window.api
-      .codexDeletePlan(deleteTarget.sessionId)
-      .then((plan) => {
-        if (current) setDeletePlan(plan)
-      })
-      .catch(() => {})
-    return () => {
-      current = false
-    }
-  }, [deleteTarget])
-
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!deleteTarget) return
     if (deleteTarget.kind === 'session') {
@@ -638,18 +593,6 @@ export function Sidebar({
 
   return (
     <>
-      {historyError && (
-        <div
-          role="alert"
-          data-testid="Sidebar.nativeHistoryError"
-          className="fixed top-3 right-3 z-50 max-w-sm rounded-lg border border-border bg-bg-secondary p-3 text-sm"
-        >
-          {historyError}
-          <button onClick={() => setHistoryError(null)} className="block mt-2">
-            Dismiss
-          </button>
-        </div>
-      )}
       <SidebarView
         style={style}
         platform={window.api.platform}
@@ -671,7 +614,6 @@ export function Sidebar({
         renamingKey={renamingKey}
         worktreesModalCwd={worktreesModalCwd}
         deleteTarget={deleteTarget}
-        deletePlan={deletePlan}
         cleanupWorktree={cleanupWorktree}
         onToggleCollapse={onToggleCollapse}
         onNewSession={handleNewSession}

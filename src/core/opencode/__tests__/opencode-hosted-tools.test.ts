@@ -655,7 +655,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     expect(def.inputSchema.shape.model.description).toContain('sonnet')
   })
 
-  it('steers opencode to its own subagent tool first (S4) and lists claude, pi and codex as targets', () => {
+  it('steers opencode to its own subagent tool first (S4) and lists claude and pi as targets', () => {
     vi.mocked(loadEngineConfig).mockReturnValue({})
     const { description } = getDispatchToolDef(tmp)
     expect(description).toContain(
@@ -663,8 +663,9 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     )
     expect(description).toContain('use your own subagent tool instead')
     expect(description).toContain(
-      "claude (Anthropic's models), pi (an alternative coding-agent harness) or codex"
+      "claude (Anthropic's models) or pi (an alternative coding-agent harness)"
     )
+    expect(description).not.toContain('codex (')
   })
 
   it('falls back to the generic Claude-alias hint when nothing is configured', () => {

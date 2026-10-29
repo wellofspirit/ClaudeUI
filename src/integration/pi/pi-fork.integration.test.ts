@@ -50,7 +50,7 @@ const SKIP = !process.env.PI_INTEGRATION_TESTS
 const MODEL = { provider: 'openai-codex', modelId: 'gpt-5.6-luna' }
 
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
-function hasCodexCredentials(): boolean {
+function hasChatgptCredentials(): boolean {
   try {
     const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent')
     const raw = readFileSync(join(agentDir, 'auth.json'), 'utf-8')
@@ -62,7 +62,7 @@ function hasCodexCredentials(): boolean {
 }
 
 const BINARY_MISSING = !locatePiBinary()
-const CREDENTIALS_MISSING = !hasCodexCredentials()
+const CREDENTIALS_MISSING = !hasChatgptCredentials()
 
 function sha256(filePath: string): string {
   return createHash('sha256').update(readFileSync(filePath)).digest('hex')

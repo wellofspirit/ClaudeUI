@@ -6,8 +6,8 @@
  *
  * Before this, only the creating client's own save wrote the row. A session
  * created by anything else — a remote `session:create`, which has no
- * `createNewSession` behind it — had none until a model-bearing `session:status`,
- * and Codex starts lazily and sends none before the first prompt: every other
+ * `createNewSession` behind it — had none until a model-bearing `session:status`:
+ * every other
  * client rendered it as Claude, and any client's next registry save could then
  * revert it.
  *
@@ -71,7 +71,7 @@ async function fresh(): Promise<{
   const db = await import('../../../core/services/db')
   const { syncCore } = await import('../../../core/services/sync-host')
   const { spawnPrepRegistry } = await import('../../../core/providers/SpawnPrepRegistry')
-  for (const id of ['claude', 'opencode', 'pi', 'codex'] as const)
+  for (const id of ['claude', 'opencode', 'pi'] as const)
     spawnPrepRegistry.register(id, async (model?: string) => ({ resolvedModel: model }))
   const { prepareAndCreateSession } = await import('../../../core/ipc/create-session')
   syncCore.resetCanonicalForTests()
@@ -86,15 +86,15 @@ async function fresh(): Promise<{
 
 // `fresh()` re-imports the whole create-session graph; a loaded machine can pass the 5 s default.
 describe('prepareAndCreateSession — birth identity', { timeout: 30_000 }, () => {
-  it('records a Codex session at once, with no model (CodexSession owns that), and replicates it', async () => {
+  it('records a session at once, with no model when none resolved, and replicates it', async () => {
     const { db, syncCore, create } = await fresh()
     try {
-      await create({ engineId: 'codex' })
+      await create({ engineId: 'pi' })
 
-      expect(db.getSessionMeta(RID)).toEqual({ engineId: 'codex' })
-      // Canonical carries it too, so every connected and late-joining client reads Codex.
-      expect(syncCore.getCanonicalState().sessionEngines[RID]).toEqual({ engineId: 'codex' })
-      expect(syncCore.getSnapshot().sessionEngines?.[RID]).toEqual({ engineId: 'codex' })
+      expect(db.getSessionMeta(RID)).toEqual({ engineId: 'pi' })
+      // Canonical carries it too, so every connected and late-joining client reads pi.
+      expect(syncCore.getCanonicalState().sessionEngines[RID]).toEqual({ engineId: 'pi' })
+      expect(syncCore.getSnapshot().sessionEngines?.[RID]).toEqual({ engineId: 'pi' })
     } finally {
       db.closeDb()
     }

@@ -65,7 +65,7 @@ import {
   type JudgeEngine
 } from '../../src/core/automode/judge-route'
 import { authVault, CHATGPT_PROVIDER_ID } from '../../src/core/auth/vault/AuthVault'
-import type { CodexInjectionToken } from '../../src/core/auth/vault/CredentialSync'
+import type { ChatgptInjectionToken } from '../../src/core/auth/vault/CredentialSync'
 import type { ChatMessage } from '../../src/shared/types'
 import {
   BASH_CASES,
@@ -694,7 +694,7 @@ if (requestedAccount !== undefined) {
 // Eval-only: read the chosen (else active), unexpired credential without refresh or
 // vault writes. A forced retry cannot refresh either; a stale token becomes a
 // reported error.
-async function readOnlyChatgptToken(force: boolean): Promise<CodexInjectionToken | null> {
+async function readOnlyChatgptToken(force: boolean): Promise<ChatgptInjectionToken | null> {
   if (force) return null
   const activeId =
     requestedAccount === undefined ? await authVault.getActiveAccountId(CHATGPT_PROVIDER_ID) : null

@@ -46,7 +46,7 @@ function blamedSessions(state: SessionState): Record<string, AuthRequiredState> 
  *
  * The scope of the proactive half (`AuthIssuesInput.inUse`): the vault answers
  * `'unauthenticated'` for an empty store, so without it a Claude-only install
- * carried a permanent amber "Blocks Codex" pill. The rule is
+ * carried a permanent amber "Blocks pi" pill. The rule is
  * {@link signInProviderFor} — the SAME one that scoped the deleted composer
  * hint to the engine it was about to spawn — applied to every session rather
  * than to the active one, because the pill is app-wide.

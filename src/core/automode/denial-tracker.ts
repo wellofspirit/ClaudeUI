@@ -132,8 +132,7 @@ export function autoModeBlockReason(result: { reason?: string; category?: string
 }
 
 /**
- * The judge's verdict as a block on the card it judged (F18) — the ClaudeUI
- * half of what Codex's native auto-review produces for itself.
+ * The judge's verdict as a block on the card it judged (F18).
  *
  * Emitted for a real verdict only. A fast-path allow never reaches the judge, an
  * `unavailable` result is not a verdict, and a denial CAP hands the decision to
@@ -142,7 +141,7 @@ export function autoModeBlockReason(result: { reason?: string; category?: string
  * which path it took.
  *
  * `reason` is UNTRUSTED model text, so it goes through the same collapse-and-cap
- * as Codex's rationale. There is no risk level: ClaudeUI's classifier scores a
+ * as every review rationale (`core/shared/tool-review.ts`). There is no risk level: ClaudeUI's classifier scores a
  * rule, not a severity.
  */
 export function autoModeReviewBlock(

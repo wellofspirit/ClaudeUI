@@ -19,15 +19,7 @@ import {
   type ResolveDeps
 } from '../resolve-install'
 import type { Candidate } from '../candidates'
-import {
-  PLACEHOLDER_STUB,
-  cmdShim,
-  linkDir,
-  shShim,
-  writeNative,
-  writePackage,
-  writeText
-} from './layout'
+import { PLACEHOLDER_STUB, cmdShim, shShim, writeNative, writePackage, writeText } from './layout'
 
 let tmp: string
 let deps: ResolveDeps
@@ -194,77 +186,6 @@ describe('opencodePlatformPackages', () => {
       'opencode-windows-x64',
       'opencode-windows-x64-baseline'
     ])
-  })
-})
-
-describe('npm Codex', () => {
-  const TRIPLE = 'x86_64-pc-windows-msvc'
-
-  function codexPackage(nm: string): string {
-    return writePackage(
-      path.join(nm, '@openai', 'codex'),
-      { name: '@openai/codex', version: '0.156.0', bin: { codex: 'bin/codex.js' } },
-      { 'bin/codex.js': '#!/usr/bin/env node\nimport "./x.js"\n' }
-    )
-  }
-
-  it('resolves the aliased platform package past the Node launcher', () => {
-    const prefix = path.join(tmp, 'npm')
-    const nm = path.join(prefix, 'node_modules')
-    codexPackage(nm)
-    // npm aliases `@openai/codex-win32-x64` to `@openai/codex@<v>-win32-x64`,
-    // so the platform package's own name is `@openai/codex`.
-    const platformPkg = writePackage(
-      path.join(nm, '@openai', 'codex-win32-x64'),
-      { name: '@openai/codex', version: '0.156.0-win32-x64' },
-      {
-        [`vendor/${TRIPLE}/bin/codex.exe`]: 'native',
-        [`vendor/${TRIPLE}/bin/codex-code-mode-host.exe`]: 'native'
-      }
-    )
-    const shim = writeText(
-      path.join(prefix, 'codex.cmd'),
-      cmdShim('node_modules/@openai/codex/bin/codex.js', true)
-    )
-    const r = resolved(resolveCandidate(file('codex', shim), { ...deps, ...WIN }))
-    const exe = path.join(platformPkg, 'vendor', TRIPLE, 'bin', 'codex.exe')
-    expect(r).toMatchObject({ displayPath: shim, realPath: exe, installKind: 'npm' })
-    expect(r.launch).toEqual({ command: exe, args: [] })
-  })
-
-  it("falls back to the package's own vendor directory", () => {
-    const nm = path.join(tmp, 'npm', 'node_modules')
-    const pkg = codexPackage(nm)
-    writeNative(path.join(pkg, 'vendor', TRIPLE, 'bin', 'codex.exe'))
-    const r = resolved(
-      resolveCandidate({ id: 'codex', kind: 'package', path: pkg }, { ...deps, ...WIN })
-    )
-    expect(r.realPath).toBe(path.join(pkg, 'vendor', TRIPLE, 'bin', 'codex.exe'))
-  })
-
-  it('is unsupported without a platform package', () => {
-    const pkg = codexPackage(path.join(tmp, 'npm', 'node_modules'))
-    const r = unsupported(
-      resolveCandidate({ id: 'codex', kind: 'package', path: pkg }, { ...deps, ...WIN })
-    )
-    expect(r.reason).toContain('@openai/codex-win32-x64')
-  })
-})
-
-describe('Codex standalone installer', () => {
-  it('resolves the current junction/symlink into the release directory', () => {
-    const standalone = path.join(deps.homedir, '.codex', 'packages', 'standalone')
-    const release = path.join(standalone, 'releases', '0.156.0-x86_64-pc-windows-msvc')
-    writeNative(path.join(release, 'bin', `codex${HOST_EXE}`))
-    linkDir(release, path.join(standalone, 'current'))
-    const r = resolved(
-      resolveCandidate(
-        file('codex', path.join(standalone, 'current', 'bin', `codex${HOST_EXE}`)),
-        deps
-      )
-    )
-    expect(r.realPath).toBe(path.join(release, 'bin', `codex${HOST_EXE}`))
-    expect(r.installKind).toBe('standalone')
   })
 })
 
@@ -478,12 +399,11 @@ describe('shimTargets', () => {
 describe('installKindFor', () => {
   it.each([
     ['/opt/homebrew/Cellar/pi-coding-agent/0.87.1/libexec/lib/node_modules/x/cli.js', 'homebrew'],
-    ['C:\\Users\\u\\scoop\\apps\\codex\\0.159.2\\bin\\codex.exe', 'scoop'],
+    ['C:\\Users\\u\\scoop\\apps\\opencode\\2.0.24\\opencode.exe', 'scoop'],
     [
-      'C:\\Users\\u\\AppData\\Local\\Microsoft\\WinGet\\Packages\\OpenAI.Codex_x\\codex.exe',
+      'C:\\Users\\u\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Some.Package_x\\opencode.exe',
       'winget'
     ],
-    ['/home/u/.codex/packages/standalone/releases/0.156.0-x/bin/codex', 'standalone'],
     ['/home/u/.pi/agent/install/releases/0.87.1/node_modules/x/cli.js', 'pi-managed'],
     ['/home/u/.bun/install/global/node_modules/x/bin/x.exe', 'bun'],
     ['/home/u/.local/share/pnpm/global/5/node_modules/.pnpm/x/node_modules/x/bin/x', 'pnpm'],

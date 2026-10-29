@@ -132,11 +132,9 @@ describe('pi', () => {
   })
 })
 
-describe('Codex and Claude Code', () => {
-  it('answers Codex with the pin and Claude Code with nothing, without a request', async () => {
+describe('Claude Code', () => {
+  it('answers Claude Code with nothing, without a request', async () => {
     const { u, f } = upstream({})
-    expect(await u.latestVersion('codex')).toBe(harnessManifest('codex').tested)
-    expect(await u.availableVersions('codex')).toEqual([harnessManifest('codex').tested])
     expect(await u.latestVersion('claude')).toBeNull()
     expect(await u.availableVersions('claude')).toEqual([])
     expect(f.calls).toEqual([])

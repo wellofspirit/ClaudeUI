@@ -271,9 +271,7 @@ export abstract class BaseSession implements ISession {
   /**
    * Hand ONE held item to the engine. The default is an ordinary prompt — for
    * opencode and pi a send during a running turn IS the steer, so `run()` picks
-   * the right transport on its own. CodexSession overrides this: its two
-   * transports are different RPCs (`turn/steer` mid-turn, `turn/start` at idle)
-   * and it correlates by a client-chosen id rather than by text.
+   * the right transport on its own.
    *
    * Delivery is reported through the queue, not the return value: leaving the
    * item `queued` tells {@link flushQueuedItems} nothing landed.
@@ -555,7 +553,7 @@ export abstract class BaseSession implements ISession {
   //
   // An engine tearing down a turn the user stopped may report the teardown as
   // a turn error (pi's aborted model request, opencode's MessageAbortedError,
-  // a Codex turn that fails in a race with the interrupt). That is not news to
+  // a turn that fails in a race with the interrupt). That is not news to
   // the user who pressed Stop, so while the window is open the session's
   // TURN-ERROR banner is not sent; the turn-end bookkeeping still runs.
   // ClaudeSession's `wasInterrupted` is the reference rule (it predates this

@@ -9,7 +9,7 @@
  *
  *   1. PATH hits for the harness's command (and its aliases), in PATH order.
  *   2. The harness's own install locations: native installers, Homebrew,
- *      WinGet, scoop, pi.dev's managed install, Codex's standalone installer.
+ *      WinGet, scoop, pi.dev's managed install.
  *   3. The harness's npm package in every npm-family global root (npm, nvm,
  *      nvm-windows, pnpm, bun, Homebrew's node).
  *
@@ -53,8 +53,7 @@ export interface CandidateDeps {
 export const HARNESS_COMMANDS: Record<HarnessId, string> = {
   claude: 'claude',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'codex'
+  pi: 'pi'
 }
 
 /**
@@ -65,8 +64,7 @@ export const HARNESS_COMMANDS: Record<HarnessId, string> = {
 export const HARNESS_COMMAND_ALIASES: Record<HarnessId, readonly string[]> = {
   claude: [],
   opencode: ['opencode2'],
-  pi: [],
-  codex: []
+  pi: []
 }
 
 /**
@@ -77,26 +75,10 @@ export const HARNESS_COMMAND_ALIASES: Record<HarnessId, readonly string[]> = {
 export const HARNESS_PACKAGES: Record<HarnessId, readonly string[]> = {
   claude: ['@anthropic-ai/claude-code'],
   opencode: ['opencode-ai', '@opencode/cli'],
-  pi: ['@earendil-works/pi-coding-agent'],
-  codex: ['@openai/codex']
+  pi: ['@earendil-works/pi-coding-agent']
 }
 
 const LIST_CAP = 200
-
-/** Codex's Rust target triple for a host (`codex-cli/bin/codex.js`), or null. */
-export function codexTriple(platform: string, arch: string): string | null {
-  const triples: Record<string, string> = {
-    'linux-x64': 'x86_64-unknown-linux-musl',
-    'linux-arm64': 'aarch64-unknown-linux-musl',
-    'android-x64': 'x86_64-unknown-linux-musl',
-    'android-arm64': 'aarch64-unknown-linux-musl',
-    'darwin-x64': 'x86_64-apple-darwin',
-    'darwin-arm64': 'aarch64-apple-darwin',
-    'win32-x64': 'x86_64-pc-windows-msvc',
-    'win32-arm64': 'aarch64-pc-windows-msvc'
-  }
-  return triples[`${platform}-${arch}`] ?? null
-}
 
 function exe(name: string, platform: NodeJS.Platform): string {
   return platform === 'win32' ? `${name}.exe` : name
@@ -329,34 +311,6 @@ export function harnessDirCandidates(id: HarnessId, deps: CandidateDeps): Candid
         )
       }
       files.push(...brewBins)
-      break
-    }
-    case 'codex': {
-      const codexHome = envGet(env, 'CODEX_HOME', platform)
-      for (const home of [codexHome, path.join(homedir, '.codex')]) {
-        if (home && path.isAbsolute(home)) {
-          files.push(
-            path.join(home, 'packages', 'standalone', 'current', 'bin', exe('codex', platform))
-          )
-        }
-      }
-      const installDir = envGet(env, 'CODEX_INSTALL_DIR', platform)
-      if (installDir && path.isAbsolute(installDir))
-        files.push(path.join(installDir, exe('codex', platform)))
-      if (win) {
-        files.push(path.join(localAppData(deps), 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe'))
-        const triple = codexTriple(platform, deps.arch)
-        files.push(
-          ...wingetLink,
-          ...wingetPackageFiles(deps, 'OpenAI.Codex_', [
-            ...(triple ? [`codex-${triple}.exe`] : []),
-            'codex.exe'
-          ])
-        )
-      } else {
-        files.push(path.join(homedir, '.local', 'bin', 'codex'))
-      }
-      files.push(...brewBins, ...scoop('codex', 'bin', 'codex.exe'))
       break
     }
   }

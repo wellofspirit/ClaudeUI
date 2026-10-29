@@ -6,7 +6,7 @@
  *
  * A leaf module on purpose. The dispatcher (main) and the Settings row
  * (renderer) must agree on the resolution rule down to the edge cases, and the
- * dispatcher's own module drags the whole opencode/pi/codex target machinery
+ * dispatcher's own module drags the whole opencode/pi target machinery
  * with it — importing that into the renderer to share one number is not a
  * trade worth making.
  */

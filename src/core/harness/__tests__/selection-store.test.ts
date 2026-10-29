@@ -38,7 +38,7 @@ describe('loadHarnessesConfig', () => {
   it('reads a missing file as the defaults', () => {
     expect(loadHarnessesConfig(file)).toEqual({})
     expect(harnessSelection('claude', loadHarnessesConfig(file))).toEqual({ source: 'bundled' })
-    for (const id of ['opencode', 'pi', 'codex'] as const) {
+    for (const id of ['opencode', 'pi'] as const) {
       expect(harnessSelection(id, loadHarnessesConfig(file))).toEqual({
         source: 'managed',
         version: 'tested'
@@ -59,22 +59,22 @@ describe('loadHarnessesConfig', () => {
     write(
       JSON.stringify({
         selections: {
-          opencode: { source: 'system' },
-          pi: { source: 'from-the-moon' },
-          codex: { source: 'managed', version: '../../evil' },
+          opencode: { source: 'from-the-moon' },
+          pi: { source: 'managed', version: '../../evil' },
           claude: { source: 'bundled', version: 7 },
+          // Engines this build does not ship (a retired `codex`, an unknown one) are ignored.
+          codex: { source: 'managed' },
           gemini: { source: 'managed' }
         }
       })
     )
     const config = loadHarnessesConfig(file)
     expect(config.selections).toEqual({
-      opencode: { source: 'system' },
       // An unsafe version is dropped, so managed means Tested again.
-      codex: { source: 'managed' },
+      pi: { source: 'managed' },
       claude: { source: 'bundled' }
     })
-    expect(harnessSelection('pi', config)).toEqual(defaultSelection('pi'))
+    expect(harnessSelection('opencode', config)).toEqual(defaultSelection('opencode'))
   })
 
   it('keeps an exact version, latest and tested', () => {
@@ -82,15 +82,13 @@ describe('loadHarnessesConfig', () => {
       JSON.stringify({
         selections: {
           opencode: { source: 'managed', version: '1.18.32' },
-          pi: { source: 'managed', version: 'latest' },
-          codex: { source: 'managed', version: '0.156.0-alpha.2' }
+          pi: { source: 'managed', version: 'latest' }
         }
       })
     )
     const config = loadHarnessesConfig(file)
     expect(harnessSelection('opencode', config).version).toBe('1.18.32')
     expect(harnessSelection('pi', config).version).toBe('latest')
-    expect(harnessSelection('codex', config).version).toBe('0.156.0-alpha.2')
   })
 })
 

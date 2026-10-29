@@ -117,11 +117,8 @@ import { formatCopiedAt } from './provider-clone'
 /** Testid namespace (ADR-027 tier 1/2). */
 const SHEET = 'ProviderSheet'
 
-/**
- * The row order of the ENABLED FOR group — claude first, as on the board, and
- * codex last because it is not a route at all (see {@link codexRow}).
- */
-const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
+/** The row order of the ENABLED FOR group — claude first, as on the board. */
+const ENGINE_ORDER: readonly EngineId[] = ['claude', 'opencode', 'pi']
 
 // ── Shared atoms (the list imports these; the direction is list → sheet) ──────
 
@@ -1248,26 +1245,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
     )
   }
 
-  /**
-   * Codex, which is not a route (ADR-068 §1). The vault injects the ACTIVE
-   * ChatGPT account into every app-server ClaudeUI starts, so there is nothing
-   * here to enable or disable — a toggle would promise a switch the vault does
-   * not have. The row exists to SAY that, and to point at the one place the
-   * account is chosen.
-   */
-  function codexRow(): React.JSX.Element {
-    return (
-      <SettingRow
-        testid={`${SHEET}.engine`}
-        dataId="codex"
-        label="Codex"
-        description="Codex always uses the active ChatGPT account; per-session pinning is in the ChatGPT card’s Options, under Subscriptions."
-      />
-    )
-  }
-
   const engineRow = (engine: EngineId): React.JSX.Element => {
-    if (engine === 'codex') return codexRow()
     if (engine === 'claude') {
       // Always off, always disabled: Claude Code talks to Anthropic's endpoint
       // and nothing else, so this row exists to SAY so rather than to be used.
@@ -1656,15 +1634,12 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
   // ── Frame ──────────────────────────────────────────────────────────────────
 
   /**
-   * The ENABLED FOR rows. Codex is filtered rather than rendered as null: the
-   * group card draws its separators with `divide-y`, so an empty wrapper would
-   * leave a stray rule under the last real row. A harness that does not run has
-   * none (ADR-082 §8); with none left at all, the group is not drawn.
+   * The ENABLED FOR rows. A harness that does not run has none (ADR-082 §8);
+   * with none left at all, the group is not drawn.
    */
   const engineRows = ENGINE_ORDER.filter(
     (engine) =>
       runs(engine) &&
-      (engine !== 'codex' || entry.engines.codex !== undefined) &&
       // An API provider's rows are its deliveries (opencode, pi); Claude
       // talks to Anthropic only, which the Claude page already says.
       (engine !== 'claude' || !isApiShared)
@@ -1848,7 +1823,7 @@ export function ProviderSheet({ entry, onClose, onWrote }: ProviderSheetProps): 
               // The vault re-delivers this definition to every enabled engine, so
               // only a shared row has anything to sync — and only while opencode
               // or pi, the harnesses it syncs to, runs (ADR-082 §8). Claude's
-              // row and Codex's are not synced.
+              // row is not synced.
               isShared && (runs('opencode') || runs('pi')) ? (
                 <Button
                   variant="link"
