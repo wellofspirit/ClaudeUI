@@ -116,11 +116,11 @@ a miss lets a command the user said "never" run.
   lexer, which refuses redirections, newlines, `$` and every construct the dialects split
   differently. Both are word-boundary prefix or exact, case-sensitive, un-normalised (`Bash(git:*)`
   does not cover `git-lfs`; `Bash(bun run test:*)` does not cover `bun run test:unit`).
-- **Predicates** for §4 and Codex: `isClassifierBypassingRule` (cli.js `ZIe` parity over the union of
+- **Predicates** for §4: `isClassifierBypassingRule` (cli.js `ZIe` parity over the union of
   the Bash and PowerShell launcher lists, `python -m dotted.module:*` excepted, `Agent`/`Task`/
   `Monitor`/`AppifactRepl`), `isCarvedOut` (positional: same program and one rule's positional words
-  are a prefix of the other's — `git:*` ⊃ `git push --force`, both directions; program strength for
-  Codex: any deny/ask on the same program family), `canLaunchOtherPrograms`, `isLauncherShapedSegment`
+  are a prefix of the other's — `git:*` ⊃ `git push --force`, both directions; the program strength
+  Codex's rules-sync used was removed 2026-10-29), `canLaunchOtherPrograms`, `isLauncherShapedSegment`
   (a segment that runs code its own words do not show: `npx`, `bunx`, `bun x|run|-e`, `node -e`,
   `python -c`, shells with `-c`/`-Command`/`-EncodedCommand`/`/c`, `eval`, `exec`, `env`, `xargs`,
   `sudo`, `ssh`, `docker exec|run`, `git -c`, `find -exec`, `sed … e`, `awk system(`, the PowerShell
@@ -222,12 +222,12 @@ Bash(git push --force:*)`, where before they ran with no card. Glob-word rules k
 - **Plan wording.** opencode and Codex have no `exit_plan` tool, so their plan refusal reads "Plan mode
   is read-only — present the plan and ask the user to leave plan mode to proceed"; pi keeps
   `exit_plan`.
-- **Codex (H4).** `rules-sync.ts` does not emit an execpolicy `allow` for a Bash allow rule that any
+- **Codex (H4)** — retired 2026-10-28 with the Codex engine (ADR-066); kept as history. `rules-sync.ts` did not emit an execpolicy `allow` for a Bash allow rule that any
   Bash deny/ask rule carves into (program strength — an emitted `allow` never reaches the matcher
-  again), nor for one that can launch other programs while any Bash deny/ask exists; Codex then
-  escalates those and `gate()` decides through pi's ladder (in auto mode Codex's guardian). Ask rules
-  are still not compiled (ruling 6). `CodexRulesStatus` and the file header list the withheld rules.
-  `forbidden` remains prefix-only.
+  again), nor for one that could launch other programs while any Bash deny/ask existed; Codex then
+  escalated those and `gate()` decided through pi's ladder (in auto mode Codex's guardian). Ask rules
+  were not compiled (ruling 6); `CodexRulesStatus` and the file header listed the withheld rules;
+  `forbidden` was prefix-only.
 
 ### 3b. Plan mode wins (ruling 7)
 

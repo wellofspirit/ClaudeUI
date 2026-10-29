@@ -2802,8 +2802,7 @@ const UNANALYSABLE_RULE = '(unanalysable rule)'
 
 function carvedOutUnsafe(
   allowRule: string,
-  denyAsk: { deny: readonly string[]; ask: readonly string[] },
-  strength: 'positional' | 'program'
+  denyAsk: { deny: readonly string[]; ask: readonly string[] }
 ): string | undefined {
   const allowSpec = bashSpecifier(allowRule)
   if (allowSpec === null) return undefined
@@ -2818,16 +2817,12 @@ function carvedOutUnsafe(
     if (!spec) return other
     const narrower = parseBashRuleUnsafe(spec)
     if (!narrower) return other
-    const same =
-      sameProgram(narrower.program, allow.program) || sameProgram(allow.program, narrower.program)
-    if (strength === 'program') {
-      if (same) return other
-      continue
-    }
     if (!allow.prefix) {
       if (denyAskHit(allowSpec, { deny: [other] })) return other
       continue
     }
+    const same =
+      sameProgram(narrower.program, allow.program) || sameProgram(allow.program, narrower.program)
     if (!same) continue
     const a = positional(allow)
     const b = positional(narrower)
@@ -2838,37 +2833,29 @@ function carvedOutUnsafe(
 
 /**
  * Is this allow rule broader than a deny/ask rule? Returns that deny/ask rule,
- * or `undefined`. Two strengths:
+ * or `undefined`.
  *
- * - `'positional'` (the host, S5 — the default): same program, and one rule's
- *   positional words are a prefix of the other's (`git:*` ⊃
- *   `git push --force:*`, `git push:*` ⊃ it, `docker:*` ⊃ `docker run:*`;
- *   `git status:*` is not). Positional words only, because flags do not narrow
- *   what a prefix rule covers — `rm -f:*` covers `rm -f -r /` just as well as
- *   `rm:*` does. BOTH directions: an ask rule broader than the allow
- *   (`ask git:*`, `allow git status:*`) binds the whole allow. An exact allow
- *   is carved out only when its own command hits. The host consults the full
- *   matcher on every command anyway, so this only decides whether the rule may
- *   skip the judge.
- * - `'program'` (no live caller; the removed Codex rules-sync used it): ANY deny/ask rule for the same program
- *   family carves the allow out. An emitted execpolicy `allow` never reaches
- *   the matcher again, and the matcher hits words in any order
- *   (`docker compose run web` hits `Bash(docker run:*)`), so a positional
- *   prefix is not a safe enough test there.
+ * Same program, and one rule's positional words are a prefix of the other's
+ * (`git:*` ⊃ `git push --force:*`, `git push:*` ⊃ it, `docker:*` ⊃
+ * `docker run:*`; `git status:*` is not). Positional words only, because flags
+ * do not narrow what a prefix rule covers — `rm -f:*` covers `rm -f -r /` just
+ * as well as `rm:*` does. BOTH directions: an ask rule broader than the allow
+ * (`ask git:*`, `allow git status:*`) binds the whole allow. An exact allow is
+ * carved out only when its own command hits. The host consults the full
+ * matcher on every command anyway, so this only decides whether the rule may
+ * skip the judge.
  *
- * Both: a bare `Bash` allow, a launcher-shaped allow
- * ({@link isClassifierBypassingRule}) and one whose program is a wrapper
- * (`sudo git:*`) are carved out by any Bash deny/ask; a bare `Bash` deny/ask
- * carves out every Bash allow. Never throws (an internal failure answers
- * "carved out").
+ * A bare `Bash` allow, a launcher-shaped allow ({@link isClassifierBypassingRule})
+ * and one whose program is a wrapper (`sudo git:*`) are carved out by any Bash
+ * deny/ask; a bare `Bash` deny/ask carves out every Bash allow. Never throws
+ * (an internal failure answers "carved out").
  */
 export function isCarvedOut(
   allowRule: string,
-  denyAsk: { deny: readonly string[]; ask: readonly string[] },
-  opts: { strength?: 'positional' | 'program' } = {}
+  denyAsk: { deny: readonly string[]; ask: readonly string[] }
 ): string | undefined {
   try {
-    return carvedOutUnsafe(allowRule, denyAsk, opts.strength ?? 'positional')
+    return carvedOutUnsafe(allowRule, denyAsk)
   } catch {
     return UNANALYSABLE_RULE
   }
