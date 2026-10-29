@@ -88,7 +88,9 @@ export function claudeSwitchConsequence(live: number): string {
  * credential it loaded (`OpencodeAuthProvider`'s feed does not recycle).
  */
 export function chatgptSwitchConsequence(routes: readonly EngineId[]): string {
-  if (routes.length === 0) return 'No running session is affected.'
+  // An auto-mode judge on ChatGPT without a pinned account reads the active one per call, so it follows.
+  if (routes.length === 0)
+    return 'No engine session uses it; an auto-mode judge on the active ChatGPT account does.'
   const names = routes.map((engine) => engineMeta(engine).label)
   return `New ${names.join(' and ')} sessions use it too.`
 }

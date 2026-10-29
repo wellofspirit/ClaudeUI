@@ -12,8 +12,8 @@
  * there is: the endpoint is the ChatGPT backend's, not a published API.
  *
  * Keyed by vault account id, never by the ChatGPT WORKSPACE id: two vault
- * accounts can share a workspace, and the picker, the session pin and the usage
- * rows all speak the vault's vocabulary.
+ * accounts can share a workspace, and the account picker and the usage rows
+ * speak the vault's vocabulary.
  */
 import type {
   ChatgptAccountLimits,

@@ -774,7 +774,9 @@ describe('consequences', () => {
     expect(claudeSwitchConsequence(1)).toBe(
       '1 running Claude session disconnects and resumes on its next message.'
     )
-    expect(chatgptSwitchConsequence([])).toBe('No running session is affected.')
+    expect(chatgptSwitchConsequence([])).toBe(
+      'No engine session uses it; an auto-mode judge on the active ChatGPT account does.'
+    )
     expect(chatgptSwitchConsequence(['opencode', 'pi'])).toBe(
       'New opencode and pi sessions use it too.'
     )
