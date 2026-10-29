@@ -48,6 +48,8 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     push: vi.fn(async () => {}),
     pushWithUpstream: vi.fn(async () => {}),
     pull: vi.fn(async () => ({ ok: true })),
+    stashPush: vi.fn(async () => {}),
+    stashRestore: vi.fn(async () => {}),
     fetch: vi.fn(async () => {}),
     startPolling: vi.fn(),
     stopPolling: vi.fn()
@@ -434,6 +436,33 @@ describe('session.ipc', () => {
       expect(res).toEqual({ ok: true, data: { path: '/tmp/wt', branch: 'feat' } })
     })
 
+    it('worktree:create declares withProgress and keeps the reporter off the wire args', async () => {
+      expect(commandRegistry.declaration('worktree:create')).toMatchObject({
+        capability: 'git',
+        kind: 'command',
+        withProgress: true
+      })
+      const { createWorktree } = await import('../../../core/services/worktree')
+      const reporter = vi.fn()
+      await dispatchDesktop(
+        'worktree:create',
+        ['/tmp/repo', 'feature', { base: 'default' }],
+        reporter
+      )
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', { base: 'default' })
+      // The heartbeat reports at once, so the web client's invoke window starts sliding.
+      expect(reporter).toHaveBeenCalledWith(expect.objectContaining({ phase: 'creating' }))
+    })
+
+    it('worktree:create forwards the base option and reads a null one as absent', async () => {
+      const { createWorktree } = await import('../../../core/services/worktree')
+      await harness.call<any>('worktree:create', '/tmp/repo', 'feature', { base: 'default' })
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', { base: 'default' })
+      // A remote client turns an omitted argument into null.
+      await harness.call<any>('worktree:create', '/tmp/repo', 'feature', null)
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', undefined)
+    })
+
     it('returns { ok: true, data } on success for git:status', async () => {
       const res = await harness.call<any>('git:status', '/tmp/repo')
       expect(res.ok).toBe(true)
@@ -788,7 +817,9 @@ describe('session.ipc', () => {
       ['git:stage-file', ['/tmp/r', 'a.ts']],
       ['git:commit', ['/tmp/r', 'msg']],
       ['git:push', ['/tmp/r']],
-      ['git:pull', ['/tmp/r']]
+      ['git:pull', ['/tmp/r']],
+      ['git:stash-push', ['/tmp/r']],
+      ['git:stash-restore', ['/tmp/r', 'a'.repeat(40)]]
     ])('%s is registered', async (channel, args) => {
       const res = await harness.call<any>(channel, ...args)
       expect(res).toHaveProperty('ok', true)

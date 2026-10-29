@@ -334,6 +334,29 @@ const SESSION_TOOLS: SettingItem = {
   )
 }
 
+/**
+ * "Start new sessions in a worktree": the one global default. A project can differ through its
+ * sidebar menu (`worktreeByProject`); read when a new session is created.
+ */
+const START_IN_WORKTREE: SettingItem = {
+  key: 'startInWorktree',
+  label: 'Start new sessions in a worktree',
+  keywords:
+    'worktree worktrees start new sessions own branch git isolate always default remote project',
+  render: (s, u) => (
+    <SettingsToggle
+      testid="SettingsStartInWorktree"
+      label="Start new sessions in a worktree"
+      description="In a git repository, each new session gets its own worktree under .claude/worktrees/, branched from the remote's default branch when you send the first message. Right-click a project to set it differently there."
+      appliesOn="next-session"
+      modified={s.startInWorktree !== undefined}
+      onReset={() => u({ startInWorktree: undefined })}
+      checked={s.startInWorktree === true}
+      onChange={(v) => u({ startInWorktree: v ? true : undefined })}
+    />
+  )
+}
+
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
@@ -346,7 +369,8 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   PI_AGENT_COLOURS,
   DISPATCH_TILE_COLOUR,
   CONTEXT_PRESSURE,
-  SESSION_TOOLS
+  SESSION_TOOLS,
+  START_IN_WORKTREE
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -528,6 +552,7 @@ export const PAGES: SettingsPage[] = [
     description:
       'How new sessions start, what the agent may do on its own, and how long chats are kept.',
     groups: [
+      { id: 'worktrees', label: 'Worktrees', items: [START_IN_WORKTREE] },
       {
         id: 'autonomy',
         label: 'Autonomy default',

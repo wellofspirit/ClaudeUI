@@ -418,6 +418,8 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
 
 /** One call removes at most this many worktrees (a crafted array cannot queue unbounded git work). */
 const MAX_REMOVE_IDS = 500
+/** How often `worktree:create` reports progress, so the web client's invoke timeout keeps sliding. */
+const WORKTREE_CREATE_HEARTBEAT_MS = 5_000
 
 /** The directory a manager call works from: a non-empty absolute path (a relative one would resolve against the host's cwd). */
 function assertAbsoluteCwd(cwd: unknown, channel: string): asserts cwd is string {
@@ -486,9 +488,26 @@ export function configCommands(
       channel: 'worktree:create',
       capability: 'git',
       kind: 'command',
-      handler: safeHandler(async (cwd: string, name: string) => {
-        return await createWorktree(cwd, name)
-      })
+      // A fetch, a checkout and the include copy can outlast the web client's 30 s invoke
+      // timeout: `withProgress` slides it, and the heartbeat keeps frames coming between phases.
+      withProgress: true,
+      handler: safeHandler(
+        async (
+          progress: ProgressReporter,
+          cwd: string,
+          name: string,
+          opts?: { base?: 'head' | 'default' } | null
+        ) => {
+          const beat = (): void => progress({ done: 0, total: null, phase: 'creating' })
+          beat()
+          const timer = setInterval(beat, WORKTREE_CREATE_HEARTBEAT_MS)
+          try {
+            return await createWorktree(cwd, name, opts ?? undefined)
+          } finally {
+            clearInterval(timer)
+          }
+        }
+      )
     },
     {
       channel: 'worktree:status',

@@ -380,7 +380,11 @@ const api: ClaudeAPI = {
   onTerminalDetached: () => () => {},
 
   // Worktree operations — all use safeHandler
-  createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
+  // Declared `withProgress` like removeWorktree: always on the progress path, no callback.
+  createWorktree: (cwd: string, name: string, opts?: { base?: 'head' | 'default' }) =>
+    invokeWithProgress('worktree:create', [cwd, name, opts], () => {}).then((r) =>
+      unwrapResult('worktree:create', r)
+    ),
   getWorktreeStatus: (worktreePath: string, originalHead: string) =>
     unwrap('worktree:status', worktreePath, originalHead),
   // Declared `withProgress` (the remote client's timeout slides on it), so it always rides the
@@ -417,7 +421,8 @@ const api: ClaudeAPI = {
   gitGetStatus: (cwd: string) => unwrap('git:status', cwd),
   gitGetBranches: (cwd: string) => unwrap('git:branches', cwd),
   gitCheckout: (cwd: string, branch: string) => unwrap('git:checkout', cwd, branch),
-  gitCreateBranch: (cwd: string, name: string) => unwrap('git:create-branch', cwd, name),
+  gitCreateBranch: (cwd: string, name: string, base?: string | null) =>
+    unwrap('git:create-branch', cwd, name, base),
   gitGetFilePatch: (cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) =>
     unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
   gitGetFileContents: (cwd: string, filePath: string, staged: boolean) =>
@@ -431,7 +436,9 @@ const api: ClaudeAPI = {
   gitPush: (cwd: string) => unwrap('git:push', cwd),
   gitPushWithUpstream: (cwd: string, branch: string) =>
     unwrap('git:push-with-upstream', cwd, branch),
-  gitPull: (cwd: string) => unwrap('git:pull', cwd),
+  gitPull: (cwd: string, mode?: 'merge' | 'rebase') => unwrap('git:pull', cwd, mode),
+  gitStashPush: (cwd: string) => unwrap('git:stash-push', cwd),
+  gitStashRestore: (cwd: string, sha: string) => unwrap('git:stash-restore', cwd, sha),
   gitFetch: (cwd: string) => unwrap('git:fetch', cwd),
   // Per-connection git interest (phase 5 S2): a REPLACE set, not a
   // start/stop pair. Real IPC on the desktop too — the renderer is one

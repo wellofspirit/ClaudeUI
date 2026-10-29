@@ -996,6 +996,40 @@ describe('useClaudeEvents extended component tests', () => {
       expect(useSessionStore.getState().sessions['route-1'].gitStatus?.branch).toBe('feature')
       expect(useSessionStore.getState().sessions['route-2'].gitStatus?.branch).toBe('feature')
     })
+
+    // The watcher states the session's WORKDIR (worktree, else cwd), so the status
+    // for it must land on that session, and the spawn cwd's must not.
+    it('routes by the worktree path for a session that entered a worktree', () => {
+      const routingId = 'route-1'
+      // Its own cwd: the module-level status cache is keyed by path and would seed
+      // gitStatus for one an earlier test used.
+      useSessionStore.getState().createNewSession(routingId, '/project/wt-routing')
+      useSessionStore.getState().setWorktreeInfo(routingId, {
+        worktreePath: '/project/wt-routing/.claude/worktrees/wt',
+        worktreeBranch: 'wt',
+        worktreeName: 'wt',
+        originalCwd: '/project/wt-routing',
+        gitRoot: '/project/wt-routing',
+        originalHeadCommit: '',
+        createdAt: 0
+      })
+      mirrorStoreIntoReplica()
+      // `setWorktreeInfo` also patches the local cwd; put it back so the test is
+      // about the worktree path alone.
+      useSessionStore.setState((s) => ({
+        sessions: {
+          ...s.sessions,
+          [routingId]: { ...s.sessions[routingId], cwd: '/project/wt-routing' }
+        }
+      }))
+      const status = { branch: 'wt', files: [] } as unknown as GitStatusData
+
+      app.emit('git:status-update', { cwd: '/project/wt-routing', status })
+      expect(useSessionStore.getState().sessions[routingId].gitStatus).toBeNull()
+
+      app.emit('git:status-update', { cwd: '/project/wt-routing/.claude/worktrees/wt', status })
+      expect(useSessionStore.getState().sessions[routingId].gitStatus?.branch).toBe('wt')
+    })
   })
 
   describe('config:settings-changed', () => {

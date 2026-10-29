@@ -1065,6 +1065,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     await settle()
     // Neither judge runs: the judge and Trust & protection go.
     expect(groupIds()).toEqual([
+      'worktrees',
       'autonomy',
       'permissions',
       'session-tools',

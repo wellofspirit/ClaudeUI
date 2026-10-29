@@ -11,10 +11,12 @@
  * .replace(/\r\n/g, '\n') before assertions.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { GitService, gitServiceManager } from '../../../core/services/git-service'
+import { simpleGit } from 'simple-git'
+import { GitService, gitServiceManager, pullArgs } from '../../../core/services/git-service'
 import { logger } from '../../../core/services/logger'
 import type { GitStatusData } from '../../../shared/types'
 import {
@@ -247,12 +249,7 @@ describe('GitService.getBranches', () => {
       expect(branches.current).toBe('main')
       expect(branches.local).toEqual(expect.arrayContaining(['main', 'feature']))
       expect(branches.remote).toEqual(expect.arrayContaining(['origin/main']))
-      // simple-git's `branch(['-a'])` summary does not populate `info.tracking`
-      // on branch entries (tracking info is only surfaced via `status()`), so
-      // the service's `tracking` record is always empty for current simple-git.
-      // This test pins that contract — if a future simple-git upgrade starts
-      // populating it, this assertion will fail and we should update the service.
-      expect(branches.tracking).toEqual({})
+      expect(branches.tracking).toEqual({ main: 'origin/main' })
     } finally {
       await remote.cleanup()
     }
@@ -265,15 +262,268 @@ describe('GitService.getBranches', () => {
     // Detach HEAD at the commit
     await repo.git.checkout([sha])
     const branches = await svc.getBranches()
-    // simple-git reports the short SHA as `current` when HEAD is detached.
-    // The service passes that through as-is — we just assert it's not a
-    // named branch. (If simple-git ever returns '' for detached HEAD, this
-    // test and the service's fallback to 'HEAD' should be revisited.)
+    // A detached HEAD has no ref row, so `current` falls back to the short SHA.
     expect(branches.current).not.toBe('main')
     expect(branches.current.length).toBeGreaterThan(0)
     expect(sha.startsWith(branches.current) || branches.current.startsWith(sha)).toBe(true)
     // local list may still include 'main' (still points at initial commit)
     expect(branches.local).toEqual(expect.arrayContaining(['main']))
+  })
+})
+
+describe('GitService.getBranches details', () => {
+  let repo: TempGitRepo
+  let remote: { path: string; cleanup: () => Promise<void> }
+  let svc: GitService
+  const extraDirs: string[] = []
+
+  beforeEach(async () => {
+    remote = await makeBareRemoteRepo()
+    repo = await makeTempGitRepo()
+    svc = new GitService(repo.path)
+    await repo.git.addRemote('origin', remote.path)
+    await repo.git.push(['-u', 'origin', 'main'])
+  })
+
+  afterEach(async () => {
+    await repo.cleanup()
+    await remote.cleanup()
+    for (const d of extraDirs.splice(0)) await fs.promises.rm(d, { recursive: true, force: true })
+  })
+
+  const detail = async (name: string, kind: 'local' | 'remote' = 'local') =>
+    (await svc.getBranches()).details.find((d) => d.name === name && d.kind === kind)
+  const samePath = (a: string, b: string): boolean =>
+    a.replace(/\\/g, '/').toLowerCase() === b.replace(/\\/g, '/').toLowerCase()
+
+  it('reports commit time and ahead/behind, sorted by last commit; origin/HEAD is not a branch', async () => {
+    await repo.git.checkoutLocalBranch('older')
+    // simple-git blocks GIT_COMMITTER_DATE; the committer date is what the list sorts by.
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'old'], {
+      cwd: repo.path,
+      env: { ...process.env, GIT_COMMITTER_DATE: '2020-01-01T00:00:00Z' }
+    })
+    await repo.git.checkout('main')
+    await repo.writeFile('a.txt', 'a\n')
+    await repo.commit('unpushed')
+    await repo.git.raw(['remote', 'set-head', 'origin', 'main'])
+
+    const b = await svc.getBranches()
+    const main = b.details.find((d) => d.name === 'main' && d.kind === 'local')!
+    expect(main).toMatchObject({ current: true, upstream: 'origin/main', ahead: 1, behind: 0 })
+    expect(main.gone).toBe(false)
+    expect(Math.abs(main.commitTime - Date.now() / 1000)).toBeLessThan(300)
+    const older = b.details.find((d) => d.name === 'older')!
+    expect(older.upstream).toBeUndefined()
+    expect(older.commitTime).toBe(Date.parse('2020-01-01T00:00:00Z') / 1000)
+    const order = b.details.map((d) => `${d.kind}:${d.name}`)
+    expect(order.indexOf('local:main')).toBeLessThan(order.indexOf('local:older'))
+    expect(b.remote).toEqual(['origin/main'])
+    expect(order).not.toContain('remote:origin')
+    expect(b.unpublished).toBe(0) // main has an upstream: nothing to count
+  })
+
+  it('counts the commits no remote has for a branch without an upstream', async () => {
+    await repo.git.checkoutLocalBranch('fresh')
+    expect((await svc.getBranches()).unpublished).toBe(0)
+    await repo.writeFile('f1.txt', '1\n')
+    await repo.commit('one')
+    await repo.writeFile('f2.txt', '2\n')
+    await repo.commit('two')
+    expect((await svc.getBranches()).unpublished).toBe(2)
+  })
+
+  it('counts commits behind the upstream after a fetch', async () => {
+    const other = await makeTempGitRepo()
+    try {
+      await other.git.addRemote('origin', remote.path)
+      await other.git.fetch(['origin'])
+      await other.git.reset(['--hard', 'origin/main'])
+      await other.writeFile('o.txt', 'o\n')
+      await other.commit('from other')
+      await other.git.push(['origin', 'HEAD:main'])
+    } finally {
+      await other.cleanup()
+    }
+    await svc.fetch()
+    expect(await detail('main')).toMatchObject({ ahead: 0, behind: 1, gone: false })
+  })
+
+  it('flags a branch whose remote branch was deleted as gone after a pruning fetch', async () => {
+    await repo.git.checkoutLocalBranch('topic')
+    await repo.writeFile('t.txt', 't\n')
+    await repo.commit('topic')
+    await repo.git.push(['-u', 'origin', 'topic'])
+    await repo.git.checkout('main')
+    expect(await detail('topic')).toMatchObject({ upstream: 'origin/topic', gone: false })
+
+    await simpleGit(remote.path).raw(['branch', '-D', 'topic'])
+    await svc.fetch() // --all --prune
+    expect(await detail('topic')).toMatchObject({ upstream: 'origin/topic', gone: true })
+  })
+
+  it('names the worktree a branch is checked out in, and whether that is the main checkout', async () => {
+    const wtPath = path.join(
+      fs.realpathSync.native(os.tmpdir()),
+      `claudeui-wt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    )
+    extraDirs.push(wtPath)
+    await repo.git.raw(['worktree', 'add', '-b', 'in-wt', wtPath])
+    await repo.git.branch(['free'])
+
+    // From the main checkout: `in-wt` is held by a linked worktree; `main` is ours.
+    const fromMain = await svc.getBranches()
+    const held = fromMain.details.find((d) => d.name === 'in-wt')!
+    expect(samePath(held.worktree!.path, wtPath)).toBe(true)
+    expect(held.worktree!.main).toBe(false)
+    expect(fromMain.details.find((d) => d.name === 'main')!.worktree).toBeUndefined()
+    expect(fromMain.details.find((d) => d.name === 'free')!.worktree).toBeUndefined()
+
+    // From the linked worktree: `main` is the parent checkout, `in-wt` is current.
+    const fromWt = await new GitService(wtPath).getBranches()
+    expect(fromWt.current).toBe('in-wt')
+    const parent = fromWt.details.find((d) => d.name === 'main')!
+    expect(parent.worktree!.main).toBe(true)
+    expect(samePath(parent.worktree!.path, repo.path)).toBe(true)
+    expect(fromWt.details.find((d) => d.name === 'in-wt')!.worktree).toBeUndefined()
+  })
+
+  it('reads the effective pull settings: branch.<name>.rebase over pull.rebase, and pull.ff', async () => {
+    const cfg = async () => (await svc.getBranches()).pullConfig
+    await repo.git.addConfig('pull.rebase', 'false')
+    expect((await cfg()).rebase).toBe('merge')
+    await repo.git.addConfig('pull.rebase', 'merges')
+    expect((await cfg()).rebase).toBe('rebase')
+    await repo.git.addConfig('branch.main.rebase', 'false')
+    expect((await cfg()).rebase).toBe('merge')
+    await repo.git.addConfig('pull.ff', 'only')
+    expect((await cfg()).ff).toBe('only')
+  })
+})
+
+describe('pullArgs', () => {
+  it.each([
+    ['merge', null, ['--no-rebase']],
+    ['rebase', 'true', ['--rebase']],
+    ['rebase', null, ['--rebase']],
+    ['rebase', 'interactive', ['--rebase']],
+    ['rebase', 'merges', ['--rebase=merges']],
+    [undefined, 'merges', []]
+  ] as const)('%s with rebase=%s -> %j', (mode, setting, expected) => {
+    expect(pullArgs(mode, setting)).toEqual(expected)
+  })
+})
+
+describe('GitService autostash (stashPush / stashRestore)', () => {
+  let repo: TempGitRepo
+  let svc: GitService
+
+  beforeEach(async () => {
+    repo = await makeTempGitRepo({ seed: { 'tracked.txt': 'v1\n', '.gitignore': 'ignored.txt\n' } })
+    svc = new GitService(repo.path)
+  })
+
+  afterEach(async () => {
+    await repo.cleanup()
+  })
+
+  const stashShas = async (): Promise<string[]> =>
+    (await repo.git.raw(['stash', 'list', '--format=%H'])).split('\n').filter(Boolean)
+
+  it('stashes tracked edits and untracked files but not ignored ones, and lists it for its branch', async () => {
+    await repo.git.checkoutLocalBranch('feat/x')
+    await repo.writeFile('tracked.txt', 'v2\n')
+    await repo.writeFile('untracked.txt', 'u\n')
+    await repo.writeFile('ignored.txt', 'i\n')
+
+    await svc.stashPush()
+
+    expect(norm(await repo.readFile('tracked.txt'))).toBe('v1\n')
+    expect(fs.existsSync(path.join(repo.path, 'untracked.txt'))).toBe(false)
+    expect(fs.existsSync(path.join(repo.path, 'ignored.txt'))).toBe(true)
+    const { autostashes } = await svc.getBranches()
+    expect(autostashes).toHaveLength(1)
+    expect(autostashes[0]).toMatchObject({ branch: 'feat/x', sha: (await stashShas())[0] })
+    expect(Number.isNaN(Date.parse(autostashes[0].time))).toBe(false)
+  })
+
+  it('does not list stashes it did not make', async () => {
+    await repo.writeFile('tracked.txt', 'v2\n')
+    await repo.git.raw(['stash', 'push', '-m', 'my own stash'])
+    expect((await svc.getBranches()).autostashes).toEqual([])
+  })
+
+  it('restores by sha and drops exactly that entry, with another stash on top', async () => {
+    await repo.writeFile('tracked.txt', 'v2\n')
+    await repo.writeFile('untracked.txt', 'u\n')
+    await svc.stashPush()
+    const [mine] = (await svc.getBranches()).autostashes
+    // Another worktree (or the user) pushes onto the shared stack afterwards.
+    await repo.writeFile('other.txt', 'o\n')
+    await repo.git.raw(['add', 'other.txt'])
+    await repo.git.raw(['stash', 'push', '-m', 'someone else'])
+    expect(await stashShas()).toHaveLength(2)
+
+    await svc.stashRestore(mine.sha)
+
+    expect(norm(await repo.readFile('tracked.txt'))).toBe('v2\n')
+    expect(norm(await repo.readFile('untracked.txt'))).toBe('u\n')
+    const left = await repo.git.raw(['stash', 'list', '--format=%gs'])
+    expect(left).toContain('someone else')
+    expect(left).not.toContain('ClaudeUI autostash')
+    expect(await stashShas()).toHaveLength(1)
+  })
+
+  it('leaves the stash in place and reports git when the apply conflicts', async () => {
+    await repo.writeFile('tracked.txt', 'stashed\n')
+    await svc.stashPush()
+    const [mine] = (await svc.getBranches()).autostashes
+    await repo.writeFile('tracked.txt', 'edited since\n')
+
+    await expect(svc.stashRestore(mine.sha)).rejects.toThrow(/tracked\.txt|overwritten|conflict/i)
+    expect(await stashShas()).toContain(mine.sha)
+  })
+
+  it('keeps the stash and says so when the apply leaves merge conflicts (git exits 1 on stdout only)', async () => {
+    await repo.writeFile('tracked.txt', 'stashed edit\n')
+    await svc.stashPush()
+    const [mine] = (await svc.getBranches()).autostashes
+    await repo.writeFile('tracked.txt', 'committed edit\n')
+    await repo.commit('a different edit to the same line')
+
+    const err = await svc.stashRestore(mine.sha).then(
+      () => null,
+      (e: Error) => e
+    )
+    expect(err?.message).toMatch(/conflicts/)
+    expect(err?.message).toMatch(/stash was kept/)
+    expect(await stashShas()).toContain(mine.sha)
+    // the tree really is conflicted
+    expect((await repo.git.status()).conflicted).toEqual(['tracked.txt'])
+  })
+
+  it('reports it when git drops a different entry than the one restored', async () => {
+    await repo.writeFile('tracked.txt', 'mine\n')
+    await svc.stashPush()
+    const [mine] = (await svc.getBranches()).autostashes
+    await repo.writeFile('other.txt', 'o\n')
+    await repo.git.raw(['add', 'other.txt'])
+    await repo.git.raw(['stash', 'push', '-m', 'on top'])
+    const [top] = (await stashShas()).filter((sha) => sha !== mine.sha)
+    // The stack changed between listing and dropping: the index we compute is stale.
+    const real = (svc as unknown as { stashEntries: () => Promise<unknown> }).stashEntries.bind(svc)
+    const spy = vi
+      .spyOn(svc as unknown as { stashEntries: () => Promise<unknown> }, 'stashEntries')
+      .mockImplementationOnce(real)
+      .mockResolvedValueOnce([{ sha: mine.sha, subject: '' }])
+
+    await expect(svc.stashRestore(mine.sha)).rejects.toThrow(new RegExp(`dropped ${top}`))
+    spy.mockRestore()
+  })
+
+  it('refuses an id that is not a stash sha', async () => {
+    await expect(svc.stashRestore('stash@{0}')).rejects.toThrow(/Invalid stash id/)
+    await expect(svc.stashRestore('a'.repeat(40))).rejects.toThrow(/no longer exists/)
   })
 })
 
@@ -311,6 +561,19 @@ describe('GitService.checkout / createBranch', () => {
     const b = await svc.getBranches()
     expect(b.current).toBe('feature/new')
     expect(b.local).toContain('feature/new')
+  })
+
+  it('createBranch(name, base) branches from the base, not from HEAD', async () => {
+    await repo.git.checkoutLocalBranch('base-branch')
+    await repo.writeFile('b.txt', 'b\n')
+    const baseSha = await repo.commit('on base')
+    await repo.git.checkout('main')
+
+    await svc.createBranch('from-base', 'base-branch')
+    const b = await svc.getBranches()
+    expect(b.current).toBe('from-base')
+    expect((await repo.git.revparse(['HEAD'])).trim()).toBe(baseSha)
+    await expect(svc.createBranch('x', '--orphan')).rejects.toThrow(/Invalid base/)
   })
 })
 
@@ -528,6 +791,57 @@ describe('GitService remote operations', () => {
       await repoB.cleanup()
       await remote.cleanup()
     }
+  })
+
+  describe('pull on a diverged branch', () => {
+    let remote: { path: string; cleanup: () => Promise<void> }
+    let repoA: TempGitRepo
+    let repoB: TempGitRepo
+
+    beforeEach(async () => {
+      remote = await makeBareRemoteRepo()
+      repoA = await makeTempGitRepo()
+      repoB = await makeTempGitRepo()
+      await repoA.git.addRemote('origin', remote.path)
+      await repoA.git.push(['-u', 'origin', 'main'])
+      await repoB.git.addRemote('origin', remote.path)
+      await repoB.git.fetch(['origin'])
+      await repoB.git.reset(['--hard', 'origin/main'])
+      await repoB.git.branch(['--set-upstream-to=origin/main', 'main'])
+      // A pushes one commit; B commits a different file locally: diverged 1/1.
+      await repoA.writeFile('a.txt', 'A\n')
+      await repoA.commit('from A')
+      await repoA.git.push()
+      await repoB.writeFile('b.txt', 'B\n')
+      await repoB.commit('from B')
+      await repoB.git.fetch(['origin'])
+    })
+
+    afterEach(async () => {
+      await repoA.cleanup()
+      await repoB.cleanup()
+      await remote.cleanup()
+    })
+
+    const parentsOfHead = async (): Promise<number> =>
+      (await repoB.git.raw(['rev-list', '--parents', '-n', '1', 'HEAD'])).trim().split(' ').length -
+      1
+
+    it("pull('rebase') replays the local commit on top: linear history, no merge commit", async () => {
+      await new GitService(repoB.path).pull('rebase')
+      expect(await parentsOfHead()).toBe(1)
+      expect((await repoB.git.log()).all.map((c) => c.message)).toEqual([
+        'from B',
+        'from A',
+        'initial'
+      ])
+    })
+
+    it("pull('merge') creates a merge commit even where git would otherwise demand a choice", async () => {
+      await repoB.git.addConfig('pull.rebase', 'true') // the explicit mode must override config
+      await new GitService(repoB.path).pull('merge')
+      expect(await parentsOfHead()).toBe(2)
+    })
   })
 
   it('fetch runs without error against a bare remote', async () => {

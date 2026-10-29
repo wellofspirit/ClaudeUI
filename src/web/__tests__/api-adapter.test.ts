@@ -157,6 +157,24 @@ describe('web api-adapter — worktree manager (ADR-112)', () => {
     expect(connection.invoke).toHaveBeenLastCalledWith('worktree:inspect', '/repo', 'id-1')
   })
 
+  it('createWorktree always rides invokeWithProgress (the channel is withProgress, so the 30 s timeout slides), forwards the base, and unwraps the envelope', async () => {
+    connection.invokeWithProgress.mockResolvedValueOnce({ ok: true, data: { worktreePath: '/wt' } })
+    await expect(
+      api.createWorktree('/repo/app', 'feature-x', { base: 'default' })
+    ).resolves.toEqual({
+      worktreePath: '/wt'
+    })
+    expect(connection.invoke).not.toHaveBeenCalled()
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'worktree:create',
+      ['/repo/app', 'feature-x', { base: 'default' }],
+      expect.any(Function)
+    )
+
+    connection.invokeWithProgress.mockResolvedValueOnce({ ok: false, error: 'permission denied' })
+    await expect(api.createWorktree('/repo/app', 'x')).rejects.toThrow('permission denied')
+  })
+
   it('the legacy removeWorktree always rides invokeWithProgress (the channel is withProgress) with a no-op callback, and unwraps the envelope', async () => {
     connection.invokeWithProgress.mockResolvedValueOnce({
       ok: true,
@@ -648,14 +666,13 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
 
   // Worktrees — `capability: 'git'`, the same one the `git:*` mutations ride.
   // These threw "Worktrees not available in remote mode".
-  { method: 'createWorktree', channel: 'worktree:create', args: ['/repo/app', 'feature-x'] },
   {
     method: 'getWorktreeStatus',
     channel: 'worktree:status',
     args: ['/repo/app-feature-x', 'abc1234']
   },
-  // `removeWorktree` rides the progress path (`withProgress` server-side): see the worktree
-  // manager describe, it does not reach `connection.invoke`.
+  // `createWorktree` and `removeWorktree` ride the progress path (`withProgress` server-side): see
+  // the worktree manager describe, they do not reach `connection.invoke`.
 
   // Automations — one frozen declaration shared by both transports
   // (`core/ipc/automation-commands.ts`, `config`). Plain handlers, so preload
@@ -830,12 +847,11 @@ describe('web api-adapter — wired methods reach the channel they claim', () =>
         'deleteOpencodeAgent',
         'setOpencodeAgentDisabled',
         'generateOpencodeAgent',
-        'createWorktree',
         'mcpToggleServer',
         'saveSharedProvider'
       ].includes(method)
     )
-    expect(mutations).toHaveLength(9)
+    expect(mutations).toHaveLength(8)
     for (const { method, args } of mutations) {
       connection.invoke.mockResolvedValueOnce({ ok: false, error: 'permission denied' })
       await expect(callMethod(method, args)).rejects.toThrow('permission denied')

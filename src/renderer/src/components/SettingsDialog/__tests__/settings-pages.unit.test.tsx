@@ -114,6 +114,7 @@ describe('PAGES structure', () => {
       appearance: ['theme', 'layout', 'agents', 'diff', 'status-line', 'git-panel'],
       chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
       sessions: [
+        'worktrees',
         'autonomy',
         'permissions',
         'judge',
@@ -248,7 +249,10 @@ describe('PAGES structure', () => {
   })
 
   it('byEngine groups list their engines in claude → opencode → pi order', () => {
-    expect(enginesOf(pageOf('sessions').groups[2])).toEqual(['opencode', 'pi'])
+    expect(enginesOf(pageOf('sessions').groups.find((g) => g.id === 'judge')!)).toEqual([
+      'opencode',
+      'pi'
+    ])
     expect(enginesOf(pageOf('models').groups.find((g) => g.id === 'defaults')!)).toEqual([
       'claude',
       'opencode',
@@ -317,7 +321,7 @@ describe('PAGES structure', () => {
   })
 
   it('a per-engine storage tag resolves against the selected engine', () => {
-    const judge = pageOf('sessions').groups[2]
+    const judge = pageOf('sessions').groups.find((g) => g.id === 'judge')!
     expect(storageOf(judge, 'opencode')).toBe('engines/opencode.json')
     expect(storageOf(judge, 'pi')).toBe('engines/pi.json')
     // A fixed tag ignores the engine.
@@ -373,7 +377,9 @@ describe('inventory guard', () => {
       // Session tools, slice 4: when a long session should hand off.
       'contextPressure',
       // Session tools, host-wide switch.
-      'sessionTools'
+      'sessionTools',
+      // Worktrees: the global default for starting new sessions in one.
+      'startInWorktree'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
@@ -627,6 +633,7 @@ describe('harnesses that do not run', () => {
     const ids = (runs: EngineRuns): string[] =>
       visibleGroups(pageOf('sessions'), undefined, runs).map((g) => g.id)
     expect(ids(except())).toEqual([
+      'worktrees',
       'autonomy',
       'permissions',
       'judge',
@@ -638,6 +645,7 @@ describe('harnesses that do not run', () => {
     // Trust & protection is read by the opencode and pi judges alone; context
     // pressure serves every harness, so it stays whatever runs.
     expect(ids(except('opencode', 'pi'))).toEqual([
+      'worktrees',
       'autonomy',
       'permissions',
       'session-tools',

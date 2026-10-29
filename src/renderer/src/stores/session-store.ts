@@ -16,6 +16,14 @@ import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import type { TranscriptLoadProgress } from '../lib/transcript-load-progress'
 import type { CanonicalSessionState, CanonicalState } from '../../../core/shared/sync/state'
 import type { SessionLinkInfo } from '../../../shared/session-links'
+import {
+  effectiveStartInWorktree,
+  generateWorktreeName,
+  isManagedWorktreePath,
+  type PendingWorktree,
+  type WorktreeProjectChoice
+} from '../../../shared/worktree-start'
+import { cwdToProjectKey } from '../../../shared/project-key'
 import type {
   ContextPressureBanner,
   ContextPressureSetting
@@ -376,6 +384,7 @@ function claudePicksOnAliases(
 export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
+import { sessionWorkdir } from '../lib/session-workdir'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -564,6 +573,13 @@ export interface AppSettings {
    * session spawns, so turning it off applies to new sessions.
    */
   sessionTools?: boolean
+  /**
+   * "Start new sessions in a worktree": the global default. Absent from {@link DEFAULT_SETTINGS}:
+   * unset is off, and Reset deletes the key. See `shared/worktree-start.ts`.
+   */
+  startInWorktree?: boolean
+  /** Per-project override of {@link startInWorktree}, keyed by the sidebar group's project key; a missing key uses the default. */
+  worktreeByProject?: Record<string, WorktreeProjectChoice>
   /**
    * Colour an agent's name in the roster, and the task card's model chip, by the
    * tier of the model it runs on (`shared/model-tier.ts`). On by default.
@@ -1046,6 +1062,12 @@ export interface PerSessionState {
    *  <anchor> --fork-session`, minting a new branch seeded with messages 1..N.
    *  Read only while `!sdkActive`; the fork materializes lazily on first prompt. */
   forkOrigin: { sourceSessionId: string; anchorUuid: string } | null
+  /**
+   * "Start in a worktree" for a session that has not spawned: the toggle, the name, and where
+   * creating it stands. The worktree is made at the first send (`lib/worktree-start.ts`), then this
+   * is cleared. View state: per client, never persisted.
+   */
+  pendingWorktree?: PendingWorktree | null
   messages: ChatMessage[]
   itemStreams: ItemStreams
   itemStreamRevision: number
@@ -1191,6 +1213,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   sdkActive: false,
   isHistorical: false,
   forkOrigin: null,
+  pendingWorktree: null,
   messages: [],
   itemStreams: {},
   itemStreamRevision: 0,
@@ -2142,6 +2165,8 @@ export interface SessionState {
   clearConversation: (routingId: string) => Promise<void>
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
+  /** Patch a not-yet-spawned session's pending worktree; null clears it. */
+  setPendingWorktree: (routingId: string, patch: Partial<PendingWorktree> | null) => void
   setQuitWorktrees: (
     sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
   ) => void
@@ -2468,6 +2493,21 @@ export const useSessionStore = create<SessionState>((set) => ({
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       if (switchTo) {
         set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView })
+      }
+      // The worktree intent starts at the project's effective setting; a session already inside a
+      // managed worktree (a /clear there) stays where it is.
+      if (cwd) {
+        set((s) => ({
+          sessions: updateSession(s.sessions, routingId, () => ({
+            pendingWorktree: {
+              enabled:
+                !isManagedWorktreePath(cwd) &&
+                effectiveStartInWorktree(state.settings, cwdToProjectKey(cwd)),
+              name: generateWorktreeName(),
+              phase: 'idle' as const
+            }
+          }))
+        }))
       }
       // A brand-new session's git status is known from the cwd cache, and that is
       // view state the projection does not carry.
@@ -2848,8 +2888,12 @@ export const useSessionStore = create<SessionState>((set) => ({
     // that spawn a session, so it goes through the replica; `isHistorical` is view
     // state and stays here.
     patchLocalSession(routingId, { sdkActive: true })
+    // A spawned session is past choosing a worktree, whichever path spawned it.
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ isHistorical: false }))
+      sessions: updateSession(state.sessions, routingId, () => ({
+        isHistorical: false,
+        pendingWorktree: null
+      }))
     }))
   },
 
@@ -3808,6 +3852,21 @@ export const useSessionStore = create<SessionState>((set) => ({
     saveSessionConfig(state, { worktreeInfoMap })
   },
 
+  setPendingWorktree: (routingId, patch) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        pendingWorktree: patch
+          ? {
+              enabled: false,
+              name: generateWorktreeName(),
+              phase: 'idle' as const,
+              ...s.pendingWorktree,
+              ...patch
+            }
+          : null
+      }))
+    })),
+
   setQuitWorktrees: (sessions) => set({ quitWorktrees: sessions }),
 
   // Git actions
@@ -3819,7 +3878,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setGitStatus: (routingId, status) =>
     set((state) => {
       const session = state.sessions[routingId]
-      if (session?.cwd) setCapped(gitStatusCache, session.cwd, status, GIT_STATUS_CACHE_MAX)
+      const workdir = session ? sessionWorkdir(session) : ''
+      if (workdir) setCapped(gitStatusCache, workdir, status, GIT_STATUS_CACHE_MAX)
       return { sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status })) }
     }),
 
@@ -4133,22 +4193,23 @@ harnessStore.followRunChanges((changed) => {
 })
 
 // ---------------------------------------------------------------------------
-// Terminal selectors (derive from active session's cwd)
+// Terminal selectors (derive from active session's workdir)
 // ---------------------------------------------------------------------------
 
 function getActiveCwd(state: SessionState): string | null {
   const id = state.activeSessionId
-  return id ? (state.sessions[id]?.cwd ?? null) : null
+  const session = id ? state.sessions[id] : undefined
+  return session ? sessionWorkdir(session) || null : null
 }
 
-/** Terminal tabs for the active session's cwd. */
+/** Terminal tabs for the active session's workdir. */
 export function selectVisibleTerminalTabs(state: SessionState): TerminalTab[] {
   const cwd = getActiveCwd(state)
   if (!cwd) return []
   return state.terminalGroups[normalizeCwd(cwd)]?.tabs ?? []
 }
 
-/** Active terminal ID for the active session's cwd. */
+/** Active terminal ID for the active session's workdir. */
 export function selectActiveTerminalId(state: SessionState): string | null {
   const cwd = getActiveCwd(state)
   if (!cwd) return null

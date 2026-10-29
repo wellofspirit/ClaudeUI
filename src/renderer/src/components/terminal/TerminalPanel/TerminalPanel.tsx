@@ -13,6 +13,7 @@ import { TerminalStepUpPrompt } from '../TerminalStepUpPrompt'
 import { DESKTOP_AVAILABILITY } from '../terminal-availability'
 import { useTerminalPool } from '../terminal-pool'
 import { nextFreeSlot } from '../pool-slot'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import { TerminalPanelView } from './View'
 import { TerminalMobileView } from './TerminalMobileView'
 
@@ -52,7 +53,7 @@ export function TerminalPanel({ style = NO_STYLE }: Props): React.JSX.Element {
 
   const cwd = useSessionStore((s) => {
     const id = s.activeSessionId
-    return id ? (s.sessions[id]?.cwd ?? '') : ''
+    return id && s.sessions[id] ? sessionWorkdir(s.sessions[id]) : ''
   })
 
   /** Capability honesty: the affordance is driven by the server's answer only. */

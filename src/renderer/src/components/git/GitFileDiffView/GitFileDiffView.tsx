@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useMemo, useRef, useState } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import { useGutterDragSelection, type GutterSelection } from '../../../hooks/useGutterDragSelection'
 import type { DiffComment } from '../../../../../shared/types'
 import { GitFileDiffViewView } from './View'
@@ -15,7 +16,7 @@ interface ActiveCommentInput {
 }
 
 export function GitFileDiffView(): React.JSX.Element {
-  const cwd = useActiveSession((s) => s.cwd)
+  const cwd = useActiveSession(sessionWorkdir)
   const gitSelectedFile = useActiveSession((s) => s.gitSelectedFile)
   const gitFileDiff = useActiveSession((s) => s.gitFileDiff)
   const gitStatus = useActiveSession((s) => s.gitStatus)

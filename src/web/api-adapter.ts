@@ -613,7 +613,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // safeHandler-wrapped, so `unwrap` carries the real reason back (an empty
     // answer would read as "this repo has no worktrees" rather than "this client
     // cannot ask").
-    createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
+    createWorktree: (cwd, name, opts) =>
+      unwrapWithProgress('worktree:create', [cwd, name, opts], () => {}),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
     // `withProgress` on the server: the progress path slides the invoke timeout; no caller
@@ -641,7 +642,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     gitGetStatus: (cwd) => unwrap('git:status', cwd),
     gitGetBranches: (cwd) => unwrap('git:branches', cwd),
     gitCheckout: (cwd, branch) => unwrap('git:checkout', cwd, branch),
-    gitCreateBranch: (cwd, name) => unwrap('git:create-branch', cwd, name),
+    gitCreateBranch: (cwd, name, base) => unwrap('git:create-branch', cwd, name, base),
     gitGetFilePatch: (cwd, filePath, staged, ignoreWhitespace) =>
       unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
     gitGetFileContents: (cwd, filePath, staged) =>
@@ -654,7 +655,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     gitCommit: (cwd, message) => unwrap('git:commit', cwd, message),
     gitPush: (cwd) => unwrap('git:push', cwd),
     gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
-    gitPull: (cwd) => unwrap('git:pull', cwd),
+    gitPull: (cwd, mode) => unwrap('git:pull', cwd, mode),
+    gitStashPush: (cwd) => unwrap('git:stash-push', cwd),
+    gitStashRestore: (cwd, sha) => unwrap('git:stash-restore', cwd, sha),
     gitFetch: (cwd) => unwrap('git:fetch', cwd),
     // Live watching is real over remote: the server shares one poller per cwd
     // with the desktop (gitWatchRegistry) and pushes git:status-update over the

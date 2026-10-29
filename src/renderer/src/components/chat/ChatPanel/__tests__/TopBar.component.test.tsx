@@ -1176,7 +1176,31 @@ describe('TopBar — mobile entry points', () => {
     )
     fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
     expect(screen.queryByTestId('TopBar.overflowMenuBranch')).toBeNull()
+  })
+
+  it('a worktree session has one pill - the branch pill in the worktree mark - and no worktree ⋯ row', () => {
+    useSessionStore.getState().createNewSession('route-topbar-gitrepo', GIT_CWD)
+    useSessionStore.setState({ activeSessionId: 'route-topbar-gitrepo' })
+    useSessionStore.getState().setIsGitRepo('route-topbar-gitrepo', true)
+    useSessionStore.getState().setGitStatus('route-topbar-gitrepo', makeGitStatus())
+    useSessionStore.getState().setWorktreeInfo('route-topbar-gitrepo', {
+      worktreePath: `${GIT_CWD}/.claude/worktrees/fix`,
+      worktreeBranch: 'worktree-fix',
+      worktreeName: 'fix',
+      originalCwd: GIT_CWD,
+      gitRoot: GIT_CWD,
+      originalHeadCommit: 'abc',
+      createdAt: 1
+    })
+
+    renderTopBar(false)
+    expect(screen.queryByTestId('WorktreePill')).toBeNull()
+    expect(screen.getByTestId('GitBranchPill.mark')).toHaveAttribute('data-mark', 'worktree')
+    expect(screen.getByTestId('GitBranchPill.toggle').className).toContain('text-mode-edit')
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
     expect(screen.queryByTestId('TopBar.overflowMenuWorktree')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenuBranch')).toBeInTheDocument()
   })
 
   // ── Skills / MCP entries (M2) ─────────────────────────────────────────────
@@ -1775,6 +1799,116 @@ describe('TopBar — VSCode button (remote IDE, ADR-064)', () => {
     expect(openInVSCode).toHaveBeenCalledWith(IDE_CWD)
     // The menu closes behind the act, like every other row.
     expect(screen.queryByTestId('TopBar.overflowMenuVSCode')).toBeNull()
+  })
+
+  // ── Worktree: the split button ────────────────────────────────────────────
+
+  const WORKTREE_PATH = '/d/repo-topbar-ide/.claude/worktrees/fix-hooks'
+  const PARENT_ROOT = '/d/repo-topbar-ide'
+
+  /** The session works in a worktree while its cwd stays the spawn directory. */
+  function enterWorktree(): void {
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        [ROUTE]: {
+          ...s.sessions[ROUTE],
+          worktreeInfo: {
+            worktreePath: WORKTREE_PATH,
+            worktreeBranch: 'worktree-fix-hooks',
+            worktreeName: 'fix-hooks',
+            originalCwd: PARENT_ROOT,
+            gitRoot: PARENT_ROOT,
+            originalHeadCommit: '',
+            createdAt: 0
+          }
+        }
+      }
+    }))
+  }
+
+  it('is a single button with no folder menu outside a worktree', () => {
+    renderTopBar(false)
+    expect(screen.queryByTestId('TopBar.openVSCodeCaret')).toBeNull()
+    fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+    expect(openInVSCode).toHaveBeenCalledWith(IDE_CWD)
+  })
+
+  it('opens the worktree from the button body and offers both folders under the ▾', () => {
+    enterWorktree()
+    renderTopBar(false)
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+    expect(openInVSCode).toHaveBeenCalledWith(WORKTREE_PATH)
+    expect(screen.queryByTestId('TopBar.openVSCodeMenu')).toBeNull()
+    // The pair collapses into the ⋯ menu together, at the same tier as the lone button.
+    expect(screen.getByTestId('TopBar.openVSCodeGroup').className).toContain(TIER2_HIDE)
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCodeCaret'))
+    const worktreeRow = screen.getByTestId('TopBar.openVSCodeMenuWorktree')
+    expect(worktreeRow).toHaveTextContent('fix-hooks')
+    expect(worktreeRow).toHaveTextContent('default')
+    expect(worktreeRow).toHaveTextContent(WORKTREE_PATH)
+    const parentRow = screen.getByTestId('TopBar.openVSCodeMenuParent')
+    expect(parentRow).toHaveTextContent('Parent repo')
+    expect(parentRow).toHaveTextContent('repo-topbar-ide')
+    expect(parentRow).toHaveTextContent(PARENT_ROOT)
+
+    fireEvent.click(parentRow)
+    expect(openInVSCode).toHaveBeenLastCalledWith(PARENT_ROOT)
+    expect(screen.queryByTestId('TopBar.openVSCodeMenu')).toBeNull()
+  })
+
+  it('closes the folder menu on Escape and on an outside press', () => {
+    enterWorktree()
+    renderTopBar(false)
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCodeCaret'))
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('TopBar.openVSCodeMenu')).toBeNull()
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCodeCaret'))
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByTestId('TopBar.openVSCodeMenu')).toBeNull()
+    expect(openInVSCode).not.toHaveBeenCalled()
+  })
+
+  it('mints the web entry for the folder chosen, still opening the tab on the click', async () => {
+    enterWorktree()
+    app.api.platform = 'web'
+    renderTopBar(false)
+    await waitFor(() => expect(screen.getByTestId('TopBar.openVSCode')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCode'))
+    expect(ideMintEntry).toHaveBeenLastCalledWith(WORKTREE_PATH, 'dark')
+
+    fireEvent.click(screen.getByTestId('TopBar.openVSCodeCaret'))
+    fireEvent.click(screen.getByTestId('TopBar.openVSCodeMenuParent'))
+    // Synchronous on the row's click, before the mint resolves (pop-up blocker).
+    expect(windowOpen).toHaveBeenCalledTimes(2)
+    expect(ideMintEntry).toHaveBeenLastCalledWith(PARENT_ROOT, 'dark')
+    await waitFor(() => expect(fakeTab.location.href).toBe('/vscode/enter?it=token'))
+  })
+
+  it('gives the ⋯ menu a second row for the parent repo only in a worktree', () => {
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuVSCode')).toHaveTextContent('Open in VS Code')
+    expect(screen.queryByTestId('TopBar.overflowMenuVSCodeParent')).toBeNull()
+    cleanup()
+
+    enterWorktree()
+    renderTopBar(true)
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
+    expect(screen.getByTestId('TopBar.overflowMenuVSCode')).toHaveTextContent(
+      'Open worktree in VS Code'
+    )
+    expect(screen.getByTestId('TopBar.overflowMenuVSCodeParent')).toHaveTextContent(
+      'Open parent repo in VS Code'
+    )
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenuVSCodeParent'))
+    expect(openInVSCode).toHaveBeenCalledWith(PARENT_ROOT)
   })
 
   // ── The click flow ────────────────────────────────────────────────────────
