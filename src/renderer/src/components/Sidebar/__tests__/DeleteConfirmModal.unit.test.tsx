@@ -162,7 +162,9 @@ describe('DeleteConfirmModal (project, relocated sessions)', () => {
       sessionPaths: [RELOCATED]
     })
     const block = screen.getByTestId('DeleteConfirmModal.relocated')
-    expect(block).toHaveTextContent('Also deletes 1 session that moved into a worktree folder:')
+    expect(block).toHaveTextContent(
+      'Also deletes 1 session file stored in other Claude project folders (moved or worktree sessions):'
+    )
     expect(
       screen.getAllByTestId('DeleteConfirmModal.relocatedPath').map((el) => el.textContent)
     ).toEqual([RELOCATED])
@@ -202,5 +204,81 @@ describe('DeleteConfirmModal (project, relocated sessions)', () => {
     })
     expect(screen.queryByTestId('DeleteConfirmModal.relocated')).not.toBeInTheDocument()
     expect(screen.getByText('~/.claude/projects/-repo/')).toBeInTheDocument()
+  })
+})
+
+/** The sidebar folds linked-worktree sessions into their parent project; the delete covers them. */
+describe('DeleteConfirmModal (project, folded worktrees and Claude memory)', () => {
+  it('says which worktree sessions are included and that the worktree folders stay', () => {
+    renderModal({
+      kind: 'project',
+      name: 'repo',
+      path: '~/.claude/projects/-repo/',
+      sessionCount: 5,
+      worktrees: { sessionCount: 3, names: ['feat-a', 'feat-b'] }
+    })
+    expect(screen.getByTestId('DeleteConfirmModal.worktrees')).toHaveTextContent(
+      'Includes 3 sessions in 2 worktrees: feat-a, feat-b. The worktree folders are not deleted.'
+    )
+  })
+
+  it('singular forms', () => {
+    renderModal({
+      kind: 'project',
+      name: 'repo',
+      path: '~/.claude/projects/-repo/',
+      sessionCount: 2,
+      worktrees: { sessionCount: 1, names: ['feat'] }
+    })
+    expect(screen.getByTestId('DeleteConfirmModal.worktrees')).toHaveTextContent(
+      'Includes 1 session in 1 worktree: feat.'
+    )
+  })
+
+  it('warns that removing the project folder also removes Claude’s saved project memory', () => {
+    renderModal({
+      kind: 'project',
+      name: 'repo',
+      path: '~/.claude/projects/-repo/',
+      sessionCount: 2
+    })
+    expect(screen.getByTestId('DeleteConfirmModal.memory')).toHaveTextContent(
+      "also removes Claude's saved project memory"
+    )
+    expect(screen.queryByTestId('DeleteConfirmModal.worktrees')).not.toBeInTheDocument()
+  })
+
+  it('a synthesised parent: the repository folder is kept, memory included, and says so', () => {
+    renderModal({
+      kind: 'project',
+      name: 'repo',
+      path: '~/.claude/projects/-repo/',
+      sessionCount: 1,
+      sessionPaths: ['~/.claude/projects/-repo--claude-worktrees-a/w1.jsonl'],
+      folderKept: true,
+      folderUnlisted: true,
+      worktrees: { sessionCount: 1, names: ['a'] }
+    })
+    expect(screen.getByTestId('DeleteConfirmModal.memoryKept')).toHaveTextContent(
+      'with its saved project memory, is not touched'
+    )
+    expect(screen.queryByTestId('DeleteConfirmModal.memory')).not.toBeInTheDocument()
+    // Not the "another project's session" explanation, which would be untrue here.
+    expect(screen.getByTestId('DeleteConfirmModal.relocated')).toHaveTextContent(
+      'Deletes 1 Claude session file one by one:'
+    )
+    expect(screen.getByText('~/.claude/projects/-repo/ — folder kept')).toBeInTheDocument()
+  })
+
+  it('a kept folder that holds another project’s session does not promise memory removal', () => {
+    renderModal({
+      kind: 'project',
+      name: 'wt',
+      path: '~/.claude/projects/-repo--claude-worktrees-wt/',
+      sessionCount: 1,
+      sessionPaths: ['~/.claude/projects/-repo--claude-worktrees-wt/a.jsonl'],
+      folderKept: true
+    })
+    expect(screen.queryByTestId('DeleteConfirmModal.memory')).not.toBeInTheDocument()
   })
 })

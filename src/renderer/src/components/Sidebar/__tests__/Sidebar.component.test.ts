@@ -24,6 +24,7 @@ import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { SidebarViewProps } from '../View'
 import type { SessionInfo, DirectoryGroup } from '../../../../../shared/types'
+import { cwdToProjectKey } from '../../../../../shared/project-key'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 
 // ---------------------------------------------------------------------------
@@ -1335,5 +1336,217 @@ describe('Sidebar FC', () => {
     // which two clients answering the same notify hold different answers.
     expect(listCalls).toBe(0)
     expect(useSessionStore.getState().directories[0].sessions[0].sessionId).toBe('s-new')
+  })
+
+  // -------------------------------------------------------------------------
+  // 17. Worktree groups fold under their parent project (ADR-112 §6)
+  // -------------------------------------------------------------------------
+
+  describe('worktree folding', () => {
+    const WT_CWD = '/d/WorkPlace/demo/.claude/worktrees/feat'
+    const WT_KEY = cwdToProjectKey(WT_CWD)
+    const worktreeGroup = (sessions: SessionInfo[]): DirectoryGroup => ({
+      cwd: WT_CWD,
+      projectKey: WT_KEY,
+      folderName: 'feat',
+      sessions,
+      linkedWorktree: { worktreePath: WT_CWD, repoRoot: CWD, name: 'feat', branch: 'feat' }
+    })
+    const wtSession = (id: string, engineId: SessionInfo['engineId'] = 'claude'): SessionInfo => ({
+      ...makeSessionInfo(id),
+      cwd: WT_CWD,
+      projectKey: WT_KEY,
+      engineId
+    })
+    const seedFolded = (parent = true): void =>
+      act(() => {
+        seed.directories([
+          ...(parent ? [makeDirectoryGroup([makeSessionInfo('p1')])] : []),
+          worktreeGroup([wtSession('w1'), wtSession('w2', 'pi')])
+        ])
+      })
+
+    it('draws the worktree sessions inside the parent group; the worktree group leaves the top level', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded()
+
+      expect(viewProps.augmentedDirs.map((g) => g.projectKey)).toEqual([PROJECT_KEY])
+      expect(viewProps.augmentedDirs[0].sessions.map((s) => s.sessionId).sort()).toEqual([
+        'p1',
+        'w1',
+        'w2'
+      ])
+      // The rows keep their own cwd, so the worktree marker (read off the unchanged listing) still shows.
+      expect(viewProps.augmentedDirs[0].sessions.find((s) => s.sessionId === 'w1')?.cwd).toBe(
+        WT_CWD
+      )
+      expect(useSessionStore.getState().directories).toHaveLength(2)
+    })
+
+    it('a repository with only worktree sessions is drawn as a synthesised parent keyed by its root', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded(false)
+
+      expect(viewProps.augmentedDirs).toHaveLength(1)
+      expect(viewProps.augmentedDirs[0]).toMatchObject({
+        cwd: CWD,
+        projectKey: cwdToProjectKey(CWD),
+        synthesized: true
+      })
+    })
+
+    it('a not-yet-listed session in a folded worktree’s cwd joins the parent', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded()
+      act(() => {
+        useSessionStore.getState().createNewSession('fresh', WT_CWD)
+      })
+
+      expect(viewProps.augmentedDirs.map((g) => g.projectKey)).toEqual([PROJECT_KEY])
+      expect(viewProps.augmentedDirs[0].sessions.map((s) => s.sessionId)).toContain('fresh')
+    })
+
+    it('hiding the parent hides the folded sessions with it: one group, filtered by its key', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded()
+      act(() => {
+        viewProps.onHideProject(PROJECT_KEY)
+      })
+
+      expect(viewProps.hiddenProjectSet.has(PROJECT_KEY)).toBe(true)
+      expect(viewProps.augmentedDirs).toHaveLength(1)
+      expect(viewProps.augmentedDirs[0].sessions).toHaveLength(3)
+    })
+
+    it('a worktree project hidden before the fold keeps its sessions hidden, dimmed under "show hidden"', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded()
+      act(() => {
+        useSessionStore.setState({ hiddenProjectKeys: [WT_KEY] })
+      })
+
+      expect(viewProps.augmentedDirs[0].sessions.map((s) => s.sessionId)).toEqual(['p1'])
+
+      act(() => {
+        viewProps.onShowHiddenToggle()
+      })
+      expect(viewProps.augmentedDirs[0].sessions.map((s) => s.sessionId).sort()).toEqual([
+        'p1',
+        'w1',
+        'w2'
+      ])
+      expect(viewProps.directoryHiddenSessionSet?.has('w1')).toBe(true)
+      expect(viewProps.directoryHiddenSessionSet?.has('p1')).toBe(false)
+    })
+
+    it('the delete request counts and names every folded session, hidden ones included', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded()
+      act(() => {
+        useSessionStore.setState({ hiddenProjectKeys: [WT_KEY] })
+      })
+      // The drawn group lacks the hidden worktree's sessions; the request is built from the full one.
+      act(() => {
+        viewProps.onDeleteProject(viewProps.augmentedDirs[0])
+      })
+
+      const target = viewProps.deleteTarget
+      expect(target?.kind).toBe('project')
+      if (target?.kind !== 'project') return
+      expect(target.sessionCount).toBe(3)
+      expect(target.synthesized).toBe(false)
+      expect(target.worktrees).toEqual({ sessionCount: 2, names: ['feat'] })
+      expect(target.claudeFiles).toEqual({
+        removeDir: true,
+        // w2 is a pi session: deleted through its engine, never in the Claude plan.
+        sessionFiles: [{ sessionId: 'w1', projectKey: WT_KEY }]
+      })
+    })
+
+    it('Unhide on a dimmed row hidden only by its worktree’s old project key unhides that project', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded()
+      act(() => {
+        useSessionStore.setState({ hiddenProjectKeys: [WT_KEY, 'other-project'] })
+      })
+      act(() => {
+        viewProps.onShowHiddenToggle()
+      })
+      const row = viewProps.augmentedDirs[0].sessions.find((x) => x.sessionId === 'w1')!
+      expect(viewProps.directoryHiddenSessionSet?.has('w1')).toBe(true)
+
+      act(() => {
+        viewProps.onUnhideSession(row)
+      })
+
+      expect(useSessionStore.getState().hiddenProjectKeys).toEqual(['other-project'])
+      expect(viewProps.directoryHiddenSessionSet?.has('w1')).toBe(false)
+    })
+
+    it('a not-yet-listed session joins the group by directory, drive-letter case aside', async () => {
+      const root = String.raw`D:\Work\demo`
+      const wt = String.raw`${root}\.claude\worktrees\feat`
+      const info = (id: string, cwd: string): SessionInfo => ({
+        ...makeSessionInfo(id),
+        cwd,
+        projectKey: cwdToProjectKey(cwd)
+      })
+      await act(async () => {
+        await renderFC()
+      })
+      act(() => {
+        seed.directories([
+          {
+            cwd: root,
+            projectKey: cwdToProjectKey(root),
+            folderName: 'demo',
+            sessions: [info('p1', root)]
+          },
+          {
+            cwd: wt,
+            projectKey: cwdToProjectKey(wt),
+            folderName: 'feat',
+            sessions: [info('w1', wt)],
+            linkedWorktree: { worktreePath: wt, repoRoot: root, name: 'feat', branch: 'feat' }
+          }
+        ])
+        useSessionStore.getState().createNewSession('fresh', 'd:/work/demo/.claude/worktrees/feat')
+        useSessionStore.getState().createNewSession('fresh-root', 'd:/work/demo')
+      })
+
+      expect(viewProps.augmentedDirs.map((g) => g.projectKey)).toEqual([cwdToProjectKey(root)])
+      expect(viewProps.augmentedDirs[0].sessions.map((x) => x.sessionId)).toEqual(
+        expect.arrayContaining(['fresh', 'fresh-root'])
+      )
+    })
+
+    it('a synthesised parent’s request keeps the repository folder', async () => {
+      await act(async () => {
+        await renderFC()
+      })
+      seedFolded(false)
+      act(() => {
+        viewProps.onDeleteProject(viewProps.augmentedDirs[0])
+      })
+
+      const target = viewProps.deleteTarget
+      if (target?.kind !== 'project') throw new Error('expected a project target')
+      expect(target.synthesized).toBe(true)
+      expect(target.claudeFiles.removeDir).toBe(false)
+    })
   })
 })

@@ -9,6 +9,7 @@ import type {
 } from '../../../../../shared/types'
 import { AutomationConfigView, type ModelOption, type InheritedPerms } from './View'
 import { dedupeResolvedModels, modelLabel } from '../../chat/InputBox/utils'
+import { foldForView } from '../../../../../shared/worktree-fold'
 
 export function AutomationConfig(): React.JSX.Element {
   const selectedId = useAutomationStore((s) => s.selectedAutomationId)
@@ -155,7 +156,7 @@ function AutomationConfigController({ automation }: { automation: Automation }):
   // equal, so the store would re-render this tree on every notification.
   const directories = useSessionStore((s) => s.directories)
   const recents = useMemo(
-    () => directories.map((g) => ({ cwd: g.cwd, folderName: g.folderName })),
+    () => foldForView(directories).map((g) => ({ cwd: g.cwd, folderName: g.folderName })),
     [directories]
   )
 

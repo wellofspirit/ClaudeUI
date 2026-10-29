@@ -184,6 +184,34 @@ describe('WelcomeState — web client', () => {
     expect(recents.map((e) => e.getAttribute('data-id'))).toEqual([KNOWN_DIR.cwd])
   })
 
+  it('lists a repository once: its worktree directories fold into it, in the dropdown and the rail', () => {
+    store.directories = [
+      KNOWN_DIR,
+      {
+        cwd: 'D:/work/known/.claude/worktrees/feat',
+        projectKey: 'D--work-known--claude-worktrees-feat',
+        folderName: 'feat',
+        sessions: [],
+        linkedWorktree: {
+          worktreePath: 'D:/work/known/.claude/worktrees/feat',
+          repoRoot: KNOWN_DIR.cwd,
+          name: 'feat',
+          branch: 'feat'
+        }
+      }
+    ]
+    render(<WelcomeState />)
+    openDropdown()
+    expect(
+      screen.getAllByTestId('WelcomeState.directory').map((e) => e.getAttribute('data-id'))
+    ).toEqual([KNOWN_DIR.cwd])
+
+    fireEvent.click(screen.getByTestId('WelcomeState.browse'))
+    expect(
+      screen.getAllByTestId('DirectoryBrowserDialog.recent').map((e) => e.getAttribute('data-id'))
+    ).toEqual([KNOWN_DIR.cwd])
+  })
+
   it('Cancel closes the dialog and leaves the welcome screen usable', () => {
     render(<WelcomeState />)
     openDropdown()
