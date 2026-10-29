@@ -357,6 +357,8 @@ const SESSION_IPC_CHANNELS = [
   'git:push',
   'git:push-with-upstream',
   'git:pull',
+  'git:stash-push',
+  'git:stash-restore',
   'git:fetch',
   'git:watch',
   'file:list-dir',
@@ -1432,10 +1434,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'git:create-branch',
     capability: 'git',
     kind: 'command',
-    handler: safeHandler(async (cwd: string, name: string) => {
+    handler: safeHandler(async (cwd: string, name: string, base?: string | null) => {
       const svc = gitServiceManager.get(cwd)
       try {
-        await svc.createBranch(name)
+        await svc.createBranch(name, base)
       } finally {
         gitServiceManager.release(cwd)
       }
@@ -1588,10 +1590,38 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'git:pull',
     capability: 'git',
     kind: 'command',
+    handler: safeHandler(async (cwd: string, mode?: 'merge' | 'rebase') => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        return await svc.pull(mode)
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  })
+
+  handleIpc({
+    channel: 'git:stash-push',
+    capability: 'git',
+    kind: 'command',
     handler: safeHandler(async (cwd: string) => {
       const svc = gitServiceManager.get(cwd)
       try {
-        return await svc.pull()
+        await svc.stashPush()
+      } finally {
+        gitServiceManager.release(cwd)
+      }
+    })
+  })
+
+  handleIpc({
+    channel: 'git:stash-restore',
+    capability: 'git',
+    kind: 'command',
+    handler: safeHandler(async (cwd: string, sha: string) => {
+      const svc = gitServiceManager.get(cwd)
+      try {
+        await svc.stashRestore(sha)
       } finally {
         gitServiceManager.release(cwd)
       }

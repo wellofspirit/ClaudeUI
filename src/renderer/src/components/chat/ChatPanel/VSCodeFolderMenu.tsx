@@ -3,7 +3,7 @@ import type { WorktreeInfo } from '../../../../../shared/types'
 import { displayCwd } from '../../../../../shared/display-path'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import { useAnchoredMenu } from '../../shared/use-anchored-menu'
-import { WORKTREE_MARK } from '../../git/WorktreePill'
+import { WORKTREE_MARK } from '../../git/GitBranchPill'
 
 function baseName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path

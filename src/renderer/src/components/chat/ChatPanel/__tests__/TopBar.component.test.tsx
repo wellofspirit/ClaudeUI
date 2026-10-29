@@ -1176,7 +1176,31 @@ describe('TopBar — mobile entry points', () => {
     )
     fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
     expect(screen.queryByTestId('TopBar.overflowMenuBranch')).toBeNull()
+  })
+
+  it('a worktree session has one pill - the branch pill in the worktree mark - and no worktree ⋯ row', () => {
+    useSessionStore.getState().createNewSession('route-topbar-gitrepo', GIT_CWD)
+    useSessionStore.setState({ activeSessionId: 'route-topbar-gitrepo' })
+    useSessionStore.getState().setIsGitRepo('route-topbar-gitrepo', true)
+    useSessionStore.getState().setGitStatus('route-topbar-gitrepo', makeGitStatus())
+    useSessionStore.getState().setWorktreeInfo('route-topbar-gitrepo', {
+      worktreePath: `${GIT_CWD}/.claude/worktrees/fix`,
+      worktreeBranch: 'worktree-fix',
+      worktreeName: 'fix',
+      originalCwd: GIT_CWD,
+      gitRoot: GIT_CWD,
+      originalHeadCommit: 'abc',
+      createdAt: 1
+    })
+
+    renderTopBar(false)
+    expect(screen.queryByTestId('WorktreePill')).toBeNull()
+    expect(screen.getByTestId('GitBranchPill.mark')).toHaveAttribute('data-mark', 'worktree')
+    expect(screen.getByTestId('GitBranchPill.toggle').className).toContain('text-mode-edit')
+
+    fireEvent.click(screen.getByTestId('TopBar.overflowMenu'))
     expect(screen.queryByTestId('TopBar.overflowMenuWorktree')).toBeNull()
+    expect(screen.getByTestId('TopBar.overflowMenuBranch')).toBeInTheDocument()
   })
 
   // ── Skills / MCP entries (M2) ─────────────────────────────────────────────
