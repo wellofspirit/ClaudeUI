@@ -24,6 +24,7 @@ import {
   type WorktreeProjectChoice
 } from '../../../shared/worktree-start'
 import { cwdToProjectKey } from '../../../shared/project-key'
+import { liveProjectMembers, projectScope } from '../../../shared/worktree-fold'
 import type {
   ContextPressureBanner,
   ContextPressureSetting
@@ -3032,20 +3033,34 @@ export const useSessionStore = create<SessionState>((set) => ({
     // group on the next listing refresh. `handlers-core.deleteProject` does that
     // sweep main-side now (pi included), which is also the only way the REMOTE
     // surface ever got it — a phone has no such follow-up loop.
+    //
+    // The project is what the sidebar shows for it: its own group plus the linked-worktree groups
+    // folded into it (`projectScope`, the rule main deletes by). Read BEFORE the await: main
+    // replicates the removal while the call is in flight, and the groups would already be gone.
+    const before = useSessionStore.getState()
+    const scope = projectScope(before.directories, projectKey)
+    const memberGroups = [...(scope.group ? [scope.group] : []), ...scope.children]
+    const memberKeys = new Set(memberGroups.map((g) => g.projectKey))
     await window.api.deleteProject(projectKey)
     // Collect all session IDs in this project (both on-disk group members and live in-memory
-    // sessions sharing the project's cwd) so we can purge them from every piece of state.
+    // sessions sharing the project's or a folded worktree's cwd) so we can purge them from every
+    // piece of state.
     const state = useSessionStore.getState()
-    const group = state.directories.find((g) => g.projectKey === projectKey)
-    const projectCwd = group?.cwd
-    const projectSessionIds = new Set(group?.sessions.map((s) => s.sessionId) ?? [])
-    if (projectCwd) {
-      for (const [id, sess] of Object.entries(state.sessions)) {
-        if (sess.cwd === projectCwd) projectSessionIds.add(id)
-      }
+    const projectSessionIds = new Set(
+      memberGroups.flatMap((g) => g.sessions.map((s) => s.sessionId))
+    )
+    for (const id of liveProjectMembers(
+      before.directories,
+      scope,
+      projectKey,
+      Object.entries(state.sessions)
+    ).ids) {
+      projectSessionIds.add(id)
     }
-    const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
-    const directories = state.directories.filter((g) => g.projectKey !== projectKey)
+    const hiddenProjects = state.hiddenProjectKeys.filter(
+      (k) => k !== projectKey && !memberKeys.has(k)
+    )
+    const directories = state.directories.filter((g) => !memberKeys.has(g.projectKey))
     set((s) => {
       const sessions = { ...s.sessions }
       for (const id of projectSessionIds) delete sessions[id]

@@ -54,3 +54,24 @@ export async function deleteProjectFiles(
   const projectDir = resolveProjectDir(projectKey, root)
   await fs.promises.rm(projectDir, { recursive: true, force: true })
 }
+
+/**
+ * Remove a project directory only if it is EMPTY: a plain `rmdir`, never recursive, so whatever
+ * else lives there (Claude's `memory/`, a transcript nothing lists) keeps it. For the worktree
+ * project dirs a folded project delete has just emptied. Missing / non-empty / busy dirs are fine.
+ */
+export async function removeEmptyProjectDir(
+  projectKey: string,
+  root: string = defaultProjectsRoot()
+): Promise<void> {
+  if (!projectKey) throw new Error('projectKey is required')
+  if (SEGMENT_TRAVERSAL.test(projectKey)) throw new Error('Invalid projectKey')
+  const projectDir = resolveProjectDir(projectKey, root)
+  try {
+    await fs.promises.rmdir(projectDir)
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code && ['ENOENT', 'ENOTEMPTY', 'EEXIST', 'EBUSY', 'EPERM'].includes(code)) return
+    throw err
+  }
+}

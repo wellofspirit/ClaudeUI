@@ -1239,6 +1239,127 @@ describe('deleteProject', () => {
     await expect(store().deleteProject('proj-key')).rejects.toThrow('EACCES')
     expect(store().recentSessionIds).toEqual(recentBefore)
   })
+
+  // The sidebar folds linked-worktree groups into their parent, and main deletes what it shows.
+  // Main also replicates the removal WHILE the call is in flight, so the project's members are
+  // read before the await.
+  // The live-session predicate is by directory (the server's too): '/a-b' shares the lossy Claude key
+  // with the worktree '/a/b' but is another directory, and a drive-letter case difference is the same one.
+  it('purges a group made only of live, not-yet-listed sessions (no listing group for the key)', async () => {
+    store().createNewSession('fresh-1', '/fresh/dir')
+    store().createNewSession('fresh-2', '/fresh/dir')
+    store().createNewSession('other', '/fresh/other')
+    useSessionStore.setState({ activeSessionId: 'fresh-1', directories: [] })
+    mirrorStoreIntoReplica()
+
+    await store().deleteProject('-fresh-dir')
+
+    expect(window.api.deleteProject).toHaveBeenCalledWith('-fresh-dir')
+    expect(store().sessions['fresh-1']).toBeUndefined()
+    expect(store().sessions['fresh-2']).toBeUndefined()
+    expect(store().sessions['other']).toBeDefined()
+    expect(store().activeSessionId).toBeNull()
+  })
+
+  it('purges live sessions by directory, not by the lossy key', async () => {
+    const info = (sessionId: string, cwd: string, projectKey: string): any => ({
+      sessionId,
+      cwd,
+      projectKey,
+      title: sessionId,
+      timestamp: 0,
+      lastActivityAt: 0
+    })
+    useSessionStore.setState({
+      directories: [
+        {
+          cwd: 'D:\\Work\\repo',
+          projectKey: 'D--Work-repo',
+          folderName: 'repo',
+          sessions: [info('p1', 'D:\\Work\\repo', 'D--Work-repo')]
+        },
+        {
+          cwd: '/a/b',
+          projectKey: '-a-b',
+          folderName: 'b',
+          sessions: [info('w1', '/a/b', '-a-b')],
+          linkedWorktree: {
+            worktreePath: '/a/b',
+            repoRoot: 'D:\\Work\\repo',
+            name: 'b',
+            branch: 'b'
+          }
+        }
+      ]
+    })
+    mirrorStoreIntoReplica()
+    store().createNewSession('live-case', 'd:/work/repo')
+    store().createNewSession('live-wt', '/a/b')
+    store().createNewSession('live-lossy', '/a-b')
+
+    await store().deleteProject('D--Work-repo')
+
+    expect(store().sessions['live-case']).toBeUndefined()
+    expect(store().sessions['live-wt']).toBeUndefined()
+    expect(store().sessions['live-lossy']).toBeDefined()
+  })
+
+  it('purges the folded worktrees’ sessions too, from the group read before the await', async () => {
+    const PARENT = { cwd: '/repo', key: '-repo' }
+    const WT = { cwd: '/repo/.claude/worktrees/a', key: '-repo--claude-worktrees-a' }
+    const info = (sessionId: string, g: { cwd: string; key: string }): any => ({
+      sessionId,
+      cwd: g.cwd,
+      projectKey: g.key,
+      title: sessionId,
+      timestamp: 0,
+      lastActivityAt: 0
+    })
+    useSessionStore.setState({
+      directories: [
+        {
+          cwd: PARENT.cwd,
+          projectKey: PARENT.key,
+          folderName: 'repo',
+          sessions: [info('p1', PARENT)]
+        },
+        {
+          cwd: WT.cwd,
+          projectKey: WT.key,
+          folderName: 'a',
+          sessions: [info('listed-wt', WT)],
+          linkedWorktree: { worktreePath: WT.cwd, repoRoot: PARENT.cwd, name: 'a', branch: 'b' }
+        },
+        {
+          cwd: '/repo2',
+          projectKey: '-repo2',
+          folderName: 'repo2',
+          sessions: [info('o1', { cwd: '/repo2', key: '-repo2' })]
+        }
+      ],
+      hiddenProjectKeys: [WT.key, '-repo2']
+    })
+    mirrorStoreIntoReplica()
+    store().createNewSession('p1', PARENT.cwd)
+    store().createNewSession('listed-wt', WT.cwd)
+    store().createNewSession('live-wt', WT.cwd) // in memory only, in the worktree's cwd
+    store().createNewSession('o1', '/repo2')
+    // main replicates the removal before the call resolves
+    ;(window.api.deleteProject as any).mockImplementationOnce(async () => {
+      useSessionStore.setState({
+        directories: useSessionStore.getState().directories.filter((g) => g.projectKey === '-repo2')
+      })
+      mirrorStoreIntoReplica()
+    })
+
+    await store().deleteProject(PARENT.key)
+
+    for (const id of ['p1', 'listed-wt', 'live-wt']) expect(store().sessions[id]).toBeUndefined()
+    expect(store().sessions['o1']).toBeDefined()
+    expect(store().directories.map((g) => g.projectKey)).toEqual(['-repo2'])
+    // The worktree's own hidden mark goes with its group; another project's stays.
+    expect(store().hiddenProjectKeys).toEqual(['-repo2'])
+  })
 })
 
 // ---------------------------------------------------------------------------

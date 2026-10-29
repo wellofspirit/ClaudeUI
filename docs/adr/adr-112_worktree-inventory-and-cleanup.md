@@ -6,7 +6,8 @@ identity).
 **Relates to:** [ADR-102](adr-102_invoke-progress-and-navigate-first-session-load.md) (per-call progress), [ADR-105](adr-105_background-dispatch.md)
 and [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (an X-Agent whose directory is gone is not
 resumed), [ADR-097](adr-097_opencode-v2-only.md) (opencode 2.x events), [ADR-048](adr-048_mobile-surface-pattern.md) (phone
-reachability).
+reachability), [ADR-114](adr-114_starting-sessions-in-a-worktree.md) (starting sessions in a worktree, setup, the
+working directory following the worktree).
 
 ## Context
 
@@ -101,13 +102,23 @@ The engines differ:
    - A project group carries `linkedWorktree` when its directory is a linked git worktree. This is read from the
      filesystem (`.git` file → `gitdir` → `commondir`) without spawning git.
    - Every engine's session in such a directory shows the worktree icon, the pill and a faint purple backdrop at the
-     right edge of its sidebar row.
+     right edge of its sidebar row. (2026-10-29: the worktree pill is merged into the branch pill, which shows the
+     worktree mark in a worktree.)
    - Claude Code's four `EnterWorktree` variants are parsed tolerantly, with the tool input as a fallback.
      `ExitWorktree` clears the entry. The status-cwd drop rule is gone.
    - opencode's `session.moved` marks or clears the session's worktree. The session's own `cwd` is unchanged:
-     permissions, the terminal and the git pill keep the spawn directory.
+     permissions keep the spawn directory. (2026-10-29: the terminal, git pills, git panel and VS Code follow the
+     worktree instead, ADR-114 §5.)
    - A detected entry is recorded only when its worktree belongs to the same repository as the session's spawn
      directory, because the entry widens `session_start`'s allowed roots.
+   - (2026-10-29) The sidebar folds each marked worktree group under its parent repository's group, synthesising the
+     parent when it has none. This happens in the view only: the listing stays one group per directory, so
+     permissions, proposals and markers are unchanged. Delete project and Hide project act on the folded group, and
+     the server derives the same set from the listing. A synthesised parent never removes the repository's
+     `~/.claude/projects/<key>/` folder, which holds Claude Code's per-repository memory, and neither does a key the
+     listing no longer knows or a worktree's own key: their sessions' files go one by one, and a worktree's key folder
+     is removed only when it is empty. Live sessions belong by directory, not by the lossy key. Worktree folders are
+     never touched.
 7. **Remote parity.** Every verb is declared once for both transports under the `git` capability, the same capability
    as the existing discard and remove verbs. Removal and size reports use per-call progress, which also keeps the web
    client's invoke alive during large deletes. Removal is serialised per repository. Each removal is logged with its
