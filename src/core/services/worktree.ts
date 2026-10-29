@@ -14,6 +14,7 @@ import type {
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { listTreeFiles, measureTree, removeTreeLinkSafe, type TreeFailure } from './worktree-fs'
+import { setupWorktree } from './worktree-setup'
 import {
   collectHolders,
   createHolderMatcher,
@@ -135,19 +136,7 @@ export async function createWorktree(cwd: string, name: string): Promise<Worktre
     logger.warn(LOG, 'Failed to copy settings.local.json', err)
   }
 
-  // Configure core.hooksPath if .husky or .git/hooks exist
-  try {
-    const huskyDir = path.join(gitRoot, '.husky')
-    const gitHooksDir = path.join(gitRoot, '.git', 'hooks')
-    const wtGit = simpleGit(worktreePath)
-    if (fs.existsSync(huskyDir)) {
-      await wtGit.addConfig('core.hooksPath', huskyDir)
-    } else if (fs.existsSync(gitHooksDir)) {
-      await wtGit.addConfig('core.hooksPath', gitHooksDir)
-    }
-  } catch (err) {
-    logger.warn(LOG, 'Failed to configure hooksPath', err)
-  }
+  await setupWorktree(gitRoot, worktreePath)
 
   const info: WorktreeInfo = {
     worktreePath,
