@@ -4,6 +4,7 @@ import { useActiveSession, useSessionStore } from '../../../stores/session-store
 import { DirectoryBrowserDialog } from '../../shared/DirectoryBrowserDialog'
 import { generateWorktreeName, sanitizeWorktreeName } from '../../../../../shared/worktree-start'
 import { requestDraftSend } from '../../../lib/worktree-start'
+import { foldForView } from '../../../../../shared/worktree-fold'
 
 const WELCOME_PHRASES = [
   "Let's build",
@@ -32,7 +33,9 @@ export function WelcomeState(): React.JSX.Element {
   const pending = useActiveSession((s) => s.pendingWorktree)
   const isGitRepo = useActiveSession((s) => s.isGitRepo)
   const sdkActive = useActiveSession((s) => s.sdkActive)
-  const directories = useSessionStore((s) => s.directories)
+  const listing = useSessionStore((s) => s.directories)
+  // Worktree directories fold into their repository: one entry per project, as in the sidebar.
+  const directories = useMemo(() => foldForView(listing), [listing])
   const createNewSession = useSessionStore((s) => s.createNewSession)
   const setPendingWorktree = useSessionStore((s) => s.setPendingWorktree)
   const defaultStartInWorktree = useSessionStore((s) => s.settings?.startInWorktree === true)

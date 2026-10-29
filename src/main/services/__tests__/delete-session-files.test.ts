@@ -13,7 +13,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { deleteSessionFiles, deleteProjectFiles } from '../../../core/services/delete-session-files'
+import {
+  deleteSessionFiles,
+  deleteProjectFiles,
+  removeEmptyProjectDir
+} from '../../../core/services/delete-session-files'
 
 let root: string
 
@@ -36,6 +40,28 @@ async function seedProject(projectKey: string, sessionIds: string[]): Promise<st
   }
   return projectDir
 }
+
+describe('removeEmptyProjectDir', () => {
+  it('removes an empty dir', async () => {
+    const dir = await seedProject('-repo--claude-worktrees-wt', [])
+    await removeEmptyProjectDir('-repo--claude-worktrees-wt', root)
+    expect(fs.existsSync(dir)).toBe(false)
+  })
+
+  it('keeps a dir that still holds anything, nested content included (never recursive)', async () => {
+    const dir = await seedProject('-repo--claude-worktrees-wt', [])
+    await fs.promises.mkdir(path.join(dir, 'memory'), { recursive: true })
+    await fs.promises.writeFile(path.join(dir, 'memory', 'MEMORY.md'), 'keep')
+    await removeEmptyProjectDir('-repo--claude-worktrees-wt', root)
+    expect(fs.readFileSync(path.join(dir, 'memory', 'MEMORY.md'), 'utf8')).toBe('keep')
+  })
+
+  it('a missing dir is fine; a traversal key is refused', async () => {
+    await expect(removeEmptyProjectDir('-gone', root)).resolves.toBeUndefined()
+    await expect(removeEmptyProjectDir('../escape', root)).rejects.toThrow()
+    await expect(removeEmptyProjectDir('', root)).rejects.toThrow()
+  })
+})
 
 describe('deleteSessionFiles', () => {
   it('removes the JSONL and the subagent directory', async () => {

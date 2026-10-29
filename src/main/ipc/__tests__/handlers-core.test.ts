@@ -40,6 +40,7 @@ const {
   deleteSessionByEngine,
   deleteProjectFiles,
   deleteSessionFiles,
+  removeEmptyProjectDir,
   refreshCanonicalDirectories
 } = vi.hoisted(() => ({
   deleteSessionByEngine: vi.fn(
@@ -47,12 +48,14 @@ const {
   ),
   deleteProjectFiles: vi.fn(async () => {}),
   deleteSessionFiles: vi.fn(async (_id: string, _key: string) => {}),
+  removeEmptyProjectDir: vi.fn(async (_key: string) => {}),
   refreshCanonicalDirectories: vi.fn(async () => {})
 }))
 vi.mock('../../../core/services/session-delete', () => ({ deleteSessionByEngine }))
 vi.mock('../../../core/services/delete-session-files', () => ({
   deleteProjectFiles,
-  deleteSessionFiles
+  deleteSessionFiles,
+  removeEmptyProjectDir
 }))
 vi.mock('../../../core/services/sync-seed', () => ({ refreshCanonicalDirectories }))
 
@@ -691,6 +694,344 @@ describe('handlers-core', () => {
 
       await expect(deleteProject(manager, '-repo')).resolves.toBeUndefined()
       expect(deleteProjectFiles).toHaveBeenCalledWith('-repo')
+    })
+
+    /**
+     * The sidebar folds linked-worktree groups into their parent, and the delete covers what it
+     * shows: the server derives the set from the canonical listing (the request names only the
+     * project key). Worktree folders on disk are never touched; only their emptied Claude project
+     * dirs may go, and only with a plain rmdir (`removeEmptyProjectDir`).
+     */
+    describe('folded worktrees', () => {
+      const WT = '/repo/.claude/worktrees/wt'
+      const WT_KEY = '-repo--claude-worktrees-wt'
+      const OC_WT = '/data/opencode/worktree/abc123/feat'
+      const OC_KEY = '-data-opencode-worktree-abc123-feat'
+      const linked = (worktreePath: string, name: string): any => ({
+        worktreePath,
+        repoRoot: '/repo',
+        name,
+        branch: 'b'
+      })
+      const sess = (
+        sessionId: string,
+        cwd: string,
+        projectKey: string,
+        engineId?: string
+      ): any => ({
+        sessionId,
+        cwd,
+        projectKey,
+        ...(engineId ? { engineId } : {})
+      })
+      const listing = (withParent: boolean): any[] => [
+        ...(withParent
+          ? [
+              {
+                cwd: '/repo',
+                projectKey: '-repo',
+                folderName: 'repo',
+                sessions: [sess('home-1', '/repo', '-repo', 'claude')]
+              }
+            ]
+          : []),
+        {
+          cwd: WT,
+          projectKey: WT_KEY,
+          folderName: 'wt',
+          linkedWorktree: linked(WT, 'wt'),
+          sessions: [sess('wt-claude', WT, WT_KEY, 'claude'), sess('wt-pi', WT, WT_KEY, 'pi')]
+        },
+        {
+          cwd: OC_WT,
+          projectKey: OC_KEY,
+          folderName: 'feat',
+          linkedWorktree: linked(OC_WT, 'feat'),
+          sessions: [sess('oc-1', OC_WT, OC_KEY, 'opencode')]
+        },
+        // A similar key, an unrelated repo: nothing of it is taken along.
+        {
+          cwd: '/repo2',
+          projectKey: '-repo2',
+          folderName: 'repo2',
+          sessions: [sess('r2-claude', '/repo2', '-repo2', 'claude')]
+        },
+        {
+          cwd: '/repo2/.claude/worktrees/x',
+          projectKey: '-repo2--claude-worktrees-x',
+          folderName: 'x',
+          linkedWorktree: { ...linked('/repo2/.claude/worktrees/x', 'x'), repoRoot: '/repo2' },
+          sessions: [
+            sess('r2-wt', '/repo2/.claude/worktrees/x', '-repo2--claude-worktrees-x', 'claude')
+          ]
+        }
+      ]
+      const manager = (): any => ({ cancel: vi.fn(), get: vi.fn(), forEach: vi.fn() })
+
+      it('an existing parent: foreign worktree sessions go by id, Claude ones by their own key, the parent dir wholesale', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        const m = manager()
+
+        await deleteProject(m, '-repo')
+
+        expect(deleteSessionByEngine.mock.calls.map((c) => [c[0], c[1], c[2]]).sort()).toEqual([
+          ['oc-1', OC_KEY, 'opencode'],
+          ['wt-pi', WT_KEY, 'pi']
+        ])
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['wt-claude', WT_KEY]
+        ])
+        expect(deleteProjectFiles.mock.calls).toEqual([['-repo']])
+        expect(removeEmptyProjectDir.mock.calls.map((c) => c[0]).sort()).toEqual([OC_KEY, WT_KEY])
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0]).sort()).toEqual([
+          'home-1',
+          'oc-1',
+          'wt-claude',
+          'wt-pi'
+        ])
+      })
+
+      it('a synthesised parent deletes the listed files and NEVER the parent folder', async () => {
+        syncCore.setDirectories(listing(false) as never)
+
+        await deleteProject(manager(), '-repo')
+
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['wt-claude', WT_KEY]
+        ])
+        // Claude's per-repo memory lives in `projects/-repo/`: no wholesale delete, of it or anything.
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(removeEmptyProjectDir.mock.calls.map((c) => c[0])).not.toContain('-repo')
+      })
+
+      it('sweeps a live worktree session the listing does not hold, and nothing of another repo', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        syncCore.emit('session:created', ['live-wt', { cwd: WT }])
+        syncCore.emit('session:created', ['live-other', { cwd: '/repo2/.claude/worktrees/x' }])
+        const m = manager()
+
+        await deleteProject(m, '-repo')
+
+        const cancelled = m.cancel.mock.calls.map((c: unknown[]) => c[0])
+        expect(cancelled).toContain('live-wt')
+        expect(cancelled).not.toContain('live-other')
+        expect(cancelled).not.toContain('r2-claude')
+        expect(cancelled).not.toContain('r2-wt')
+        expect(deleteSessionByEngine.mock.calls.map((c) => c[0])).not.toContain('r2-wt')
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => c[0])).not.toContain('r2-wt')
+      })
+
+      it('a request for the worktree’s own key deletes just that group, file by file, never wholesale', async () => {
+        syncCore.setDirectories(listing(true) as never)
+
+        await deleteProject(manager(), WT_KEY)
+
+        expect(deleteSessionByEngine.mock.calls.map((c) => c[0])).toEqual(['wt-pi'])
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['wt-claude', WT_KEY]
+        ])
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(removeEmptyProjectDir.mock.calls).toEqual([[WT_KEY]])
+      })
+
+      it('a group of live, not-yet-listed sessions only: cancelled, storage deleted, no folder wholesale', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        syncCore.emit('session:created', ['new-claude', { cwd: '/fresh/dir' }])
+        syncCore.emit('session:created', ['new-pi', { cwd: '/fresh/dir', engineId: 'pi' }])
+        syncCore.emit('session:created', ['elsewhere', { cwd: '/fresh/other' }])
+        const m = manager()
+
+        await deleteProject(m, '-fresh-dir')
+
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0]).sort()).toEqual([
+          'new-claude',
+          'new-pi'
+        ])
+        expect(deleteSessionFiles.mock.calls).toEqual([['new-claude', '-fresh-dir']])
+        expect(deleteSessionByEngine).toHaveBeenCalledWith('new-pi', '-fresh-dir', 'pi')
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(syncCore.getCanonicalState().sessions['elsewhere']).toBeDefined()
+      })
+
+      it('...but never a session a listed group claims by directory or already holds', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: 'D:\\Work\\x',
+            projectKey: 'D--Work-x',
+            folderName: 'x',
+            sessions: [sess('held', 'D:\\Work\\x', 'D--Work-x', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['claimed', { cwd: 'd:/work/x' }])
+        syncCore.emit('session:created', ['held', { cwd: 'd:/work/x' }])
+        const m = manager()
+
+        await deleteProject(m, 'd--work-x')
+
+        expect(m.cancel).not.toHaveBeenCalled()
+        expect(deleteSessionFiles).not.toHaveBeenCalled()
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+      })
+
+      it('a live session another listed group holds is cancelled with its project but its files are not named by cwd', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/repo',
+            projectKey: '-repo',
+            folderName: 'repo',
+            sessions: [sess('p1', '/repo', '-repo', 'claude')]
+          },
+          {
+            cwd: '/elsewhere',
+            projectKey: '-elsewhere',
+            folderName: 'elsewhere',
+            sessions: [sess('moved', '/elsewhere', '-elsewhere', 'claude')]
+          }
+        ] as never)
+        // Live in the repo's directory, but a different group lists it.
+        syncCore.emit('session:created', ['moved', { cwd: '/repo' }])
+        const m = manager()
+
+        await deleteProject(m, '-repo')
+
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0])).toContain('moved')
+        expect(
+          deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])
+        ).not.toContainEqual(['moved', '-repo'])
+      })
+
+      it('a key the listing has no group for deletes no folder and no listed session', async () => {
+        syncCore.setDirectories(listing(false) as never)
+
+        await deleteProject(manager(), '-gone')
+
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(deleteSessionFiles).not.toHaveBeenCalled()
+        expect(deleteSessionByEngine).not.toHaveBeenCalled()
+      })
+
+      it('the live sweep is by directory: "/a-b" is not swept by deleting a repo whose worktree is "/a/b"', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/repo',
+            projectKey: '-repo',
+            folderName: 'repo',
+            sessions: [sess('p1', '/repo', '-repo', 'claude')]
+          },
+          {
+            cwd: '/a/b',
+            projectKey: '-a-b',
+            folderName: 'b',
+            linkedWorktree: { worktreePath: '/a/b', repoRoot: '/repo', name: 'b', branch: 'b' },
+            sessions: [sess('w1', '/a/b', '-a-b', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['live-lossy', { cwd: '/a-b' }])
+        syncCore.emit('session:created', ['live-wt', { cwd: '/a/b' }])
+        const m = manager()
+
+        await deleteProject(m, '-repo')
+
+        const cancelled = m.cancel.mock.calls.map((c: unknown[]) => c[0])
+        expect(cancelled).toContain('live-wt')
+        expect(cancelled).not.toContain('live-lossy')
+        expect(syncCore.getCanonicalState().sessions['live-lossy']).toBeDefined()
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => c[0])).not.toContain(
+          'live-lossy'
+        )
+      })
+
+      it('the live sweep ignores a drive-letter case or separator difference', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: 'D:\\Work\\repo',
+            projectKey: 'D--Work-repo',
+            folderName: 'repo',
+            sessions: [sess('p1', 'D:\\Work\\repo', 'D--Work-repo', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['live-1', { cwd: 'd:/work/repo' }])
+        const m = manager()
+
+        await deleteProject(m, 'D--Work-repo')
+
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0])).toContain('live-1')
+      })
+
+      it('a live session the listing does not hold also loses its persisted history, by its own cwd key', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        syncCore.emit('session:created', ['live-claude', { cwd: WT }])
+        syncCore.emit('session:created', ['live-pi', { cwd: WT, engineId: 'pi' }])
+        syncCore.emit('session:created', ['live-oc', { cwd: '/repo', engineId: 'opencode' }])
+
+        await deleteProject(manager(), '-repo')
+
+        // Claude: the file under the key of the session's own cwd.
+        expect(deleteSessionFiles).toHaveBeenCalledWith('live-claude', WT_KEY)
+        // opencode and pi: by engine session id, like the listed ones.
+        expect(deleteSessionByEngine).toHaveBeenCalledWith('live-pi', WT_KEY, 'pi')
+        expect(deleteSessionByEngine).toHaveBeenCalledWith('live-oc', '-repo', 'opencode')
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => c[0])).not.toContain('live-pi')
+      })
+
+      it('a synthesised parent’s live session loses its history too, and the parent folder stays', async () => {
+        syncCore.setDirectories(listing(false) as never)
+        syncCore.emit('session:created', ['live-root', { cwd: '/repo' }])
+
+        await deleteProject(manager(), '-repo')
+
+        expect(deleteSessionFiles).toHaveBeenCalledWith('live-root', '-repo')
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+      })
+
+      it('repo "/a/b" with no root group and its worktree "/a-b": only that worktree’s sessions, no folder wholesale', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/a-b',
+            projectKey: '-a-b',
+            folderName: 'a-b',
+            linkedWorktree: { worktreePath: '/a-b', repoRoot: '/a/b', name: 'a-b', branch: 'b' },
+            sessions: [sess('w1', '/a-b', '-a-b', 'claude'), sess('w2', '/a-b', '-a-b', 'pi')]
+          }
+        ] as never)
+
+        await deleteProject(manager(), '-a-b')
+
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['w1', '-a-b']
+        ])
+        expect(deleteSessionByEngine.mock.calls.map((c) => c[0])).toEqual(['w2'])
+      })
+
+      it('"/a-b" a worktree of "/other", "/wt" a worktree of "/a/b": deleting "-a-b" takes only "/wt"', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/a-b',
+            projectKey: '-a-b',
+            folderName: 'a-b',
+            linkedWorktree: { worktreePath: '/a-b', repoRoot: '/other', name: 'a-b', branch: 'b' },
+            sessions: [sess('other-wt', '/a-b', '-a-b', 'claude')]
+          },
+          {
+            cwd: '/wt',
+            projectKey: '-wt',
+            folderName: 'wt',
+            linkedWorktree: { worktreePath: '/wt', repoRoot: '/a/b', name: 'wt', branch: 'b' },
+            sessions: [sess('mine', '/wt', '-wt', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['live-other', { cwd: '/a-b' }])
+        const m = manager()
+
+        await deleteProject(m, '-a-b')
+
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['mine', '-wt']
+        ])
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0])).toEqual(['mine'])
+      })
     })
 
     it('one engine failing does not abandon the rest of the delete', async () => {

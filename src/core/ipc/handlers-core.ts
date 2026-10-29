@@ -30,12 +30,17 @@ import { emitEvent, syncCore } from '../services/sync-host'
 import { blobStore, internAttachments } from '../services/blob-store'
 import { deleteSessionByEngine } from '../services/session-delete'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
-import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-session-files'
+import {
+  deleteProjectFiles,
+  deleteSessionFiles,
+  removeEmptyProjectDir
+} from '../services/delete-session-files'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { seedCanonicalTranscript } from './seed-canonical-transcript'
 import { unwatchSession } from '../services/session-watcher'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
+import { liveProjectMembers, projectScope } from '../../shared/worktree-fold'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
@@ -441,10 +446,37 @@ export async function deleteSession(
  */
 export async function deleteProject(manager: SessionManager, projectKey: string): Promise<void> {
   const state = syncCore.getCanonicalState()
-  const group = state.directories.find((g) => g.projectKey === projectKey)
-  const ids = new Set<string>(group?.sessions.map((s) => s.sessionId) ?? [])
-  for (const [routingId, session] of Object.entries(state.sessions)) {
-    if (cwdToProjectKey(session.cwd) === projectKey) ids.add(routingId)
+  // What the sidebar showed for this key: the parent's group (none for a synthesised parent or an
+  // unknown key) plus the linked-worktree groups folded into it. Resolved here from the canonical
+  // listing through the same fold, never from the client's request.
+  const scope = projectScope(state.directories, projectKey)
+  const memberGroups = [...(scope.group ? [scope.group] : []), ...scope.children]
+  const memberSessions = memberGroups.flatMap((g) =>
+    g.sessions.map((s) => ({ s, key: g.projectKey }))
+  )
+  const ids = new Set<string>(memberSessions.map(({ s }) => s.sessionId))
+  // Live sessions of the project (see `liveProjectMembers`). The ones no listing group holds also
+  // lose their persisted history, under the key of their OWN cwd (nothing else names it).
+  const live = liveProjectMembers(
+    state.directories,
+    scope,
+    projectKey,
+    Object.entries(state.sessions)
+  )
+  const liveUnlisted: Array<{ id: string; key: string; engineId: EngineId | undefined }> = []
+  for (const routingId of live.ids) {
+    const session = state.sessions[routingId]
+    if (live.unlisted.includes(routingId) && !ids.has(routingId)) {
+      liveUnlisted.push({
+        id: routingId,
+        key: cwdToProjectKey(session.cwd),
+        engineId:
+          manager.get(routingId)?.engineId ??
+          getSessionMeta(routingId)?.engineId ??
+          session.selectedEngineId
+      })
+    }
+    ids.add(routingId)
   }
 
   for (const id of ids) {
@@ -456,27 +488,31 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   // Engine-owned storage first (see above). `allSettled`: one engine being down
   // must not abandon the rest of the delete — the Claude unlink below is the
   // irreversible step and it still has to run.
-  const foreign = (group?.sessions ?? []).filter(
-    (s) => isEngineId(s.engineId) && s.engineId !== 'claude'
-  )
+  const foreign = [
+    ...memberSessions,
+    ...liveUnlisted.map(({ id, key, engineId }) => ({
+      s: { sessionId: id, engineId },
+      key
+    }))
+  ].filter(({ s }) => isEngineId(s.engineId) && s.engineId !== 'claude')
   const results = await Promise.allSettled(
-    foreign.map((s) => deleteSessionByEngine(s.sessionId, projectKey, s.engineId))
+    foreign.map(({ s, key }) => deleteSessionByEngine(s.sessionId, key, s.engineId))
   )
   const survivors = new Set<string>()
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
-      survivors.add(foreign[i].sessionId)
+      survivors.add(foreign[i].s.sessionId)
       logger.warn(
         'IPC',
-        `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`,
+        `session:delete-project: ${foreign[i].s.engineId} session ${foreign[i].s.sessionId} survived the delete`,
         result.reason
       )
     } else if (result.value === false) {
       // opencode and pi swallow their own failures and say so this way.
-      survivors.add(foreign[i].sessionId)
+      survivors.add(foreign[i].s.sessionId)
       logger.warn(
         'IPC',
-        `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`
+        `session:delete-project: ${foreign[i].s.engineId} session ${foreign[i].s.sessionId} survived the delete`
       )
     }
   })
@@ -490,7 +526,14 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   // kept. The rule is `planClaudeProjectDelete`'s (shared), so the confirmation
   // dialog describes exactly what runs here. `allSettled` for the same reason as
   // the engine sweep above — one stuck file must not abandon the rest.
-  const { removeDir, sessionFiles } = planClaudeProjectDelete(state.directories, projectKey)
+  const plan = planClaudeProjectDelete(state.directories, projectKey)
+  const { removeDir } = plan
+  const sessionFiles = [
+    ...plan.sessionFiles,
+    ...liveUnlisted
+      .filter(({ engineId }) => !engineId || engineId === 'claude')
+      .map(({ id, key }) => ({ sessionId: id, projectKey: key }))
+  ]
   const fileResults = await Promise.allSettled(
     sessionFiles.map((s) => deleteSessionFiles(s.sessionId, s.projectKey))
   )
@@ -505,6 +548,12 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   })
 
   if (removeDir) await deleteProjectFiles(projectKey)
+  // A worktree group's own project dir (folded in, or asked for by its own key), once its sessions
+  // are gone: only if it is empty (a plain rmdir, never recursive). Nothing under the worktree
+  // folders themselves is touched.
+  await Promise.allSettled(
+    memberGroups.filter((g) => g.linkedWorktree).map((g) => removeEmptyProjectDir(g.projectKey))
+  )
   // Every session the engines accepted the delete of: its X-Agents end with it (ADR-105 §5).
   // A survivor, or a Claude transcript that could not be removed, keeps them.
   const stuck = new Set(survivors)
