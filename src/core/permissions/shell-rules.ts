@@ -17,7 +17,7 @@
  *   {@link isCarvedOut}, {@link canLaunchOtherPrograms},
  *   {@link isLauncherShapedSegment}, {@link ruleNamesLaunchedProgram}) — the
  *   predicates the auto-mode allow-skip (S5, `../automode/allow-rule-skip.ts`)
- *   and the Codex rule compiler use to refuse a rule that is broader than it
+ *   uses to refuse a rule that is broader than it
  *   looks.
  *
  * **This module is pure** and **never throws**: the command text and the rule
@@ -28,8 +28,8 @@
  * ## Two dialects, one answer
  *
  * The shell that runs a command is not always knowable from here (opencode on
- * Windows defaults to pwsh, pi always runs Git Bash, Codex wraps with the user's
- * shell). The deny/ask matcher therefore tokenizes every command TWICE — bash
+ * Windows defaults to pwsh, pi always runs Git Bash). The deny/ask
+ * matcher therefore tokenizes every command TWICE — bash
  * quoting and PowerShell quoting — and a hit in either reading counts. The
  * lenient allow coverage requires BOTH readings to be covered (a reading
  * PowerShell cannot even parse runs nothing); the strict one uses ADR-084's
@@ -61,7 +61,7 @@
  *   `make`, `npm test`, `bun file.ts`, `bash x.sh`, `tar --to-command`,
  *   `rsync -e`, `tmux`, `go run`, `gh alias set --shell` are not
  *   launcher-shaped, although each runs code its words do not show. (Adding
- *   `tar` / `rsync` / `tmux` / `go` / `gh` would make the Codex compiler
+ *   `tar` / `rsync` / `tmux` / `go` / `gh` would make the allow-skip
  *   withhold every allow for them whenever a Bash deny/ask exists.)
  *
  * ## Layout
@@ -1266,7 +1266,9 @@ const RC_FILES: ReadonlySet<string> = new Set([
 /**
  * Paths whose contents a later program runs: anything under `.git/` (config
  * aliases and `core.fsmonitor`, hooks, attribute filter drivers — review r3
- * S28), any `hooks/` directory, and the agents' own control directories. A
+ * S28), any `hooks/` directory, and the agents' own control directories
+ * (`.codex/` stays although ClaudeUI no longer drives Codex: the CLI may still
+ * be installed, and a file written there runs later). A
  * small explicit list on purpose — this module stays a leaf (it does not
  * import ADR-084's agent-control paths), and a miss only keeps the text data.
  */
@@ -2357,7 +2359,7 @@ function bashSpecifier(rule: string): string | undefined | null {
 
 /**
  * Is any of these rules a `Bash` rule (by the same parser every question here
- * uses)? The Codex compiler's "any Bash deny/ask?" gate (review r2 S24). Never
+ * uses)? The "any Bash deny/ask?" gate (review r2 S24). Never
  * throws (an internal failure answers `true`, which withholds more).
  */
 export function hasBashRule(rules: readonly string[]): boolean {
@@ -2663,7 +2665,7 @@ export function allowCovers(
   }
 }
 
-// ── Allow-rule predicates (S5, Codex rules-sync) ─────────────────────────────
+// ── Allow-rule predicates (S5) ─────────────────────────────
 
 /**
  * cli.js's interpreter/launcher prefixes (`SJt` + `Qmr` for Bash, `OOn`'s list
@@ -2848,7 +2850,7 @@ function carvedOutUnsafe(
  *   is carved out only when its own command hits. The host consults the full
  *   matcher on every command anyway, so this only decides whether the rule may
  *   skip the judge.
- * - `'program'` (Codex rules-sync): ANY deny/ask rule for the same program
+ * - `'program'` (no live caller; the removed Codex rules-sync used it): ANY deny/ask rule for the same program
  *   family carves the allow out. An emitted execpolicy `allow` never reaches
  *   the matcher again, and the matcher hits words in any order
  *   (`docker compose run web` hits `Bash(docker run:*)`), so a positional
@@ -2981,8 +2983,8 @@ const LAUNCHER_CAPABLE: ReadonlySet<string> = new Set([
  * one {@link isLauncherShapedSegment} can call launcher-shaped (a shell, a
  * wrapper, an interpreter or package runner, `docker`/`kubectl`, `git`,
  * `find`, `sed`, `awk`, `make`)? Also true for a bare or launcher-shaped Bash
- * rule. The Codex compiler withholds such allows whenever the user has any
- * Bash deny/ask rule: an emitted execpolicy `allow` would skip every review
+ * rule. The removed Codex compiler withheld such allows whenever the user had any
+ * Bash deny/ask rule: an emitted execpolicy `allow` would have skipped every review
  * of `npm exec -- git push --force`. Never throws (answers `true`).
  */
 export function canLaunchOtherPrograms(allowRule: string): boolean {

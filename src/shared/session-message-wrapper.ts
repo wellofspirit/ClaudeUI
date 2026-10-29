@@ -12,8 +12,8 @@
  *    control/format characters removed, and a closing tag inside the body is
  *    broken with `<\`. Find them in vendor/claude-cli/cli.js by the strings
  *    `from-name=` and `cross-session-message`.
- *  - `<session-message from="…" title="…">` is ClaudeUI's own, for opencode and
- *    Codex (a plain prompt), followed by one sentence saying it is not the
+ *  - `<session-message from="…" title="…">` is ClaudeUI's own, for opencode
+ *    (a plain prompt), followed by one sentence saying it is not the
  *    user's.
  *
  * The reader (`parseSessionMessageWrapper`) serves every cold-load path and the
@@ -180,7 +180,7 @@ function trailerFor(key: string): string {
   return isXAgentMessageSender(key) ? X_AGENT_MESSAGE_TRAILER : SESSION_MESSAGE_TRAILER
 }
 
-/** ClaudeUI's own wrapper — the prompt text for opencode and Codex. */
+/** ClaudeUI's own wrapper — the prompt text for opencode. */
 export function buildSessionMessageWrapper(
   from: { key: string; title: string },
   text: string

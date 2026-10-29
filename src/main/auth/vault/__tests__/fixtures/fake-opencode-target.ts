@@ -7,7 +7,7 @@
  */
 import { vi } from 'vitest'
 import type {
-  CodexCredentialInput,
+  ChatgptCredentialInput,
   OpencodeChatgptTarget
 } from '../../../../../core/auth/vault/CredentialSync'
 import { OpencodeCredentialStore } from '../../../../../core/opencode/credential-store'
@@ -15,14 +15,14 @@ import { fakeCredentialTable } from '../../../../../core/opencode/__tests__/fixt
 
 export function fakeOpencodeTarget(): {
   target: OpencodeChatgptTarget
-  feed: ReturnType<typeof vi.fn<(vendorId: string, cred: CodexCredentialInput) => Promise<void>>>
+  feed: ReturnType<typeof vi.fn<(vendorId: string, cred: ChatgptCredentialInput) => Promise<void>>>
   remove: ReturnType<typeof vi.fn<(vendorId: string) => Promise<void>>>
   /** The token-check each vend/removal was handed, last first. */
   checks: Array<(refresh: string) => Promise<boolean>>
   /** What the target holds as vended (the gate's input). */
   vended: () => { access: string; realExpires: number } | null
 } {
-  const feed = vi.fn(async (_vendorId: string, _cred: CodexCredentialInput) => {})
+  const feed = vi.fn(async (_vendorId: string, _cred: ChatgptCredentialInput) => {})
   const remove = vi.fn(async (_vendorId: string) => {})
   const checks: Array<(refresh: string) => Promise<boolean>> = []
   let vended: { access: string; realExpires: number } | null = null
@@ -54,7 +54,7 @@ export function fakeOpencodeTarget(): {
 export function storeBackedOpencode(available: () => boolean = () => true) {
   const table = fakeCredentialTable()
   const store = new OpencodeCredentialStore({ connect: table.connect, available })
-  const feed = vi.fn(async (_vendorId: string, _cred: CodexCredentialInput) => {})
+  const feed = vi.fn(async (_vendorId: string, _cred: ChatgptCredentialInput) => {})
   const remove = vi.fn(async (_vendorId: string) => {})
   let own = 0
   const target: OpencodeChatgptTarget = {

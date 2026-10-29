@@ -1,9 +1,9 @@
 /**
- * codex-device-code.ts — the ChatGPT DEVICE-CODE sign-in (ADR-068 §3, Slice 7).
+ * chatgpt-device-code.ts — the ChatGPT DEVICE-CODE sign-in (ADR-068 §3, Slice 7).
  *
- * Ported from Codex's own `codex-rs/login/src/device_code_auth.rs` (vendored at
- * `vendor/codex-src/`), against the SAME issuer and the SAME `CLIENT_ID` as the
- * loopback flow in `codex-oauth.ts`. The wire, verbatim from that file:
+ * Ported from the Codex CLI's `codex-rs/login/src/device_code_auth.rs`, against
+ * the SAME issuer and the SAME `CLIENT_ID` as the
+ * loopback flow in `chatgpt-oauth.ts`. The wire, verbatim from that file:
  *
  *   1. `POST {issuer}/api/accounts/deviceauth/usercode` `{client_id}` →
  *      `{device_auth_id, user_code|usercode, interval}`. A 404 means the server
@@ -48,7 +48,7 @@ import {
   type OAuthDeps,
   type PkceCodes,
   type VaultCredential
-} from './codex-oauth'
+} from './chatgpt-oauth'
 
 // ---------------------------------------------------------------------------
 // Constants (device_code_auth.rs)
@@ -66,7 +66,7 @@ export const DEVICE_CODE_MIN_INTERVAL_MS = 1_000
 
 /** Set by `request_user_code` when the endpoint 404s — the server has device code turned off. */
 export const DEVICE_CODE_UNSUPPORTED_MESSAGE =
-  'device code login is not enabled for this Codex server. Use the browser login or verify the server URL.'
+  'device code login is not enabled for this server. Use the browser login or verify the server URL.'
 
 /** `poll_for_token`'s timeout message. */
 export const DEVICE_CODE_TIMEOUT_MESSAGE = 'device auth timed out after 15 minutes'
@@ -93,7 +93,7 @@ export interface DeviceCodeStart {
   expiresAt: number
 }
 
-/** What `AuthVault` needs from a device-code flow. `CodexDeviceCodeFlow` implements it; tests fake it. */
+/** What `AuthVault` needs from a device-code flow. `ChatgptDeviceCodeFlow` implements it; tests fake it. */
 export interface DeviceCodeFlowLike {
   start(): Promise<DeviceCodeStart>
   waitForCompletion(): Promise<VaultCredential>
@@ -121,7 +121,7 @@ export function isDeviceCodeCancellation(err: unknown): boolean {
   return err instanceof Error && /login cancelled/i.test(err.message)
 }
 
-export interface CodexDeviceCodeFlowOptions {
+export interface ChatgptDeviceCodeFlowOptions {
   /** Injectable fetch/issuer. Defaults to the real auth.openai.com — never in a test. */
   deps?: OAuthDeps
   /** Clock for the deadline and the credential's `expires`. Defaults to Date.now. */
@@ -193,18 +193,18 @@ function asString(value: unknown): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// CodexDeviceCodeFlow — one flow object per sign-in attempt.
+// ChatgptDeviceCodeFlow — one flow object per sign-in attempt.
 // ---------------------------------------------------------------------------
 
 /**
  * Drives usercode → poll → exchange for exactly one attempt. Like
- * `CodexLoginFlow` this holds NO module-level state, so every attempt (and every
+ * `ChatgptLoginFlow` this holds NO module-level state, so every attempt (and every
  * test) is isolated.
  *
  * `waitForCompletion()` is idempotent — it memoizes the one run — so the vault
  * can await it once while `cancel()` races it from the IPC side.
  */
-export class CodexDeviceCodeFlow implements DeviceCodeFlowLike {
+export class ChatgptDeviceCodeFlow implements DeviceCodeFlowLike {
   private readonly deps: OAuthDeps
   private readonly now: () => number
   private readonly sleepFn: (ms: number, signal?: AbortSignal) => Promise<void>
@@ -220,7 +220,7 @@ export class CodexDeviceCodeFlow implements DeviceCodeFlowLike {
   private deadline = 0
   private pending: Promise<VaultCredential> | undefined
 
-  constructor(options: CodexDeviceCodeFlowOptions = {}) {
+  constructor(options: ChatgptDeviceCodeFlowOptions = {}) {
     this.deps = options.deps ?? { fetch, issuer: ISSUER }
     this.now = options.now ?? ((): number => Date.now())
     this.sleepFn = options.sleep ?? defaultSleep
@@ -237,7 +237,7 @@ export class CodexDeviceCodeFlow implements DeviceCodeFlowLike {
    * and a status-bearing error otherwise, exactly as the Rust does.
    */
   async start(): Promise<DeviceCodeStart> {
-    if (this.started) throw new Error('CodexDeviceCodeFlow: start() was already called')
+    if (this.started) throw new Error('ChatgptDeviceCodeFlow: start() was already called')
     this.started = true
     let response: Response
     try {
@@ -275,7 +275,7 @@ export class CodexDeviceCodeFlow implements DeviceCodeFlowLike {
   /** `complete_device_code_login` — poll, then exchange. Memoized; safe to await once. */
   waitForCompletion(): Promise<VaultCredential> {
     if (!this.started) {
-      throw new Error('CodexDeviceCodeFlow: call start() before waitForCompletion()')
+      throw new Error('ChatgptDeviceCodeFlow: call start() before waitForCompletion()')
     }
     if (!this.pending) {
       // RACED against cancellation rather than relying on the poll loop noticing.

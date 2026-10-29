@@ -4,7 +4,7 @@
  *
  * A leaf module for the same reason `dispatch-concurrency.ts` is one: two
  * modules have to agree on this string exactly, and importing the dispatcher
- * to share it would drag the whole opencode/pi/codex target machinery into
+ * to share it would drag the whole opencode/pi target machinery into
  * `usage-reconciler.ts` — and back into the dispatcher, since the reconciler's
  * own import graph already reaches it.
  */

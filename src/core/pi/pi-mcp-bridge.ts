@@ -3,7 +3,7 @@
  *
  * The catalog is the Claude-scoped server list McpDialog manages (user /
  * project / local, minus the cwd's `disabledMcpServers`) — the same read the
- * opencode and Codex bridges inherit (`readEnabledClaudeMcpServers`). pi 1.0
+ * opencode bridge inherits (`readEnabledClaudeMcpServers`). pi 1.0
  * takes a server at runtime through the extension API
  * `pi.registerMcpServer(name, config)` (session-only, never written to pi's
  * `mcp.json`; `vendor/pi-src/packages/coding-agent/src/core/mcp-servers.ts`), so

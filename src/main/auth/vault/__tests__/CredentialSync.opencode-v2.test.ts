@@ -15,7 +15,7 @@ import {
   REFRESH_MARGIN_MS,
   type VaultLike
 } from '../../../../core/auth/vault/CredentialSync'
-import type { TokenResponse, VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import type { TokenResponse, VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
 import { memoryFedTokenHistory } from '../../../../core/auth/vault/fed-token-history'
 import { fakeOpencodeTarget, storeBackedOpencode } from './fixtures/fake-opencode-target'
 import { logger } from '../../../../core/services/logger'

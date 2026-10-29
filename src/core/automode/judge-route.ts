@@ -34,8 +34,8 @@ import { nativeAccountKey, type AccountIdentity } from '../../shared/account-key
 import { deliveredDefinition, type SharedProviderDefinition } from '../../shared/shared-provider'
 import type { JudgeModelSupport, OpencodeCatalogModel } from '../../shared/types'
 import { authVault, CHATGPT_PROVIDER_ID } from '../auth/vault/AuthVault'
-import { computeResidencyFromToken } from '../auth/vault/codex-oauth'
-import { credentialSync, type CodexInjectionToken } from '../auth/vault/CredentialSync'
+import { computeResidencyFromToken } from '../auth/vault/chatgpt-oauth'
+import { credentialSync, type ChatgptInjectionToken } from '../auth/vault/CredentialSync'
 import { hostAppVersion } from '../host'
 import { getOpencodeProviderModels } from '../opencode/model-discovery'
 import { getPiModelCatalog } from '../pi/model-discovery'
@@ -65,7 +65,7 @@ export interface JudgeRouteDeps {
    * `accountId` — that vault account's; `force` refreshes it first whatever its
    * expiry. Null when the account is signed out, gone or workspace-less.
    */
-  chatgptToken(force: boolean, accountId?: string): Promise<CodexInjectionToken | null>
+  chatgptToken(force: boolean, accountId?: string): Promise<ChatgptInjectionToken | null>
   /**
    * Whether {@link chatgptToken} would find a token, answered WITHOUT one: the
    * active account holds a credential with a workspace id. The describe path's
@@ -399,7 +399,7 @@ export function chatgptUserAgent(appVersion: string): string {
  * account whose token pins one.
  */
 export function chatgptRequestHeaders(
-  token: CodexInjectionToken,
+  token: ChatgptInjectionToken,
   appVersion: string
 ): Record<string, string> {
   const residency = computeResidencyFromToken(token.accessToken)
@@ -415,14 +415,14 @@ export function chatgptRequestHeaders(
 /**
  * The ChatGPT backend with the active account's token — or, given `accountId`,
  * that vault account's. `originator: opencode` because the vault's token is
- * issued to opencode's OAuth client (`codex-oauth.ts`'s `CLIENT_ID`).
+ * issued to opencode's OAuth client (`chatgpt-oauth.ts`'s `CLIENT_ID`).
  * `reauthorize` rebuilds the route from a force-refreshed token of the SAME
  * account for the transport's one 401 retry.
  */
 async function chatgptRoute(ctx: RouteContext, accountId?: string): Promise<JudgeRouteResult> {
   const { deps, model, provider } = ctx
 
-  const build = async (token: CodexInjectionToken): Promise<ResolvedJudgeRoute> => {
+  const build = async (token: ChatgptInjectionToken): Promise<ResolvedJudgeRoute> => {
     const identity = await deps.chatgptIdentity(token.vaultAccountId)
     return {
       kind: 'chatgpt',

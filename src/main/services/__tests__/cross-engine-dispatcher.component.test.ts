@@ -387,8 +387,7 @@ beforeEach(() => {
 describe('CrossEngineDispatcher — guards', () => {
   it('rejects dispatch into a genuinely unsupported engine (defensive guard — EngineId is closed, but this crosses an IPC boundary at runtime)', async () => {
     const { dispatcher } = makeHarness()
-    // A string no EngineId has ever been. 'codex' USED to stand in here; slice
-    // H made it a real target, so the defensive guard needs a genuinely
+    // A string no EngineId has ever been, so the defensive guard has a genuinely
     // unknown engine to be defensive about.
     const result = await dispatcher.dispatch(
       { engine: 'gemini' as unknown as EngineId, prompt: 'x' },

@@ -4,7 +4,7 @@
  *
  * The report is reviewed by the X-Agent's OWN judge (the one that reviews its other actions):
  * ClaudeUI's judge for a pi or opencode target, Claude Code's own classifier for a Claude
- * target, ClaudeUI's judge on the target's own model for a Codex target. The review FLAGS, it
+ * target. The review FLAGS, it
  * never blocks: Claude Code's semantics, which this ports. The report is always stored and
  * delivered; a verdict only decides the words above it.
  *

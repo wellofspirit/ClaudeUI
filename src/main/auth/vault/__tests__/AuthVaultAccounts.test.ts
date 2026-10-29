@@ -24,7 +24,7 @@ vi.mock('node:os', async () => {
 })
 
 import { AuthVault, vaultPath, CHATGPT_PROVIDER_ID } from '../../../../core/auth/vault/AuthVault'
-import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
 
 let testHome: string
 beforeEach(() => {

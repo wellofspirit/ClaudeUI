@@ -697,7 +697,7 @@ describe('reducer — transcript', () => {
    * and that bucket is where its card renders. A verdict or denial for it binds
    * there when the top-level transcript has no such call: tool-use ids are
    * unique, so the owning bucket is found by searching, never named by the
-   * producer. Every engine benefits — Codex, opencode and pi reviews of subagent
+   * producer. Every engine benefits — opencode and pi reviews of subagent
    * calls used to be dropped here too.
    */
   describe('a decision on a call made inside a subagent', () => {
@@ -2342,8 +2342,8 @@ describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3
   /**
    * GUARD — the retry belongs to a turn this failure actually killed.
    *
-   * Codex's host fans one failed refresh to EVERY session attached to the
-   * process (ADR-069 §8), so a session that has been idle for hours hears about
+   * A host can fan one failed refresh to EVERY session attached to the
+   * process, so a session that has been idle for hours hears about
    * a credential it was not using. Capturing its last prompt there meant the
    * sign-in dialog then offered to "retry" a turn that completed long ago.
    */

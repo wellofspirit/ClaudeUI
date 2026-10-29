@@ -105,7 +105,7 @@ export function loadMcpServers(scope: McpScope, cwd?: string): Record<string, Mc
  * resolves to the narrowest declaration, which is Claude Code's own precedence.
  *
  * Shared by every engine bridge through {@link readEnabledClaudeMcpServers}
- * (opencode, Codex, pi), so the translations cannot drift on WHICH servers
+ * (opencode, pi), so the translations cannot drift on WHICH servers
  * they see — only on how each one is shaped for its engine. The disabled list
  * is per-cwd policy, applied on top of the merge, not part of it.
  */
@@ -120,7 +120,7 @@ export function mergeClaudeMcpServers(cwd: string): Record<string, McpServerConf
 /**
  * The servers every engine bridge inherits for `cwd`: {@link mergeClaudeMcpServers}
  * minus the cwd's `disabledMcpServers` (the per-cwd switch McpDialog writes).
- * The ONE read the opencode, Codex and pi bridges share, so they cannot drift on
+ * The ONE read the opencode and pi bridges share, so they cannot drift on
  * WHICH servers a session in `cwd` gets — each bridge only filters and shapes
  * the result for its engine. Throws on what the two reads throw on; every
  * bridge wraps it, since a config-read failure must never block a spawn.

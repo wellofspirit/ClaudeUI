@@ -631,34 +631,6 @@ describe('DispatchTargetJudge.reviewHandBack (ADR-105 §3, slice B-3c)', () => {
     })
   })
 
-  it('a Codex target’s report goes through pi’s route on the target’s own model, under the Codex engine’s switches', async () => {
-    const asked: string[] = []
-    const { judge, call, transportOpts, replies } = setup(
-      { twoStageMode: 'fast', judgeModel: 'someone-elses/judge', enabled: true },
-      {
-        engine: 'pi',
-        configEngine: 'codex',
-        fixedModel: () => 'gpt-5.4',
-        model: () => 'gpt-5.4',
-        sessionId: () => null,
-        loadEngineConfig: (id: string) => {
-          asked.push(id)
-          return {
-            autoMode: { twoStageMode: 'fast', judgeModel: 'someone-elses/judge' }
-          } as EngineConfig
-        }
-      }
-    )
-    replies.push('<block>no</block>')
-    expect(await judge.reviewHandBack(review(), call)).toEqual({ kind: 'allow' })
-    expect(asked).toEqual(['codex'])
-    expect(transportOpts[0].engine).toBe('pi')
-    // The target's own model — never another engine's configured judge model.
-    expect(transportOpts[0].modelValue()).toBe('gpt-5.4')
-    // No Codex thread id is passed off as a pi session on the usage row.
-    expect(transportOpts[0].sessionId()).toBeNull()
-  })
-
   it('the caller’s signal reaches the transport request: aborting it aborts the request in flight', async () => {
     const stop = new AbortController()
     const { judge, call, requests, replies } = setup({ twoStageMode: 'both' })
@@ -816,21 +788,15 @@ describe('DispatchTargetJudge fallback judge (autoMode.fallbackJudgeModel)', () 
     ])
   })
 
-  it('no fallback is in effect when it is blank, equals the effective primary, or the judge is fixed', async () => {
-    const cases: Array<
-      [NonNullable<EngineConfig['autoMode']>, Partial<DispatchTargetJudgeOptions>]
-    > = [
-      [{ twoStageMode: 'fast', fallbackJudgeModel: '  ' }, {}],
+  it('no fallback is in effect when it is blank or equals the effective primary', async () => {
+    const cases: Array<NonNullable<EngineConfig['autoMode']>> = [
+      { twoStageMode: 'fast', fallbackJudgeModel: '  ' },
       // No judgeModel: the primary is the target's own model.
-      [{ twoStageMode: 'fast', fallbackJudgeModel: PRIMARY }, {}],
-      [
-        { twoStageMode: 'fast', fallbackJudgeModel: FALLBACK },
-        { engine: 'pi', configEngine: 'codex', fixedModel: () => 'gpt-5.4' }
-      ]
+      { twoStageMode: 'fast', fallbackJudgeModel: PRIMARY }
     ]
-    for (const [autoMode, over] of cases) {
+    for (const autoMode of cases) {
       const { asked, makeTransport } = scripted({}, {})
-      const { judge, call, emit } = setup(autoMode, { ...over, makeTransport })
+      const { judge, call, emit } = setup(autoMode, { makeTransport })
       expect((await judge.judge(bash, call)).kind).toBe('human')
       expect(asked).toHaveLength(1)
       expect(errors(emit)).toEqual([expect.stringContaining("Auto-mode can't judge here:")])

@@ -56,7 +56,7 @@ import { fedTokenHistory } from '../auth/vault/fed-token-history'
 import { opencodeCredentialStore } from '../opencode/opencode-credentials'
 import { fileSlotMemory } from '../opencode/credential-store'
 import { setOpencodeAuthHooks } from '../opencode/opencode-auth-hooks'
-import { OPENCODE_CODEX_VENDOR_ID } from '../auth/vault/CredentialSync'
+import { OPENCODE_CHATGPT_VENDOR_ID } from '../auth/vault/CredentialSync'
 import { usageHubClient } from '../services/usage-hub/client'
 import { CHATGPT_PROVIDER_ID } from '../auth/auth-providers'
 import { addHostObserver, emitEvent, syncCore } from '../services/sync-host'
@@ -319,9 +319,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   })
   setOpencodeAuthHooks({
     beforeTurn: async (providerID) =>
-      providerID === OPENCODE_CODEX_VENDOR_ID ? credentialSync.opencodeTurnGate() : null,
+      providerID === OPENCODE_CHATGPT_VENDOR_ID ? credentialSync.opencodeTurnGate() : null,
     authFailed: (providerID) => {
-      if (providerID === OPENCODE_CODEX_VENDOR_ID) void credentialSync.opencodeAuthFailed()
+      if (providerID === OPENCODE_CHATGPT_VENDOR_ID) void credentialSync.opencodeAuthFailed()
     }
   })
 

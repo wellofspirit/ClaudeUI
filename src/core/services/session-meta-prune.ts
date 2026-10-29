@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { claudeUnmeteredSessionIds, deleteSessionMeta } from './db'
+import { claudeSessionMetaIds, deleteSessionMeta } from './db'
 import { logger } from './logger'
 import { loadSessionConfig, sessionConfigIsReadable } from './ui-config'
 
@@ -40,7 +40,7 @@ function listClaudeTranscriptIds(projectsDir: string): Set<string> | null {
 }
 
 /**
- * Which of these Claude session ids provably have NO record (criteria 3-6 below): no
+ * Which of these Claude session ids provably have NO record (criteria 2-5 below): no
  * transcript in any project dir and no mention in `sessions.json`. Empty whenever the
  * store proves nothing — `CLAUDE_CONFIG_DIR` set, an unreadable or empty transcript
  * store, an unparseable registry — so a caller that acts on "gone" never acts on doubt.
@@ -91,16 +91,14 @@ export function claudeSessionsWithNoRecord(
  *  1. its `engine_id` is exactly `claude` (the other engines keep their sessions in
  *     stores this cannot read without a running server — opencode — or whose
  *     location is user-configurable — pi — so "no record" is not provable for them);
- *  2. it carries no context reading (a belt: a Claude row has none today, so this
- *     filters nothing — it only keeps the prune from ever touching one that gains one);
- *  3. no `<id>.jsonl` exists in ANY project dir under `~/.claude/projects` (a real
+ *  2. no `<id>.jsonl` exists in ANY project dir under `~/.claude/projects` (a real
  *     historical session always has one — it is what the sidebar lists);
- *  4. nothing in `sessions.json` still mentions the id (recents, pins, hidden, a
+ *  3. nothing in `sessions.json` still mentions the id (recents, pins, hidden, a
  *     custom title, worktree info): a session the user touched stays;
- *  5. the transcript store was read completely and holds at least one transcript — an
+ *  4. the transcript store was read completely and holds at least one transcript — an
  *     unreadable, unmounted or freshly wiped store proves nothing, and must not be
  *     read as "every session is an orphan";
- *  6. `sessions.json` is readable (a missing file is an empty registry; one that
+ *  5. `sessions.json` is readable (a missing file is an empty registry; one that
  *     exists but does not parse would make everything look unreferenced), and
  *     `CLAUDE_CONFIG_DIR` is not set — the user's own config dir moves Claude's
  *     transcripts out of `~/.claude/projects`, so that store proves nothing either.
@@ -110,7 +108,7 @@ export function claudeSessionsWithNoRecord(
  * ran; a live session re-writes its row from the renderer's map on its next save.
  */
 export function pruneOrphanClaudeSessionMeta(projectsDir: string = claudeProjectsDir()): string[] {
-  const candidates = claudeUnmeteredSessionIds()
+  const candidates = claudeSessionMetaIds()
   const orphans = claudeSessionsWithNoRecord(candidates, projectsDir, 'pruning nothing')
   for (const id of orphans) deleteSessionMeta(id)
   if (orphans.length > 0) {

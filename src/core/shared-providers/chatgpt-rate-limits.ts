@@ -24,8 +24,8 @@ import type {
 import { UNKNOWN_ACCOUNT_KEY } from '../../shared/account-key'
 import { windowKindsForReading } from '../../shared/window-kind'
 import { chatgptRequestHeaders } from '../automode/judge-route'
-import { parseJwtClaims } from '../auth/vault/codex-oauth'
-import { credentialSync, type CodexInjectionToken } from '../auth/vault/CredentialSync'
+import { parseJwtClaims } from '../auth/vault/chatgpt-oauth'
+import { credentialSync, type ChatgptInjectionToken } from '../auth/vault/CredentialSync'
 import { hostAppVersion } from '../host'
 import { publishCreditReading } from '../services/credit-readings'
 import { emitEvent } from '../services/sync-host'
@@ -259,7 +259,7 @@ export interface ChatgptUsageReadDeps {
    * An account's token: `force` refreshes it first whatever its expiry. Null
    * when the account is signed out, gone or workspace-less.
    */
-  token: (force: boolean, accountId: string) => Promise<CodexInjectionToken | null>
+  token: (force: boolean, accountId: string) => Promise<ChatgptInjectionToken | null>
   fetch: typeof fetch
   appVersion: string
 }
@@ -276,7 +276,7 @@ function isFedrampToken(accessToken: string): boolean {
 }
 
 /** The request headers for `token`: the judge's set, plus Codex's FedRAMP routing header when it applies. */
-function usageHeaders(token: CodexInjectionToken, appVersion: string): Record<string, string> {
+function usageHeaders(token: ChatgptInjectionToken, appVersion: string): Record<string, string> {
   return {
     ...chatgptRequestHeaders(token, appVersion),
     Accept: 'application/json',

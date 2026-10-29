@@ -482,11 +482,7 @@ describe('InputBox FC — rendered', () => {
       record('session:cancel', ...args)
       return null
     })
-    // ADR-068 §2 — the per-session ChatGPT pin and the account list behind it.
-    app.bridge.ipcMain.handle('session:set-account', (_e: unknown, ...args: unknown[]) => {
-      record('session:set-account', ...args)
-      return null
-    })
+    // ADR-068 §2 — the ChatGPT account list.
     app.bridge.ipcMain.handle('provider-account:list', (_e: unknown, ...args: unknown[]) => {
       record('provider-account:list', ...args)
       return { ok: true, data: useSessionStore.getState().providerAccounts }

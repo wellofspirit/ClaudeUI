@@ -73,9 +73,8 @@ describe('E2E: auto-mode verdict on the card it judged', () => {
         type: 'tool_review',
         toolUseId: 'tool-1',
         reviewId: 'rv-1',
-        reviewer: 'codex-auto-review',
+        reviewer: 'auto-mode',
         decision: 'approved',
-        riskLevel: 'medium',
         rationale: 'Writes only to dist/.'
       }
     })
@@ -90,9 +89,8 @@ describe('E2E: auto-mode verdict on the card it judged', () => {
         type: 'tool_review',
         toolUseId: 'tool-1',
         reviewId: 'rv-1',
-        reviewer: 'codex-auto-review',
+        reviewer: 'auto-mode',
         decision: 'approved',
-        riskLevel: 'medium',
         rationale: 'Writes only to dist/.'
       }
     ])

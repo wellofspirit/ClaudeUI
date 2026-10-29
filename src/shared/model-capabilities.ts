@@ -1052,7 +1052,7 @@ export function resolveClaudeCapabilities(
  * while busy is posted at once under a ClaudeUI id as a `steer` (folded in at the
  * next step boundary, ADR-053 §1) and stays cancellable until delivered, so
  * take-back is a real dequeue.
- * voice:true — on-device speech-to-text (ADR-101), the same worker as pi and Codex;
+ * voice:true — on-device speech-to-text (ADR-101), the same worker as pi;
  * OpencodeSession ANDs the host's `voicePackPlatformKey() !== null`.
  * subagents:true (Phase 8d) — opencode's `subagent` tool (2.x; `task` in 1.x) spawns
  * child sessions whose transcripts stream on the shared SSE; the event-mapper routes

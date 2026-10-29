@@ -5,12 +5,12 @@ import { createHash, randomBytes } from 'node:crypto'
 import { validateSharedProviderId } from '../../../shared/shared-provider'
 import { logger } from '../../services/logger'
 import { hostOAuthLoopback } from '../../host'
-import { CodexLoginFlow, type LoginFlow, type VaultCredential } from './codex-oauth'
+import { ChatgptLoginFlow, type LoginFlow, type VaultCredential } from './chatgpt-oauth'
 import {
-  CodexDeviceCodeFlow,
+  ChatgptDeviceCodeFlow,
   type DeviceCodeFlowLike,
   type DeviceCodeStart
-} from './codex-device-code'
+} from './chatgpt-device-code'
 
 export function claudeUiDir(): string {
   return path.join(os.homedir(), '.claude', 'ui')
@@ -115,25 +115,25 @@ export class AuthVault {
     // before `bootCore()` publishes the desktop host hooks. An unwired host —
     // `claudeui-server` — gets `false`, so its PKCE sign-ins never bind port
     // 1455 and two concurrent ones cannot collide (the code arrives by
-    // paste-back; see `CodexLoginFlowOptions.loopback`).
+    // paste-back; see `ChatgptLoginFlowOptions.loopback`).
     const loginFlowPort = deps.loginFlowPort
     this.loginFlowFactory =
       deps.loginFlowFactory ??
       (() =>
-        new CodexLoginFlow({
+        new ChatgptLoginFlow({
           now: this.now,
           loopback: hostOAuthLoopback(),
           ...(loginFlowPort === undefined ? {} : { port: loginFlowPort })
         }))
     this.deviceCodeFlowFactory =
-      deps.deviceCodeFlowFactory ?? (() => new CodexDeviceCodeFlow({ now: this.now }))
+      deps.deviceCodeFlowFactory ?? (() => new ChatgptDeviceCodeFlow({ now: this.now }))
     this.newAccountId = deps.newAccountId ?? (() => randomBytes(8).toString('hex'))
   }
 
   /**
    * The ACTIVE ChatGPT account's credential. Kept as-is across the v3 move: it
    * is what `CredentialSync` feeds to pi and opencode, whose stores hold exactly
-   * one Codex entry each (ADR-068 §2).
+   * one ChatGPT entry each (ADR-068 §2).
    */
   async load(): Promise<VaultCredential | null> {
     const credential = await this.loadCredential(CHATGPT_PROVIDER_ID)

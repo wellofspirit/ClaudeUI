@@ -41,7 +41,7 @@ import type { VendorAuthMap, VendorAuthOption, AccountRef, AuthState } from '../
 import { nativeAccountKey, type AccountIdentity } from '../../shared/account-key'
 import type { EngineAuthProvider } from './EngineAuthProvider'
 import { FREE_OPENCODE_VENDOR_IDS } from '../../shared/engine-meta'
-import type { CodexCredentialInput } from './vault/CredentialSync'
+import type { ChatgptCredentialInput } from './vault/CredentialSync'
 
 /** Auth calls run no turn: never wait for the hosted MCP tools (S2 readiness). */
 const NO_TURN = { waitForHostedTools: false, lingerMs: READ_LINGER_MS } as const
@@ -325,7 +325,7 @@ export class OpencodeAuthProvider implements EngineAuthProvider {
 
   /** Vend the active ChatGPT account: access-only, padded expiry, rotate-by-replace (§5). */
   async vendChatgpt(
-    cred: CodexCredentialInput,
+    cred: ChatgptCredentialInput,
     isClaudeuiToken?: ClaudeuiTokenCheck
   ): Promise<void> {
     await opencodeCredentialStore.vendChatgpt(

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest'
-import type { CodexInjectionToken } from '../../auth/vault/CredentialSync'
+import type { ChatgptInjectionToken } from '../../auth/vault/CredentialSync'
 import {
   CHATGPT_USAGE_URL,
   ChatgptRateLimitStore,
@@ -690,7 +690,7 @@ function fakeJwt(claims: Record<string, unknown>): string {
 const tokenFor = (
   vaultAccountId: string,
   claims: Record<string, unknown> = {}
-): CodexInjectionToken => ({
+): ChatgptInjectionToken => ({
   accessToken: fakeJwt({ account: vaultAccountId, ...claims }),
   chatgptAccountId: `ws-${vaultAccountId}`,
   chatgptPlanType: 'plus',
@@ -770,7 +770,7 @@ describe('the usage read', () => {
   })
 
   it('a failing account is absent and does not sink the others', async () => {
-    const tokens: Record<string, CodexInjectionToken | null> = {
+    const tokens: Record<string, ChatgptInjectionToken | null> = {
       'acct-ok': tokenFor('acct-ok'),
       'acct-500': tokenFor('acct-500'),
       'acct-throws': tokenFor('acct-throws'),

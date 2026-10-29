@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * Behavioral tests for CodexLoginFlow's real loopback HTTP server.
+ * Behavioral tests for ChatgptLoginFlow's real loopback HTTP server.
  *
  * Every instance binds port 0 (OS-assigned ephemeral port, read back from the
  * authorize URL's own redirect_uri — see portFromAuthorizeUrl()) so tests
@@ -12,10 +12,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createServer } from 'node:http'
 import {
-  CodexLoginFlow,
+  ChatgptLoginFlow,
   type OAuthDeps,
   type TokenResponse
-} from '../../../../core/auth/vault/codex-oauth'
+} from '../../../../core/auth/vault/chatgpt-oauth'
 
 function makeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')
@@ -56,7 +56,7 @@ function canListen(port: number): Promise<boolean> {
 
 /**
  * True if a fresh server can bind `port` ON 127.0.0.1 — the exact interface
- * CodexLoginFlow binds. `canListen()` above binds the wildcard address, which
+ * ChatgptLoginFlow binds. `canListen()` above binds the wildcard address, which
  * on Windows happily coexists with a 127.0.0.1 bind of the same port, so it can
  * NOT be used to prove "nothing is listening".
  */
@@ -78,7 +78,7 @@ async function freePort(): Promise<number> {
   return port
 }
 
-describe('CodexLoginFlow', () => {
+describe('ChatgptLoginFlow', () => {
   it('resolves waitForCallback with a credential built from the mocked exchange, then frees the port', async () => {
     const idToken = makeJwt({ chatgpt_account_id: 'acct-1', email: 'user@example.com' })
     const deps = fakeExchangeDeps({
@@ -87,7 +87,7 @@ describe('CodexLoginFlow', () => {
       refresh_token: 'ref-tok',
       expires_in: 100
     })
-    const flow = new CodexLoginFlow({ port: 0, deps, now: () => 1_000_000 })
+    const flow = new ChatgptLoginFlow({ port: 0, deps, now: () => 1_000_000 })
 
     const { authorizeUrl, state } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
@@ -111,7 +111,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('wrong state rejects as a CSRF mismatch and responds 400', async () => {
-    const flow = new CodexLoginFlow({
+    const flow = new ChatgptLoginFlow({
       port: 0,
       deps: fakeExchangeDeps({ access_token: 'a', refresh_token: 'r' })
     })
@@ -130,7 +130,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('an error= redirect param rejects the pending wait (200, error page)', async () => {
-    const flow = new CodexLoginFlow({ port: 0 })
+    const flow = new ChatgptLoginFlow({ port: 0 })
     const { authorizeUrl, state } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
     const assertion = expect(flow.waitForCallback()).rejects.toThrow('User declined')
@@ -145,7 +145,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('missing code responds 400 and rejects', async () => {
-    const flow = new CodexLoginFlow({ port: 0 })
+    const flow = new ChatgptLoginFlow({ port: 0 })
     const { authorizeUrl, state } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
     const assertion = expect(flow.waitForCallback()).rejects.toThrow('Missing authorization code')
@@ -156,7 +156,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('GET /cancel rejects the pending wait and frees the port', async () => {
-    const flow = new CodexLoginFlow({ port: 0 })
+    const flow = new ChatgptLoginFlow({ port: 0 })
     const { authorizeUrl } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
     const assertion = expect(flow.waitForCallback()).rejects.toThrow('Login cancelled')
@@ -168,7 +168,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('unmatched paths 404 without disturbing the pending wait', async () => {
-    const flow = new CodexLoginFlow({ port: 0 })
+    const flow = new ChatgptLoginFlow({ port: 0 })
     const { authorizeUrl } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
     // Armed but intentionally left unsettled until the cleanup cancel() below
@@ -184,7 +184,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('cancel() rejects a pending wait and frees the port without any HTTP request', async () => {
-    const flow = new CodexLoginFlow({ port: 0 })
+    const flow = new ChatgptLoginFlow({ port: 0 })
     const { authorizeUrl } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
     const waitPromise = flow.waitForCallback()
@@ -196,7 +196,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('rejects with a timeout error when no callback arrives before the configured timeout', async () => {
-    const flow = new CodexLoginFlow({ port: 0, timeoutMs: 15 })
+    const flow = new ChatgptLoginFlow({ port: 0, timeoutMs: 15 })
     const { authorizeUrl } = await flow.start()
     const port = portFromAuthorizeUrl(authorizeUrl)
     const waitPromise = flow.waitForCallback()
@@ -206,7 +206,7 @@ describe('CodexLoginFlow', () => {
   })
 
   it('waitForCallback() before start() throws synchronously', () => {
-    const flow = new CodexLoginFlow({ port: 0 })
+    const flow = new ChatgptLoginFlow({ port: 0 })
     expect(() => flow.waitForCallback()).toThrow(/call start\(\)/)
   })
 
@@ -218,7 +218,7 @@ describe('CodexLoginFlow', () => {
       blocker.listen(0, '127.0.0.1', () => resolve((blocker.address() as { port: number }).port))
     )
     try {
-      const flow = new CodexLoginFlow({ port, timeoutMs: 20 })
+      const flow = new ChatgptLoginFlow({ port, timeoutMs: 20 })
       await expect(flow.start()).rejects.toThrow()
 
       // POST-FIX: the optimistically-armed pending promise is torn down (so
@@ -245,11 +245,11 @@ describe('CodexLoginFlow', () => {
  * URL (the redirect URI is registered to CLIENT_ID and cannot change — ADR-057).
  * The code arrives by paste-back instead of a redirect this host could receive.
  */
-describe('CodexLoginFlow with loopback disabled (headless)', () => {
+describe('ChatgptLoginFlow with loopback disabled (headless)', () => {
   it('binds nothing, so two concurrent flows on the same port do not collide', async () => {
     const port = await freePort()
-    const first = new CodexLoginFlow({ port, loopback: false, timeoutMs: 50_000 })
-    const second = new CodexLoginFlow({ port, loopback: false, timeoutMs: 50_000 })
+    const first = new ChatgptLoginFlow({ port, loopback: false, timeoutMs: 50_000 })
+    const second = new ChatgptLoginFlow({ port, loopback: false, timeoutMs: 50_000 })
     try {
       const a = await first.start()
       const b = await second.start()
@@ -270,7 +270,7 @@ describe('CodexLoginFlow with loopback disabled (headless)', () => {
   })
 
   it('keeps the registered localhost:1455 redirect when no port is passed', async () => {
-    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 50_000 })
+    const flow = new ChatgptLoginFlow({ loopback: false, timeoutMs: 50_000 })
     try {
       const { authorizeUrl } = await flow.start()
       expect(new URL(authorizeUrl).searchParams.get('redirect_uri')).toBe(
@@ -292,7 +292,7 @@ describe('CodexLoginFlow with loopback disabled (headless)', () => {
       expires_in: 3600
     })
     const port = await freePort()
-    const flow = new CodexLoginFlow({ port, loopback: false, deps, now: () => 1_000 })
+    const flow = new ChatgptLoginFlow({ port, loopback: false, deps, now: () => 1_000 })
     const { state } = await flow.start()
     expect(await canListenLoopback(port)).toBe(true)
 
@@ -314,7 +314,7 @@ describe('CodexLoginFlow with loopback disabled (headless)', () => {
   })
 
   it('rejects a mismatched pasted state as CSRF', async () => {
-    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 50_000 })
+    const flow = new ChatgptLoginFlow({ loopback: false, timeoutMs: 50_000 })
     await flow.start()
     await expect(flow.completeFromPastedInput('?code=c&state=not-the-state')).rejects.toThrow(
       /CSRF/
@@ -322,7 +322,7 @@ describe('CodexLoginFlow with loopback disabled (headless)', () => {
   })
 
   it('cancel() rejects the pending wait', async () => {
-    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 50_000 })
+    const flow = new ChatgptLoginFlow({ loopback: false, timeoutMs: 50_000 })
     await flow.start()
     const waitPromise = flow.waitForCallback()
 
@@ -333,7 +333,7 @@ describe('CodexLoginFlow with loopback disabled (headless)', () => {
   })
 
   it('still arms the timeout', async () => {
-    const flow = new CodexLoginFlow({ loopback: false, timeoutMs: 15 })
+    const flow = new ChatgptLoginFlow({ loopback: false, timeoutMs: 15 })
     await flow.start()
     await expect(flow.waitForCallback()).rejects.toThrow(/timeout/i)
   })

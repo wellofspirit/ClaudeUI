@@ -150,9 +150,10 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
  * A permission JUDGE's verdict on the tool call it judged, carried on the card
  * of that call rather than as prose beside it (ADR-067, F18).
  *
- * Two reviewers produce one: Codex's native auto-review (`codex-auto-review`,
- * whose `riskLevel` is the reviewer's own) and the Auto-mode classifier
- * (`auto-mode`, whose `rule` names the rule it matched). `auto-mode` covers two
+ * Two reviewers produce one: the Auto-mode classifier (`auto-mode`, whose
+ * `rule` names the rule it matched) and, in transcripts stored before the Codex
+ * engine was removed, Codex's native auto-review (`codex-auto-review`, whose
+ * `riskLevel` is the reviewer's own; nothing writes it any more). `auto-mode` covers two
  * judges that answer the same question: ClaudeUI's own classifier on opencode
  * and pi, and cli.js's native one on Claude, whose verdict reaches us as
  * `system/permission_denied` — blocks only, since cli.js emits no frame for an
@@ -172,7 +173,7 @@ export type ToolReviewBlock = {
   reviewId: string
   reviewer: 'codex-auto-review' | 'auto-mode'
   decision: 'approved' | 'denied' | 'timedOut' | 'aborted' | 'inProgress'
-  /** Codex's auto-review only — ClaudeUI's judge scores no risk level. */
+  /** `codex-auto-review` blocks only (stored transcripts) — ClaudeUI's judge scores no risk level. */
   riskLevel?: 'low' | 'medium' | 'high' | 'critical'
   /** ClaudeUI's judge only — the corpus rule name behind a block. */
   rule?: string
@@ -182,7 +183,7 @@ export type ToolReviewBlock = {
    * its held card, or Approve on the blocked review afterwards. The host
    * re-sends the review with this set (a new `reviewId`, so the reducer's
    * last-one-wins shows it and it replicates like any review); the card then
-   * reads "approved by you" and offers no Approve. Never set by Codex.
+   * reads "approved by you" and offers no Approve.
    */
   overriddenByUser?: true
   /**
@@ -295,8 +296,7 @@ export type ContentBlock =
   | { type: 'compact_separator'; text?: string }
   /**
    * Context an engine injected into the model's prompt that the USER never
-   * typed — Codex's `hookPrompt` fragments today, pi's `custom_message`
-   * entries, and (later) Claude's `attachment` family. Collapsed to a count by
+   * typed — pi's `custom_message` entries, and (later) Claude's `attachment` family. Collapsed to a count by
    * default; every fragment is UNTRUSTED third-party text and is rendered
    * verbatim, never through the markdown pipeline.
    */
@@ -457,8 +457,7 @@ export function piModel(vendorId: VendorId, modelId: string): ModelRef {
 export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
 
 /**
- * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent or
- * a Codex child thread; 'dispatch' is a cross-engine dispatch (ADR-033), which
+ * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent; 'dispatch' is a cross-engine dispatch (ADR-033), which
  * counts in dashboard totals but not in the dispatching session's headline.
  * 'judge' is an auto-mode judge call ClaudeUI made itself for the session named
  * by `parentRoutingId` (ADR-081 §5).
@@ -499,7 +498,7 @@ export interface VendorAuthOption {
 }
 
 /**
- * Read-only snapshot of the M6a/M6b auth vault's Codex (ChatGPT) credential —
+ * Read-only snapshot of the M6a/M6b auth vault's ChatGPT credential —
  * CredentialSync.getStatus(). Drives PiVendors.tsx's (M6c) "Connect ChatGPT"
  * UI. NEVER carries token material (access/refresh).
  */
@@ -606,8 +605,7 @@ export interface PendingApproval {
    * Set when the card holds an auto-mode judge BLOCK for the user (ADR-091 §3;
    * pi, opencode and their dispatch targets): the card offers Keep blocked /
    * Approve anyway, never a standing rule. `expiresAt` (epoch ms) is when the
-   * host resolves it as Keep blocked and withdraws the card. Engine-neutral,
-   * unlike Codex's after-the-fact `codex.guardianOverride`.
+   * host resolves it as Keep blocked and withdraws the card. Engine-neutral.
    */
   autoModeBlock?: { expiresAt: number }
   suggestions?: PermissionSuggestion[]
@@ -1143,7 +1141,7 @@ export interface DispatchConfig {
   maxCostUsd?: number
   /**
    * Absolute cap on ONE dispatched turn, in MILLISECONDS — the user's own
-   * limit, applied in EVERY dispatch direction (Claude, opencode, pi, Codex).
+   * limit, applied in EVERY dispatch direction (Claude, opencode, pi).
    *
    * THERE IS NO BUILT-IN DEFAULT (ADR-033's 2026-09-18 amendment): undefined
    * and `0` both mean NO LIMIT. A dispatched agent then runs until it finishes,
@@ -1738,7 +1736,7 @@ export interface DirectoryGroup {
   sessions: SessionInfo[]
   /**
    * Set (main side, filesystem facts only) when `cwd` is a linked git worktree, wherever it
-   * lives (`<repo>/.claude/worktrees`, opencode's data dir, `~/.codex/worktrees`). Every session
+   * lives (`<repo>/.claude/worktrees`, opencode's data dir). Every session
    * row in this group is a worktree session; the sidebar and the pill read it by normalised cwd.
    */
   linkedWorktree?: LinkedWorktree
@@ -2605,7 +2603,7 @@ interface FileAPI {
  * here is display material: the page to open, the code to type, and when the
  * host stops polling. The `device_auth_id` the host polls with never crosses the
  * wire. Structurally mirrored by `DeviceCodeStart` in
- * `core/auth/vault/codex-device-code.ts`, which owns the flow.
+ * `core/auth/vault/chatgpt-device-code.ts`, which owns the flow.
  */
 export interface VendorDeviceCodeStart {
   verificationUrl: string
@@ -2686,7 +2684,7 @@ interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
   /**
    * Per-account ChatGPT rate limits (ADR-068 §2). `refresh` asks the host to
-   * read them from Codex first; without it the last known map comes back.
+   * read them from the ChatGPT backend first; without it the last known map comes back.
    */
   fetchChatgptLimits(refresh?: boolean): Promise<ChatgptRateLimits>
   fetchBlockUsage(): Promise<BlockUsageData>
@@ -3631,7 +3629,7 @@ export interface ClaudeAPI
    *  executable, or a System pi's shim rather than its `cli.js`; null if not
    *  found. Settings › pi's subscription hint block (`pi /login`). */
   getPiBinaryPath(): Promise<string | null>
-  /** Read-only Codex (ChatGPT) auth-vault connection status (M6c). Drives
+  /** Read-only ChatGPT auth-vault connection status (M6c). Drives
    *  PiVendors.tsx's "Connect ChatGPT" UI — never returns token material. */
   getPiAuthStatus(): Promise<PiAuthStatus>
 }
@@ -3646,8 +3644,7 @@ export interface RateWindow {
   /**
    * How long the window lasts, when the vendor says (ADR-071 §6, S3c).
    *
-   * ChatGPT states it (`limit_window_seconds` → Codex's `window_minutes` →
-   * `windowDurationMins`) and it is what the window's KIND is derived from, so
+   * ChatGPT states it (`limit_window_seconds`, converted to minutes) and it is what the window's KIND is derived from, so
    * a plan with only a weekly limit is no longer filed as a five-hour one.
    * Claude never states it: its windows are named by the API itself
    * (`five_hour`, `seven_day`), so the name carries the length and this stays
@@ -3659,10 +3656,9 @@ export interface RateWindow {
 /**
  * ChatGPT subscription usage for ONE stored vault account (ADR-068 §2).
  *
- * Codex's `RateLimitSnapshot` maps onto {@link RateWindow} one to one —
- * `usedPercent` is already 0-100 and `resetsAt` is a unix timestamp in SECONDS
- * (`protocol/src/protocol.rs`: "Unix timestamp (seconds since epoch) when the
- * window resets"), converted to ISO 8601 on the way in so the panel's existing
+ * The backend's rate-limit windows map onto {@link RateWindow} one to one —
+ * `used_percent` is already 0-100 and `reset_at` is a unix timestamp in SECONDS,
+ * converted to ISO 8601 on the way in so the panel's existing
  * `formatResetTime` works unchanged.
  *
  * `primary` and `secondary` are SLOTS, not lengths (corrected 2026-09-21, S3c):
@@ -3679,8 +3675,7 @@ export interface ChatgptAccountLimits {
   secondary: RateWindow | null
   /**
    * A CREDITS-based plan (a business workspace, seen live 2026-09-14) reports no
-   * windows at all — both are null in `rateLimits` and in
-   * `rateLimitsByLimitId.codex` — and answers with a credit balance instead.
+   * windows at all — both are null — and answers with a credit balance instead.
    * Percentage bars are not the shape that plan has, so the balance is what the
    * panel shows for it. Absent when the backend says the account has no credits.
    */
@@ -3695,16 +3690,16 @@ export interface ChatgptAccountLimits {
 
 /**
  * A business workspace member's credit allowance: the backend's
- * `spend_control.individual_limit`, which Codex forwards as `individualLimit`
- * and its own `/status` renders as "Monthly credit limit — N of M credits used".
+ * `spend_control.individual_limit`, which the Codex CLI's `/status`
+ * renders as "Monthly credit limit — N of M credits used".
  *
  * It is what makes a credits plan's usage legible. `credits` only says the
  * workspace HAS credits (its balance is usually withheld from members), while
  * this says how much of the member's share is spent.
  *
  * The wire carries the amounts as decimal STRINGS; they are parsed once on the
- * way in, and an allowance whose amounts do not parse is dropped whole, as
- * Codex's own display drops it. `resetsAt` is ISO 8601 like every
+ * way in, and an allowance whose amounts do not parse is dropped whole.
+ * `resetsAt` is ISO 8601 like every
  * {@link RateWindow}. It is a month away, not a rolling window, so it is never a
  * window kind and is not sampled (ADR-071 §6 samples rolling windows only).
  */
@@ -4360,7 +4355,7 @@ export interface StatusLineData {
   /** What actually left a wallet, by the same rule: `0` under a subscription or
    *  a free vendor, the engine's figure under an API key, null when unknown.
    *  Optional because only the engines that follow ADR-071 §2 report it — a
-   *  Claude or Codex status line leaves it (and `unknownCostMessages`) unset,
+   *  Claude status line leaves it (and `unknownCostMessages`) unset,
    *  and the tooltip shows the extra rows only when they are present. */
   billedCostUsd?: number | null
   /** How many of this session's messages had no known cost. Omitted when none:

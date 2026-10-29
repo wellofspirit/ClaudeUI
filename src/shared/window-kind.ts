@@ -2,14 +2,13 @@
  * What kind of limit window a reading describes, from the LENGTH the vendor
  * states (ADR-071 §6).
  *
- * The kind used to come from the window's POSITION in the payload: Codex's
+ * The kind used to come from the window's POSITION in the payload: the
  * `primary` window was filed as `5h` and `secondary` as `7d`. That is wrong on
  * real plans — a ChatGPT plan with only a weekly limit delivers it as
  * `primary`, so a seven-day window was stored, summed and labelled as a
  * five-hour one (owner, 2026-09-21: "don't just assume, use trusted value").
  * The API states the length: the ChatGPT backend answers
- * `primary_window.limit_window_seconds`, Codex converts it to `window_minutes`
- * and the app-server wire carries it as `windowDurationMins`.
+ * `primary_window.limit_window_seconds`, which is converted to `window_minutes`.
  *
  * So the kind is DERIVED FROM THE DURATION, in one place, for core and renderer
  * alike. It is a grouping key (`usage_window_sample.window_kind`,
@@ -64,7 +63,7 @@ function usableMinutes(minutes: number | null | undefined): number | null {
  *
  * Whole days and whole hours get the unit a person would use for them, so a
  * three-day window reads `3d` rather than `4320m`. A length that is neither —
- * Codex's own fixtures use 1800 s and 3600 s windows, so arbitrary values are
+ * the backend's own fixtures use 1800 s and 3600 s windows, so arbitrary values are
  * expected — keeps its minutes, fraction and all: two readings of one window
  * must produce the same grouping key, and rounding is what would break that.
  */

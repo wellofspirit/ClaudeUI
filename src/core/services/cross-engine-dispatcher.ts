@@ -7387,7 +7387,7 @@ export class CrossEngineDispatcher {
    * Is a forwarded approval for this dispatch target still awaiting a human?
    * Read by the turn watchdog to keep an approval-PARKED turn's inactivity
    * clock rolling (see `startTurnWatchdog`). NOT scoped to any target kind: as
-   * of ADR-033's 2026-09-18 amendment all four directions run on that
+   * of ADR-033's 2026-09-18 amendment every direction runs on that
    * watchdog, and a Claude/pi target blocked on its gate is exactly as
    * silent as an opencode one blocked on `ctx.ask`. A plain scan: the map holds
    * at most a handful of live approvals. A null session id (a Claude target
@@ -7451,7 +7451,7 @@ export class CrossEngineDispatcher {
 
   /**
    * Arm one dispatch turn's liveness watchdog — the SINGLE implementation
-   * shared by all four directions (ADR-033's 2026-09-18 amendment; before it
+   * shared by every direction (ADR-033's 2026-09-18 amendment; before it
    * only the opencode direction had one, and claude/pi raced a fixed
    * 10-minute `setTimeout` no user could change).
    *

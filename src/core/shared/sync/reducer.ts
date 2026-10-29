@@ -143,7 +143,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * binding rule is ONE rule, not two: search from the END (a repeated identical
  * call must annotate its latest card, not the first one that ever ran), append
  * once, and DROP rather than park when no message holds the call. Parking is
- * the producer's job — CodexSession holds a verdict until its target item
+ * the producer's job — hold a verdict until its target item
  * lands — and a reducer-side queue would be a second, divergent copy of that
  * rule.
  *

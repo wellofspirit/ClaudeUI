@@ -6,8 +6,8 @@
  *
  * Before this, only the creating client's own save wrote the row. A session
  * created by anything else — a remote `session:create`, which has no
- * `createNewSession` behind it — had none until a model-bearing `session:status`,
- * and Codex starts lazily and sends none before the first prompt: every other
+ * `createNewSession` behind it — had none until a model-bearing `session:status`:
+ * every other
  * client rendered it as Claude, and any client's next registry save could then
  * revert it.
  *

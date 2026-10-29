@@ -98,8 +98,8 @@ import { DoneStage } from './sign-in/DoneStage'
 import { FlowStage, type FlowPanel } from './sign-in/FlowStage'
 import { SignInIssueList } from './sign-in/SignInIssueList'
 
-/** pi's auth.json key for the ChatGPT credential — `CredentialSync.PI_CODEX_VENDOR_ID`. */
-const CODEX_VENDOR_ID = 'openai-codex'
+/** pi's auth.json key for the ChatGPT credential — `CredentialSync.PI_CHATGPT_VENDOR_ID`. */
+const PI_CHATGPT_VENDOR_ID = 'openai-codex'
 /** The shared vault's id for the ChatGPT subscription. */
 const CHATGPT_ID = 'chatgpt'
 
@@ -395,13 +395,13 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
         // stored, exactly like the desktop loopback's. The paste fallback and
         // the desktop both stay on the PKCE flow.
         if (isWeb && (flowKind ?? chatgptFlow) === 'device') {
-          const device = await authorizeVendorDeviceCode('pi', CODEX_VENDOR_ID)
+          const device = await authorizeVendorDeviceCode('pi', PI_CHATGPT_VENDOR_ID)
           if (!current()) return
           if (device.ok) await finish()
           else if (device.error) setError(device.error)
           return
         }
-        const result = await authorizeVendorOAuth('pi', CODEX_VENDOR_ID)
+        const result = await authorizeVendorOAuth('pi', PI_CHATGPT_VENDOR_ID)
         if (!current()) return
         // Desktop resolves ok once the loopback completed; web parks the store's
         // flow at `paste` (or `error`) and the panel below takes over.

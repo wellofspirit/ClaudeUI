@@ -292,8 +292,7 @@ export interface SyncEventMap {
   /**
    * A credential the session needs was rejected and cannot be renewed
    * (ADR-068 §4) — the ONE auth event, from every engine that can tell a
-   * rejected credential apart. Codex raises it when it cannot answer the
-   * app-server's `account/chatgptAuthTokens/refresh`, opencode for a
+   * rejected credential apart. opencode raises it for a
    * `ProviderAuthError` carrying a vendor, Claude for an `authentication`
    * api_error, and pi for a turn whose `errorMessage` opens with a 401/403 (the
    * only status it exposes — see `core/pi/event-mapper.ts`'s classifier).
@@ -419,7 +418,7 @@ export interface SyncEventMap {
    * desktop sign-in clears the owed sign-in on the phone too.
    *
    * `accountId` is the VAULT account id the credential landed on — the same
-   * id-space `session:auth-required` reports (`CodexInjectionToken.vaultAccountId`
+   * id-space `session:auth-required` reports (`ChatgptInjectionToken.vaultAccountId`
    * on one side, `CredentialSync.keyForCredential` on the other). It narrows the
    * fan-out: a provider can hold several accounts, so adding ChatGPT account B
    * must not announce that the sessions broken on account A are fixed. The

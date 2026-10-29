@@ -7,7 +7,7 @@
  * classifier lives inside cli.js (docs/protocol-cc/14-auto-mode-classifier.md),
  * so `system/permission_denied` is the ONLY way its verdict reaches the UI.
  * ClaudeUI dropped it, which is why an auto-mode block on Claude showed as a
- * bare red tool_result while pi, opencode and Codex all rendered a verdict.
+ * bare red tool_result while pi and opencode both rendered a verdict.
  *
  * The wire order replayed here is the one PROBED against 2.1.268 on 2026-09-21:
  * the assistant message carrying the `tool_use`, then the system frame, then the

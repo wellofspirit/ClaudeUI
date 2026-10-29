@@ -67,7 +67,7 @@ describe('firstPartyDisplayName: each engine strips its own prefix only', () => 
     ).toBeUndefined()
   })
 
-  it('bare (pi, Codex): only the bare spelling', () => {
+  it('bare (pi): only the bare spelling', () => {
     expect(firstPartyDisplayName('dispatch_agent', 'bare')).toBe('X-Agent')
     expect(firstPartyDisplayName('session_message', 'bare')).toBe('Session · message')
     expect(firstPartyDisplayName('claudeui_dispatch_agent', 'bare')).toBeUndefined()
@@ -94,9 +94,9 @@ describe('dispatchTaskView: name and description', () => {
 
   it('falls back to "Dispatch: <engine>" and no name; blank or non-string values count as absent', () => {
     for (const extra of [{}, { name: '  ', description: '' }, { name: 3, description: null }]) {
-      const view = dispatchTaskView({ engine: 'codex', prompt: 'p', ...extra })
-      expect(view.description).toBe('Dispatch: codex')
-      expect(view.description).toBe(dispatchPlaceholderDescription('codex'))
+      const view = dispatchTaskView({ engine: 'pi', prompt: 'p', ...extra })
+      expect(view.description).toBe('Dispatch: pi')
+      expect(view.description).toBe(dispatchPlaceholderDescription('pi'))
       expect('name' in view).toBe(false)
     }
   })

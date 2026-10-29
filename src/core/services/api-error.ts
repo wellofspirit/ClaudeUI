@@ -11,12 +11,12 @@ import type { ChatMessage } from '../../shared/types'
  *
  * Claude has emitted this block since ADR-014 (`api_error` with
  * `errorType: 'authentication'`, which `MessageBubble` already switches on);
- * Codex, opencode and pi emitted only a floating `session:error` card, so on
- * three of four engines a rejected credential left no trace in the transcript at
+ * opencode and pi emitted only a floating `session:error` card, so on
+ * two of three engines a rejected credential left no trace in the transcript at
  * all once the card was dismissed. They all build the same block here.
  *
  * The `id` comes from the CALLER, because each session class already mints ids
- * its own way (`randomUUID` in Codex, `uuid()` in opencode/pi) and its history
+ * its own way (`uuid()` in opencode/pi) and its history
  * upsert is keyed on them — a second id scheme in here would produce duplicate
  * rows on the replay paths.
  *

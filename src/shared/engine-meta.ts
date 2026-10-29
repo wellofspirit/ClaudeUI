@@ -30,7 +30,7 @@ export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
 
 /**
  * The hard-coded pi fallback model VALUE. `openai-codex` is pi's provider id
- * for the ChatGPT-subscription flow (shares opencode's Codex OAuth client —
+ * for the ChatGPT-subscription flow (shares opencode's ChatGPT OAuth client —
  * see docs/protocol-pi/README.md "Auth"). A per-engine configurable default
  * (mirroring opencode's opencodeConfig.model) shipped in M3 — Settings'
  * PiDefaultModelSection + session-store's `piDefaultModel` — and takes

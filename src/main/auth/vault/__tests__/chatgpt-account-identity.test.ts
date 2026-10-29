@@ -3,8 +3,8 @@
  *
  * ADR-071 §3 — `CredentialSync.accountIdentity()`.
  *
- * The vault holds the ChatGPT identity Codex runs under (ADR-068 §1), so the
- * account key for a Codex turn has to come from here — and it has to be the
+ * The vault holds the ChatGPT identity the engines run under (ADR-068 §1), so the
+ * account key for a turn has to come from here — and it has to be the
  * SAME key opencode and pi derive from their own `auth.json` for the same
  * subscription, or one person's spend lands in three buckets.
  *
@@ -29,7 +29,10 @@ vi.mock('../../../../core/services/logger', () => ({
 
 import { AuthVault, CHATGPT_PROVIDER_ID } from '../../../../core/auth/vault/AuthVault'
 import { CredentialSync } from '../../../../core/auth/vault/CredentialSync'
-import { buildVaultCredential, type VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import {
+  buildVaultCredential,
+  type VaultCredential
+} from '../../../../core/auth/vault/chatgpt-oauth'
 import { accountIdentityFromAuthEntry } from '../../../../core/auth/account-identity'
 
 const FAKE_SIGNATURE = 'not-a-real-signature'
@@ -139,7 +142,7 @@ describe('CredentialSync.accountIdentity', () => {
   })
 
   it('is native when no vault account backs the session', async () => {
-    // Codex signed in on its own: there is nothing here to name it with.
+    // ChatGPT signed in on its own: there is nothing here to name it with.
     const identity = await sync(new AuthVault()).accountIdentity(null)
     expect(identity).toEqual({ accountKey: 'codex:openai:native', accountLabel: 'openai' })
   })

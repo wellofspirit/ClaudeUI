@@ -1,12 +1,12 @@
 /**
  * @vitest-environment node
  *
- * Unit tests for codex-oauth.ts's PKCE/JWT/URL primitives + the
+ * Unit tests for chatgpt-oauth.ts's PKCE/JWT/URL primitives + the
  * exchange/refresh HTTP calls.
  *
  * SAFETY: every exchangeCodeForTokens()/refreshAccessToken() call below goes
  * through a `vi.fn()` fake passed as `deps.fetch` — none of these tests ever
- * construct a real `fetch` or reach the network. See codex-oauth.ts's header
+ * construct a real `fetch` or reach the network. See chatgpt-oauth.ts's header
  * for why a real call would be dangerous (refresh_token rotation).
  */
 import { describe, it, expect, vi } from 'vitest'
@@ -25,10 +25,10 @@ import {
   extractAccountId,
   extractEmail,
   parsePastedCallback,
-  CodexLoginFlow,
+  ChatgptLoginFlow,
   type PkceCodes,
   type TokenResponse
-} from '../../../../core/auth/vault/codex-oauth'
+} from '../../../../core/auth/vault/chatgpt-oauth'
 
 function makeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')
@@ -403,10 +403,10 @@ describe('parsePastedCallback (ADR-057)', () => {
   })
 })
 
-describe('CodexLoginFlow.completeFromPastedInput (ADR-057 remote paste-back)', () => {
+describe('ChatgptLoginFlow.completeFromPastedInput (ADR-057 remote paste-back)', () => {
   /** A flow bound to an ephemeral loopback port with a mocked token endpoint. */
   async function armFlow(fetchFn: ReturnType<typeof vi.fn>) {
-    const flow = new CodexLoginFlow({
+    const flow = new ChatgptLoginFlow({
       port: 0,
       deps: { fetch: fetchFn as unknown as typeof fetch, issuer: ISSUER },
       now: () => 1_000_000

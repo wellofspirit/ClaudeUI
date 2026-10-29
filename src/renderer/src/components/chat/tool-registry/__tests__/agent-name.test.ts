@@ -3,7 +3,7 @@
  *
  * Without it a fan-out of four Explore agents renders four identical rows, and
  * nothing can tie a `SendMessage{to: "reviewer"}` back to the agent it
- * addressed. The four engines keep the name in four different places, which is
+ * addressed. The engines keep the name in different places, which is
  * exactly why the ToolView carries one normalized field.
  */
 import { describe, expect, it } from 'vitest'

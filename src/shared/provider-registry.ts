@@ -28,7 +28,7 @@ export type ProviderOrigin = 'anthropic' | 'shared' | 'opencode-native' | 'pi-na
  * The credential badge on the row.
  *
  * - `signed-in` — the native Claude account (Anthropic only).
- * - `connected`  — an OAuth/subscription credential (ChatGPT, pi's Codex entry).
+ * - `connected`  — an OAuth/subscription credential (ChatGPT, pi's `openai-codex` entry).
  * - `api-key`    — a key ClaudeUI can see in a store it reads.
  * - `free`       — needs no credential at all (opencode's bundled zen gateway).
  * - `custom`     — configured OUTSIDE ClaudeUI's stores: opencode reports the

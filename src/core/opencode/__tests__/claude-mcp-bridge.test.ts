@@ -106,7 +106,7 @@ describe('translateClaudeMcpServer', () => {
 vi.mock('../../services/claude-mcp', () => {
   const loadMcpServers = vi.fn()
   const readDisabledMcpServers = vi.fn()
-  // The three-scope merge moved into `claude-mcp.ts` so the Codex bridge can
+  // The three-scope merge moved into `claude-mcp.ts` so the other engine bridges can
   // share it (ADR-068 §5). Re-expressed here over the SAME mocked reads, so
   // every assertion below — precedence, the per-scope call args, the
   // throwing-read case — keeps measuring what it always did.

@@ -1165,7 +1165,7 @@ export const MIGRATIONS: Migration[] = [
     // BOTH KEY SHAPES, because a versioned migration cannot be widened later.
     // `persistChatgptSamples` files a reading under the vault's resolved
     // identity and drops only `unknown`, so a stored credential with no
-    // workspace id resolves through `codexNativeIdentity()` and its samples are
+    // workspace id resolves through `chatgptNativeIdentity()` and its samples are
     // keyed `codex:openai:native` — mis-kinded exactly like the `chatgpt:` ones,
     // and invisible to a `LIKE 'chatgpt:%'` sweep. No other vendor writes that
     // key, so nothing else is caught by it.
@@ -3022,20 +3022,15 @@ export function allSessionMeta(db: Db = getDb()): Record<string, SessionMeta> {
 }
 
 /**
- * Ids of the rows that name Claude AND carry no context reading — the only rows the
- * orphan prune ({@link pruneOrphanClaudeSessionMeta}) may consider.
+ * Ids of the rows that name Claude — the only rows the orphan prune
+ * ({@link pruneOrphanClaudeSessionMeta}) may consider.
  *
  * Read from the raw column, not through {@link allSessionMeta}, which hides the rows
- * of an engine this build does not know. The context filter is a belt, not a proof
- * of anything: a Claude row never carries a context reading today (v24) and the
- * filter excludes none.
+ * of an engine this build does not know.
  */
-export function claudeUnmeteredSessionIds(db: Db = getDb()): string[] {
+export function claudeSessionMetaIds(db: Db = getDb()): string[] {
   const rows = db
-    .prepare(
-      `SELECT session_id FROM session_meta
-       WHERE engine_id = 'claude' AND context_used IS NULL AND context_window IS NULL`
-    )
+    .prepare(`SELECT session_id FROM session_meta WHERE engine_id = 'claude'`)
     .all() as Array<{ session_id: string }>
   return rows.map((r) => r.session_id)
 }

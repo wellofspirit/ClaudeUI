@@ -764,7 +764,7 @@ function ApiErrorBlock({
  * replacing `AuthErrorBlock`.
  *
  * Every engine emits this block now (`api_error` / `errorType:
- * 'authentication'`), so the failure is anchored where it happened on all four
+ * 'authentication'`), so the failure is anchored where it happened on every engine
  * instead of Claude having history and the rest a floating card that vanished.
  *
  * THREE LIFETIMES, read off the session's `authRequired` (ADR-070 §2), because

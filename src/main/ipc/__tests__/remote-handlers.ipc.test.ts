@@ -3220,7 +3220,7 @@ describe('S4 vendor-credential surface dispatch (ADR-057)', () => {
     expect(fakeProvider.cancelVendorOauth).toHaveBeenCalledTimes(1)
   })
 
-  it("does NOT refuse pi's Codex `auto` remotely — it completes via paste-back", async () => {
+  it("does NOT refuse pi's ChatGPT `auto` remotely — it completes via paste-back", async () => {
     const conn = makeRemoteConnection('password', null)
     const res = (await dispatcher.handle(
       makeRequest('vendor-auth:oauth-authorize', 'pi', 'openai-codex', 0),

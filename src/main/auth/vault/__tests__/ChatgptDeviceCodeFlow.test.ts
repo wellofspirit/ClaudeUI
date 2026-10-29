@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * Behavioral tests for CodexDeviceCodeFlow (ADR-068 §3, Slice 7) — the port of
+ * Behavioral tests for ChatgptDeviceCodeFlow (ADR-068 §3, Slice 7) — the port of
  * Codex's `login/src/device_code_auth.rs`.
  *
  * SAFETY: every request here goes through an INJECTED `deps.fetch` against a
@@ -12,15 +12,15 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import {
-  CodexDeviceCodeFlow,
+  ChatgptDeviceCodeFlow,
   DeviceCodeCancelledError,
   DEVICE_CODE_MAX_WAIT_MS,
   DEVICE_CODE_MIN_INTERVAL_MS,
   DEVICE_CODE_TIMEOUT_MESSAGE,
   DEVICE_CODE_UNSUPPORTED_MESSAGE,
   parsePollIntervalMs
-} from '../../../../core/auth/vault/codex-device-code'
-import type { OAuthDeps } from '../../../../core/auth/vault/codex-oauth'
+} from '../../../../core/auth/vault/chatgpt-device-code'
+import type { OAuthDeps } from '../../../../core/auth/vault/chatgpt-oauth'
 
 const ISSUER = 'https://issuer.test'
 const USERCODE_URL = `${ISSUER}/api/accounts/deviceauth/usercode`
@@ -113,13 +113,13 @@ describe('parsePollIntervalMs', () => {
   })
 })
 
-describe('CodexDeviceCodeFlow.start', () => {
+describe('ChatgptDeviceCodeFlow.start', () => {
   it('POSTs the usercode request Codex sends and returns only the three display fields', async () => {
     const { deps, calls } = makeDeps({
       usercode: ok({ device_auth_id: 'dev-1', user_code: 'ABCD-1234', interval: '4' })
     })
     const clock = fakeClock()
-    const flow = new CodexDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
+    const flow = new ChatgptDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
 
     const started = await flow.start()
 
@@ -141,24 +141,24 @@ describe('CodexDeviceCodeFlow.start', () => {
   it('accepts the `usercode` spelling the server also ships', async () => {
     const { deps } = makeDeps({ usercode: ok({ device_auth_id: 'dev-1', usercode: 'WXYZ-9' }) })
     const clock = fakeClock()
-    const flow = new CodexDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
+    const flow = new ChatgptDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
     await expect(flow.start()).resolves.toMatchObject({ userCode: 'WXYZ-9' })
   })
 
   it('turns a 404 into the "not enabled for this server" message and any other status into a status error', async () => {
     const notFound = makeDeps({ usercode: fail(404) })
     await expect(
-      new CodexDeviceCodeFlow({ deps: notFound.deps, sleep: fakeClock().sleep }).start()
+      new ChatgptDeviceCodeFlow({ deps: notFound.deps, sleep: fakeClock().sleep }).start()
     ).rejects.toThrow(DEVICE_CODE_UNSUPPORTED_MESSAGE)
 
     const boom = makeDeps({ usercode: fail(500) })
     await expect(
-      new CodexDeviceCodeFlow({ deps: boom.deps, sleep: fakeClock().sleep }).start()
+      new ChatgptDeviceCodeFlow({ deps: boom.deps, sleep: fakeClock().sleep }).start()
     ).rejects.toThrow('device code request failed with status 500')
   })
 })
 
-describe('CodexDeviceCodeFlow.waitForCompletion', () => {
+describe('ChatgptDeviceCodeFlow.waitForCompletion', () => {
   it('treats 403 and 404 as "not yet", then exchanges the SERVER verifier against deviceauth/callback', async () => {
     const { deps, calls } = makeDeps({
       usercode: ok({ device_auth_id: 'dev-1', user_code: 'ABCD-1234', interval: 3 }),
@@ -174,7 +174,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
       exchange: ok({ access_token: 'access-x', refresh_token: 'refresh-x', expires_in: 60 })
     })
     const clock = fakeClock()
-    const flow = new CodexDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
+    const flow = new ChatgptDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
 
     await flow.start()
     const cred = await flow.waitForCompletion()
@@ -201,7 +201,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
   it('fails at once on any other poll status, with the status in the message', async () => {
     const { deps } = makeDeps({ polls: [fail(500)] })
     const clock = fakeClock()
-    const flow = new CodexDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
+    const flow = new ChatgptDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
     await flow.start()
     await expect(flow.waitForCompletion()).rejects.toThrow('device auth failed with status 500')
     expect(clock.slept).toEqual([])
@@ -214,7 +214,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
       usercode: ok({ device_auth_id: 'dev-1', user_code: 'ABCD-1234', interval: 600 }),
       polls: [fail(403), fail(403), fail(403)]
     })
-    const flow = new CodexDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
+    const flow = new ChatgptDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
     await flow.start()
     await expect(flow.waitForCompletion()).rejects.toThrow(DEVICE_CODE_TIMEOUT_MESSAGE)
     expect(clock.slept).toEqual([600_000, 300_000])
@@ -226,7 +226,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
     const { deps, calls } = makeDeps({
       polls: [fail(403), ok({ authorization_code: 'c', code_verifier: 'v', code_challenge: 'h' })]
     })
-    const flow = new CodexDeviceCodeFlow({
+    const flow = new ChatgptDeviceCodeFlow({
       deps,
       now: clock.now,
       // Cancel from INSIDE the sleep — the exact race the Cancel button creates.
@@ -247,7 +247,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
     const clock = fakeClock()
     const calls: string[] = []
     // A holder, because the fetch double has to reach the flow that owns it.
-    const live: { flow?: CodexDeviceCodeFlow } = {}
+    const live: { flow?: ChatgptDeviceCodeFlow } = {}
     const deps: OAuthDeps = {
       issuer: ISSUER,
       fetch: vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -260,7 +260,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
         return fail(403)
       }) as unknown as typeof fetch
     }
-    const flow = new CodexDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
+    const flow = new ChatgptDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
     live.flow = flow
 
     await flow.start()
@@ -273,7 +273,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
     // (AuthVault.claimLoginSlot), so a cancel that did not settle this promise
     // would leave a zombie poller running for the rest of the fifteen minutes.
     const { deps } = makeDeps({ polls: [fail(403)] })
-    const flow = new CodexDeviceCodeFlow({
+    const flow = new ChatgptDeviceCodeFlow({
       deps,
       now: () => 1_000_000,
       sleep: () => new Promise<void>(() => {})
@@ -287,7 +287,7 @@ describe('CodexDeviceCodeFlow.waitForCompletion', () => {
   it('isSettled() is false while the flow is live, so the vault will not supersede it', async () => {
     const { deps } = makeDeps({ polls: [fail(403)] })
     const clock = fakeClock()
-    const flow = new CodexDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
+    const flow = new ChatgptDeviceCodeFlow({ deps, now: clock.now, sleep: clock.sleep })
     expect(flow.isSettled()).toBe(false)
     await flow.start()
     expect(flow.isSettled()).toBe(false)

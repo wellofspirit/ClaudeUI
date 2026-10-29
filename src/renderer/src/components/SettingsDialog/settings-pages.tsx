@@ -312,8 +312,8 @@ const CONTEXT_PRESSURE: SettingItem = {
 }
 
 /**
- * Session tools, host-wide switch: the `session_*` tools and their prompt guidance on all four
- * engines. On by default; read at spawn, so off applies to sessions started afterwards.
+ * Session tools, host-wide switch: the `session_*` tools and their prompt guidance on every
+ * engine. On by default; read at spawn, so off applies to sessions started afterwards.
  */
 const SESSION_TOOLS: SettingItem = {
   key: 'sessionTools',

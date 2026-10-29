@@ -41,7 +41,7 @@ src/
                          (fallback-account snapshot), judge-capture.ts
                          (opt-in prompt+reply JSONL) (ADR-023/050/106/107)
     auth/              — EngineAuthProvider + opencode/pi implementations; vault/
-                         (AuthVault, CredentialSync, codex-oauth — ADR-036/037)
+                         (AuthVault, CredentialSync, chatgpt-oauth — ADR-036/037)
     shared-providers/  — canonical provider/model routing + native projections (ADR-037)
     ipc/               — the registrars (session/terminal/automation/webauthn/authcfg)
                          + command-registry, remote-handlers, the shared command

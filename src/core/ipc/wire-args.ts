@@ -23,9 +23,8 @@
  * still puts a `null` on the wire.
  *
  * `null` is not "unset" to the shared code behind these handlers — several
- * places distinguish unset with `=== undefined` (`CodexSession.validateEffort`
- * threw "Codex reasoning effort is unavailable for the selected model" on every
- * fresh web-client Codex session because of exactly this), and the rest declare
+ * places distinguish unset with `=== undefined` (an effort check that
+ * treated `null` as a value once rejected every fresh web-client session), and the rest declare
  * the parameter `?: T`, which `null` does not satisfy. So every optional
  * argument is put back through here at the handler boundary rather than
  * teaching each service to accept two spellings of "nothing".

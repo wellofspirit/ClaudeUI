@@ -1,6 +1,6 @@
 /**
  * Thrown by a session's `resolveApproval` when the ANSWER was malformed but the
- * request is still parked and answerable (e.g. a Codex question answer that is
+ * request is still parked and answerable (e.g. a question answer that is
  * missing or not an offered choice). The approval answer seam
  * (`src/core/ipc/approval-response.ts`) dismisses the card on every other
  * outcome, including a stale-id throw, but must keep the card for this one: the

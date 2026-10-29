@@ -36,7 +36,6 @@ vi.mock('os', async () => {
 vi.mock('../../../core/services/claude-session', () => ({ ClaudeSession: class {} }))
 vi.mock('../../../core/opencode/OpencodeSession', () => ({ OpencodeSession: class {} }))
 vi.mock('../../../core/pi/PiSession', () => ({ PiSession: class {} }))
-vi.mock('../../../core/codex/CodexSession', () => ({ CodexSession: class {} }))
 vi.mock('../../../core/providers/claude-spawn-prep', () => ({
   claudeSpawnPrep: vi.fn(async (model?: string) => ({ resolvedModel: model }))
 }))

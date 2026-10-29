@@ -29,11 +29,11 @@ import { AuthVault, CHATGPT_PROVIDER_ID } from '../../../../core/auth/vault/Auth
 import {
   CredentialSync,
   REFRESH_MARGIN_MS,
-  type CodexCredentialInput,
-  type CodexEntrySnapshot,
-  type CodexFeedTarget
+  type ChatgptCredentialInput,
+  type ChatgptEntrySnapshot,
+  type ChatgptFeedTarget
 } from '../../../../core/auth/vault/CredentialSync'
-import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
 import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
 
 let testHome: string
@@ -62,18 +62,18 @@ function cred(over: Partial<VaultCredential> & { ws?: string } = {}): VaultCrede
 }
 
 /** A spy feed target whose auth file never exists, so no fs.watch is armed. */
-function fakeTarget(holding: CodexEntrySnapshot | null = null): {
-  target: CodexFeedTarget
+function fakeTarget(holding: ChatgptEntrySnapshot | null = null): {
+  target: ChatgptFeedTarget
   feed: ReturnType<typeof vi.fn>
   remove: ReturnType<typeof vi.fn>
 } {
-  const feed = vi.fn(async (_vendorId: string, _cred: CodexCredentialInput) => {})
+  const feed = vi.fn(async (_vendorId: string, _cred: ChatgptCredentialInput) => {})
   const remove = vi.fn(async (_vendorId: string) => {})
   return {
     target: {
       authFilePath: () => join(testHome, 'no-such-dir', 'auth.json'),
       feedOauthCredential: feed,
-      readOauthEntry: vi.fn(async (): Promise<CodexEntrySnapshot | null> => holding),
+      readOauthEntry: vi.fn(async (): Promise<ChatgptEntrySnapshot | null> => holding),
       removeVendorAuth: remove
     },
     feed,
@@ -82,7 +82,7 @@ function fakeTarget(holding: CodexEntrySnapshot | null = null): {
 }
 
 /** A feed target whose store already holds `entry` (an engine-rotated token). */
-function targetHolding(entry: CodexEntrySnapshot | null): CodexFeedTarget {
+function targetHolding(entry: ChatgptEntrySnapshot | null): ChatgptFeedTarget {
   return {
     authFilePath: () => join(testHome, 'no-such-dir', 'auth.json'),
     feedOauthCredential: vi.fn(async () => {}),
@@ -448,7 +448,7 @@ describe('CredentialSync.injectionTokenFor', () => {
   })
 
   it('answers a REFRESH request from cache: margin 0 refreshes only what expired', async () => {
-    // Codex abandons the turn after 10 s, so the refresh handler passes margin 0
+    // A refresh request is answered inside a short deadline, so the handler passes margin 0
     // and a token that is merely inside the 15-minute window is answered as is.
     const vault = new AuthVault()
     await vault.upsertAccount(

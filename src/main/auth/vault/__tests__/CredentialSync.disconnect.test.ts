@@ -27,17 +27,17 @@ vi.mock('node:os', async () => {
 import { AuthVault, CHATGPT_PROVIDER_ID, vaultPath } from '../../../../core/auth/vault/AuthVault'
 import {
   CredentialSync,
-  OPENCODE_CODEX_VENDOR_ID,
-  PI_CODEX_VENDOR_ID,
-  type CodexEntrySnapshot,
-  type CodexFeedTarget,
+  OPENCODE_CHATGPT_VENDOR_ID,
+  PI_CHATGPT_VENDOR_ID,
+  type ChatgptEntrySnapshot,
+  type ChatgptFeedTarget,
   type VaultLike
 } from '../../../../core/auth/vault/CredentialSync'
 import type {
   LoginFlow,
   TokenResponse,
   VaultCredential
-} from '../../../../core/auth/vault/codex-oauth'
+} from '../../../../core/auth/vault/chatgpt-oauth'
 import {
   FED_TOKEN_HISTORY_CAP,
   fedTokenHistory,
@@ -67,18 +67,18 @@ function cred(refresh: string, ws?: string, expiresIn = 10 * DAY): VaultCredenti
 }
 
 /** An engine entry; older than a vault credential by default, so a feed does not see it as a rotation. */
-function entry(refresh: string, expiresIn = 5 * DAY): CodexEntrySnapshot {
+function entry(refresh: string, expiresIn = 5 * DAY): ChatgptEntrySnapshot {
   return { access: `fake-access-${refresh}`, refresh, expires: Date.now() + expiresIn }
 }
 
 /** One engine's auth store: an in-memory map, so a removal is gone for the next read. */
 function engineStore(engine: Engine) {
-  const store = new Map<string, CodexEntrySnapshot>()
-  const vendorId = engine === 'pi' ? PI_CODEX_VENDOR_ID : OPENCODE_CODEX_VENDOR_ID
-  const feed = vi.fn(async (id: string, input: CodexEntrySnapshot) => void store.set(id, input))
+  const store = new Map<string, ChatgptEntrySnapshot>()
+  const vendorId = engine === 'pi' ? PI_CHATGPT_VENDOR_ID : OPENCODE_CHATGPT_VENDOR_ID
+  const feed = vi.fn(async (id: string, input: ChatgptEntrySnapshot) => void store.set(id, input))
   const remove = vi.fn(async (id: string) => void store.delete(id))
   const removeDirect = vi.fn(async (id: string) => void store.delete(id))
-  const target: CodexFeedTarget = {
+  const target: ChatgptFeedTarget = {
     // A directory that never exists, so no fs.watch is armed.
     authFilePath: () => join(testHome, 'no-such-dir', `${engine}-auth.json`),
     feedOauthCredential: feed,
@@ -163,7 +163,7 @@ describe('a ChatGPT disconnect takes out only what ClaudeUI put in (S7e)', () =>
 
     await h.boot().disconnectChatgpt()
 
-    expect(h.pi.remove).toHaveBeenCalledWith(PI_CODEX_VENDOR_ID)
+    expect(h.pi.remove).toHaveBeenCalledWith(PI_CHATGPT_VENDOR_ID)
     expect(h.pi.held()).toBeUndefined()
     // opencode 2.x: nothing of ClaudeUI's was there; the user's row is untouched.
     expect(h.opencode.table.calls.filter((call) => call.includes('cred_user'))).toEqual([])

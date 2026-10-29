@@ -1,5 +1,5 @@
 /**
- * codex-oauth.ts — Codex (ChatGPT) OAuth primitives + loopback login flow (M6a).
+ * chatgpt-oauth.ts — ChatGPT OAuth primitives + loopback login flow (M6a).
  *
  * Ported from vendor/opencode-src/packages/opencode/src/plugin/openai/codex.ts
  * ("the port source" — see the M6a kickoff spec's "Verified flow facts"), with
@@ -7,7 +7,7 @@
  *
  *   1. NO module-level mutable server/pending-flow state. codex.ts keeps
  *      `oauthServer` / `pendingOAuth` as file-level singletons; here
- *      `CodexLoginFlow` is a class so every login attempt (and every test) gets
+ *      `ChatgptLoginFlow` is a class so every login attempt (and every test) gets
  *      an isolated instance instead of sharing global state.
  *   2. HTTP fetch + the wall clock are INJECTED (`OAuthDeps.fetch`, ctor `now`)
  *      instead of calling the global `fetch` / `Date.now()` directly, so tests
@@ -36,7 +36,7 @@ export const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 export const ISSUER = 'https://auth.openai.com'
 /**
  * Fixed loopback port — registered to CLIENT_ID on the auth server. Do NOT
- * parameterize this for production; CodexLoginFlowOptions.port exists solely
+ * parameterize this for production; ChatgptLoginFlowOptions.port exists solely
  * so tests can bind an ephemeral port instead of fighting over 1455.
  */
 export const DEFAULT_OAUTH_PORT = 1455
@@ -107,7 +107,7 @@ export interface VaultCredential {
   email?: string
   /**
    * The ChatGPT subscription tier off the JWT (`chatgpt_plan_type`). Carried so
-   * an account row can say which plan it is, and so Codex's injected-token login
+   * an account row can say which plan it is, and so the injected-token login
    * can forward `chatgptPlanType` (ADR-068 §1) without re-parsing the JWT.
    */
   planType?: string
@@ -121,7 +121,7 @@ export interface VaultCredential {
   userId?: string
 }
 
-/** What AuthVault needs from a login flow — CodexLoginFlow implements this; tests can fake it. */
+/** What AuthVault needs from a login flow — ChatgptLoginFlow implements this; tests can fake it. */
 export interface LoginFlow {
   start(): Promise<{ authorizeUrl: string; state: string }>
   waitForCallback(): Promise<VaultCredential>
@@ -445,7 +445,7 @@ export async function refreshAccessToken(
  * `prior` lets a REFRESH carry forward the accountId/email the vault already
  * holds when the refresh response's JWTs omit them (a refresh_token grant's
  * id_token frequently lacks the profile claims the original authorization_code
- * grant carried). Exported so the login path (CodexLoginFlow) and the refresh
+ * grant carried). Exported so the login path (ChatgptLoginFlow) and the refresh
  * path (CredentialSync.doRefresh) compute the credential identically — the two
  * must not drift on the expires math or the accountId/email fallback rules.
  */
@@ -510,10 +510,10 @@ function renderErrorPage(message: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// CodexLoginFlow — owns ONE loopback server for ONE login attempt.
+// ChatgptLoginFlow — owns ONE loopback server for ONE login attempt.
 // ---------------------------------------------------------------------------
 
-export interface CodexLoginFlowOptions {
+export interface ChatgptLoginFlowOptions {
   /** Loopback port. Defaults to DEFAULT_OAUTH_PORT (1455) in production; tests pass 0 to let the OS assign a free ephemeral port (read back via server.address() after listen()). */
   port?: number
   /** Milliseconds before an un-completed callback rejects. Defaults to 5 minutes. */
@@ -554,13 +554,13 @@ type TerminalResult = { ok: true; cred: VaultCredential } | { ok: false; err: Er
  * the pending promise, so by the time waitForCallback() resolves/rejects, the
  * port is already free (verified in tests via a second listen on the same port).
  */
-export class CodexLoginFlow implements LoginFlow {
+export class ChatgptLoginFlow implements LoginFlow {
   /** The port requested via options — 0 means "let the OS pick" (tests). Production always passes a concrete port (default 1455). */
   private readonly requestedPort: number
   private readonly timeoutMs: number
   private readonly deps: OAuthDeps
   private readonly now: () => number
-  /** Whether start() binds the loopback callback server. See CodexLoginFlowOptions.loopback. */
+  /** Whether start() binds the loopback callback server. See ChatgptLoginFlowOptions.loopback. */
   private readonly loopback: boolean
 
   private server: Server | undefined
@@ -573,7 +573,7 @@ export class CodexLoginFlow implements LoginFlow {
   private pendingPromise: Promise<VaultCredential> | undefined
   private timeoutHandle: NodeJS.Timeout | undefined
 
-  constructor(options: CodexLoginFlowOptions = {}) {
+  constructor(options: ChatgptLoginFlowOptions = {}) {
     this.requestedPort = options.port ?? DEFAULT_OAUTH_PORT
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.deps = options.deps ?? defaultDeps()
@@ -637,7 +637,7 @@ export class CodexLoginFlow implements LoginFlow {
 
   waitForCallback(): Promise<VaultCredential> {
     if (!this.pendingPromise) {
-      throw new Error('CodexLoginFlow: call start() before waitForCallback()')
+      throw new Error('ChatgptLoginFlow: call start() before waitForCallback()')
     }
     return this.pendingPromise
   }
@@ -663,7 +663,7 @@ export class CodexLoginFlow implements LoginFlow {
    */
   async completeFromPastedInput(input: string): Promise<VaultCredential> {
     if (!this.pkce || !this.state) {
-      throw new Error('CodexLoginFlow: call start() before completeFromPastedInput()')
+      throw new Error('ChatgptLoginFlow: call start() before completeFromPastedInput()')
     }
     const { code, state, structured } = parsePastedCallback(input)
     if (!code) {

@@ -1,8 +1,8 @@
 /**
  * How an X-Agent's `hand_back` report is framed before another model reads it (ADR-105 §3).
  *
- * A report is agent-authored, untrusted output with no user authority, and on a pi,
- * opencode or Codex parent no engine-side defence sits between it and the model. This is
+ * A report is agent-authored, untrusted output with no user authority, and on a pi
+ * or opencode parent no engine-side defence sits between it and the model. This is
  * ClaudeUI's port of what Claude Code does to a subagent's `SubagentHandback` report
  * (cli.js 2.1.293, `cli.js@char7716976` / `@char7721535`;
  * `docs/protocol-cc/04-system-subtypes.md` §4.4):

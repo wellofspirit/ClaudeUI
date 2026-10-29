@@ -11,7 +11,7 @@
  * WHAT CROSSES THE WIRE TO GET HERE. Three fields, all display material: the
  * verification URL, the user code, and the expiry. The `device_auth_id` the host
  * polls with never leaves the host, and neither does any token — see
- * `core/auth/vault/codex-device-code.ts` and
+ * `core/auth/vault/chatgpt-device-code.ts` and
  * `docs/architecture/security.md` § "The vendor-credential surface".
  *
  * DESKTOP NEVER MOUNTS THIS. Like the paste panel, it is gated on
