@@ -2,6 +2,8 @@ import { useState, useMemo, useCallback, useEffect } from 'react'
 import { v4 as uuid } from 'uuid'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
 import { DirectoryBrowserDialog } from '../../shared/DirectoryBrowserDialog'
+import { generateWorktreeName, sanitizeWorktreeName } from '../../../../../shared/worktree-start'
+import { requestDraftSend } from '../../../lib/worktree-start'
 
 const WELCOME_PHRASES = [
   "Let's build",
@@ -16,41 +18,6 @@ const WELCOME_PHRASES = [
   'Time to create'
 ]
 
-const ADJECTIVES = [
-  'swift',
-  'calm',
-  'bold',
-  'keen',
-  'warm',
-  'cool',
-  'wild',
-  'soft',
-  'fair',
-  'deep',
-  'pure',
-  'dark',
-  'safe',
-  'firm',
-  'vast'
-]
-const NOUNS = [
-  'river',
-  'stone',
-  'cloud',
-  'flame',
-  'frost',
-  'ridge',
-  'creek',
-  'grove',
-  'bloom',
-  'cedar',
-  'maple',
-  'cliff',
-  'brook',
-  'trail',
-  'haven'
-]
-
 /**
  * Highest `welcomeBrowseToken` any instance has acted on. MODULE scope, not a
  * component ref: the usual order is "sidebar requests, then this component
@@ -60,31 +27,24 @@ const NOUNS = [
  */
 let lastBrowseTokenConsumed = 0
 
-function generateRandomName(): string {
-  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)]
-  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)]
-  return `${adj}-${noun}`
-}
-
-function sanitizeWorktreeName(val: string): string {
-  return val
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, '')
-    .slice(0, 30)
-}
-
 export function WelcomeState(): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
+  const pending = useActiveSession((s) => s.pendingWorktree)
+  const isGitRepo = useActiveSession((s) => s.isGitRepo)
+  const sdkActive = useActiveSession((s) => s.sdkActive)
   const directories = useSessionStore((s) => s.directories)
   const createNewSession = useSessionStore((s) => s.createNewSession)
-  const setWorktreeInfo = useSessionStore((s) => s.setWorktreeInfo)
+  const setPendingWorktree = useSessionStore((s) => s.setPendingWorktree)
+  const defaultStartInWorktree = useSessionStore((s) => s.settings?.startInWorktree === true)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const welcomeBrowseToken = useSessionStore((s) => s.welcomeBrowseToken)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [browseDialogOpen, setBrowseDialogOpen] = useState(false)
-  const [worktreeEnabled, setWorktreeEnabled] = useState(false)
-  const [worktreeName, setWorktreeName] = useState(() => generateRandomName())
-  const [isCreatingWorktree, setIsCreatingWorktree] = useState(false)
+  // Before a directory is chosen there is no session to hold the choice: it waits here, and
+  // `null` means "not touched", so the project's own setting decides for the directory picked.
+  const [chosenEnabled, setChosenEnabled] = useState<boolean | null>(null)
+  const [chosenName, setChosenName] = useState(() => generateWorktreeName())
+  const [chosenNameTouched, setChosenNameTouched] = useState(false)
 
   const phrase = useMemo(
     () => WELCOME_PHRASES[Math.floor(Math.random() * WELCOME_PHRASES.length)],
@@ -92,26 +52,43 @@ export function WelcomeState(): React.JSX.Element {
     [activeSessionId]
   )
 
+  // The toggle and name of the session being set up: the session's own once it has a directory.
+  const hasSession = !!cwd && !!pending
+  const worktreeEnabled = hasSession ? pending.enabled : (chosenEnabled ?? defaultStartInWorktree)
+  const worktreeName = hasSession ? pending.name : chosenName
+  const phase = hasSession ? pending.phase : 'idle'
+  const showWorktreeToggle = !cwd || (hasSession && isGitRepo && !sdkActive)
+  const patchWorktree = (patch: {
+    enabled?: boolean
+    name?: string
+    nameTouched?: boolean
+  }): void => {
+    if (hasSession && activeSessionId) {
+      setPendingWorktree(activeSessionId, patch)
+      return
+    }
+    if (patch.enabled !== undefined) setChosenEnabled(patch.enabled)
+    if (patch.name !== undefined) setChosenName(patch.name)
+    if (patch.nameTouched !== undefined) setChosenNameTouched(patch.nameTouched)
+  }
+
+  // The worktree itself is made at the first send, not here: this only creates the session.
   const startSession = useCallback(
-    async (dirCwd: string): Promise<void> => {
+    (dirCwd: string): void => {
       const routingId = uuid()
-      if (worktreeEnabled && worktreeName.trim()) {
-        setIsCreatingWorktree(true)
-        try {
-          const info = await window.api.createWorktree(dirCwd, worktreeName.trim())
-          createNewSession(routingId, info.worktreePath)
-          setWorktreeInfo(routingId, info)
-        } catch (err) {
-          window.api.logError('WelcomeState', `Failed to create worktree: ${err}`)
-          createNewSession(routingId, dirCwd)
-        } finally {
-          setIsCreatingWorktree(false)
-        }
-      } else {
-        createNewSession(routingId, dirCwd)
+      createNewSession(routingId, dirCwd)
+      // A touched toggle or a typed name is the user's, whatever the project's default says.
+      if (chosenEnabled !== null || chosenNameTouched) {
+        setPendingWorktree(routingId, {
+          ...(chosenEnabled !== null ? { enabled: chosenEnabled } : {}),
+          name: chosenName,
+          nameTouched: chosenNameTouched
+        })
       }
+      setChosenEnabled(null)
+      setChosenNameTouched(false)
     },
-    [worktreeEnabled, worktreeName, createNewSession, setWorktreeInfo]
+    [chosenEnabled, chosenName, chosenNameTouched, createNewSession, setPendingWorktree]
   )
 
   // A surface with no native dialog (the sidebar's web double-click) asked for
@@ -176,8 +153,11 @@ export function WelcomeState(): React.JSX.Element {
       <p className="text-[22px] text-text-secondary font-light tracking-tight">{phrase}</p>
 
       {/* Creating worktree indicator */}
-      {isCreatingWorktree && (
-        <div className="flex items-center gap-2 text-[12px] text-text-muted animate-fade-in">
+      {phase === 'creating' && (
+        <div
+          data-testid="WelcomeState.worktreeCreating"
+          className="flex items-center gap-2 text-[12px] text-text-muted animate-fade-in"
+        >
           <div className="flex gap-[3px]">
             {[0, 200, 400].map((delay) => (
               <span
@@ -187,12 +167,12 @@ export function WelcomeState(): React.JSX.Element {
               />
             ))}
           </div>
-          <span>Creating worktree...</span>
+          <span>Creating worktree…</span>
         </div>
       )}
 
       {/* Directory dropdown */}
-      {!cwd && !isCreatingWorktree && (
+      {!cwd && (
         <div className="relative">
           <button
             data-testid="WelcomeState.selectDirectory"
@@ -272,13 +252,15 @@ export function WelcomeState(): React.JSX.Element {
         </div>
       )}
 
-      {/* Worktree toggle */}
-      {!cwd && !isCreatingWorktree && (
+      {/* Worktree toggle: made at the first send, so it stays until then. */}
+      {showWorktreeToggle && phase !== 'creating' && (
         <div className="flex flex-col items-center gap-2">
           <label className="flex items-center gap-2 cursor-default select-none">
             <button
               data-testid="WelcomeState.worktreeToggle"
-              onClick={() => setWorktreeEnabled(!worktreeEnabled)}
+              role="switch"
+              aria-checked={worktreeEnabled}
+              onClick={() => patchWorktree({ enabled: !worktreeEnabled })}
               className={`relative w-8 h-[18px] rounded-full transition-colors ${worktreeEnabled ? 'bg-mode-edit' : 'bg-bg-hover border border-border'}`}
             >
               <span
@@ -289,41 +271,94 @@ export function WelcomeState(): React.JSX.Element {
           </label>
 
           {worktreeEnabled && (
-            <div className="flex items-center gap-1.5 animate-fade-in">
-              <input
-                data-testid="WelcomeState.worktreeName"
-                type="text"
-                value={worktreeName}
-                onChange={(e) => setWorktreeName(sanitizeWorktreeName(e.target.value))}
-                placeholder="worktree-name"
-                className="w-40 px-2 py-1 rounded-md bg-bg-tertiary border border-border text-[12px] text-text-primary font-mono focus:outline-none focus:border-accent"
-              />
-              <button
-                data-testid="WelcomeState.randomizeName"
-                onClick={() => setWorktreeName(generateRandomName())}
-                className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
-                title="Randomize name"
-              >
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+            <>
+              <div className="flex items-center gap-1.5 animate-fade-in">
+                <input
+                  data-testid="WelcomeState.worktreeName"
+                  type="text"
+                  value={worktreeName}
+                  onChange={(e) =>
+                    patchWorktree({ name: sanitizeWorktreeName(e.target.value), nameTouched: true })
+                  }
+                  placeholder="worktree-name"
+                  className="w-40 px-2 py-1 rounded-md bg-bg-tertiary border border-border text-[12px] text-text-primary font-mono focus:outline-none focus:border-accent"
+                />
+                <button
+                  data-testid="WelcomeState.randomizeName"
+                  onClick={() =>
+                    patchWorktree({ name: generateWorktreeName(), nameTouched: false })
+                  }
+                  className="w-6 h-6 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+                  title="Randomize name"
                 >
-                  <rect x="1" y="1" width="22" height="22" rx="4" />
-                  <circle cx="8" cy="8" r="1.5" fill="currentColor" />
-                  <circle cx="16" cy="8" r="1.5" fill="currentColor" />
-                  <circle cx="8" cy="16" r="1.5" fill="currentColor" />
-                  <circle cx="16" cy="16" r="1.5" fill="currentColor" />
-                  <circle cx="12" cy="12" r="1.5" fill="currentColor" />
-                </svg>
-              </button>
-            </div>
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <rect x="1" y="1" width="22" height="22" rx="4" />
+                    <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+                    <circle cx="16" cy="8" r="1.5" fill="currentColor" />
+                    <circle cx="8" cy="16" r="1.5" fill="currentColor" />
+                    <circle cx="16" cy="16" r="1.5" fill="currentColor" />
+                    <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+                  </svg>
+                </button>
+              </div>
+              <span
+                data-testid="WelcomeState.worktreeHint"
+                className="text-[11px] text-text-muted animate-fade-in"
+              >
+                Created from the remote&apos;s default branch when you send.
+              </span>
+            </>
           )}
+        </div>
+      )}
+
+      {/* The worktree could not be made: the message is still in the composer, unsent. */}
+      {hasSession && phase === 'failed' && (
+        <div
+          data-testid="WelcomeState.worktreeError"
+          role="alert"
+          className="flex flex-col items-center gap-2 max-w-sm text-center animate-fade-in"
+        >
+          <span className="text-[13px] text-text-primary">Couldn&apos;t create the worktree</span>
+          <span
+            data-testid="WelcomeState.worktreeErrorText"
+            className="text-[12px] text-text-muted break-words"
+          >
+            {pending.error}
+          </span>
+          <div className="flex items-center gap-3">
+            <button
+              data-testid="WelcomeState.worktreeRetry"
+              onClick={() => activeSessionId && requestDraftSend(activeSessionId)}
+              className="text-[13px] text-accent hover:underline"
+            >
+              Retry
+            </button>
+            <button
+              data-testid="WelcomeState.worktreeSendWithout"
+              onClick={() => {
+                if (!activeSessionId) return
+                setPendingWorktree(activeSessionId, {
+                  enabled: false,
+                  phase: 'idle',
+                  error: undefined
+                })
+                requestDraftSend(activeSessionId)
+              }}
+              className="text-[13px] text-accent hover:underline"
+            >
+              Send without a worktree
+            </button>
+          </div>
         </div>
       )}
 

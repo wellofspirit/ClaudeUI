@@ -390,7 +390,11 @@ const api: ClaudeAPI = {
   onTerminalDetached: () => () => {},
 
   // Worktree operations — all use safeHandler
-  createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
+  // Declared `withProgress` like removeWorktree: always on the progress path, no callback.
+  createWorktree: (cwd: string, name: string, opts?: { base?: 'head' | 'default' }) =>
+    invokeWithProgress('worktree:create', [cwd, name, opts], () => {}).then((r) =>
+      unwrapResult('worktree:create', r)
+    ),
   getWorktreeStatus: (worktreePath: string, originalHead: string) =>
     unwrap('worktree:status', worktreePath, originalHead),
   // Declared `withProgress` (the remote client's timeout slides on it), so it always rides the

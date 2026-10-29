@@ -625,7 +625,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // safeHandler-wrapped, so `unwrap` carries the real reason back (an empty
     // answer would read as "this repo has no worktrees" rather than "this client
     // cannot ask").
-    createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
+    createWorktree: (cwd, name, opts) =>
+      unwrapWithProgress('worktree:create', [cwd, name, opts], () => {}),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
     // `withProgress` on the server: the progress path slides the invoke timeout; no caller

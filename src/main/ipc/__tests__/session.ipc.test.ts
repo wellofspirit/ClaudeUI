@@ -446,6 +446,33 @@ describe('session.ipc', () => {
       expect(res).toEqual({ ok: true, data: { path: '/tmp/wt', branch: 'feat' } })
     })
 
+    it('worktree:create declares withProgress and keeps the reporter off the wire args', async () => {
+      expect(commandRegistry.declaration('worktree:create')).toMatchObject({
+        capability: 'git',
+        kind: 'command',
+        withProgress: true
+      })
+      const { createWorktree } = await import('../../../core/services/worktree')
+      const reporter = vi.fn()
+      await dispatchDesktop(
+        'worktree:create',
+        ['/tmp/repo', 'feature', { base: 'default' }],
+        reporter
+      )
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', { base: 'default' })
+      // The heartbeat reports at once, so the web client's invoke window starts sliding.
+      expect(reporter).toHaveBeenCalledWith(expect.objectContaining({ phase: 'creating' }))
+    })
+
+    it('worktree:create forwards the base option and reads a null one as absent', async () => {
+      const { createWorktree } = await import('../../../core/services/worktree')
+      await harness.call<any>('worktree:create', '/tmp/repo', 'feature', { base: 'default' })
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', { base: 'default' })
+      // A remote client turns an omitted argument into null.
+      await harness.call<any>('worktree:create', '/tmp/repo', 'feature', null)
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', undefined)
+    })
+
     it('returns { ok: true, data } on success for git:status', async () => {
       const res = await harness.call<any>('git:status', '/tmp/repo')
       expect(res.ok).toBe(true)
