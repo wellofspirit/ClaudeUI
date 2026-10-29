@@ -33,8 +33,7 @@ describe('parseVersionOutput', () => {
     ['opencode', 'opencode v2.0.24\n', '2.0.24'],
     ['opencode', 'opencode v2.1.0-beta.1\r\n', '2.1.0-beta.1'],
     ['opencode', '1.18.32\n', '1.18.32'],
-    ['pi', '0.87.1\n', '0.87.1'],
-    ['codex', 'codex-cli 0.156.0\n', '0.156.0']
+    ['pi', '0.87.1\n', '0.87.1']
   ] as const)('%s: %j → %s', (id, stdout, version) => {
     expect(parseVersionOutput(id, stdout)).toEqual({ status: 'ok', version })
   })
@@ -55,7 +54,6 @@ describe('parseVersionOutput', () => {
 
   it('fails on output of the wrong shape', () => {
     expect(parseVersionOutput('claude', '2.1.280\n').status).toBe('failed')
-    expect(parseVersionOutput('codex', '0.156.0').status).toBe('failed')
     expect(parseVersionOutput('pi', '').status).toBe('failed')
     expect(parseVersionOutput('opencode', 'Error: something broke\nat x').status).toBe('failed')
   })
@@ -71,8 +69,7 @@ describe('probeVersion isolation', () => {
     }[] = []
     const run = vi.fn<RunFn>(async (command, args, options) => {
       const env = options.env ?? {}
-      const dir =
-        env.CLAUDE_CONFIG_DIR ?? env.CODEX_HOME ?? env.PI_CODING_AGENT_DIR ?? env.XDG_DATA_HOME
+      const dir = env.CLAUDE_CONFIG_DIR ?? env.PI_CODING_AGENT_DIR ?? env.XDG_DATA_HOME
       seen.push({ command, args, options, dirExisted: !!dir && fs.existsSync(dir) })
       return { stdout, code: 0, timedOut: false }
     })
@@ -127,8 +124,7 @@ describe('probeVersion isolation', () => {
       '1.18.32',
       ['XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME']
     ],
-    ['pi', '0.87.1', ['PI_CODING_AGENT_DIR']],
-    ['codex', 'codex-cli 0.156.0', ['CODEX_HOME']]
+    ['pi', '0.87.1', ['PI_CODING_AGENT_DIR']]
   ] as const)('%s: its state dirs point into the fresh dir', async (id, stdout, dirs) => {
     const { run, seen } = capture(stdout)
     await probeVersion(id, nativeLaunch('/x/h'), {

@@ -195,14 +195,12 @@ function branchOfHead(adminDir: string): string {
   return m ? m[1] : ''
 }
 
-export type WorktreeLocation = 'managed' | 'opencode' | 'codex' | 'other'
-
-const HEX4 = /^[0-9a-f]{4}$/i
+export type WorktreeLocation = 'managed' | 'opencode' | 'other'
 
 /**
  * Classify a worktree directory by layout (display only): under `<repo>/.claude/worktrees`;
- * Codex `<...>/worktrees/<4 hex>/<repo>`; opencode `<...>/worktree/<6 chars>/<slug>`. The name is
- * the last segment, `<4hex>/<repo>` for Codex, the path below the managed root for a managed one.
+ * opencode `<...>/worktree/<6 chars>/<slug>`. The name is the last segment, the path below the
+ * managed root for a managed one.
  */
 export function classifyWorktreeLocation(
   worktreePath: string,
@@ -222,9 +220,6 @@ export function classifyWorktreeLocation(
   }
   const bucket = path.basename(path.dirname(p))
   const parentOfBucket = path.basename(path.dirname(path.dirname(p))).toLowerCase()
-  if (HEX4.test(bucket) && parentOfBucket === 'worktrees') {
-    return { location: 'codex', name: `${bucket}/${last}` }
-  }
   if (bucket.length === 6 && parentOfBucket === 'worktree')
     return { location: 'opencode', name: last }
   return { location: 'other', name: last }

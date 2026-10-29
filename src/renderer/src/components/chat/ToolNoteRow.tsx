@@ -3,9 +3,8 @@
  *
  * Stopping a background task, loading tool schemas, deleting a schedule, leaving
  * a worktree: a header, a chevron, an expandable body and a result area would be
- * chrome around a single fact. This is the shape `SleepRow` already uses for
- * Codex's `clock.sleep`, generalised — which is also what keeps the harnesses
- * looking like one app.
+ * chrome around a single fact. One shape for every harness is also what keeps
+ * them looking like one app.
  *
  * A FAILED call is never a quiet grey line: it promotes itself to the error
  * tone and shows what came back, because a row that reads the same whether it

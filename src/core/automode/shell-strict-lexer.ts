@@ -284,7 +284,7 @@ export function lexShellStrict(
  * Claude-syntax `Tool(specifier)` parser — same semantics as
  * `permission-compiler.ts` `parseClaudeRule` (an empty or `*` specifier means
  * the whole tool). Re-implemented because that module is not pure (it imports
- * the settings loader and the Codex rules sync, i.e. `node:fs`). Shared by
+ * the settings loader, i.e. `node:fs`). Shared by
  * `read-only.ts` (which re-exports it) and `../permissions/shell-rules.ts`.
  */
 export function parseRuleText(rule: string): { tool: string; specifier?: string } | null {

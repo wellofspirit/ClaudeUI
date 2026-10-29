@@ -1023,20 +1023,11 @@ export interface SessionHistoryResult {
    * `tool_use` id — the same key `session:subagent-message` uses live.
    *
    * Claude leaves this undefined: its subagent transcripts are separate JSONL
-   * files the Sidebar fetches per `agentIdToToolUseId` entry. Codex has no
-   * sidecar — a child is a native THREAD read over the same connection as the
-   * parent — so its reader returns them inline instead of inventing a second
-   * round trip that would cost another engine process (ADR-066 slice F).
+   * files the Sidebar fetches per `agentIdToToolUseId` entry. opencode has no
+   * sidecar — a child is a session on the same server as the parent — so its
+   * reader returns them inline instead of inventing a second round trip.
    */
   subagentMessages?: Record<string, ChatMessage[]>
-  /**
-   * The engine-native reasoning tier the thread last ran at (or was last set
-   * to), for a COLD reopen to show and resume with. Codex only: its tiers are
-   * the engine's own, and the thread's rollout is the one place that remembers
-   * them across an app restart. `null` when the rollout names none; absent for
-   * every other engine.
-   */
-  lastEffort?: string | null
   /**
    * Claude only: every subagent the main transcript (or a sidecar) mapped to an
    * origin tool_use id, BY that id — size, recency, parent and sidecar names

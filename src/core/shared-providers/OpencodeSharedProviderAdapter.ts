@@ -1,5 +1,5 @@
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
-import type { CodexCredentialInput } from '../auth/vault/CredentialSync'
+import type { ChatgptCredentialInput } from '../auth/vault/CredentialSync'
 import {
   readOpencodeNativeConfig,
   writeOpencodeNativeConfig,
@@ -31,7 +31,7 @@ import type {
 export interface OpencodeSharedProviderAuthTarget {
   setVendorApiKey(vendorId: string, key: string): Promise<void>
   /** The ChatGPT vend (CredentialSync's path); absent, an OAuth vend is refused. */
-  vendChatgpt?(credential: CodexCredentialInput): Promise<void>
+  vendChatgpt?(credential: ChatgptCredentialInput): Promise<void>
   /** ClaudeUI's API key only (sign-ins started from the provider screen stay, and so do the user's rows). */
   removeVendorKey(vendorId: string): Promise<void>
   listVendorCredentialIds?(): Promise<Record<string, 'api' | 'oauth'>>
@@ -182,7 +182,7 @@ export class OpencodeSharedProviderAdapter {
 
   async vendOauthCredential(
     definition: SharedProviderDefinition,
-    credential: CodexCredentialInput
+    credential: ChatgptCredentialInput
   ): Promise<void> {
     if (definition.kind !== 'subscription') {
       throw new Error('Custom providers require API-key credentials')

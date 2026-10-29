@@ -494,7 +494,7 @@ describe('TopBar — dispatched (cross-engine) rows and total (Slice C)', () => 
 
 // ---------------------------------------------------------------------------
 // Unknown cost: `totalCostUsd: null` means the engine could NOT price the
-// session (Codex on an unpriced model), which is a different statement from a
+// session (an unpriced model), which is a different statement from a
 // real $0.00. The tooltip must never launder the former into the latter.
 // ---------------------------------------------------------------------------
 
@@ -555,7 +555,7 @@ describe('TopBar — unknown (unpriced) cost', () => {
       model: null,
       cwd: '/d/repo',
       totalCostUsd: null,
-      engineId: 'codex',
+      engineId: 'pi',
       capabilities: resolveClaudeCapabilities('default'),
       account: null
     } as SessionStatus)
@@ -594,8 +594,8 @@ describe('TopBar — unknown (unpriced) cost', () => {
 // ---------------------------------------------------------------------------
 // Two costs (ADR-071 §2): an engine that can tell what a turn was WORTH from
 // what it CHARGED sends both, and the tooltip has to say which figure is which
-// — otherwise a subscription session reads as money spent. Claude and Codex
-// send neither field, and for them the block must look exactly as it did.
+// — otherwise a subscription session reads as money spent. Claude sends
+// neither field, and for it the block must look exactly as it did.
 // ---------------------------------------------------------------------------
 
 describe('TopBar — billed cost and coverage', () => {
@@ -669,7 +669,7 @@ describe('TopBar — billed cost and coverage', () => {
   })
 
   it('an engine that sends neither field renders the block unchanged', () => {
-    // Claude and Codex status lines: no billedCostUsd, no unknownCostMessages.
+    // Claude status lines: no billedCostUsd, no unknownCostMessages.
     seed.statusLine(ROUTE, makeStatusLine({ totalCostUsd: 1.5 }))
 
     const { unmount } = render(<TopBar hasContent />)

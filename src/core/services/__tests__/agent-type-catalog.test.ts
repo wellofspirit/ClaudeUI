@@ -362,16 +362,6 @@ describe('pi models', () => {
   })
 })
 
-describe('Codex', () => {
-  it('lists the built-in roles', () => {
-    expect(listAgentTypes('codex', project)).toEqual([
-      { type: 'default', source: 'builtin' },
-      { type: 'explorer', source: 'builtin' },
-      { type: 'worker', source: 'builtin' }
-    ])
-  })
-})
-
 describe('opencode effort check (listAgentTypesChecked)', () => {
   const agent = (name: string, fields: string): string =>
     `---\nname: ${name}\ndescription: d\n${fields}\n---\nBody\n`

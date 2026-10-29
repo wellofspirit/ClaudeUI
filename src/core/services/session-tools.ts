@@ -2,7 +2,7 @@
  * The session tools, engine-neutral (session tools, slice 1c, spec §4 / §6 / §7):
  * one function per verb, each taking the calling session and the tool's input
  * and returning the text the model reads. The adapters (Claude's
- * `claude-ui-sessions` server today; opencode, pi and Codex in slice 2) only
+ * `claude-ui-sessions` server today; opencode and pi in slice 2) only
  * translate their transport to these calls.
  *
  * Everything resolves through {@link resolveRef}, everything is delivered
@@ -21,7 +21,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { ChatMessage, EngineId } from '../../shared/types'
+import { ENGINE_IDS, type ChatMessage, type EngineId } from '../../shared/types'
 import {
   SESSION_TOOL_LIMITS,
   ACTING_SESSION_TOOLS,
@@ -267,8 +267,7 @@ export function auditSessionToolCall(
 /**
  * The audit row for an acting call the gate denied. The service never runs for a
  * denied call, so the engine's approval callback writes this one (Claude's
- * `canUseTool`, opencode's permission ask, pi's `tool_call` gate, Codex's
- * hosted-tool call); reads leave no row, as they do in the service.
+ * `canUseTool`, opencode's permission ask, pi's `tool_call` gate); reads leave no row, as they do in the service.
  */
 export function auditSessionToolDenial(
   caller: SessionToolCaller,
@@ -1216,7 +1215,7 @@ export async function sessionMessage(
       : { key: mine, title: titleOf(caller.routingId) || 'Untitled session' }
     const result = await deliver(need().manager, target.id, {
       origin: 'session-message',
-      // An X-Agent's text is untrusted model output, and a pi, opencode or Codex parent has no
+      // An X-Agent's text is untrusted model output, and a pi or opencode parent has no
       // envelope handling of its own: it is defused as a report is, with the marker (applied once, here; a second pass would add
       // another marker).
       text: caller.xAgent ? defusedXAgentMessage(text) : text,
@@ -1369,7 +1368,7 @@ export type SessionHandOffInput = {
   effort?: string
 }
 
-const ENGINES: readonly EngineId[] = ['claude', 'opencode', 'pi', 'codex']
+const ENGINES: readonly EngineId[] = ENGINE_IDS
 
 interface NewSessionPlan {
   engine: EngineId

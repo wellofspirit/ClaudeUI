@@ -15,11 +15,11 @@ import {
 /**
  * The session tools' input schemas, once (session tools, slice 2). Claude's
  * `claude-ui-sessions` server and opencode's hosted `claudeui` server register
- * these zod shapes directly; pi's bridge and Codex's `dynamicTools` take the same
- * schemas as JSON ({@link sessionToolJsonSpecs}), so the four carriers cannot
+ * these zod shapes directly; pi's bridge takes the same
+ * schemas as JSON ({@link sessionToolJsonSpecs}), so the three carriers cannot
  * describe different tools.
  */
-const engine = z.enum(['claude', 'opencode', 'pi', 'codex'])
+const engine = z.enum(['claude', 'opencode', 'pi'])
 
 export const SESSION_TOOL_SHAPES: Record<SessionToolName, Record<string, z.ZodType>> = {
   session_list: {
@@ -87,7 +87,7 @@ export const SESSION_TOOL_SHAPES: Record<SessionToolName, Record<string, z.ZodTy
   }
 }
 
-/** One tool as pi's `registerTool` and Codex's `DynamicToolSpec` take it. */
+/** One tool as pi's `registerTool` takes it. */
 export interface SessionToolJsonSpec {
   name: SessionToolName
   description: string
@@ -158,7 +158,7 @@ export const X_AGENT_SESSION_MESSAGE_SHAPE: Record<string, z.ZodType> = {
   message: z.string().describe('What to tell that session')
 }
 
-/** The X-Agent's `session_message` as pi's `registerTool` and Codex's `DynamicToolSpec` take it. */
+/** The X-Agent's `session_message` as pi's `registerTool` takes it. */
 export function xAgentSessionMessageSpec(): SessionToolJsonSpec {
   const { properties, required } = z.toJSONSchema(z.object(X_AGENT_SESSION_MESSAGE_SHAPE), {
     io: 'input'

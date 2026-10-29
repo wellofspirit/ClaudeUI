@@ -105,7 +105,7 @@ them = inventing a feature pi doesn't have.
 ### Bucket C — limited by pi's design (workaround or pi-upstream)
 
 - **`auth.canDriveLogin`** — ✅ SHIPPED for `openai-codex` (M6, ADR-036): rather than driving pi's
-  TUI `/login`, ClaudeUI runs the Codex OAuth flow itself in a ClaudeUI-owned **auth vault** and
+  TUI `/login`, ClaudeUI runs the ChatGPT OAuth flow itself in a ClaudeUI-owned **auth vault** and
   feeds BOTH pi's and opencode's native stores from one login (sole proactive refresher + fs-watch
   resync; Claude Code excluded). `canDriveLogin` is now true; Settings › pi › Providers has a real
   "Connect ChatGPT" button (verified live: connected state renders off the vault). v1 is

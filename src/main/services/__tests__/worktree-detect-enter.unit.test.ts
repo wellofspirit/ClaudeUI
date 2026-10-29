@@ -159,7 +159,7 @@ describe('resolveEnteredWorktree + recordDetectedWorktree (C-B4)', () => {
   it('a detached worktree resolves with an empty branch', () => {
     const detached = fabricateWorktree(
       repo,
-      path.join(base, '.codex', 'worktrees', 'ab12', 'repo'),
+      path.join(base, 'elsewhere', 'ab12', 'repo'),
       'det',
       'a'.repeat(40)
     )
@@ -171,7 +171,7 @@ describe('resolveEnteredWorktree + recordDetectedWorktree (C-B4)', () => {
     expect(got).toMatchObject({
       worktreePath: detached,
       worktreeBranch: '',
-      worktreeName: 'ab12/repo'
+      worktreeName: 'repo'
     })
   })
 

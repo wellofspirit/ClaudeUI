@@ -4,25 +4,22 @@
  * Which engines the headless server will drive a sign-in for (ADR-068 §3,
  * Slice 7 review).
  *
- * The bug this pins: the server refused `requireEngineAuth` for EVERY engine but
- * `codex`, so `vendor-auth:device-code-start('pi', 'openai-codex')` — the whole
+ * The bug this pins: the server refused `requireEngineAuth` for every engine,
+ * so `vendor-auth:device-code-start('pi', 'openai-codex')` — the whole
  * point of Slice 7, and the flow ADR-068 §3 reserved for exactly this
  * deployment — was refused before the device code was even requested. A
  * hermetic-server drive caught it: the dialog showed "Requesting a code…" and
  * then the refusal.
  *
- * The two providers are stubbed. Importing the real ones here would pull the
- * vault, the credential sync and both engine adapters into a unit test that only
- * needs to know WHICH object comes back, and `CodexAuthProvider` starts timers on
- * construction.
+ * The provider is stubbed. Importing the real one here would pull the vault, the
+ * credential sync and the engine adapter into a unit test that only needs to know
+ * WHICH object comes back.
  */
 import { describe, it, expect, vi } from 'vitest'
 
 const providers = vi.hoisted(() => ({
-  codex: { probe: vi.fn(), __id: 'codex' },
   pi: { probe: vi.fn(), __id: 'pi' }
 }))
-vi.mock('../../core/auth/CodexAuthProvider', () => ({ codexAuthProvider: providers.codex }))
 vi.mock('../../core/auth/PiAuthProvider', () => ({ piAuthProvider: providers.pi }))
 
 import { requireServerEngineAuth, DESKTOP_ONLY_SIGN_IN_MESSAGE } from '../engine-auth'
@@ -30,10 +27,6 @@ import { requireServerEngineAuth, DESKTOP_ONLY_SIGN_IN_MESSAGE } from '../engine
 describe('requireServerEngineAuth', () => {
   it('drives pi — the ChatGPT vault is shared and device code was built for this box (GUARD)', () => {
     expect(requireServerEngineAuth('pi')).toBe(providers.pi)
-  })
-
-  it('drives codex, as it always did', () => {
-    expect(requireServerEngineAuth('codex')).toBe(providers.codex)
   })
 
   it('refuses claude and opencode, and says why THOSE two are desktop-bound', () => {

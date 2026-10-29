@@ -309,7 +309,7 @@ export class VoiceRelayRegistry {
    * Bind this owner's audio to `routingId`'s voice server and start relaying.
    *
    * Gated by `capabilities.voice`: Claude's server is a cli.js patch (absent on a
-   * binary without it); opencode, pi and Codex use the host's on-device worker
+   * binary without it); opencode and pi use the host's on-device worker
    * (ADR-101), which needs the speech pack — a start without it ends with the
    * download offer, not a throw (see below). Throws on refusal: unlike the audio
    * frames, the control verb is a request the caller is entitled to an answer to.

@@ -434,7 +434,7 @@ export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[
     } else if (e.type === 'custom_message' && e.display) {
       // An extension injected this into the model's context. It was dropped
       // entirely, so the transcript disagreed with what the model saw. Same row
-      // Codex's hook fragments take, titled by the extension that wrote it, and
+      // type as any injected context, titled by the extension that wrote it, and
       // rendered VERBATIM — an extension's text is third-party text. The live
       // mapper uses the same converter (ADR-089 S3), and ClaudeUI's own agent
       // messages are recognised there by customType + details, never by text.

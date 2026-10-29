@@ -28,7 +28,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   })
 
   it('is version 25 (the extension throws without bridge credentials)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('25')
+    expect(PI_BRIDGE_VERSION).toBe('26')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -577,11 +577,10 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
           },
           required: ['source']
         })
-        // All three OTHER engines — 'codex' joined in bridge v7 (ADR-033 slice
-        // H). pi itself is absent: pi->pi is same-engine and guard-rejected.
+        // Both OTHER engines. pi itself is absent: pi->pi is same-engine and guard-rejected.
         expect(tools.get('dispatch_agent')!.parameters).toMatchObject({
           type: 'object',
-          properties: { engine: { type: 'string', enum: ['claude', 'opencode', 'codex'] } },
+          properties: { engine: { type: 'string', enum: ['claude', 'opencode'] } },
           required: ['engine', 'prompt', 'description']
         })
       }

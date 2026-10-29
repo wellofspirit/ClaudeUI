@@ -140,9 +140,6 @@ const SHARED_DECLARATION_SOURCES = [
   // channel served on both transports. Every `remote:*` MUTATION is absent from
   // this list because it is absent from the registry entirely.
   'src/core/ipc/remote-view-commands.ts',
-  // ADR-066 — the native-Codex family (settings, approvals, the login
-  // ceremony), spread by both transports from one declaration.
-  'src/core/ipc/codex-commands.ts',
   // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
   // transports (`registerSessionIpc` on the desktop side).
   'src/core/ipc/usage-hub-commands.ts',
@@ -311,8 +308,7 @@ const PROVIDER_ACCOUNT_SWEEP: Record<
 > = {
   'provider-account:list': { capability: 'config', kind: 'query' },
   'provider-account:switch': { capability: 'config', kind: 'command' },
-  'provider-account:remove': { capability: 'config', kind: 'command' },
-  'provider-account:set-per-session': { capability: 'config', kind: 'command' }
+  'provider-account:remove': { capability: 'config', kind: 'command' }
 }
 
 /** channel → declared capability, parsed from remote-handlers.ts registrations. */

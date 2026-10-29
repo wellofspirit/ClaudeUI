@@ -153,7 +153,7 @@ const RESULT_IMAGE = 120
 const RESULT_IMAGE_GAP = 8
 /** Review/denial strip shown between header and body when expanded. */
 const DECISION_STRIP = 32
-/** One-row cards: TodoToolBlock / SleepRow `h-7`, ToolNoteRow `min-h-7`. */
+/** One-row cards: TodoToolBlock `h-7`, ToolNoteRow `min-h-7`. */
 const ROW_CARD = 28
 /** TaskCard collapsed: header h-9 + border-b, then the footer strip (px-3 py-1.5 + chips). */
 const TASK_CARD = 36 + 1 + 31 + 2
@@ -201,8 +201,6 @@ const PEER_HOLD_SETTLED = 36
 const SESSION_CARD = 84
 /** ProposalCard: kind line, title row, placement line, brief toggle, expiry and the Start / Dismiss row. */
 const PROPOSAL_CARD = 168
-/** ReviewResultCard: expanded by default, `max-h-96` body under an h-9 header. */
-const REVIEW_BODY_MAX = 384
 /** Fallback for a role/shape this module does not know. */
 const UNKNOWN_HEIGHT = 100
 
@@ -620,7 +618,6 @@ function toolHeight(
   }
   switch (view.kind) {
     case 'todo':
-    case 'sleep':
     case 'note':
       return ROW_CARD
     case 'task':
@@ -697,12 +694,6 @@ function systemHeight(message: ChatMessage, columnPx: number): number {
       parts.push(SESSION_CARD)
     } else if (block.type === 'proposal_card') {
       parts.push(PROPOSAL_CARD)
-    } else if (block.type === 'review_result') {
-      parts.push(
-        COLLAPSED_ROW +
-          Math.min(REVIEW_BODY_MAX, estimateMarkdownHeight(block.text, columnPx - SECTION_PAD_X)) +
-          SECTION_PAD_Y
-      )
     } else if (block.type === 'text') {
       // `border-l-2 pl-3 py-0.5`, 12px at leading 1.6, pre-wrap.
       parts.push(4 + proseHeight(block.text, columnPx - 14, 12))

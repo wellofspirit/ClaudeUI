@@ -1,6 +1,5 @@
 /**
- * Injected-context row — Codex `hookPrompt` fragments today; pi
- * `custom_message` entries, and (later) Claude's `attachment` family, reuse it.
+ * Injected-context row — pi `custom_message` entries, and (later) Claude's `attachment` family, reuse it.
  *
  * Context the ENGINE put into the model's prompt that the user never typed. The
  * rule the survey set is "context the model saw is visible": it is in the

@@ -68,8 +68,7 @@ export interface ToolCardProps {
   result?: ToolResultBlock
   approval?: PendingApproval
   /**
-   * A permission judge's verdict on THIS call (F18) — Codex's native auto-review
-   * or ClaudeUI's own Auto-mode judge. The last verdict wins when a call was
+   * A permission judge's verdict on THIS call (F18) — ClaudeUI's own Auto-mode judge. The last verdict wins when a call was
    * reviewed twice (a re-review after "approve anyway"); the caller picks it.
    */
   review?: ToolReviewBlock

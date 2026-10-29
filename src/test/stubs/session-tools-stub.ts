@@ -1,6 +1,6 @@
 /**
  * The session tools' service, stubbed for suites that double `sync-host` with just
- * `emitEvent`: CodexSession, PiSession and OpencodeSession import the real module,
+ * `emitEvent`: PiSession and OpencodeSession import the real module,
  * whose import pulls in the canonical-state graph (`syncCore`) those doubles do not
  * carry. The tools are off here (`sessionToolsAvailable()` is false), so a session
  * advertises none and runs none.

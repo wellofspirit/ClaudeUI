@@ -47,8 +47,6 @@
 // distribution died at startup until the entrypoint pulled it in explicitly.
 // Electron's main process never hit this because it is not bundled this way.
 import 'reflect-metadata'
-import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
-import { codexBinaryAvailable, codexLinuxSandboxWarning } from '../core/codex/codex-locate'
 import { requireServerEngineAuth } from './engine-auth'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -304,7 +302,7 @@ async function main(): Promise<void> {
   }
 
   installHostAdapters()
-  // opencode / pi / Codex voice input runs in a worker that is this executable
+  // opencode / pi voice input runs in a worker that is this executable
   // again (ADR-101 §4); declared here, as the SQLite driver is, because the
   // launch command depends on how THIS entrypoint was started.
   setVoiceWorkerLauncher(serverVoiceWorkerLauncher())
@@ -333,7 +331,7 @@ async function main(): Promise<void> {
     hostActor: hostConnection('server-console'),
     // The desktop-auth pair.
     //
-    // `requireEngineAuth` drives the ChatGPT vault for `pi` and `codex` here —
+    // `requireEngineAuth` drives the ChatGPT vault for `pi` here —
     // device code (ADR-068 §3) was built FOR this deployment and paste-back
     // (ADR-057) works here too — and refuses `claude` and `opencode`, whose
     // flows genuinely live inside cli.js and the opencode server. See
@@ -394,34 +392,12 @@ async function main(): Promise<void> {
     `claudeui-server listening on port ${status.port} (sqlite: ${isBun() ? 'bun:sqlite' : 'node:sqlite'})`
   )
 
-  // Linux ships Codex but not its sandbox: `bwrap` is a distro package, and
-  // without it the FIRST sandboxed command panics with no explanation an operator
-  // could act on. Said once here, where a headless box's only UI is its log, and
-  // only when Codex is actually installed — on every other host, and on a Linux
-  // box with bubblewrap present, this is silent. The desktop does not call it: no
-  // Linux desktop build ships.
-  // `statSync`, not `lstatSync`: Codex's own lookup follows symlinks (`which`
-  // semantics), and distros that install `bwrap` as a link would otherwise be
-  // told it is missing.
-  const sandboxWarning = codexBinaryAvailable()
-    ? codexLinuxSandboxWarning(process.platform, process.env, (candidate) => {
-        try {
-          const entry = fs.statSync(candidate)
-          return entry.isFile() && (entry.mode & 0o111) !== 0
-        } catch {
-          return false
-        }
-      })
-    : null
-  if (sandboxWarning !== null) logger.warn('server', sandboxWarning)
-
   // Graceful shutdown. `stop()` is fire-and-forget by design (see host-anchor),
   // so the exit is not gated on peers that may never close their sockets.
   let stopping = false
   const shutdown = (signal: string): void => {
     if (stopping) return
     stopping = true
-    codexAuthProvider.dispose()
     // The speech worker (~0.8 GB while loaded): it exits on its own when this
     // process's pipe closes, but a signalled shutdown should not leave it to the
     // OS. Fire-and-forget like `anchor.stop()`; the exit below is bounded.
@@ -430,9 +406,6 @@ async function main(): Promise<void> {
     // flight is idempotent on the hub, so nothing waits on it.
     core.usageHubClient.stop()
     core.releaseDispatchParents()
-    core.sessionManager.forEach((session) => {
-      if (session.engineId === 'codex') session.dispose()
-    })
     logger.info('server', `${signal} received — shutting down`)
     anchor.stop()
     // Give the listener a moment to close before the process goes, but never

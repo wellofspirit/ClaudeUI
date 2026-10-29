@@ -6,9 +6,8 @@
  * The flush is serialized so two boundaries cannot forward the same item
  * twice. The trap is what "serialized" costs: if a boundary arriving mid-flush
  * is simply DROPPED, a forward the engine refuses strands its item, because a
- * finished turn emits no later boundary to retry it. CodexSession had to work
- * around this locally (`queueBoundary` chains boundaries on its own promise);
- * the memory lives in the base now, so every engine gets it.
+ * finished turn emits no later boundary to retry it. The memory lives in the
+ * base, so every engine gets it.
  *
  * These tests drive the base class directly through a probe subclass — no
  * engine, no Electron, no DB — so they pin the scheduling rule itself rather

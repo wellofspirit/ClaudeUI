@@ -1,4 +1,4 @@
-import { emitEvent, syncCore } from '../services/sync-host'
+import { syncCore } from '../services/sync-host'
 import { readSessionHistory as loadSessionHistory } from '../services/engine-history'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from '../services/claude-transcript-locator'
@@ -69,11 +69,6 @@ export async function seedCanonicalTranscript(
       sentFiles: buildSentFilesFromMessages(messages) ?? []
     })
   } catch (err) {
-    if (engineId === 'codex')
-      emitEvent('session:error', [
-        routingId,
-        'Codex history could not be loaded; native context was not replaced.'
-      ])
     logger.warn(
       'create-session',
       `canonical seed failed for ${routingId} (shadow state starts empty): ${

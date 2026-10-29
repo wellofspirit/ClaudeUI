@@ -16,10 +16,6 @@
  *    shim, ADR-103), exactly the ones it injects: a name opencode already has
  *    (primary and hidden ones included) or a refused model leaves one out.
  *  - pi: `pi-agent-registry` (built-in, user, project). pi has no colour key.
- *  - Codex: the built-in roles `default`, `explorer`, `worker`
- *    (codex-rs/core/src/agent/role.rs). User roles (`[agents.<name>]` in
- *    config.toml) are NOT listed: reading them means starting an app-server
- *    child, which is not a cheap read for a settings list.
  *
  * A type can carry a `warning` (opencode only, and only from the async
  * {@link listAgentTypesChecked}): an injected agent whose `effort` the shim mapped to a
@@ -32,7 +28,7 @@
  *
  * `model` is the type's DECLARED model, for the settings column: Claude's file
  * key, pi's definition (`inherit` is none), opencode's native agent and the
- * injected agents' `harness.opencode.model` (variant dropped). Codex roles list none.
+ * injected agents' `harness.opencode.model` (variant dropped).
  *
  * Frontmatter is parsed by `skill-scanner`'s reader (a line scanner: nothing is
  * evaluated). The files come from whatever repository the user opened, so the
@@ -65,9 +61,6 @@ const CLAUDE_BUILTIN_TYPES = [
   'statusline-setup',
   'claude-code-guide'
 ]
-
-/** Codex's built-in roles (`built_in::configs`). */
-const CODEX_BUILTIN_ROLES = ['default', 'explorer', 'worker']
 
 /** A declared model, or undefined for none: absent and `inherit` both mean the parent's. */
 const declaredModel = (value: string | undefined): string | undefined => {
@@ -246,8 +239,6 @@ export function listAgentTypes(engine: EngineId, cwd?: string): AgentTypeInfo[] 
       return opencodeCatalog(cwd).types
     case 'pi':
       return piTypes(cwd)
-    case 'codex':
-      return CODEX_BUILTIN_ROLES.map((type) => ({ type, source: 'builtin' as const }))
   }
 }
 

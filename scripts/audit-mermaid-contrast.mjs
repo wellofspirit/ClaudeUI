@@ -278,7 +278,6 @@ const DIAGRAMS = [
   "claude-code" : 4210
   "opencode" : 2870
   "pi" : 1640
-  "codex" : 980
   "other" : 415
   "cached" : 3305`
   },
@@ -364,7 +363,6 @@ const DIAGRAMS = [
   Claude Code: [0.75, 0.9]
   opencode: [0.6, 0.7]
   pi: [0.35, 0.45]
-  Codex: [0.55, 0.3]
   Legacy shim: [0.2, 0.15]`
   },
   {

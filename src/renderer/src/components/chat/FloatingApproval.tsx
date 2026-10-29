@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { CodexApprovalCard } from './CodexApprovalCard'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import type {
   ApprovalDecision,
@@ -90,8 +89,6 @@ export function ApprovalCardView({
   actionLabel,
   target
 }: ApprovalCardViewProps): React.JSX.Element {
-  // See ApprovalButtons: the codex card is the native-question surface only.
-  if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
   const input = approval.input
   const toolName = approval.toolName
   const isSandboxEscape = !!input?.dangerouslyDisableSandbox
@@ -342,7 +339,7 @@ type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
  * (the key of its `subagentMessages` bucket and of its roster row) and, when its
  * transcript already holds the call being asked about, that call.
  *
- * opencode marks a child ask itself (`subagent.parentToolUseId`); Claude, Codex
+ * opencode marks a child ask itself (`subagent.parentToolUseId`); Claude
  * and dispatched targets do not, so the bucket holding a `tool_use` with the
  * ask's own `toolUseId` is the attribution (a call id is unique per session).
  * Undefined for the session's own asks.

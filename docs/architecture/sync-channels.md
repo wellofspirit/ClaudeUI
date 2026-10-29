@@ -314,9 +314,7 @@ an `item-stream` append by SYNTHESIS.
 longer have a producer, but plugins written against them keep working: an append frame
 for a ROOT text/thinking block fires `session:stream` and one for a child's fires
 `session:subagent-stream`, each carrying only the new chunk exactly as before. A `plan`
-block synthesizes neither, because the old channels never carried plans. On a **Codex**
-session a root append instead fires `session:message` with the growing message, which is
-what that engine emitted before its migration. At every `session:item-seal` the bridge
+block synthesizes neither, because the old channels never carried plans. At every `session:item-seal` the bridge
 fires `session:message` / `session:subagent-message` with the message read back from
 canonical state and overlaid with any still-active sibling block. Plugins can also
 subscribe to the three item channels directly and get per-block identity.
@@ -481,7 +479,7 @@ receive them from the observer list instead: a pass-through frame by reading
 
 ### Remote voice — the lane's TARGETED delivery (S3)
 
-> **ADR-101:** opencode, pi and Codex sessions use the same relay and the same protocol: their
+> **ADR-101:** opencode and pi sessions use the same relay and the same protocol: their
 > `voiceStartServer()` returns the host's on-device voice worker (`core/voice/local-voice-server.ts`)
 > instead of cli.js's server, plus a per-spawn token in `startFields`. `voice:error` gained an
 > optional 4th argument, the notice ACTION (`install-voice-pack` when the speech pack is missing),
@@ -616,7 +614,7 @@ uptime, worst on a headless server.
 engine is still folding events into the transcript. Two triggers, both host-side:
 
 - **Engine exit.** Inside `SyncCore.process`, after a `session:status` whose state is
-  `disconnected`, under the POST-rekey id. Claude, opencode and Codex report exit that way,
+  `disconnected`, under the POST-rekey id. Claude and opencode report exit that way,
   and the funnel is the one place that sees every one. pi reports an unexpected process
   death as `disconnected` too, but its own stop (`cancel()` / dispose) reports `idle` and
   leaves canonical's `sdkActive` true — so a pi session the user stopped is not evicted by
@@ -702,8 +700,7 @@ flight still sends synchronously), every send waiting on the same read resumes i
 order, and the entry clears when the read settles, success or failure.
 A Claude, opencode or pi session that exits (the inactivity timer, any `cancel()`) and then
 respawns IN PLACE has no `createSession` to seed canonical: the next prompt reaches the same
-session object, which resumes its engine session itself (a cancelled Codex object refuses to
-run again, so Codex always respawns through `createSession`). `sendPrompt` therefore seeds in that case too — canonical
+session object, which resumes its engine session itself. `sendPrompt` therefore seeds in that case too — canonical
 holds nothing for the session, did not drop an empty one, and the engine has a session id to
 resume — through the same `seedCanonicalTranscript` (`ipc/seed-canonical-transcript.ts`) and
 `trackSeed`, and waits on it. A prompt that would only queue behind a running turn does not.

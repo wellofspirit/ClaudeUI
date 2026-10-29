@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * Worktree inventory, inspection and measuring against REAL git repos (the `git` project).
- * Out-of-repo layouts (opencode's `<data>/worktree/<proj6>/<slug>`, Codex's
+ * Out-of-repo layouts (opencode's `<data>/worktree/<proj6>/<slug>`, a foreign tool's
  * `<home>/worktrees/<4hex>/<repo>`) are made with `git worktree add` into a scratch base.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -145,21 +145,18 @@ describe('inventoryWorktrees', () => {
   })
 
   it('lists worktrees registered OUTSIDE the repo with their layout, and they verify (removable)', async () => {
-    const codex = path.join(scratch.base, '.codex', 'worktrees', 'ab12', 'myrepo')
+    const foreign = path.join(scratch.base, '.codex', 'worktrees', 'ab12', 'myrepo')
     const opencode = path.join(scratch.base, 'share', 'opencode', 'worktree', 'abcdef', 'brave-fox')
     const other = path.join(scratch.base, 'elsewhere', 'wt')
-    await addWorktreeAt(repo, codex)
+    await addWorktreeAt(repo, foreign)
     await addWorktreeAt(repo, opencode)
     await addWorktreeAt(repo, other)
 
     const inv = await inventoryWorktrees(repo.path)
 
     const byId = new Map(inv.entries.map((e) => [e.id, e]))
-    expect(byId.get(idOf(codex))).toMatchObject({
-      location: 'codex',
-      name: 'ab12/myrepo',
-      kind: 'worktree'
-    })
+    // A layout ClaudeUI used to name (the removed Codex engine's) is now just another outside directory.
+    expect(byId.get(idOf(foreign))).toMatchObject({ location: 'other', kind: 'worktree' })
     expect(byId.get(idOf(opencode))).toMatchObject({ location: 'opencode', name: 'brave-fox' })
     expect(byId.get(idOf(other))).toMatchObject({ location: 'other', name: 'wt' })
     for (const e of inv.entries) expect(e.invalidReason).toBeUndefined()

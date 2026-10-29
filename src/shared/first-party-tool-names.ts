@@ -2,7 +2,7 @@
  * Display names for ClaudeUI's own tools (dispatch, the session tools, diagrams,
  * mockups). Each engine spells them differently on the wire — Claude's
  * `mcp__claude-ui-collab__dispatch_agent`, opencode's `claudeui_dispatch_agent`,
- * pi's and Codex's bare `dispatch_agent` — and none of those spellings belongs in
+ * pi's bare `dispatch_agent` — and none of those spellings belongs in
  * a card header or the roster. The table is keyed by the bare name; each engine
  * tool map strips its own prefix and asks here. A name that is not ours (any other
  * `mcp__x__y`) answers `undefined`, so the engine keeps its own display for it.
@@ -38,7 +38,7 @@ const FIRST_PARTY_MCP_SERVERS: Readonly<Record<string, (tool: string) => boolean
   'claude-ui-handback': (tool) => tool === 'hand_back'
 }
 
-/** How an engine spells a first-party tool: Claude's MCP name, opencode's `claudeui_`, or bare (pi, Codex). */
+/** How an engine spells a first-party tool: Claude's MCP name, opencode's `claudeui_`, or bare (pi). */
 export type FirstPartyToolSpelling = 'mcp' | 'claudeui_' | 'bare'
 
 /** The label of a BARE first-party tool name, or undefined for any other name. */

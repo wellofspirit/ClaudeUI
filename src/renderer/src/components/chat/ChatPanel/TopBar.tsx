@@ -281,22 +281,6 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
 
-  /**
-   * Settings' one link INTO the MCP surface (ADR-068 §6: the Codex page's MCP
-   * group states how many servers a thread inherits and sends the user here to
-   * change them).
-   *
-   * An event rather than a prop for the same reason `open-settings` is one: the
-   * dialog's state lives in this bar, the link lives inside a static settings
-   * group definition several trees away, and the two hosts of the settings
-   * dialog close themselves on the same event so the MCP dialog is not opened
-   * behind one.
-   */
-  useEffect(() => {
-    const handler = (): void => setMcpOpen(true)
-    window.addEventListener('open-mcp-servers', handler)
-    return () => window.removeEventListener('open-mcp-servers', handler)
-  }, [])
   const [overflowOpen, setOverflowOpen] = useState(false)
   const overflowRef = useRef<HTMLDivElement>(null)
   const overflowButtonRef = useRef<HTMLButtonElement>(null)
@@ -658,7 +642,7 @@ export function TopBar({ hasContent }: { hasContent: boolean }): React.JSX.Eleme
   const costUnknown = cost === null
   // ADR-071 §2: the engines that separate the two costs send what was BILLED
   // beside the headline. Undefined means the engine does not make the
-  // distinction (Claude, Codex) — then the tooltip says nothing extra.
+  // distinction (Claude) — then the tooltip says nothing extra.
   const billedCostUsd = statusLine?.billedCostUsd
   // A ZERO bill is said in words on the label, never as a figure: `$0.0000` in
   // a row of its own read as a tiny charge, and as one more model line. The

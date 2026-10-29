@@ -106,7 +106,7 @@ export function jsonLine(value: unknown): string {
   )
 }
 
-/** Tool names whose input names a file to write (pi, opencode, Codex shapes). */
+/** Tool names whose input names a file to write (pi, opencode shapes). */
 const EDIT_TOOL_NAMES: ReadonlySet<string> = new Set([
   'edit',
   'write',

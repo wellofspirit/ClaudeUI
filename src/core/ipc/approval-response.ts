@@ -16,7 +16,7 @@ import { emitEvent } from '../services/sync-host'
  * answer. Engines emit their own dismiss for internal resolutions (abort, turn
  * end) and some also on a human answer; the reducer's removal is idempotent, so
  * the duplicate is harmless and the engines' emits stay. A resolve that throws
- * (Codex's "Stale or unknown approval") still retires the card everywhere, and
+ * (an engine's "Stale or unknown approval") still retires the card everywhere, and
  * the error still reaches the caller. The one exception is `ApprovalAnswerRejected`
  * (a malformed answer to a still-parked request): the card stays.
  */

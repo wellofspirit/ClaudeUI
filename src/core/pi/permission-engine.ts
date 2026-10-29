@@ -120,26 +120,25 @@ export interface PermissionEngineContext {
    * target): judged -> the `acceptEdits` base with the allow tier stripped (the judge decides
    * what the base asks); `false` (the user turned the judge off) -> the `default` base with the
    * caller's full rule set, because without a judge an `auto` mode must not widen anything beyond
-   * what a human would have been asked. ABSENT is the legacy contract, kept for Codex, which
-   * maps `auto` to `default` itself and passes everything else through: the raw mode's own base
-   * (`auto`/`full` -> allow-everything), no stripping.
+   * what a human would have been asked. ABSENT is the legacy contract: everything passes through
+   * as the raw mode's own base (`auto`/`full` -> allow-everything), no stripping.
    */
   judge?: boolean
   rules: MergedClaudeRules
   /**
    * "Allow for this session" entries. pi: {@link piSessionAllowKey} — `bash:<normalized
    * command>`, `<path tool>:<abs path>` (`read`, `edit`, `write`, `grep`, `find`, `ls`), else the bare tool name; set
-   * `sessionAllowsByPath`. Codex keeps the bare {@link sessionAllowKey} for everything but bash.
+   * `sessionAllowsByPath`. Without it the bare {@link sessionAllowKey} is used for everything but bash.
    */
   sessionAllows: ReadonlySet<string>
-  /** `sessionAllows` holds pi's per-path keys for the path tools ({@link piSessionAllowKey}); absent = the bare-name keys (Codex). */
+  /** `sessionAllows` holds pi's per-path keys for the path tools ({@link piSessionAllowKey}); absent = the bare-name keys. */
   sessionAllowsByPath?: boolean
   /**
    * The workspace the containment rung checks pi's path tools (`read`, `edit`, `write`, `grep`,
    * `find`, `ls`) against — see `pi-path-scope.ts`. ONLY the pi callers pass it (PiSession, its
    * children, the pi dispatch target, all with a `judge`): absent, the ladder has no notion of
-   * "outside the workspace" and behaves exactly as before, which is what Codex (its own
-   * `insideWorkspace`) and every scope-less caller rely on. With it the ladder resolves each call's
+   * "outside the workspace" and behaves exactly as before, which is what every scope-less
+   * caller relies on. With it the ladder resolves each call's
    * path as pi will (`@x`, `~/x`, `file://`, …), matches path rules and session-allow keys on that
    * canonical path, and answers per the containment table (see {@link scopedBase}).
    * `bypassPermissions` ignores it (allow-everything is its contract).
@@ -177,7 +176,7 @@ export interface PermissionEngineContext {
    * before it is compared (ADR-096). pi sanitizes `mcp__<server>__<tool>` to
    * `[A-Za-z0-9_]` (`mcp__my-server__x` is called `mcp__my_server__x`), so pi's
    * gates pass `piMcpRuleKey` and a rule written for Claude matches pi's call.
-   * Absent = compared as written (Codex names MCP calls in Claude's own form).
+   * Absent = compared as written.
    */
   mcpRuleKey?: (ruleTool: string) => string
 }
@@ -611,10 +610,8 @@ const MCP_RULE_PREFIX = 'mcp__'
  * only the seven tools with a pi analogue, and so made every `mcp__…` rule a
  * user wrote inert in every tier).
  *
- * Codex gates its MCP tool approvals through this ladder under exactly these
- * names (ADR-067 / `codex/mcp-elicitation.ts`), including the server-only name
- * the gate falls back to when the elicitation does not name a tool; pi's own
- * `mcp__*` tool calls now honour the same rules, which they never did before.
+ * pi's own `mcp__*` tool calls honour the same rules under these names, which
+ * they never did before.
  */
 function mcpRuleMatches(
   parsed: { tool: string; specifier?: string },
@@ -707,7 +704,7 @@ function ruleMatchesTool(
   return false
 }
 
-/** The "allow for this session" dedup key for a tool_call — bash is scoped by its (normalized) command, everything else by bare tool name. Codex's keys; pi uses {@link piSessionAllowKey}. */
+/** The "allow for this session" dedup key for a tool_call — bash is scoped by its (normalized) command, everything else by bare tool name. The bare keys; pi uses {@link piSessionAllowKey}. */
 export function sessionAllowKey(toolName: string, input: Record<string, unknown>): string {
   if (toolName === 'bash') return `bash:${normalizeWhitespace(String(input.command ?? ''))}`
   return toolName
@@ -815,7 +812,7 @@ function editsAgentControlPath(input: Record<string, unknown>, cwd: string | und
  *  - bypassPermissions/full/auto -> allow everything (except the plan-kind carve-out above).
  *    A pi caller never reaches `full`/`auto` here: it passes `judge`, and {@link ladderBase}
  *    turns them into `acceptEdits` (judged) or `default` (no judge). Only a caller that does
- *    not (Codex, which passes `full` through) gets the allow-everything base.
+ *    not gets the allow-everything base.
  *  - plan (M5a — real autonomy mode now, see planModeBaseDecision) -> read-only:
  *    reads/search allow, exit_plan asks, bash gated by isPlanReadOnlyCommand,
  *    everything else (fileEdit/fileWrite/task/unknown/…) denies outright
@@ -873,7 +870,7 @@ function modeBaseDecision(
 export const PLAN_MODE_DENY_REASON =
   'Plan mode is read-only — present a plan and call exit_plan to proceed'
 
-/** The same refusal for the engines with NO exit_plan tool (opencode, Codex — ADR-085 S4, S3b verifier F4):
+/** The same refusal for the engines with NO exit_plan tool (opencode — ADR-085 S4, S3b verifier F4):
  *  the user leaves plan mode from the mode picker. opencode's own `plan_exit` (its plan agent's tool) is
  *  model-visible but its "switch to build agent" question does not change ClaudeUI's permission mode. */
 export const PLAN_MODE_DENY_REASON_NO_EXIT_TOOL =
@@ -1129,7 +1126,7 @@ export interface PlanReadOnlyScope {
  * (`readOnlyVerdict(...).ok` — sync, no armed-git capture). A command is
  * plan-read-only when EITHER says so. Without a scope (no cwd) only the list
  * decides. Used everywhere the plan line is drawn: the plan rung and the plan
- * base on pi / Codex / the dispatcher's pi and Codex targets, and opencode's
+ * base on pi / the dispatcher's pi targets, and opencode's
  * host pre-check and dispatch targets (`planModeRefusesAsk`).
  *
  * Why a union: both are read-only checkers, and each knows commands the other
@@ -1299,8 +1296,7 @@ export function decide(
  * every segment of the command covered by some allow rule (`ls && git status`
  * needs `ls` and `git` covered; `ls && curl x | sh` is covered by nothing),
  * with the first segment's rule reported. Every caller inherits this:
- * PiSession's gate, `CodexSession.gate()` (exec approvals, file changes, MCP
- * elicitations, hosted tools) and the dispatcher's pi and Codex targets.
+ * PiSession's gate and the dispatcher's pi targets.
  */
 export function decideWithSource(
   toolName: string,
@@ -1391,9 +1387,8 @@ export function decideWithSource(
   // ADR-085 ruling 7 — plan mode wins over every rung below for a mutating call: a user ask rule
   // no longer surfaces a card for it, and neither a session allow nor an allow rule allows it.
   // The deny rung stays above (a user deny gives the more specific reason). `mode-base` so the
-  // callers (PiSession's gate, CodexSession.gate(), the dispatcher's pi/Codex targets) attach
-  // PLAN_MODE_DENY_REASON unchanged. Auto mode never reaches this (`ctx.mode` is `plan` here):
-  // CodexSession passes `default` for its `auto`.
+  // callers (PiSession's gate, the dispatcher's pi targets) attach
+  // PLAN_MODE_DENY_REASON unchanged. Auto mode never reaches this (`ctx.mode` is `plan` here).
   // The second read-only oracle needs the session's scope (ADR-085 S3b); without a cwd only
   // pi's plan-safe list decides.
   const planScope: PlanReadOnlyScope | undefined =
@@ -1529,7 +1524,7 @@ function scopedBase(
  *    are the base's, everything it asks (bash, `agent`, sensitive edits, …) goes to the judge.
  *  - `auto`/`full`, no judge -> `default` base, full rules: with nobody to review, a human is
  *    asked exactly as in `default` and the user's allow rules are their way to stop being asked.
- *  - `auto`/`full` with `judge` ABSENT (Codex) and anything else (`bypassPermissions` included)
+ *  - `auto`/`full` with `judge` ABSENT and anything else (`bypassPermissions` included)
  *    -> itself, unchanged from before the judge flag existed.
  *
  * The scope rung (path containment) reads `judged` to pick between the judge-on and judge-off
@@ -1583,8 +1578,8 @@ function tierRule(hit: DenyAskHit | undefined, tier: 'deny' | 'ask'): string | u
  * The user's deny rule that names one of the session tools, if any. Their rules are
  * written for Claude's spelling of the tool (`mcp__claude-ui-sessions__session_start`,
  * or the whole server), so that is the name the rule list is asked about; the tools'
- * own gate (`sessionToolsGate`) decides everything else. pi and Codex call this before
- * it, so a deny the user wrote holds on their engines too. (No engine-specific rule
+ * own gate (`sessionToolsGate`) decides everything else. pi calls this before
+ * it, so a deny the user wrote holds on its engine too. (No engine-specific rule
  * spelling: the name asked about is already Claude's.)
  */
 export function sessionToolDenyRule(
@@ -1654,7 +1649,7 @@ export function withoutAllowRules(rules: MergedClaudeRules): MergedClaudeRules {
 // ---------------------------------------------------------------------------
 
 /**
- * An empty rule set. Exported (ADR-033 M4c) for the dispatcher's pi and Codex
+ * An empty rule set. Exported (ADR-033 M4c) for the dispatcher's pi
  * target gates, which used it as their rules until ADR-085 §3 gave every
  * dispatch target the user's deny/ask rules (never the allow tier — see
  * cross-engine-dispatcher.ts's `targetRules`); kept for any caller that needs

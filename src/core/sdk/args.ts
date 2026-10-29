@@ -368,7 +368,7 @@ export function buildSpawnEnv(base: NodeJS.ProcessEnv = process.env): SpawnEnv {
   // No in-app endpoint configured: do NOT delete inherited ANTHROPIC_BASE_URL/
   // ANTHROPIC_AUTH_TOKEN. A user routing through a gateway/LiteLLM via their own
   // env relies on them and the stock CLI supports them (M-CL4). These inherited
-  // values are the user's own shell env — the Codex/vault path never writes
+  // values are the user's own shell env — the vault path never writes
   // ANTHROPIC_* to process.env, so this cannot leak vault tokens into Claude.
   // The exception is a multi-account host-token spawn, below: it runs on the
   // account's own OAuth token, which never goes to an inherited gateway.

@@ -93,7 +93,7 @@ export function WorktreePopover({
             {worktreeInfo.worktreeName}
           </span>
         </div>
-        {/* A detached worktree (opencode, Codex) has no branch to show. */}
+        {/* A detached worktree (opencode) has no branch to show. */}
         {worktreeInfo.worktreeBranch && (
           <div className="flex items-center justify-between" data-testid="WorktreePill.branch">
             <span className="text-text-muted">Branch</span>

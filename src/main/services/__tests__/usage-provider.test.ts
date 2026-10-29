@@ -96,7 +96,7 @@ vi.mock('../../../core/services/window-samples', () => ({
   recordLimitSamples: mockRecordLimitSamples
 }))
 
-vi.mock('../../../core/codex/chatgpt-rate-limits', () => ({
+vi.mock('../../../core/shared-providers/chatgpt-rate-limits', () => ({
   chatgptRateLimits: { refresh: mockChatgptRefresh, snapshot: mockChatgptSnapshot }
 }))
 

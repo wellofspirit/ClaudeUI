@@ -78,8 +78,6 @@ export interface CanonicalSessionState {
   sdkActive: boolean
   selectedEngineId: EngineId
   selectedModel: string
-  /** A catalog preview is not an explicit native model override. */
-  codexModelExplicit?: boolean
   /**
    * The credential this session needs was rejected and could not be renewed
    * (ADR-068 §4, widened to the three lifetimes of ADR-070 §2).
@@ -265,7 +263,6 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       sdkActive: s.sdkActive ?? false,
       selectedEngineId: s.selectedEngineId ?? 'claude',
       selectedModel: s.selectedModel ?? 'default',
-      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
       // The WHOLE object, never a field-by-field rebuild: `AuthRequiredState`
       // grew from two fields to five (ADR-070 §2) and a rebuild is the shape of
       // edit that silently drops the new ones on every resync.
@@ -332,7 +329,6 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       selectedEngineId: s.selectedEngineId,
       selectedModel: s.selectedModel,
       authRequired: s.authRequired,
-      ...(s.codexModelExplicit !== undefined ? { codexModelExplicit: s.codexModelExplicit } : {}),
       // One rule: canonical does not hold this transcript. That covers a dropped
       // one AND a resume whose history read is still in flight; omitting the
       // second would hand a client that syncs inside that window an empty

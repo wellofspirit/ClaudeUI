@@ -526,7 +526,7 @@ duration_ms: 135000
   })
 
   // The type tile (ADR-094): type · background · model, then ↗. The default type
-  // has none; a dispatch is an X; a Codex spawn (a model, never a type) has none.
+  // has none; a dispatch is an X; an opencode spawn (a model, never a type) has none.
   describe('the type tile', () => {
     const HAIKU: ModelInfo = {
       value: 'haiku',
@@ -610,7 +610,7 @@ duration_ms: 135000
       }
     })
 
-    it('never makes a Codex model a type: a spawn that carries only a model gets the bot alone', async () => {
+    it('never makes a model a type: a spawn that carries only a model gets the bot alone', async () => {
       cleanup()
       seed([], { engineId: 'claude' })
       const card = await mountCard(1, {

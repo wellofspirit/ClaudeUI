@@ -1,15 +1,15 @@
 /**
  * Which executable runs for each harness (ADR-082). The one place that answers
- * it; `sdk/locate`, `pi/pi-locate`, `codex/codex-locate` and
+ * it; `sdk/locate`, `pi/pi-locate` and
  * `OpencodeServerManager` delegate here.
  *
  * Order, per harness:
  *
- *   1. `CLAUDEUI_<ID>_CLI` (CLAUDE, OPENCODE, PI, CODEX): a development
+ *   1. `CLAUDEUI_<ID>_CLI` (CLAUDE, OPENCODE, PI): a development
  *      override. Resolved against the cwd, it must name a regular file; any
  *      other value warns once and falls through.
  *   2. The selection in `~/.claude/ui/harnesses.json` (`selection-store.ts`):
- *      - `managed` (opencode, pi, Codex): the selected version (`tested` = the
+ *      - `managed` (opencode, pi): the selected version (`tested` = the
  *        manifest's, `latest` = the newest installed, or an exact one) from
  *        the store (`store.ts`).
  *      - `system`: the best install in the detection cache
@@ -24,7 +24,7 @@
  *        packaged                <Resources>/claude-cli/            (extraResources)
  *                                <app.asar.unpacked>/vendor/claude-cli/  (fallback)
  *
- * opencode, pi and Codex are not bundled (ADR-082 §8): a selection that cannot
+ * opencode and pi are not bundled (ADR-082 §8): a selection that cannot
  * be honoured (the version is not in the store, no usable System install)
  * resolves to `path: null` with the reason. A vendored or packaged copy is
  * never looked for, even when an old checkout still has one on disk.
@@ -70,15 +70,13 @@ import { withinRange } from './version-gate'
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
+  pi: 'pi'
 }
 
 const EXECUTABLES: Record<HarnessId, string> = {
   claude: 'bun-claude',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'codex'
+  pi: 'pi'
 }
 
 function exe(base: string): string {
@@ -88,28 +86,6 @@ function exe(base: string): string {
 /** The env var that overrides harness `id`, e.g. `CLAUDEUI_OPENCODE_CLI`. */
 export function harnessEnvVar(id: HarnessId): string {
   return `CLAUDEUI_${id.toUpperCase()}_CLI`
-}
-
-// ── Codex host gate ───────────────────────────────────────────────────────────
-
-/**
- * Hosts whose Codex release assets have reviewed digests, so acquisition can
- * install them and the engine may be offered. Mirrors the keys of
- * `src/shared/harness-manifests/codex.json#platforms`; a test keeps the two in
- * parity, and the manifest is where a new host is added first.
- */
-export const CODEX_SUPPORTED_HOSTS: ReadonlySet<string> = new Set([
-  'darwin-arm64',
-  'win32-x64',
-  'linux-x64',
-  'linux-arm64'
-])
-
-export function codexHostSupported(
-  platform: string = process.platform,
-  arch: string = process.arch
-): boolean {
-  return CODEX_SUPPORTED_HOSTS.has(`${platform}-${arch}`)
 }
 
 // ── Filesystem probes ─────────────────────────────────────────────────────────
@@ -199,110 +175,6 @@ export function bundledClaudePath(): string {
   return path.join(bundledClaudeRoots()[0], exe(EXECUTABLES.claude))
 }
 
-// ── Codex code-mode host ──────────────────────────────────────────────────────
-
-function isDir(p: string): boolean {
-  try {
-    return fs.statSync(p).isDirectory()
-  } catch {
-    return false
-  }
-}
-
-function canonical(p: string): string {
-  try {
-    return fs.realpathSync(p)
-  } catch {
-    return p
-  }
-}
-
-interface CodexPackageLayout {
-  binDir: string
-  /** `<package>/codex-resources`, when it is a directory. */
-  resourcesDir: string | null
-}
-
-/**
- * `<package>/bin` is a package layout only when the package root carries a
- * `codex-package.json` (`CodexPackageLayout::from_package_bin_dir`).
- */
-function layoutFromBinDir(binDir: string): CodexPackageLayout | null {
-  if (!isDir(binDir)) return null
-  const packageDir = path.dirname(binDir)
-  if (!isFile(path.join(packageDir, 'codex-package.json'))) return null
-  const resources = path.join(packageDir, 'codex-resources')
-  return { binDir, resourcesDir: isDir(resources) ? resources : null }
-}
-
-/**
- * Codex's own package-layout detection from its canonical executable
- * (`vendor/codex-src/codex-rs/install-context/src/lib.rs`,
- * `CodexPackageLayout::from_exe`): WinGet's flat package root (Windows only,
- * when `codex-package.json` names this executable as a layout-1 entrypoint),
- * then an exe in `bin/`, in `codex-resources/`, or in a `CodexCLI.app` bundle.
- */
-function codexPackageLayout(canonicalExe: string): CodexPackageLayout | null {
-  const exeDir = path.dirname(canonicalExe)
-  if (process.platform === 'win32') {
-    try {
-      const meta = JSON.parse(
-        fs.readFileSync(path.join(exeDir, 'codex-package.json'), 'utf-8')
-      ) as { layoutVersion?: unknown; entrypoint?: unknown } | null
-      if (meta?.layoutVersion === 1 && meta.entrypoint === path.basename(canonicalExe)) {
-        const resources = path.join(exeDir, 'codex-resources')
-        return { binDir: exeDir, resourcesDir: isDir(resources) ? resources : null }
-      }
-    } catch {
-      // No metadata here: not the WinGet layout.
-    }
-  }
-  const name = path.basename(exeDir)
-  if (name === 'bin') return layoutFromBinDir(exeDir)
-  if (name === 'codex-resources') return layoutFromBinDir(path.join(path.dirname(exeDir), 'bin'))
-  if (name === 'MacOS') {
-    const contents = path.dirname(exeDir)
-    const bundle = path.dirname(contents)
-    if (path.basename(contents) !== 'Contents' || path.basename(bundle) !== 'CodexCLI.app') {
-      return null
-    }
-    return layoutFromBinDir(path.join(path.dirname(bundle), 'bin'))
-  }
-  return null
-}
-
-/**
- * The `codex-code-mode-host` the Codex at `exePath` will run, in Codex's own
- * order (`InstallContext::code_mode_host_program`):
- *
- *   1. `<package>/codex-resources/`, when the executable sits in a package
- *      layout that has one;
- *   2. the layout's `bin/` directory, or the executable's canonical directory
- *      when there is no layout;
- *   3. the directory of the path Codex was started from.
- *
- * Codex's legacy standalone branch (a release directory under
- * `$CODEX_HOME/packages/standalone/releases`) is not mirrored: it depends on
- * the child's `CODEX_HOME`, which ClaudeUI sets per account, so Codex may not
- * take it under our spawn. A host there is still found by step 2 or 3 when it
- * sits beside the executable. Null when none exists.
- */
-export function codexHostFor(exePath: string): string | null {
-  const host = exe('codex-code-mode-host')
-  const canonicalExe = canonical(exePath)
-  const layout = codexPackageLayout(canonicalExe)
-  const dirs = [
-    ...(layout?.resourcesDir ? [layout.resourcesDir] : []),
-    layout ? layout.binDir : path.dirname(canonicalExe),
-    path.dirname(exePath)
-  ]
-  for (const dir of dirs) {
-    const candidate = path.join(dir, host)
-    if (isFile(candidate)) return candidate
-  }
-  return null
-}
-
 // ── Resolution ────────────────────────────────────────────────────────────────
 
 interface CacheEntry {
@@ -316,8 +188,6 @@ interface CacheEntry {
    */
   appPath: string
   resolved: ResolvedHarness
-  /** Codex only: the `codex-code-mode-host` the resolved `codex` will run (`codexHostFor`). */
-  codexHost: string | null
 }
 
 const cache = new Map<HarnessId, CacheEntry>()
@@ -514,7 +384,7 @@ function resolveUncached(id: HarnessId, rawEnv: string | undefined): ResolvedHar
   const selection = harnessSelection(id)
   if (id === 'claude') return resolveClaude(selection)
 
-  // opencode, pi and Codex are not bundled (ADR-082 §8): the selection or
+  // opencode and pi are not bundled (ADR-082 §8): the selection or
   // nothing. A `bundled` selection (never offered for them) reads as the
   // default, Tested.
   const source = selection.source === 'system' ? 'system' : 'managed'
@@ -533,8 +403,7 @@ function entry(id: HarnessId): CacheEntry {
   if (hit && hit.env === env && hit.appPath === appPath) return hit
   const raw = resolveUncached(id, env)
   const resolved = Object.freeze({ ...raw, launch: raw.launch && freezeLaunch(raw.launch) })
-  const codexHost = id === 'codex' && resolved.path !== null ? codexHostFor(resolved.path) : null
-  const next: CacheEntry = { env, appPath, resolved, codexHost }
+  const next: CacheEntry = { env, appPath, resolved }
   cache.set(id, next)
   return next
 }
@@ -552,16 +421,9 @@ export function harnessLaunch(id: HarnessId): HarnessLaunch | null {
   return entry(id).resolved.launch
 }
 
-/**
- * Can `id` run? Codex additionally needs a reviewed host and the
- * `codex-code-mode-host` it will run (`codexHostFor`): catalog models are
- * `code_mode_only`.
- */
+/** Can `id` run? */
 export function harnessAvailable(id: HarnessId): boolean {
-  const e = entry(id)
-  if (e.resolved.path === null) return false
-  if (id === 'codex') return codexHostSupported() && e.codexHost !== null
-  return true
+  return entry(id).resolved.path !== null
 }
 
 /**
@@ -608,16 +470,10 @@ export function harnessWritable(id: HarnessId): boolean {
   return harnessAvailable(id)
 }
 
-/** The `codex-code-mode-host` the resolved `codex` will run, or null. */
-export function codexCodeModeHostPath(): string | null {
-  return entry('codex').codexHost
-}
-
 const ENSURE_SCRIPTS: Record<HarnessId, string> = {
   claude: 'ensure-cli',
   opencode: 'ensure-opencode',
-  pi: 'ensure-pi',
-  codex: 'ensure-codex'
+  pi: 'ensure-pi'
 }
 
 /**
@@ -630,9 +486,6 @@ const ENSURE_SCRIPTS: Record<HarnessId, string> = {
 export function harnessUnavailableMessage(id: HarnessId): string {
   const e = entry(id)
   const label = LABELS[id]
-  if (id === 'codex' && !codexHostSupported()) {
-    return `Codex is not available for ${process.platform}-${process.arch} (supported: macOS arm64, Windows x64, Linux x64, Linux arm64)`
-  }
   if (e.resolved.path === null) {
     const reason = e.resolved.reason ?? `${label} was not found`
     // The script installs ClaudeUI's own copy, which a System choice would not run.
@@ -640,9 +493,6 @@ export function harnessUnavailableMessage(id: HarnessId): string {
     return `${reason} (development: run \`bun run ${ENSURE_SCRIPTS[id]}\` to ${
       id === 'claude' ? 'vendor' : 'install'
     } it)`
-  }
-  if (id === 'codex' && e.codexHost === null) {
-    return `Codex at ${e.resolved.path} has no codex-code-mode-host beside it`
   }
   return `${label} is not available`
 }

@@ -4,7 +4,7 @@
  *
  * A nested transcript lives in `subagentMessages[parentToolUseId]`, outside the
  * session's top-level `messages`. Its tool calls carry their own inner ids —
- * a Codex child item id, a dispatched claude/pi target's tool-call id — and the
+ * an opencode child item id, a dispatched claude/pi target's tool-call id — and the
  * approval raised for one of them carries that SAME id. Pre-fix
  * `SubagentMessages` did no approval binding at all, so the only actionable
  * surface was the floating card, detached from the command it concerned.
@@ -76,14 +76,14 @@ describe('SubagentMessages — approvals bound to nested tool calls', () => {
       ROUTE,
       makePendingApproval({
         requestId: 'nested-req-1',
-        toolUseId: 'codex:child-item-1',
+        toolUseId: 'child-item-1',
         toolName: 'Bash'
       })
     )
 
     render(
       <>
-        <SubagentMessages messages={[nestedBashMsg('codex:child-item-1')]} />
+        <SubagentMessages messages={[nestedBashMsg('child-item-1')]} />
         <FloatingApproval />
       </>
     )
@@ -143,7 +143,7 @@ describe('SubagentMessages — approvals bound to nested tool calls', () => {
       })
     )
 
-    render(<SubagentMessages messages={[nestedBashMsg('codex:child-item-9')]} />)
+    render(<SubagentMessages messages={[nestedBashMsg('child-item-9')]} />)
 
     expect(screen.queryByTestId('ApprovalButtons.allow')).not.toBeInTheDocument()
     expect(screen.queryByTestId('ApprovalButtons.deny')).not.toBeInTheDocument()
@@ -159,7 +159,7 @@ describe('SubagentMessages — approvals bound to nested tool calls', () => {
       })
     )
 
-    render(<SubagentMessages messages={[nestedBashMsg('codex:child-item-10')]} />)
+    render(<SubagentMessages messages={[nestedBashMsg('child-item-10')]} />)
 
     expect(screen.queryByTestId('ApprovalButtons.allow')).not.toBeInTheDocument()
   })

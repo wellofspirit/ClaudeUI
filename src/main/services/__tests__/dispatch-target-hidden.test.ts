@@ -74,7 +74,6 @@ function recordTarget(
     model: 'haiku',
     launchMode: 'default',
     accountKey: null,
-    codexAccountId: null,
     callerRestriction: null,
     name: null,
     description: null

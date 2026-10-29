@@ -1,8 +1,8 @@
 /**
  * The host's handle on the voice worker — ADR-101 §3–4, docs/architecture/local-voice.md C3.
  *
- * ONE worker process per host serves every on-device capture (opencode, pi and
- * Codex sessions; the desktop window and every remote browser). This module owns
+ * ONE worker process per host serves every on-device capture (opencode and pi
+ * sessions; the desktop window and every remote browser). This module owns
  * its life: spawned lazily by the first {@link LocalVoiceServer.acquire}, shared
  * by concurrent acquires, respawned by the next acquire after any exit, killed by
  * {@link LocalVoiceServer.stop}. What it hands back is the loopback `port` and the

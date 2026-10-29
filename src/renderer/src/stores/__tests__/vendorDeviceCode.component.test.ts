@@ -105,15 +105,15 @@ describe('authorizeVendorDeviceCode', () => {
   it('a failed start becomes a terminal error card carrying the host message', async () => {
     stubApi({
       vendorAuthDeviceCodeStart: vi.fn(async () => {
-        throw new Error('device code login is not enabled for this Codex server.')
+        throw new Error('device code login is not enabled for this server.')
       })
     })
     const result = await run()
     expect(result.ok).toBe(false)
-    expect(result.error).toMatch(/not enabled for this Codex server/)
+    expect(result.error).toMatch(/not enabled for this server/)
     expect(useSessionStore.getState().vendorOAuth).toMatchObject({
       stage: 'error',
-      error: expect.stringContaining('not enabled for this Codex server')
+      error: expect.stringContaining('not enabled for this server')
     })
     expect(window.api.vendorAuthDeviceCodeStatus).not.toHaveBeenCalled()
   })

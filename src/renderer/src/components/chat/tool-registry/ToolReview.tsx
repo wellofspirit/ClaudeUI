@@ -52,13 +52,8 @@ function decisionWord(review: ToolReviewBlock): string {
 
 /** The strip's sentence — who decided, and what they decided. */
 function sentence(review: ToolReviewBlock): string {
-  if (review.reviewer === 'auto-mode' && review.overriddenByUser)
-    return 'Auto mode blocked this action — you approved it'
-  if (review.reviewer === 'auto-mode')
-    return `Auto mode ${review.decision === 'denied' ? 'blocked' : 'allowed'} this action`
-  if (review.decision === 'approved') return 'Codex auto-review approved this action'
-  if (review.decision === 'denied') return 'Codex auto-review denied this action'
-  return 'Codex auto-review did not finish reviewing this action'
+  if (review.overriddenByUser) return 'Auto mode blocked this action — you approved it'
+  return `Auto mode ${review.decision === 'denied' ? 'blocked' : 'allowed'} this action`
 }
 
 /** Risk reads on its own scale, not the decision's: a low-risk denial is green-ish news. */

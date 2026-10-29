@@ -30,12 +30,7 @@ import { requestSubagentTranscript } from '../../lib/subagent-prefetch'
 import { useSubagentPending } from '../../hooks/useSubagentPending'
 import { dispatchLabel, taskHeaderLabel } from '../../../../shared/tool-kinds'
 import { modelTier, type ModelTier } from '../../../../shared/model-tier'
-import {
-  agentModelShortName,
-  latestMessageModel,
-  resolveAgentModel,
-  useParentModel
-} from '../../lib/agent-model'
+import { agentModelShortName, latestMessageModel, resolveAgentModel } from '../../lib/agent-model'
 import { MODEL_TIER_TEXT_CLASS } from '../../lib/model-tier-class'
 import {
   AGENT_CHIP_CLASS,
@@ -420,7 +415,6 @@ export function TaskCard({
   const engineId = useActiveSession((s) => s.status.engineId)
   const availableModels = useSessionStore((s) => s.availableModels)
   const tierColors = useSessionStore((s) => s.settings.agentModelTierColors)
-  const parentModel = useParentModel()
   const [expanded, setExpanded] = useState(false)
 
   const toolUseId = block.toolUseId
@@ -504,8 +498,7 @@ export function TaskCard({
   const description = (view.description || view.prompt || '').slice(0, 120)
   const prompt = view.prompt
   // The type tile (ADR-094): a dispatch is the bot and an X, the engine's default type
-  // and an untyped agent the bot alone. `view.subagent` is a TYPE on every engine, and
-  // a Codex spawn has none.
+  // and an untyped agent the bot alone. `view.subagent` is a TYPE on every engine.
   const sessionTypes = useSessionAgentTypes()
   const tile = useAgentTile(engineId, view.subagent, view.dispatch, sessionTypes)
   // The model the agent runs on (`resolveAgentModel`, the roster's rule): the newest
@@ -515,7 +508,6 @@ export function TaskCard({
     latestModel: latestMessageModel(msgs),
     requested: view.model,
     engine: engineId,
-    parentModel,
     dispatch: view.dispatch
   })
   const model = view.dispatch

@@ -93,7 +93,7 @@ the ChatGPT backend, after a forced token refresh.
 **Responses (ChatGPT backend).**
 
 - Headers: `Authorization: Bearer`, `ChatGPT-Account-Id`, `originator: opencode`, `User-Agent`,
-  `session-id`. The vault's token is issued to opencode's OAuth client (`codex-oauth.ts:35`), so
+  `session-id`. The vault's token is issued to opencode's OAuth client (`chatgpt-oauth.ts:35`), so
   the originator matches it. `x-openai-internal-codex-residency` is added when the token's
   `chatgpt_compute_residency` claim is set.
 - Body: `model`, `instructions` (the system prompt, verbatim), one `input` user item,

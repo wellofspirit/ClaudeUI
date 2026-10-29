@@ -192,7 +192,7 @@ import { piAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
 import { BashStreamGate } from '../opencode/bash-stream-gate'
 
 /** The engines pi's `dispatch_agent` can target (never pi itself). */
-const PI_DISPATCH_TARGETS: readonly DispatchTargetEngine[] = ['claude', 'opencode', 'codex']
+const PI_DISPATCH_TARGETS: readonly DispatchTargetEngine[] = ['claude', 'opencode']
 
 /**
  * The `dispatch_agent` description for the bridge (`CLAUDEUI_PI_DISPATCH_DESCRIPTION`):
@@ -381,8 +381,8 @@ export class PiSession extends BaseSession {
   /**
    * ADR-030/ADR-033 M4-A: the STATIC PI_ENGINE_CAPABILITIES.crossEngineDispatch
    * flag is true (M4b shipped), but the HONEST per-session value additionally
-   * requires crossEngineDispatchAvailable('pi') — some target (Claude Code,
-   * opencode or Codex) being available, which ADR-082 made a live question.
+   * requires crossEngineDispatchAvailable('pi') — some target (Claude Code
+   * or opencode) being available, which ADR-082 made a live question.
    * ANDed at this GETTER (not baked into every `_capabilities` assignment
    * site — the constructor's sync+async assignments, resolveCapsForModel,
    * adoptEngineModel, setModel — since unlike OpencodeSession's single
@@ -3377,7 +3377,7 @@ export class PiSession extends BaseSession {
    * `toolCallId` is pi's own call id, which is EXACTLY the `toolUseId` the
    * transcript's `tool_use` block carries (`event-mapper.ts` maps
    * `toolCall → tool_use { toolUseId: id }`), so the reducer binds it to the
-   * right card. No hold is needed the way Codex needs one: the assistant
+   * right card. No hold is needed: the assistant
    * `message_end` that mints the block precedes `tool_execution_*` on pi's own
    * verified event order, and the judge round-trip that produced this verdict
    * sits on top of that.
@@ -3561,7 +3561,7 @@ export class PiSession extends BaseSession {
         content: [
           {
             type: 'text',
-            text: 'dispatch_agent requires "engine" (one of "claude"|"opencode"|"codex") and a string "prompt".'
+            text: 'dispatch_agent requires "engine" (one of "claude"|"opencode") and a string "prompt".'
           }
         ],
         isError: true

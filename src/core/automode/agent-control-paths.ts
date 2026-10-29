@@ -12,7 +12,7 @@
  * docs/protocol-cc/14-auto-mode-classifier.md §3 step 2).
  *
  * ONE list, two consumers:
- *  - pi (and Codex, which shares pi's evaluator) call {@link isAgentControlPath}
+ *  - pi calls {@link isAgentControlPath}
  *    from the acceptEdits mode base (`pi/permission-engine.ts`);
  *  - opencode evaluates its ruleset server-side, so the list is rendered into
  *    opencode `edit` ask patterns by {@link agentControlEditPatterns}

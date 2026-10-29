@@ -22,11 +22,6 @@ vi.mock('../../../core/pi/pi-locate', () => ({
   locatePiLaunch: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
-vi.mock('../../../core/codex/codex-locate', () => ({
-  codexBinaryAvailable: vi.fn(() => false),
-  locateCodexBinary: vi.fn(() => null),
-  locateCodexCodeModeHost: vi.fn(() => null)
-}))
 vi.mock('../../../core/harness/resolve', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/harness/resolve')>()),
   harnessAvailable: vi.fn(() => true)
@@ -1860,19 +1855,6 @@ describe('opencode target — shared machinery', () => {
     expect([r1, r2].filter((r) => r.isError).map((r) => r.text)).toEqual([
       expect.stringContaining('concurrent dispatches')
     ])
-  })
-
-  it('a codex-sourced dispatch into opencode runs', async () => {
-    const { dispatcher } = makeHarness()
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ fromEngine: 'codex', fromRoutingId: 'routing-codex' })
-    )
-    expect(result).toEqual({
-      text: 'target answer',
-      sessionId: 'oc-sess-1',
-      agentRef: expect.stringMatching(/^s-/)
-    })
   })
 
   it('sends progress heartbeats through extra while the turn is in flight', async () => {

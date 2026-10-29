@@ -68,7 +68,6 @@ function row(over: Partial<DispatchTargetRow> = {}): DispatchTargetRow {
     model: 'haiku',
     launchMode: 'acceptEdits',
     accountKey: 'anthropic:org:acc',
-    codexAccountId: null,
     callerRestriction: null,
     name: null,
     description: null,
@@ -94,7 +93,7 @@ describe('dispatch_target (migration v35)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(40)
+      expect(older.pragma('user_version', { simple: true })).toBe(41)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -149,7 +148,7 @@ describe('migration v39 (the owner of a running target)', () => {
         )
         .run()
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(40)
+      expect(older.pragma('user_version', { simple: true })).toBe(41)
       const [kept] = runningDispatchTargets(older)
       expect(kept).toMatchObject({
         id: 's-aaaaaa',
@@ -184,7 +183,7 @@ describe('migration v40 (the parent directory of a target)', () => {
         )
         .run()
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(40)
+      expect(older.pragma('user_version', { simple: true })).toBe(41)
       const column = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as {
           name: string
@@ -350,7 +349,7 @@ describe('dispatch_target DAO', () => {
 
   it('lists every harness session id', () => {
     insertDispatchTarget(row({ id: 's-000001', harnessRef: 'a' }), db)
-    insertDispatchTarget(row({ id: 's-000002', harnessRef: 'b', engine: 'codex' }), db)
+    insertDispatchTarget(row({ id: 's-000002', harnessRef: 'b', engine: 'opencode' }), db)
     expect(allDispatchTargetHarnessRefs(db).sort()).toEqual(['a', 'b'])
   })
 })

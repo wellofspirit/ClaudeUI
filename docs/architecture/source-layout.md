@@ -33,12 +33,6 @@ src/
                          model-discovery, PiBridgeHost (loopback approval + hosted-tool
                          host), pi-bridge-source (the -e extension), permission-engine,
                          pi-locate, pi-protocol (ADR-035)
-    codex/             — Codex backend: CodexAppServerClient (stdio JSONL),
-                         CodexClient (typed methods), CodexService (read-only
-                         catalog/history/auth), CodexSession, event-mapper,
-                         history, settings, model-discovery, model-selection,
-                         codex-locate, protocol/ (generated) + __tests__
-                         (ADR-066/067)
     automode/          — engine-neutral auto-mode judge: classifier.ts, rules/,
                          ground-truth.ts (redirect facts), redirect-measure.ts
                          (fs measurement), action-meta.ts (per-action meta),
@@ -47,7 +41,7 @@ src/
                          (fallback-account snapshot), judge-capture.ts
                          (opt-in prompt+reply JSONL) (ADR-023/050/106/107)
     auth/              — EngineAuthProvider + opencode/pi implementations; vault/
-                         (AuthVault, CredentialSync, codex-oauth — ADR-036/037)
+                         (AuthVault, CredentialSync, chatgpt-oauth — ADR-036/037)
     shared-providers/  — canonical provider/model routing + native projections (ADR-037)
     ipc/               — the registrars (session/terminal/automation/webauthn/authcfg)
                          + command-registry, remote-handlers, the shared command
@@ -58,7 +52,7 @@ src/
     shared/sync/       — the wire types both sides fold: channels.ts (the closed
                          channel set), reducer.ts, state.ts, stream.ts, sync-client.ts,
                          sync-decision.ts, client-registry.ts, events.ts
-    voice/             — on-device speech-to-text for opencode, pi and Codex (ADR-101):
+    voice/             — on-device speech-to-text for opencode and pi (ADR-101):
                          worker/ (the voice worker: protocol server, LocalAgreement preview,
                          segmented final pass, sherpa loader), local-voice-server.ts (the
                          host's one worker), pack-store.ts + pack-installer.ts (the speech
@@ -113,8 +107,8 @@ src/
   e2e/flows/           — layer-3 E2E tests
   integration/         — layer-4 integration tests (real engine binaries, gated)
 vendor/                — rebundled bun-claude + engine source checkouts (not checked in);
-                         opencode, pi and Codex live in ~/.claude/ui/harnesses (ADR-082)
-scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode/pi/codex
+                         opencode and pi live in ~/.claude/ui/harnesses (ADR-082)
+scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode/pi
                          over the harness installer,
                          build-server.mjs for the two server artifacts,
                          verify-bun-sqlite.ts for driver conformance,

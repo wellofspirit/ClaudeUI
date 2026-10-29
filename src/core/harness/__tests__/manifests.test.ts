@@ -2,9 +2,6 @@
  * @vitest-environment node
  *
  * The release manifests (ADR-082 §5) are the source of truth for "Tested".
- * Codex's own parity checks (host set vs `CODEX_SUPPORTED_HOSTS`, `tested` vs
- * the generated protocol's provenance) live beside the Codex tooling tests in
- * `src/core/codex/__tests__/codex-tooling.test.ts`.
  */
 import { describe, it, expect } from 'vitest'
 import { HARNESS_IDS } from '../../../shared/harness-types'

@@ -6,7 +6,7 @@
  * on a slow link may want the final text only, while the desktop wants words as
  * they are said. So it never joins the synced UISettings. The voice controller
  * reads it at every start and sends it as `{ preview }` with the start; only the
- * on-device recognizer (opencode, pi and Codex sessions) has a preview to turn
+ * on-device recognizer (opencode and pi sessions) has a preview to turn
  * off — cli.js ignores the field.
  *
  * Default ON. Storage can be missing or throw (a private window, blocked site

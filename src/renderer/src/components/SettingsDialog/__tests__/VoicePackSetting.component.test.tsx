@@ -280,7 +280,7 @@ describe('VoicePreviewSetting', () => {
     expect(screen.getByTestId('VoicePreviewSetting')).toHaveTextContent(VOICE_PREVIEW_HELP_TEXT)
     expect(screen.getByTestId('VoicePreviewSetting')).toHaveTextContent('this device')
     expect(VOICE_PREVIEW_HELP_TEXT).toBe(
-      'Shows words as you speak for opencode, pi and Codex sessions; the final text arrives when you let go'
+      'Shows words as you speak for opencode and pi sessions; the final text arrives when you let go'
     )
   })
 

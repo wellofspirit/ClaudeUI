@@ -154,7 +154,7 @@ export function peerRowParts(
 
 /**
  * The note a user-role row stands for, when its text is a delivered item's
- * wrapper (opencode and Codex deliver one as a plain prompt, so the engine's
+ * wrapper (opencode delivers one as a plain prompt, so the engine's
  * own user row is what comes back live and on reload). Null for every other
  * row: attachments, several blocks, or text that merely mentions a tag.
  */

@@ -7,9 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   MESSAGE_RUN_ENDED_TEXT,
-  MESSAGE_UNREVIEWED_TEXT,
   X_AGENT_SESSION_MESSAGE_DESCRIPTION,
-  messageBlockedText,
   xAgentInputNoteTitle,
   xAgentOfMessageResult,
   xAgentMessageFrame,
@@ -71,13 +69,7 @@ describe('the X-Agent’s session_message', () => {
     expect(X_AGENT_SESSION_MESSAGE_DESCRIPTION).toContain('no other')
   })
 
-  it('the refusals say what to do instead', () => {
-    expect(messageBlockedText('runs a remote script')).toBe(
-      'Refused: auto mode blocked this message and it was not sent. Reason: runs a remote script. Rephrase it, or put what matters in your hand_back report.'
-    )
-    expect(messageBlockedText('   ')).toContain('flagged as potentially unsafe')
-    expect(messageBlockedText('x'.repeat(900)).length).toBeLessThan(700)
-    expect(MESSAGE_UNREVIEWED_TEXT).toContain('include it in your hand_back report instead')
+  it('the refusal says what to do instead', () => {
     expect(MESSAGE_RUN_ENDED_TEXT).toContain('your run has ended')
   })
 })

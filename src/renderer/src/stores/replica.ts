@@ -295,7 +295,7 @@ export function isLocallyCreated(routingId: string): boolean {
  * gone from canonical AND from the store in the same tick, so nothing left in the
  * renderer can answer "what happened to it?". A caller that captured the id
  * BEFORE an await needs exactly that answer — `InputBox.handleSend` holds one
- * across `sendPrompt`, and Codex reports its stable session id (`thread/start`)
+ * across `sendPrompt`, and an engine may report its stable session id
  * while that await is still pending, so the guard "is the user still on this
  * session?" would otherwise compare the new active id against an id that no
  * longer exists and leave the sent prompt sitting in the textarea.
@@ -957,7 +957,6 @@ function projectSession(
     selectedEngineId: c.selectedEngineId,
     selectedModel: c.selectedModel,
     authRequired: c.authRequired,
-    ...(c.codexModelExplicit !== undefined ? { codexModelExplicit: c.codexModelExplicit } : {}),
     // The per-session mirror of the app-level map (plus the linked-worktree marker of its cwd).
     worktreeInfo: worktreeInfo ?? null
   }

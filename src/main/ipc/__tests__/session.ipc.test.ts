@@ -16,21 +16,9 @@ import * as os from 'os'
 import { EventEmitter } from 'events'
 import * as path from 'path'
 
-vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
-vi.mock('../../../core/codex/model-discovery', () => ({
-  discoverCodexModels: vi.fn(async () => [])
-}))
-vi.mock('../../../core/codex/history', () => ({
-  listCodexSessions: vi.fn(async () => []),
-  loadCodexHistory: vi.fn()
-}))
-vi.mock('../../../core/auth/CodexAuthProvider', () => ({
-  codexAuthProvider: {
-    status: vi.fn(async () => ({ available: false, authenticated: false, authKind: null })),
-    loginStart: vi.fn(),
-    loginStatus: vi.fn(() => ({ status: 'idle' })),
-    loginCancel: vi.fn()
-  }
+vi.mock('../../../core/pi/model-discovery', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/pi/model-discovery')>()),
+  discoverPiModels: vi.fn(async () => [])
 }))
 
 // ---------------------------------------------------------------------------
@@ -697,12 +685,12 @@ describe('session.ipc', () => {
       const dismissals: unknown[][] = []
       harness.onEvent('session:approval-dismiss', (...args) => dismissals.push(args))
       sessionStub.resolveApproval.mockImplementationOnce(() => {
-        throw new Error('Stale or unknown Codex approval')
+        throw new Error('Stale or unknown approval')
       })
       await expect(
-        harness.call('session:approval-response', 'codex-rid', 'req-x', 'allow')
-      ).rejects.toThrow('Stale or unknown Codex approval')
-      expect(dismissals).toEqual([['codex-rid', { requestId: 'req-x' }]])
+        harness.call('session:approval-response', 'pi-rid-2', 'req-x', 'allow')
+      ).rejects.toThrow('Stale or unknown approval')
+      expect(dismissals).toEqual([['pi-rid-2', { requestId: 'req-x' }]])
     })
 
     it('falls through to the session when the dispatcher declines to consume', async () => {
@@ -1054,7 +1042,7 @@ describe('session.ipc', () => {
       forgetEntriesQuiet(['/tmp/wt-quiet'])
 
       expect(refreshCanonicalDirectories).not.toHaveBeenCalled()
-      // ...while the in-session hook does (a Codex app-server must not start after the teardown).
+      // ...while the in-session hook does (an engine server must not start after the teardown).
       forgetEntriesAndEmit(['/tmp/wt-quiet'])
       expect(refreshCanonicalDirectories).toHaveBeenCalledTimes(1)
     })
@@ -1165,7 +1153,7 @@ describe('session.ipc', () => {
       }
     })
 
-    it('worktree:remove-many does NOT restrict to created worktrees (the manager removes Codex/opencode/orphan ones too)', async () => {
+    it('worktree:remove-many does NOT restrict to created worktrees (the manager removes opencode/orphan ones too)', async () => {
       await harness.call('worktree:remove-many', '/tmp/r', ['a'])
       const opts = vi.mocked(removeWorktrees).mock.lastCall![3] as Record<string, unknown>
       expect(opts.createdOnly).toBeUndefined()
@@ -1340,17 +1328,17 @@ describe('session.ipc', () => {
     })
 
     // The composer asks per engine (engine-models.ts); the id must reach the
-    // handler through the desktop transport, or every request answers all four.
-    it('session:get-engine-models carries its engine id: codex probes only codex', async () => {
-      const { discoverCodexModels } = await import('../../../core/codex/model-discovery')
+    // handler through the desktop transport, or every request answers all three.
+    it('session:get-engine-models carries its engine id: pi probes only pi', async () => {
+      const { discoverPiModels } = await import('../../../core/pi/model-discovery')
       const native = {
-        engineId: 'codex' as const,
-        vendorId: 'openai',
-        vendorName: 'OpenAI',
-        models: [{ value: 'gpt', displayName: 'GPT', description: '', engineId: 'codex' as const }]
+        engineId: 'pi' as const,
+        vendorId: 'openai-codex',
+        vendorName: 'ChatGPT',
+        models: [{ value: 'gpt', displayName: 'GPT', description: '', engineId: 'pi' as const }]
       }
-      vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
-      await expect(harness.call('session:get-engine-models', 'codex')).resolves.toEqual([native])
+      vi.mocked(discoverPiModels).mockResolvedValueOnce([native])
+      await expect(harness.call('session:get-engine-models', 'pi')).resolves.toEqual([native])
       // Claude's probe never ran.
       expect(vi.mocked(query)).not.toHaveBeenCalled()
       await expect(harness.call('session:get-engine-models', 'gemini')).rejects.toThrow(
@@ -1486,7 +1474,7 @@ describe('session.ipc', () => {
       sharedProviderSpies.setApiKey.mockClear()
       await harness.callSafe('shared-provider:set-key', 'local', 'secret', ['pi'])
       expect(sharedProviderSpies.setApiKey).toHaveBeenCalledWith('local', 'secret', ['pi'])
-      for (const bad of [true, 'pi', ['pi', 'codex']]) {
+      for (const bad of [true, 'pi', ['pi', 'gemini']]) {
         await expect(
           harness.callSafe('shared-provider:set-key', 'local', 'secret', bad)
         ).rejects.toThrow(/replaceOwn/)

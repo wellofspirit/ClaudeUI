@@ -4,12 +4,11 @@ import { NoticeCard } from '../shared/NoticeCard'
 /**
  * Ordinary errors and warnings, with no special case in them.
  *
- * There used to be exactly one: Codex discovering no models because the vault's
- * ChatGPT credential was refused got a Sign in button, attached by matching the
- * EXACT string the store pushed onto `errors[]`. ADR-070 §1 routes that through
- * the one auth fact instead — a renderer rule keyed on an engine-authored string
- * is the fragile coupling, and an auth failure now has one row and one action
- * wherever it comes from.
+ * There used to be exactly one: a refused credential got a Sign in button,
+ * attached by matching the EXACT string the store pushed onto `errors[]`.
+ * ADR-070 §1 routes that through the one auth fact instead — a renderer rule
+ * keyed on an engine-authored string is the fragile coupling, and an auth
+ * failure now has one row and one action wherever it comes from.
  */
 export function FloatingError(): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)

@@ -12,6 +12,7 @@ M2's `persistSession: false` and continuation by `session_id` superseded by [ADR
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-24 amendment: a target's additional directories, plus the dispatcher's directory when it runs elsewhere, are real scope on every engine; allow rules stay excluded)
 **Amended by:** [ADR-105](adr-105_background-dispatch.md) (2026-10-19: dispatch is a background run of a durable X-Agent, not a blocking call over in-memory targets; blocking remains as a mode for a subagent caller)
 **Amended by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — caller identity. As built: ADR-097 §4 "As built (S2)" (`_meta["ai.opencode/sessionID"]` wins over the plugin stamp) and "As built (S9)" (opencode TARGETS on the 2.x client, per-server feed, exact leases, the session's host pre-check; a subagent child's call resolved to its chat through `parentID`).
+**Amended 2026-10-28:** the Codex engine was removed; dispatch targets are claude, opencode and pi, and every Codex target path below is retired.
 
 ## Context
 

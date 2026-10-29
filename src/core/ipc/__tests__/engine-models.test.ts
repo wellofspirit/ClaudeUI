@@ -4,21 +4,19 @@
  * `listEngineModels` — what `session:get-engine-models` answers on both
  * transports. Asked for one engine, only that engine is probed (the composer's
  * per-engine requests: one slow pi probe must not hold back Claude's,
- * opencode's and Codex's models). Asked for all, the engines are probed
+ * and opencode's models). Asked for all, the engines are probed
  * concurrently and the groups keep their order. Each engine degrades to [] on
  * its own, and an engine id that is not one rejects.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { EngineModelGroup, ModelInfo } from '../../../shared/types'
 
-const { discoverOpencodeModels, discoverPiModels, discoverCodexModels } = vi.hoisted(() => ({
+const { discoverOpencodeModels, discoverPiModels } = vi.hoisted(() => ({
   discoverOpencodeModels: vi.fn(),
-  discoverPiModels: vi.fn(),
-  discoverCodexModels: vi.fn()
+  discoverPiModels: vi.fn()
 }))
 vi.mock('../../opencode/model-discovery', () => ({ discoverOpencodeModels }))
 vi.mock('../../pi/model-discovery', () => ({ discoverPiModels }))
-vi.mock('../../codex/model-discovery', () => ({ discoverCodexModels }))
 
 import { listEngineModels } from '../engine-models'
 
@@ -48,30 +46,25 @@ const opus: ModelInfo = { value: 'opus', displayName: 'Opus', description: '' }
 beforeEach(() => {
   discoverOpencodeModels.mockReset()
   discoverPiModels.mockReset()
-  discoverCodexModels.mockReset()
 })
 
 describe('listEngineModels', () => {
-  it('starts every engine before any answers, and keeps claude, opencode, pi, codex order', async () => {
+  it('starts every engine before any answers, and keeps claude, opencode, pi order', async () => {
     const claude = deferred<ModelInfo[]>()
     const opencode = deferred<EngineModelGroup[]>()
     const pi = deferred<EngineModelGroup[]>()
-    const codex = deferred<EngineModelGroup[]>()
     const claudeModels = vi.fn(() => claude.promise)
     discoverOpencodeModels.mockReturnValue(opencode.promise)
     discoverPiModels.mockReturnValue(pi.promise)
-    discoverCodexModels.mockReturnValue(codex.promise)
 
     const answer = listEngineModels(claudeModels)
-    // Nothing has resolved, yet all four lookups are already running.
+    // Nothing has resolved, yet all three lookups are already running.
     await Promise.resolve()
     expect(claudeModels).toHaveBeenCalledTimes(1)
     expect(discoverOpencodeModels).toHaveBeenCalledTimes(1)
     expect(discoverPiModels).toHaveBeenCalledTimes(1)
-    expect(discoverCodexModels).toHaveBeenCalledTimes(1)
 
     // Settle in reverse order: the result order is fixed regardless.
-    codex.resolve([group('codex', 'openai')])
     pi.resolve([group('pi', 'openrouter')])
     opencode.resolve([group('opencode', 'zen')])
     claude.resolve([opus])
@@ -80,8 +73,7 @@ describe('listEngineModels', () => {
     expect(groups.map((g) => `${g.engineId}:${g.vendorId}`)).toEqual([
       'claude:anthropic',
       'opencode:zen',
-      'pi:openrouter',
-      'codex:openai'
+      'pi:openrouter'
     ])
     // Claude's bare ModelInfo is stamped so a pick is attributed to claude.
     expect(groups[0].models).toEqual([{ ...opus, engineId: 'claude', vendorId: 'anthropic' }])
@@ -90,7 +82,6 @@ describe('listEngineModels', () => {
   it('a failing engine is an empty contribution, never a failed catalog', async () => {
     discoverOpencodeModels.mockRejectedValue(new Error('server did not start'))
     discoverPiModels.mockResolvedValue([group('pi', 'openrouter')])
-    discoverCodexModels.mockRejectedValue(new Error('app-server crashed'))
 
     const groups = await listEngineModels(async () => {
       throw new Error('not logged in')
@@ -104,7 +95,6 @@ describe('listEngineModels', () => {
   it('null asks for every engine, like no argument (a JSON wire sends `undefined` as null)', async () => {
     discoverOpencodeModels.mockResolvedValue([group('opencode', 'zen')])
     discoverPiModels.mockResolvedValue([])
-    discoverCodexModels.mockResolvedValue([])
 
     const groups = await listEngineModels(async () => [opus], null)
     expect(groups.map((g) => g.engineId)).toEqual(['claude', 'opencode'])
@@ -114,8 +104,7 @@ describe('listEngineModels', () => {
 describe('listEngineModels for one engine', () => {
   it.each([
     ['opencode', discoverOpencodeModels, 'zen'],
-    ['pi', discoverPiModels, 'openrouter'],
-    ['codex', discoverCodexModels, 'openai']
+    ['pi', discoverPiModels, 'openrouter']
   ] as const)(
     '%s: runs only its own lookup and answers only its groups',
     async (id, own, vendor) => {
@@ -127,7 +116,7 @@ describe('listEngineModels for one engine', () => {
       expect(groups.map((g) => `${g.engineId}:${g.vendorId}`)).toEqual([`${id}:${vendor}`])
       expect(own).toHaveBeenCalledTimes(1)
       expect(claudeModels).not.toHaveBeenCalled()
-      for (const lookup of [discoverOpencodeModels, discoverPiModels, discoverCodexModels]) {
+      for (const lookup of [discoverOpencodeModels, discoverPiModels]) {
         if (lookup !== own) expect(lookup).not.toHaveBeenCalled()
       }
     }
@@ -146,7 +135,6 @@ describe('listEngineModels for one engine', () => {
     ])
     expect(discoverOpencodeModels).not.toHaveBeenCalled()
     expect(discoverPiModels).not.toHaveBeenCalled()
-    expect(discoverCodexModels).not.toHaveBeenCalled()
   })
 
   it('degrades to its empty contribution, never a rejection', async () => {
@@ -167,7 +155,6 @@ describe('listEngineModels for one engine', () => {
       expect(claudeModels).not.toHaveBeenCalled()
       expect(discoverOpencodeModels).not.toHaveBeenCalled()
       expect(discoverPiModels).not.toHaveBeenCalled()
-      expect(discoverCodexModels).not.toHaveBeenCalled()
     }
   )
 })

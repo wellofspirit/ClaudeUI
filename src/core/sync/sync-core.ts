@@ -390,7 +390,7 @@ export class SyncCore {
 
   /**
    * Engine exit is the moment a session stops needing a host-side transcript.
-   * Claude, opencode and Codex report it as `session:status` → `disconnected`, so
+   * Claude and opencode report it as `session:status` → `disconnected`, so
    * the trigger lives here, at the one place that sees every status, rather than in
    * each engine's teardown. pi reports an unexpected process death that way too,
    * but its own `cancel()` clears the flag and reports `idle` — so a pi session the

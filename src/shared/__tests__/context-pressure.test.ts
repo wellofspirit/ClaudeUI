@@ -95,7 +95,7 @@ describe('the effective ceiling (P6: auto-compact at window minus 33k)', () => {
     expect(Math.floor(effectiveCeilingPercent('claude', 1_000_000) ?? 0)).toBe(96)
   })
   it('is unknown for the other engines and for a window too small to have one', () => {
-    for (const engine of ['opencode', 'pi', 'codex'] as const) {
+    for (const engine of ['opencode', 'pi'] as const) {
       expect(effectiveCeilingPercent(engine, 200_000)).toBeNull()
     }
     expect(effectiveCeilingPercent('claude', 0)).toBeNull()
@@ -113,13 +113,13 @@ describe('the effective ceiling (P6: auto-compact at window minus 33k)', () => {
       { engine: 'claude', model: 'opus', windowSize: 200_000 },
       { engine: 'claude', model: 'opus', windowSize: 200_000 },
       { engine: 'claude', model: 'opus', windowSize: 1_000_000 },
-      { engine: 'codex', model: 'gpt', windowSize: 400_000 },
+      { engine: 'pi', model: 'gpt', windowSize: 400_000 },
       { engine: 'pi', model: 'unknown', windowSize: 0 }
     ])
     expect(rows.map((r) => [r.engine, r.model, r.windowSize])).toEqual([
       ['claude', 'opus', 200_000],
       ['claude', 'opus', 1_000_000],
-      ['codex', 'gpt', 400_000]
+      ['pi', 'gpt', 400_000]
     ])
     expect(rows[0].ceilingPercent).toBeCloseTo(83.5, 5)
     expect(rows[2].ceilingPercent).toBeNull()
@@ -167,13 +167,12 @@ describe('the hand-off instruction', () => {
     expect(handOffToolName('claude')).toBe('mcp__claude-ui-sessions__session_hand_off')
     expect(handOffToolName('opencode')).toBe('claudeui_session_hand_off')
     expect(handOffToolName('pi')).toBe('session_hand_off')
-    expect(handOffToolName('codex')).toBe('session_hand_off')
-    for (const engine of ['claude', 'opencode', 'pi', 'codex'] as const) {
+    for (const engine of ['claude', 'opencode', 'pi'] as const) {
       expect(sessionToolBareName(handOffToolName(engine))).toBe('session_hand_off')
     }
   })
   it('carries the percentage, the tool and the content a fresh session needs', () => {
-    const text = handOffInstruction(72, 'codex')
+    const text = handOffInstruction(72, 'pi')
     expect(text).toContain('Your context is at 72 %.')
     expect(text).toContain('call session_hand_off')
     for (const part of [
@@ -197,14 +196,14 @@ describe('the guidance block says the user’s context instruction beats "no nee
   it.each([
     ['Claude', 'mcp__claude-ui-sessions__'],
     ['opencode', 'claudeui_'],
-    ['pi and Codex', '']
+    ['pi', '']
   ])('%s: the system-prompt text names session_hand_off and carries the line', (_, prefix) => {
     const text = sessionToolsGuidance({ toolPrefix: prefix })
     expect(text).toContain(`\`${prefix}session_hand_off\``)
     expect(text).toContain(SUPERSEDES)
   })
 
-  it('every carrier takes the same bullets (pi promptGuidelines, Codex developerInstructions, opencode instructions)', () => {
+  it('every carrier takes the same bullets (pi promptGuidelines, opencode instructions)', () => {
     const { bullets } = sessionToolsGuidanceParts({ toolPrefix: '' })
     expect(bullets.some((b) => b.includes(SUPERSEDES))).toBe(true)
     expect(SESSION_TOOL_NAMES).toContain('session_hand_off')

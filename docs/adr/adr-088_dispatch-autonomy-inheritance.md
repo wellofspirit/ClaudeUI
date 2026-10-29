@@ -17,6 +17,7 @@ delegated work judged against the parent), [ADR-076](adr-076_claude-automode-ver
 [ADR-067](adr-067_codex-shared-permission-model.md) (the shared permission ladder),
 [ADR-069](adr-069_codex-host-per-home-and-account.md) (Codex targets are threads on the caller's host),
 [ADR-089](adr-089_pi-subagents-host-run.md) (amends the transcript rule: `system` rows are skipped).
+**Amended 2026-10-28:** the Codex engine was removed; dispatch targets are claude, opencode and pi, so the Codex target rules below are retired.
 
 ## Context
 

@@ -764,7 +764,7 @@ export type WorktreeRemoveOptions = (
    * C-S11: when given, only an entry for which this returns true may be removed; any other is
    * refused (`invalid: not a worktree ClaudeUI created`) before anything is touched. The legacy
    * entry point and the quit removal pass it; the manager's `remove-many` does not (it removes
-   * what the inventory lists: Codex, opencode and orphan shells too).
+   * what the inventory lists: opencode and orphan shells too).
    */
   createdOnly?: (worktreePath: string) => boolean
 }
@@ -923,16 +923,6 @@ async function applyBranchRule(
     const reason = err instanceof Error ? err.message.split('\n')[0] : String(err)
     logger.warn(LOG, `Failed to delete branch ${plan.name}`, err)
     return { name: plan.name, action: 'kept', uniqueCommits, reason }
-  }
-}
-
-async function removeEmptyCodexBucket(entryPath: string): Promise<void> {
-  const bucket = path.dirname(entryPath)
-  try {
-    if (!isRealDirectory(bucket)) return
-    await fs.promises.rmdir(bucket) // not recursive: a bucket that still holds anything stays
-  } catch {
-    // not empty, or already gone
   }
 }
 
@@ -1097,7 +1087,6 @@ async function removeOne(
     }
   }
   const branch = await applyBranchRule(git, plan)
-  if (entry.location === 'codex') await removeEmptyCodexBucket(entry.path)
   return {
     result: { id, outcome: 'removed', ...(branch ? { branch } : {}) },
     touchedPath: entry.path

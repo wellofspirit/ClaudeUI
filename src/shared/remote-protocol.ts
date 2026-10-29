@@ -1136,7 +1136,6 @@ export interface PerSessionSnapshot {
   selectedEngineId?: EngineId
   /** Model picker value within the selected engine. */
   selectedModel?: string
-  codexModelExplicit?: boolean
   /**
    * The sign-in this session owes — see {@link AuthRequiredState}. Optional for
    * the same older-server-compat reason as {@link PerSessionSnapshot.queue}: a

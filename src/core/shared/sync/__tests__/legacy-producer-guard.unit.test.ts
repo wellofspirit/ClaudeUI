@@ -7,7 +7,6 @@ describe('transcript producers use item lifecycle', () => {
     'src/core/services/claude-session.ts',
     'src/core/opencode/OpencodeSession.ts',
     'src/core/pi/PiSession.ts',
-    'src/core/codex/CodexSession.ts',
     'src/core/services/cross-engine-dispatcher.ts'
   ]
 

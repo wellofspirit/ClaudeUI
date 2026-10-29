@@ -203,7 +203,7 @@ describe('SyncCore.evictTranscript — what it does not touch, and what it leave
 
     expect(core.getCanonicalState().sessions['idle'].seeded).toBe(true)
     // A fresh client would otherwise be told to read a conversation from disk that
-    // does not exist, and Codex would try to resume a thread that never started.
+    // does not exist, and an engine would try to resume a thread that never started.
     expect('seeded' in core.getSnapshot().sessions['idle']).toBe(false)
   })
 

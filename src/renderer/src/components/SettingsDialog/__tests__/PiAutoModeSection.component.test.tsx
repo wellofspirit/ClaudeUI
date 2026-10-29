@@ -96,7 +96,6 @@ const saveEngineConfig = vi.fn(async (engineId: string, cfg: EngineConfig) => {
 /** Two ChatGPT vault accounts; the first is the active one. */
 const ACCOUNTS: SharedProviderAccountList = {
   activeId: 'acct-personal',
-  perSession: false,
   accounts: [
     { id: 'acct-personal', email: 'Personal', planType: 'pro', expiresAt: 0, needsReauth: false },
     { id: 'acct-work', email: 'Work', planType: 'business', expiresAt: 0, needsReauth: false }
@@ -822,7 +821,6 @@ describe('AutoModeSection - fallback on a different account', () => {
     async (active, want) => {
       const three: SharedProviderAccountList = {
         activeId: active,
-        perSession: false,
         accounts: ['a', 'b', 'c'].map((id) => ({
           id,
           email: id.toUpperCase(),
@@ -905,7 +903,7 @@ describe('AutoModeSection - fallback on a different account', () => {
   })
 
   describe('with no ChatGPT account to offer', () => {
-    const NONE: SharedProviderAccountList = { activeId: null, perSession: false, accounts: [] }
+    const NONE: SharedProviderAccountList = { activeId: null, accounts: [] }
 
     it('the toggle is disabled and says to sign in', async () => {
       await renderWith(

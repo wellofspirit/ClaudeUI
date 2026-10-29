@@ -42,7 +42,7 @@ afterEach(() => cleanup())
 function renderBubble(block: Hold, routingId: string | null = 'r-transcript') {
   return render(
     <TranscriptSessionProvider value={routingId}>
-      <MessageBubble message={message(block)} pendingApprovals={[]} isLastAssistant={false} />
+      <MessageBubble message={message(block)} pendingApprovals={[]} />
     </TranscriptSessionProvider>
   )
 }

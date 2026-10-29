@@ -118,14 +118,6 @@ async function invokeWithProgress<T>(
 }
 
 const api: ClaudeAPI = {
-  codexApproval: (id, requestId, decision) =>
-    unwrap('session:codex-approval', id, requestId, decision),
-  codexAuthStatus: () => unwrap('codex:auth-status'),
-  readCodexConfig: () => unwrap('codex-config:read'),
-  writeCodexConfig: (edits, expectedVersion) =>
-    unwrap('codex-config:write', edits, expectedVersion),
-  recompileCodexRules: () => unwrap('codex:recompile-rules'),
-  codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
   platform: process.platform,
   // Resolved here, in the one process that sees BOTH forms of the opt-in: the
   // env var (inherited from main) and the `--claudeui-verifier-hooks` switch main
@@ -294,8 +286,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-model', routingId, model),
   setEffort: (routingId: string, effort: string) =>
     ipcRenderer.invoke('session:set-effort', routingId, effort),
-  setSessionAccount: (routingId: string, accountId: string | null) =>
-    ipcRenderer.invoke('session:set-account', routingId, accountId),
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   setReasoningVariant: (routingId: string, variant: string | null) =>
@@ -653,8 +643,6 @@ const api: ClaudeAPI = {
     unwrap('provider-account:switch', providerId, accountId),
   removeProviderAccount: (providerId: string, accountId: string) =>
     unwrap('provider-account:remove', providerId, accountId),
-  setProviderAccountsPerSession: (providerId: string, enabled: boolean) =>
-    unwrap('provider-account:set-per-session', providerId, enabled),
   listSharedProviders: () => unwrap('shared-provider:list'),
   getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
   listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),

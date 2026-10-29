@@ -11,8 +11,8 @@
  * value is either computable from the view/result we already hold, or supplied
  * by an engine whose wire actually carries it. A field an engine does not report
  * renders NOTHING — never a placeholder, never a zero standing in for unknown.
- * Codex's `commandExecution` carries a real `exitCode`, Claude's Bash result does
- * not, so a Codex command card shows `exit 1` and a Claude one shows nothing;
+ * An engine whose command result carries a real `exitCode` shows `exit 1`; Claude's
+ * Bash result does not, so it shows nothing;
  * duration is absent from every harness's tool_result today, so no card claims it.
  */
 
@@ -46,8 +46,7 @@ function countLines(text: string): number {
 
 /**
  * `+n −m` for an edit. Counted on the before/after pair the view carries, so an
- * engine that supplies per-file diffs instead (opencode `apply_patch`, Codex
- * `fileChange`) sums those hunks' own +/- lines rather than a pair it never had.
+ * engine that supplies per-file diffs instead (opencode `apply_patch`) sums those hunks' own +/- lines rather than a pair it never had.
  */
 function editDeltaChip(view: Extract<ToolView, { kind: 'fileEdit' }>): ToolChip | null {
   if (view.files?.length) {
@@ -122,7 +121,7 @@ export function toolChips(kind: ToolKind, view: ToolView, result?: ToolResultBlo
   switch (kind) {
     case 'command': {
       if (view.kind !== 'command') break
-      // Only an engine that reports an exit code gets the chip (Codex today).
+      // Only an engine that reports an exit code gets the chip.
       // `0` is a real value and must survive the guard, so test for undefined.
       if (view.exitCode !== undefined) {
         chips.push({

@@ -6,7 +6,7 @@
  *   - sessionEngines is carried over correctly through rekeySession
  *   - applyExternalSessionConfig restores sessionEngines from disk config
  *   - SessionStatus.model is a ModelRef and claudeModel() builds anthropic-vendored refs
- *   - The sessionProviders→sessionEngines read-migration path works correctly (incl. 'codex')
+ *   - The sessionProviders→sessionEngines read-migration path works correctly
  *
  * Pattern: pure store state transitions, no React, no TestIpcBridge.
  */
@@ -239,14 +239,14 @@ describe('engine persistence: applyExternalSessionConfig', () => {
 // ---------------------------------------------------------------------------
 
 describe('sessionEngines migration shape acceptance', () => {
-  it('accepts migrated sessionEngines with engineId:claude (formerly codex or any value)', () => {
-    // Simulate what loadSessionConfig() returns after migrating 'codex' → { engineId: 'claude' }
+  it('accepts migrated sessionEngines with engineId:claude (a legacy value migrated away)', () => {
+    // Simulate what loadSessionConfig() returns after migrating a legacy provider value to { engineId: 'claude' }
     seed.sessionsConfig({
       sessionEngines: {
-        'old-codex-session': { engineId: 'claude' as EngineId }
+        'old-session': { engineId: 'claude' as EngineId }
       }
     })
-    expect(store().sessionEngines['old-codex-session']?.engineId).toBe('claude')
+    expect(store().sessionEngines['old-session']?.engineId).toBe('claude')
   })
 })
 

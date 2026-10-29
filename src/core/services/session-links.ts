@@ -174,7 +174,7 @@ export function engineOfId(id: string): EngineId {
   const state = syncCore.getCanonicalState()
   const live = state.sessions[id]
   // Canonical's status names the engine only once the session has reported one
-  // (`DEFAULT_STATUS` says claude): a session that has not — Codex starts lazily —
+  // (`DEFAULT_STATUS` says claude): a session that has not
   // still has the engine it was born with, from `session:created`.
   if (live) return live.status.sessionId ? live.status.engineId : live.selectedEngineId
   for (const group of state.directories) {
