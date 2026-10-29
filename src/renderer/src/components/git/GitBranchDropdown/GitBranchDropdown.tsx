@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import { useEscapeLayer } from '../../shared/use-escape-layer'
 import type { GitBranchData } from '../../../../../shared/types'
 import { GitBranchDropdownView } from './View'
@@ -13,7 +14,7 @@ interface Props {
 const FETCH_COOLDOWN = 30_000
 
 export function GitBranchDropdown({ onClose, anchorRef }: Props): React.JSX.Element {
-  const cwd = useActiveSession((s) => s.cwd)
+  const cwd = useActiveSession(sessionWorkdir)
   const gitStatus = useActiveSession((s) => s.gitStatus)
   const syncOp = useActiveSession((s) => s.gitSyncOperation)
   const syncError = useActiveSession((s) => s.gitSyncError)

@@ -42,6 +42,7 @@ import { voiceController } from '../lib/voice/voice-controller'
 import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
 import { hasWakingTask } from '../lib/task-types'
 import { isCreatedWorktree } from '../../../shared/linked-worktree'
+import { sessionWorkdir } from '../lib/session-workdir'
 import { approvalActionName } from '../components/chat/tool-registry/approval-action'
 import type {
   SessionResult,
@@ -335,9 +336,9 @@ export function useClaudeEvents(): void {
       // Git status updates from polling
       onSyncEvent('git:status-update', ({ cwd, status }) => {
         const store = useSessionStore.getState()
-        // Find all sessions with this cwd and update them
+        // Find all sessions working in this directory (worktree, else cwd) and update them
         for (const [routingId, session] of Object.entries(store.sessions)) {
-          if (session.cwd === cwd) {
+          if (sessionWorkdir(session) === cwd) {
             store.setGitStatus(routingId, status)
           }
         }

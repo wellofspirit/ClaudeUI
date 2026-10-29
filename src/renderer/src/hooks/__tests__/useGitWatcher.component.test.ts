@@ -110,6 +110,35 @@ describe('useGitWatcher', () => {
     expect(stated()).toContainEqual(['/some/project'])
   })
 
+  it('states the WORKTREE path for a session whose worktree differs from its cwd', async () => {
+    useSessionStore.getState().createNewSession('session-1', '/repo')
+    useSessionStore.setState((s) => ({
+      sessions: {
+        ...s.sessions,
+        'session-1': {
+          ...s.sessions['session-1'],
+          isGitRepo: true,
+          worktreeInfo: {
+            worktreePath: '/repo/.claude/worktrees/wt',
+            worktreeBranch: 'wt',
+            worktreeName: 'wt',
+            originalCwd: '/repo',
+            gitRoot: '/repo',
+            originalHeadCommit: '',
+            createdAt: 0
+          }
+        }
+      }
+    }))
+
+    renderHook(() => useGitWatcher())
+    await flush()
+
+    expect(gitCheckRepo).toHaveBeenCalledWith('/repo/.claude/worktrees/wt')
+    expect(gitCheckRepo).not.toHaveBeenCalledWith('/repo')
+    expect(stated().at(-1)).toEqual(['/repo/.claude/worktrees/wt'])
+  })
+
   it('switching sessions REPLACES the set in one call — no stop verb', async () => {
     useSessionStore.getState().createNewSession('session-1', '/repo-a')
     useSessionStore.getState().setIsGitRepo('session-1', true)

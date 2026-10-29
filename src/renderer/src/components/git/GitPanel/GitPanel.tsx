@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import { GitPanelView } from './View'
 
 interface Props {
@@ -8,7 +9,7 @@ interface Props {
 
 export function GitPanel({ style }: Props): React.JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const cwd = useActiveSession((s) => s.cwd)
+  const cwd = useActiveSession(sessionWorkdir)
   const gitStatus = useActiveSession((s) => s.gitStatus)
   const gitPanelLayout = useSessionStore((s) => s.settings.gitPanelLayout)
   const closeGitPanel = useSessionStore((s) => s.closeGitPanel)

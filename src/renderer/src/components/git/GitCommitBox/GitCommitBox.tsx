@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import { GitCommitBoxView } from './View'
 
 interface Props {
@@ -14,7 +15,7 @@ interface Props {
 }
 
 export function GitCommitBox({ autoSelectNext = true }: Props = {}): React.JSX.Element {
-  const cwd = useActiveSession((s) => s.cwd)
+  const cwd = useActiveSession(sessionWorkdir)
   const gitCommitMessage = useActiveSession((s) => s.gitCommitMessage)
   const gitStatus = useActiveSession((s) => s.gitStatus)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
