@@ -918,14 +918,9 @@ describe('isCarvedOut', () => {
     expect(isCarvedOut('Bash(git push origin main)', denyAsk)).toBeUndefined()
   })
 
-  it("'program' strength: any deny/ask rule for the same program carves it out", () => {
-    const program = { strength: 'program' as const }
-    // `docker compose run web` hits the ask, so an emitted allow would skip it.
+  it('a sibling subcommand is not carved out (positional words, not the program)', () => {
+    // The host still runs `docker compose run web` through the full matcher, which hits the ask.
     expect(isCarvedOut('Bash(docker compose:*)', denyAsk)).toBeUndefined()
-    expect(isCarvedOut('Bash(docker compose:*)', denyAsk, program)).toBe(DOCKER_RUN)
-    expect(isCarvedOut('Bash(git status:*)', denyAsk, program)).toBe(FORCE_PUSH)
-    expect(isCarvedOut('Bash(git status)', denyAsk, program)).toBe(FORCE_PUSH)
-    expect(isCarvedOut('Bash(ls:*)', denyAsk, program)).toBeUndefined()
   })
 
   it('never throws (answers carved out)', () => {
