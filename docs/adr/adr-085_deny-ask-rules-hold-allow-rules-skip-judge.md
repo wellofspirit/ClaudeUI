@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-09-30). Built on branch `harnesses` in the 3.6 line, five slices (S1–S5),
 plus a follow-up that keeps opencode's `DeniedError` rule dump out of the model's context (§3 "No
 server-side rule dump").
+**Amended 2026-10-28:** the Codex engine was removed (ADR-066); the rules below now hold on claude, opencode and pi, and every Codex passage is historical.
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-23: a dispatch target's deny/ask rules are the union of the dispatcher's and the target's directories; targets still get no allow rules or additional directories in any ruleset)
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-24 amendment: a target's additional directories, plus the dispatcher's directory when it runs elsewhere, are real scope on every engine; allow rules stay excluded)
 **Amended by:** [ADR-110](adr-110_pi-path-containment-and-judge-off.md) §7a (2026-10-25: on pi, with a path scope, an edit of an agent-control path asks before the allow tier, so a user allow rule no longer allows it; the ladder reads deny → plan → hosted → ask → human-only → session allow → sensitive-edit ask → allow → mode base)
@@ -222,12 +223,12 @@ Bash(git push --force:*)`, where before they ran with no card. Glob-word rules k
 - **Plan wording.** opencode and Codex have no `exit_plan` tool, so their plan refusal reads "Plan mode
   is read-only — present the plan and ask the user to leave plan mode to proceed"; pi keeps
   `exit_plan`.
-- **Codex (H4)** — retired 2026-10-28 with the Codex engine (ADR-066); kept as history. `rules-sync.ts` did not emit an execpolicy `allow` for a Bash allow rule that any
+- **Codex (H4).** `rules-sync.ts` does not emit an execpolicy `allow` for a Bash allow rule that any
   Bash deny/ask rule carves into (program strength — an emitted `allow` never reaches the matcher
-  again), nor for one that could launch other programs while any Bash deny/ask existed; Codex then
-  escalated those and `gate()` decided through pi's ladder (in auto mode Codex's guardian). Ask rules
-  were not compiled (ruling 6); `CodexRulesStatus` and the file header listed the withheld rules;
-  `forbidden` was prefix-only.
+  again), nor for one that can launch other programs while any Bash deny/ask exists; Codex then
+  escalates those and `gate()` decides through pi's ladder (in auto mode Codex's guardian). Ask rules
+  are still not compiled (ruling 6). `CodexRulesStatus` and the file header list the withheld rules.
+  `forbidden` remains prefix-only.
 
 ### 3b. Plan mode wins (ruling 7)
 
