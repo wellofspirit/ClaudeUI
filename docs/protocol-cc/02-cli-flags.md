@@ -448,6 +448,8 @@ Pre-parse argv scan at char `12940601` (`Bt1`) intercepts `--handle-uri`, `-p`, 
 - **Effect:** Additional settings. Inline JSON is persisted to a content-hashed temp file via `MNH("claude-settings", ".json", {contentHash: $})`; file path is resolved against `k8()` and read. Lazily parsed during `preAction`.
 - **Anchors:** parseOpt `12950310`, handler `ut1` `12938600`.
 
+ClaudeUI passes this **flag settings** source (never the user's `~/.claude/settings.json`, which the terminal `claude` shares) two keys of its own, from `engines/claude.json#claudeConfig` (`claudeBehaviorSettings`, `src/core/sdk/args.ts`): `idleCompaction` — cli.js reads it with a default of true and summarises a 200K+ token conversation left idle on the `claude-desktop` entrypoint; ClaudeUI's default is **false** — and `enabledPlugins["cc-plugin-privacy@builtin"]` — the bundled email-address privacy plugin (`defaultEnabled:!0`, `enabledFromTrustedSettingsOnly:!0`, so only user/flag/policy settings can turn it off); ClaudeUI's default is **true**. Every session spawn carries them beside its `permissions` rules (`claude-session.ts`), as does the `--settings` JSON built for a cross-engine dispatch target (`cross-engine-dispatcher.ts`).
+
 ### `--setting-sources <sources>`
 
 - **Type:** string (comma list of `user`, `project`, `local`)

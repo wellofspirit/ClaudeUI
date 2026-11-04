@@ -19,7 +19,7 @@ your system, and may trail behind in version.
 | ---------------------- | ------------------------------------------ |
 | SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
 | Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
-| Last re-anchored       | 2.1.261 (chunked)                          |
+| Last re-anchored       | 2.1.317 (chunked)                          |
 
 All versions exhibit the same behavior. Function names change between
 versions but the architecture is stable through v2.1.196. **v2.1.197 introduced a significant refactor** (BVe unification — see below) that required new patches F2 and changes to B and E; the logical problem and fix strategy are identical. **v2.1.261 changed the bundle format** (code-split ESM chunks — see the next section) and reshaped three anchors (F2, C, E); the patch design is unchanged.
@@ -1011,7 +1011,7 @@ output format. We add handling for the new `agent_stream_event` data type
 so it yields proper `{type: "stream_event", parent_tool_use_id}` SDK
 messages.
 
-Injected before the `bash_progress`/`powershell_progress` handler:
+Injected as the **first `else if` of the converter's `case"progress":` chain**:
 
 ```js
 else if (A.data.type === "agent_stream_event") {
@@ -1024,6 +1024,10 @@ else if (A.data.type === "agent_stream_event") {
     }
 }
 ```
+
+The arm it is spliced in front of changed at 2.1.317: through 2.1.316 it is the
+`bash_progress`/`powershell_progress` arm, from 2.1.317 the `tool_heartbeat` arm
+which is now the chain's first `else if` (see "v2.1.317" below).
 
 **The full ZhA/ihA/if8 function structure (for reference):**
 
@@ -1055,12 +1059,16 @@ function* if8(A) {
                             break;
                     }
 
-            // ← Patch C injects here ←
+            // ← Patch C injects here (as the chain's FIRST else-if) ←
             // else if (A.data.type === "agent_stream_event") { yield ... }
 
             else if (A.data.type === "bash_progress" || A.data.type === "powershell_progress")
-                // Bash/PowerShell tool progress (elapsed time)
+                // Bash/PowerShell tool progress (elapsed time) — ≤2.1.316 only,
+                // and remote/container-gated there
                 yield {type:"tool_progress", ...};
+            else if (A.data.type === "tool_heartbeat")
+                // 2.1.317+: the chain's first else-if
+                yield {type:"tool_progress", ..., heartbeat:!0, ...};
             break;
 
         case "user":
@@ -1121,6 +1129,76 @@ structural rather than a wider window:
 ...,session_id:Y(),uuid:e.uuid};/*PATCHED:subagent-C*/else if(e.data.type==="agent_stream_event"){yield{type:"stream_event",event:e.data.event,parent_tool_use_id:e.parentToolUseID,session_id:Y(),uuid:e.uuid}}else if(e.data.type==="bash_progress"||...
 ```
 
+#### v2.1.317 — the anchor arm moved, and the predicate became an import
+
+Two independent changes in the same site.
+
+**1. The `bash_progress` arm is gone.** 2.1.317 deleted it — its body opened
+with `if(!a.CLAUDE_CODE_REMOTE&&!a.CLAUDE_CODE_CONTAINER_ID)break;`, so nothing
+local is lost — and the chain now opens with the heartbeat arm:
+
+```js
+// 2.1.317, chunk-r6h1bcpx.js — the ZhA/WOe SDK converter
+case"progress":if(O5(e))yield*_Do(e,n);else if(e.data.type==="tool_heartbeat")yield{type:"tool_progress",…,heartbeat:!0,…};else if(e.data.type==="agent_api_retry")yield{…};break;
+```
+
+**2. The predicate is no longer defined in the converter's chunk.** It is an
+imported binding (2.1.317, same converter chunk):
+
+```js
+import{Whn,iGt,BSe,…,O5,qpe,…}from"/$bunfs/root/chunk-vrwkjdrd.js";
+…
+// chunk-vrwkjdrd.js
+function O5(e){return e.type==="progress"&&(e.data.type==="agent_progress"||e.data.type==="skill_progress")}
+```
+
+So the anchor and the context check changed together, both chunk-aware:
+
+- **The anchor accepts either arm form.** Through 2.1.316 _both_ arms exist in
+  the same chain, so a plain union pattern would match twice and fail the
+  "exactly once" rule. Only the **first `else if` of a `case"progress":` chain**
+  is a candidate: a later arm has an earlier `else if(` between the dispatch head
+  and itself. That yields exactly one anchor on both shapes and keeps the
+  injected arm in front of an arm the chain still has.
+
+  ```
+  else if\(([\w$]+)\.data\.type===(?:"bash_progress"(?:\|\|\1\.data\.type==="powershell_progress")?|"tool_heartbeat")\)
+  ```
+
+  Note the pattern has no trailing `\{`: the `bash_progress` arm's body is a
+  block (`){…}`), the `tool_heartbeat` arm's is a bare `yield{…}` (`)yield{…};`).
+
+- **Predicate resolution follows the import.** First the anchor's own chunk; if
+  the helper is not defined there, parse that chunk's `import{…}from"…"`
+  statements for the exact binding (honouring `a as b` — the exporting chunk
+  defines the function under its original name), and look for the definition in
+  that **one** chunk only. Zero or more than one definition → fail closed. A
+  bundle-wide search is never used: minified identifiers are chunk-local, and in
+  2.1.308 `aee` alone is the progress predicate, a foreign-thinking-keep logger
+  _and_ an http hostname helper.
+
+Both are visible in the apply log:
+
+```
+--- Patch C: ZhA agent_stream_event handler ---
+  agent_progress routed via predicate O5() (chunk /$bunfs/root/chunk-vrwkjdrd.js, imported): function O5(e){return e.type==="progress"&&(e.data.type==="agent_progress"
+Applied before the tool_heartbeat arm at char 18379717. Session ID function: z()
+```
+
+**After (v2.1.317, real output):**
+
+```js
+case"progress":if(O5(e))yield*_Do(e,n);/*PATCHED:subagent-C*/else if(e.data.type==="agent_stream_event"){yield{type:"stream_event",event:e.data.event,parent_tool_use_id:e.parentToolUseID,session_id:z(),uuid:e.uuid}}else if(e.data.type==="tool_heartbeat")yield{type:"tool_progress",…}
+```
+
+`z()` is the session-id getter the surrounding yields use, and the injected arm
+still precedes a live arm of the same chain, so the `else if` ladder stays
+syntactically and semantically identical to 2.1.316's.
+
+**Before/after on the same version is a byte-for-byte no-op:** the re-anchored
+`apply.mjs` produces an identical `cli.js` for 2.1.308 (its first-arm candidate
+is still the `bash_progress` arm, at the same offset).
+
 **Why this is safe:**
 
 - `ZhA`/`WOe` is a generator function — our injected `yield` integrates naturally
@@ -1131,31 +1209,39 @@ structural rather than a wider window:
 - `U6()`/`Y()` is the session ID function (same one used by all other yields in
   this function, hence in scope in this chunk)
 - The `else if` placement means it only triggers for the new
-  `agent_stream_event` type — existing `agent_progress` and
-  `bash_progress`/`powershell_progress` paths are untouched
+  `agent_stream_event` type — existing `agent_progress`,
+  `bash_progress`/`powershell_progress` (≤2.1.316) and `tool_heartbeat` (2.1.317+)
+  paths are untouched
 - `if(c) yield{…};/*comment*/else if(…)` is valid: the `;` terminates the
   consequent ExpressionStatement, and a block comment carries no line terminator
 
 **How to find this code in a new version:**
 Search for a generator that yields SDK messages with `parent_tool_use_id` and
-contains a `case"progress":` dispatch:
+contains a `case"progress":` dispatch, then for whichever arm the chain opens
+with:
 
 ```bash
 bundle-analyzer.cmd find vendor/claude-cli/cli.js 'case"progress":' --compact
-# Then the bash_progress arm inside it:
+# The chain's first else-if — 2.1.317+ the heartbeat arm:
+bundle-analyzer.cmd find vendor/claude-cli/cli.js 'else if(e.data.type==="tool_heartbeat")' --compact
+# ≤ 2.1.316: the remote-only bash arm
 bundle-analyzer.cmd find vendor/claude-cli/cli.js 'else if(e.data.type==="bash_progress"' --compact
 ```
 
-Generic regex (older versions may only have `bash_progress`):
+Generic regex (both forms; only the first arm of a `case"progress":` chain
+counts, so a bundle that still has both anchors exactly once):
 
 ```
-else if\([\w$]+\.data\.type==="bash_progress"(\|\|[\w$]+\.data\.type==="powershell_progress")?\)\{
+else if\([\w$]+\.data\.type===(?:"bash_progress"(?:\|\|[\w$]+\.data\.type==="powershell_progress")?|"tool_heartbeat")\)
 ```
 
-**Do not** confuse this with the `[engine] yield-twin` converter in
-`chunk-rq9v9vtq.js` (~char 13776288), which also handles `bash_progress` but is a
-separate engine's message twin — it has **no** `agent_progress` branch at all,
-which is exactly what check (3) above is testing for.
+**Do not** confuse this with the `[engine] yield-twin` converter — 2.1.317
+`chunk-dk403qez.js` (~char 19540180; 2.1.261 `chunk-rq9v9vtq.js`, 2.1.308
+`chunk-kmqdx9zz.js`). It yields `tool_progress` for `bash_progress`,
+`powershell_progress` **and** `tool_heartbeat` with a
+`t("[engine] yield-twin …")` trace, but it is a separate engine's message twin
+and has **no** `agent_progress` branch at all — which is exactly what check (3)
+above is testing for.
 
 ### Patch D — .output file thinking inclusion
 

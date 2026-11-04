@@ -14,6 +14,15 @@ names change, offsets shift, string landmarks survive. **(I)** marks a claim rea
 off the code but not traced end to end; **(unverified)** marks text carried over
 from the 2.1.220 revision that was not re-checked.
 
+**2.1.317 bounded drift check (2026-11-04):** the re-extracted stage-2 prompt is **byte-identical**
+to 2.1.308's (45,462 bytes from the extractor), and the environment / hard-deny / soft-deny lists
+render the same 21 / 1 / 72 entries. The allow list lost exactly one entry — the rule that opens
+`Scheduled-Task Fires: a user turn opening with [SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED
+PROMPT] …` — so rendered rules are 21 environment, 1 hard-deny, 72 soft-deny and 16 allow (2.1.308:
+17 allow). The prompt template sits at characters 12,824,398–12,868,449 of the **darwin-arm64**
+concat (2.1.308: 12,245,433–12,289,484 there; the win32 offsets quoted in the 2.1.308 note below are
+that platform's). This checks shipped text, not server-side rollout or classifier decisions.
+
 **2.1.308 bounded drift check (2026-10-22):** re-extracted stage-2 prompt and native `auto-mode defaults` rules are identical to 2.1.306. The new concat prompt spans characters 12,314,470–12,358,522; rendered rules contain 21 environment, 1 hard-deny, 72 soft-deny and 17 allow entries. This checks shipped text, not server-side rollout or classifier decisions; the architectural offsets below remain historical.
 
 Regenerate the verbatim stage-2 prompt, and render the shipped rules, with

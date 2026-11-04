@@ -345,10 +345,13 @@ const DARWIN_NAMESPACE_ROOTS: ReadonlySet<string> = new Set([
  * mount of whatever host the model named; Linux autofs as well as macOS), `/Network/Servers/…` is
  * macOS's directory-service browse surface, and `/.vol`, `/.file`, `/.nofollow`, `/.resolve` are
  * paths the macOS kernel redirects (by volume id / file id) and that can land on a network mount.
- * Judged from the SPELLING alone, so the gate never touches them. Mirrors Claude Code's checks
- * (cli.js 2.1.308): `vze`'s live ones are `Mw` (bare `/net`) and `Rb` (the `/.vol` family), and `Iy`
- * (called via `Xv` on each link target inside Claude's link walk) adds `Pqe` (`/net/<host>`,
- * `/Network/Servers/<host>`) and `iD` (`/Network`). Claude applies `/Network` and the `/.vol` family on
+ * Judged from the SPELLING alone, so the gate never touches them. Mirrors Claude Code's checks in the
+ * path-safety chunk (cli.js 2.1.317; the behaviour is byte-identical to 2.1.308, only the minified
+ * names moved): `tv` is the bare `/net` test (2.1.308 `Mw`), `J_` the `/.vol`/`.file`/`.nofollow`/
+ * `.resolve` family (2.1.308 `RS`), `nN`/`rt` `/Network` (2.1.308 `dH`/`Mt`), the first-component
+ * scan for `/net/<host>` and `/Network/Servers/<host>` is `nz` over the component test `T` (2.1.308
+ * `gse`/`N`), and `tN` (2.1.308 `WU`) is the remote-namespace gate Claude calls on every link target
+ * in its symlink walk. Claude applies `/Network` and the `/.vol` family on
  * every platform; limiting them to darwin here is a deliberate narrowing (on Linux they are
  * ordinary names). The FIRST component decides, case-insensitively (macOS volumes are
  * case-insensitive by default; on Linux the extra case folding only over-asks, which is the safe

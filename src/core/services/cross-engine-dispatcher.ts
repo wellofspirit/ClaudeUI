@@ -100,6 +100,7 @@ import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajecto
 import { STAGE2_TIMEOUT_MS, type JudgeTransport } from '../automode/classifier'
 import type { SessionJudgeOptions } from '../automode/session-judge'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
+import { claudeBehaviorSettings } from '../sdk/args'
 import { loadEngineConfig, loadSettings } from './ui-config'
 import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
@@ -518,11 +519,11 @@ export interface ClaudeQuerySpawnOpts {
   /** The harness session a RESUMED target continues (`--resume`); exclusive with `sessionId`. */
   resume?: string
   /**
-   * `--settings <json>` for the target (ADR-085 §3): `{ permissions: { deny,
-   * ask } }` when the user has any deny/ask rule, absent otherwise. It is
-   * cli.js's `flagSettings` source, independent of `settingSources: []`
-   * (`docs/protocol-cc/02-cli-flags.md` §2.6; `sdk/args.ts` emits
-   * `options.settings` as `--settings`).
+   * `--settings <json>` for the target: ClaudeUI's two behaviour switches
+   * (`claudeBehaviorSettings`, always) plus `permissions: { deny, ask }` when
+   * the user has any deny/ask rule (ADR-085 §3). It is cli.js's `flagSettings`
+   * source, independent of `settingSources: []` (`docs/protocol-cc/02-cli-
+   * flags.md` §2.6; `sdk/args.ts` emits `options.settings` as `--settings`).
    */
   settings?: Record<string, unknown>
   /**
@@ -7022,6 +7023,11 @@ export class CrossEngineDispatcher {
       ctx.callerRestriction
     )
     const addDirs = existingDirectories(additionalDirectories, 'CrossEngineDispatcher')
+    // The target is a cli.js of ours too, so it carries the Claude engine's two
+    // behaviour switches (`engines/claude.json#claudeConfig`, read per spawn):
+    // the same `--settings` object as the permission tiers below, never inside
+    // them.
+    const behavior = claudeBehaviorSettings(this.deps.loadEngineConfig('claude').claudeConfig)
     entry.query = await this.spawnClaudeQuery({
       cwd,
       model,
@@ -7031,7 +7037,10 @@ export class CrossEngineDispatcher {
       abortController: entry.abortController,
       prompt: entry.channel,
       ...ids,
-      ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {}),
+      settings: {
+        ...behavior,
+        ...(deny.length > 0 || ask.length > 0 ? { permissions: { deny, ask } } : {})
+      },
       // The target's scope as `--add-dir` (ADR-108 as amended): cli.js loads no settings here.
       ...(addDirs.length > 0 ? { additionalDirectories: addDirs } : {}),
       // The target's report channel (ADR-105 §3): a one-tool server of its own. It is in the

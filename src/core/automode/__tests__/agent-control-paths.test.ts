@@ -48,7 +48,7 @@ describe('isAgentControlPath — what matches', () => {
     expect(isAgentControlPath(p)).toBe(true)
   })
 
-  // cli.js 2.1.308 DANGEROUS_DIRECTORIES / DANGEROUS_FILES beyond the original list.
+  // cli.js 2.1.317 DANGEROUS_DIRECTORIES / DANGEROUS_FILES beyond the original list.
   it.each([
     '.idea/workspace.xml',
     '.cargo/config.toml',

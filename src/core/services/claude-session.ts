@@ -57,7 +57,8 @@ import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { unwatchAllSubagents } from './subagent-watcher'
-import { saveSlashCommands } from './ui-config'
+import { loadEngineConfig, saveSlashCommands } from './ui-config'
+import { claudeBehaviorSettings } from '../sdk/args'
 import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
 import { scanSkills } from './skill-scanner'
 import { logger } from './logger'
@@ -1058,7 +1059,12 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
               }
             : {}),
           settingSources: ['user', 'project', 'local'],
+          // `--settings` flag settings: the two cli.js behaviour switches the
+          // Claude engine's settings own (read fresh per spawn, so a change
+          // binds the next session start/respawn) beside the paths our own UI
+          // tools write, which stay allowed without a card.
           settings: {
+            ...claudeBehaviorSettings(loadEngineConfig('claude').claudeConfig),
             permissions: {
               allow: [`Edit(${this.cwd}/.claude/ui/**)`, `Write(${this.cwd}/.claude/ui/**)`]
             }

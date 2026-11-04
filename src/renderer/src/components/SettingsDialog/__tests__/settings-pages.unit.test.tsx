@@ -140,10 +140,11 @@ describe('PAGES structure', () => {
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
       harnesses: ['harnesses', 'updates'],
-      // The Anthropic endpoint FIRST: it only ever reaches cli.js (ADR-074 §9).
+      // 'session' first, as on opencode and pi: the harness's own behaviour.
+      // The Anthropic endpoint next: it only ever reaches cli.js (ADR-074 §9).
       // 'agent-colours' (ADR-094): one group on each harness page, after that page's own
       // settings groups (last on Claude, before 'raw' on opencode and pi).
-      claude: ['endpoint', 'model-mapping', 'sandbox', 'proxy', 'agent-colours'],
+      claude: ['session', 'endpoint', 'model-mapping', 'sandbox', 'proxy', 'agent-colours'],
       opencode: [
         'session',
         'tool-output',
@@ -432,6 +433,7 @@ describe('SECTION_TARGET', () => {
 describe('visibleGroups', () => {
   it('keeps every group when the engine has the capability', () => {
     expect(visibleGroups(pageOf('claude')).map((g) => g.id)).toEqual([
+      'session',
       'endpoint',
       'model-mapping',
       'sandbox',
@@ -444,12 +446,14 @@ describe('visibleGroups', () => {
     // The endpoint groups are ungated: every Claude build reads the env vars.
     const caps = { sandbox: false, proxy: false } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), caps).map((g) => g.id)).toEqual([
+      'session',
       'endpoint',
       'model-mapping',
       'agent-colours'
     ])
     const onlyProxy = { sandbox: false, proxy: true } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual([
+      'session',
       'endpoint',
       'model-mapping',
       'proxy',
