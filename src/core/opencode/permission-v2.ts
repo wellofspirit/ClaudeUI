@@ -273,6 +273,26 @@ export const SESSION_TOOLS_ASK_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_sessi
 export const SESSION_TOOLS_DENY_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_session_*`, 'deny')
 
 /**
+ * The two hosted worktree tools (`claudeui_enter_worktree` / `claudeui_exit_worktree`, worktree
+ * parity D7/D8). They move the session itself, so they are for a chat's root agent only.
+ *
+ * No allow rule: like Claude's `EnterWorktree(name)` they run without an ask in default and
+ * acceptEdits. No mode gate asks for an MCP tool (the agent's own `{*: allow}` baseline leaves
+ * it unasked, like `create_mockup`), and auto's `claudeui_*` allow covers them. A user deny or
+ * ask written for either tool therefore wins on its own.
+ */
+export const ENTER_WORKTREE_ACTION = `${CLAUDEUI_MCP_SERVER}_enter_worktree`
+export const EXIT_WORKTREE_ACTION = `${CLAUDEUI_MCP_SERVER}_exit_worktree`
+/**
+ * Hidden (whole-category deny) from plan mode, a subagent child and a dispatch target: plan mode
+ * must not change where the session works, and the others are not the chat's root agent.
+ */
+export const WORKTREE_TOOLS_DENY_RULES: readonly V2Rule[] = [
+  rule(ENTER_WORKTREE_ACTION, 'deny'),
+  rule(EXIT_WORKTREE_ACTION, 'deny')
+]
+
+/**
  * `hand_back` (ADR-105 §3) lives on the shared hosted server, so every session of the server is
  * offered it. Only a dispatch target is meant to have it: an interactive session and its
  * subagents get this whole-category deny (hidden from the model), a target's ruleset gets
@@ -443,14 +463,16 @@ export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule
  * Plan mode's server-side refusals, AFTER the user's rules so none of them
  * re-opens what plan mode closes: every edit (wholly denied → edit/write/patch
  * hidden), image generation (wholly denied → the paid tool is hidden, not
- * merely asked) and the mutating `general` subagent. Robust against a stale host
- * and against the shared saved-allow table, which an `ask` is not.
+ * merely asked), the mutating `general` subagent and the worktree tools (plan mode does not
+ * move the session). Robust against a stale host and against the shared saved-allow table,
+ * which an `ask` is not.
  */
 export function planEnforcement(): V2Rule[] {
   return [
     rule('subagent', 'deny', 'general'),
     rule('edit', 'deny'),
-    rule('experimental_image_generate', 'deny')
+    rule('experimental_image_generate', 'deny'),
+    ...WORKTREE_TOOLS_DENY_RULES
   ]
 }
 
@@ -494,6 +516,28 @@ export interface SessionRulesetInput {
    * leave out the deny every other session gets. Default false.
    */
   handBackTarget?: boolean
+  /**
+   * The transition ruleset of a worktree move (D5): the user's deny/ask rules compiled for the
+   * NEW base (`compileClaudeRulesV2(…, { cwd: newLocation, … })`, no allows). Merged into the
+   * user's own rules ({@link withTransition}), so the trailing asks and whole-category denies stay last.
+   */
+  transitionRules?: readonly V2Rule[]
+}
+
+/**
+ * The user's rules with a worktree move's transition rules (the user's deny/ask rules compiled for
+ * the NEW base) merged in. Order: the user's non-denies, the transition asks, the user's denies,
+ * the transition denies. A deny must outrank every ask (last match wins), so a broad new-base ask
+ * cannot override a narrow old-base deny. Without transition rules `effective` is returned as is.
+ */
+function withTransition(effective: V2Rule[], transition: readonly V2Rule[] = []): V2Rule[] {
+  if (transition.length === 0) return effective
+  return [
+    ...effective.filter((r) => r.effect !== 'deny'),
+    ...transition.filter((r) => r.effect === 'ask'),
+    ...effective.filter((r) => r.effect === 'deny'),
+    ...transition.filter((r) => r.effect === 'deny')
+  ]
 }
 
 /** The compiled session ruleset and what the host keeps beside it. */
@@ -539,7 +583,7 @@ export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset 
   // (permission-v2.test pins this for every mode).
   const rules = wireOrder([
     ...modeGates(input.mode, { autoMode, externalDirAllows: input.externalDirAllows }),
-    ...effective,
+    ...withTransition(effective, input.transitionRules),
     ...(input.mode === 'plan' ? planEnforcement() : []),
     EXECUTE_DENY_RULE,
     ...DIRECT_TOOL_DENY_RULES,

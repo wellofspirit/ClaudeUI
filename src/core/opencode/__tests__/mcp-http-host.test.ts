@@ -246,6 +246,8 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'create_mockup',
       'dispatch_agent',
+      'enter_worktree',
+      'exit_worktree',
       'render_mermaid',
       'show_mockup'
     ])

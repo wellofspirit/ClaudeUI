@@ -202,7 +202,10 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       ...(session.blockedCalls ? { blockedCalls: session.blockedCalls } : {}),
       emit: (channel, data) => session.emit(channel, data),
       addDispatchedCost: (engineId, modelId, costUsd) =>
-        session.addDispatchedCost(engineId, modelId, costUsd)
+        session.addDispatchedCost(engineId, modelId, costUsd),
+      // The worktree tools (worktree parity D7) act on the live opencode session itself.
+      ...(session.enterWorktree ? { enterWorktree: (input) => session.enterWorktree!(input) } : {}),
+      ...(session.exitWorktree ? { exitWorktree: () => session.exitWorktree!() } : {})
     }
   })
   opencodeServerManager.setDispatchAgent((req, ctx) => crossEngineDispatcher.dispatch(req, ctx))

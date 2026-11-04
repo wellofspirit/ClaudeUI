@@ -56,7 +56,7 @@ const WORKTREE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const WORKTREE_NAME_MAX = 100
 
 /** Absolute path of the managed worktrees directory for a given git root. */
-function getManagedWorktreesRoot(gitRoot: string): string {
+export function getManagedWorktreesRoot(gitRoot: string): string {
   return path.join(gitRoot, WORKTREES_DIR)
 }
 

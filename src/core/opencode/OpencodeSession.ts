@@ -42,7 +42,9 @@
  */
 import type { HostWindowHandle } from '../host'
 import { v4 as uuid } from 'uuid'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
+import * as path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { opencodeServerManager, OpencodePermissionGuardError } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
 import { OpencodeClient, type PermissionReply } from './OpencodeClient'
@@ -60,7 +62,12 @@ import { reconcileAfterReconnect } from './reconnect'
 import { convertOpencodeHistory, readOpencodeHistory } from './history'
 import { ShellOutputPoller } from './shell-output-poller'
 import { BaseSession } from '../providers/BaseSession'
-import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
+import type {
+  EngineSpawnOptions,
+  NonUserItem,
+  NonUserOutcome,
+  WorktreeToolResult
+} from '../providers/ISession'
 import { buildSessionMessageWrapper, wrapperSender } from '../../shared/session-message-wrapper'
 import { sessionMessageNote } from '../services/agent-note'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
@@ -84,7 +91,8 @@ import type {
   SkillInfo,
   ModelCostEntry,
   QueuedItem,
-  ToolReviewBlock
+  ToolReviewBlock,
+  WorktreeInfo
 } from '../../shared/types'
 import { opencodeModel } from '../../shared/types'
 import {
@@ -99,9 +107,15 @@ import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
 import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
-import { applySessionMoved } from '../services/worktree-detect'
-import { samePath } from '../services/worktree-root'
-import { managedWorktreeRepo } from '../services/worktree'
+import { applySessionMoved, vetDetectedWorktree } from '../services/worktree-detect'
+import { resolveRepoRoot, samePath } from '../services/worktree-root'
+import {
+  createWorktree,
+  getManagedWorktreesRoot,
+  managedWorktreeRepo,
+  validateWorktreeName
+} from '../services/worktree'
+import { generateWorktreeName } from '../../shared/worktree-start'
 import { isCreatedWorktree } from '../../shared/linked-worktree'
 import { emitEvent } from '../services/sync-host'
 import { authErrorTranscriptMessage } from '../services/api-error'
@@ -457,6 +471,20 @@ export class OpencodeSession extends BaseSession {
   private leases = new Map<string, ServerConnection>()
   /** The re-root a `session.moved` started, while it runs: asks wait for it. */
   private reroot: Promise<void> | null = null
+  /**
+   * The target of a move this session is making (enter/exit tool) that `session.moved` has not
+   * confirmed yet. While set, EVERY ruleset apply carries the transition rules for it (the user's
+   * deny/ask rules compiled for that base), so a mode switch or a settings refresh in the window
+   * does not drop them. Cleared on `session.moved`, on a failure, on a resume and on teardown.
+   */
+  private pendingMove: string | null = null
+  /** A tool call has claimed the move before its target is known (parallel calls must not both move). */
+  private moveClaimed = false
+
+  private clearMove(): void {
+    this.pendingMove = null
+    this.moveClaimed = false
+  }
   /** Resume has just read the server's location: the first catch-up need not read it again. */
   private locationReadAtResume = false
 
@@ -1024,6 +1052,7 @@ export class OpencodeSession extends BaseSession {
    * once while idle. Throws when the lease or the move fails (fail closed).
    */
   private async adoptResumedLocation(info: Session_Info): Promise<void> {
+    this.clearMove()
     const dir = info.location?.directory
     const client = this.client
     if (!dir || samePath(dir, this.location) || !client) return
@@ -1554,6 +1583,7 @@ export class OpencodeSession extends BaseSession {
    */
   private onMoved(directory: string): void {
     this.location = directory
+    this.clearMove()
     this.recordMoved(directory)
     this.resetLocationCaches()
     const run = this.applyChain.then(() => this.rerootNow(directory))
@@ -1614,6 +1644,215 @@ export class OpencodeSession extends BaseSession {
     if (this._cancelled || this.conn !== conn) return
     if (!this.isProcessing) this.send('session:error', reason)
     this.markDisconnected(reason)
+  }
+
+  // ── The worktree tools (D5, D7) ────────────────────────────────────────────
+
+  private refused(text: string): WorktreeToolResult {
+    return { text: `Refused: ${text}`, isError: true }
+  }
+
+  /** `claudeui_enter_worktree`: create (or reuse) a managed worktree and move the session into it. */
+  async enterWorktree(input: { name?: string; path?: string }): Promise<WorktreeToolResult> {
+    const state = this.worktreeToolState('enter_worktree')
+    if (state) return state
+    if (input.name !== undefined && input.path !== undefined)
+      return this.refused('pass at most one of name and path.')
+    const location = this.location
+    // Set before the first await: a parallel call in the same step must not move twice.
+    this.moveClaimed = true
+    let created: { path: string; branch: string } | null = null
+    try {
+      let target: string
+      let branch: string
+      if (input.path !== undefined) {
+        const vetted = this.vetEnterPath(input.path, location)
+        if (typeof vetted === 'string') {
+          this.clearMove()
+          return this.refused(vetted)
+        }
+        if (samePath(vetted.worktreePath, location)) {
+          this.clearMove()
+          return this.refused(`the session is already there (${location}).`)
+        }
+        target = vetted.worktreePath
+        branch = vetted.worktreeBranch
+      } else {
+        if (managedWorktreeRepo(location)) {
+          this.clearMove()
+          return this.refused(
+            `the session is already in a worktree (${location}); leave it first, or pass the path of an existing one.`
+          )
+        }
+        const name =
+          input.name?.trim() || `${generateWorktreeName()}-${randomBytes(2).toString('hex')}`
+        try {
+          validateWorktreeName(name)
+        } catch (err) {
+          this.clearMove()
+          return this.refused(errText(err))
+        }
+        const info = await createWorktree(location, name, { base: 'default' })
+        target = info.worktreePath
+        branch = info.worktreeBranch
+        created = { path: target, branch }
+      }
+      await this.relocate(target)
+      const after = `The session moves into it after this step; tool calls later in this same response still run in ${location}. Use claudeui_exit_worktree to leave it.`
+      return {
+        text: created
+          ? `Created worktree at ${target} on branch ${branch}. ${after}`
+          : `Entering existing worktree at ${target}${branch ? ` on branch ${branch}` : ''}. ${after}`
+      }
+    } catch (err) {
+      this.clearMove()
+      return {
+        text: `Could not enter the worktree: ${errText(err)}${created ? ` The worktree ${created.path} (branch ${created.branch}) was created and left in place.` : ''}`,
+        isError: true
+      }
+    }
+  }
+
+  /** `claudeui_exit_worktree`: back to the directory this session entered the worktree from (keep only). */
+  async exitWorktree(): Promise<WorktreeToolResult> {
+    const state = this.worktreeToolState('exit_worktree')
+    if (state) return state
+    const location = this.location
+    let info: WorktreeInfo | undefined
+    try {
+      info = loadSessionConfig().worktreeInfoMap?.[this.routingId]
+    } catch {
+      info = undefined
+    }
+    if (
+      !info ||
+      isCreatedWorktree(info) ||
+      !samePath(info.worktreePath, location) ||
+      samePath(location, this.cwd) ||
+      !info.originalCwd
+    )
+      return {
+        text: 'No-op: there is no worktree this session entered to exit. Only a worktree entered with claudeui_enter_worktree in this session can be exited; a session started in a worktree stays there.',
+        isError: true
+      }
+    const target = info.originalCwd
+    if (!existsSync(target))
+      return this.refused(`${target}, where this session entered the worktree from, is gone.`)
+    this.moveClaimed = true
+    try {
+      await this.relocate(target)
+    } catch (err) {
+      this.clearMove()
+      return { text: `Could not leave the worktree: ${errText(err)}`, isError: true }
+    }
+    return {
+      text: `Leaving the worktree (kept on disk at ${info.worktreePath}${info.worktreeBranch ? `, branch ${info.worktreeBranch}` : ''}). The session moves back to ${target} after this step.`
+    }
+  }
+
+  /** Refusals both tools share; null = go on. */
+  private worktreeToolState(tool: string): WorktreeToolResult | null {
+    if (this.permissionMode === 'plan')
+      return this.refused(`${tool} is not available in plan mode.`)
+    if (this.reroot) return this.refused('the session is still moving; try again after this step.')
+    if (this.pendingMove || this.moveClaimed)
+      return this.refused('a move of this session is still pending; wait for it to apply.')
+    if (!this.client || !this.openSessionId || !this.conn)
+      return this.refused('the session is not connected to opencode.')
+    return null
+  }
+
+  /**
+   * A `path` is entered only when it is a managed worktree (`<repo>/.claude/worktrees/<n>`) of the
+   * session's own repository: lexically in the managed root, its real path directly under the
+   * managed root's real path (a symlink inside the root cannot lead out of it), and the git
+   * linkage vets (`vetDetectedWorktree`).
+   */
+  private vetEnterPath(
+    input: string,
+    location: string
+  ): { worktreePath: string; worktreeBranch: string } | string {
+    const repo = resolveRepoRoot(location)
+    if (!repo) return `${location} is not inside a git repository.`
+    const root = getManagedWorktreesRoot(repo)
+    const given = path.resolve(location, input)
+    const givenRepo = managedWorktreeRepo(given)
+    if (!givenRepo || !samePath(givenRepo, repo)) return `${input} is not a worktree under ${root}.`
+    let real: string
+    let realRoot: string
+    try {
+      real = realpathSync(given)
+      realRoot = realpathSync(root)
+    } catch {
+      return `${input} does not exist.`
+    }
+    // Both are real paths, so `dirname(real)` is the directory the worktree is actually in.
+    if (!samePath(path.dirname(real), realRoot)) return `${input} resolves outside ${root}.`
+    const vetted = vetDetectedWorktree(real, this.cwd)
+    if (typeof vetted === 'string') return vetted
+    return { worktreePath: vetted.worktreePath, worktreeBranch: vetted.worktreeBranch }
+  }
+
+  /**
+   * The move's host side, in order: lease the target on this server (fails closed), PATCH the
+   * ruleset with the transition rules for it (`pendingMove` makes every apply carry them), post
+   * the move. A failure gives the lease back (when this call took it) and re-applies the ordinary
+   * ruleset: a half-done move must not leave the transition rules behind.
+   */
+  private async relocate(target: string): Promise<void> {
+    const client = this.client
+    const sessionId = this.openSessionId
+    if (!client || !sessionId) throw new Error('opencode is not connected')
+    const leasedHere = !this.leases.has(target)
+    try {
+      await this.leaseLocation(target)
+      this.pendingMove = target
+      await this.applyPermissionMode()
+      // An apply that found no session returns quietly: never post the move without the transition.
+      if (this.client !== client || this.openSessionId !== sessionId)
+        throw new Error('the session changed while the transition permissions were applied')
+      await client.moveSession(sessionId, target, 'steer')
+    } catch (err) {
+      this.clearMove()
+      const lease = this.leases.get(target)
+      if (leasedHere && lease && !samePath(target, this.location)) {
+        this.leases.delete(target)
+        opencodeServerManager.releaseIfCurrent(target, lease)
+      }
+      await this.applyPermissionMode().catch((reapplyErr: unknown) =>
+        logger.warn('OpencodeSession', `re-applying the ruleset failed: ${errText(reapplyErr)}`)
+      )
+      throw err
+    }
+  }
+
+  /**
+   * D5. Between the move applying and the re-root's PATCH, the ruleset built for the OLD
+   * location governs the NEW one, where an absolute deny can compile to a pattern that misses.
+   * So while a move is pending the ruleset also carries the user's deny/ask rules compiled for the
+   * new base (no allows: nothing widens). `session.moved`'s re-root replaces it.
+   */
+  private async transitionRulesFor(newLocation: string): Promise<V2Rule[]> {
+    // `resolveMcpServers` may answer with the old location's cached list: acceptable, it only
+    // decides how an `mcp__server` rule is spelled, and denies/asks are emitted regardless.
+    const [mcpServers, newWorktree] = await Promise.all([
+      this.resolveMcpServers(newLocation),
+      this.worktreeRootAt(newLocation)
+    ])
+    return compileClaudeRulesV2(
+      { ...this.mergedUserPermissions(newLocation), allow: [], additionalDirectories: [] },
+      { mcpServers, cwd: newLocation, worktree: newWorktree ?? newLocation }
+    ).filter((r) => r.effect !== 'allow')
+  }
+
+  /** The git worktree root of another location (not cached); undefined = unknown. */
+  private async worktreeRootAt(location: string): Promise<string | undefined> {
+    try {
+      return (await locationWorktree(this.locationClient(location))) ?? undefined
+    } catch (err) {
+      logger.debug('OpencodeSession', `GET /api/location failed: ${errText(err)}`)
+      return undefined
+    }
   }
 
   /**
@@ -2011,6 +2250,7 @@ export class OpencodeSession extends BaseSession {
     this.shellPoller.stopAll()
     this.bashStreamGate.cancelAll()
     this.applied = null
+    this.clearMove()
     crossEngineDispatcher.disposeFor(this.routingId)
     this.unsubscribeServerExit?.()
     this.unsubscribeServerExit = null
@@ -2041,6 +2281,7 @@ export class OpencodeSession extends BaseSession {
    * server is gone: just release.
    */
   private endLease(conn: ServerConnection, client: OpencodeClient | null): void {
+    this.clearMove()
     // Every held lease goes back (D2); the set is taken now, the release may wait.
     const held = this.leases.size > 0 ? [...this.leases] : [[conn.directory, conn] as const]
     this.leases.clear()
@@ -2381,6 +2622,9 @@ export class OpencodeSession extends BaseSession {
     location: string
   ): Promise<ReturnType<typeof buildSessionRuleset>> {
     const autoMode = this.isAutoMode(mode)
+    const pending = this.pendingMove
+    const transitionRules =
+      pending && !samePath(pending, location) ? await this.transitionRulesFor(pending) : undefined
     const [mcpServers, worktree, externalDirAllows] = await Promise.all([
       this.resolveMcpServers(location),
       this.resolveWorktree(location),
@@ -2393,7 +2637,8 @@ export class OpencodeSession extends BaseSession {
       mcpServers,
       cwd: location,
       ...(worktree ? { worktree } : {}),
-      externalDirAllows
+      externalDirAllows,
+      ...(transitionRules ? { transitionRules } : {})
     })
   }
 

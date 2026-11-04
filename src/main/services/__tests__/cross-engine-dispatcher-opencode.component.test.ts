@@ -756,10 +756,15 @@ describe('opencode target — lifecycle', () => {
       // Without `requireHandBack` (the dispatcher's own suites) a target is an ordinary session of the server.
       { action: 'claudeui_hand_back', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
+      // The worktree tools move the chat's own session: hidden from a dispatch target.
+      { action: 'claudeui_enter_worktree', resource: '*', effect: 'deny' },
+      { action: 'claudeui_exit_worktree', resource: '*', effect: 'deny' },
       // The session tools are the root agent's: hidden from a dispatch target (slice 2).
       { action: 'claudeui_session_*', resource: '*', effect: 'deny' },
       { action: 'question', resource: '*', effect: 'deny' }
     ])
+    expect(v2ToolHidden(rules, 'claudeui_enter_worktree', 'linux')).toBe(true)
+    expect(v2ToolHidden(rules, 'claudeui_exit_worktree', 'linux')).toBe(true)
     // The session tools are hidden and denied for the target, the other hosted tools are not.
     expect(v2ToolHidden(rules, 'claudeui_session_start', 'linux')).toBe(true)
     expect(evaluateV2Call(rules, 'claudeui_session_message', ['*'], 'linux')).toBe('deny')

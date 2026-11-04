@@ -8,7 +8,7 @@
  * the host pre-check and the judge pipeline are REAL — only the wire and the
  * host's settings/auth/discovery are doubles.
  */
-import { readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { onHostPlatform } from '../../../test/helpers/host-platform'
@@ -53,6 +53,7 @@ const h = vi.hoisted(() => {
     acquire: vi.fn(),
     leaseSameServer: vi.fn(),
     releaseIfCurrent: vi.fn(),
+    createWorktree: vi.fn(),
     subscribeExit: vi.fn(() => () => {}),
     client: {} as Record<string, ReturnType<typeof vi.fn>>,
     permissions: { allow: [] as string[], deny: [] as string[], ask: [] as string[] },
@@ -92,6 +93,11 @@ vi.mock('../OpencodeServerManager', async (importOriginal) => ({
     releaseIfCurrent: h.releaseIfCurrent,
     subscribeExit: h.subscribeExit
   }
+}))
+
+vi.mock('../../services/worktree', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/worktree')>()),
+  createWorktree: (...args: unknown[]) => h.createWorktree(...args)
 }))
 
 vi.mock('../OpencodeClient', async (importOriginal) => ({
@@ -3167,6 +3173,427 @@ describe('location, leases and re-root (worktree parity S1)', () => {
       )
       // The stale worktree record is dropped.
       expect(h.sessionConfig.worktreeInfoMap).toEqual({})
+    })
+  })
+})
+
+describe('the worktree tools: claudeui_enter_worktree / claudeui_exit_worktree (worktree parity S2)', () => {
+  let base: string
+  let repo: string
+  let managed: string
+  let wt: string
+
+  beforeEach(() => {
+    forgetLinkedWorktrees()
+    h.sessionConfig = {}
+    base = makeScratchDir('claudeui-oc-wt-')
+    repo = fabricateRepo(join(base, 'repo'))
+    managed = join(repo, '.claude', 'worktrees')
+    wt = fabricateWorktree(repo, join(managed, 'feat'), 'feat')
+    // The real `createWorktree` runs git; the double answers with the worktree already fabricated.
+    h.createWorktree.mockReset().mockImplementation(async (_cwd: string, name: string) => ({
+      worktreePath: join(managed, name),
+      worktreeBranch: `worktree-${name}`,
+      worktreeName: name,
+      originalCwd: repo,
+      gitRoot: repo,
+      originalHeadCommit: 'abc',
+      createdAt: 1,
+      origin: 'created'
+    }))
+  })
+  afterEach(() => rmSync(base, { recursive: true, force: true, maxRetries: 5 }))
+
+  const sessionAt = (cwd: string, opts: Record<string, unknown> = {}): OpencodeSession => {
+    const win = {
+      webContents: { send: (channel: string, ...args: unknown[]) => sent.push([channel, ...args]) }
+    }
+    subscribeWindowToSync(win)
+    return new OpencodeSession('route-1', null, cwd, { model: 'openai/gpt-x', ...opts })
+  }
+  const moved = (directory: string): OpencodeFeedItem =>
+    event('session.moved', {
+      sessionID: SID,
+      location: { directory },
+      projectID: 'prj',
+      subpath: ''
+    })
+  const ownPatches = () =>
+    h.client.setSessionPermissions.mock.calls
+      .filter(([id]) => id === SID)
+      .map(([, rules]) => rules as V2Rule[])
+  /** `GET /api/location` answers for the directory the client was re-targeted to. */
+  const locationAware = (): void => {
+    h.client.forDirectory.mockImplementation((directory: string) => ({
+      ...h.client,
+      call: vi.fn(async (op: string) =>
+        op === 'location.get'
+          ? {
+              directory,
+              project: {
+                id: 'prj',
+                directory: directory.startsWith(managed) ? directory : repo,
+                canonical: repo
+              }
+            }
+          : (h.client.call as (op: string) => Promise<unknown>)(op)
+      )
+    }))
+  }
+  const text = (result: { text: string }): string => result.text
+
+  it('enter by name: create, then lease, then the transition PATCH, then the move (steer); the result names the path and branch', async () => {
+    // An absolute deny compiles differently per base, so the transition ruleset differs from the current one.
+    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    locationAware()
+    session = sessionAt(repo)
+    await startTurn()
+    const patchesBefore = ownPatches().length
+
+    const result = await session.enterWorktree({ name: 'feat2' })
+
+    const created = join(managed, 'feat2')
+    expect(result.isError).toBeUndefined()
+    expect(text(result)).toContain(`Created worktree at ${created} on branch worktree-feat2`)
+    expect(text(result)).toContain('claudeui_exit_worktree')
+    expect(h.createWorktree).toHaveBeenCalledWith(repo, 'feat2', { base: 'default' })
+    expect(h.leaseSameServer).toHaveBeenCalledWith(CONN, created)
+    expect(h.client.moveSession).toHaveBeenCalledWith(SID, created, 'steer')
+    const lastPatch = h.client.setSessionPermissions.mock.invocationCallOrder.at(-1)!
+    expect(ownPatches().length).toBe(patchesBefore + 1)
+    expect(h.createWorktree.mock.invocationCallOrder[0]).toBeLessThan(
+      h.leaseSameServer.mock.invocationCallOrder.at(-1)!
+    )
+    expect(h.leaseSameServer.mock.invocationCallOrder.at(-1)!).toBeLessThan(lastPatch)
+    expect(lastPatch).toBeLessThan(h.client.moveSession.mock.invocationCallOrder[0])
+  })
+
+  it('enter without arguments uses a generated name that passes validation', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    const result = await session.enterWorktree({})
+    expect(result.isError).toBeUndefined()
+    const name = h.createWorktree.mock.calls[0][1] as string
+    expect(name).toMatch(/^[a-z]+-[a-z]+-[0-9a-f]{4}$/)
+  })
+
+  it('enter by path into an existing managed worktree creates nothing', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    const result = await session.enterWorktree({ path: wt })
+    expect(result.isError).toBeUndefined()
+    expect(text(result)).toContain(`Entering existing worktree at ${wt}`)
+    expect(h.createWorktree).not.toHaveBeenCalled()
+    expect(h.client.moveSession).toHaveBeenCalledWith(SID, wt, 'steer')
+  })
+
+  it('exit: the transition PATCH carries the user deny for the NEW base (the main checkout) and no new allow', async () => {
+    // Absolute spelling: inside the worktree it compiles to a pattern that misses the main checkout.
+    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    locationAware()
+    session = sessionAt(repo)
+    await startTurn()
+    await session.enterWorktree({ path: wt })
+    h.feed.push(moved(wt))
+    await flush()
+    const inWorktree = ownPatches().at(-1)!
+    const secrets: V2Rule = { action: 'edit', resource: 'secrets/**', effect: 'deny' }
+    expect(inWorktree).not.toContainEqual(secrets)
+
+    const result = await session.exitWorktree()
+
+    expect(result.isError).toBeUndefined()
+    expect(text(result)).toContain(`kept on disk at ${wt}`)
+    expect(h.client.moveSession).toHaveBeenLastCalledWith(SID, repo, 'steer')
+    const transition = ownPatches().at(-1)!
+    expect(transition).toContainEqual(secrets)
+    // The old base's rules are all still there, and nothing was allowed that was not before.
+    for (const rule of inWorktree) expect(transition).toContainEqual(rule)
+    const allows = (rules: V2Rule[]) => rules.filter((x) => x.effect === 'allow')
+    expect(allows(transition)).toEqual(allows(inWorktree))
+  })
+
+  it('exit moves back to the recorded originalCwd (the spawn directory, not the repo root)', async () => {
+    const pkg = join(repo, 'pkg')
+    mkdirSync(pkg, { recursive: true })
+    session = sessionAt(pkg)
+    await startTurn()
+    await session.enterWorktree({ path: wt })
+    h.feed.push(moved(wt))
+    await flush()
+    expect(h.sessionConfig.worktreeInfoMap).toMatchObject({
+      'route-1': { worktreePath: wt, originalCwd: pkg, origin: 'detected' }
+    })
+
+    const result = await session.exitWorktree()
+
+    expect(result.isError).toBeUndefined()
+    expect(text(result)).toContain(`moves back to ${pkg}`)
+    expect(h.client.moveSession).toHaveBeenLastCalledWith(SID, pkg, 'steer')
+  })
+
+  it('refuses in plan mode, and without a connected session; nothing is created or moved', async () => {
+    session = sessionAt(repo, { permissionMode: 'plan' })
+    expect((await session.enterWorktree({ name: 'x' })).isError).toBe(true)
+    expect((await session.exitWorktree()).isError).toBe(true)
+    await startTurn()
+    const plan = await session.enterWorktree({ name: 'x' })
+    expect(plan.isError).toBe(true)
+    expect(text(plan)).toContain('plan mode')
+    expect(h.createWorktree).not.toHaveBeenCalled()
+    expect(h.client.moveSession).not.toHaveBeenCalled()
+  })
+
+  it('enter by path equal to the current location is refused as already there', async () => {
+    session = sessionAt(wt)
+    await startTurn()
+    const result = await session.enterWorktree({ path: wt })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('already there')
+    expect(h.client.moveSession).not.toHaveBeenCalled()
+  })
+
+  it('a mode switch between the transition PATCH and session.moved still carries the transition rules; session.moved drops them', async () => {
+    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    locationAware()
+    session = sessionAt(repo)
+    await startTurn()
+    await session.enterWorktree({ path: wt })
+    const secrets: V2Rule = { action: 'edit', resource: 'secrets/**', effect: 'deny' }
+    expect(ownPatches().at(-1)).toContainEqual(secrets)
+
+    await session.setPermissionMode('acceptEdits')
+    await flush()
+    const switched = ownPatches().at(-1)!
+    expect(switched).toContainEqual(secrets)
+    // It is the acceptEdits ruleset (edits ask only on agent-control paths), not a stale one.
+    expect(switched).not.toContainEqual({ action: 'edit', resource: '*', effect: 'ask' })
+
+    h.feed.push(moved(wt))
+    await flush()
+    expect(ownPatches().at(-1)).not.toContainEqual(secrets)
+  })
+
+  it('enter and exit are refused while a re-root is running', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    let grant!: () => void
+    h.leaseSameServer.mockImplementationOnce(
+      () => new Promise((resolve) => (grant = () => resolve({ ...CONN, directory: wt })))
+    )
+    h.feed.push(moved(wt))
+    await flush()
+    for (const result of [
+      await session.enterWorktree({ path: wt }),
+      await session.exitWorktree()
+    ]) {
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('still moving')
+    }
+    grant()
+    await flush()
+  })
+
+  it('exit text omits the branch of a detached worktree', async () => {
+    h.sessionConfig = {
+      worktreeInfoMap: {
+        'route-1': {
+          worktreePath: wt,
+          worktreeBranch: '',
+          worktreeName: 'feat',
+          originalCwd: repo,
+          gitRoot: repo,
+          originalHeadCommit: '',
+          createdAt: 1,
+          origin: 'detected'
+        }
+      }
+    }
+    session = sessionAt(repo)
+    await startTurn()
+    h.feed.push(moved(wt))
+    await flush()
+    h.sessionConfig = {
+      worktreeInfoMap: {
+        'route-1': {
+          ...(h.sessionConfig.worktreeInfoMap as Record<string, object>)['route-1'],
+          worktreeBranch: ''
+        }
+      }
+    }
+    const result = await session.exitWorktree()
+    expect(result.isError).toBeUndefined()
+    expect(text(result)).toContain(`kept on disk at ${wt}).`)
+  })
+
+  it('refuses both name and path', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    const result = await session.enterWorktree({ name: 'x', path: wt })
+    expect(result.isError).toBe(true)
+    expect(h.client.moveSession).not.toHaveBeenCalled()
+  })
+
+  it('a second call while the first move is pending is refused; session.moved clears it', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    expect((await session.enterWorktree({ path: wt })).isError).toBeUndefined()
+    const second = await session.enterWorktree({ path: wt })
+    expect(second.isError).toBe(true)
+    expect(text(second)).toContain('pending')
+    expect((await session.exitWorktree()).isError).toBe(true)
+    expect(h.client.moveSession).toHaveBeenCalledTimes(1)
+
+    h.feed.push(moved(wt))
+    await flush()
+    // Now the exit is judged on its merits (the worktree was entered): it moves.
+    const exit = await session.exitWorktree()
+    expect(exit.isError).toBeUndefined()
+    expect(h.client.moveSession).toHaveBeenCalledTimes(2)
+  })
+
+  it('name (or no argument) is refused while the location is already a managed worktree', async () => {
+    session = sessionAt(wt)
+    await startTurn()
+    for (const input of [{ name: 'more' }, {}]) {
+      const result = await session.enterWorktree(input)
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('already in a worktree')
+    }
+    expect(h.createWorktree).not.toHaveBeenCalled()
+    expect(h.client.moveSession).not.toHaveBeenCalled()
+  })
+
+  describe('a path that is not a managed worktree of this repository', () => {
+    const refusedPath = async (input: string): Promise<void> => {
+      const result = await session.enterWorktree({ path: input })
+      expect(result.isError, input).toBe(true)
+      expect(h.client.moveSession, input).not.toHaveBeenCalled()
+      expect(h.leaseSameServer, input).not.toHaveBeenCalled()
+    }
+
+    it('outside the managed root, missing, or the main checkout', async () => {
+      const elsewhere = fabricateWorktree(repo, join(base, 'elsewhere', 'wt'), 'elsewhere')
+      session = sessionAt(repo)
+      await startTurn()
+      await refusedPath(elsewhere)
+      await refusedPath(join(managed, 'nope'))
+      await refusedPath(repo)
+    })
+
+    it('a worktree of another repository placed under this root is refused by the git linkage', async () => {
+      const other = fabricateRepo(join(base, 'other'))
+      const foreign = fabricateWorktree(other, join(managed, 'foreign'), 'foreign')
+      session = sessionAt(repo)
+      await startTurn()
+      await refusedPath(foreign)
+    })
+
+    it('a symlink inside the root whose real path is elsewhere', async () => {
+      const elsewhere = fabricateWorktree(repo, join(base, 'elsewhere', 'wt'), 'elsewhere')
+      symlinkSync(elsewhere, join(managed, 'link'), 'dir')
+      session = sessionAt(repo)
+      await startTurn()
+      await refusedPath(join(managed, 'link'))
+    })
+
+    it('a managed root that is itself a symlink: a leaf escaping its real path is refused, a real one entered', async () => {
+      const repo2 = fabricateRepo(join(base, 'repo2'))
+      const realRoot = join(base, 'real-root')
+      mkdirSync(join(repo2, '.claude'), { recursive: true })
+      mkdirSync(realRoot, { recursive: true })
+      symlinkSync(realRoot, join(repo2, '.claude', 'worktrees'), 'dir')
+      const inside = fabricateWorktree(repo2, join(realRoot, 'ok'), 'ok')
+      const outside = fabricateWorktree(repo2, join(base, 'outside', 'wt'), 'outside')
+      symlinkSync(outside, join(realRoot, 'escape'), 'dir')
+
+      session = sessionAt(repo2)
+      await startTurn()
+      await refusedPath(join(repo2, '.claude', 'worktrees', 'escape'))
+      const ok = await session.enterWorktree({ path: join(repo2, '.claude', 'worktrees', 'ok') })
+      expect(ok.isError).toBeUndefined()
+      expect(h.client.moveSession).toHaveBeenCalledWith(SID, inside, 'steer')
+    })
+  })
+
+  it('a failed move POST rolls back: the lease is given back, the ordinary ruleset re-applied, pendingMove cleared; the created worktree is left in place', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    const normal = ownPatches().at(-1)!
+    h.client.moveSession.mockRejectedValueOnce(new Error('boom'))
+    h.releaseIfCurrent.mockClear()
+
+    const result = await session.enterWorktree({ name: 'rb' })
+
+    const created = join(managed, 'rb')
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('boom')
+    expect(text(result)).toContain('left in place')
+    expect(text(result)).toContain(created)
+    expect(h.releaseIfCurrent).toHaveBeenCalledWith(created, { ...CONN, directory: created })
+    // The transition ruleset was replaced by the ordinary one.
+    expect(ownPatches().at(-1)).toEqual(normal)
+    // pendingMove is clear: the next call goes through.
+    const retry = await session.enterWorktree({ path: wt })
+    expect(retry.isError).toBeUndefined()
+  })
+
+  it('a guard failure on the target fails closed: no PATCH of the transition, no move, the error says the worktree was left', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    const patches = ownPatches().length
+    h.leaseSameServer.mockRejectedValueOnce(new OpencodePermissionGuardError(managed, 'no guard'))
+
+    const result = await session.enterWorktree({ name: 'noguard' })
+
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('left in place')
+    expect(h.client.moveSession).not.toHaveBeenCalled()
+    expect(ownPatches().length).toBe(patches)
+    // And the next call is not stuck on a pending move.
+    expect((await session.enterWorktree({ path: wt })).isError).toBeUndefined()
+  })
+
+  describe('exit', () => {
+    const entry = (over: Record<string, unknown> = {}) => ({
+      worktreePath: wt,
+      worktreeBranch: 'worktree-feat',
+      worktreeName: 'feat',
+      originalCwd: repo,
+      gitRoot: repo,
+      originalHeadCommit: '',
+      createdAt: 1,
+      origin: 'detected',
+      ...over
+    })
+
+    it('is refused for a session started in a worktree (a created entry), and nothing moves', async () => {
+      h.sessionConfig = { worktreeInfoMap: { 'route-1': entry({ origin: 'created' }) } }
+      session = sessionAt(wt)
+      await startTurn()
+      const result = await session.exitWorktree()
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('no worktree this session entered')
+      expect(h.client.moveSession).not.toHaveBeenCalled()
+    })
+
+    it('is refused when nothing was entered', async () => {
+      session = sessionAt(repo)
+      await startTurn()
+      const result = await session.exitWorktree()
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('no worktree this session entered')
+      expect(h.client.moveSession).not.toHaveBeenCalled()
+    })
+
+    it('is refused when the recorded worktree is not where the session is', async () => {
+      h.sessionConfig = {
+        worktreeInfoMap: { 'route-1': entry({ worktreePath: join(managed, 'other') }) }
+      }
+      session = sessionAt(repo)
+      await startTurn()
+      expect((await session.exitWorktree()).isError).toBe(true)
+      expect(h.client.moveSession).not.toHaveBeenCalled()
     })
   })
 })

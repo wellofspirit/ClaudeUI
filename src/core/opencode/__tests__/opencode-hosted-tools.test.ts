@@ -63,7 +63,7 @@ describe('createOpencodeHostedToolsServer', () => {
     expect(server).toBeInstanceOf(McpServer)
   })
 
-  it('registers exactly 4 tools: render_mermaid, create_mockup, show_mockup, dispatch_agent', () => {
+  it('registers exactly 6 tools: render_mermaid, create_mockup, show_mockup, dispatch_agent, enter_worktree, exit_worktree', () => {
     const server = createOpencodeHostedToolsServer(tmp)
     // Access the internal tool registry via the server's _registeredTools map
     // (internal API, but necessary for unit verification without a full MCP session).
@@ -73,6 +73,8 @@ describe('createOpencodeHostedToolsServer', () => {
     expect(toolNames.sort()).toEqual([
       'create_mockup',
       'dispatch_agent',
+      'enter_worktree',
+      'exit_worktree',
       'render_mermaid',
       'show_mockup'
     ])

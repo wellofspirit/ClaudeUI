@@ -48,6 +48,12 @@ export interface NonUserItem {
  */
 export type NonUserOutcome = 'started' | 'queued' | 'unavailable'
 
+/** What a worktree tool answers: the text the model reads, an error when it was refused or failed. */
+export interface WorktreeToolResult {
+  text: string
+  isError?: boolean
+}
+
 /**
  * Engine-neutral session interface. All methods here are implemented by
  * every backend (Claude, opencode, etc.). Engine-specific capabilities
@@ -104,6 +110,14 @@ export interface ISession {
    * optional so a minimal test double need not carry it.
    */
   readonly blockedCalls?: BlockedCallLedger
+
+  /**
+   * The hosted `claudeui_enter_worktree` / `claudeui_exit_worktree` tools (opencode, worktree
+   * parity D7): move this session into a ClaudeUI worktree and back. Optional: only the opencode
+   * session implements them.
+   */
+  enterWorktree?(input: { name?: string; path?: string }): Promise<WorktreeToolResult>
+  exitWorktree?(): Promise<WorktreeToolResult>
 
   /**
    * Approve one auto-mode block after the fact (ADR-091 part 6): grant, route

@@ -24,7 +24,9 @@ import {
   compileClaudeRulesV2,
   DIRECT_TOOL_DENY_RULES,
   DISPATCH_ASK_RULE,
+  ENTER_WORKTREE_ACTION,
   EXECUTE_DENY_RULE,
+  EXIT_WORKTREE_ACTION,
   externalDirectoryGates,
   HAND_BACK_ALLOW_RULE,
   HAND_BACK_DENY_RULE,
@@ -35,6 +37,7 @@ import {
   THROWAWAY_RULESET,
   withoutAllowRulesV2,
   withoutMutatingAllowRulesV2,
+  WORKTREE_TOOLS_DENY_RULES,
   wireOrder,
   type SessionRulesetInput,
   type V2Rule
@@ -660,11 +663,155 @@ describe('buildSessionRuleset', () => {
     const { rules } = buildSessionRuleset(input({ mode: 'auto', autoMode: true }))
     const explore: V2Rule[] = [r('*', 'allow')]
     const child = childSessionRuleset(rules, explore, 'linux')
-    expect(child.at(-1)).toEqual(SESSION_TOOLS_DENY_RULE)
+    expect(child).toContainEqual(SESSION_TOOLS_DENY_RULE)
     expect(v2ToolHidden(child, 'claudeui_session_start', 'linux')).toBe(true)
     expect(evaluateV2Call(child, 'claudeui_session_message', ['*'], 'linux')).toBe('deny')
     // Its sibling hosted tools are not hidden with them.
     expect(v2ToolHidden(child, 'claudeui_render_mermaid', 'linux')).toBe(false)
+  })
+
+  describe('worktree tools (worktree parity D5, D8)', () => {
+    const TOOLS = [ENTER_WORKTREE_ACTION, EXIT_WORKTREE_ACTION]
+    const nonDeny = (rules: V2Rule[]) => rules.filter((rule) => rule.effect !== 'deny')
+    /** What a default `{*: allow}` agent baseline puts in front of the session rules. */
+    const withBaseline = (rules: V2Rule[]): V2Rule[] => [r('*', 'allow'), ...rules]
+
+    it.each([
+      ['default', false],
+      ['acceptEdits', false],
+      ['auto', true],
+      ['auto', false]
+    ] as const)('%s (classifier %s): neither tool asks or is hidden', (mode, autoMode) => {
+      const { rules } = buildSessionRuleset(input({ mode, autoMode }))
+      for (const tool of TOOLS) {
+        expect(evaluateV2Call(withBaseline(rules), tool, ['*'], 'linux'), tool).toBe('allow')
+        expect(v2ToolHidden(rules, tool, 'linux'), tool).toBe(false)
+      }
+    })
+
+    it('a user deny or ask written for either tool still wins', () => {
+      const { rules } = buildSessionRuleset(
+        input({
+          permissions: perms({
+            deny: ['mcp__claudeui__enter_worktree'],
+            ask: ['mcp__claudeui__exit_worktree']
+          })
+        })
+      )
+      expect(evaluateV2Call(withBaseline(rules), ENTER_WORKTREE_ACTION, ['*'], 'linux')).toBe(
+        'deny'
+      )
+      expect(evaluateV2Call(withBaseline(rules), EXIT_WORKTREE_ACTION, ['*'], 'linux')).toBe('ask')
+    })
+
+    it('plan mode denies both, hidden, whatever the user allowed', () => {
+      const { rules } = buildSessionRuleset(
+        input({ mode: 'plan', permissions: perms({ allow: ['mcp__claudeui'] }) })
+      )
+      for (const tool of TOOLS) {
+        expect(evaluateV2Call(withBaseline(rules), tool, ['*'], 'linux'), tool).toBe('deny')
+        expect(v2ToolHidden(rules, tool, 'linux'), tool).toBe(true)
+      }
+      expect(planEnforcement()).toEqual(expect.arrayContaining([...WORKTREE_TOOLS_DENY_RULES]))
+      // The other hosted tools are not hidden with them.
+      expect(v2ToolHidden(rules, 'claudeui_render_mermaid', 'linux')).toBe(false)
+    })
+
+    // The transition ruleset (D5): the user's deny/ask rules for the NEW base, right after the
+    // user's own rules, so the trailing asks and whole-category denies keep their place.
+    it('transition rules sit after the user rules and before the trailing asks and denies; the session-tools ask stays the last non-deny', () => {
+      const transition = [r('edit', 'deny', 'secrets/**'), r('shell', 'ask', 'rm *')]
+      for (const [mode, autoMode] of [
+        ['default', false],
+        ['plan', false],
+        ['auto', true]
+      ] as const) {
+        const { rules } = buildSessionRuleset(
+          input({
+            mode,
+            autoMode,
+            permissions: perms({ ask: ['Bash(ls:*)'] }),
+            transitionRules: transition
+          })
+        )
+        const at = (rule: V2Rule): number =>
+          rules.findIndex(
+            (x) =>
+              x.action === rule.action && x.resource === rule.resource && x.effect === rule.effect
+          )
+        const userAsk = rules.findIndex((x) => x.action === 'shell' && x.resource.startsWith('ls'))
+        expect(userAsk, mode).toBeGreaterThanOrEqual(0)
+        // The user's non-denies, then the transition asks, then the transition denies.
+        expect(at(transition[1]), mode).toBeGreaterThan(userAsk)
+        expect(at(transition[0]), mode).toBeGreaterThan(at(transition[1]))
+        expect(at(transition[0]), mode).toBeLessThan(rules.indexOf(DISPATCH_ASK_RULE))
+        expect(at(transition[0]), mode).toBeLessThan(rules.indexOf(SESSION_TOOLS_ASK_RULE))
+        expect(nonDeny(rules).at(-1), mode).toEqual(SESSION_TOOLS_ASK_RULE)
+        // Whole-category denies (and only those) are still last.
+        const firstWhole = rules.findIndex((x) => x.effect === 'deny' && x.resource === '*')
+        expect(
+          rules.slice(firstWhole).every((x) => x.effect === 'deny' && x.resource === '*'),
+          mode
+        ).toBe(true)
+      }
+    })
+
+    it('a broad new-base ask cannot override a narrow old-base deny (deny stays after every ask)', () => {
+      const repo = '/work/repo'
+      const worktree = `${repo}/.claude/worktrees/x`
+      const permissions = perms({ deny: [`Edit(/${repo}/secrets/**)`] })
+      const base = { cwd: worktree, worktree, permissions, platform: 'linux' as const }
+      const target = '../../../secrets/a.txt'
+      const before = buildSessionRuleset(input(base)).rules
+      expect(evaluateV2Call(before, 'edit', [target], 'linux')).toBe('deny')
+      // The user's new-base rules: a blanket `Edit` ask.
+      const transitionRules = compileClaudeRulesV2(perms({ ask: ['Edit'] }), {
+        mcpServers: ['claudeui'],
+        cwd: repo,
+        worktree: repo,
+        home: HOME,
+        platform: 'linux'
+      })
+      expect(transitionRules).toContainEqual(r('edit', 'ask'))
+      const during = buildSessionRuleset(input({ ...base, transitionRules })).rules
+      expect(evaluateV2Call(during, 'edit', [target], 'linux')).toBe('deny')
+      // …while an edit the old base never denied now asks (the new base's rule applies).
+      expect(evaluateV2Call(during, 'edit', ['src/a.ts'], 'linux')).toBe('ask')
+    })
+
+    it('without transition rules the ruleset is unchanged', () => {
+      expect(buildSessionRuleset(input({ transitionRules: [] })).rules).toEqual(
+        buildSessionRuleset(input()).rules
+      )
+    })
+
+    it('exit example: from <repo>/.claude/worktrees/x back to <repo>, an absolute user deny reaches the new base', () => {
+      const repo = '/work/repo'
+      const worktree = `${repo}/.claude/worktrees/x`
+      const permissions = perms({ deny: [`Edit(/${repo}/secrets/**)`] })
+      // What the ruleset for the worktree carries: the deny does not name `secrets/**` relative to the repo.
+      const fromWorktree = buildSessionRuleset(
+        input({ cwd: worktree, worktree, permissions, platform: 'linux' })
+      ).rules
+      expect(fromWorktree).not.toContainEqual(r('edit', 'deny', 'secrets/**'))
+      const transitionRules = compileClaudeRulesV2(permissions, {
+        mcpServers: ['claudeui'],
+        cwd: repo,
+        worktree: repo,
+        home: HOME,
+        platform: 'linux'
+      }).filter((rule) => rule.effect !== 'allow')
+      expect(transitionRules).toContainEqual(r('edit', 'deny', 'secrets/**'))
+      const transition = buildSessionRuleset(
+        input({ cwd: worktree, worktree, permissions, platform: 'linux', transitionRules })
+      ).rules
+      expect(transition).toContainEqual(r('edit', 'deny', 'secrets/**'))
+      // The old base's rules stay (both bases are governed during the window).
+      for (const rule of fromWorktree) expect(transition).toContainEqual(rule)
+      // …and the transition adds no allow.
+      const allows = (rules: V2Rule[]) => rules.filter((x) => x.effect === 'allow')
+      expect(allows(transition)).toEqual(allows(fromWorktree))
+    })
   })
 
   it('a user allow for the dispatch tool cannot un-gate it', () => {

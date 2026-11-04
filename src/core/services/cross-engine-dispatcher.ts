@@ -54,6 +54,7 @@ import {
   CLAUDEUI_MCP_SERVER,
   HAND_BACK_ALLOW_RULE,
   SESSION_TOOLS_DENY_RULE,
+  WORKTREE_TOOLS_DENY_RULES,
   wireOrder,
   type V2Rule
 } from '../opencode/permission-v2'
@@ -5565,6 +5566,7 @@ export class CrossEngineDispatcher {
       rules: wireOrder([
         ...built.rules,
         TARGET_DISPATCH_DENY,
+        ...WORKTREE_TOOLS_DENY_RULES,
         ...targetSessionToolRules(canMessage, autoMode),
         TARGET_QUESTION_DENY,
         ...(this.requireHandBack ? [HAND_BACK_ALLOW_RULE] : [])
