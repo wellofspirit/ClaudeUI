@@ -416,3 +416,58 @@ describe('claudeui-xeng plugin: subagent model gate', () => {
     }
   })
 })
+
+// ── opencode_worktree_remove (header §6) ────────────────────────────────────
+
+describe('claudeui-xeng plugin: opencode_worktree_remove is refused', () => {
+  const MESSAGE =
+    'ClaudeUI manages worktrees; opencode_worktree_remove is disabled in ClaudeUI sessions.'
+
+  it('throws before the tool runs, with the message the model reads', async () => {
+    const { hooks } = await load()
+    const event: HookEvent = {
+      tool: 'opencode_worktree_remove',
+      sessionID: 'ses_1',
+      id: 'call_1',
+      input: { directory: '/tmp/wt', force: true }
+    }
+    await expect(hooks['execute.before'](event)).rejects.toThrow(MESSAGE)
+    // The input is untouched: nothing rewrote what the tool would have received.
+    expect(event.input).toEqual({ directory: '/tmp/wt', force: true })
+  })
+
+  it('refuses with and without `force`, and leaves every other tool alone', async () => {
+    const { hooks } = await load()
+    for (const input of [
+      { directory: '/tmp/wt' },
+      { directory: '/tmp/wt', force: true },
+      {},
+      null
+    ]) {
+      await expect(
+        hooks['execute.before']({
+          tool: 'opencode_worktree_remove',
+          sessionID: 's',
+          id: 'c',
+          input
+        })
+      ).rejects.toThrow(MESSAGE)
+    }
+    // The sibling opencode_* tools keep working (worktree_create/list, models, the
+    // MCP resource tools) — only the removal is ClaudeUI's to refuse.
+    for (const tool of [
+      'opencode_worktree_create',
+      'opencode_worktree_list',
+      'opencode_models',
+      'opencode_read_mcp_resource',
+      'edit',
+      'shell',
+      'read'
+    ]) {
+      const input = { directory: '/tmp/wt', path: '/etc/hosts' }
+      const event: HookEvent = { tool, sessionID: 's', id: 'c', input }
+      await hooks['execute.before'](event)
+      expect(event.input, tool).toBe(input)
+    }
+  })
+})

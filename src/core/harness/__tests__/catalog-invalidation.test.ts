@@ -21,7 +21,8 @@ const { mockRequest, MockPiRpcClient } = vi.hoisted(() => {
 vi.mock('../../pi/PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
 vi.mock('../../pi/pi-locate', () => ({
   locatePiLaunch: () => ({ command: '/fake/pi', args: [] }),
-  piBinaryAvailable: () => true
+  piBinaryAvailable: () => true,
+  PI_APPROVE_ARGS: ['--approve']
 }))
 vi.mock('../../services/ui-config', () => ({ loadEngineConfig: () => ({}) }))
 vi.mock('../../services/logger', () => ({

@@ -740,6 +740,30 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.stopAll()
   })
 
+  it("carries the Claude engine's behaviour switches as --settings, read per run", async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+
+    // What the Claude engine's own settings screen writes (`~/.claude/ui/engines/claude.json`).
+    const dir = nodePath.join(TEMP_HOME, '.claude', 'ui', 'engines')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      nodePath.join(dir, 'claude.json'),
+      JSON.stringify({ claudeConfig: { idleCompaction: true, privacyEmailCheck: false } })
+    )
+
+    sdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+    mgr.upsert(makeAutomation({ id: 'settings-1' }))
+    await mgr.runNow('settings-1')
+
+    expect(lastSdkParams?.options?.settings).toEqual({
+      idleCompaction: true,
+      enabledPlugins: { 'cc-plugin-privacy@builtin': false }
+    })
+
+    mgr.stopAll()
+  })
+
   it('coerces unsupported thinkingMode / effort against the selected model', async () => {
     const { mgr } = await freshManager()
     mgr.load()

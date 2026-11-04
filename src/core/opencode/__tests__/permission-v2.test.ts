@@ -22,12 +22,14 @@ import {
   asHostPrecheckRules,
   buildSessionRuleset,
   compileClaudeRulesV2,
+  DIRECT_TOOL_DENY_RULES,
   DISPATCH_ASK_RULE,
   EXECUTE_DENY_RULE,
   externalDirectoryGates,
   HAND_BACK_ALLOW_RULE,
   HAND_BACK_DENY_RULE,
   modeGates,
+  planEnforcement,
   SESSION_TOOLS_ASK_RULE,
   SESSION_TOOLS_DENY_RULE,
   THROWAWAY_RULESET,
@@ -51,6 +53,12 @@ const r = (action: string, effect: V2Rule['effect'], resource = '*'): V2Rule => 
   resource,
   effect
 })
+
+/** The two rules a server-level deny/ask adds for that server's MCP resources, in emission order. */
+const resourceRules = (raw: string, effect: V2Rule['effect']): V2Rule[] => [
+  r('opencode_list_mcp_resources', effect, raw),
+  r('opencode_read_mcp_resource', effect, `${raw}:*`)
+]
 
 const HOME = '/home/u'
 
@@ -285,10 +293,12 @@ describe('compileClaudeRulesV2 — MCP rules (ADR-085 §3)', () => {
     ])
   })
 
-  it('server level deny/ask → `s_*`, known server or not; allow only for a live server', () => {
+  it('server level deny/ask → `s_*` plus its two resource rules, known server or not; allow only for a live server', () => {
     expect(compile({ ask: ['mcp__jira'], deny: ['mcp__lsphub__*'] })).toEqual([
       r('jira_*', 'ask'),
-      r('lsphub_*', 'deny')
+      ...resourceRules('jira', 'ask'),
+      r('lsphub_*', 'deny'),
+      ...resourceRules('lsphub', 'deny')
     ])
     expect(compile({ allow: ['mcp__lsphub', 'mcp__other__*'] }, ['lsphub'])).toEqual([
       r('lsphub_*', 'allow')
@@ -296,11 +306,41 @@ describe('compileClaudeRulesV2 — MCP rules (ADR-085 §3)', () => {
     expect(compile({ allow: ['mcp__lsphub'] })).toEqual([])
   })
 
+  it('a server-level ALLOW never emits a resource rule (it would widen what the model may read)', () => {
+    const rules = compile({ allow: ['mcp__lsphub'] }, ['lsphub'])
+    expect(rules.filter((x) => x.action.startsWith('opencode_'))).toEqual([])
+  })
+
+  it('a server-level deny/ask covers the resources of a live server its Claude name normalises to', () => {
+    // Claude spells `my.docs` as `mcp__my_docs`; the engine asks with the CONFIGURED name.
+    expect(compile({ deny: ['mcp__my_docs'] }, ['my.docs', 'other'])).toEqual([
+      r('my_docs_*', 'deny'),
+      ...resourceRules('my_docs', 'deny'),
+      ...resourceRules('my.docs', 'deny')
+    ])
+    // The live server is named in both spellings when they coincide: no duplicate rule.
+    expect(compile({ ask: ['mcp__claudeui'] }, ['claudeui'])).toEqual([
+      r('claudeui_*', 'ask'),
+      ...resourceRules('claudeui', 'ask')
+    ])
+  })
+
+  it('a tool-level deny/ask emits no resource rule', () => {
+    for (const x of compile({ deny: ['mcp__lsphub__delete_all'], ask: ['mcp__lsphub__rename'] }))
+      expect(x.action).not.toBe('opencode_list_mcp_resources')
+    expect(compile({ deny: ['mcp__lsphub__delete_all'] }, ['lsphub'])).toEqual([
+      r('lsphub_delete_all', 'deny')
+    ])
+  })
+
   it('a server-level allow whose glob hits a 2.x built-in action is skipped; its deny is emitted', () => {
     // `opencode_*` would grant `opencode_read_mcp_resource`; `external_*` `external_directory`.
     expect(compile({ allow: ['mcp__opencode'] }, ['opencode'])).toEqual([])
     expect(compile({ allow: ['mcp__external'] }, ['external'])).toEqual([])
-    expect(compile({ deny: ['mcp__external'] }, ['external'])).toEqual([r('external_*', 'deny')])
+    expect(compile({ deny: ['mcp__external'] }, ['external'])).toEqual([
+      r('external_*', 'deny'),
+      ...resourceRules('external', 'deny')
+    ])
     // A 1.x-only name no longer collides (`doom_loop` is gone in 2.x).
     expect(compile({ allow: ['mcp__doom'] }, ['doom'])).toEqual([r('doom_*', 'allow')])
   })
@@ -313,6 +353,19 @@ describe('compileClaudeRulesV2 — MCP rules (ADR-085 §3)', () => {
     const rules = compile({ allow: ['mcp__lsphub'], deny: ['mcp__lsphub__delete_all'] }, ['lsphub'])
     expect(evaluateV2Call(rules, 'lsphub_delete_all', ['*'], 'linux')).toBe('deny')
     expect(evaluateV2Call(rules, 'lsphub_find_refs', ['*'], 'linux')).toBe('allow')
+  })
+
+  it('a denied server’s resources are refused by the compiled rules (the engine’s own matcher)', () => {
+    const rules = compile({ deny: ['mcp__my_docs'] }, ['my.docs'])
+    for (const name of ['my_docs', 'my.docs']) {
+      expect(evaluateV2Call(rules, 'opencode_list_mcp_resources', [name], 'linux')).toBe('deny')
+      expect(
+        evaluateV2Call(rules, 'opencode_read_mcp_resource', [`${name}:file:///x`], 'linux')
+      ).toBe('deny')
+    }
+    expect(evaluateV2Call(rules, 'opencode_list_mcp_resources', ['other'], 'linux')).not.toBe(
+      'deny'
+    )
   })
 })
 
@@ -385,11 +438,12 @@ describe('wireOrder — whole-category denies last (re-verified for 2.x `whollyD
 })
 
 describe('modeGates', () => {
-  it('default (and ask / bypassPermissions / unknown / auto with the classifier off): shell, edit, webfetch ask', () => {
+  it('default (and ask / bypassPermissions / unknown / auto with the classifier off): shell, edit, webfetch and image generation ask', () => {
     const gated = [
       r('shell', 'ask'),
       r('edit', 'ask'),
       r('webfetch', 'ask'),
+      r('experimental_image_generate', 'ask'),
       r('external_directory', 'ask')
     ]
     for (const mode of ['default', 'ask', 'bypassPermissions', 'whatever'])
@@ -398,10 +452,11 @@ describe('modeGates', () => {
     expect(modeGates('full')).toEqual(gated)
   })
 
-  it('acceptEdits: shell and webfetch ask, edits only on the agent-control paths', () => {
+  it('acceptEdits: shell, webfetch and image generation ask, edits only on the agent-control paths', () => {
     expect(modeGates('acceptEdits')).toEqual([
       r('shell', 'ask'),
       r('webfetch', 'ask'),
+      r('experimental_image_generate', 'ask'),
       ...agentControlEditPatterns().map((p) => r('edit', 'ask', p)),
       r('external_directory', 'ask')
     ])
@@ -417,19 +472,21 @@ describe('modeGates', () => {
     )
   })
 
-  it('plan: shell, webfetch and external_directory ask (edits are enforced after the user rules)', () => {
+  it('plan: shell, webfetch, image generation and external_directory ask (edits are enforced after the user rules)', () => {
     expect(modeGates('plan')).toEqual([
       r('shell', 'ask'),
       r('webfetch', 'ask'),
+      r('experimental_image_generate', 'ask'),
       r('external_directory', 'ask')
     ])
   })
 
-  it('auto (classifier on): every edit, websearch, skill and subagent spawn asks, every MCP tool asks via the `*_*` catch-all, claudeui allowed', () => {
+  it('auto (classifier on): every edit, websearch, skill, subagent spawn and image generation ask, every MCP tool asks via the `*_*` catch-all, claudeui allowed', () => {
     const own = [r('external_directory', 'allow', '/data/opencode/tool-output/*')]
     expect(modeGates('auto', { autoMode: true, externalDirAllows: own })).toEqual([
       r('shell', 'ask'),
       r('webfetch', 'ask'),
+      r('experimental_image_generate', 'ask'),
       r('websearch', 'ask'),
       r('skill', 'ask'),
       r('subagent', 'ask'),
@@ -476,7 +533,7 @@ describe('buildSessionRuleset', () => {
     ...over
   })
 
-  it('default: gates, user rules, the Code Mode deny, the dispatch and session-tools asks after the user rules', () => {
+  it('default: gates, user rules, the Code Mode and direct-tool denies, the dispatch and session-tools asks after the user rules', () => {
     const { rules, userRules, agent } = buildSessionRuleset(
       input({ permissions: perms({ allow: ['Bash(npm test)'] }) })
     )
@@ -486,11 +543,13 @@ describe('buildSessionRuleset', () => {
       r('shell', 'ask'),
       r('edit', 'ask'),
       r('webfetch', 'ask'),
+      r('experimental_image_generate', 'ask'),
       r('external_directory', 'ask'),
       r('shell', 'allow', 'npm test'),
       DISPATCH_ASK_RULE,
       SESSION_TOOLS_ASK_RULE,
       EXECUTE_DENY_RULE,
+      ...DIRECT_TOOL_DENY_RULES,
       HAND_BACK_DENY_RULE
     ])
   })
@@ -697,6 +756,188 @@ describe('buildSessionRuleset', () => {
       expect(v2ToolHidden(rules, 'execute', 'linux')).toBe(true)
       expect(rules).toContainEqual(r('shell', 'deny', 'git push --force*'))
       expect(evaluateV2Call(rules, 'shell', ['git push origin main --force'], 'linux')).toBe('deny')
+    }
+  })
+})
+
+// `execute` hidden (every mode, above) no longer removes the Code Mode tools: 2.2.0 offers them
+// as DIRECT tools instead (`core/src/tool.ts` `snapshot`), and most of them run with no
+// permission check of their own. So the families ClaudeUI does not want a model to reach are
+// wholly denied, last, which is also what hides them (`whollyDisabled`).
+describe('the direct opencode_* tools (reachable since 2.2.0)', () => {
+  const build = (mode: string, p: Partial<ClaudePermissions> = {}, autoMode?: boolean) =>
+    buildSessionRuleset({
+      mode,
+      autoMode: autoMode ?? mode === 'auto',
+      permissions: perms(p),
+      mcpServers: ['claudeui', 'opencode'],
+      home: HOME
+    }).rules
+
+  // `tool/plugin/opencode.ts` at v2.2.5: these carry no permission check (`worktree_remove` is
+  // the exception — it asks `edit`, below), so only a deny can stop them.
+  const direct = [
+    'opencode_session_rename',
+    'opencode_session_move',
+    'opencode_worktree_create',
+    'opencode_worktree_list',
+    'opencode_artifact_create',
+    'opencode_artifact_read',
+    'opencode_artifact_update',
+    'opencode_artifact_delete',
+    'opencode_schedule_create',
+    'opencode_schedule_list',
+    'opencode_schedule_pause',
+    'opencode_schedule_resume',
+    'opencode_schedule_delete'
+  ]
+
+  it.each([
+    ['default', undefined],
+    ['acceptEdits', undefined],
+    ['auto', true],
+    ['auto', false],
+    ['plan', undefined],
+    ['bypassPermissions', undefined]
+  ] as const)(
+    '%s (autoMode %s): every session/worktree/artifact/schedule tool is denied and hidden, whatever the user allows',
+    (mode, autoMode) => {
+      // Even a user allow/ask naming the exact tool action cannot re-open them: the deny is last.
+      const rules = build(
+        mode,
+        {
+          allow: ['mcp__opencode__session_rename', 'mcp__opencode__worktree_create'],
+          ask: ['mcp__opencode__schedule_create']
+        },
+        autoMode
+      )
+      for (const tool of direct) {
+        expect(evaluateV2Call(rules, tool, ['*'], 'linux')).toBe('deny')
+        expect(v2ToolHidden(rules, tool, 'linux')).toBe(true)
+      }
+      // ... and the user's allow was never even emitted for a built-in action (its ask is).
+      expect(rules.some((x) => x.action.startsWith('opencode_') && x.effect === 'allow')).toBe(
+        false
+      )
+    }
+  )
+
+  it('`opencode_worktree_remove` is an `edit` call, so the edit ladder decides it (not the family rule)', () => {
+    // `tool/plugin/opencode.ts`: `options.permission: "edit"`, and it asserts `edit` itself, so
+    // `whollyDisabled("edit")` is the visibility check the engine runs for it.
+    expect(v2ToolHidden(build('default'), 'edit', 'linux')).toBe(false)
+    expect(evaluateV2Call(build('default'), 'edit', ['../wt'], 'linux')).toBe('ask')
+    expect(v2ToolHidden(build('plan'), 'edit', 'linux')).toBe(true)
+  })
+
+  it('leaves the read-only tools alone: `opencode_models`, the MCP resource tools', () => {
+    for (const mode of ['default', 'acceptEdits', 'plan', 'auto']) {
+      const rules = build(mode)
+      for (const tool of [
+        'opencode_models',
+        'opencode_list_mcp_resources',
+        'opencode_read_mcp_resource'
+      ]) {
+        expect(v2ToolHidden(rules, tool, 'linux')).toBe(false)
+        expect(evaluateV2Call(rules, tool, ['*'], 'linux')).not.toBe('deny')
+      }
+    }
+  })
+
+  it('a dispatch target gets the same denies (its own ruleset is built the same way)', () => {
+    const { rules } = buildSessionRuleset({
+      mode: 'default',
+      autoMode: false,
+      permissions: perms({}),
+      mcpServers: ['claudeui'],
+      home: HOME,
+      handBackTarget: true
+    })
+    for (const tool of direct) expect(v2ToolHidden(rules, tool, 'linux')).toBe(true)
+  })
+
+  it('the names are in V2_BUILTIN_ACTIONS, so a server-level MCP allow cannot grant them', () => {
+    for (const tool of [
+      ...direct,
+      'opencode_worktree_remove',
+      'opencode_models',
+      'experimental_image_generate'
+    ])
+      expect(V2_BUILTIN_ACTIONS).toContain(tool)
+  })
+})
+
+// `experimental_image_generate` (`tool/plugin/image-generate.ts`, on by default since 2.2.2) is a
+// DIRECT tool that asks `experimental_image_generate` with the `provider/model` it bills: a paid
+// model call the model may start on its own, so it is gated exactly like `webfetch`.
+describe('experimental_image_generate (a paid model call, gated like webfetch)', () => {
+  const build = (mode: string, p: Partial<ClaudePermissions> = {}, autoMode?: boolean) =>
+    buildSessionRuleset({
+      mode,
+      autoMode: autoMode ?? mode === 'auto',
+      permissions: perms(p),
+      mcpServers: ['claudeui', 'opencode'],
+      home: HOME
+    }).rules
+
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['auto', true],
+    ['auto', false],
+    ['bypassPermissions', false]
+  ] as const)('%s (autoMode %s): asks, like webfetch', (mode, autoMode) => {
+    // Webfetch's own verdict for the same mode, so the two cannot drift apart.
+    expect(
+      evaluateV2Call(
+        build(mode, {}, autoMode),
+        'experimental_image_generate',
+        ['openai/gpt-image-2'],
+        'linux'
+      )
+    ).toBe(
+      evaluateV2Call(build(mode, {}, autoMode), 'webfetch', ['https://example.com/x'], 'linux')
+    )
+    expect(
+      evaluateV2Call(
+        build(mode, {}, autoMode),
+        'experimental_image_generate',
+        ['openai/gpt-image-2'],
+        'linux'
+      )
+    ).toBe('ask')
+    expect(v2ToolHidden(build(mode, {}, autoMode), 'experimental_image_generate', 'linux')).toBe(
+      false
+    )
+  })
+
+  it('plan: wholly denied and hidden after the user rules, so a user allow cannot re-open it', () => {
+    const rules = build('plan', { allow: ['mcp__experimental__image_generate'] })
+    expect(planEnforcement()).toContainEqual(r('experimental_image_generate', 'deny'))
+    expect(
+      evaluateV2Call(rules, 'experimental_image_generate', ['openai/gpt-image-2'], 'linux')
+    ).toBe('deny')
+    expect(v2ToolHidden(rules, 'experimental_image_generate', 'linux')).toBe(true)
+  })
+
+  it('a user deny wins in every other mode; a user ask keeps it asking', () => {
+    for (const mode of ['default', 'acceptEdits', 'plan', 'auto']) {
+      expect(
+        evaluateV2Call(
+          build(mode, { deny: ['mcp__experimental__image_generate'] }),
+          'experimental_image_generate',
+          ['openai/gpt-image-2'],
+          'linux'
+        )
+      ).toBe('deny')
+      expect(
+        evaluateV2Call(
+          build(mode, { ask: ['mcp__experimental__image_generate'] }),
+          'experimental_image_generate',
+          ['openai/gpt-image-2'],
+          'linux'
+        )
+      ).toBe(mode === 'plan' ? 'deny' : 'ask')
     }
   })
 })

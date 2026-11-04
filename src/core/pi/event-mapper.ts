@@ -27,7 +27,8 @@ import type {
   PiEvent,
   PiImageContent,
   PiTextContent,
-  PiToolExecutionPartialResult
+  PiToolExecutionPartialResult,
+  PiUsage
 } from './pi-protocol'
 import { piCustomMessageToChat } from './pi-custom-message'
 import { piAgentDeliveryDetails } from './pi-delivery'
@@ -143,7 +144,13 @@ export type PiMapperOutput =
       provider: string
       modelId: string
       tokens: PiUsageTokens
-      costUsd: number
+      /**
+       * pi's `usage.cost`, verbatim: `total` is either a catalog list price or —
+       * when `totalFromProvider` (pi 1.5.0, OpenRouter) — the BILLED figure,
+       * while the components stay list prices. `undefined` for a usage snapshot
+       * that carried none (an errored or aborted turn).
+       */
+      cost: PiUsage['cost'] | undefined
       messageId: string
     }
   | { kind: 'result'; totalCostUsd: number; durationMs: number; sessionId: string | null }
@@ -398,7 +405,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
               cacheWrite: usage.cacheWrite,
               ...(usage.reasoning != null ? { reasoning: usage.reasoning } : {})
             },
-            costUsd: cost,
+            cost: usage.cost,
             messageId
           })
         }

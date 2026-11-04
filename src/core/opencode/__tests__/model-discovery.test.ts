@@ -215,7 +215,10 @@ beforeEach(() => {
   opencodeCredentialStore.configure({
     connect: fakeCredentialTable().connect,
     available: () => true,
-    memory: memorySlotMemory()
+    memory: memorySlotMemory(),
+    // As boot wires it (`core-services.ts`): a create needs the proven-copy cleanup, which needs
+    // a recogniser (one that knows no token here).
+    isClaudeuiToken: () => false
   })
   invalidateOpencodeModelCache()
 })

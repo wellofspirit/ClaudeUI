@@ -1,13 +1,18 @@
 /**
  * What one pi assistant message cost (ADR-071 §2).
  *
- * pi prices every turn from its OWN model catalog's list rates, whatever the
- * credential is behind it — so `usage.cost.total` is a list-price equivalent
- * under every billing type, never a bill under a subscription, and reporting
- * it as spend overstates what the user paid. It is also a BETTER equivalent
- * than ours: pi's catalog knows things our table does not, long-context tiers
- * among them. So pi's own figure is the equivalent whenever it reports one,
- * and our table only stands in where pi reports nothing.
+ * THE RULE (owner ruling, pi 1.5.0). The list-price equivalent is what pi's
+ * catalog prices this message's tokens at — the four component figures of
+ * `usage.cost` (`input`, `output`, `cacheRead`, `cacheWrite`), which know
+ * things our table does not, long-context tiers among them — and our table
+ * only stands in where pi reports no components. ONE EXCEPTION: an
+ * OpenRouter-BILLED total. Since pi 1.5.0
+ * (`vendor/pi-src/packages/ai/src/utils/openrouter-cost.ts`, and
+ * `Usage.cost.totalFromProvider` at `types.ts:485`) `usage.cost.total` is
+ * OpenRouter's real charge while the components stay catalog list prices, so
+ * with `totalFromProvider` the engine figure is that total and the equivalent
+ * is the component sum. Everywhere else pi's `total` is itself a catalog list
+ * price, so it remains the equivalent whenever pi reports one.
  *
  * TWO STEPS, deliberately. {@link piCostInputs} captures everything that
  * depends on the MESSAGE; {@link resolvePiCosts} applies the billing type, and
@@ -22,6 +27,7 @@
 import { equivalentCostUsd } from '../../shared/pricing'
 import { resolveCosts, type ResolvedCosts } from '../../shared/cost-rule'
 import { piAuthProvider } from '../auth/PiAuthProvider'
+import type { PiUsage } from './pi-protocol'
 
 /** pi's per-message token counts, in the disjoint shape `usage` reports. */
 export interface PiCostTokens {
@@ -32,36 +38,83 @@ export interface PiCostTokens {
   reasoning?: number
 }
 
+/**
+ * What pi reported for one message's cost — `usage.cost` as the RPC usage
+ * event and a session file both carry it, reduced to what the rule reads.
+ */
+export interface PiCostReport {
+  /** `usage.cost.total`: a catalog list-price total, or the provider's BILLED figure when `fromProvider`. */
+  totalUsd: number | null
+  /** `usage.cost.totalFromProvider` (pi 1.5.0): `totalUsd` is money OpenRouter charged. Absent means a catalog estimate. */
+  fromProvider?: boolean
+  /** `usage.cost`'s four component figures summed — pi's catalog list price — or null when pi sent none. */
+  componentsUsd?: number | null
+}
+
+/** A cost is usable only if it is an actual finite number; NaN and ±Infinity are unknown. */
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * {@link PiCostReport} from pi's raw `usage.cost` — the one conversion, so the
+ * live event path and the session-file walk read pi the same way.
+ * `missingTotal` is what a message with no `cost` reports: the live event
+ * path passes `0` (an errored or aborted turn is a KNOWN zero), the
+ * session-file walk keeps `null`.
+ */
+export function piCostReport(
+  cost: PiUsage['cost'] | undefined | null,
+  missingTotal: number | null = null
+): PiCostReport {
+  const parts = cost ? [cost.input, cost.output, cost.cacheRead, cost.cacheWrite] : []
+  return {
+    totalUsd: cost?.total ?? missingTotal,
+    fromProvider: cost?.totalFromProvider === true,
+    componentsUsd:
+      parts.length === 4 && parts.every((n) => typeof n === 'number' && Number.isFinite(n))
+        ? parts.reduce((sum, n) => sum + n, 0)
+        : null
+  }
+}
+
 /** One message's cost inputs: the half that depends on the model, not the account. */
 export interface PiCostInputs {
   /** The provider whose billing type prices this message. */
   vendorId: string
-  /** The list-price figure for this message — pi's, or ours, see below. */
+  /** The list-price figure for this message — pi's components (or its catalog total), or ours, see above. */
   equivCostUsd: number | null
   /** pi's own figure for the message, or null when it reported none. */
   engineCostUsd: number | null
 }
 
 /**
- * Capture one message's cost inputs from pi's figure and, where we have them,
- * its tokens.
+ * Capture one message's cost inputs from what pi reported and, where we have
+ * them, its tokens.
  *
- * The equivalent is pi's figure when pi reported a real charge; our table's
- * figure for the tokens when it did not and we can price them (a turn pi
- * reports as `0` on a model we know the rates for is worth something, and a
- * caller with no token breakdown at all — the dispatcher — simply has nothing
- * to fall back to); and pi's figure as it came otherwise, so a reported `0`
- * stays a KNOWN zero instead of becoming a turn we claim to have no price for.
+ * Without `totalFromProvider` this is the pre-1.5.0 rule: the equivalent is
+ * pi's figure when pi reported a real charge; our table's figure for the
+ * tokens when it did not and we can price them (a turn pi reports as `0` on a
+ * model we know the rates for is worth something, and a caller with no token
+ * breakdown at all — the dispatcher — simply has nothing to fall back to); and
+ * pi's figure as it came otherwise, so a reported `0` stays a KNOWN zero
+ * instead of becoming a turn we claim to have no price for.
+ *
+ * With it, pi's figure is a CHARGE: it stays the engine figure, and the
+ * equivalent comes from the components, falling back to our table and then to
+ * pi's total exactly as above.
  */
 export function piCostInputs(
   vendorId: string,
   modelId: string,
   tokens: PiCostTokens | undefined,
-  piCostUsd: number | null
+  report: PiCostReport
 ): PiCostInputs {
-  const piReported = typeof piCostUsd === 'number' && Number.isFinite(piCostUsd) && piCostUsd > 0
-  const fromTable =
-    !piReported && tokens
+  const total = finiteOrNull(report.totalUsd)
+  const piReported = total !== null && total > 0
+  /** Our table's figure for the tokens, computed only when the rule actually needs it. */
+  const fromTable = (): number | null =>
+    tokens
       ? equivalentCostUsd(vendorId, modelId, {
           inputTokens: tokens.input,
           // Reasoning tokens are billed as output (same fold as recordUsageEvent).
@@ -71,11 +124,16 @@ export function piCostInputs(
           cacheReadTokens: tokens.cacheRead
         })
       : null
+  const billed = report.fromProvider === true && total !== null
 
   return {
     vendorId,
-    equivCostUsd: piReported ? piCostUsd : (fromTable ?? piCostUsd),
-    engineCostUsd: piCostUsd
+    equivCostUsd: billed
+      ? (finiteOrNull(report.componentsUsd) ?? fromTable() ?? total)
+      : piReported
+        ? report.totalUsd
+        : (fromTable() ?? report.totalUsd),
+    engineCostUsd: report.totalUsd
   }
 }
 
@@ -99,7 +157,7 @@ export function piMessageCosts(
   vendorId: string,
   modelId: string,
   tokens: PiCostTokens | undefined,
-  piCostUsd: number | null
+  report: PiCostReport
 ): ResolvedCosts {
-  return resolvePiCosts(piCostInputs(vendorId, modelId, tokens, piCostUsd))
+  return resolvePiCosts(piCostInputs(vendorId, modelId, tokens, report))
 }

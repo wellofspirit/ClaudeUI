@@ -1,4 +1,4 @@
-/** Real RPC guard for pi 1.4.0 transcript tool restoration; no provider call. */
+/** Real RPC guard for pi 1.5.0 transcript tool restoration; no provider call. */
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'

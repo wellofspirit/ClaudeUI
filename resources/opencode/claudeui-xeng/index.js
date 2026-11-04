@@ -55,6 +55,15 @@
 //    `opencodeModelAllowed` (src/core/opencode/model-allowlist.ts; a parity
 //    test pins them together).
 //
+// 6. `opencode_worktree_remove` is refused, in every mode. It is a direct tool
+//    whose permission id is `edit` (`tool/plugin/opencode.ts` `permission:
+//    "edit"`, v2.2.5), so ClaudeUI's `opencode_worktree_*` deny cannot reach it
+//    (denying `edit` would hide every edit) and the edit ladder leaves it
+//    unasked wherever edits are — acceptEdits included. It also takes `force`,
+//    which discards uncommitted files. ClaudeUI manages the worktrees of its
+//    own sessions, so `execute.before` throws (a Tool.Error the model reads)
+//    before the tool resolves a path or asks anything.
+//
 // Only the opencode process ClaudeUI spawns loads this plugin; the user's own
 // opencode keeps its own behaviour.
 
@@ -62,6 +71,9 @@ const HOSTED_PREFIX = 'claudeui_'
 const DISPATCH_TOOL = 'claudeui_dispatch_agent'
 const SUBAGENT_TOOL = 'subagent'
 const LIST_MODELS_TOOL = 'claudeui_list_models'
+const WORKTREE_REMOVE_TOOL = 'opencode_worktree_remove'
+const WORKTREE_REMOVE_MESSAGE =
+  'ClaudeUI manages worktrees; opencode_worktree_remove is disabled in ClaudeUI sessions.'
 
 /** opencode's `Wildcard.match` (core/src/util/wildcard.ts), verbatim in behaviour. */
 export function wildcardMatch(input, pattern, platform = process.platform) {
@@ -285,6 +297,7 @@ export default {
     const allowlist = readAllowlist(ctx.options)
     await ctx.tool.hook('execute.before', async (event) => {
       if (!event) return
+      if (event.tool === WORKTREE_REMOVE_TOOL) throw new Error(WORKTREE_REMOVE_MESSAGE)
       if (event.tool === SUBAGENT_TOOL) return gateSubagentModel(ctx, event, allowlist)
       if (event.tool !== DISPATCH_TOOL) return
       const input = event.input && typeof event.input === 'object' ? event.input : {}

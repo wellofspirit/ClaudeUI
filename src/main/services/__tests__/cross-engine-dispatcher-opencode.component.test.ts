@@ -19,6 +19,7 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 vi.mock('../../../core/pi/pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
   locatePiLaunch: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
@@ -505,7 +506,8 @@ function connFor(
     authHeader: 'Basic x',
     directory,
     startedAt: 0,
-    hostedTools: { state: 'skipped' }
+    hostedTools: { state: 'skipped' },
+    cleaned: true
   }
 }
 
@@ -740,10 +742,17 @@ describe('opencode target — lifecycle', () => {
       { action: 'shell', resource: '*', effect: 'ask' },
       { action: 'edit', resource: '*', effect: 'ask' },
       { action: 'webfetch', resource: '*', effect: 'ask' },
+      // A paid model call, gated like webfetch (2.2.2+ offers it by default).
+      { action: 'experimental_image_generate', resource: '*', effect: 'ask' },
       { action: 'external_directory', resource: '*', effect: 'ask' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'ask' },
       { action: 'claudeui_session_*', resource: '*', effect: 'ask' },
       { action: 'execute', resource: '*', effect: 'deny' },
+      // The direct tools of 2.2.0+ (Code Mode's, offered directly while `execute` is hidden).
+      { action: 'opencode_session_*', resource: '*', effect: 'deny' },
+      { action: 'opencode_worktree_*', resource: '*', effect: 'deny' },
+      { action: 'opencode_artifact_*', resource: '*', effect: 'deny' },
+      { action: 'opencode_schedule_*', resource: '*', effect: 'deny' },
       // Without `requireHandBack` (the dispatcher's own suites) a target is an ordinary session of the server.
       { action: 'claudeui_hand_back', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },

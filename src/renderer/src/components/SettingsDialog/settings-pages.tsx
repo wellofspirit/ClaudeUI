@@ -857,10 +857,23 @@ export const PAGES: SettingsPage[] = [
     description:
       'Where Claude Code sends requests, and its launch parameters. Permission rules are on Sessions & autonomy.',
     groups: [
-      // FIRST, and here rather than on Models & providers (ADR-074 §9):
-      // `vendors/anthropic.json` only ever reaches cli.js spawns, so the page of
-      // the engine it configures is its one home. No `requires` — every Claude
-      // build honours ANTHROPIC_BASE_URL and the model env vars.
+      {
+        // FIRST, as on the opencode and pi pages: how the harness itself
+        // behaves in a session. Two cli.js behaviours ClaudeUI owns a switch
+        // for (idle compaction, the built-in email-address privacy check),
+        // written to ClaudeUI's own engines/claude.json and delivered per
+        // spawn as `--settings` — never to ~/.claude/settings.json.
+        id: 'session',
+        label: 'Session behaviour',
+        appliesOn: 'next-session',
+        note: 'Applies to newly started Claude sessions.',
+        storage: 'engines/claude.json',
+        items: itemsOf('claude-session')
+      },
+      // The Endpoint card is here rather than on Models & providers
+      // (ADR-074 §9): `vendors/anthropic.json` only ever reaches cli.js spawns,
+      // so the page of the engine it configures is its one home. No `requires`
+      // — every Claude build honours ANTHROPIC_BASE_URL and the model env vars.
       {
         id: 'endpoint',
         label: 'Endpoint',
@@ -1302,6 +1315,7 @@ export const SECTION_TARGET: Readonly<Record<string, { page: SettingsPageId; gro
 
   remote: { page: 'remote', group: 'server' },
 
+  'claude-session': { page: 'claude', group: 'session' },
   'claude-endpoint': { page: 'claude', group: 'endpoint' },
   sandbox: { page: 'claude', group: 'sandbox' },
   proxy: { page: 'claude', group: 'proxy' },

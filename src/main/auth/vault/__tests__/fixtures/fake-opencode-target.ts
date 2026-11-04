@@ -53,7 +53,13 @@ export function fakeOpencodeTarget(): {
  */
 export function storeBackedOpencode(available: () => boolean = () => true) {
   const table = fakeCredentialTable()
-  const store = new OpencodeCredentialStore({ connect: table.connect, available })
+  // A recogniser as boot wires one (`core-services.ts`): without it the store refuses every
+  // `create`, because the proven-copy cleanup cannot be proven done. This one knows no token.
+  const store = new OpencodeCredentialStore({
+    connect: table.connect,
+    available,
+    isClaudeuiToken: () => false
+  })
   const feed = vi.fn(async (_vendorId: string, _cred: ChatgptCredentialInput) => {})
   const remove = vi.fn(async (_vendorId: string) => {})
   let own = 0

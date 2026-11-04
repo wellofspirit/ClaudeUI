@@ -165,8 +165,11 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
     const at = rules.findIndex((rule) => rule.action === own[0].action && rule.effect === 'deny')
     expect(rules.slice(at, at + own.length)).toEqual(own)
     expect(rules.slice(at + own.length)).toEqual([
-      // opencode's browser plugin denies the browser tool on every agent (opt-in per session).
-      { action: 'browser', resource: '*', effect: 'deny' }
+      // opencode's browser plugin denies the browser tools on every agent (opt-in per session):
+      // `packages/plugin-browser/src/connection.ts` at v2.2.5 appends both — the tool family and
+      // the `Browser` skill it registers (`skill.ts`: id `browser`).
+      { action: 'browser', resource: '*', effect: 'deny' },
+      { action: 'skill', resource: 'browser', effect: 'deny' }
     ])
     expect(own.some((rule) => rule.effect !== 'deny' || rule.action === '*')).toBe(false)
     // The repository's agent is there too, on the model its own file names.

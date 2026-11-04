@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-06-03
+**Changed 2026-11-04:** a cli.js setting whose ClaudeUI default differs from the terminal's is stored in ClaudeUI's Claude
+engine config and passed per spawn as flag settings (`--settings`), like `sandbox`; today `idleCompaction` (ClaudeUI default
+off) and `enabledPlugins["cc-plugin-privacy@builtin"]` (Claude Code 2.1.317).
 
 ## Context
 

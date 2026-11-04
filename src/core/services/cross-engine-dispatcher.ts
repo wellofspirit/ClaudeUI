@@ -100,6 +100,7 @@ import { collectToolUseIds, recordTrajectoryMessage } from '../automode/trajecto
 import { STAGE2_TIMEOUT_MS, type JudgeTransport } from '../automode/classifier'
 import type { SessionJudgeOptions } from '../automode/session-judge'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
+import { claudeBehaviorSettings } from '../sdk/args'
 import { loadEngineConfig, loadSettings } from './ui-config'
 import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
@@ -144,7 +145,7 @@ import {
 } from '../pi/pi-scratchpad'
 import type { ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeMessageCosts } from '../opencode/message-cost'
-import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
+import { piMessageCosts, type PiCostReport, type PiCostTokens } from '../pi/message-cost'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, sendProgress } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
@@ -518,11 +519,11 @@ export interface ClaudeQuerySpawnOpts {
   /** The harness session a RESUMED target continues (`--resume`); exclusive with `sessionId`. */
   resume?: string
   /**
-   * `--settings <json>` for the target (ADR-085 §3): `{ permissions: { deny,
-   * ask } }` when the user has any deny/ask rule, absent otherwise. It is
-   * cli.js's `flagSettings` source, independent of `settingSources: []`
-   * (`docs/protocol-cc/02-cli-flags.md` §2.6; `sdk/args.ts` emits
-   * `options.settings` as `--settings`).
+   * `--settings <json>` for the target: ClaudeUI's two behaviour switches
+   * (`claudeBehaviorSettings`, always) plus `permissions: { deny, ask }` when
+   * the user has any deny/ask rule (ADR-085 §3). It is cli.js's `flagSettings`
+   * source, independent of `settingSources: []` (`docs/protocol-cc/02-cli-
+   * flags.md` §2.6; `sdk/args.ts` emits `options.settings` as `--settings`).
    */
   settings?: Record<string, unknown>
   /**
@@ -1723,10 +1724,10 @@ function errText(err: unknown): string {
 function piTurnCost(
   model: string,
   tokens: PiCostTokens | undefined,
-  engineCostUsd: number
+  report: PiCostReport
 ): ResolvedCosts {
   const { vendorId, modelId } = engineMeta('pi').decodeModelValue(model)
-  return piMessageCosts(vendorId, modelId, tokens, engineCostUsd)
+  return piMessageCosts(vendorId, modelId, tokens, report)
 }
 
 // ── Who a dispatched turn is billed to (ADR-071 §1 / §3) ────────────────────
@@ -7022,6 +7023,11 @@ export class CrossEngineDispatcher {
       ctx.callerRestriction
     )
     const addDirs = existingDirectories(additionalDirectories, 'CrossEngineDispatcher')
+    // The target is a cli.js of ours too, so it carries the Claude engine's two
+    // behaviour switches (`engines/claude.json#claudeConfig`, read per spawn):
+    // the same `--settings` object as the permission tiers below, never inside
+    // them.
+    const behavior = claudeBehaviorSettings(this.deps.loadEngineConfig('claude').claudeConfig)
     entry.query = await this.spawnClaudeQuery({
       cwd,
       model,
@@ -7031,7 +7037,10 @@ export class CrossEngineDispatcher {
       abortController: entry.abortController,
       prompt: entry.channel,
       ...ids,
-      ...(deny.length > 0 || ask.length > 0 ? { settings: { permissions: { deny, ask } } } : {}),
+      settings: {
+        ...behavior,
+        ...(deny.length > 0 || ask.length > 0 ? { permissions: { deny, ask } } : {})
+      },
       // The target's scope as `--add-dir` (ADR-108 as amended): cli.js loads no settings here.
       ...(addDirs.length > 0 ? { additionalDirectories: addDirs } : {}),
       // The target's report channel (ADR-105 §3): a one-tool server of its own. It is in the
@@ -7574,7 +7583,11 @@ export class CrossEngineDispatcher {
     const turnCostUsd = piTurnCost(
       model,
       { ...entry.runner.turnTokens, reasoning: entry.runner.turnReasoningTokens },
-      rawTurnCostUsd
+      {
+        totalUsd: rawTurnCostUsd,
+        fromProvider: entry.runner.turnCostFromProvider,
+        componentsUsd: entry.runner.turnCostComponentsUsd
+      }
     ).displayCostUsd
     if (turnCostUsd === null) {
       entry.unpricedTurns++
@@ -7878,7 +7891,10 @@ export class CrossEngineDispatcher {
               tokens: entry.runner.turnTokens,
               engineCostUsd: entry.turnEngineCostUsd,
               account: piDispatchAccount(model),
-              engineCostIsEquivalent: true
+              // pi's figure is a list price UNLESS the turn carried an
+              // OpenRouter-billed total (pi 1.5.0 `totalFromProvider`), which
+              // is money charged and must be read as the billed figure.
+              engineCostIsEquivalent: !entry.runner.turnCostFromProvider
             })
           }
           return errorResult(text, entry.sessionId ?? '')
@@ -7915,7 +7931,7 @@ export class CrossEngineDispatcher {
             tokens: entry.runner.turnTokens,
             engineCostUsd: entry.turnEngineCostUsd,
             account: piDispatchAccount(model),
-            engineCostIsEquivalent: true
+            engineCostIsEquivalent: !entry.runner.turnCostFromProvider
           })
           return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
         }
@@ -7969,10 +7985,12 @@ export class CrossEngineDispatcher {
           toolUseId: ctx.toolUseId ?? null,
           tokens: entry.runner.turnTokens,
           // pi reports a LIST PRICE, not a charge (S1b) — the ledger must not
-          // read it as money that left a wallet.
+          // read it as money that left a wallet — unless the turn carried an
+          // OpenRouter-billed total (pi 1.5.0 `totalFromProvider`), which IS
+          // money charged.
           engineCostUsd: entry.turnEngineCostUsd,
           account: piDispatchAccount(model),
-          engineCostIsEquivalent: true
+          engineCostIsEquivalent: !entry.runner.turnCostFromProvider
         })
         return done
       } finally {

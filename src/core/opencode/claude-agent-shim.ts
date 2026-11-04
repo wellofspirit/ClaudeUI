@@ -84,6 +84,7 @@ import {
 import { isSafeIdSegment } from '../services/path-containment'
 import { HOSTED_MCP_SERVER } from './claude-mcp-bridge'
 import { opencodeModelAllowed } from './model-allowlist'
+import { sanitizeMcpName } from './permission-compiler'
 import { CLAUDE_TOOL_TO_V2_ACTION, V2_TOOL_ACTIONS, type V2Action } from './permission-keys'
 import type { Config_AgentEncoded, Permission_Rule } from './protocol-v2/openapi'
 
@@ -109,10 +110,8 @@ const LOWER_TOOL_TO_V2_ACTION: Readonly<Record<string, V2Action>> = Object.fromE
 /** Claude's tool for asking the user; opencode spells it with its `question` action (not in the tool map). */
 const ASK_USER_QUESTION = 'askuserquestion'
 
-/** An MCP tool-id segment as opencode spells it (`permission-keys.ts`: `[^a-zA-Z0-9_-]` → `_`). */
-function sanitizeMcp(s: string): string {
-  return s.replace(/[^a-zA-Z0-9_-]/g, '_')
-}
+/** An MCP tool-id segment as opencode spells it (`permission-compiler.ts` `sanitizeMcpName`). */
+const sanitizeMcp = sanitizeMcpName
 
 /** The agent as read from a file, before it is turned into an injected entry. */
 interface ClaudeAgentDef {

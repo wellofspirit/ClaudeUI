@@ -42,6 +42,7 @@ import {
   type ReadinessDeps
 } from './opencode-server-readiness'
 import { agentPermissionOverlay } from './permission-v2'
+import { OpencodeCredentialCleanupError } from './credential-cleanup-error'
 import { loadClaudeAgentsForOpencode, type ClaudeAgentShim } from './claude-agent-shim'
 import { loadOpencodeModelAllowlist } from './model-allowlist'
 import { opencodeMcpServerNames, opencodeNativeAgentNames } from './opencode-config-sources'
@@ -115,6 +116,13 @@ export interface ServerConnection {
    * instead of ending at once (S7, ADR-097 §5).
    */
   lingerMs?: number
+  /**
+   * The manager's verdict at hand-out: the first-contact cleanup (proven copies
+   * of ClaudeUI's own sign-in) succeeded on this server. Only a
+   * `credentialRoutesOnly` lease can be unclean; a credential `create` is
+   * refused on one (it boots a location, 2.2.5).
+   */
+  cleaned: boolean
 }
 
 interface ServerHandle {
@@ -146,6 +154,9 @@ interface ServerHandle {
    * The first-contact hook (proven-copy cleanup) succeeded on this server. Until
    * it has, the server serves credential-route leases only: anything else could
    * activate a location, and so resolve (and refresh) a copy (S7 review 1).
+   * The one credential route that is NOT safe meanwhile is `create` — it boots
+   * the global-config location on 2.2.5 — so the store refuses it on an unclean
+   * lease (`ServerConnection.cleaned`).
    */
   cleaned: boolean
   /** The hook run in flight or last settled. */
@@ -162,20 +173,11 @@ export const CLEANUP_RETRY_DELAYS_MS: readonly number[] = [500, 1_500]
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * Thrown by `acquire` when ClaudeUI could not check a
- * server's credentials for copies of its own ChatGPT sign-in: such a server
- * is not used for anything that activates a location (fail closed).
+ * The fail-closed refusal for an unclean server, and for a credential `create` on one. Defined
+ * in its own module ({@link ./credential-cleanup-error}) so the credential store — and the tests
+ * that mock this one — can throw it; re-exported here, where `acquire` throws it.
  */
-export class OpencodeCredentialCleanupError extends Error {
-  constructor(readonly baseUrl: string) {
-    super(
-      'ClaudeUI could not check opencode’s saved credentials for a copy of its own ChatGPT sign-in, ' +
-        'so it will not open opencode sessions on that server yet (opencode could refresh the copy and ' +
-        'sign ClaudeUI out). This is usually a busy opencode database — try again in a moment.'
-    )
-    this.name = 'OpencodeCredentialCleanupError'
-  }
-}
+export { OpencodeCredentialCleanupError } from './credential-cleanup-error'
 
 /** Where readiness and the cwd resolver send their requests. */
 export interface Endpoint {
@@ -750,12 +752,15 @@ export class OpencodeServerManager {
 
   /**
    * The first-contact hook (S7 follow-up, ADR-097 §5): the credential store's
-   * proven-copy cleanup. 2.0.24 resolves (and so may refresh) the active OAuth
-   * credential only when a location activates its plugins; the credential
-   * routes do not activate one, so a hook using only them runs ahead of every
-   * resolution. One run, bounded by {@link SERVER_STARTED_HOOK_TIMEOUT_MS};
-   * resolves whether it succeeded (a run that outlives the bound may still
-   * succeed later and mark the server).
+   * proven-copy cleanup. opencode 2.x resolves (and so may refresh) the active
+   * OAuth credential when a location activates its plugins: not at boot, not on
+   * `credential.list` / `remove` / `activate` / relabel — but `credential.create`
+   * DOES boot the global-config location (2.2.5, `packages/server/src/handlers/
+   * credential.ts`), so the store refuses that one on an unclean server. A hook
+   * using only the location-less routes runs ahead of every resolution. One run,
+   * bounded by {@link SERVER_STARTED_HOOK_TIMEOUT_MS}; resolves whether it
+   * succeeded (a run that outlives the bound may still succeed later and mark
+   * the server).
    */
   private boundedCleanup(handle: ServerHandle): Promise<boolean> {
     const hook = this.serverStartedHook
@@ -920,7 +925,8 @@ export class OpencodeServerManager {
       authHeader: handle.authHeader,
       directory,
       startedAt: handle.startedAt,
-      hostedTools
+      hostedTools,
+      cleaned: handle.cleaned
     }
   }
 
@@ -945,9 +951,10 @@ export class OpencodeServerManager {
       waitForHostedTools?: boolean
       lingerMs?: number
       /**
-       * The lease only uses `/api/credential` routes, which never activate a
-       * location — the one kind served by a server whose first-contact cleanup
-       * has not succeeded (S7 review 1).
+       * The lease only uses `/api/credential` routes, none of which activate a
+       * location — `create` excepted on 2.2.5 — the kind served by a server
+       * whose first-contact cleanup has not succeeded (S7 review 1). The store
+       * refuses a `create` on such a lease (`ServerConnection.cleaned`).
        */
       credentialRoutesOnly?: boolean
     } = {}

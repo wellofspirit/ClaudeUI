@@ -2,7 +2,7 @@
  * ClaudeUI's permission model compiled for opencode 2.x (ADR-097 §3, amending
  * ADR-022 and ADR-085 for the 2.x engine). Pure: no I/O, no logger.
  *
- * ## 2.x facts this module is built on (`vendor/opencode-src` @ v2.0.24; 2.0.26 differs in `external_directory`, below)
+ * ## 2.x facts this module is built on (`vendor/opencode-src` @ v2.2.5; 2.0.26 differs in `external_directory`, below)
  *
  * - A rule is `{action, resource, effect}`. A call is checked against
  *   `agent.permissions ++ session.permissions` (`core/src/permission.ts`
@@ -22,6 +22,15 @@
  *   model when the LAST rule whose action matches its permission id has
  *   `resource:"*"` and `effect:"deny"`. `edit`/`write`/`patch` share the id
  *   `edit`. Code Mode's `execute` is hidden the same way.
+ * - Since 2.2.0 (`tool.ts` `snapshot`) hiding `execute` does NOT hide the Code
+ *   Mode tools: they are offered as DIRECT tools instead, and most of them
+ *   carry no permission check at all — {@link DIRECT_TOOL_DENY_RULES}. The ones
+ *   that do check ask `edit` (`opencode_worktree_remove`) or the MCP resource
+ *   actions (`opencode_list_mcp_resources`, `opencode_read_mcp_resource`).
+ * - `experimental_image_generate` (`tool/plugin/image-generate.ts`, on by
+ *   default since 2.2.2) is a direct tool that asks `experimental_image_generate`
+ *   with the `provider/model` it will bill: a paid model call, gated like
+ *   `webfetch`.
  *
  * ## Decisions (ADR-097 §3 "As built (S6)")
  *
@@ -38,7 +47,12 @@
  *   wholly denied tool from the model's list too) — {@link wireOrder}.
  * - `execute` (Code Mode) is wholly denied in every mode: its runtime carries
  *   an UNGATED `fetch` (`core/src/codemode/web.ts`), which would bypass the
- *   `webfetch` gate and the auto-mode judge.
+ *   `webfetch` gate and the auto-mode judge. Its tools do not go away with it
+ *   (2.2.0): they become direct tools, so every family ClaudeUI does not want
+ *   the model to reach is wholly denied too ({@link DIRECT_TOOL_DENY_RULES}).
+ * - `experimental_image_generate` is gated as `webfetch` is (ask in default,
+ *   acceptEdits and auto; denied in plan mode): it is a paid model call, and
+ *   the model may start it without the user asking for an image.
  * - `external_directory` is ClaudeUI's own ask in EVERY mode ({@link
  *   externalDirectoryGates}). Up to 2.0.24 every agent carried `{*: ask}` plus
  *   allows for opencode's own directories; 2.0.25 removed both and made
@@ -59,6 +73,7 @@ import {
   opencodeMcpKey,
   parseClaudeRule,
   parseMcpRuleTool,
+  sanitizeMcpName,
   translateSpecifierPatterns,
   type OpencodePermissionRule
 } from './permission-compiler'
@@ -86,7 +101,9 @@ const rule = (action: string, effect: V2Effect, resource = '*'): V2Rule => ({
 export interface CompileV2Options {
   /**
    * The live MCP server set (bridged Claude servers, `claudeui`, `GET /api/mcp`
-   * names). Gates server-level ALLOW rules only; absent → none is emitted.
+   * names). A server-level ALLOW rule needs its server here; a server-level
+   * DENY/ASK covers the configured name of every live server whose id the rule
+   * names too. Absent → only the rule's own spelling is used.
    */
   mcpServers?: readonly string[]
   /** Home directory for `~/` path specifiers (default `os.homedir()`). */
@@ -143,6 +160,25 @@ function compileTierV2(rules: readonly string[], effect: V2Effect, opts: Compile
         if (isV2BuiltinAction((key) => wildcardMatch(key, action, 'win32'))) continue
       }
       push(rule(action, effect))
+      // A server-level deny/ask also covers that server's RESOURCES: since 2.2.0 the
+      // MCP resource tools are direct tools that ask `opencode_list_mcp_resources`
+      // with the raw configured server name and `opencode_read_mcp_resource` with
+      // `<raw server>:<uri>` (`tool/plugin/mcp-resource.ts` at v2.2.5), neither of
+      // which `<sanitized>_*` matches. Same two rules `claude-agent-shim.ts`
+      // `denyServer` emits for a denied agent tool. Never for an allow: it would
+      // widen what the models may read.
+      if (mcp.tool === undefined && effect !== 'allow') {
+        // Claude spells a server by its normalized name (`mcp__my_docs` for `my.docs`),
+        // so a live server whose id that is gets its configured name covered too.
+        const names = new Set([mcp.server])
+        const wanted = sanitizeMcpName(mcp.server)
+        for (const live of opts.mcpServers ?? [])
+          if (sanitizeMcpName(live) === wanted) names.add(live)
+        for (const name of names) {
+          push(rule('opencode_list_mcp_resources', effect, name))
+          push(rule('opencode_read_mcp_resource', effect, `${name}:*`))
+        }
+      }
       continue
     }
     const action = CLAUDE_TOOL_TO_V2_ACTION[parsed.tool]
@@ -250,14 +286,42 @@ export const HAND_BACK_ALLOW_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_hand_ba
  * Auto mode's catch-all for MCP tools. 2.x names an MCP tool's action
  * `<server>_<tool>` (`tool/mcp.ts` `name`), so every MCP action contains `_` —
  * whichever server, whenever it connected. The direct built-ins that contain
- * `_` are `external_directory` (re-stated by {@link autoModeGates}) and
- * ClaudeUI's own `claudeui_*` tools (re-allowed); the `opencode_*` built-ins
- * are Code Mode tools, unreachable while `execute` is hidden.
+ * `_` are `external_directory` (re-stated by {@link autoModeGates}), ClaudeUI's
+ * own `claudeui_*` tools (re-allowed) and the `opencode_*` direct tools, which
+ * {@link DIRECT_TOOL_DENY_RULES} denies after this catch-all (wholly, so they
+ * are hidden).
  */
 export const AUTO_MCP_CATCH_ALL: V2Rule = rule('*_*', 'ask')
 
 /** Code Mode: hidden in every mode (its runtime has an ungated `fetch`). */
 export const EXECUTE_DENY_RULE: V2Rule = rule('execute', 'deny')
+
+/**
+ * The tools that become DIRECT when `execute` is hidden (2.2.0+, `core/src/tool.ts`
+ * `snapshot`: "Without Code Mode its tools would be unreachable, so expose them as
+ * direct tools instead"). Most run with NO permission check of their own
+ * (`tool/plugin/opencode.ts` at v2.2.5: `session_rename`, `session_move`,
+ * `worktree_create`, `worktree_list`, `models`), so only a deny can stop them: in
+ * every mode the model must not rename or move the session, create or remove
+ * worktrees, publish artifacts or schedule future turns behind the user's back.
+ *
+ * Hidden, not merely refused: `resource:"*"` last makes `whollyDisabled` drop them
+ * from the tool list ({@link wireOrder}). `opencode_worktree_remove` is the exception:
+ * its permission id is `edit` (`tool/plugin/opencode.ts` `permission: "edit"`), so this
+ * deny never matches it and the edit gates would have to deny every edit to hide it;
+ * ClaudeUI's own plugin refuses the call instead, in every mode
+ * (`resources/opencode/claudeui-xeng/index.js` §6). `opencode_models`,
+ * `opencode_list_mcp_resources` and `opencode_read_mcp_resource` stay available: they
+ * read, and a model that cannot look up a model id guesses one — a server-level user
+ * deny/ask still covers that server's resources ({@link compileClaudeRulesV2}). The
+ * artifact and schedule families only exist when the user turns those features on.
+ */
+export const DIRECT_TOOL_DENY_RULES: readonly V2Rule[] = [
+  rule('opencode_session_*', 'deny'),
+  rule('opencode_worktree_*', 'deny'),
+  rule('opencode_artifact_*', 'deny'),
+  rule('opencode_schedule_*', 'deny')
+]
 
 /**
  * What a throwaway session (side question, agent generation) runs with:
@@ -273,22 +337,31 @@ export const THROWAWAY_RULESET: readonly V2Rule[] = [rule('*', 'deny')]
  * - EVERY mode: `external_directory` asks, opencode's own directories allowed
  *   ({@link externalDirectoryGates}).
  * - default (also `ask`, `bypassPermissions` — ClaudeUI has no bypass for
- *   opencode — and auto with the classifier off): shell, edit, webfetch ask.
- * - acceptEdits / autoEdit: shell and webfetch ask; edits ask only on the
- *   agent-control paths (ADR-084 §3).
+ *   opencode — and auto with the classifier off): shell, edit, webfetch and
+ *   `experimental_image_generate` ask.
+ * - acceptEdits / autoEdit: shell, webfetch and `experimental_image_generate`
+ *   ask; edits ask only on the agent-control paths (ADR-084 §3).
  * - auto (classifier on): acceptEdits, except EVERY edit asks (the host's
  *   agent-control gate clears ordinary ones) and EVERY MCP tool asks — a
  *   catch-all on the MCP action shape, so a server unknown when the rules were
  *   sent (late connect, the user's own config) is judged too
  *   ({@link autoModeGates}).
- * - plan: shell and webfetch ask; edits and the `general` subagent are
- *   enforced AFTER the user rules ({@link planEnforcement}).
+ * - plan: shell, webfetch and `experimental_image_generate` ask; edits, the
+ *   `general` subagent and image generation are enforced AFTER the user rules
+ *   ({@link planEnforcement}).
  */
 export function modeGates(
   mode: string,
   opts: { autoMode?: boolean; externalDirAllows?: readonly V2Rule[] } = {}
 ): V2Rule[] {
-  const shellWeb = [rule('shell', 'ask'), rule('webfetch', 'ask')]
+  // `experimental_image_generate` bills a model call and can run without the user asking
+  // for an image (it starts a background job), so it follows `webfetch` in every mode,
+  // bypass included: opencode offers it by default (2.2.2+) and asks only this action.
+  const shellWeb = [
+    rule('shell', 'ask'),
+    rule('webfetch', 'ask'),
+    rule('experimental_image_generate', 'ask')
+  ]
   const external = externalDirectoryGates(opts.externalDirAllows)
   switch (mode) {
     case 'plan':
@@ -303,9 +376,21 @@ export function modeGates(
     case 'auto':
     case 'full':
       if (opts.autoMode) return autoModeGates(opts.externalDirAllows ?? [])
-      return [rule('shell', 'ask'), rule('edit', 'ask'), rule('webfetch', 'ask'), ...external]
+      return [
+        rule('shell', 'ask'),
+        rule('edit', 'ask'),
+        rule('webfetch', 'ask'),
+        rule('experimental_image_generate', 'ask'),
+        ...external
+      ]
     default:
-      return [rule('shell', 'ask'), rule('edit', 'ask'), rule('webfetch', 'ask'), ...external]
+      return [
+        rule('shell', 'ask'),
+        rule('edit', 'ask'),
+        rule('webfetch', 'ask'),
+        rule('experimental_image_generate', 'ask'),
+        ...external
+      ]
   }
 }
 
@@ -326,12 +411,12 @@ export function externalDirectoryGates(ownDirAllows: readonly V2Rule[] = []): V2
 }
 
 /**
- * Auto mode (classifier on): shell, webfetch, websearch, skill, every edit and
- * every subagent spawn ask; every MCP tool asks ({@link AUTO_MCP_CATCH_ALL})
- * except ClaudeUI's hosted `claudeui_*` tools (the dispatch tool keeps its own
- * ask, appended later). The catch-all also covers `external_directory`; it is
- * re-stated as the ordinary ask with opencode's own directories allowed after
- * it ({@link externalDirectoryGates}).
+ * Auto mode (classifier on): shell, webfetch, `experimental_image_generate`,
+ * websearch, skill, every edit and every subagent spawn ask; every MCP tool asks
+ * ({@link AUTO_MCP_CATCH_ALL}) except ClaudeUI's hosted `claudeui_*` tools (the
+ * dispatch tool keeps its own ask, appended later). The catch-all also covers
+ * `external_directory`; it is re-stated as the ordinary ask with opencode's own
+ * directories allowed after it ({@link externalDirectoryGates}).
  *
  * `subagent` / `websearch` / `skill` have no gate in the other modes (opencode's
  * own baseline allows them): in auto mode Claude Code's classifier reads them
@@ -343,6 +428,7 @@ export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule
   return [
     rule('shell', 'ask'),
     rule('webfetch', 'ask'),
+    rule('experimental_image_generate', 'ask'),
     rule('websearch', 'ask'),
     rule('skill', 'ask'),
     rule('subagent', 'ask'),
@@ -356,11 +442,16 @@ export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule
 /**
  * Plan mode's server-side refusals, AFTER the user's rules so none of them
  * re-opens what plan mode closes: every edit (wholly denied → edit/write/patch
- * hidden) and the mutating `general` subagent. Robust against a stale host
+ * hidden), image generation (wholly denied → the paid tool is hidden, not
+ * merely asked) and the mutating `general` subagent. Robust against a stale host
  * and against the shared saved-allow table, which an `ask` is not.
  */
 export function planEnforcement(): V2Rule[] {
-  return [rule('subagent', 'deny', 'general'), rule('edit', 'deny')]
+  return [
+    rule('subagent', 'deny', 'general'),
+    rule('edit', 'deny'),
+    rule('experimental_image_generate', 'deny')
+  ]
 }
 
 /**
@@ -422,9 +513,10 @@ export interface SessionRuleset {
 /**
  * The ruleset a ClaudeUI opencode session runs with (and every subagent child
  * inherits): mode gates → the user's rules (auto: without allows; plan:
- * without edit/shell/subagent allows) → plan enforcement → Code Mode deny →
- * dispatch ask → session tools ask, in {@link wireOrder}. Deterministic (equal input, equal
- * output), so a caller can skip an unchanged PATCH.
+ * without edit/shell/subagent allows) → plan enforcement → the Code Mode deny
+ * and {@link DIRECT_TOOL_DENY_RULES} → dispatch ask → session tools ask, in
+ * {@link wireOrder}. Deterministic (equal input, equal output), so a caller can
+ * skip an unchanged PATCH.
  */
 export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset {
   const autoMode = input.autoMode && (input.mode === 'auto' || input.mode === 'full')
@@ -450,6 +542,7 @@ export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset 
     ...effective,
     ...(input.mode === 'plan' ? planEnforcement() : []),
     EXECUTE_DENY_RULE,
+    ...DIRECT_TOOL_DENY_RULES,
     DISPATCH_ASK_RULE,
     SESSION_TOOLS_ASK_RULE,
     ...(input.handBackTarget ? [] : [HAND_BACK_DENY_RULE])

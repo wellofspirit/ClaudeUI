@@ -119,7 +119,9 @@ beforeEach(() => {
   opencodeCredentialStore.configure({
     connect: table.connect,
     available: () => true,
-    memory: memorySlotMemory()
+    memory: memorySlotMemory(),
+    // As boot wires it: a create needs the proven-copy cleanup, which needs a recogniser.
+    isClaudeuiToken: () => false
   })
   mockAcquire.mockResolvedValue(CONN)
   client.integrations.mockResolvedValue(integrations)

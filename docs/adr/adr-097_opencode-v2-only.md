@@ -7,7 +7,11 @@ pass remain; S9's rule that a dropped target's session is deleted amended 2026-1
 §5's "user rows are never touched" amended 2026-10-21: an explicit Remove deletes every credential
 row of the provider, see the end of §5; a target's ruleset carries the user's additional directories since the
 [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) amendment of 2026-10-24; auto mode asks for `subagent`, `websearch` and `skill` for the judge since
-[ADR-111](adr-111_opencode-native-subagent-parity.md), 2026-10-25).
+[ADR-111](adr-111_opencode-native-subagent-parity.md), 2026-10-25; 2026-11-04, opencode 2.2.5: §3 wholly denies the
+direct `opencode_session_*` / `worktree_*` / `artifact_*` / `schedule_*` tools in every mode and gates
+`experimental_image_generate` as `webfetch` (denied in plan), a server-level MCP deny/ask also covers that server's
+`opencode_*_mcp_resource` calls, and the plugin refuses `opencode_worktree_remove` (its permission id is `edit`); §5's credential `create` boots a location, so the store
+refuses it until the proven-copy cleanup has succeeded; the skill list hides skills every agent denies).
 It comes from the spike in
 [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md), which has the evidence, citations and live
 transcripts this ADR relies on. **Owner decisions recorded 2026-10-06:**

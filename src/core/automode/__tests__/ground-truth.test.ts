@@ -461,7 +461,7 @@ describe('analyzeRedirects', () => {
       ['sub/.ssh/authorized_keys', '.ssh'],
       ['.profile', '.profile'],
       ['.bash_profile', '.bash_profile'],
-      // agent-control list (cli.js 2.1.308 additions): single and multi-component entries
+      // agent-control list (cli.js 2.1.317 additions): single and multi-component entries
       ['.idea/workspace.xml', '.idea'],
       ['sub/.yarn/cache/x.zip', '.yarn'],
       ['bunfig.toml', 'bunfig.toml'],

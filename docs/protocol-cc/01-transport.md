@@ -382,6 +382,8 @@ Module table entries (52 bytes each, back-to-back):
 
 StringPointer offsets are **relative to the data buffer start** (`data_start = magic_offset - 32 - byte_count`). Each string is written with a trailing `\0` in the buffer (length excludes the terminator). No integrity checks — no hashes, no compression, no signatures over the graph. The only alignment rule: when `bytecode.len > 0`, `bytecode.off % 128 == 120` or JSC segfaults on load.
 
+`bytecode`, `module_info` and `bytecode_origin_path` are read as **lengths only**, never as bytes: the rebundle drops all three (it emits `{off:0,len:0}`), and 2.1.317 (Bun 1.4.x) made `bytecode.len` span from that module's bytecode start to the start of the contents region — up to 105 MB per module, ~259 GB over the 2,942 entries, where 2.1.308's largest was 14 MB. `module_info` reads `[0,0]` there too (2.1.308: `[off,0]`). Copying what those fields point at SIGKILLs the reader before the writer runs.
+
 **`flags` and the Bun 1.4 optional records.** Bun 1.4 chains optional records _after_ the module table, each gated by a `flags` bit (`Flags` in `StandaloneModuleGraph`):
 
 | Bits | Meaning                                                                                                                                                                                                                                     |
@@ -389,7 +391,7 @@ StringPointer offsets are **relative to the data buffer start** (`data_start = m
 | 0–3  | `DISABLE_DEFAULT_ENV_FILES`, `DISABLE_AUTOLOAD_BUNFIG`, `DISABLE_AUTOLOAD_TSCONFIG`, `DISABLE_AUTOLOAD_PACKAGE_JSON` — behavioural; **must be preserved**.                                                                                  |
 | 4–10 | `SOURCE_TEXT_CONTIGUOUS`, `HAS_SOURCE_HASHES`, `HAS_BUILTIN_BYTECODE`, `HAS_BYTECODE_STRING_TABLE`, `HAS_STARTUP_MODULE_COUNT`, `HAS_MODULE_INFO_STRING_TABLE`, `CROSS_COMPILED_BYTECODE` — each declares a trailing record we do not emit. |
 
-The 2.1.261 binary ships `flags = 0x3ff`. The 2.1.285 binary (Bun 1.4.3) ships `0x1bff`: bits 11 and 12 are new and not identified in the table above. They are dropped with the rest, and the `0xf` output loads and runs (`--version`, the voice probe and the live patch harness all pass). Our writer emits none of the optional records, so it writes `flags & 0xf`. Copying the flags verbatim while omitting the records makes the loader parse whatever follows the table as record data — **empirically a segfault before `main`**.
+The 2.1.261 binary ships `flags = 0x3ff`, 2.1.285 (Bun 1.4.3) `0x1bff`, 2.1.308 `0x1fff` and 2.1.317 `0x3fff`: bits 11–13 are new and not identified in the table above (Bun's enum names are not in the binary — no `HAS_SOURCE_HASHES`/`CROSS_COMPILED_BYTECODE` string survives stripping). They are dropped with the rest, and the `0xf` output loads and runs (`--version`, the boot probe, the voice probe and the live patch harness all pass; at 2.1.317 a `0x200f` build — bit 13 kept — boots identically, so the bit is not a trailing-record selector we can observe, and it changes nothing we can measure either way). Our writer emits none of the optional records, so it writes `flags & 0xf`. Copying the flags verbatim while omitting the records makes the loader parse whatever follows the table as record data — **empirically a segfault before `main`**.
 
 ### Per-platform container wrappers
 

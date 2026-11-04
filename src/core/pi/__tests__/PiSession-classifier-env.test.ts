@@ -51,6 +51,7 @@ vi.mock('../pi-mcp-bridge', async (importOriginal) => ({
   readPiNativeMcpServerNames: () => []
 }))
 vi.mock('../pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
   locatePiLaunch: () => ({ command: '/fake/pi', args: [] }),
   piBinaryAvailable: () => true
 }))

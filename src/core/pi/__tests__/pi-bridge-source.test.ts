@@ -66,10 +66,9 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     }
   })
 
-  it('registers a project_trust handler that trusts without remembering', () => {
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/project_trust/)
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/trusted:\s*'yes'/)
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/remember:\s*false/)
+  it("registers no project_trust handler: project trust is the spawn's --approve, not the extension", () => {
+    // pi 1.5.0 keeps the event, but ClaudeUI never reaches it (PI_APPROVE_ARGS).
+    expect(PI_BRIDGE_EXTENSION_SOURCE).not.toMatch(/pi\.on\('project_trust'/)
   })
 
   it('registers a resources_discover handler returning skillPaths (M3 shared skills)', () => {
@@ -456,8 +455,8 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hosted-tools registration matrix (execu
         const { tools, events, commands } = runExtension()
         expect(tools.size).toBe(0)
         // withEnv's baseline carries the bridge creds (the load throws without them), so the
-        // approval hook is the ONE registration; no ambient gate var may add another.
-        expect([...events.keys()].sort()).toEqual(['project_trust', 'tool_call', 'tool_result'])
+        // two tool gates are the ONLY registrations; no ambient gate var may add another.
+        expect([...events.keys()].sort()).toEqual(['tool_call', 'tool_result'])
         expect(events.has('session_start')).toBe(false)
         expect(commands.has('cui-plan-enter')).toBe(false)
         expect(commands.has('cui-plan-exit')).toBe(false)

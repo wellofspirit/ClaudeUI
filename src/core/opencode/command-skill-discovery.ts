@@ -2,9 +2,33 @@ import { opencodeServerManager } from './OpencodeServerManager'
 import { OpencodeClient } from './OpencodeClient'
 import { logger } from '../services/logger'
 import type { SkillInfo } from '../../shared/types'
+import type { Agent_Info, Skill_Info } from './protocol-v2/openapi'
+import { evaluateV2Call } from './wildcard'
 
 // Per-cwd cache of discovered skills. Keyed by normalized absolute cwd.
 const skillCache = new Map<string, SkillInfo[]>()
+
+/**
+ * Does EVERY agent of this directory deny `skill`? 2.x hides a skill a rule denies from
+ * the `skill` tool (`core/src/skill.ts` `available`: `Permission.evaluate("skill", id)`, last
+ * match wins), while `GET /api/skill` lists every REGISTERED skill, so the two disagree.
+ *
+ * The case that matters: upstream's browser plugin registers a `Browser` skill (id
+ * `browser`, `packages/plugin-browser/src/skill.ts`) and appends
+ * `{action:"skill", resource:"browser", effect:"deny"}` to EVERY agent
+ * (`packages/plugin-browser/src/connection.ts`, "Appended after config, so every agent
+ * hides the browser until an attachment allows it"); only an attached browser adds the
+ * allow, and ClaudeUI never attaches one. At v2.2.5 `GET /api/agent` carries that rule.
+ *
+ * Unknown is not denied: an empty or failed `agent.list` must not empty the dialog, so
+ * such a skill stays listed (the model still cannot load it).
+ */
+function noAgentOffers(skill: Skill_Info, agents: readonly Agent_Info[]): boolean {
+  return (
+    agents.length > 0 &&
+    agents.every((agent) => evaluateV2Call(agent.permissions ?? [], 'skill', [skill.id]) === 'deny')
+  )
+}
 
 /**
  * Discover opencode skills for a given working directory by spinning up a
@@ -29,17 +53,21 @@ export async function discoverOpencodeSkills(cwd: string): Promise<SkillInfo[]> 
     const client = new OpencodeClient(conn)
     try {
       const skills = await client.skills()
-      const result: SkillInfo[] = skills.map((s) => ({
-        name: s.name,
-        displayName: s.name,
-        description: s.description ?? '',
-        // opencode doesn't expose a source taxonomy — use 'project' as a neutral
-        // "available in this workspace" value (all valid SkillSource values render
-        // identically in the Skills dialog).
-        source: 'project' as const,
-        path: s.path,
-        content: s.content
-      }))
+      // A skill every agent denies is not offered to any model: do not offer it here.
+      const agents = await client.agents().catch(() => [] as readonly Agent_Info[])
+      const result: SkillInfo[] = skills
+        .filter((s) => !noAgentOffers(s, agents))
+        .map((s) => ({
+          name: s.name,
+          displayName: s.name,
+          description: s.description ?? '',
+          // opencode doesn't expose a source taxonomy — use 'project' as a neutral
+          // "available in this workspace" value (all valid SkillSource values render
+          // identically in the Skills dialog).
+          source: 'project' as const,
+          path: s.path,
+          content: s.content
+        }))
       skillCache.set(cwd, result)
       return result
     } finally {

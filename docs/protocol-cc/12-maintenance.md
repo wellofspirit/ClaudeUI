@@ -151,8 +151,11 @@ Trigger: `package.json#claudeCliVersion` changes. This invalidates our assumptio
     still hold `claude-desktop`); the response schema (`reason:` next to
     `accessToken:o().nullable()`) and its reason enum (`["signed_out",`); the 401
     handler that calls the host and adopts a DIFFERENT token (`SDK getOAuthToken
-callback returned the same expired token`); the env-token credential
-    (`accessToken:a.CLAUDE_CODE_OAUTH_TOKEN,refreshToken:null`) and the scopes,
+callback returned the same expired token`); the env-token credential — search
+    for `refreshToken:null,expiresAt:null` (2.1.317: two hits, one in the shared
+    builder and one in the `CLAUDE_CODE_OAUTH_TOKEN` variant; the minified object
+    it hangs off changes every version, so never grep the whole
+    `accessToken:…,refreshToken:null` shape) — and the scopes,
     subscription and tier variables it reads; the `update_environment_variables`
     allowlist (`new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN"`) and its
     `control_response` on a `request_id`; and the child-env scrub that keeps the

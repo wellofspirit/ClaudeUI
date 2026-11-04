@@ -1,12 +1,12 @@
 /**
  * @vitest-environment node
  *
- * `EnterWorktree` detection against cli.js 2.1.308's real result strings (slice 3a), and the
+ * `EnterWorktree` detection against cli.js 2.1.317's real result strings (slice 3a), and the
  * C-B4 gate every DETECTED write passes. The repos are fabricated on disk (a `.git` directory plus
  * the files git keeps under `worktrees/<id>`), so `linkedWorktreeOf` runs for real and no git is
  * spawned.
  *
- * The result strings are verbatim from cli.js: curly quotes from `EU()`, the branch part absent
+ * The result strings are verbatim from cli.js: curly quotes from `Qj()`, the branch part absent
  * for a detached worktree, and a sentence appended after the branch for Reused/Resumed.
  */
 
@@ -48,7 +48,7 @@ const REUSED =
 const RESUMED =
   ' A worktree with this name already existed and was resumed as-is \u2014 it may carry an earlier session\u2019s commits. Pass a different name if you wanted a fresh worktree.'
 
-describe('detectEnteredWorktree: cli.js 2.1.308 results', () => {
+describe('detectEnteredWorktree: cli.js 2.1.317 results', () => {
   it.each([
     ['Created', ''],
     ['Entered', ''],

@@ -264,7 +264,7 @@ describe.skipIf(!LAUNCH)('pi + the shared MCP catalog (credential-free, ADR-096)
 
     // Resume a transcript that already selected the MCP tool. It is not
     // registered until the bridge fetches the catalog at session_start:
-    // pi 1.4.0 must keep that selection pending until registration completes.
+    // pi 1.5.0 must keep that selection pending until registration completes.
     const sessionPath = join(dir, 'resume.jsonl')
     const timestamp = new Date().toISOString()
     writeFileSync(

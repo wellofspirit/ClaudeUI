@@ -195,7 +195,21 @@ export interface PiUsage {
   reasoning?: number
   /** Was doc drift #1 at v0.80.10; documented in the 0.82.1 rpc.md. */
   totalTokens?: number
-  cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
+  cost: {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    /** pi's catalog total, or the provider's BILLED figure when `totalFromProvider`. */
+    total: number
+    /**
+     * pi 1.5.0 (`vendor/pi-src/packages/ai/src/types.ts:485`): `total` is the
+     * billed cost OpenRouter reported, not a catalog estimate; the four
+     * components above stay list prices. Absent (or false) means `total` is a
+     * catalog estimate — which is what every session recorded before it means.
+     */
+    totalFromProvider?: boolean
+  }
 }
 
 export interface PiUserMessage {

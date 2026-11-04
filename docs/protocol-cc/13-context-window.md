@@ -10,6 +10,16 @@ Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
 not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
 models, same context/pricing/capability records.
 
+**2.1.317:** complete baked catalog compared model by model against 2.1.308: same 22 models,
+same ids, aliases (`opus` → `claude-opus-5-5`, `sonnet` → `claude-sonnet-5-5`, `haiku` →
+`claude-haiku-5-5`, `fable` → `claude-fable-5-1`) and `latest_per_family`, same `context`
+records (`window`, `native_1m`, `maximum_window`, `clamp_long_context_without_beta`,
+`supports_1m_suffix`), same `max_output_tokens`, pricing tiers, `default_effort`,
+`effort_cost_index` and `image_limits`. Only capability flags moved: `tool_loaded_text` appears
+on 18 of the 22 models, and `total_tokens_reminder` is gone from `claude-opus-5-5` and
+`claude-sonnet-5-5`. Neither flag is mirrored, so `IMPLICIT_1M_BASE_MODELS`, the alias targets and
+`context-window.ts` need no change. Provider-specific runtime resolution was not re-verified.
+
 **2.1.285:** one new model, `claude-sonnet-5-5` (Sonnet 5.5): 1M native
 (`context:{window:1e6,native_1m:!0}`), 128K output (`default` and `upper`),
 `tier_2_10` pricing, `default_effort:"medium"`, capabilities `effort`,

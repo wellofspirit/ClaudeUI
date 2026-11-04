@@ -67,7 +67,7 @@ function flavorOf(platform: NodeJS.Platform): Flavor {
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g
 
 /**
- * Port of `normalizeWindowsShellPath` (utils/paths.ts, pi v1.4.0): Git Bash / MSYS / Cygwin / WSL
+ * Port of `normalizeWindowsShellPath` (utils/paths.ts, pi v1.5.0): Git Bash / MSYS / Cygwin / WSL
  * drive paths (`/c/x`, `/mnt/c/x`, `/cygdrive/c/x`) become `C:\x`. Skipped, exactly as pi skips,
  * for a non-rooted path, a `//` path and any path with a backslash.
  */
@@ -109,7 +109,7 @@ function piNormalizePath(
 /**
  * The absolute path pi's `resolveToCwd` gives `raw` for a session in `cwd`
  * (`utils/paths.ts` `resolvePath` with `normalizeUnicodeSpaces` + `stripAtPrefix`, as
- * `core/tools/path-utils.ts` calls it, pi v1.4.0): unicode spaces folded, one leading `@`
+ * `core/tools/path-utils.ts` calls it, pi v1.5.0): unicode spaces folded, one leading `@`
  * stripped, Windows shell drive paths converted, `~` / `~/` (and `~\` on win32) expanded,
  * `file://` decoded, then resolved against the cwd.
  *
@@ -135,7 +135,7 @@ export function piResolvePath(
 const NARROW_NO_BREAK_SPACE = '\u202F'
 
 /**
- * Port of `resolveReadPathAsync`'s candidate choice (`core/tools/path-utils.ts`, pi v1.4.0):
+ * Port of `resolveReadPathAsync`'s candidate choice (`core/tools/path-utils.ts`, pi v1.5.0):
  * `resolved` itself when it exists, else the first existing of the macOS variants in pi's order
  * (AM/PM narrow space, NFD, curly quote, NFD + curly quote), else `resolved`. Not platform-gated
  * in pi, so not here. `exists` follows links (`access(F_OK)`), as pi's does.
@@ -345,10 +345,13 @@ const DARWIN_NAMESPACE_ROOTS: ReadonlySet<string> = new Set([
  * mount of whatever host the model named; Linux autofs as well as macOS), `/Network/Servers/…` is
  * macOS's directory-service browse surface, and `/.vol`, `/.file`, `/.nofollow`, `/.resolve` are
  * paths the macOS kernel redirects (by volume id / file id) and that can land on a network mount.
- * Judged from the SPELLING alone, so the gate never touches them. Mirrors Claude Code's checks
- * (cli.js 2.1.308): `vze`'s live ones are `Mw` (bare `/net`) and `Rb` (the `/.vol` family), and `Iy`
- * (called via `Xv` on each link target inside Claude's link walk) adds `Pqe` (`/net/<host>`,
- * `/Network/Servers/<host>`) and `iD` (`/Network`). Claude applies `/Network` and the `/.vol` family on
+ * Judged from the SPELLING alone, so the gate never touches them. Mirrors Claude Code's checks in the
+ * path-safety chunk (cli.js 2.1.317; the behaviour is byte-identical to 2.1.308, only the minified
+ * names moved): `tv` is the bare `/net` test (2.1.308 `Mw`), `J_` the `/.vol`/`.file`/`.nofollow`/
+ * `.resolve` family (2.1.308 `RS`), `nN`/`rt` `/Network` (2.1.308 `dH`/`Mt`), the first-component
+ * scan for `/net/<host>` and `/Network/Servers/<host>` is `nz` over the component test `T` (2.1.308
+ * `gse`/`N`), and `tN` (2.1.308 `WU`) is the remote-namespace gate Claude calls on every link target
+ * in its symlink walk. Claude applies `/Network` and the `/.vol` family on
  * every platform; limiting them to darwin here is a deliberate narrowing (on Linux they are
  * ordinary names). The FIRST component decides, case-insensitively (macOS volumes are
  * case-insensitive by default; on Linux the extra case folding only over-asks, which is the safe

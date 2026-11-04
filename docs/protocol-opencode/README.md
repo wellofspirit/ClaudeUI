@@ -15,9 +15,10 @@ imported from `auth.json` (`credential-store.ts`).
 
 ## Pin
 
-- opencode **2.1.2**, tag `v2.1.2`, commit `a517687fde98a7329ada3ae644a01a9fc6c4e99e` (verified
-  against upstream's `refs/tags/v2.1.2`). The wire types come from the spec the 2.1.2 binary
-  SERVES, not from upstream's committed `packages/protocol/openapi.json` (see Generated types).
+- opencode **2.2.5**, tag `v2.2.5`, commit `9bbb8ce18c80f099e0e448775f59d965ead40a21` (verified
+  against upstream's `refs/tags/v2.2.5`). The wire types come from the spec the 2.2.5 binary
+  SERVES, not from upstream's committed `packages/protocol/openapi.json` (see Generated types;
+  the two agree again at 2.2.5).
   **2.1.0 changed public contracts on purpose** (upstream's "Breaking changes"): provider replay
   data is `native` everywhere (`state`, `providerState`, `resultState`, `providerContext` are
   gone; tool parts carry one `native` that the result shallow-merges into), `Credential.Key.configuration` is removed in favour of `metadata`, summary compactions reference their first
@@ -25,7 +26,19 @@ imported from `auth.json` (`credential-store.ts`).
   `native.messages`, and the transitional `session.compacted` event is gone. The served spec also
   gained the `Voice` and `PersistentPty` groups, session archiving events
   (`session.archived`/`session.unarchived`), provider `encoding`/`compatibility` settings and
-  `retryAfterMs` on `Session.StructuredError`. 2.1.2 itself is fixes only.
+  `retryAfterMs` on `Session.StructuredError`. 2.1.2 was fixes only.
+  **2.2.x is additive on the wire** (reviewed file by file at 2.2.5): `event.subscribe` takes an
+  optional `types` filter (ClaudeUI sends none — every event, as before); the `Artifact` events
+  join the feed (uncurated: unknown types are ignored, never an error); `schedule`/`artifact`/
+  `usageLimits`/`persistentPty`/`voice` groups and a `Model.Type` (`chat`/`decision`/`image`),
+  provider `cache` settings and a `claude-agent` provider id arrive; the inbox gains opt-in
+  `MediaUser`/`MediaInfo` payloads (only for clients that set `experimental-media-uri` — ClaudeUI
+  does not) and an unused `Session.Event.Source` struct goes away. Two behaviour changes that
+  reach ClaudeUI: `execute` hidden no longer hides the Code Mode tools (they become DIRECT
+  tools — §Permissions) and `credential.create` boots the global-config location (§Credentials);
+  `session.interrupt` now 404s an unknown session, which every caller already tolerates (they
+  race it against a session that may be gone). The generated schema renames are internal
+  (`Session.Message.Native_1..4` → `Native`, `Form.Fields_1..3` → `Form.Fields`).
 - **One pin.** The version is the harness manifest's `tested`
   (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
   and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
@@ -52,30 +65,30 @@ imported from `auth.json` (`credential-store.ts`).
 - Provenance (2.0.24): every package's `repository` is `anomalyco/opencode`, maintainer `thdxr`,
   published by GitHub Actions through npm trusted publishing (OIDC); the darwin binaries are signed
   `Developer ID Application: Anomaly Innovations, Inc. (5NZ4Q7NXJ4)`.
-- `--version` prints `opencode v2.1.2` (1.x printed the bare version; a source build without a
+- `--version` prints `opencode v2.2.5` (1.x printed the bare version; a source build without a
   version prints `opencode vlocal`). Detection reads both; a 1.x install is labelled too old
-  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.1.2 or newer)"), and
+  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.2.5 or newer)"), and
   `opencode2` is searched on PATH beside `opencode`. Homebrew's `opencode` formula is a 2.x source
   build with the version stamped in (`OPENCODE_VERSION`), found at `<prefix>/bin/opencode` as
   System and labelled by its version like any other.
 
 ## Server lifecycle (`opencode-server-spawn.ts`, `OpencodeServerManager.ts`)
 
-| What          | 2.x                                                                                                                                                                                                                                                                                                                                                                                     |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Command       | `opencode serve --stdio --hostname 127.0.0.1 --port 0` (never `--service`)                                                                                                                                                                                                                                                                                                              |
-| Listen line   | The FIRST stdout line is JSON `{"url":"http://127.0.0.1:<port>"}`; only a loopback `http:` URL with a port is accepted                                                                                                                                                                                                                                                                  |
-| Auth          | HTTP Basic `opencode:<password>`; the password goes in `OPENCODE_PASSWORD` (the legacy `OPENCODE_SERVER_PASSWORD` is deleted from the child env). In `--stdio` mode the server deletes both from its own env, so its tools cannot read it                                                                                                                                               |
-| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`. No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                          |
-| End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway                                                                                                                                                                                                 |
-| Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained) |
-| Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn)                                                                                                  |
-| Release       | `releaseIfCurrent(cwd, conn)` — exact: a server's URL + password is unique per spawn, so a stale lease never releases a replacement. There is no cwd-only release                                                                                                                                                                                                                       |
-| Death         | An unexpected exit fans out to `subscribeExit` listeners (exact per lease)                                                                                                                                                                                                                                                                                                              |
-| First contact | Before a server serves anything that can activate a location, the credential store's proven-copy cleanup runs on it (S7); until it succeeds the server serves credential-route leases only (fail closed, `OpencodeCredentialCleanupError`)                                                                                                                                              |
-| Readiness     | Per (server, directory): `POST /api/rpc/claudeui-xeng/tools` lists the registered `claudeui_*` tools; `acquire` waits (10 s cap, logged, never throws) until `claudeui_dispatch_agent` is there. Fallback: `GET /api/mcp` connected + 400 ms                                                                                                                                            |
-| Guard         | Per (server, directory): `POST /api/rpc/claudeui-xeng/guard` must answer `{permissionHook:true, mcpDirect:true, modelGate:true}` (plus `allowlistLoaded`, reported and logged, never required) within 10 s, else a turn-running `acquire` throws `OpencodePermissionGuardError` (fail closed; only `active` is memoized)                                                                |
-| Config reload | After a ClaudeUI config write: per server `POST /api/location/reload`, then readiness again — but never on a server with a running execution (a reload cancels pending asks and forms; opencode's own config watcher applies the files there, ~0.5 s)                                                                                                                                   |
+| What          | 2.x                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Command       | `opencode serve --stdio --hostname 127.0.0.1 --port 0` (never `--service`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Listen line   | The FIRST stdout line is JSON `{"url":"http://127.0.0.1:<port>"}`; only a loopback `http:` URL with a port is accepted                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Auth          | HTTP Basic `opencode:<password>`; the password goes in `OPENCODE_PASSWORD` (the legacy `OPENCODE_SERVER_PASSWORD` is deleted from the child env). In `--stdio` mode the server deletes both from its own env, so its tools cannot read it                                                                                                                                                                                                                                                                                                                     |
+| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`. No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                                                                                                                                                                                                |
+| End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway                                                                                                                                                                                                                                                                                                                                                                       |
+| Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained)                                                                                                                                                                       |
+| Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn)                                                                                                                                                                                                                                                                        |
+| Release       | `releaseIfCurrent(cwd, conn)` — exact: a server's URL + password is unique per spawn, so a stale lease never releases a replacement. There is no cwd-only release                                                                                                                                                                                                                                                                                                                                                                                             |
+| Death         | An unexpected exit fans out to `subscribeExit` listeners (exact per lease)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| First contact | Before a server serves anything that can activate a location, the credential store's proven-copy cleanup runs on it (S7); until it succeeds the server serves credential-route leases only (fail closed, `OpencodeCredentialCleanupError`). On 2.2.5 `list`/`remove`/`activate`/relabel do not activate a location, but `credential.create` DOES (it boots the global-config Location), so a create is refused until the cleanup has succeeded — in the store's own process and on a lease the manager vouches for (`ServerConnection.cleaned`); §Credentials |
+| Readiness     | Per (server, directory): `POST /api/rpc/claudeui-xeng/tools` lists the registered `claudeui_*` tools; `acquire` waits (10 s cap, logged, never throws) until `claudeui_dispatch_agent` is there. Fallback: `GET /api/mcp` connected + 400 ms                                                                                                                                                                                                                                                                                                                  |
+| Guard         | Per (server, directory): `POST /api/rpc/claudeui-xeng/guard` must answer `{permissionHook:true, mcpDirect:true, modelGate:true}` (plus `allowlistLoaded`, reported and logged, never required) within 10 s, else a turn-running `acquire` throws `OpencodePermissionGuardError` (fail closed; only `active` is memoized)                                                                                                                                                                                                                                      |
+| Config reload | After a ClaudeUI config write: per server `POST /api/location/reload`, then readiness again — but never on a server with a running execution (a reload cancels pending asks and forms; opencode's own config watcher applies the files there, ~0.5 s)                                                                                                                                                                                                                                                                                                         |
 
 ## Requests (`OpencodeClient.ts`)
 
@@ -97,6 +110,15 @@ error union when tagged), our timeout `OpencodeTimeoutError` (60 s; `generate` 2
 | Credentials | `GET/POST /api/credential`, `PATCH /api/credential/{id} {label}`, `DELETE /api/credential/{id}`, `POST /api/credential/{id}/activate`, the integration OAuth flow routes                                                          | See §Credentials                                                                                                                                                                                                                                                                          |
 | Plugin RPC  | `POST /api/rpc/{rpcID}/{method}` (`{input}` → `{output}`)                                                                                                                                                                         | The spec's params omit `{method}`; the client builds the path                                                                                                                                                                                                                             |
 | Events      | `GET /api/event` (SSE)                                                                                                                                                                                                            | See §Event feed                                                                                                                                                                                                                                                                           |
+
+`GET /api/skill` lists every REGISTERED skill, while the `skill` tool offers only what the agent's
+rules let through (`packages/core/src/skill.ts` `available`). So the skill list ClaudeUI shows is
+filtered by the agents' own rules: a skill EVERY agent denies is left out. That is the `Browser`
+skill (id `browser`), which upstream's browser plugin registers and then denies on every agent
+(`packages/plugin-browser/src/connection.ts` at v2.2.5: `{action:"skill", resource:"browser",
+effect:"deny"}` appended to each agent; only an attached desktop browser adds an allow, and
+ClaudeUI never attaches one) — `command-skill-discovery.ts`. An unknown agent list filters nothing.
+The `goal` command (`/api/command`, 2.2.x) stays listed.
 
 ## Event feed (`opencode-event-stream.ts`, `protocol-v2/events.ts`)
 
@@ -164,12 +186,38 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
 - Rules are `{action, resource, effect}`, last match wins, no match = `ask`. Actions: `shell`
   (Claude `Bash`), `subagent` (`Task`), `edit` (also write/patch/apply_patch/multiedit), `read`,
   `glob`, `grep`, `webfetch`, `websearch`, `skill`, `question`, `external_directory`, `execute`
-  (Code Mode), MCP tools as `<server>_<tool>`. Dead 1.x keys are dropped (`list`, `todowrite`,
+  (Code Mode), `opencode_<namespace>_<tool>` (the opencode built-ins), `experimental_image_generate`,
+  MCP tools as `<server>_<tool>`. Dead 1.x keys are dropped (`list`, `todowrite`,
   `doom_loop`, `lsp`, `batch`, …).
 - A whole-category deny (`resource:"*"`) last for its action HIDES the tool from the model.
+- **Since 2.2.0 hiding `execute` does NOT hide the Code Mode tools** (`packages/core/src/tool.ts`
+  `snapshot`: "Without Code Mode its tools would be unreachable, so expose them as direct tools
+  instead"): they are offered as DIRECT tools, and most carry no permission check of their own
+  (`packages/core/src/tool/plugin/opencode.ts` at v2.2.5: `session_rename`, `session_move`,
+  `worktree_create`, `worktree_list`, `models`; `worktree_remove` asks `edit`). So in EVERY mode
+  ClaudeUI wholly denies `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*` and
+  `opencode_schedule_*` (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`, next to the Code Mode deny
+  and moved last by `wireOrder`, so no user allow re-opens them) — the model must not rename or
+  move the session, create or remove worktrees, publish artifacts or schedule turns on its own.
+  `opencode_models`, `opencode_list_mcp_resources` and `opencode_read_mcp_resource` stay
+  available (they read), and the artifact/schedule families exist only when the user enables
+  those features.
+- `experimental_image_generate` (`tool/plugin/image-generate.ts`, on by default since 2.2.2) is a
+  paid model call the model can start without the user asking for an image: it asks in default,
+  acceptEdits and auto, like `webfetch`, and is wholly denied (hidden) in plan mode.
+- The shell PERMISSION resources come from 2.2.x's portable scanner (`core/src/shell/scan.ts`,
+  `parse.ts` `scan`), not tree-sitter (2.1.2). An ordinary heredoc, `$(…)` and a compound command
+  ARE analysed: a heredoc is ONE resource, the whole command text (body included); `$(…)` yields
+  the outer statement AND the substitution as separate resources (`echo $(date +%Y)` →
+  `echo $(date +%Y)` and `date +%Y`); `{ …; }`, `( … )` and `if … fi` yield their inner
+  statements. A command the scanner calls opaque (`alias x=y`: `dynamic-execution`; an
+  unterminated quote) FAILS the call before any ask with `{"type":"unknown","message":"Portable
+shell scanner cannot analyze command: <reason>"}` — fail closed, nothing runs, and ClaudeUI's
+  ladder never sees it.
 - Per-session rules ride `POST /api/session {permissions}` and `PATCH` (which REPLACES). The
   session ruleset ClaudeUI sends only tightens: mode gates (asks) → the user's compiled rules (no
-  allows under auto; no mutating allows in plan) → plan enforcement → `{execute,*,deny}` → the
+  allows under auto; no mutating allows in plan) → plan enforcement → `{execute,*,deny}` and the
+  four `DIRECT_TOOL_DENY_RULES` families → the
   `claudeui_dispatch_agent` ask, whole-category denies moved last.
 - `external_directory` (a tool target outside the session dir AND its git worktree; resource
   `<dir>/*`, slashed, absolute): **since 2.0.25 no agent asks** (the baseline is `{*: allow}`;
@@ -260,9 +308,21 @@ metadata:{accountID}}`) plus the sign-ins started from ClaudeUI (labelled
   re-POST of an id is a 409): POST the next generation `activate:true`, then DELETE the previous.
   2.x hot-reloads credentials (`credential.switched`); there is no recycle.
 - opencode resolves (and may refresh) the active OAuth credential only when a LOCATION activates
-  its plugins, never at boot or on a credential route — which is why the first-contact cleanup
-  runs before any location request.
+  its plugins, never at boot. Of the credential routes, `list`, `remove`, `activate` and relabel
+  never activate one; **`credential.create` does** on 2.2.5 (it boots the global-config Location,
+  `packages/server/src/handlers/credential.ts`, loading the user's plugins — the ChatGPT plugin
+  then resolves the active connection). That is why the first-contact cleanup runs before any
+  location request, and why `OpencodeCredentialStore` fails a create closed until the cleanup has
+  succeeded in this process and on a lease the manager vouched for (`credential-store.ts`
+  `createGuard`, `OpencodeCredentialCleanupError`); every other credential operation is
+  unchanged and needs neither.
 - An expired ChatGPT bearer surfaces as `session.execution.failed {error:{type:'provider.auth'}}`.
+- On 2.2.x a ChatGPT sign-in REPLACES openai's model list with the codex set and disables every
+  model that is not newer than `gpt-5.5` (`packages/core/src/plugin/provider/openai.ts`:
+  `major > 5 || (major === 5 && minor > 5)`; the list is `plugin/provider/chatgpt.ts`
+  `fallbackModels`). A remembered `openai/gpt-5.5` therefore fails the turn with
+  "Model unavailable" in ChatGPT mode, which is why the credential contract cases drive
+  `openai/gpt-5.6-luna`.
 
 ## Config ClaudeUI injects (`opencode-server-config.ts`) and edits (S8)
 
@@ -404,8 +464,9 @@ predate the 1.x removal and keep their names; there is no other opencode integra
 - The ChatGPT credential case needs `sandbox-exec`, so it runs on darwin only.
 
 What it covers, per file: the raw client and wire facts (`client`, `turn`, `inbox`, `permission`,
-`form`, `mcp-identity`, `credential`, `paths`, `ruleset`, `plugin-permissions`,
-`external-directory`), the S4 mapper
+`form`, `mcp-identity`, `credential`, `credential-location` — which credential route boots a
+location, `paths`, `ruleset`, `plugin-permissions`, `external-directory`, `direct-tools` — the
+direct `opencode_*` tools absent from the tool list the model is sent), the S4 mapper
 against recorded and live sequences (`mapper`), and the production stack end to end — the server
 manager (`server-manager`: readiness, `_meta` identity incl. a subagent child's, a second
 directory, stdin-EOF end), the chat (`session`), credentials (`credentials-s7`), config

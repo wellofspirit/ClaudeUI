@@ -34,6 +34,7 @@ vi.mock('../../../core/services/logger', () => ({
 // on them either way — see buildPiTargetChildEnv's own dedicated test for the
 // real defaultSpawnPiTarget's recursion-guard property.
 vi.mock('../../../core/pi/pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
   locatePiLaunch: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
 }))
@@ -182,6 +183,16 @@ function unusedOpencode(): never {
   throw new Error(
     'opencode targets are tested in cross-engine-dispatcher-opencode.component.test.ts'
   )
+}
+
+/**
+ * The `--settings` behaviour switches every Claude target carries, whatever the
+ * user's rules are: engines/claude.json `claudeConfig` at its defaults (idle
+ * compaction OFF, the built-in email privacy check ON).
+ */
+const CLAUDE_BEHAVIOR_SETTINGS = {
+  idleCompaction: false,
+  enabledPlugins: { 'cc-plugin-privacy@builtin': true }
 }
 
 /** The user's merged permission rules as the dispatcher loads them (ADR-085 §3). */
@@ -5236,11 +5247,15 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
     async function start(
       rules: MergedClaudeRules,
       mode = 'default',
-      extra: Partial<DispatchContext> = {}
+      extra: Partial<DispatchContext> = {},
+      claudeConfig?: Record<string, unknown>
     ) {
       const target = makeFakeClaudeTarget()
       const { dispatcher } = makeHarness({
-        loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'haiku' } })),
+        loadEngineConfig: vi.fn(() => ({
+          dispatch: { defaultModel: 'haiku' },
+          ...(claudeConfig ? { claudeConfig } : {})
+        })),
         spawnClaudeQuery: target.spawnClaudeQuery,
         loadUserRules: () => rules
       })
@@ -5259,7 +5274,25 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
     it('spawn opts carry settings.permissions.{deny, ask} — never the allow tier', async () => {
       const { target, finish } = await start(RULES, 'auto')
       expect(target.spawnCalls[0].settings).toEqual({
+        ...CLAUDE_BEHAVIOR_SETTINGS,
         permissions: { deny: [FORCE_DENY], ask: [DOCKER_ASK] }
+      })
+      await finish()
+    })
+
+    it("spawn opts carry the Claude engine's behaviour switches, flipped when its config says so", async () => {
+      const { target, finish } = await start(
+        userRules(),
+        'default',
+        {},
+        {
+          idleCompaction: true,
+          privacyEmailCheck: false
+        }
+      )
+      expect(target.spawnCalls[0].settings).toEqual({
+        idleCompaction: true,
+        enabledPlugins: { 'cc-plugin-privacy@builtin': false }
       })
       await finish()
     })
@@ -5286,9 +5319,10 @@ describe('CrossEngineDispatcher — ADR-085 §3: user deny/ask rules on every ta
       await finish()
     })
 
-    it('no settings key at all when the user has no deny/ask rule', async () => {
+    it('no permissions key when the user has no deny/ask rule — the behaviour switches still ride', async () => {
       const { target, finish } = await start(userRules({ allow: ['Bash(git:*)'] }))
-      expect('settings' in target.spawnCalls[0]).toBe(false)
+      expect(target.spawnCalls[0].settings).toEqual(CLAUDE_BEHAVIOR_SETTINGS)
+      expect(target.spawnCalls[0].settings).not.toHaveProperty('permissions')
       await finish()
     })
 
@@ -5894,6 +5928,7 @@ describe('X-Agent ledger — Claude targets (ADR-105)', () => {
     )
     expect(again.isError).toBeUndefined()
     expect(target.spawnCalls[1].settings).toEqual({
+      ...CLAUDE_BEHAVIOR_SETTINGS,
       permissions: { deny: ['Edit'], ask: ['Bash(git push*)'] }
     })
 
@@ -5907,6 +5942,7 @@ describe('X-Agent ledger — Claude targets (ADR-105)', () => {
     )
     expect(unrestricted.isError).toBeUndefined()
     expect(target.spawnCalls[2].settings).toEqual({
+      ...CLAUDE_BEHAVIOR_SETTINGS,
       permissions: { deny: ['Edit'], ask: ['Bash(git push*)'] }
     })
   })
@@ -11781,6 +11817,7 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
       const { target, run } = claude({ loadUserRules: rulesBy(wt) })
       await run({ engine: 'claude', prompt: 'x', workdir: wt })
       expect(target.spawnCalls[0].settings).toEqual({
+        ...CLAUDE_BEHAVIOR_SETTINGS,
         permissions: { deny: [PARENT_DENY, BOTH_DENY], ask: [TARGET_ASK] }
       })
     })
@@ -11790,6 +11827,7 @@ describe('CrossEngineDispatcher — the X-Agent working directory (workdir)', ()
       const { target, run } = claude({ loadUserRules })
       await run({ engine: 'claude', prompt: 'x' })
       expect(target.spawnCalls[0].settings).toEqual({
+        ...CLAUDE_BEHAVIOR_SETTINGS,
         permissions: { deny: [PARENT_DENY, BOTH_DENY], ask: [] }
       })
       // (the dispatcher also reads the additional directories of the parent for `workdir`; none

@@ -89,6 +89,7 @@ describe('opencode raw-config key partition', () => {
       'enterprise',
       'policies',
       'references',
+      'timezone',
       'username',
       'warming',
       'websearch',

@@ -754,16 +754,9 @@ export default function (pi) {
     }
   });
 
-  // The user already chose to open/trust this folder in ClaudeUI -- the
-  // desktop app itself is the trust boundary, not pi's own per-project
-  // trust.json. remember:false deliberately does NOT persist this decision to
-  // pi's trust store: trust is re-derived fresh from ClaudeUI's own state on
-  // every launch, and since this handler only participates when
-  // CLAUDEUI_PI_BRIDGE_URL/TOKEN are set (i.e. ClaudeUI itself spawned the
-  // process -- the load throws without them, see the top), a user running the
-  // SAME pinned binary by hand never loads this file and still gets pi's own
-  // built-in trust prompt untouched.
-  pi.on('project_trust', () => ({ trusted: 'yes', remember: false }));
+  // Trust is the spawn's, not this extension's: every pi spawn ClaudeUI makes
+  // passes --approve (pi-locate.ts's PI_APPROVE_ARGS), so pi never reaches its
+  // own trust store or the project_trust event here.
 
   // MCP servers from ClaudeUI's shared catalog (bridge v13, ADR-096): its OWN
   // gate (CLAUDEUI_PI_MCP=1) on top of the bridge creds. The configs carry

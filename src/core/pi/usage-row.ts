@@ -40,7 +40,7 @@ export function piUsageEvent(
       cacheWrite1h: 0, // pi does not distinguish 1h-TTL cache writes
       cacheRead: output.tokens.cacheRead
     },
-    engineCostUsd: output.costUsd,
+    engineCostUsd: output.cost?.total ?? 0,
     sessionId: opts.sessionId,
     messageId: output.messageId,
     source: 'live',
@@ -49,9 +49,12 @@ export function piUsageEvent(
     billingType: piAuthProvider.buildPiAccountRef(output.provider)?.billingType ?? 'unknown',
     origin: opts.origin,
     parentRoutingId: opts.parentRoutingId,
-    // pi reports a LIST PRICE, not a charge: its catalog knows
-    // long-context tiers our table does not (S1b), but the figure is the
-    // same whether the credential is a subscription or an API key.
-    engineCostIsEquivalent: true
+    // pi reports a LIST PRICE, not a charge: its catalog knows long-context
+    // tiers our table does not (S1b), but the figure is the same whether the
+    // credential is a subscription or an API key. The one exception is an
+    // OpenRouter-billed total (pi 1.5.0 `totalFromProvider`), which IS money
+    // charged — the row must then record it as the billed figure, not as an
+    // equivalent, or a subscription would read it as never spent.
+    engineCostIsEquivalent: output.cost?.totalFromProvider !== true
   }
 }

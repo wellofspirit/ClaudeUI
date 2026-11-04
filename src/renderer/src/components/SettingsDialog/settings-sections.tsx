@@ -1525,6 +1525,65 @@ function OpencodeRawConfigSection(): React.JSX.Element {
   )
 }
 
+// ── Claude › Session behaviour ───────────────────────────────────────
+
+/**
+ * The two cli.js behaviours ClaudeUI owns a switch for (engines/claude.json
+ * `claudeConfig`), delivered per spawn as `--settings` flag settings so the
+ * user's own `~/.claude/settings.json` — shared with the terminal `claude` — is
+ * never touched (`claudeBehaviorSettings`, sdk/args.ts).
+ *
+ * Both are ABSENT-means-default keys: switching a row back to its default
+ * DELETES it rather than writing the default out, so the hand-editable file
+ * says only what the user actually changed.
+ */
+function ClaudeSessionBehaviorSection({
+  engineConfig,
+  updateEngineConfig
+}: {
+  engineConfig: EngineConfig
+  updateEngineConfig: (p: Partial<EngineConfig>) => void
+}): React.JSX.Element {
+  const claudeConfig = engineConfig.claudeConfig ?? {}
+  // `idleCompaction` absent = OFF; `privacyEmailCheck` absent = ON.
+  const idleCompaction = claudeConfig.idleCompaction === true
+  const privacyEmailCheck = claudeConfig.privacyEmailCheck !== false
+
+  /** Write a key, or DELETE it when the new value is that key's default. */
+  const save = (key: 'idleCompaction' | 'privacyEmailCheck', value: boolean): void => {
+    const next = { ...claudeConfig }
+    const isDefault = key === 'idleCompaction' ? value === false : value === true
+    if (isDefault) delete next[key]
+    else next[key] = value
+    updateEngineConfig({ claudeConfig: next })
+  }
+
+  return (
+    <div data-testid="ClaudeSessionBehaviorSection" className="divide-y divide-border/55">
+      <SettingsToggle
+        testid="ClaudeSessionBehaviorSection.idleCompaction"
+        label="Compact idle conversations"
+        description="Claude Code summarises a long conversation (200K+ tokens) left idle. Off keeps the full history. Applies to sessions started after the change."
+        keyText="engines/claude.json · claudeConfig.idleCompaction"
+        checked={idleCompaction}
+        onChange={(v) => save('idleCompaction', v)}
+        modified={claudeConfig.idleCompaction !== undefined}
+        onReset={() => save('idleCompaction', false)}
+      />
+      <SettingsToggle
+        testid="ClaudeSessionBehaviorSection.privacyEmailCheck"
+        label="Ask before sending your email address"
+        description="Claude Code asks before a web or shell call that would send your account email address off this machine. Applies to sessions started after the change."
+        keyText="engines/claude.json · claudeConfig.privacyEmailCheck"
+        checked={privacyEmailCheck}
+        onChange={(v) => save('privacyEmailCheck', v)}
+        modified={claudeConfig.privacyEmailCheck !== undefined}
+        onReset={() => save('privacyEmailCheck', true)}
+      />
+    </div>
+  )
+}
+
 // ── SECTIONS data ────────────────────────────────────────────────────
 
 export const SECTIONS: Section[] = [
@@ -2492,6 +2551,43 @@ export const SECTIONS: Section[] = [
         keywords:
           'subscription anthropic claude chatgpt openai account accounts login sign in switch active multi multiple keychain plaintext credentials workspace organisation organization per-session pin engines',
         render: () => <SubscriptionsSection />
+      }
+    ]
+  },
+  {
+    // Claude › Session behaviour: the two cli.js behaviours ClaudeUI owns a
+    // switch for (idle compaction, the built-in email-address privacy check).
+    // Claude-only, so it sits on the Claude page like Endpoint does.
+    id: 'claude-session',
+    label: 'Claude session behaviour',
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <line x1="4" y1="6" x2="20" y2="6" />
+        <circle cx="9" cy="6" r="2" />
+        <line x1="4" y1="12" x2="20" y2="12" />
+        <circle cx="15" cy="12" r="2" />
+        <line x1="4" y1="18" x2="20" y2="18" />
+        <circle cx="7" cy="18" r="2" />
+      </svg>
+    ),
+    items: [
+      {
+        key: 'claudeSessionBehavior',
+        label: 'Session behaviour',
+        keywords:
+          'idle compaction compact summarise summarize summary 200k long conversation history email privacy address account web shell send leave machine',
+        render: (_s, _u, e, ue) => (
+          <ClaudeSessionBehaviorSection engineConfig={e} updateEngineConfig={ue} />
+        )
       }
     ]
   },

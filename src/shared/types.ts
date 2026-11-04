@@ -1093,6 +1093,24 @@ export interface EngineConfig {
 export interface ClaudeEngineConfig {
   /** A Claude picker value from `supportedModels()`: an alias (`opus`, `sonnet[1m]`, …; ADR-100). */
   defaultModel?: string
+  /**
+   * Whether cli.js may summarise a long (200K+ token) conversation left idle —
+   * its `idleCompaction` setting (read as `ri("idleCompaction",!0)`,
+   * `vendor/claude-cli/cli.js` 2.1.317). ClaudeUI's default is OFF: absent
+   * means false, and the value is passed per spawn as `--settings` flag
+   * settings, so the user's own `~/.claude/settings.json` (which the terminal
+   * `claude` shares) is never touched.
+   */
+  idleCompaction?: boolean
+  /**
+   * Whether cli.js's built-in `cc-plugin-privacy@builtin` plugin asks before a
+   * Web/Bash/Monitor/PowerShell call whose input holds the account email
+   * address. ClaudeUI's default is ON: absent means true. cli.js reads the
+   * plugin's switch (`enabledPlugins`, `defaultEnabled:!0`,
+   * `enabledFromTrustedSettingsOnly:!0`) only from user, flag or policy
+   * settings, so it is passed per spawn as `--settings` flag settings.
+   */
+  privacyEmailCheck?: boolean
 }
 
 /**

@@ -11,14 +11,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // Hoist mocks BEFORE vi.mock() calls
 // ---------------------------------------------------------------------------
 
-const { mockAcquire, mockRelease, mockListSkills, MockOpencodeClient } = vi.hoisted(() => {
-  const mockAcquire = vi.fn()
-  // releaseIfCurrent — the exact release for this lease.
-  const mockRelease = vi.fn()
-  const mockListSkills = vi.fn()
-  const MockOpencodeClient = vi.fn()
-  return { mockAcquire, mockRelease, mockListSkills, MockOpencodeClient }
-})
+const { mockAcquire, mockRelease, mockListSkills, mockListAgents, MockOpencodeClient } = vi.hoisted(
+  () => {
+    const mockAcquire = vi.fn()
+    // releaseIfCurrent — the exact release for this lease.
+    const mockRelease = vi.fn()
+    const mockListSkills = vi.fn()
+    const mockListAgents = vi.fn()
+    const MockOpencodeClient = vi.fn()
+    return { mockAcquire, mockRelease, mockListSkills, mockListAgents, MockOpencodeClient }
+  }
+)
 
 vi.mock('../OpencodeServerManager', () => ({
   opencodeServerManager: {
@@ -49,6 +52,7 @@ beforeEach(() => {
   mockAcquire.mockReset()
   mockRelease.mockReset()
   mockListSkills.mockReset()
+  mockListAgents.mockReset()
   MockOpencodeClient.mockReset()
   // Invalidate cache so each test starts fresh
   invalidateOpencodeSkillCache()
@@ -58,8 +62,10 @@ beforeEach(() => {
     authHeader: 'Basic test',
     directory: cwd
   }))
+  // No agents unless a test says otherwise: nothing is filtered.
+  mockListAgents.mockResolvedValue([])
   MockOpencodeClient.mockImplementation(function () {
-    return { skills: mockListSkills }
+    return { skills: mockListSkills, agents: mockListAgents }
   })
 })
 
@@ -136,6 +142,53 @@ describe('discoverOpencodeSkills', () => {
     expect(a[0].name).toBe('skill-a')
     expect(b[0].name).toBe('skill-b')
     expect(mockAcquire).toHaveBeenCalledTimes(2)
+  })
+
+  it('hides a skill EVERY agent denies (the browser plugin denies `Browser` on every agent)', async () => {
+    // `packages/plugin-browser/src/connection.ts` appends `{action:"skill", resource:"browser",
+    // effect:"deny"}` to every agent; only an attached browser allows it, and ClaudeUI never
+    // attaches one. `GET /api/skill` still lists it, `skill.list` being unfiltered.
+    const browserDeny = { action: 'skill', resource: 'browser', effect: 'deny' }
+    mockListSkills.mockResolvedValue([
+      { id: 'browser', name: 'Browser', path: '/builtin/browser.md', content: '# In-app browser' },
+      { id: 'my-skill', name: 'my-skill', path: '/x/SKILL.md', content: 'c' }
+    ])
+    mockListAgents.mockResolvedValue([
+      { id: 'build', permissions: [browserDeny] },
+      { id: 'explore', permissions: [browserDeny] }
+    ])
+
+    const result = await discoverOpencodeSkills('/skills/denied')
+
+    expect(result.map((s) => s.name)).toEqual(['my-skill'])
+  })
+
+  it('keeps a skill at least one agent may load, and everything when the agent list is unknown', async () => {
+    const browserDeny = { action: 'skill', resource: 'browser', effect: 'deny' }
+    mockListSkills.mockResolvedValue([
+      { id: 'browser', name: 'Browser', path: '/builtin/browser.md', content: '' },
+      { id: 'deploy', name: 'deploy', path: '/x/SKILL.md', content: '' }
+    ])
+    // `deploy` is denied by one agent only; `browser` by every agent except one that allows it.
+    mockListAgents.mockResolvedValue([
+      {
+        id: 'build',
+        permissions: [browserDeny, { action: 'skill', resource: 'deploy', effect: 'deny' }]
+      },
+      { id: 'review', permissions: [{ action: 'skill', resource: '*', effect: 'allow' }] }
+    ])
+    expect((await discoverOpencodeSkills('/skills/partial')).map((s) => s.name)).toEqual([
+      'Browser',
+      'deploy'
+    ])
+
+    // A cold or failed `agent.list` filters nothing rather than emptying the dialog.
+    invalidateOpencodeSkillCache()
+    mockListAgents.mockRejectedValue(new Error('agent.list → 500'))
+    expect((await discoverOpencodeSkills('/skills/partial')).map((s) => s.name)).toEqual([
+      'Browser',
+      'deploy'
+    ])
   })
 
   it('degrades to [] on acquire failure (opencode optional)', async () => {

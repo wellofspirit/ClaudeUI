@@ -1,4 +1,5 @@
 import { query as sdkQuery } from '../sdk'
+import { claudeBehaviorSettings } from '../sdk/args'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
@@ -19,7 +20,7 @@ import {
   type ThinkingMode
 } from '../../shared/model-capabilities'
 import { ensureClaudeModels } from './claude-model-catalog'
-import { loadSettings } from './ui-config'
+import { loadEngineConfig, loadSettings } from './ui-config'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 import type { HostNotifier } from '../host'
 
@@ -708,6 +709,9 @@ export class AutomationManager {
 
       // Start with acceptEdits (auto mode) or default. The acceptEdits base ensures
       // the SDK always accepts the mode; we attempt to upgrade to native auto below.
+      // `settings` carries the two cli.js behaviour switches the Claude engine's
+      // settings own (`claudeBehaviorSettings`, read fresh per run like a session's
+      // spawn), so an automation honours the toggles too.
       const q = sdkQuery({
         prompt,
         options: {
@@ -717,6 +721,7 @@ export class AutomationManager {
           model: modelValue,
           permissionMode: useAutoMode ? ('acceptEdits' as const) : ('default' as const),
           settingSources: ['user', 'project', 'local'],
+          settings: claudeBehaviorSettings(loadEngineConfig('claude').claudeConfig),
           abortController,
           includePartialMessages: true,
           thinking: thinkingConfig,
