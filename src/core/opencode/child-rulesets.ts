@@ -19,9 +19,10 @@
  */
 import type { OpencodeClient } from './OpencodeClient'
 import type { Agent_Info } from './protocol-v2/openapi'
-import type { V2Rule } from './permission-v2'
+import { THROWAWAY_RULESET, type V2Rule } from './permission-v2'
 import { childSessionRuleset, evaluateChildCall } from './subagent-permissions'
 import { logger } from '../services/logger'
+import { samePath } from '../services/worktree-root'
 
 /**
  * Test seam: hold every child ruleset PATCH until the returned promise
@@ -40,6 +41,8 @@ interface ChildSession {
   readonly parentID: string
   /** The child's agent id (`session.created.agent`, then `session.agent.selected`). */
   agent?: string
+  /** Where opencode runs the child (`session.created` / the session info); read on demand when unknown. */
+  location?: string
   /** The ruleset last computed for it (what a grandchild's ruleset builds on). */
   rules?: V2Rule[]
   /** What was last PATCHed (skip an unchanged one). */
@@ -69,6 +72,12 @@ export interface ChildRulesetHost {
   rootSessionId(): string | null
   /** The ruleset last applied to the root, or undefined before the first apply. */
   rootRules(): readonly V2Rule[] | undefined
+  /**
+   * Where the root session runs now. A child located elsewhere is not governed by
+   * the root's rules (they name the root's directory): it gets deny-all. Omitted =
+   * no location rule (the dispatcher's targets never move).
+   */
+  rootLocation?(): string | undefined
   /** Loads (and caches) the agent list; null when it cannot be read. */
   loadAgents(): Promise<readonly Agent_Info[] | null>
   /** A cached agent by id (the default agent for an unnamed one). */
@@ -89,7 +98,12 @@ export class ChildRulesetKeeper {
   }
 
   /** `session.created`: a child of the root (or of a known child) — learn it and PATCH it. */
-  onSessionCreated(data: { sessionID: string; parentID?: string; agent?: string }): void {
+  onSessionCreated(data: {
+    sessionID: string
+    parentID?: string
+    agent?: string
+    location?: { directory?: string }
+  }): void {
     const { sessionID, parentID } = data
     const root = this.host.rootSessionId()
     if (!parentID || sessionID === root) return
@@ -98,7 +112,8 @@ export class ChildRulesetKeeper {
       this.children.set(sessionID, {
         parentID,
         chain: Promise.resolve(),
-        ...(data.agent ? { agent: data.agent } : {})
+        ...(data.agent ? { agent: data.agent } : {}),
+        ...(data.location?.directory ? { location: data.location.directory } : {})
       })
     void this.patchChild(sessionID)
   }
@@ -137,12 +152,15 @@ export class ChildRulesetKeeper {
     if (!child || !client) return
     if (childPatchGate) await childPatchGate(childID)
     await this.host.loadAgents()
+    await this.learnLocation(childID, child, client)
     const parentRules =
       child.parentID === this.host.rootSessionId()
         ? this.host.rootRules()
         : this.children.get(child.parentID)?.rules
     if (!parentRules) return
-    const parentKey = JSON.stringify(parentRules)
+    // Read with the rules, after the last await: a move in between re-patches this child.
+    const offLocation = this.offLocation(child, true)
+    const parentKey = JSON.stringify(parentRules) + (offLocation ? '\0off' : '')
     if (!force && !child.unpatched && child.parentKey === parentKey) return
     const agent = this.host.agentInfo(child.agent)
     if (!agent)
@@ -150,7 +168,9 @@ export class ChildRulesetKeeper {
         this.host.logSource,
         `subagent ${child.agent ?? '(default)'}: agent rules unknown — the child gets the parent's rules (its agent's own rules still hold in the plugin hook)`
       )
-    const rules = childSessionRuleset(parentRules, agent?.permissions ?? [])
+    const rules = offLocation
+      ? [...THROWAWAY_RULESET]
+      : childSessionRuleset(parentRules, agent?.permissions ?? [])
     child.rules = rules
     child.parentKey = parentKey
     const key = JSON.stringify(rules)
@@ -186,6 +206,31 @@ export class ChildRulesetKeeper {
       if (grandchild.parentID === childID) void this.patchChild(grandchildID)
   }
 
+  /** A child whose location is not known yet is read from opencode (never assumed). */
+  private async learnLocation(
+    childID: string,
+    child: ChildSession,
+    client: ChildRulesetClient
+  ): Promise<void> {
+    if (child.location || !this.host.rootLocation) return
+    try {
+      child.location = (await client.getSession(childID)).location?.directory
+    } catch (err) {
+      logger.debug(this.host.logSource, `child ${childID} location not read: ${errText(err)}`)
+    }
+  }
+
+  /**
+   * The child runs somewhere other than the root's current location. Such a
+   * child keeps deny-all. `unknownIsOff`: a location that could not be read
+   * counts as off too (fail closed; the PATCH path, after its read).
+   */
+  private offLocation(child: ChildSession, unknownIsOff: boolean): boolean {
+    const root = this.host.rootLocation?.()
+    if (!root) return false
+    return child.location ? !samePath(child.location, root) : unknownIsOff
+  }
+
   /**
    * A resumed root's children from an earlier process (any of them can be
    * resumed by a later call with its `sessionID`): learn them all (breadth
@@ -210,7 +255,8 @@ export class ChildRulesetKeeper {
         this.children.set(info.id, {
           parentID,
           chain: Promise.resolve(),
-          ...(info.agent ? { agent: info.agent } : {})
+          ...(info.agent ? { agent: info.agent } : {}),
+          ...(info.location?.directory ? { location: info.location.directory } : {})
         })
         queue.push(info.id)
       }
@@ -230,7 +276,8 @@ export class ChildRulesetKeeper {
         this.onSessionCreated({
           sessionID: id,
           parentID: info.parentID,
-          ...(info.agent ? { agent: info.agent } : {})
+          ...(info.agent ? { agent: info.agent } : {}),
+          ...(info.location?.directory ? { location: info.location } : {})
         })
       } catch (err) {
         logger.debug(this.host.logSource, `child ${id} not readable: ${errText(err)}`)
@@ -250,6 +297,13 @@ export class ChildRulesetKeeper {
   ): string | undefined {
     const child = this.children.get(childID)
     if (!child) return undefined
+    if (this.offLocation(child, false)) {
+      logger.info(
+        this.host.logSource,
+        `child ask ${approval.toolName} refused: it runs outside the session's location`
+      )
+      return 'This subagent runs in a different directory than the session now does, so its tool calls are refused. Start a new subagent instead.'
+    }
     if (child.unpatched) {
       logger.info(
         this.host.logSource,

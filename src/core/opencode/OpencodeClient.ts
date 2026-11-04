@@ -403,6 +403,24 @@ export class OpencodeClient {
     return this.updateSession(sessionID, { permissions }, opts)
   }
 
+  /**
+   * `POST /api/session/{id}/move` — queue a move of the session to `directory`;
+   * opencode applies it at the next step boundary (at once when idle) and emits
+   * `session.moved`.
+   */
+  moveSession(
+    sessionID: string,
+    directory: string,
+    delivery?: 'steer' | 'queue',
+    opts?: OpencodeRequestOptions
+  ): Promise<void> {
+    return this.call('session.move', {
+      params: { sessionID },
+      body: { directory, ...(delivery ? { delivery } : {}) },
+      ...opts
+    })
+  }
+
   switchAgent(sessionID: string, agent: string, opts?: OpencodeRequestOptions): Promise<void> {
     return this.call('session.switchAgent', { params: { sessionID }, body: { agent }, ...opts })
   }

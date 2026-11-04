@@ -966,6 +966,21 @@ export class OpencodeServerManager {
     return this.leaseOn(handle, directory, options)
   }
 
+  /**
+   * A lease for `directory` on the SAME server `conn` came from — never another
+   * one, whatever that directory's config would pick: a session that moved
+   * keeps its server. Checks the permission guard and the hosted tools for
+   * `directory` like any turn-running acquire, and throws
+   * {@link OpencodePermissionGuardError} on a guard failure (fail closed; the
+   * lease is released). Throws when `conn`'s server is gone.
+   */
+  async leaseSameServer(conn: ServerConnection, directory: string): Promise<ServerConnection> {
+    const handle = this.handleOf(conn)
+    if (!handle || this.handles.get(handle.key) !== handle)
+      throw new Error(`opencode server ${conn.baseUrl} is gone`)
+    return this.leaseOn(handle, resolvePath(directory), {})
+  }
+
   /** A lease on a resolved server (the rest of `acquire`). */
   private async leaseOn(
     handle: ServerHandle,

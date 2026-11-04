@@ -42,6 +42,7 @@
  */
 import type { HostWindowHandle } from '../host'
 import { v4 as uuid } from 'uuid'
+import { existsSync } from 'node:fs'
 import { opencodeServerManager, OpencodePermissionGuardError } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
 import { OpencodeClient, type PermissionReply } from './OpencodeClient'
@@ -99,6 +100,9 @@ import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } fro
 import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
 import { logger } from '../services/logger'
 import { applySessionMoved } from '../services/worktree-detect'
+import { samePath } from '../services/worktree-root'
+import { managedWorktreeRepo } from '../services/worktree'
+import { isCreatedWorktree } from '../../shared/linked-worktree'
 import { emitEvent } from '../services/sync-host'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { opencodeAuthHooks } from './opencode-auth-hooks'
@@ -182,7 +186,11 @@ import {
   type RepoVisibility,
   type ToolOutcome
 } from '../automode/ground-truth'
-import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
+import {
+  loadEngineConfig,
+  loadSessionConfig,
+  loadSharedAutoModeConfig
+} from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
 import { opencodeAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
@@ -240,6 +248,8 @@ interface PendingAsk {
   /** The call the ask is about (undefined when opencode named none). */
   toolUseId?: string
   approval: PendingApproval
+  /** The location when the ask arrived: where an "always allow" it earns is persisted. */
+  location: string
   /** false when a user ask rule (or a held block) keeps it for the human — never swept. */
   sweepable: boolean
   /** Set while the card holds an auto-mode judge block (ADR-091 §3). */
@@ -275,6 +285,34 @@ function tokensOf(t: {
     cacheWrite: t.cache.write,
     cacheRead: t.cache.read
   }
+}
+
+/**
+ * The identity directory of a session constructed at `cwd`. A cold listing groups a
+ * moved session by its location, so a resume may be handed the worktree it moved
+ * into: when this session's recorded worktree entry is a detected one for exactly
+ * that directory, its `originalCwd` is the identity (Claude keeps the first cwd).
+ */
+function identityCwd(routingId: string, cwd: string): string {
+  try {
+    const info = loadSessionConfig().worktreeInfoMap?.[routingId]
+    if (info && !isCreatedWorktree(info) && info.originalCwd && samePath(info.worktreePath, cwd))
+      return info.originalCwd
+  } catch {
+    // an unreadable record leaves the identity as given
+  }
+  return goneWorktreeRepo(cwd) ?? cwd
+}
+
+/**
+ * A managed worktree (`<repo>/.claude/worktrees/<name>`) that no longer exists: the repo
+ * it belonged to, when that still exists — the identity and move-back target for a session
+ * whose worktree record went with the worktree. Null otherwise.
+ */
+function goneWorktreeRepo(dir: string): string | null {
+  if (existsSync(dir)) return null
+  const repo = managedWorktreeRepo(dir)
+  return repo && existsSync(repo) ? repo : null
 }
 
 /** A tool-call id safe to quote in a host note (provider-stream data is not trusted). */
@@ -390,6 +428,7 @@ export class OpencodeSession extends BaseSession {
     client: () => this.client,
     rootSessionId: () => this.openSessionId,
     rootRules: () => this.applied?.rules,
+    rootLocation: () => this.location,
     loadAgents: () => this.loadAgents(),
     agentInfo: (id) => this.agentInfo(id),
     logSource: 'OpencodeSession'
@@ -407,6 +446,19 @@ export class OpencodeSession extends BaseSession {
   private ownDirAllows: V2Rule[] | null = null
   /** The location's git worktree root (`GET /api/location` project directory); null = none/unknown. */
   private worktree: string | null | undefined = undefined
+  /**
+   * The directory opencode runs this session in (D1). `cwd` stays the identity
+   * directory; the permission inputs read this. It changes only on `session.moved`
+   * and on resume. Per ask, read it ONCE on arrival and use that snapshot —
+   * never after an await.
+   */
+  private location: string
+  /** Held leases by directory, all on the ONE server of `conn` (D2). */
+  private leases = new Map<string, ServerConnection>()
+  /** The re-root a `session.moved` started, while it runs: asks wait for it. */
+  private reroot: Promise<void> | null = null
+  /** Resume has just read the server's location: the first catch-up need not read it again. */
+  private locationReadAtResume = false
 
   // ── Auto mode (ADR-023) ────────────────────────────────────────────────────
   private _autoModeConfig: AutoModeConfig | undefined
@@ -444,7 +496,8 @@ export class OpencodeSession extends BaseSession {
     cwd: string,
     opts: EngineSpawnOptions = {}
   ) {
-    super(routingId, win, cwd)
+    super(routingId, win, identityCwd(routingId, cwd))
+    this.location = cwd
     this._model = opts.model ?? DEFAULT_MODEL
     this.permissionMode = opts.permissionMode ?? 'default'
     this.resumeSessionId = opts.resumeSessionId || undefined
@@ -883,7 +936,7 @@ export class OpencodeSession extends BaseSession {
     if (!this.client || this._cancelled) return
 
     if (!this.openSessionId) {
-      const built = await this.buildRuleset(this.permissionMode)
+      const built = await this.buildRuleset(this.permissionMode, this.location)
       const agent = built.agent ?? (await this.defaultAgentId())
       const model = this.modelRef()
       // No title: opencode's default placeholder gates its own title generation.
@@ -950,6 +1003,10 @@ export class OpencodeSession extends BaseSession {
       return
     }
     if (this.openSessionId) return
+    // The server's location is the truth (D6): lease it before any apply or prompt.
+    await this.adoptResumedLocation(info)
+    if (this.openSessionId) return
+    this.locationReadAtResume = true
     this.adoptSession(info)
     this.needsCatchUp = true
     this.needsPurge = true
@@ -957,6 +1014,36 @@ export class OpencodeSession extends BaseSession {
     logger.info('OpencodeSession', `Resuming opencode session ${info.id}`)
     this.sendStatus()
     await this.replayStoredHistory(info)
+  }
+
+  /**
+   * A resumed session runs where opencode says (`info.location`). A different
+   * directory is leased on the same server and replaces the connect-time one. A
+   * directory that no longer exists (a worktree removed while cold) is left: the
+   * session is moved back to the identity directory, which opencode applies at
+   * once while idle. Throws when the lease or the move fails (fail closed).
+   */
+  private async adoptResumedLocation(info: Session_Info): Promise<void> {
+    const dir = info.location?.directory
+    const client = this.client
+    if (!dir || samePath(dir, this.location) || !client) return
+    let target = dir
+    if (!existsSync(dir)) {
+      logger.info(
+        'OpencodeSession',
+        `session ${info.id} was in ${dir}, which is gone — moving it back to ${this.cwd}`
+      )
+      await client.moveSession(info.id, this.cwd)
+      target = this.cwd
+    }
+    if (target !== this.location) {
+      await this.leaseLocation(target)
+      this.location = target
+      this.resetLocationCaches()
+      this.releaseOtherLeases(target)
+      if (!this._cancelled) await this.publishCommands(this.locationClient())
+    }
+    this.recordMoved(target)
   }
 
   /** Replay a resumed session's history once (memoized against eager connect + run racing). */
@@ -1018,12 +1105,25 @@ export class OpencodeSession extends BaseSession {
     if (this.conn) return
     if (!this.connectingPromise) {
       this.connectingPromise = (async () => {
-        const c = await opencodeServerManager.acquire(this.cwd)
+        // Where the session actually runs (a reconnect or a new server after a
+        // config change checks the guard THERE). A location that is gone (a
+        // worktree removed while cold) falls back to the identity directory;
+        // resume then moves the session back.
+        if (!existsSync(this.location) && this.location !== this.cwd) {
+          logger.info(
+            'OpencodeSession',
+            `location ${this.location} is gone — connecting at ${this.cwd}`
+          )
+          this.location = this.cwd
+        }
+        const dir = this.location
+        const c = await opencodeServerManager.acquire(dir)
         if (this._cancelled) {
-          opencodeServerManager.releaseIfCurrent(this.cwd, c)
+          opencodeServerManager.releaseIfCurrent(dir, c)
           return
         }
         this.conn = c
+        this.leases = new Map([[dir, c]])
         this.client = new OpencodeClient(c)
         // A new lease may be a different server (another config): re-read
         // what is per server, and re-assert the session's rules.
@@ -1035,7 +1135,7 @@ export class OpencodeSession extends BaseSession {
         this.disconnected = false
         this.unsubscribeServerExit?.()
         this.unsubscribeServerExit = opencodeServerManager.subscribeExit(
-          this.cwd,
+          dir,
           () => this.markDisconnected('opencode server exited', { serverGone: true }),
           c
         )
@@ -1051,31 +1151,36 @@ export class OpencodeSession extends BaseSession {
     await this.connectingPromise
   }
 
+  /** Read the location's commands and skills and publish them. Never throws. */
+  private async publishCommands(client: OpencodeClient): Promise<void> {
+    const [commands, skills] = await Promise.all([
+      client.commands().catch((err) => {
+        logger.warn('OpencodeSession', `commands() failed: ${errText(err)}`)
+        return []
+      }),
+      client.skills().catch((err) => {
+        logger.warn('OpencodeSession', `skills() failed: ${errText(err)}`)
+        return []
+      })
+    ])
+    this.knownCommandNames = new Set(commands.map((c) => c.name))
+    this.send(
+      'session:slash-commands',
+      commands.map((c) => ({ name: '/' + c.name, description: c.description }))
+    )
+    this.send(
+      'session:skills',
+      skills.map((s) => s.name)
+    )
+  }
+
   /** Warm the connection, publish commands/skills, replay a resumed session. Never throws. */
   private async eagerConnect(): Promise<void> {
     try {
       await this.ensureConnected()
       const client = this.client
       if (!client || this._cancelled) return
-      const [commands, skills] = await Promise.all([
-        client.commands().catch((err) => {
-          logger.warn('OpencodeSession', `commands() failed: ${errText(err)}`)
-          return []
-        }),
-        client.skills().catch((err) => {
-          logger.warn('OpencodeSession', `skills() failed: ${errText(err)}`)
-          return []
-        })
-      ])
-      this.knownCommandNames = new Set(commands.map((c) => c.name))
-      this.send(
-        'session:slash-commands',
-        commands.map((c) => ({ name: '/' + c.name, description: c.description }))
-      )
-      this.send(
-        'session:skills',
-        skills.map((s) => s.name)
-      )
+      await this.publishCommands(client)
       if (this.resumeSessionId && !this.openSessionId) {
         await this.resume(this.resumeSessionId)
         // Follow a resumed session at once: a turn opencode resumes on its own
@@ -1159,12 +1264,40 @@ export class OpencodeSession extends BaseSession {
     const mapper = this.mapper
     if (!mapper) return
     try {
+      // A move made while the feed was down never reached us as an event.
+      // (A resume's first catch-up has just read the location itself.)
+      if (this.locationReadAtResume) this.locationReadAtResume = false
+      else await this.adoptMissedMove(client)
       const outputs = await reconcileAfterReconnect(client, mapper)
       for (const output of outputs) this.dispatch(output)
       await this.adoptUnknownChildren()
     } catch (err) {
       logger.warn('OpencodeSession', `reconnect catch-up failed: ${errText(err)}`)
     }
+  }
+
+  /** The server's location for this session, when it differs from ours: a missed `session.moved`. */
+  private async adoptMissedMove(client: OpencodeClient): Promise<void> {
+    const sessionID = this.openSessionId
+    if (!sessionID) return
+    // Never fails the catch-up: the reconcile after it must still run.
+    const dir = await client.getSession(sessionID).then(
+      (info) => info.location?.directory,
+      (err: unknown) => {
+        logger.warn('OpencodeSession', `reading the session's location failed: ${errText(err)}`)
+        return undefined
+      }
+    )
+    if (!dir || samePath(dir, this.location)) return
+    if (!existsSync(dir)) {
+      // A worktree removed meanwhile: the same move back a resume makes.
+      logger.info('OpencodeSession', `session is in ${dir}, which is gone — moving it back`)
+      await client.moveSession(sessionID, this.location).catch((err: unknown) => {
+        logger.warn('OpencodeSession', `move back from a gone location failed: ${errText(err)}`)
+      })
+      return
+    }
+    this.onMoved(dir)
   }
 
   /** Raw hooks the mapper does not cover, then every mapper output. */
@@ -1326,12 +1459,7 @@ export class OpencodeSession extends BaseSession {
       case 'session-renamed':
         return
       case 'session-moved':
-        // 3d: mark (or unmark) the session's worktree; `cwd` stays the spawn cwd.
-        try {
-          applySessionMoved(this.routingId, o.directory, this.cwd, emitEvent)
-        } catch (err) {
-          logger.warn('OpencodeSession', `could not record session.moved: ${String(err)}`)
-        }
+        this.onMoved(o.directory)
         return
       case 'session-deleted':
         logger.warn('OpencodeSession', `opencode session ${this.openSessionId} was deleted`)
@@ -1361,6 +1489,131 @@ export class OpencodeSession extends BaseSession {
         return
       }
     }
+  }
+
+  // ── Location and leases (D1-D3) ────────────────────────────────────────────
+
+  /** A client for the location-scoped reads (`/api/location`, agents, MCP, commands). */
+  private locationClient(location = this.location): OpencodeClient {
+    const client = this.client!
+    return location === client.directory ? client : client.forDirectory(location)
+  }
+
+  /** Mark (or unmark) the session's worktree; `cwd` stays the identity directory. */
+  private recordMoved(directory: string): void {
+    try {
+      applySessionMoved(this.routingId, directory, this.cwd, emitEvent)
+    } catch (err) {
+      logger.warn('OpencodeSession', `could not record session.moved: ${String(err)}`)
+    }
+  }
+
+  /** What was read for the old location is not the new one's. */
+  private resetLocationCaches(): void {
+    this.worktree = undefined
+    this.agentList = null
+    this.knownMcpServers = null
+    this.applied = null
+    this.lastUserRules = null
+  }
+
+  /**
+   * Lease `dir` on the server this session already uses (the guard and hosted
+   * tools are checked for that directory; throws {@link OpencodePermissionGuardError}
+   * on failure). A directory already held is adopted, not counted twice.
+   */
+  private async leaseLocation(dir: string): Promise<void> {
+    if (this.leases.has(dir)) return
+    const held = this.conn
+    if (!held) throw new Error('opencode is not connected')
+    const lease = await opencodeServerManager.leaseSameServer(held, dir)
+    if (this.conn !== held || this.leases.has(dir)) {
+      // The connection ended meanwhile (its leases are already released), or a
+      // concurrent lease won: give this one back.
+      opencodeServerManager.releaseIfCurrent(dir, lease)
+      if (this.conn !== held) throw new Error('opencode connection ended while leasing')
+      return
+    }
+    this.leases.set(dir, lease)
+  }
+
+  /** Release every held lease except the one for `keep`. */
+  private releaseOtherLeases(keep: string): void {
+    for (const [dir, lease] of [...this.leases]) {
+      if (dir === keep) continue
+      this.leases.delete(dir)
+      opencodeServerManager.releaseIfCurrent(dir, lease)
+    }
+  }
+
+  /**
+   * opencode moved THIS session (`session.moved`, from ClaudeUI's tools or not):
+   * its permission inputs follow where it actually is. Synchronously: the new
+   * location, the worktree record, fresh caches — then the re-root (lease, ruleset
+   * PATCH, children), which asks wait for.
+   */
+  private onMoved(directory: string): void {
+    this.location = directory
+    this.recordMoved(directory)
+    this.resetLocationCaches()
+    const run = this.applyChain.then(() => this.rerootNow(directory))
+    this.applyChain = run
+    const tracked = run.finally(() => {
+      if (this.reroot !== tracked) return
+      this.reroot = null
+      // Session allows granted meanwhile were not swept (the caches were reset).
+      this.sweepSessionAllows()
+    })
+    this.reroot = tracked
+  }
+
+  /** Never rejects: a failure fails the session closed. */
+  private async rerootNow(directory: string): Promise<void> {
+    // A later move supersedes this one; its own re-root does the work.
+    if (directory !== this.location || this._cancelled || !this.conn || !this.client) return
+    const conn = this.conn
+    try {
+      await this.leaseLocation(directory)
+      // Moved again meanwhile: the later re-root PATCHes (for its own, leased, location) and releases.
+      if (directory !== this.location) return
+      await this.applyPermissionModeNow()
+      this.releaseOtherLeases(directory)
+      if (directory === this.location && this.client)
+        await this.publishCommands(this.locationClient(directory))
+    } catch (err) {
+      // Only the connection this re-root started on is failed: a cancel or a new
+      // connection (the server died, the user resent) has its own state.
+      if (this._cancelled || this.conn !== conn) {
+        logger.debug('OpencodeSession', `re-root to ${directory} abandoned: ${errText(err)}`)
+        return
+      }
+      await this.failClosedAfterMove(directory, err, conn)
+    }
+  }
+
+  /**
+   * The new location cannot be governed (no guard there, or its ruleset did not
+   * apply): keep the location, stop the session and drop the connection. A
+   * reconnect leases the location and fails the same way.
+   */
+  private async failClosedAfterMove(
+    directory: string,
+    err: unknown,
+    conn: ServerConnection | null
+  ): Promise<void> {
+    const detail =
+      err instanceof OpencodePermissionGuardError
+        ? `the permission guard is not active there: ${err.reason}`
+        : errText(err)
+    const reason = `The session moved to ${directory}, where ClaudeUI cannot enforce its permission rules (${detail}). It was stopped.`
+    logger.error('OpencodeSession', reason)
+    const client = this.client
+    const sessionID = this.openSessionId
+    if (client && sessionID) await client.interrupt(sessionID).catch(() => {})
+    // The interrupt took time: a cancel or a new connection owns the state now.
+    if (this._cancelled || this.conn !== conn) return
+    if (!this.isProcessing) this.send('session:error', reason)
+    this.markDisconnected(reason)
   }
 
   /**
@@ -1710,6 +1963,7 @@ export class OpencodeSession extends BaseSession {
   private markDisconnected(reason: string, options: { serverGone?: boolean } = {}): void {
     if (this.disconnected && !this.conn) return
     this.disconnected = true
+    this.locationReadAtResume = false
     this.feedAbort?.abort()
     this.feedAbort = null
     this.feedReady = null
@@ -1743,6 +1997,7 @@ export class OpencodeSession extends BaseSession {
   cancel(): void {
     this.clearInactivityTimer()
     this._cancelled = true
+    this.locationReadAtResume = false
     this.isProcessing = false
     this.endUserStop()
     this.disconnected = true
@@ -1786,7 +2041,12 @@ export class OpencodeSession extends BaseSession {
    * server is gone: just release.
    */
   private endLease(conn: ServerConnection, client: OpencodeClient | null): void {
-    const release = () => opencodeServerManager.releaseIfCurrent(this.cwd, conn)
+    // Every held lease goes back (D2); the set is taken now, the release may wait.
+    const held = this.leases.size > 0 ? [...this.leases] : [[conn.directory, conn] as const]
+    this.leases.clear()
+    const release = () => {
+      for (const [dir, lease] of held) opencodeServerManager.releaseIfCurrent(dir, lease)
+    }
     const sessionID = this.openSessionId
     // A message from another session still waiting in opencode's inbox is taken
     // back here too: it is re-held by recallQueuedOnEngineLoss right after, and a
@@ -1860,8 +2120,26 @@ export class OpencodeSession extends BaseSession {
     this.pendingApprovals.set(approval.requestId, {
       toolUseId: approval.toolUseId,
       approval,
+      location: this.location,
       sweepable: true
     })
+    // A re-root in flight (a `session.moved` is being applied) decides what governs
+    // this ask: wait for it, then route against the location it settled on.
+    if (this.reroot) {
+      void this.settledReroot().then(() => {
+        if (this.pendingApprovals.has(approval.requestId)) this.routeApproval(approval, route)
+      })
+      return
+    }
+    this.routeApproval(approval, route)
+  }
+
+  /** Resolves once no re-root is in flight — the LATEST one, when a move came during another. */
+  private async settledReroot(): Promise<void> {
+    while (this.reroot) await this.reroot.catch(() => {})
+  }
+
+  private routeApproval(approval: PendingApproval, route: OpencodeApprovalRoute): void {
     if (approval.subagent && this.refuseByChildAgent(approval, route.sessionID)) return
     this.routePermissionAsk(approval)
   }
@@ -1923,7 +2201,12 @@ export class OpencodeSession extends BaseSession {
       this.sessionAllows.add(pending.approval.toolName, pending.approval.always)
       this.sweepSessionAllows()
     }
-    if (persist) persistAllowSuggestions(updatedPermissions!, this.cwd, 'OpencodeSession')
+    if (persist)
+      persistAllowSuggestions(
+        updatedPermissions!,
+        pending?.location ?? this.location,
+        'OpencodeSession'
+      )
   }
 
   /**
@@ -2056,6 +2339,7 @@ export class OpencodeSession extends BaseSession {
     const sessionId = this.openSessionId
     if (!client || !sessionId) return
     const mode = this.permissionMode
+    const location = this.location
     const fail = (err: unknown): Error => {
       const detail = errText(err)
       logger.error(
@@ -2066,7 +2350,7 @@ export class OpencodeSession extends BaseSession {
         `Could not apply permission mode "${mode}" to the opencode session: ${detail}`
       )
     }
-    const built = await this.buildRuleset(mode)
+    const built = await this.buildRuleset(mode, location)
     this.lastUserRules = built.userRules
     const key = JSON.stringify(built.rules)
     const agent = built.agent ?? (await this.defaultAgentId())
@@ -2092,25 +2376,34 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** The session ruleset for `mode` (S6 `buildSessionRuleset` with this chat's inputs). */
-  private async buildRuleset(mode: string): Promise<ReturnType<typeof buildSessionRuleset>> {
+  private async buildRuleset(
+    mode: string,
+    location: string
+  ): Promise<ReturnType<typeof buildSessionRuleset>> {
     const autoMode = this.isAutoMode(mode)
     const [mcpServers, worktree, externalDirAllows] = await Promise.all([
-      this.resolveMcpServers(),
-      this.resolveWorktree(),
+      this.resolveMcpServers(location),
+      this.resolveWorktree(location),
       this.resolveOwnDirAllows()
     ])
     return buildSessionRuleset({
       mode,
       autoMode,
-      permissions: this.mergedUserPermissions(),
+      permissions: this.mergedUserPermissions(location),
       mcpServers,
-      cwd: this.cwd,
+      cwd: location,
       ...(worktree ? { worktree } : {}),
       externalDirAllows
     })
   }
 
-  private mergedUserPermissions(): ClaudePermissions {
+  /**
+   * The user's permissions at `location` (every scope). After a move, deny and ask
+   * rules are the union of the spawn cwd's and the location's — a deny that lives
+   * only in the main checkout must not vanish because the model moved — while
+   * allow rules (and extra directories) come from the location alone.
+   */
+  private mergedUserPermissions(location = this.location): ClaudePermissions {
     const merged: ClaudePermissions = {
       allow: [],
       deny: [],
@@ -2121,32 +2414,43 @@ export class OpencodeSession extends BaseSession {
     try {
       const scopes: PermissionScope[] = ['user', 'project', 'local']
       for (const scope of scopes) {
-        const p = loadClaudePermissions(scope, this.cwd)
+        const p = loadClaudePermissions(scope, location)
         merged.allow.push(...p.allow)
         merged.ask.push(...p.ask)
         merged.deny.push(...p.deny)
         merged.additionalDirectories.push(...p.additionalDirectories)
+        if (location !== this.cwd && scope !== 'user') {
+          const spawn = loadClaudePermissions(scope, this.cwd)
+          merged.ask.push(...spawn.ask)
+          merged.deny.push(...spawn.deny)
+        }
       }
     } catch (err) {
       logger.warn('OpencodeSession', `loading user permission rules failed: ${errText(err)}`)
     }
+    merged.allow = [...new Set(merged.allow)]
+    merged.deny = [...new Set(merged.deny)]
+    merged.ask = [...new Set(merged.ask)]
+    merged.additionalDirectories = [...new Set(merged.additionalDirectories)]
     return merged
   }
 
-  private staticMcpServers(): string[] {
+  private staticMcpServers(location = this.location): string[] {
     return [
-      ...new Set([...Object.keys(collectClaudeMcpForOpencode(this.cwd)), CLAUDEUI_MCP_SERVER])
+      ...new Set([...Object.keys(collectClaudeMcpForOpencode(location)), CLAUDEUI_MCP_SERVER])
     ]
   }
 
   /** Bridged + `claudeui` + `GET /api/mcp` names (cached per lease; a failure is not). */
-  private async resolveMcpServers(): Promise<string[]> {
+  private async resolveMcpServers(location = this.location): Promise<string[]> {
     if (this.knownMcpServers) return this.knownMcpServers
-    const known = this.staticMcpServers()
+    const known = this.staticMcpServers(location)
     try {
-      const servers = (await this.client?.mcpServers()) ?? []
-      this.knownMcpServers = [...new Set([...known, ...servers.map((s) => s.name)])]
-      return this.knownMcpServers
+      const servers = this.client ? await this.locationClient(location).mcpServers() : []
+      const all = [...new Set([...known, ...servers.map((s) => s.name)])]
+      // A move meanwhile reset the caches: this read is for the old location.
+      if (location === this.location) this.knownMcpServers = all
+      return all
     } catch (err) {
       if (!this.mcpStatusWarned) {
         this.mcpStatusWarned = true
@@ -2160,26 +2464,30 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** The location's git worktree root — where 2.x stops spelling paths relatively. */
-  private async resolveWorktree(): Promise<string | undefined> {
+  private async resolveWorktree(location = this.location): Promise<string | undefined> {
     if (this.worktree !== undefined) return this.worktree ?? undefined
-    const client = this.client
-    if (!client) return undefined
+    if (!this.client) return undefined
     try {
-      this.worktree = await locationWorktree(client)
+      const worktree = await locationWorktree(this.locationClient(location))
+      // A move meanwhile reset the caches: this read is for the old location.
+      if (location === this.location) this.worktree = worktree
+      return worktree ?? undefined
     } catch (err) {
       logger.debug('OpencodeSession', `GET /api/location failed: ${errText(err)}`)
       return undefined
     }
-    return this.worktree ?? undefined
   }
 
   private async loadAgents(): Promise<Agent_Info[] | null> {
     if (this.agentList) return this.agentList
+    const location = this.location
     try {
-      const listed = await this.client?.agents()
+      const listed = this.client ? await this.locationClient(location).agents() : undefined
       if (!Array.isArray(listed)) throw new Error('GET /api/agent did not return a list')
-      this.agentList = [...listed]
-      return this.agentList
+      const agents = [...listed]
+      // A move meanwhile reset the caches: this read is for the old location.
+      if (location === this.location) this.agentList = agents
+      return agents
     } catch (err) {
       if (!this.agentsWarned) {
         this.agentsWarned = true
@@ -2262,11 +2570,11 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** The user's compiled rules (all tiers), compiled on demand before the first apply. */
-  private userOriginRules(): OpencodePermissionRule[] {
+  private userOriginRules(location = this.location): OpencodePermissionRule[] {
     if (this.lastUserRules === null) {
-      this.lastUserRules = compileClaudeRulesV2(this.mergedUserPermissions(), {
-        mcpServers: this.knownMcpServers ?? this.staticMcpServers(),
-        cwd: this.cwd,
+      this.lastUserRules = compileClaudeRulesV2(this.mergedUserPermissions(location), {
+        mcpServers: this.knownMcpServers ?? this.staticMcpServers(location),
+        cwd: location,
         ...(this.worktree ? { worktree: this.worktree } : {})
       })
     }
@@ -2297,14 +2605,14 @@ export class OpencodeSession extends BaseSession {
     return this.sessionRepoVisibility
   }
 
-  private async classifierEnvironment(): Promise<EnvironmentInfo> {
+  private async classifierEnvironment(location: string): Promise<EnvironmentInfo> {
     const remotes = await this.sessionGitRemotes()
     return buildClassifierEnvironment({
-      cwd: this.cwd,
+      cwd: location,
       platform: process.platform,
       remotes,
       repoVisibility: this.sessionRepoVisibility,
-      permissions: this.mergedUserPermissions(),
+      permissions: this.mergedUserPermissions(location),
       shared: this.sharedAutoModeConfig()
     })
   }
@@ -2312,7 +2620,8 @@ export class OpencodeSession extends BaseSession {
   /** Measured ground truth for a shell action (absence is never "fine"). */
   private async captureActionMeta(
     toolName: string,
-    input: Record<string, unknown>
+    input: Record<string, unknown>,
+    location: string
   ): Promise<Record<string, unknown> | undefined> {
     const command = shellCommandOf(toolName, input)
     if (!command) return undefined
@@ -2321,12 +2630,12 @@ export class OpencodeSession extends BaseSession {
     return captureShellActionMeta({
       command,
       input,
-      cwd: this.cwd,
+      cwd: location,
       honoursWorkdir: true,
       // opencode's shell on win32: PowerShell when `$SHELL` is unset or names
       // it, unknown (both readings) for any other `$SHELL`; POSIX elsewhere.
       shell: opencodeShellFor(),
-      additionalDirectories: this.mergedUserPermissions().additionalDirectories,
+      additionalDirectories: this.mergedUserPermissions(location).additionalDirectories,
       sessionStartMs: this.sessionStartMs,
       repoVisibility: () => this.sessionVisibility()
     })
@@ -2506,14 +2815,16 @@ export class OpencodeSession extends BaseSession {
    * ladder.
    */
   private routePermissionAsk(approval: PendingApproval): void {
+    // The per-ask snapshot (D1): the location is read once, here, and used throughout.
+    const location = this.location
     const sessionTool = sessionToolOfAsk(approval.toolName)
     if (sessionTool) {
-      this.routeSessionToolAsk(approval, sessionTool)
+      this.routeSessionToolAsk(approval, sessionTool, location)
       return
     }
     const category = approval.toolName
     const autoMode = this.isAutoMode(this.permissionMode)
-    const verdict = hostPrecheck(approval, this.precheckContext())
+    const verdict = hostPrecheck(approval, this.precheckContext(location))
     if (approval.subagent) {
       logger.debug(
         'OpencodeSession',
@@ -2551,7 +2862,7 @@ export class OpencodeSession extends BaseSession {
         return
       }
       case 'session-allow':
-        if (!this.sessionAllowApplies(approval)) break
+        if (!this.sessionAllowApplies(approval, location)) break
         logger.debug('OpencodeSession', `session allow ${category}`)
         this.autoReply(approval.requestId, { decision: 'once' })
         return
@@ -2565,7 +2876,7 @@ export class OpencodeSession extends BaseSession {
       case 'continue':
         break
     }
-    if (autoMode) void this.handleAutoModeApproval(approval)
+    if (autoMode) void this.handleAutoModeApproval(approval, location)
     else this.send('session:approval-request', approval)
   }
 
@@ -2587,7 +2898,11 @@ export class OpencodeSession extends BaseSession {
    * of the tool holds first. An ask that arrives without the call's input (the tool
    * part not seen yet) cannot be scoped, so it goes to the user.
    */
-  private routeSessionToolAsk(approval: PendingApproval, tool: SessionToolName): void {
+  private routeSessionToolAsk(
+    approval: PendingApproval,
+    tool: SessionToolName,
+    location: string
+  ): void {
     const caller = this.sessionToolCaller()
     const input = (approval.input ?? {}) as Record<string, unknown>
     const reject = (message: string): void => {
@@ -2597,7 +2912,7 @@ export class OpencodeSession extends BaseSession {
         this.sendDenial(approval.toolUseId, 'rule', message)
     }
     const rule = userDenyRule(
-      this.userOriginRules(),
+      this.userOriginRules(location),
       opencodeMcpKey(SESSION_TOOLS_SERVER_NAME, tool),
       undefined
     )
@@ -2625,14 +2940,14 @@ export class OpencodeSession extends BaseSession {
     }
   }
 
-  private precheckContext(): HostPrecheckContext {
-    const permissions = this.mergedUserPermissions()
+  private precheckContext(location: string): HostPrecheckContext {
+    const permissions = this.mergedUserPermissions(location)
     return {
       mode: this.permissionMode,
       rules: { deny: permissions.deny, ask: permissions.ask, allow: permissions.allow },
-      cwd: this.cwd,
+      cwd: location,
       additionalDirectories: permissions.additionalDirectories,
-      userRules: this.userOriginRules(),
+      userRules: this.userOriginRules(location),
       sessionAllows: this.sessionAllows,
       onError: (err) =>
         logger.warn('OpencodeSession', `host pre-check failed — asking the human: ${errText(err)}`)
@@ -2684,12 +2999,12 @@ export class OpencodeSession extends BaseSession {
    * spawn (ADR-085: the delegation payload is always the judge's to read) never
    * ride a session allow.
    */
-  private sessionAllowApplies(approval: PendingApproval): boolean {
+  private sessionAllowApplies(approval: PendingApproval, location: string): boolean {
     if (!this.isAutoMode(this.permissionMode)) return true
     if (approval.toolName === 'subagent') return false
     return !(
       approval.toolName === 'edit' &&
-      !editClearsAgentControl(approval.patterns, approval.input, this.cwd)
+      !editClearsAgentControl(approval.patterns, approval.input, location)
     )
   }
 
@@ -2721,23 +3036,26 @@ export class OpencodeSession extends BaseSession {
 
   /** Answer every pending ask (own and child) a new session allow covers. */
   private sweepSessionAllows(): void {
+    // A re-root in flight reset what the pre-check reads; its waiting asks are routed when it settles.
+    if (this.reroot) return
     if (this.sessionAllows.size === 0 || this.pendingApprovals.size === 0) return
-    const ctx = this.precheckContext()
+    const location = this.location
+    const ctx = this.precheckContext(location)
     for (const [requestId, rec] of [...this.pendingApprovals]) {
       if (!rec.sweepable) continue
       if (hostPrecheck(rec.approval, ctx).kind !== 'session-allow') continue
-      if (!this.sessionAllowApplies(rec.approval)) continue
+      if (!this.sessionAllowApplies(rec.approval, location)) continue
       logger.debug('OpencodeSession', `session allow ${rec.approval.toolName} — pending ask swept`)
       this.autoReply(requestId, { decision: 'once' })
     }
   }
 
   /** The auto-mode decision: the edit fast path, then the shared judge pipeline (ADR-088). */
-  private async handleAutoModeApproval(approval: PendingApproval): Promise<void> {
+  private async handleAutoModeApproval(approval: PendingApproval, location: string): Promise<void> {
     const category = approval.toolName
     if (
       category === 'edit' &&
-      editClearsAgentControl(approval.patterns, approval.input, this.cwd)
+      editClearsAgentControl(approval.patterns, approval.input, location)
     ) {
       this.autoReply(approval.requestId, { decision: 'once' })
       return
@@ -2754,10 +3072,10 @@ export class OpencodeSession extends BaseSession {
       { toolUseId: approval.toolUseId ?? '', toolName: category, input: approval.input },
       {
         logSource: 'OpencodeSession',
-        cwd: this.cwd,
+        cwd: location,
         currentMode: () => this.permissionMode,
         autoModeActive: () => this.isAutoMode(this.permissionMode),
-        permissions: () => this.mergedUserPermissions(),
+        permissions: () => this.mergedUserPermissions(location),
         honoursWorkdir: true,
         inputFor: async (stage) =>
           stage === 'read-only' ? this.readOnlyInput(approval) : approval.input,
@@ -2779,8 +3097,8 @@ export class OpencodeSession extends BaseSession {
         },
         judgeTransport: () => transport!,
         fallbackJudgeTransport: () => this.fallbackJudge(),
-        environment: () => this.classifierEnvironment(),
-        captureActionMeta: (name, input) => this.captureActionMeta(name, input),
+        environment: () => this.classifierEnvironment(location),
+        captureActionMeta: (name, input) => this.captureActionMeta(name, input, location),
         messages: () =>
           child
             ? inTimeOrder(this.messageHistory, this.queuedUserTurns(), child.trajectory.values())
@@ -2793,7 +3111,7 @@ export class OpencodeSession extends BaseSession {
         twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
         sendReview: (_id, review) => this.sendToolReview(approval.toolUseId, review),
         consumeGrant: (name, input) =>
-          this.blockedCalls.consumeGrant(blockGrantKey('opencode', name, input, this.cwd, true)),
+          this.blockedCalls.consumeGrant(blockGrantKey('opencode', name, input, location, true)),
         stillPending: (stage) => {
           if (this.pendingApprovals.has(approval.requestId)) return true
           logger.debug('OpencodeSession', `auto-mode ${stage}: ask already settled — not replying`)
@@ -2806,7 +3124,7 @@ export class OpencodeSession extends BaseSession {
         this.autoReply(approval.requestId, { decision: 'once' })
         return
       case 'hold':
-        this.holdBlock(approval, outcome.reason, outcome.review)
+        this.holdBlock(approval, outcome.reason, location, outcome.review)
         return
       case 'human':
         this.fallbackToHuman(approval, outcome.reason)
@@ -2841,7 +3159,12 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** A judge block (ADR-091 §3): kept at once, or held on the card for the user's window. */
-  private holdBlock(approval: PendingApproval, reason: string, review?: ToolReviewBlock): void {
+  private holdBlock(
+    approval: PendingApproval,
+    reason: string,
+    location: string,
+    review?: ToolReviewBlock
+  ): void {
     const rec = this.pendingApprovals.get(approval.requestId)
     if (!rec) return
     const { requestId } = approval
@@ -2854,7 +3177,7 @@ export class OpencodeSession extends BaseSession {
           toolName: approval.toolName,
           input: approval.input,
           review,
-          grantKey: blockGrantKey('opencode', approval.toolName, approval.input, this.cwd, true),
+          grantKey: blockGrantKey('opencode', approval.toolName, approval.input, location, true),
           ...(agentLabel ? { agentLabel } : {})
         },
         ms > 0

@@ -60,6 +60,15 @@ function getManagedWorktreesRoot(gitRoot: string): string {
   return path.join(gitRoot, WORKTREES_DIR)
 }
 
+/**
+ * The repository root a managed worktree path (`<repo>/.claude/worktrees/<name>`) belongs to, or
+ * null when `dir` is not shaped like one. Lexical only: the directory may already be gone.
+ */
+export function managedWorktreeRepo(dir: string): string | null {
+  const repo = path.dirname(path.dirname(path.dirname(path.resolve(dir))))
+  return samePath(path.dirname(path.resolve(dir)), getManagedWorktreesRoot(repo)) ? repo : null
+}
+
 /** Throw unless `name` is a safe worktree name (main-side enforcement of R2). */
 export function validateWorktreeName(name: string): void {
   if (

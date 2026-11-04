@@ -51,10 +51,13 @@ const h = vi.hoisted(() => {
     Feed,
     feed: new Feed(),
     acquire: vi.fn(),
+    leaseSameServer: vi.fn(),
     releaseIfCurrent: vi.fn(),
     subscribeExit: vi.fn(() => () => {}),
     client: {} as Record<string, ReturnType<typeof vi.fn>>,
     permissions: { allow: [] as string[], deny: [] as string[], ask: [] as string[] },
+    /** Project-scope permissions by directory (the real loader reads the cwd's settings). */
+    projectPermissions: {} as Record<string, { allow?: string[]; deny?: string[]; ask?: string[] }>,
     engineConfig: { autoMode: {} as Record<string, unknown> },
     recordUsageEvent: vi.fn(),
     shared: {} as Record<string, unknown>,
@@ -85,6 +88,7 @@ vi.mock('../OpencodeServerManager', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../OpencodeServerManager')>()),
   opencodeServerManager: {
     acquire: h.acquire,
+    leaseSameServer: h.leaseSameServer,
     releaseIfCurrent: h.releaseIfCurrent,
     subscribeExit: h.subscribeExit
   }
@@ -98,10 +102,17 @@ vi.mock('../OpencodeClient', async (importOriginal) => ({
 }))
 
 vi.mock('../../services/claude-settings', () => ({
-  loadClaudePermissions: (scope: string) =>
+  loadClaudePermissions: (scope: string, cwd?: string) =>
     scope === 'user'
       ? { ...h.permissions, additionalDirectories: [], defaultMode: undefined }
-      : { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined },
+      : {
+          allow: [],
+          deny: [],
+          ask: [],
+          ...(scope === 'project' && cwd ? h.projectPermissions[cwd] : {}),
+          additionalDirectories: [],
+          defaultMode: undefined
+        },
   saveClaudePermissions: vi.fn(),
   loadClaudeAutoModeFlags: () => ({ classifyAllShell: false })
 }))
@@ -207,7 +218,12 @@ import { deliver } from '../../services/session-delivery'
 import type { SessionManager } from '../../services/session-manager'
 import { OpencodePermissionGuardError } from '../OpencodeServerManager'
 import { OpencodeApiError } from '../OpencodeClient'
-import { buildSessionRuleset, THROWAWAY_RULESET, type V2Rule } from '../permission-v2'
+import {
+  buildSessionRuleset,
+  compileClaudeRulesV2,
+  THROWAWAY_RULESET,
+  type V2Rule
+} from '../permission-v2'
 import { resolveOpencodeOwnDirAllows, type OwnDirClient } from '../own-dirs'
 import { childSessionRuleset } from '../subagent-permissions'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
@@ -323,6 +339,8 @@ function freshClient(): Record<string, ReturnType<typeof vi.fn>> {
       sessionInfo(SID, { agent: body.agent, model: body.model })
     ),
     getSession: vi.fn(async (id: string) => sessionInfo(id)),
+    moveSession: vi.fn(async () => {}),
+    forDirectory: vi.fn((): unknown => h.client),
     setSessionPermissions: vi.fn(async () => {}),
     switchAgent: vi.fn(async () => {}),
     switchModel: vi.fn(async () => {}),
@@ -410,6 +428,10 @@ beforeEach(() => {
   h.feed = new h.Feed()
   h.client = freshClient()
   h.acquire.mockReset().mockResolvedValue(CONN)
+  h.leaseSameServer
+    .mockReset()
+    .mockImplementation(async (_conn: unknown, directory: string) => ({ ...CONN, directory }))
+  h.projectPermissions = {}
   h.releaseIfCurrent.mockReset()
   h.subscribeExit.mockReset().mockReturnValue(() => {})
   h.recordUsageEvent.mockReset()
@@ -2630,6 +2652,522 @@ describe('session.moved marks the session’s worktree (slice 3d)', () => {
     h.feed.push(moved(repo))
     await flush()
     expect(recorded()['route-1']).toBeUndefined()
+  })
+})
+
+describe('location, leases and re-root (worktree parity S1)', () => {
+  let base: string
+  let repo: string
+  let worktree: string
+
+  beforeEach(() => {
+    forgetLinkedWorktrees()
+    h.sessionConfig = {}
+    base = makeScratchDir('claudeui-oc-loc-')
+    repo = fabricateRepo(join(base, 'repo'))
+    worktree = fabricateWorktree(repo, join(base, 'data', 'worktree', 'abcdef', 'brave-fox'), 'bf')
+  })
+  afterEach(() => rmSync(base, { recursive: true, force: true, maxRetries: 5 }))
+
+  const sessionAt = (cwd: string, opts: Record<string, unknown> = {}): OpencodeSession => {
+    const win = {
+      webContents: { send: (channel: string, ...args: unknown[]) => sent.push([channel, ...args]) }
+    }
+    subscribeWindowToSync(win)
+    return new OpencodeSession('route-1', null, cwd, { model: 'openai/gpt-x', ...opts })
+  }
+  const moved = (directory: string, sessionID = SID): OpencodeFeedItem =>
+    event('session.moved', { sessionID, location: { directory }, projectID: 'prj', subpath: '' })
+  const ask = (id: string, action: string, resources: string[]) =>
+    event('permission.asked', {
+      id,
+      sessionID: SID,
+      action,
+      resources,
+      save: resources,
+      metadata: {}
+    })
+  const ownPatches = () =>
+    h.client.setSessionPermissions.mock.calls
+      .filter(([id]) => id === SID)
+      .map(([, rules]) => rules as V2Rule[])
+  const cards = () => payloads('session:approval-request').map((a) => a.requestId)
+  /** A `GET /api/location` that answers for the directory the client was re-targeted to. */
+  const locationAware = (): void => {
+    h.client.forDirectory.mockImplementation((directory: string) => ({
+      ...h.client,
+      call: vi.fn(async (op: string) =>
+        op === 'location.get'
+          ? { directory, project: { id: 'prj', directory, canonical: repo } }
+          : (h.client.call as (op: string) => Promise<unknown>)(op)
+      )
+    }))
+  }
+
+  it('session.moved re-roots: an ask during the re-root waits and is then judged at the new location; rules are rebuilt for it; the old lease is released', async () => {
+    // A spawn-cwd absolute deny compiles to a different form inside the worktree.
+    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    // A rule that exists ONLY in the worktree's settings: the verdict depends on the location.
+    h.projectPermissions[worktree] = {
+      deny: [`Edit(/${repo}/secrets/**)`, 'Bash(ls:*)']
+    }
+    locationAware()
+    session = sessionAt(repo)
+    await startTurn()
+    const before = h.client.createSession.mock.calls[0][0].permissions as V2Rule[]
+    h.acquire.mockClear()
+    let grantLease!: () => void
+    h.leaseSameServer.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          grantLease = () => resolve({ ...CONN, directory: worktree })
+        })
+    )
+
+    h.feed.push(moved(worktree), ask('per_wait', 'shell', ['ls']))
+    await flush()
+    expect(h.leaseSameServer).toHaveBeenCalledWith(CONN, worktree)
+    // The ask is held back while the re-root runs; the old lease stays until it ends.
+    expect(cards()).not.toContain('per_wait')
+    expect(h.client.replyPermission).not.toHaveBeenCalled()
+    expect(h.releaseIfCurrent).not.toHaveBeenCalled()
+    // The location is set synchronously: the worktree record is out while the lease is open.
+    expect(h.sessionConfig.worktreeInfoMap).toMatchObject({
+      'route-1': { worktreePath: worktree, origin: 'detected' }
+    })
+
+    grantLease()
+    await flush()
+    // Judged at the NEW location: the worktree-only deny refuses it host-side, no card.
+    expect(cards()).not.toContain('per_wait')
+    expect(h.client.replyPermission).toHaveBeenCalledWith(
+      SID,
+      'per_wait',
+      expect.objectContaining({ decision: 'reject' })
+    )
+    const after = ownPatches().at(-1)!
+    const expected = compileClaudeRulesV2(
+      {
+        allow: [],
+        ask: [],
+        deny: [`Edit(/${repo}/secrets/**)`],
+        additionalDirectories: [],
+        defaultMode: undefined
+      },
+      { mcpServers: ['claudeui'], cwd: worktree, worktree }
+    )
+    for (const rule of expected) expect(after).toContainEqual(rule)
+    expect(after).not.toEqual(before)
+    expect(h.client.forDirectory).toHaveBeenCalledWith(worktree)
+    expect(h.releaseIfCurrent).toHaveBeenCalledTimes(1)
+    expect(h.releaseIfCurrent).toHaveBeenCalledWith(repo, CONN)
+    // The identity directory does not move.
+    expect(session.status.cwd).toBe(repo)
+  })
+
+  it('a failed re-root acts only on the connection it started on: a lost server stays quiet', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    let failLease!: () => void
+    h.leaseSameServer.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failLease = () => reject(new OpencodePermissionGuardError(worktree, 'no guard RPC'))
+        })
+    )
+    h.feed.push(moved(worktree))
+    await flush()
+    // The server dies during the lease probe (its exit handler drops the connection).
+    const onExit = (h.subscribeExit.mock.calls.at(-1) as unknown as [string, () => void])[1]
+    onExit()
+    sent.length = 0
+    h.client.interrupt.mockClear()
+    failLease()
+    await flush()
+    expect(h.client.interrupt).not.toHaveBeenCalled()
+    expect(sent.some(([c, , m]) => c === 'session:error' && String(m).includes(worktree))).toBe(
+      false
+    )
+  })
+
+  it('cancel during a re-root: its failure sends nothing to the closed chat', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    let failLease!: () => void
+    h.leaseSameServer.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failLease = () => reject(new Error('probe failed'))
+        })
+    )
+    h.feed.push(moved(worktree))
+    await flush()
+    session.cancel()
+    await flush()
+    sent.length = 0
+    h.client.interrupt.mockClear()
+    failLease()
+    await flush()
+    expect(h.client.interrupt).not.toHaveBeenCalled()
+    expect(sent.some(([c]) => c === 'session:error')).toBe(false)
+  })
+
+  it('a superseded re-root stops after its lease: the PATCH waits for the current location’s lease', async () => {
+    const second = join(base, 'second')
+    session = sessionAt(repo)
+    await startTurn()
+    let grantFirst!: () => void
+    h.leaseSameServer.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          grantFirst = () => resolve({ ...CONN, directory: worktree })
+        })
+    )
+    h.client.setSessionPermissions.mockClear()
+    h.feed.push(moved(worktree), moved(second))
+    await flush()
+    grantFirst()
+    await flush()
+    const leasedSecond = h.leaseSameServer.mock.calls.findIndex(([, dir]) => dir === second)
+    expect(leasedSecond).toBeGreaterThan(-1)
+    const firstPatch = h.client.setSessionPermissions.mock.invocationCallOrder[0]
+    expect(h.leaseSameServer.mock.invocationCallOrder[leasedSecond]).toBeLessThan(firstPatch)
+    // Only the current location's lease is left.
+    expect(h.releaseIfCurrent).toHaveBeenCalledWith(repo, CONN)
+    expect(h.releaseIfCurrent).toHaveBeenCalledWith(worktree, { ...CONN, directory: worktree })
+    expect(h.releaseIfCurrent).not.toHaveBeenCalledWith(second, expect.anything())
+  })
+
+  it('the session-allow sweep waits out a re-root; the waiting ask is routed when it settles', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    h.feed.push(ask('per_a', 'shell', ['ls']), ask('per_c', 'shell', ['ls']))
+    await flush()
+    let grantLease!: () => void
+    h.leaseSameServer.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          grantLease = () => resolve({ ...CONN, directory: worktree })
+        })
+    )
+    h.feed.push(moved(worktree), ask('per_b', 'shell', ['ls']))
+    await flush()
+    session.resolveApproval('per_a', 'allowForSession')
+    expect(h.client.replyPermission).not.toHaveBeenCalledWith(SID, 'per_b', expect.anything())
+    grantLease()
+    await flush()
+    expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_b', { decision: 'once' })
+    // A card that was already up and is covered by the allow is swept once the re-root settles.
+    expect(h.client.replyPermission).toHaveBeenCalledWith(SID, 'per_c', { decision: 'once' })
+  })
+
+  it('an ask that arrived during re-root 1 is routed only after the latest re-root settled', async () => {
+    const second = join(base, 'second')
+    h.projectPermissions[second] = { deny: ['Bash(ls:*)'] }
+    session = sessionAt(repo)
+    await startTurn()
+    let grantFirst!: () => void
+    h.leaseSameServer.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          grantFirst = () => resolve({ ...CONN, directory: worktree })
+        })
+    )
+    h.feed.push(moved(worktree), ask('per_late', 'shell', ['ls']), moved(second))
+    await flush()
+    grantFirst()
+    await flush()
+    const reply = h.client.replyPermission.mock.calls.findIndex(([, id]) => id === 'per_late')
+    expect(reply).toBeGreaterThan(-1)
+    const leasedSecond = h.leaseSameServer.mock.calls.findIndex(([, dir]) => dir === second)
+    expect(h.client.replyPermission.mock.invocationCallOrder[reply]).toBeGreaterThan(
+      h.leaseSameServer.mock.invocationCallOrder[leasedSecond]
+    )
+    expect(h.client.replyPermission.mock.invocationCallOrder[reply]).toBeGreaterThan(
+      h.client.setSessionPermissions.mock.invocationCallOrder.at(-1)!
+    )
+  })
+
+  it('a catch-up that finds the session in a gone directory moves it back instead of leasing it', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    const gone = join(base, 'removed', 'wt')
+    h.client.getSession.mockImplementation(async (id: string) =>
+      sessionInfo(id, { location: { directory: gone } })
+    )
+    h.feed.push(connected(true))
+    await flush()
+    expect(h.client.moveSession).toHaveBeenCalledWith(SID, repo)
+    expect(h.leaseSameServer).not.toHaveBeenCalled()
+  })
+
+  it('a failing location read in the catch-up does not stop the reconcile', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    h.client.getSession.mockRejectedValue(new Error('boom'))
+    h.client.activeSessions.mockClear()
+    h.feed.push(connected(true))
+    await flush()
+    expect(h.client.activeSessions).toHaveBeenCalled()
+  })
+
+  it('a disconnect before the first catch-up clears the resume shortcut: the reconnect reads the location', async () => {
+    session = sessionAt(repo, { resumeSessionId: SID })
+    const first = session.run('go')
+    await flush()
+    const onExit = (h.subscribeExit.mock.calls.at(-1) as unknown as [string, () => void])[1]
+    onExit()
+    await first.catch(() => {})
+    h.client.getSession.mockClear()
+    h.feed = new h.Feed()
+    h.client.subscribeEvents.mockImplementation((opts: { signal?: AbortSignal }) =>
+      h.feed.pull(opts?.signal)
+    )
+    h.feed.push(connected())
+    await session.run('again').catch(() => {})
+    await flush()
+    expect(h.client.getSession.mock.calls.filter(([id]) => id === SID).length).toBeGreaterThan(0)
+  })
+
+  it('a move made while the feed was down is adopted on the reconnect catch-up', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    h.client.getSession.mockImplementation(async (id: string) =>
+      sessionInfo(id, { location: { directory: worktree } })
+    )
+    h.feed.push(connected(true))
+    await flush()
+    expect(h.leaseSameServer).toHaveBeenCalledWith(CONN, worktree)
+    expect(ownPatches().length).toBeGreaterThan(0)
+  })
+
+  it('a user-scope deny is not duplicated by the spawn-cwd pass after a move', async () => {
+    h.permissions.deny = ['Bash(rm:*)']
+    session = sessionAt(repo)
+    await startTurn()
+    h.feed.push(moved(worktree))
+    await flush()
+    const merged = (
+      session as unknown as { mergedUserPermissions(): { deny: string[] } }
+    ).mergedUserPermissions()
+    expect(merged.deny).toEqual(['Bash(rm:*)'])
+  })
+
+  it('a reroot guard failure keeps the location, interrupts, disconnects — and a reconnect acquires the location', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    h.leaseSameServer.mockRejectedValueOnce(
+      new OpencodePermissionGuardError(worktree, 'no guard RPC')
+    )
+    h.feed.push(moved(worktree))
+    await flush()
+    expect(h.client.interrupt).toHaveBeenCalledWith(SID)
+    expect(session.status.state).toBe('disconnected')
+    expect(sent.some(([c, , m]) => c === 'session:error' && String(m).includes(worktree))).toBe(
+      true
+    )
+    // Every lease is back.
+    expect(h.releaseIfCurrent).toHaveBeenCalledWith(repo, CONN)
+
+    h.acquire.mockClear()
+    h.feed.push(connected())
+    await session.run('again').catch(() => {})
+    await flush()
+    expect(h.acquire).toHaveBeenCalledWith(worktree)
+  })
+
+  it('the event of a child session is ignored', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    const patches = ownPatches().length
+    h.feed.push(moved(worktree, CHILD))
+    await flush()
+    expect(h.leaseSameServer).not.toHaveBeenCalled()
+    expect(ownPatches()).toHaveLength(patches)
+  })
+
+  it('cancel releases the lease it moved to', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    h.feed.push(moved(worktree))
+    await flush()
+    h.releaseIfCurrent.mockClear()
+    session.cancel()
+    await flush()
+    expect(h.releaseIfCurrent).toHaveBeenCalledTimes(1)
+    expect(h.releaseIfCurrent).toHaveBeenCalledWith(worktree, { ...CONN, directory: worktree })
+  })
+
+  it('user permissions after a move: a deny that exists only at the spawn cwd survives; an allow there does not', async () => {
+    h.projectPermissions[repo] = { deny: ['Bash(rm:*)'], allow: ['Bash(make:*)'] }
+    session = sessionAt(repo)
+    await startTurn()
+    h.feed.push(moved(worktree))
+    await flush()
+    const rules = ownPatches().at(-1)!
+    const shellRules = rules.filter((r) => r.action === 'shell')
+    expect(shellRules).toContainEqual(expect.objectContaining({ effect: 'deny', resource: 'rm*' }))
+    expect(
+      shellRules.some((r) => r.effect === 'allow' && String(r.resource).startsWith('make'))
+    ).toBe(false)
+
+    // The host pre-check enforces the same union.
+    h.feed.push(ask('per_rm', 'shell', ['rm -rf x']))
+    await flush()
+    expect(h.client.replyPermission).toHaveBeenCalledWith(
+      SID,
+      'per_rm',
+      expect.objectContaining({ decision: 'reject' })
+    )
+  })
+
+  describe('children', () => {
+    const created = (id: string, directory: string) =>
+      event('session.created', {
+        sessionID: id,
+        parentID: SID,
+        agent: 'explore',
+        projectID: 'prj',
+        location: { directory },
+        slug: id,
+        version: '2'
+      })
+    const childPatches = (id: string) =>
+      h.client.setSessionPermissions.mock.calls.filter(([sid]) => sid === id).map((c) => c[1])
+    const DENY_ALL = [{ action: '*', resource: '*', effect: 'deny' }]
+
+    it('a child located elsewhere than the parent now gets deny-all and keeps it; one that inherited the new location gets the normal ruleset', async () => {
+      session = sessionAt(repo)
+      await startTurn()
+      h.feed.push(created(CHILD, repo))
+      await flush()
+      expect(childPatches(CHILD).at(-1)).not.toEqual(DENY_ALL)
+
+      h.feed.push(moved(worktree))
+      await flush()
+      expect(childPatches(CHILD).at(-1)).toEqual(DENY_ALL)
+
+      // A background child started in the same step as the move is still in the old location.
+      h.feed.push(created('ses_bg', repo), created('ses_new', worktree))
+      await flush()
+      expect(childPatches('ses_bg').at(-1)).toEqual(DENY_ALL)
+      expect(childPatches('ses_new').at(-1)).not.toEqual(DENY_ALL)
+
+      // A later parent re-apply does not lift it.
+      await session.setPermissionMode('acceptEdits')
+      await flush()
+      expect(childPatches(CHILD).at(-1)).toEqual(DENY_ALL)
+      expect(childPatches('ses_new').at(-1)).not.toEqual(DENY_ALL)
+    })
+
+    it('a child’s location is read from opencode when the event did not carry it', async () => {
+      h.client.getSession.mockImplementation(async (id: string) =>
+        sessionInfo(id, { location: { directory: id === 'ses_elsewhere' ? repo : worktree } })
+      )
+      session = sessionAt(repo)
+      await startTurn()
+      h.feed.push(moved(worktree))
+      await flush()
+      const bare = (id: string) =>
+        event('session.created', {
+          sessionID: id,
+          parentID: SID,
+          agent: 'explore',
+          projectID: 'prj',
+          slug: id,
+          version: '2'
+        })
+      h.feed.push(bare('ses_elsewhere'), bare('ses_here'))
+      await flush()
+      expect(childPatches('ses_elsewhere').at(-1)).toEqual(DENY_ALL)
+      expect(childPatches('ses_here').at(-1)).not.toEqual(DENY_ALL)
+    })
+  })
+
+  describe('resume', () => {
+    const storedAt = (directory: string): void => {
+      h.client.getSession.mockImplementation(async (id: string) =>
+        sessionInfo(id, { location: { directory } })
+      )
+    }
+    const entry = (path: string) => ({
+      worktreePath: path,
+      worktreeBranch: 'worktree-bf',
+      worktreeName: 'brave-fox',
+      originalCwd: repo,
+      gitRoot: repo,
+      originalHeadCommit: '',
+      createdAt: 1,
+      origin: 'detected'
+    })
+
+    it('leases the server’s location before any apply or prompt and drops the connect-time lease', async () => {
+      storedAt(worktree)
+      session = sessionAt(repo, { resumeSessionId: SID })
+      h.feed.push(connected())
+      await session.run('go')
+      await flush()
+      expect(h.acquire).toHaveBeenCalledWith(repo)
+      expect(h.leaseSameServer).toHaveBeenCalledWith(CONN, worktree)
+      const leaseAt = h.leaseSameServer.mock.invocationCallOrder[0]
+      expect(leaseAt).toBeLessThan(h.client.setSessionPermissions.mock.invocationCallOrder[0])
+      expect(leaseAt).toBeLessThan(h.client.prompt.mock.invocationCallOrder[0])
+      expect(h.releaseIfCurrent).toHaveBeenCalledWith(repo, CONN)
+      expect(session.status.cwd).toBe(repo)
+    })
+
+    it('a session handed its worktree restores the recorded original cwd as its identity', async () => {
+      h.sessionConfig = { worktreeInfoMap: { 'route-1': entry(worktree) } }
+      storedAt(worktree)
+      session = sessionAt(worktree, { resumeSessionId: SID })
+      expect(session.cwd).toBe(repo)
+      h.feed.push(connected())
+      await session.run('go')
+      await flush()
+      // Connected at where it runs; no second lease for a place it already holds.
+      expect(h.acquire).toHaveBeenCalledWith(worktree)
+      expect(h.leaseSameServer).not.toHaveBeenCalled()
+    })
+
+    it('a created worktree entry does not change the identity (the session started there)', () => {
+      h.sessionConfig = {
+        worktreeInfoMap: {
+          'route-1': { ...entry(worktree), origin: 'created', originalHeadCommit: 'abc' }
+        }
+      }
+      expect(sessionAt(worktree).cwd).toBe(worktree)
+    })
+
+    it('a managed worktree removed through the UI (its record gone with it): the repo it lived in is the identity and the move-back target', async () => {
+      const gone = join(repo, '.claude', 'worktrees', 'brave-fox')
+      storedAt(gone)
+      session = sessionAt(gone, { resumeSessionId: SID })
+      expect(session.cwd).toBe(repo)
+      h.feed.push(connected())
+      await session.run('go')
+      await flush()
+      expect(h.acquire).toHaveBeenCalledWith(repo)
+      expect(h.client.moveSession).toHaveBeenCalledWith(SID, repo)
+    })
+
+    it('a worktree removed while cold: the session is moved back to the original cwd while idle, before the prompt', async () => {
+      const gone = join(base, 'removed', 'brave-fox')
+      h.sessionConfig = { worktreeInfoMap: { 'route-1': entry(gone) } }
+      storedAt(gone)
+      session = sessionAt(gone, { resumeSessionId: SID })
+      h.feed.push(connected())
+      await session.run('go')
+      await flush()
+      // Never connects to (or leases) the missing directory.
+      expect(h.acquire).toHaveBeenCalledWith(repo)
+      expect(h.leaseSameServer).not.toHaveBeenCalledWith(expect.anything(), gone)
+      expect(h.client.moveSession).toHaveBeenCalledWith(SID, repo)
+      expect(h.client.moveSession.mock.invocationCallOrder[0]).toBeLessThan(
+        h.client.prompt.mock.invocationCallOrder[0]
+      )
+      // The stale worktree record is dropped.
+      expect(h.sessionConfig.worktreeInfoMap).toEqual({})
+    })
   })
 })
 
