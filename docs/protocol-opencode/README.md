@@ -277,7 +277,8 @@ location, after an hour by default). Only the opencode ClaudeUI spawns loads it.
 ## Hosted MCP and caller identity (ADR-097 §4; `mcp-http-host.ts`, `opencode-hosted-tools.ts`)
 
 - ClaudeUI serves its hosted tools (`render_mermaid`, `create_mockup`, `show_mockup`,
-  `dispatch_agent`, `list_models` — the allowlisted models a subagent may name, ADR-111 §5) as the `claudeui` MCP server per opencode server: Streamable HTTP on loopback,
+  `dispatch_agent`, `list_models` — the allowlisted models a subagent may name, ADR-111 §5,
+  `enter_worktree`/`exit_worktree` — §Worktree moves) as the `claudeui` MCP server per opencode server: Streamable HTTP on loopback,
   a static bearer, `oauth:false`, `codemode:false`; one MCP session per opencode location.
 - opencode puts `_meta["ai.opencode/sessionID"]` on EVERY `tools/call`. It wins: the engine sets it
   outside anything the model or a plugin controls. The plugin's stamp is the fallback for a request
@@ -289,6 +290,64 @@ location, after an hour by default). Only the opencode ClaudeUI spawns loads it.
   call is refused.
 - Mockups resolve their directory per call from the calling session (ClaudeUI's own, else the
   server's session record).
+
+## Worktree moves
+
+ClaudeUI's equivalent of Claude Code's EnterWorktree / ExitWorktree for opencode sessions.
+
+**The route.**
+
+- `POST /api/session/{id}/move {directory, delivery?: "steer"|"queue"}` answers 204 immediately.
+  It does not wait for the move.
+- The move is queued in the session inbox and applied at the next step boundary
+  (`vendor/opencode-src/packages/core/src/session/move.ts`, `session/runner/llm.ts`). A session
+  that is idle in a directory that no longer exists moves at once.
+- Applying the move emits the durable `session.moved` `{sessionID, location:{directory},
+projectID, subpath}`. One feed sees it, because `/api/event` is cross-location.
+- A tool call already in flight finishes in the OLD directory. The next step re-drains in the
+  new location's instance, and opencode tells the model "The working directory has been changed
+  to …".
+- The only checks on the target: it exists, it is a directory, and its instance starts. There is
+  no permission check.
+
+**After the move.**
+
+- The location's project directory is the worktree root, so the main checkout is EXTERNAL:
+  reading it raises an `external_directory` ask.
+- Edit asks name worktree-relative paths, and AGENTS.md is reloaded for the new directory.
+- Children created after the move inherit the new location. Existing children stay where they
+  were, and a child resumed by `sessionID` keeps its old directory.
+- The session's `permissions` survive the move unchanged.
+
+**What ClaudeUI does** (`OpencodeSession`):
+
+- **Identity and location.** `cwd` stays the session's identity (status, git, the session tools).
+  `location` follows opencode and drives the ruleset, the user's settings, the host gates and the
+  judge.
+- **On `session.moved`:**
+  1. The location is updated at once.
+  2. The new directory is leased on the SAME server. `leaseSameServer` checks that the plugin
+     guard and the hosted tools are active for that directory.
+  3. The ruleset is rebuilt and PATCHed, and the other leases are released.
+  4. Any failure fails closed: the session is interrupted and disconnected.
+  5. Asks wait for the re-root to finish.
+- **User settings after a move.** Deny and ask rules are the union of the spawn directory's and
+  the location's settings. Allow rules come from the location's settings only.
+- **Subagents left behind.** A child still running in another directory gets the deny-all
+  ruleset, and its asks are refused on the host side.
+- **Reconnect and resume.** Both lease the server's location. A move that happened while the
+  feed was down is picked up at catch-up. A worktree removed while the session was closed moves
+  the session back to its recorded original directory, else to the managed worktree's repo.
+- **The hosted tools.** `claudeui_enter_worktree {name?|path?}` creates `<repo>/.claude/worktrees/<name>`
+  on branch `worktree-<name>` (`createWorktree`, from origin's default branch), or enters an
+  existing managed worktree of the same repo. `claudeui_exit_worktree {}` is keep-only and returns
+  to the recorded original directory, only when this session entered the worktree.
+  - They do not ask, which matches Claude Code. They are denied in plan mode, for subagent
+    children and for dispatch targets.
+  - Before posting the move, ClaudeUI PATCHes a transition ruleset. It adds the user's deny and
+    ask rules compiled for the destination, placed before the existing denies, and adds no allow.
+    That way, an absolute deny inside the destination holds before the re-root lands.
+- opencode's own `opencode_session_*` and `opencode_worktree_*` tools stay denied.
 
 ## Credentials (ADR-097 §5; `credential-store.ts`)
 
