@@ -218,7 +218,7 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
     expect(toolResultFor(r, okTag)).toContain('state="completed"')
   })
 
-  it("(f) opencode's own models tool is not offered to the model (Code Mode, execute hidden)", async () => {
+  it("(f) hiding Code Mode offers opencode's model LOOKUP as a direct tool (2.2.0); the gate still holds", async () => {
     const r = rig()
     const tag = nonce('f')
     const parent = await r.createSession({
@@ -227,9 +227,13 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
     await r.turn(parent, `plain ${tag}`)
     const offered = r.fixture.mentioning(tag).at(0)?.tools ?? []
     expect(offered).toContain('subagent')
-    expect(offered).not.toContain('models')
-    expect(offered).not.toContain('opencode_models')
     expect(offered).not.toContain('execute')
+    // Code Mode's namespaced `models` goes with Code Mode. Since 2.2.0 the same tool is offered
+    // DIRECTLY instead (`packages/core/src/tool.ts` `snapshot`), and it only LISTS models: the
+    // gate is on the call's effective model ((d)/(e) above), so nothing here is a way around it.
+    // ClaudeUI keeps `opencode_models` available on purpose (permission-v2.ts DIRECT_TOOL_DENY_RULES).
+    expect(offered).not.toContain('models')
+    expect(offered).toContain('opencode_models')
   })
 })
 

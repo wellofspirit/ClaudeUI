@@ -16,7 +16,7 @@ import { expect, it } from 'vitest'
 import type { ClaudePermissions } from '../../shared/types'
 import type { Config_InfoEncoded } from '../../core/opencode/protocol-v2/openapi'
 import { buildSessionRuleset } from '../../core/opencode/permission-v2'
-import { SHELL_COMMAND, type FixtureProvider } from './harness/fixture-provider'
+import { SHELL_COMMAND, messageText, type FixtureProvider } from './harness/fixture-provider'
 import {
   describeV2,
   FIXTURES_DIR,
@@ -193,3 +193,31 @@ describeV2(
     })
   }
 )
+
+describeV2('opencode 2.x contract: opencode_worktree_remove is refused (plugin)', () => {
+  const rig = useRig('plugin-worktree', { config: withPlugin })
+  const MESSAGE =
+    'ClaudeUI manages worktrees; opencode_worktree_remove is disabled in ClaudeUI sessions.'
+
+  it('a direct call is refused in acceptEdits: no ask, no run, and the model reads why', async () => {
+    const r = rig()
+    // acceptEdits is the mode the owner found this in: the tool asks `edit`
+    // (`tool/plugin/opencode.ts` `permission: "edit"` at v2.2.5) and the edit
+    // ladder gates only agent-control paths there, so nothing asks and the tool
+    // used to run — `force` and all.
+    const id = await create(r, 'acceptEdits')
+    const tag = nonce('worktree-remove')
+    const { end, from } = await r.turn(id, `[worktreeremove] ${tag}`)
+    expect(r.feed.select('permission.asked', { sessionID: id, after: from })).toHaveLength(0)
+    expect(r.feed.select('session.tool.success', { sessionID: id, after: from })).toHaveLength(0)
+    const failed = r.feed.select('session.tool.failed', { sessionID: id, after: from })
+    expect(failed).toHaveLength(1)
+    // A throw from `execute.before` reaches the engine as a failure it cannot type
+    // (`type: "unknown"`); the message the model reads is the plugin's.
+    expect(failed[0].data.error.message).toBe(MESSAGE)
+    // The refusal reached the model as the call's result; the turn went on.
+    expect(end.type).toBe('session.execution.succeeded')
+    const after = r.fixture.mentioning(tag).at(-1)
+    expect(messageText(after?.messages.at(-1)?.content)).toContain(MESSAGE)
+  })
+})

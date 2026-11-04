@@ -25,6 +25,8 @@ export interface FakeCredentialTable {
   /** Leases opened and released (a lease must always be released). */
   readonly leases: { opened: number; released: number }
   connect: () => Promise<CredentialLease>
+  /** Flip the lease's manager verdict (`false`: an unclean server, which refuses `create`). */
+  setCleaned(cleaned: boolean): void
   /** Insert a row directly (a user's sign-in, an imported row) — not recorded as a call. */
   seed(input: Credential_CreateInput & { id: string }): void
   rows(): Credential_Entry[]
@@ -38,6 +40,8 @@ export function fakeCredentialTable(): FakeCredentialTable {
   const calls: string[] = []
   const leases = { opened: 0, released: 0 }
   let clock = 0
+  // The manager's verdict a lease carries: clean unless a test says otherwise.
+  let cleaned = true
   const failing = new Map<string, number>()
   const maybeFail = (op: string): void => {
     const skip = failing.get(op)
@@ -118,8 +122,9 @@ export function fakeCredentialTable(): FakeCredentialTable {
     leases,
     connect: async () => {
       leases.opened++
-      return { api, release: () => void leases.released++ }
+      return { api, cleaned, release: () => void leases.released++ }
     },
+    setCleaned: (value) => void (cleaned = value),
     seed: (input) => void insert(input),
     rows: () => ordered().map((row) => row.entry),
     active: (integrationID) =>

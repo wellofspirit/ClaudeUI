@@ -52,6 +52,7 @@ import type {
   Credential_Value
 } from './protocol-v2/openapi'
 import { logger } from '../services/logger'
+import { OpencodeCredentialCleanupError } from './credential-cleanup-error'
 import { writeJsonAtomic } from '../services/write-json-atomic'
 import { logSafeError } from '../services/redact-secrets'
 import { accountIdentityFromAuthEntry } from '../auth/account-identity'
@@ -128,6 +129,13 @@ export interface CopyCleanupRecord {
 
 export interface CredentialLease {
   readonly api: CredentialApi
+  /**
+   * The server manager's verdict: its first-contact cleanup (proven copies of
+   * ClaudeUI's own sign-in) succeeded on this server. A lease it did not vouch
+   * for serves the location-less credential routes only, and `create` is not
+   * one of those (2.2.5 boots a location) — see {@link OpencodeCredentialStore}.
+   */
+  readonly cleaned: boolean
   release(): void
 }
 
@@ -723,6 +731,10 @@ export class OpencodeCredentialStore {
       this.cached = snapshotOf(await api.list(), this.now(), this.ownedBy())
       this.notify()
     }
+    // The deletions went through: the cleanup HAS succeeded in this process, whichever
+    // lease ran it (this store's own, or the server manager's first-contact hook, which
+    // calls this method). A create needs it — see {@link createGuard}.
+    this.copiesCleaned = true
     return copies.length
   }
 
@@ -1032,6 +1044,9 @@ export class OpencodeCredentialStore {
   /**
    * One lease, alone, with the pending removals applied first. `prepare` runs
    * first of all, inside the turn (a vend records its slot there).
+   *
+   * Every operation gets {@link createGuard}'s API: `create` fails closed until
+   * the proven-copy cleanup has succeeded in this process AND on this lease.
    */
   private exclusive<T>(op: (api: CredentialApi) => Promise<T>, prepare?: () => void): Promise<T> {
     const run = this.chain.then(async () => {
@@ -1039,15 +1054,23 @@ export class OpencodeCredentialStore {
       const lease = await this.connect()
       try {
         if (this.memory.takeRebuild?.()) await this.rebuildRecords(lease.api)
-        // The first operation of the process deletes proven copies BEFORE it
-        // vends or removes anything (each new server also runs it at first
-        // contact — `deleteProvenCopies` via the server manager's hook).
-        if (!this.copiesCleaned && this.isClaudeuiToken) {
-          // Recorded as done only once it succeeded: a failed run retries on
-          // the next operation (S7 review 1).
+        // The proven copies are deleted BEFORE this operation vends or removes anything
+        // (each new server also runs it at first contact — `deleteProvenCopies` via the
+        // server manager's hook). The store's own run happens when the process has never
+        // completed one, and when the manager did not vouch for THIS server: its
+        // first-contact run may have been slow past its bound or failed once, and a
+        // credential-route lease never re-runs it (`OpencodeServerManager.ts`
+        // `leaseOn` skips `ensureCleaned` for these), so without this a create would stay
+        // refused for the whole life of a clean server.
+        let leaseCleaned = lease.cleaned
+        if (this.isClaudeuiToken && (!this.copiesCleaned || !lease.cleaned)) {
+          // Idempotent: removing an already removed id is a no-op. `deleteProvenCopies`
+          // records the success itself, and only on success — a failed run retries on the
+          // next operation (S7 review 1), and a create in the meantime is refused
+          // ({@link createGuard}).
           try {
             await this.deleteProvenCopies(lease.api, 'first contact')
-            this.copiesCleaned = true
+            leaseCleaned = true
           } catch (err) {
             logger.warn('OpencodeCredentials', `proven-copy cleanup failed: ${errText(err)}`)
           }
@@ -1056,13 +1079,41 @@ export class OpencodeCredentialStore {
           logger.warn('OpencodeCredentials', `adopting late sign-ins failed: ${errText(err)}`)
         )
         await this.applyPending(lease.api)
-        return await op(lease.api)
+        return await op(this.createGuard(lease, leaseCleaned))
       } finally {
         lease.release()
       }
     })
     this.chain = run.catch(() => undefined)
     return run
+  }
+
+  /**
+   * The lease's API with `create` behind the proven-copy cleanup. `POST /api/credential` is
+   * the one credential route that BOOTS the global-config location (2.2.5,
+   * `packages/server/src/handlers/credential.ts`): its plugins load, the ChatGPT plugin
+   * resolves the active connection, and it may refresh it. list, remove, activate and
+   * relabel do not boot one. So until the cleanup has succeeded in THIS process for THIS
+   * store ({@link copiesCleaned}), and on the lease it runs on — either the manager
+   * vouched for that server ({@link CredentialLease.cleaned}) or the store's own run on
+   * this lease succeeded (`leaseCleaned`) — a create could hand opencode a copy of
+   * ClaudeUI's sign-in to rotate away. Fail closed, with the manager's own error type;
+   * the next operation runs the cleanup on its own lease (a run that succeeds then lets
+   * creates through).
+   */
+  private createGuard(lease: CredentialLease, leaseCleaned: boolean): CredentialApi {
+    const blocked = !this.copiesCleaned || !leaseCleaned
+    if (!blocked) return lease.api
+    return {
+      ...lease.api,
+      create: (): Promise<Credential_Entry> => {
+        logger.warn(
+          'OpencodeCredentials',
+          'credential create refused: the proven-copy cleanup has not succeeded yet'
+        )
+        return Promise.reject(new OpencodeCredentialCleanupError(undefined, 'credential-create'))
+      }
+    }
   }
 
   /** After a corrupt record file: every slot holding a `cred_claudeui_*` row is ClaudeUI's again. */
