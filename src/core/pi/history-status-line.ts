@@ -16,7 +16,7 @@
 
 import type { ModelCostEntry, ModelRef, StatusLineData } from '../../shared/types'
 import { totalCosts } from '../../shared/cost-rule'
-import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
+import { piCostInputs, piCostReport, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { peekPiModelContextWindow } from './model-discovery'
 import type { PiSessionEntry } from './pi-protocol'
 
@@ -62,7 +62,7 @@ export function piHistorySeed(entries: PiSessionEntry[]): PiHistorySeed {
           cacheWrite: usage.cacheWrite,
           ...(usage.reasoning != null ? { reasoning: usage.reasoning } : {})
         },
-        usage.cost?.total ?? null
+        piCostReport(usage.cost)
       )
     )
     tokens.input += usage.input

@@ -27,6 +27,14 @@ const realHarnessStore = (process.env.CLAUDEUI_REAL_HARNESS_STORE ??=
   process.env.CLAUDEUI_HARNESS_STORE ?? resolve(realHome, '.claude', 'ui', 'harnesses'))
 
 /**
+ * An isolated pi agent directory for the pi model-call suites (`docs/protocol-pi/README.md`):
+ * PI_CODING_AGENT_DIR is dropped below like the other home-derived variables, and only the
+ * integration project gets it back. Kept in the environment the same way, for a re-evaluation.
+ */
+const piAgentDir = (process.env.CLAUDEUI_REAL_PI_AGENT_DIR ??=
+  process.env.PI_CODING_AGENT_DIR ?? '')
+
+/**
  * The main process's home, moved BEFORE Vitest starts a single worker. The setup files give every
  * test FILE its own home, but only a process-level move protects what they cannot: worker threads
  * (their `process.env` writes never reach `os.homedir()`), config and plugin code, and anything that
@@ -353,7 +361,10 @@ export default defineConfig({
           setupFiles: ['./src/test/setup/node.setup.ts'],
           // The suites run the opencode and pi installed in the real
           // store, and skip without them.
-          env: { CLAUDEUI_HARNESS_STORE: realHarnessStore },
+          env: {
+            CLAUDEUI_HARNESS_STORE: realHarnessStore,
+            ...(piAgentDir ? { PI_CODING_AGENT_DIR: piAgentDir } : {})
+          },
           include: ['src/integration/**/*.integration.test.ts'],
           testTimeout: 60000
         }

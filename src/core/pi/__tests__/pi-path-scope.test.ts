@@ -51,7 +51,7 @@ import { makeVirtualFs, type VirtualNode } from '../../../test/helpers/virtual-p
 const NNBSP = '\u202F'
 
 // ---------------------------------------------------------------------------
-// piResolvePath — a port of pi 1.4.0 utils/paths.ts resolvePath(+normalizePath)
+// piResolvePath — a port of pi 1.5.0 utils/paths.ts resolvePath(+normalizePath)
 // ---------------------------------------------------------------------------
 
 describe('piResolvePath — POSIX', () => {

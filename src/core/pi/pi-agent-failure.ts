@@ -12,7 +12,7 @@
  *
  * PORTED PATTERNS. The message patterns below are copied from pi's own
  * classifiers so the host agrees with pi on what "retryable" means. Source
- * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.4.0
+ * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.5.0
  * (`src/shared/harness-manifests/pi.json#tested`). A pin bump must re-diff
  * `overflow.ts` and `retry.ts` against the three blocks marked PORTED.
  *
@@ -33,7 +33,7 @@ export type PiAgentFailureInput =
   /** A `/cui-` prompt the runner refused to send. */
   | { kind: 'refused-command' }
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.4.0) ──
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/overflow.ts (pi 1.5.0) ──
 // OVERFLOW_PATTERNS, NON_OVERFLOW_PATTERNS and the Cerebras body-less case.
 // The silent-overflow cases (usage vs. context window) are not message
 // patterns and need the assistant message, so they are not ported.
@@ -44,6 +44,7 @@ const OVERFLOW_PATTERNS: readonly RegExp[] = [
   /input is too long for requested model/i, // Amazon Bedrock
   /exceeds the context window/i, // OpenAI (Completions & Responses API)
   /exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))/i, // OpenAI-compatible proxies (LiteLLM)
+  /context window exceeded/i, // LiteLLM pre-call check (ContextWindowExceededError)
   /input token count.*exceeds the maximum/i, // Google (Gemini)
   /maximum prompt length is \d+/i, // xAI (Grok)
   /reduce the length of the messages/i, // Groq
@@ -78,7 +79,7 @@ const NON_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /too many requests/i // Generic HTTP 429 style
 ]
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.4.0) ─────
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.5.0) ─────
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
   return new RegExp(patterns.join('|'), 'i')
 }
@@ -107,7 +108,11 @@ const PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
   'subscription_sharing_usage_limit_exceeded',
   // Business workspace admin limits are resumable under ADR-089, even though
   // pi excludes them from automatic retries. An admin can raise the limit.
-  'subscription_sharing_workplace_individual_usage_limit_exceeded'
+  'subscription_sharing_workplace_individual_usage_limit_exceeded',
+
+  // Zhipu/Z.ai (open.bigmodel.cn) error code 1308: the plan's usage limit is
+  // reached, sent as HTTP 429. It resets after hours, not seconds (#11537).
+  '"code"\\s*:\\s*"?1308(?![0-9])'
 ])
 
 /** RETRYABLE_PROVIDER_ERROR_PATTERN: pi's own "restart the turn" errors. */

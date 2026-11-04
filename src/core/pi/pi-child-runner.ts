@@ -31,7 +31,8 @@ import { createPiMapperState, finishPiMessage, mapPiEvent } from './event-mapper
 import type { PiMapperOutput, PiMapperState } from './event-mapper'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
 import type { PiBridgeAbandoned, PiBridgeHandler, PiHostedToolHandler } from './PiBridgeHost'
-import { locatePiLaunch } from './pi-locate'
+import { piCostReport } from './message-cost'
+import { PI_APPROVE_ARGS, locatePiLaunch } from './pi-locate'
 import { deliveryCommand, isReservedPiCommandText, PI_RESERVED_COMMAND_PREFIX } from './pi-delivery'
 import type { PiAgentDelivery } from './pi-delivery'
 import type {
@@ -119,7 +120,7 @@ export const defaultSpawnPiChild: SpawnPiChildFn = async (opts) => {
   const bridgePath = writeBridgeExtension()
   const client = new PiRpcClient(launch, {
     cwd: opts.cwd,
-    args: ['--mode', 'rpc', '-e', bridgePath, ...(opts.args ?? [])],
+    args: ['--mode', 'rpc', ...PI_APPROVE_ARGS, '-e', bridgePath, ...(opts.args ?? [])],
     env: (opts.env ?? defaultChildEnv)(bridge)
   })
   try {
@@ -276,6 +277,18 @@ export class PiChildRunner {
    *  has no column for them (they are billed as output) but `piCostInputs`
    *  prices them — the same fold `PiSession` makes for its own turns. */
   turnReasoningTokens = 0
+  /** The turn's `usage.cost` COMPONENT figures summed — pi's catalog list
+   *  price — accumulated beside the tokens so a provider-billed total can be
+   *  priced against its list-price equivalent (message-cost.ts). NULL as soon
+   *  as any message of the turn reported none: a sum of the rest would claim a
+   *  list price the turn does not have, and `piCostInputs` falls back to
+   *  ClaudeUI's pricing table on null. Reset to 0 (not null) with the tokens. */
+  turnCostComponentsUsd: number | null = 0
+  /** Whether any of the turn's messages carried a provider-billed total
+   *  (`usage.cost.totalFromProvider`, pi 1.5.0 / OpenRouter). Reset with the
+   *  tokens; one model per turn in practice, so the turn's delta is the
+   *  provider's figure whenever this is true. */
+  turnCostFromProvider = false
   /**
    * Mirrors `ClaudeTargetEntry.lastReportedTotalCostUsd` — VERIFIED WIRE FACT
    * (event-mapper.ts's `agent_settled` case echoes `state.totalCostUsd`, which
@@ -411,6 +424,8 @@ export class PiChildRunner {
     this.turnTotalTokens = 0
     this.turnTokens = zeroTurnTokens()
     this.turnReasoningTokens = 0
+    this.turnCostComponentsUsd = 0
+    this.turnCostFromProvider = false
     this.lastActivityAt = startedAt
   }
 
@@ -766,6 +781,16 @@ export class PiChildRunner {
       this.turnTokens.cacheWrite += out.tokens.cacheWrite
       this.turnTokens.cacheRead += out.tokens.cacheRead
       this.turnReasoningTokens += out.tokens.reasoning ?? 0
+      // `usage.cost` reaches the cost rule through the same accumulation: the
+      // turn's list-price components, and whether its total was a bill. One
+      // message with no components makes the turn's list price unknown (null):
+      // a partial sum would understate it instead.
+      const report = piCostReport(out.cost)
+      this.turnCostComponentsUsd =
+        this.turnCostComponentsUsd === null || report.componentsUsd == null
+          ? null
+          : this.turnCostComponentsUsd + report.componentsUsd
+      this.turnCostFromProvider ||= report.fromProvider === true
       this.opts.onUsage?.(out)
       return
     }

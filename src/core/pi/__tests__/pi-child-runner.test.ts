@@ -82,6 +82,10 @@ function assistantEnd(opts: {
   text?: string
   toolUse?: { id: string; name: string; input: Cmd }
   cost?: number
+  /** Override the four `usage.cost` component figures (all 0 by default). */
+  costParts?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+  /** Omit `usage.cost` entirely: a message pi reported no figures for. */
+  noCost?: boolean
 }): Cmd {
   const content: Cmd[] = []
   if (opts.text !== undefined) content.push({ type: 'text', text: opts.text })
@@ -93,6 +97,7 @@ function assistantEnd(opts: {
       arguments: opts.toolUse.input
     })
   }
+  const parts = opts.costParts ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   return {
     type: 'message_end',
     message: {
@@ -106,7 +111,7 @@ function assistantEnd(opts: {
         cacheRead: 2,
         cacheWrite: 1,
         reasoning: 3,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.cost ?? 0 }
+        ...(opts.noCost ? {} : { cost: { ...parts, total: opts.cost ?? 0 } })
       },
       stopReason: 'stop',
       timestamp: Date.now()
@@ -129,6 +134,18 @@ function toolResultEnd(toolCallId: string, text: string): Cmd {
 }
 
 const SETTLED = { type: 'agent_settled' }
+
+/** pi's `message_start` for an assistant message (it is what re-opens the mapper after an end). */
+const messageStart = (): Cmd => ({
+  type: 'message_start',
+  message: {
+    role: 'assistant',
+    content: [],
+    provider: 'openai-codex',
+    model: 'gpt-5.6-luna',
+    timestamp: Date.now()
+  }
+})
 
 /** pi's errored assistant message_end (stopReason 'error'); a 401/403 text is the mapper's auth-required. */
 function erroredAssistantEnd(errorMessage: string): Cmd {
@@ -226,7 +243,43 @@ describe('PiChildRunner turns', () => {
 
     runner.beginTurn()
     expect(runner.turnTotalTokens).toBe(0)
+    expect(runner.turnCostComponentsUsd).toBe(0)
     expect(runner.turnToolUseIds.size).toBe(0)
+  })
+
+  it('the turn’s cost COMPONENTS are a sum only while every message carries them (null otherwise)', async () => {
+    const child = makeFakeChild()
+    const runner = await PiChildRunner.start(runnerOpts(child))
+    runner.beginTurn()
+    const turn = runner.runTurn('do it')
+    await tick()
+    // Two billed messages: the turn's list price is the sum of their components.
+    child.push(
+      assistantEnd({
+        text: 'one',
+        cost: 1,
+        costParts: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4 }
+      })
+    )
+    child.push(messageStart())
+    child.push(
+      assistantEnd({
+        text: 'two',
+        cost: 0.5,
+        costParts: { input: 0.2, output: 0.1, cacheRead: 0.2, cacheWrite: 0.2 }
+      })
+    )
+    expect(runner.turnCostComponentsUsd).toBeCloseTo(1.7, 10)
+    // One message without figures makes the turn's list price UNKNOWN — not the partial sum
+    // that would understate it and price a billed turn's equivalent at the rest alone.
+    child.push(messageStart())
+    child.push(assistantEnd({ text: 'three', noCost: true }))
+    child.push(SETTLED)
+    expect((await turn).kind).toBe('ok')
+    expect(runner.turnCostComponentsUsd).toBeNull()
+    // The next turn starts over: 0, so a turn whose every message carries them sums again.
+    runner.beginTurn()
+    expect(runner.turnCostComponentsUsd).toBe(0)
   })
 
   it('R3: runTurn refuses a /cui- prompt (model-authored text) and sends nothing', async () => {

@@ -25,13 +25,13 @@ import type {
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
 import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
-import { piCostInputs, resolvePiCosts, type PiCostInputs } from './message-cost'
+import { piCostInputs, piCostReport, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { logger } from '../services/logger'
 import { internAttachments } from '../services/blob-store'
 import { authErrorTranscriptMessage } from '../services/api-error'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { harnessUnavailableMessage } from '../harness/resolve'
-import { locatePiLaunch } from './pi-locate'
+import { PI_APPROVE_ARGS, locatePiLaunch } from './pi-locate'
 import { PiRpcClient } from './PiRpcClient'
 import { mapPiEvent, createPiMapperState, finishPiMessage } from './event-mapper'
 import type { PiMapperOutput, PiMapperState } from './event-mapper'
@@ -997,7 +997,7 @@ export class PiSession extends BaseSession {
     try {
       const bridgePath = writeBridgeExtension()
 
-      const args = ['--mode', 'rpc', '-e', bridgePath]
+      const args = ['--mode', 'rpc', ...PI_APPROVE_ARGS, '-e', bridgePath]
       // Host-run subagents (ADR-089): the agent registry is a spawn-time
       // snapshot (Claude Code loads its definitions at start too) — a
       // definition added mid-session takes effect at the next spawn. Never
@@ -1430,14 +1430,15 @@ export class PiSession extends BaseSession {
           // not an unpriced one. Seeding an entry here would report a session
           // that has cost nothing yet as "unknown" on any unpriced model.
           const metered = statsResp.data.cost > 0 || statsResp.data.tokens.total > 0
+          // `get_session_stats` reports one cumulative figure with no
+          // per-message `totalFromProvider` (agent-session.ts's SessionStats),
+          // so the base keeps pi's own rule: that figure is the equivalent, and
+          // the live turns that follow state their own.
           this.costBase = metered
             ? [
-                piCostInputs(
-                  model.vendorId,
-                  model.modelId,
-                  statsResp.data.tokens,
-                  statsResp.data.cost
-                )
+                piCostInputs(model.vendorId, model.modelId, statsResp.data.tokens, {
+                  totalUsd: statsResp.data.cost
+                })
               ]
             : []
           this.sumInputTokens = statsResp.data.tokens.input
@@ -1828,7 +1829,7 @@ export class PiSession extends BaseSession {
         // that is what the user was charged. The ledger row above keeps pi's
         // raw figure as `engineCostUsd`, unchanged.
         this.liveCostInputs.push(
-          piCostInputs(output.provider, output.modelId, output.tokens, output.costUsd)
+          piCostInputs(output.provider, output.modelId, output.tokens, piCostReport(output.cost, 0))
         )
         this.sumInputTokens += output.tokens.input
         this.sumOutputTokens += output.tokens.output
@@ -2160,6 +2161,7 @@ export class PiSession extends BaseSession {
       args: [
         '--mode',
         'rpc',
+        ...PI_APPROVE_ARGS,
         '--no-session',
         '--no-tools',
         '--no-extensions',

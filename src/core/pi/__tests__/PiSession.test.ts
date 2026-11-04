@@ -322,6 +322,7 @@ vi.mock('../../automode/judge-accounts', async (importOriginal) => {
 vi.mock('../../automode/judge-usage', () => ({ recordJudgeUsage: mockRecordJudgeUsage }))
 vi.mock('../../automode/judge-http/net', () => ({ pickJudgeFetch: mockPickJudgeFetch }))
 vi.mock('../pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
   locatePiLaunch: mockLocatePiLaunch,
   piBinaryAvailable: () => true
 }))
@@ -846,7 +847,9 @@ describe('PiSession.run — sends a prompt', () => {
       { command: '/fake/pi', args: [] },
       {
         cwd: '/cwd',
-        args: ['--mode', 'rpc', '-e', '/fake/tmp/claudeui-bridge.ts'],
+        // `--approve` (pi-locate.ts PI_APPROVE_ARGS): ClaudeUI decides project
+        // trust; pi's own trust store is never consulted.
+        args: ['--mode', 'rpc', '--approve', '-e', '/fake/tmp/claudeui-bridge.ts'],
         env: {
           CLAUDEUI_PI_BRIDGE_URL: 'http://127.0.0.1:9999',
           CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
@@ -8185,6 +8188,7 @@ describe('PiSession — askSideQuestion (/btw, transcript-fed ephemeral pi)', ()
       args: [
         '--mode',
         'rpc',
+        '--approve',
         '--no-session',
         '--no-tools',
         '--no-extensions',

@@ -144,7 +144,7 @@ import {
 } from '../pi/pi-scratchpad'
 import type { ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeMessageCosts } from '../opencode/message-cost'
-import { piMessageCosts, type PiCostTokens } from '../pi/message-cost'
+import { piMessageCosts, type PiCostReport, type PiCostTokens } from '../pi/message-cost'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
 import { query as sdkQuery, sendProgress } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
@@ -1723,10 +1723,10 @@ function errText(err: unknown): string {
 function piTurnCost(
   model: string,
   tokens: PiCostTokens | undefined,
-  engineCostUsd: number
+  report: PiCostReport
 ): ResolvedCosts {
   const { vendorId, modelId } = engineMeta('pi').decodeModelValue(model)
-  return piMessageCosts(vendorId, modelId, tokens, engineCostUsd)
+  return piMessageCosts(vendorId, modelId, tokens, report)
 }
 
 // ── Who a dispatched turn is billed to (ADR-071 §1 / §3) ────────────────────
@@ -7574,7 +7574,11 @@ export class CrossEngineDispatcher {
     const turnCostUsd = piTurnCost(
       model,
       { ...entry.runner.turnTokens, reasoning: entry.runner.turnReasoningTokens },
-      rawTurnCostUsd
+      {
+        totalUsd: rawTurnCostUsd,
+        fromProvider: entry.runner.turnCostFromProvider,
+        componentsUsd: entry.runner.turnCostComponentsUsd
+      }
     ).displayCostUsd
     if (turnCostUsd === null) {
       entry.unpricedTurns++
@@ -7878,7 +7882,10 @@ export class CrossEngineDispatcher {
               tokens: entry.runner.turnTokens,
               engineCostUsd: entry.turnEngineCostUsd,
               account: piDispatchAccount(model),
-              engineCostIsEquivalent: true
+              // pi's figure is a list price UNLESS the turn carried an
+              // OpenRouter-billed total (pi 1.5.0 `totalFromProvider`), which
+              // is money charged and must be read as the billed figure.
+              engineCostIsEquivalent: !entry.runner.turnCostFromProvider
             })
           }
           return errorResult(text, entry.sessionId ?? '')
@@ -7915,7 +7922,7 @@ export class CrossEngineDispatcher {
             tokens: entry.runner.turnTokens,
             engineCostUsd: entry.turnEngineCostUsd,
             account: piDispatchAccount(model),
-            engineCostIsEquivalent: true
+            engineCostIsEquivalent: !entry.runner.turnCostFromProvider
           })
           return errorResult(`Dispatched turn failed: ${winner.message}`, entry.sessionId ?? '')
         }
@@ -7969,10 +7976,12 @@ export class CrossEngineDispatcher {
           toolUseId: ctx.toolUseId ?? null,
           tokens: entry.runner.turnTokens,
           // pi reports a LIST PRICE, not a charge (S1b) — the ledger must not
-          // read it as money that left a wallet.
+          // read it as money that left a wallet — unless the turn carried an
+          // OpenRouter-billed total (pi 1.5.0 `totalFromProvider`), which IS
+          // money charged.
           engineCostUsd: entry.turnEngineCostUsd,
           account: piDispatchAccount(model),
-          engineCostIsEquivalent: true
+          engineCostIsEquivalent: !entry.runner.turnCostFromProvider
         })
         return done
       } finally {

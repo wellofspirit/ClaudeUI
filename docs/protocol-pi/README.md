@@ -1,6 +1,75 @@
 # pi wire protocol — verified integration notes
 
-Current tested release: **1.4.0** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.4.0)); floor = tested = **1.4.0**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.4.0, 2.0.0) other than 1.4.0 runs as _untested_; only **1.4.0** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.4.0. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+Current tested release: **1.5.0** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.5.0)); floor = tested = **1.5.0**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.5.0, 2.0.0) other than 1.5.0 runs as _untested_; only **1.5.0** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.5.0. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+
+## 1.4.0 → 1.5.0 compatibility assessment (2026-11-04)
+
+`git diff v1.4.0..v1.5.0` (all paths below at `v1.5.0`). Nothing under
+`packages/coding-agent/src/modes/rpc` changed and `docs/rpc.md` is untouched, so the wire
+ClaudeUI speaks — the command/event union, usage snapshots, `get_session_stats` — is the one
+measured on 1.4.0. Every CLI flag ClaudeUI passes
+(`--mode rpc`, `-e`, `--session`, `--session-id`, `--session-dir`, `--append-system-prompt`,
+`--tools`, `--exclude-tools`, `--thinking`, the `--no-*` discovery flags) parses exactly as
+before: `packages/coding-agent/src/cli/args.ts` changed only help text and one new environment
+variable. The session file format is unchanged too; the
+`packages/coding-agent/src/core/session-manager.ts` changes are behaviour fixes (a failed write is
+rolled back instead of leaving an in-memory entry with no file line, path comparison is
+case-insensitive on Windows, `fork` writes through one file handle).
+
+- **Project trust is the host's (`--approve`):** `packages/coding-agent/src/main.ts:754-759` now
+  resolves `trustStore.get(cwd) ?? !hasTrustRequiringResources`, where 1.4.0 had
+  `!hasTrustRequiringResources || trustStore.get(cwd) === true` — so a saved "do not trust" in
+  `~/.pi/agent/trust.json` wins even for a folder with no trust-requiring resources, silently
+  dropping its `AGENTS.md`, skills and extensions. `resolveProjectTrusted`
+  (`packages/coding-agent/src/core/project-trust.ts`) made the same change. ClaudeUI decides
+  trust (the user opened the folder in the app), so every pi spawn now passes `--approve`
+  (`src/core/pi/pi-locate.ts` `PI_APPROVE_ARGS`): it sets `projectTrustOverride = true`
+  (`packages/coding-agent/src/cli/args.ts:241-242`) and pi skips its trust store and the
+  `project_trust` extension event entirely. The bridge's `pi.on('project_trust')` handler is gone;
+  the `--no-*` ephemeral spawns (model discovery, a side question) carry the flag too, which is
+  harmless because it only covers project-local resources.
+- **OpenRouter billed cost:** `packages/ai/src/utils/openrouter-cost.ts` now replaces
+  `usage.cost.total` with OpenRouter's BILLED figure and sets
+  `usage.cost.totalFromProvider = true` (`types.ts:485`); the four component figures
+  (`input`/`output`/`cacheRead`/`cacheWrite`) stay catalog list-price estimates. ClaudeUI takes
+  that total as the engine figure and the component sum as the list-price equivalent
+  (`src/core/pi/message-cost.ts`), so an API-key OpenRouter turn bills what OpenRouter charged
+  while a subscription still reads the list price. Absent or `false` (every session recorded
+  before 1.5.0) keeps the old rule: pi's total is the equivalent. `get_session_stats` reports one
+  cumulative `cost` with no such flag, so a resumed session's seeded base keeps the old rule.
+- **Failure classification:** `packages/ai/src/utils/retry.ts` added Zhipu/Z.ai error code 1308
+  (`'"code"\s*:\s*"?1308(?![0-9])'`) to the non-retryable provider-limits pattern, and
+  `packages/ai/src/utils/overflow.ts` added the LiteLLM pre-call overflow text
+  `/context window exceeded/i`. `src/core/pi/pi-agent-failure.ts` is re-synced to 1.5.0: a z.ai 1308
+  quota stays resumable under ADR-089 and the LiteLLM overflow stays permanent.
+- **Tool-argument validation (breaking upstream):** arguments are validated as JSON Schema by
+  `@earendil-works/pi-schema` instead of TypeBox, and loosely typed arguments are coerced before
+  validation — a `null` the model sends for a required string now arrives as `"null"` (it was
+  `""`), a numeric string becomes a number, a single value becomes a one-item array. TypeBox
+  features outside JSON Schema (`Type.Refine()`, `Type.BigInt()`, `Format.Set()` formats) no longer
+  apply, and validation-failure text the model sees is pi-schema's (`- path: missing`). ClaudeUI's
+  bridge tools declare plain JSON Schema, so nothing to re-port; handlers that read a string
+  argument see `"null"` where they used to see `""`.
+- **`setActiveTools` order:** `_applyToolLoadout` now keeps the tools that stay active in their
+  existing order and appends newly activated ones, so an extension setting the same tool set in a
+  different order no longer rebuilds the system prompt. ClaudeUI registers tools per load and does
+  not reorder, so no change in behaviour.
+- **Embedded Bun 1.3.14 → 1.4.4:** `.github/workflows/build-binaries.yml` builds the shipped
+  binaries with Bun 1.4.4. The gated suite passes on the darwin-arm64 1.5.0 managed-store binary,
+  25 of 25 with no skip (`pi-rpc` 7, `pi-resume-tools` 2, `pi-session-tools` 3, `pi-mcp` 3 and the 10
+  model-call cases on `openai-codex/gpt-5.6-luna`), so the bridge's long-poll and the `-e` path hold
+  under Bun 1.4.4.
+- **Running the model-call cases (2026-11-04):** `PI_CODING_AGENT_DIR` points at an isolated agent
+  directory; `vitest.config.ts` hands it to the integration project only. In that directory,
+  `auth.json` carries an `openai-codex` entry (the tests' credential gate), and `models.json` sets
+  `providers.openai-codex.apiKey` to `!/usr/bin/env PI_CODING_AGENT_DIR=<real agent dir> <pi> auth
+check --provider openai-codex --no-refresh --credentials`. pi 1.5.0 does not treat an `api_key`
+  record in `auth.json` as configuring `openai-codex`; the `models.json` key does. The command reads
+  the real credential without refreshing it. The real `auth.json`'s mtime and size were unchanged
+  after the run.
+- **Also worth knowing:** the default OpenAI model moved from `gpt-5.5` to `gpt-6.1-sol` (only
+  reachable when a session sets no model of its own; ClaudeUI resolves one before spawning), and the
+  catalog moved to models.dev v2 with realtime/image-only models no longer offered as chat models.
 
 ## 1.3.0 → 1.4.0 compatibility assessment (2026-10-22)
 

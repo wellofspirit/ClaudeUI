@@ -41,6 +41,7 @@ const {
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
 vi.mock('../pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
   locatePiLaunch: mockLocatePiLaunch,
   piBinaryAvailable: mockPiBinaryAvailable
 }))
@@ -308,7 +309,8 @@ describe('discoverPiModels', () => {
     await discoverPiModels()
     expect(MockPiRpcClient).toHaveBeenCalledWith(
       { command: '/fake/pi', args: [] },
-      expect.objectContaining({ args: ['--mode', 'rpc', '--no-session'] })
+      // `--approve`: the ephemeral probe skips pi's own trust store too.
+      expect.objectContaining({ args: ['--mode', 'rpc', '--approve', '--no-session'] })
     )
     expect(mockDispose).toHaveBeenCalled()
   })

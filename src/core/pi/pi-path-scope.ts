@@ -67,7 +67,7 @@ function flavorOf(platform: NodeJS.Platform): Flavor {
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g
 
 /**
- * Port of `normalizeWindowsShellPath` (utils/paths.ts, pi v1.4.0): Git Bash / MSYS / Cygwin / WSL
+ * Port of `normalizeWindowsShellPath` (utils/paths.ts, pi v1.5.0): Git Bash / MSYS / Cygwin / WSL
  * drive paths (`/c/x`, `/mnt/c/x`, `/cygdrive/c/x`) become `C:\x`. Skipped, exactly as pi skips,
  * for a non-rooted path, a `//` path and any path with a backslash.
  */
@@ -109,7 +109,7 @@ function piNormalizePath(
 /**
  * The absolute path pi's `resolveToCwd` gives `raw` for a session in `cwd`
  * (`utils/paths.ts` `resolvePath` with `normalizeUnicodeSpaces` + `stripAtPrefix`, as
- * `core/tools/path-utils.ts` calls it, pi v1.4.0): unicode spaces folded, one leading `@`
+ * `core/tools/path-utils.ts` calls it, pi v1.5.0): unicode spaces folded, one leading `@`
  * stripped, Windows shell drive paths converted, `~` / `~/` (and `~\` on win32) expanded,
  * `file://` decoded, then resolved against the cwd.
  *
@@ -135,7 +135,7 @@ export function piResolvePath(
 const NARROW_NO_BREAK_SPACE = '\u202F'
 
 /**
- * Port of `resolveReadPathAsync`'s candidate choice (`core/tools/path-utils.ts`, pi v1.4.0):
+ * Port of `resolveReadPathAsync`'s candidate choice (`core/tools/path-utils.ts`, pi v1.5.0):
  * `resolved` itself when it exists, else the first existing of the macOS variants in pi's order
  * (AM/PM narrow space, NFD, curly quote, NFD + curly quote), else `resolved`. Not platform-gated
  * in pi, so not here. `exists` follows links (`access(F_OK)`), as pi's does.

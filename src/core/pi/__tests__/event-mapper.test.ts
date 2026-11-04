@@ -189,7 +189,9 @@ describe('mapPiEvent — full happy turn', () => {
       provider: 'anthropic',
       modelId: 'claude-sonnet-4-6',
       tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
-      costUsd: 0.003,
+      // pi's `usage.cost` verbatim (the cost rule reads its components and
+      // `totalFromProvider`; the ledger reads `total`).
+      cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
       messageId
     })
     expect(state.currentMessageId).toBeNull()
@@ -669,8 +671,42 @@ describe('mapPiEvent — usage extraction incl. reasoning tokens', () => {
         cacheWrite: 0,
         reasoning: 15
       })
-      expect(usageOutput.costUsd).toBeCloseTo(0.03)
+      expect(usageOutput.cost?.total).toBeCloseTo(0.03)
     }
+  })
+
+  it('carries usage.cost verbatim, including a provider-billed totalFromProvider (pi 1.5.0)', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const msg = assistantMsg({
+      usage: {
+        input: 100,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 120,
+        cost: {
+          input: 0.01,
+          output: 0.02,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0.5,
+          totalFromProvider: true
+        }
+      }
+    })
+    const out = mapPiEvent({ type: 'message_end', message: msg }, state)
+    const usageOutput = out.find((o) => o.kind === 'usage')
+    if (usageOutput?.kind !== 'usage') throw new Error('no usage output')
+    // The cost rule needs the components and the flag; the ledger needs `total`.
+    expect(usageOutput.cost).toEqual({
+      input: 0.01,
+      output: 0.02,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0.5,
+      totalFromProvider: true
+    })
   })
 
   it('omits tokens.reasoning entirely when usage.reasoning is absent', () => {
