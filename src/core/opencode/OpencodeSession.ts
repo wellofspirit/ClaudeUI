@@ -1657,6 +1657,11 @@ export class OpencodeSession extends BaseSession {
     return { text: `Refused: ${text}`, isError: true }
   }
 
+  /** Where opencode runs this session now (D1); a dispatched X-Agent starts here. */
+  get workingDirectory(): string {
+    return existsSync(this.location) ? this.location : this.cwd
+  }
+
   /** `claudeui_enter_worktree`: create (or reuse) a managed worktree and move the session into it. */
   async enterWorktree(input: { name?: string; path?: string }): Promise<WorktreeToolResult> {
     const state = this.worktreeToolState('enter_worktree')

@@ -103,6 +103,7 @@ import type { SessionJudgeOptions } from '../automode/session-judge'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { claudeBehaviorSettings } from '../sdk/args'
 import { loadEngineConfig, loadSettings } from './ui-config'
+import { worktreeCwdKey } from '../../shared/linked-worktree'
 import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
@@ -308,11 +309,18 @@ export interface DispatchContext {
   fromEngine: EngineId
   fromRoutingId: string
   /**
-   * The DISPATCHING session's working directory, on every context (a launch's, and the one a message
+   * The DISPATCHING session's CURRENT working directory (the worktree it entered, else its cwd), on
+   * every context (a launch's, and the one a message
    * to a finished X-Agent rebuilds from its row's `parentCwd`). Where a target runs is its own
    * (`entry.cwd`, the row's `cwd`): its `workdir`, else this.
    */
   cwd: string
+  /**
+   * The dispatching session's identity (spawn) directory when it differs from {@link cwd}: its
+   * settings' deny and ask rules still bind a target (`targetRules`). Absent on a context rebuilt
+   * from a ledger row, which stores only `cwd`.
+   */
+  originCwd?: string
   /**
    * The dispatching session's permission mode (Claude-style string), read LIVE
    * (ADR-088 ruling 3): every decision point calls it again, so a target
@@ -1006,6 +1014,8 @@ interface TargetRuleInputs {
   cwd: string
   /** The dispatching session's directory (`ctx.cwd`): its rules and directories bind the target too (`targetRules`). */
   parentCwd: string
+  /** The dispatching session's identity directory when it differs from `parentCwd` (`DispatchContext.originCwd`). */
+  originCwd?: string
   /** `GET /api/agent` — the default agent. */
   agents: Agent_Info[] | null
   /** Bridged + `claudeui` + `GET /api/mcp` server names (MCP rule keys, the auto catch-all). */
@@ -2624,6 +2634,11 @@ export class CrossEngineDispatcher {
    * `workdir`, say a sibling git worktree, that cannot otherwise see the repo it came from). Read
    * fresh per call, like the interactive sessions' gates.
    *
+   * `parentCwd` is the dispatching session's WORKING directory (a worktree it entered); `originCwd`
+   * is its identity directory when that differs. The identity directory's settings join the union
+   * (a deny that exists only in the main checkout still binds), but it is not itself added to the
+   * target's scope: the session no longer works there.
+   *
    * Both are the UNION of what is loaded for the PARENT's directory and for the TARGET's: the
    * parent's gitignored `.claude/settings.local.json` still binds a target that runs elsewhere,
    * and the target's own project settings still apply to it. A union of deny/ask only tightens;
@@ -2636,9 +2651,10 @@ export class CrossEngineDispatcher {
   private targetRules(
     targetCwd: string,
     parentCwd: string,
-    restriction?: CallerRestriction
+    restriction?: CallerRestriction,
+    originCwd?: string
   ): MergedClaudeRules {
-    const sources = uniqueDirs([parentCwd, targetCwd])
+    const sources = uniqueDirs([parentCwd, ...(originCwd ? [originCwd] : []), targetCwd])
     const loaded = sources.map((dir) => ({ dir, rules: this.loadUserRules(dir) }))
     // Provenance for the read block (path containment): any source setting it binds the target,
     // and the directories only PROJECT settings listed do not count for reads. A rule loader
@@ -3218,11 +3234,17 @@ export class CrossEngineDispatcher {
   private contextForRow(row: DispatchTargetRow): DispatchContext {
     const parentId = (): string => this.runs.parentOf(row.parentSessionId)
     const live = (): LiveParentSession | undefined => this.parents?.session(parentId())
+    // The row keeps only the directory the launch ran from; the parent's identity directory (its
+    // settings still bind the target) is read from canonical state. An unknown parent: unset.
+    const identity = this.parents?.identityCwd?.(parentId())
     return {
       fromEngine: row.parentEngine,
       fromRoutingId: row.parentSessionId,
       // The DISPATCHING session's directory, as on every other context; the target's own is `row.cwd`.
       cwd: row.parentCwd,
+      ...(identity && worktreeCwdKey(identity) !== worktreeCwdKey(row.parentCwd)
+        ? { originCwd: identity }
+        : {}),
       getAutonomyMode: () => live()?.getAutonomyMode?.() ?? row.launchMode,
       getMessages: () => live()?.getMessages() ?? [],
       emit: (channel, data) => this.parents?.emit(parentId(), channel, data),
@@ -4524,7 +4546,13 @@ export class CrossEngineDispatcher {
           currentMode: mode,
           stillPending: live,
           signal,
-          permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+          permissions: () =>
+            this.targetRules(
+              entry.cwd,
+              entry.ctx.cwd,
+              entry.ctx.callerRestriction,
+              entry.ctx.originCwd
+            )
         })
     switch (entry.kind) {
       case 'opencode':
@@ -5239,6 +5267,7 @@ export class CrossEngineDispatcher {
         client,
         cwd,
         parentCwd: ctx.cwd,
+        ...(ctx.originCwd ? { originCwd: ctx.originCwd } : {}),
         agents: null,
         mcpServers: null,
         worktree: undefined,
@@ -5550,7 +5579,7 @@ export class CrossEngineDispatcher {
     const built = buildSessionRuleset({
       mode,
       autoMode,
-      permissions: this.targetRules(inputs.cwd, inputs.parentCwd, restriction),
+      permissions: this.targetRules(inputs.cwd, inputs.parentCwd, restriction, inputs.originCwd),
       mcpServers,
       cwd: inputs.cwd,
       ...(worktree ? { worktree } : {}),
@@ -5597,6 +5626,8 @@ export class CrossEngineDispatcher {
   private async applyTargetRulesNow(entry: OpencodeTargetEntry): Promise<void> {
     // The ctx is replaced on every continuation: the parent's rules are the latest one's.
     entry.parentCwd = entry.ctx.cwd
+    if (entry.ctx.originCwd) entry.originCwd = entry.ctx.originCwd
+    else delete entry.originCwd
     const mode = liveMode(entry.ctx)
     const built = await this.buildTargetRuleset(
       entry,
@@ -6037,7 +6068,12 @@ export class CrossEngineDispatcher {
 
   /** The host pre-check over a target: the user's deny/ask tiers and the target's scope, no allows. */
   private targetPrecheckContext(entry: OpencodeTargetEntry): HostPrecheckContext {
-    const rules = this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+    const rules = this.targetRules(
+      entry.cwd,
+      entry.ctx.cwd,
+      entry.ctx.callerRestriction,
+      entry.ctx.originCwd
+    )
     return {
       mode: liveMode(entry.ctx),
       rules: { deny: rules.deny, ask: rules.ask, allow: [] },
@@ -6175,7 +6211,13 @@ export class CrossEngineDispatcher {
           stillPending: () => entry.judging.has(id) && this.targets.get(entry.sessionId) === entry,
           honoursWorkdir: true,
           ...(typeof input.command === 'string' ? {} : { skipReadOnlyGate: true }),
-          permissions: () => this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+          permissions: () =>
+            this.targetRules(
+              entry.cwd,
+              entry.ctx.cwd,
+              entry.ctx.callerRestriction,
+              entry.ctx.originCwd
+            )
         }
       )
     } finally {
@@ -7022,7 +7064,8 @@ export class CrossEngineDispatcher {
     const { deny, ask, additionalDirectories } = this.targetRules(
       cwd,
       ctx.cwd,
-      ctx.callerRestriction
+      ctx.callerRestriction,
+      ctx.originCwd
     )
     const addDirs = existingDirectories(additionalDirectories, 'CrossEngineDispatcher')
     // The target is a cli.js of ours too, so it carries the Claude engine's two
@@ -7343,7 +7386,7 @@ export class CrossEngineDispatcher {
     if (isShellToolName(toolName) && typeof input.command === 'string') {
       const hit = denyAskHit(
         input.command,
-        this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+        this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction, entry.ctx.originCwd)
       )
       if (hit?.tier === 'deny') {
         logger.info(
@@ -8247,7 +8290,12 @@ export class CrossEngineDispatcher {
    * there as outside the granted directories.
    */
   private piTargetJudgeRules(entry: PiTargetEntry): MergedClaudeRules {
-    const rules = this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction)
+    const rules = this.targetRules(
+      entry.cwd,
+      entry.ctx.cwd,
+      entry.ctx.callerRestriction,
+      entry.ctx.originCwd
+    )
     const scratchpad = entry.scratchpad?.dir
     return scratchpad
       ? { ...rules, additionalDirectories: [...rules.additionalDirectories, scratchpad] }
@@ -8258,7 +8306,12 @@ export class CrossEngineDispatcher {
   private piTargetPathScope(entry: PiTargetEntry): PiPathScope {
     return buildPiPathScope({
       cwd: entry.cwd,
-      rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+      rules: this.targetRules(
+        entry.cwd,
+        entry.ctx.cwd,
+        entry.ctx.callerRestriction,
+        entry.ctx.originCwd
+      ),
       scratchpad: entry.scratchpad?.dir,
       projectTemp: entry.scratchpad?.projectTemp
     })
@@ -8288,7 +8341,12 @@ export class CrossEngineDispatcher {
       const denied = sessionToolDenyRule(
         X_AGENT_MESSAGE_TOOL,
         payload.input,
-        this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+        this.targetRules(
+          entry.cwd,
+          entry.ctx.cwd,
+          entry.ctx.callerRestriction,
+          entry.ctx.originCwd
+        ),
         entry.cwd
       )
       if (denied) return { behavior: 'deny', reason: `Denied by permission rule: ${denied}` }
@@ -8302,7 +8360,12 @@ export class CrossEngineDispatcher {
     const verdict = decideWithSource(payload.toolName, payload.input, {
       mode,
       judge: auto,
-      rules: this.targetRules(entry.cwd, entry.ctx.cwd, entry.ctx.callerRestriction),
+      rules: this.targetRules(
+        entry.cwd,
+        entry.ctx.cwd,
+        entry.ctx.callerRestriction,
+        entry.ctx.originCwd
+      ),
       sessionAllows: EMPTY_PI_SESSION_ALLOWS,
       scope: this.piTargetPathScope(entry),
       // The acceptEdits base matches agent-control paths cwd-relative

@@ -67,6 +67,8 @@ import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { createCollabServer } from './collab-tool'
+import { currentWorkdir } from './session-workdir'
+import { syncCore } from './sync-host'
 import { ToolUseOwners } from './tool-use-owners'
 import {
   createSessionToolsServer,
@@ -910,6 +912,11 @@ export class ClaudeSession extends BaseSession {
             engineId: this.engineId,
             getRoutingId: () => this.routingId,
             cwd: this.cwd,
+            getWorkingDirectory: () =>
+              currentWorkdir(
+                this.cwd,
+                syncCore.getCanonicalState().worktreeInfoMap[this.routingId]
+              ),
             getAutonomyMode: () => this.permissionMode,
             getMessages: () => this.getMessages(),
             getQueuedUserTurns: () => this.queuedUserTurns(),
