@@ -8,6 +8,7 @@
  * rule than the one that runs would be worse than one that said nothing.
  */
 
+import { projectScope } from './worktree-fold'
 import type { DirectoryGroup, SessionInfo } from './types'
 
 export interface ClaudeProjectDeletePlan {
@@ -35,6 +36,15 @@ const isClaude = (s: SessionInfo): boolean => !s.engineId || s.engineId === 'cla
  *    wholesale would silently delete a session the sidebar shows under a
  *    different project. Then every member goes one by one and the dir stays.
  *
+ * The sidebar also folds linked-worktree groups into their parent
+ * (`projectScope`), so the project's members include theirs. Those go one
+ * by one under their own key (the caller then removes each emptied worktree dir,
+ * never recursively). A parent the listing has no group for (a synthesised one)
+ * NEVER has its dir removed: it holds Claude's per-repo auto-memory and maybe
+ * transcripts nothing lists. The same goes for a key the listing has no group
+ * for (a stale or crafted request) and for a worktree group itself: the dir
+ * goes wholesale only for a real, unmarked group (`projectScope.ownDirRemovable`).
+ *
  * Other engines' sessions are never in the plan: they are deleted through their
  * own engines, not by unlinking anything under `~/.claude/projects`.
  */
@@ -42,14 +52,27 @@ export function planClaudeProjectDelete(
   directories: DirectoryGroup[],
   projectKey: string
 ): ClaudeProjectDeletePlan {
-  const group = directories.find((g) => g.projectKey === projectKey)
+  // The group the sidebar showed for this key (see `projectScope`), not "any group with this key".
+  const { group, children, ownDirRemovable } = projectScope(directories, projectKey)
   const dirShared = directories.some(
     (g) =>
       g.projectKey !== projectKey &&
+      !children.includes(g) &&
       g.sessions.some((s) => isClaude(s) && s.projectKey === projectKey)
   )
-  const sessionFiles = (group?.sessions ?? [])
-    .filter((s) => isClaude(s) && (dirShared || s.projectKey !== projectKey))
-    .map((s) => ({ sessionId: s.sessionId, projectKey: s.projectKey }))
-  return { removeDir: !dirShared, sessionFiles }
+  const planned: ClaudeProjectDeletePlan['sessionFiles'] = []
+  const seen = new Set<string>()
+  const add = (s: SessionInfo): void => {
+    const id = `${s.projectKey}\u0000${s.sessionId}`
+    if (seen.has(id)) return
+    seen.add(id)
+    planned.push({ sessionId: s.sessionId, projectKey: s.projectKey })
+  }
+  for (const s of group?.sessions ?? []) {
+    if (isClaude(s) && (dirShared || !ownDirRemovable || s.projectKey !== projectKey)) add(s)
+  }
+  for (const child of children) {
+    for (const s of child.sessions) if (isClaude(s)) add(s)
+  }
+  return { removeDir: ownDirRemovable && !dirShared, sessionFiles: planned }
 }
