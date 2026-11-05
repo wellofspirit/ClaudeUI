@@ -1053,6 +1053,26 @@ describe('non-user delivery (slice 1a)', () => {
     await (session as unknown as { purgeStaleInbox(): Promise<void> }).purgeStaleInbox()
     expect(h.client.cancelInbox).not.toHaveBeenCalled()
   })
+
+  it("a reconnect's purge cancels a queued session move this connection no longer tracks", async () => {
+    session = makeSession()
+    await startTurn()
+    h.client.listInbox.mockResolvedValue([{ id: 'inb_opencode_move_1', type: 'move' }])
+    ;(session as unknown as { needsPurge: boolean }).needsPurge = true
+    await (session as unknown as { purgeStaleInbox(): Promise<void> }).purgeStaleInbox()
+    expect(h.client.cancelInbox).toHaveBeenCalledWith(SID, 'inb_opencode_move_1')
+  })
+
+  it("a reconnect's purge leaves a move this session is still waiting for alone", async () => {
+    session = makeSession()
+    await startTurn()
+    ;(session as unknown as { pendingMove: string | null }).pendingMove =
+      '/repo/.claude/worktrees/x'
+    h.client.listInbox.mockResolvedValue([{ id: 'inb_opencode_move_2', type: 'move' }])
+    ;(session as unknown as { needsPurge: boolean }).needsPurge = true
+    await (session as unknown as { purgeStaleInbox(): Promise<void> }).purgeStaleInbox()
+    expect(h.client.cancelInbox).not.toHaveBeenCalled()
+  })
 })
 
 describe('non-user delivery that opencode never reads (slice 1a review)', () => {
@@ -3574,6 +3594,18 @@ describe('the worktree tools: claudeui_enter_worktree / claudeui_exit_worktree (
       const result = await session.exitWorktree()
       expect(result.isError).toBe(true)
       expect(text(result)).toContain('no worktree this session entered')
+      expect(h.client.moveSession).not.toHaveBeenCalled()
+    })
+
+    it('enter by path is refused for a session started in a worktree (exit could not undo it)', async () => {
+      h.sessionConfig = { worktreeInfoMap: { 'route-1': entry({ origin: 'created' }) } }
+      session = sessionAt(wt)
+      await startTurn()
+      const other = fabricateWorktree(repo, join(managed, 'other'), 'other')
+      const result = await session.enterWorktree({ path: other })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('was started in the worktree')
+      expect(h.leaseSameServer).not.toHaveBeenCalled()
       expect(h.client.moveSession).not.toHaveBeenCalled()
     })
 

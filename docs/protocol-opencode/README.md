@@ -345,8 +345,11 @@ projectID, subpath}`. One feed sees it, because `/api/event` is cross-location.
   - They do not ask, which matches Claude Code. They are denied in plan mode, for subagent
     children and for dispatch targets.
   - Before posting the move, ClaudeUI PATCHes a transition ruleset. It adds the user's deny and
-    ask rules compiled for the destination, placed before the existing denies, and adds no allow.
+    ask rules compiled for the destination, and adds no allow. The new asks go before the
+    existing denies, so a broad ask never overrides a narrow deny. The new denies go after them.
     That way, an absolute deny inside the destination holds before the re-root lands.
+  - A queued move that the connection no longer tracks (after a teardown) is cancelled from the
+    inbox on reconnect or resume.
 - opencode's own `opencode_session_*` and `opencode_worktree_*` tools stay denied.
 
 ## Credentials (ADR-097 §5; `credential-store.ts`)

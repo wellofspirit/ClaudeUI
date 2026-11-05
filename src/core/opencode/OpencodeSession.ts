@@ -1675,6 +1675,14 @@ export class OpencodeSession extends BaseSession {
           this.clearMove()
           return this.refused(`the session is already there (${location}).`)
         }
+        // A session STARTED in a worktree cannot switch to another: exit could not bring it
+        // back, and its pill and terminal stay on the worktree it was started in.
+        if (managedWorktreeRepo(location) && !this.enteredWorktree(location)) {
+          this.clearMove()
+          return this.refused(
+            `this session was started in the worktree ${location}; start a new session for another worktree.`
+          )
+        }
         target = vetted.worktreePath
         branch = vetted.worktreeBranch
       } else {
@@ -1714,15 +1722,16 @@ export class OpencodeSession extends BaseSession {
   }
 
   /** `claudeui_exit_worktree`: back to the directory this session entered the worktree from (keep only). */
-  async exitWorktree(): Promise<WorktreeToolResult> {
-    const state = this.worktreeToolState('exit_worktree')
-    if (state) return state
-    const location = this.location
+  /**
+   * The worktree record of a worktree this session ENTERED (a `detected` entry for `location`,
+   * reached from somewhere else) — what exit can leave. Null for a session started in a worktree.
+   */
+  private enteredWorktree(location: string): WorktreeInfo | null {
     let info: WorktreeInfo | undefined
     try {
       info = loadSessionConfig().worktreeInfoMap?.[this.routingId]
     } catch {
-      info = undefined
+      return null
     }
     if (
       !info ||
@@ -1731,6 +1740,15 @@ export class OpencodeSession extends BaseSession {
       samePath(location, this.cwd) ||
       !info.originalCwd
     )
+      return null
+    return info
+  }
+
+  async exitWorktree(): Promise<WorktreeToolResult> {
+    const state = this.worktreeToolState('exit_worktree')
+    if (state) return state
+    const info = this.enteredWorktree(this.location)
+    if (!info)
       return {
         text: 'No-op: there is no worktree this session entered to exit. Only a worktree entered with claudeui_enter_worktree in this session can be exited; a session started in a worktree stays there.',
         isError: true
@@ -2121,6 +2139,14 @@ export class OpencodeSession extends BaseSession {
     try {
       const inbox = await client.listInbox(sessionID)
       for (const item of inbox) {
+        // A queued move this connection is not tracking (a teardown cleared `pendingMove`):
+        // applied later it would run without the transition ruleset and in a directory whose
+        // guard this connection never checked. opencode names move rows itself, so no prefix.
+        if (item.type === 'move' && !this.pendingMove) {
+          await client.cancelInbox(sessionID, item.id).catch(() => {})
+          logger.info('OpencodeSession', 'cancelled a stale queued session move')
+          continue
+        }
         if (!item.id.startsWith(CLAUDEUI_INBOX_PREFIX) || this.inboxToItem.has(item.id)) continue
         if (item.type === 'user' && this.ownInboxIds.has(item.id)) continue
         await client.cancelInbox(sessionID, item.id).catch(() => {})
