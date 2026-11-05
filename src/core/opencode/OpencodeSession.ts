@@ -315,19 +315,16 @@ function identityCwd(routingId: string, cwd: string): string {
   } catch {
     // an unreadable record leaves the identity as given
   }
-  return goneWorktreeRepo(cwd) ?? cwd
+  return cwd
 }
 
 /**
- * A managed worktree (`<repo>/.claude/worktrees/<name>`) that no longer exists: the repo
- * it belonged to, when that still exists — the identity and move-back target for a session
- * whose worktree record went with the worktree. Null otherwise.
+ * The refusal for a session whose directory is gone and that has no recorded directory to
+ * return to — Claude Code's answer too ("The current directory no longer exists"): never a
+ * silent relocation, e.g. into the main checkout of a removed worktree.
  */
-function goneWorktreeRepo(dir: string): string | null {
-  if (existsSync(dir)) return null
-  const repo = managedWorktreeRepo(dir)
-  return repo && existsSync(repo) ? repo : null
-}
+const goneDirectoryMessage = (dir: string): string =>
+  `This session's directory ${dir} no longer exists (a removed worktree?). Start a new session from an existing directory.`
 
 /** A tool-call id safe to quote in a host note (provider-stream data is not trusted). */
 const SAFE_CALL_ID = /^[A-Za-z0-9_.:-]{1,128}$/
@@ -1064,6 +1061,11 @@ export class OpencodeSession extends BaseSession {
       )
       await client.moveSession(info.id, this.cwd)
       target = this.cwd
+      // Claude Code's resume says the same when a worktree it entered is gone.
+      this.send(
+        'session:warning',
+        `Did not re-enter the worktree ${dir}: it no longer exists. This session now works in ${this.cwd}, without worktree isolation.`
+      )
     }
     if (target !== this.location) {
       await this.leaseLocation(target)
@@ -1136,8 +1138,9 @@ export class OpencodeSession extends BaseSession {
       this.connectingPromise = (async () => {
         // Where the session actually runs (a reconnect or a new server after a
         // config change checks the guard THERE). A location that is gone (a
-        // worktree removed while cold) falls back to the identity directory;
-        // resume then moves the session back.
+        // worktree it moved into, removed while cold) falls back to the identity
+        // directory; resume then moves the session back. A gone identity directory
+        // (a session started in a removed worktree) is refused, never relocated.
         if (!existsSync(this.location) && this.location !== this.cwd) {
           logger.info(
             'OpencodeSession',
@@ -1145,6 +1148,8 @@ export class OpencodeSession extends BaseSession {
           )
           this.location = this.cwd
         }
+        if (managedWorktreeRepo(this.location) && !existsSync(this.location))
+          throw new Error(goneDirectoryMessage(this.location))
         const dir = this.location
         const c = await opencodeServerManager.acquire(dir)
         if (this._cancelled) {

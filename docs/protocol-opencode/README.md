@@ -336,8 +336,11 @@ projectID, subpath}`. One feed sees it, because `/api/event` is cross-location.
 - **Subagents left behind.** A child still running in another directory gets the deny-all
   ruleset, and its asks are refused on the host side.
 - **Reconnect and resume.** Both lease the server's location. A move that happened while the
-  feed was down is picked up at catch-up. A worktree removed while the session was closed moves
-  the session back to its recorded original directory, else to the managed worktree's repo.
+  feed was down is picked up at catch-up. If a worktree the session ENTERED was removed while
+  the session was closed, the session moves back to its recorded original directory and shows a
+  warning, as Claude Code's resume does. With no record to return to (the session started in
+  that worktree, or ClaudeUI's removal dropped the record), it is refused with "no longer exists",
+  matching Claude Code and X-Agents. It is never silently moved into the main checkout.
 - **The hosted tools.** `claudeui_enter_worktree {name?|path?}` creates `<repo>/.claude/worktrees/<name>`
   on branch `worktree-<name>` (`createWorktree`, from origin's default branch), or enters an
   existing managed worktree of the same repo. `claudeui_exit_worktree {}` is keep-only and returns

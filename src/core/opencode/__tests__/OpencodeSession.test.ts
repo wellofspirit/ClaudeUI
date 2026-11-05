@@ -3164,16 +3164,18 @@ describe('location, leases and re-root (worktree parity S1)', () => {
       expect(sessionAt(worktree).cwd).toBe(worktree)
     })
 
-    it('a managed worktree removed through the UI (its record gone with it): the repo it lived in is the identity and the move-back target', async () => {
+    it('a removed worktree with no record to return to (started there, or the record went with it): refused, never relocated into the main checkout', async () => {
       const gone = join(repo, '.claude', 'worktrees', 'brave-fox')
       storedAt(gone)
       session = sessionAt(gone, { resumeSessionId: SID })
-      expect(session.cwd).toBe(repo)
+      expect(session.cwd).toBe(gone)
       h.feed.push(connected())
       await session.run('go')
       await flush()
-      expect(h.acquire).toHaveBeenCalledWith(repo)
-      expect(h.client.moveSession).toHaveBeenCalledWith(SID, repo)
+      expect(h.acquire).not.toHaveBeenCalled()
+      expect(h.client.moveSession).not.toHaveBeenCalled()
+      expect(h.client.prompt).not.toHaveBeenCalled()
+      expect(JSON.stringify(payloads('session:error'))).toContain('no longer exists')
     })
 
     it('a worktree removed while cold: the session is moved back to the original cwd while idle, before the prompt', async () => {
@@ -3193,6 +3195,8 @@ describe('location, leases and re-root (worktree parity S1)', () => {
       )
       // The stale worktree record is dropped.
       expect(h.sessionConfig.worktreeInfoMap).toEqual({})
+      // And the user is told, as Claude Code's resume does.
+      expect(JSON.stringify(payloads('session:warning'))).toContain('Did not re-enter the worktree')
     })
   })
 })
