@@ -2917,6 +2917,18 @@ describe('location, leases and re-root (worktree parity S1)', () => {
     )
   })
 
+  it('workingDirectory is the worktree after session.moved, and the cwd once that directory is gone', async () => {
+    session = sessionAt(repo)
+    await startTurn()
+    expect(session.workingDirectory).toBe(repo)
+    h.feed.push(moved(worktree))
+    await flush()
+    expect(session.cwd).toBe(repo)
+    expect(session.workingDirectory).toBe(worktree)
+    rmSync(worktree, { recursive: true, force: true })
+    expect(session.workingDirectory).toBe(repo)
+  })
+
   it('a catch-up that finds the session in a gone directory moves it back instead of leasing it', async () => {
     session = sessionAt(repo)
     await startTurn()

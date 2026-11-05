@@ -27,7 +27,13 @@ export interface CollabServerContext {
   engineId: EngineId
   /** Live routingId lookup — the session is rekeyed to its UUID after init. */
   getRoutingId: () => string
+  /** The session's identity (spawn) directory. */
   cwd: string
+  /**
+   * The directory the session works in NOW (a worktree it entered, else `cwd`), read at each
+   * dispatch: the session moves after this server is built. A dispatched target runs there.
+   */
+  getWorkingDirectory?: () => string
   /** Live permission-mode lookup — read at every dispatch decision (ADR-088). */
   getAutonomyMode: () => string
   /** The session's live transcript (`getMessages()`), for the judge of a
@@ -136,6 +142,8 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
           // presence and never fails a dispatch over it.
           const toolUseId = extra?.meta?.['claudecode/toolUseId']
           const callId = typeof toolUseId === 'string' ? toolUseId : undefined
+          // Read now, not at build: a target starts where the session works at this call.
+          const workingDirectory = ctx.getWorkingDirectory?.() || ctx.cwd
           // Only a call that may run in the background needs to know the caller (a wait of up to
           // 250 ms on a call whose frame has not been seen yet): an unspecified one takes the
           // default from it, and a subagent's explicit one is told its report goes to the root.
@@ -159,7 +167,8 @@ export function createCollabServer(ctx: CollabServerContext): SdkMcpServer {
             {
               fromEngine: ctx.engineId,
               fromRoutingId: ctx.getRoutingId(),
-              cwd: ctx.cwd,
+              cwd: workingDirectory,
+              ...(workingDirectory !== ctx.cwd ? { originCwd: ctx.cwd } : {}),
               getAutonomyMode: ctx.getAutonomyMode,
               getMessages: ctx.getMessages,
               ...(ctx.getQueuedUserTurns ? { getQueuedUserTurns: ctx.getQueuedUserTurns } : {}),

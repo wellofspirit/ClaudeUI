@@ -112,6 +112,12 @@ export interface ISession {
   readonly blockedCalls?: BlockedCallLedger
 
   /**
+   * The directory the engine runs this session in now, when it can differ from `cwd` (opencode:
+   * the worktree it moved into). Optional: absent means `cwd`. Read at the moment of use.
+   */
+  readonly workingDirectory?: string
+
+  /**
    * The hosted `claudeui_enter_worktree` / `claudeui_exit_worktree` tools (opencode, worktree
    * parity D7): move this session into a ClaudeUI worktree and back. Optional: only the opencode
    * session implements them.
