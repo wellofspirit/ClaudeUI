@@ -18,6 +18,9 @@
  *   [handback]  call ClaudeUI's hosted `claudeui_hand_back` (a dispatch target's report); then echo the result
  *   [sessiontool]  call ClaudeUI's hosted `claudeui_session_list`; then echo the result
  *   [subsession]   `subagent` tool call whose child prompt is `[sessiontool]`
+ *   [enterwt:<name>]  ClaudeUI's hosted `claudeui_enter_worktree` with `{ name }`; then echo the result
+ *   [enterwtpath:<abs>]  the same with `{ path }` (an existing managed worktree; no `]` in the path)
+ *   [exitwt]    ClaudeUI's hosted `claudeui_exit_worktree`; then echo the result
  *   [websearch] `websearch` tool call (query `contract query`)
  *   [skill]     `skill` tool call loading `SKILL_ID` (a test creates it under `.opencode/skills/`)
  *   [question]  `question` tool call (one single-choice question)
@@ -313,6 +316,26 @@ export async function startFixtureProvider(
           res,
           tools.find((tool) => tool === 'claudeui_session_list'),
           { scope: 'linked' }
+        )
+      const enterWt = /\[enterwt:([A-Za-z0-9_-]+)\]/.exec(text)
+      if (enterWt)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_enter_worktree'),
+          { name: enterWt[1] }
+        )
+      const enterWtPath = /\[enterwtpath:([^\]]+)\]/.exec(text)
+      if (enterWtPath)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_enter_worktree'),
+          { path: enterWtPath[1] }
+        )
+      if (text.includes('[exitwt]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_exit_worktree'),
+          {}
         )
       if (text.includes('[mcp]'))
         return streamToolCall(

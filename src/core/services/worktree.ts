@@ -56,8 +56,17 @@ const WORKTREE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const WORKTREE_NAME_MAX = 100
 
 /** Absolute path of the managed worktrees directory for a given git root. */
-function getManagedWorktreesRoot(gitRoot: string): string {
+export function getManagedWorktreesRoot(gitRoot: string): string {
   return path.join(gitRoot, WORKTREES_DIR)
+}
+
+/**
+ * The repository root a managed worktree path (`<repo>/.claude/worktrees/<name>`) belongs to, or
+ * null when `dir` is not shaped like one. Lexical only: the directory may already be gone.
+ */
+export function managedWorktreeRepo(dir: string): string | null {
+  const repo = path.dirname(path.dirname(path.dirname(path.resolve(dir))))
+  return samePath(path.dirname(path.resolve(dir)), getManagedWorktreesRoot(repo)) ? repo : null
 }
 
 /** Throw unless `name` is a safe worktree name (main-side enforcement of R2). */

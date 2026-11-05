@@ -114,6 +114,8 @@ describe('the session tools on the hosted claudeui server', () => {
     expect(tools.map((tool) => tool.name).sort()).toEqual([
       'create_mockup',
       'dispatch_agent',
+      'enter_worktree',
+      'exit_worktree',
       'render_mermaid',
       'show_mockup'
     ])
@@ -306,5 +308,62 @@ describe('session_message from a dispatch target (ADR-105 §4)', () => {
     )
     expect(out.isError).toBe(true)
     expect(rig.run).not.toHaveBeenCalled()
+  })
+})
+
+describe('the worktree tools on the hosted claudeui server (worktree parity D7)', () => {
+  const enter = vi.fn(async () => ({ text: 'Created worktree at /w' }))
+  const exit = vi.fn(async () => ({ text: 'Leaving the worktree', isError: true }))
+  const chat = (): CallerSessionHandle => handle({ enterWorktree: enter, exitWorktree: exit })
+  const textOf = (out: Awaited<ReturnType<typeof call>>): string =>
+    (out.content as { text: string }[])[0].text
+
+  it('registers both with their schemas, without the session tools wired', async () => {
+    const rig = await connect({ sessionTools: false })
+    const { tools } = await rig.client.listTools()
+    const enterTool = tools.find((tool) => tool.name === 'enter_worktree')!
+    const exitTool = tools.find((tool) => tool.name === 'exit_worktree')!
+    expect(Object.keys(enterTool.inputSchema.properties ?? {}).sort()).toEqual(['name', 'path'])
+    expect(enterTool.inputSchema.required ?? []).toEqual([])
+    expect(Object.keys(exitTool.inputSchema.properties ?? {})).toEqual([])
+    expect(enterTool.description).toContain('ONLY when explicitly instructed')
+    expect(exitTool.description).toContain('only when the user asks')
+  })
+
+  it('a call from a ClaudeUI chat reaches its handle; the result (and an error) come back', async () => {
+    const rig = await connect({
+      lookupCallerSession: (id) => (id === 'ses_chat' ? chat() : undefined)
+    })
+    const entered = await call(rig, 'enter_worktree', { name: 'feat' }, 'ses_chat')
+    expect(enter).toHaveBeenCalledWith({ name: 'feat' })
+    expect(entered.isError).toBeUndefined()
+    expect(textOf(entered)).toBe('Created worktree at /w')
+    const left = await call(rig, 'exit_worktree', {}, 'ses_chat')
+    expect(exit).toHaveBeenCalledTimes(1)
+    expect(left.isError).toBe(true)
+  })
+
+  it('a subagent child is refused and nothing reaches the handle', async () => {
+    enter.mockClear()
+    const rig = await connect({
+      lookupCallerSession: (id) => (id === 'ses_chat' ? chat() : undefined),
+      resolveCallerRoot: async () => ({ root: 'ses_chat', restriction: undefined })
+    })
+    const out = await call(rig, 'enter_worktree', {}, 'ses_child')
+    expect(out.isError).toBe(true)
+    expect(textOf(out)).toContain('subagent')
+    expect(enter).not.toHaveBeenCalled()
+  })
+
+  it('a session that is not a ClaudeUI chat, an unidentified call and a handle without the method are refused', async () => {
+    enter.mockClear()
+    const rig = await connect({
+      lookupCallerSession: (id) =>
+        id === 'ses_bare' ? handle() : id === 'ses_chat' ? chat() : undefined
+    })
+    expect((await call(rig, 'enter_worktree', {}, 'ses_target')).isError).toBe(true)
+    expect((await call(rig, 'exit_worktree', {})).isError).toBe(true)
+    expect((await call(rig, 'enter_worktree', {}, 'ses_bare')).isError).toBe(true)
+    expect(enter).not.toHaveBeenCalled()
   })
 })

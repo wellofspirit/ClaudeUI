@@ -104,8 +104,11 @@ The engines differ:
      right edge of its sidebar row.
    - Claude Code's four `EnterWorktree` variants are parsed tolerantly, with the tool input as a fallback.
      `ExitWorktree` clears the entry. The status-cwd drop rule is gone.
-   - opencode's `session.moved` marks or clears the session's worktree. The session's own `cwd` is unchanged:
-     permissions, the terminal and the git pill keep the spawn directory.
+   - opencode's `session.moved` marks or clears the session's worktree. The session's own `cwd` (its identity) is
+     unchanged, and the terminal and git pill follow the recorded worktree. 2026-11-05: an opencode session's
+     permissions now follow its location too: ClaudeUI leases the new directory, re-checks the plugin guard there and
+     rebuilds the ruleset. The moves come from ClaudeUI's `claudeui_enter_worktree`/`claudeui_exit_worktree` tools
+     ([opencode protocol §Worktree moves](../protocol-opencode/README.md#worktree-moves)).
    - A detected entry is recorded only when its worktree belongs to the same repository as the session's spawn
      directory, because the entry widens `session_start`'s allowed roots.
 7. **Remote parity.** Every verb is declared once for both transports under the `git` capability, the same capability

@@ -219,6 +219,50 @@ describe('OpencodeServerManager (2.x) — keying', () => {
   })
 })
 
+describe('OpencodeServerManager (2.x) — leaseSameServer (a moved session)', () => {
+  it('leases another directory on the SAME server, even when that directory would pick another one', async () => {
+    const { manager, calls, configs, waits } = makeRig()
+    configs.set('/proj/b', {
+      pluginDir: '/res/claudeui-xeng',
+      bridgedMcp: { local: { type: 'local', command: ['x'], codemode: false } }
+    })
+    const a = await manager.acquire('/proj/a')
+    const b = await manager.leaseSameServer(a, '/proj/b')
+    expect(calls).toHaveLength(1)
+    expect(b.baseUrl).toBe(a.baseUrl)
+    expect(b.directory).toBe(dir('/proj/b'))
+    // The readiness (and guard) wait ran for the new directory.
+    expect(waits.map((w) => w.directory)).toContain(dir('/proj/b'))
+    manager.releaseIfCurrent('/proj/a', a)
+    expect(calls[0].child.killed).toBe(false)
+    manager.releaseIfCurrent('/proj/b', b)
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('a guard failure in the new directory throws, leaves the held lease alone and holds nothing', async () => {
+    const { manager, calls } = makeRig({
+      waitGuardFn: async (_endpoint, directory) =>
+        directory === dir('/proj/b')
+          ? { state: 'missing', reason: 'no hook there', elapsedMs: 0 }
+          : { state: 'active', elapsedMs: 0 }
+    })
+    const a = await manager.acquire('/proj/a')
+    const err = await manager.leaseSameServer(a, '/proj/b').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(OpencodePermissionGuardError)
+    expect(calls[0].child.killed).toBe(false)
+    // Only /proj/a is still held: releasing it ends the server.
+    manager.releaseIfCurrent('/proj/a', a)
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('throws when the connection’s server is gone', async () => {
+    const { manager } = makeRig()
+    const a = await manager.acquire('/proj/a')
+    manager.releaseIfCurrent('/proj/a', a)
+    await expect(manager.leaseSameServer(a, '/proj/b')).rejects.toThrow(/is gone/)
+  })
+})
+
 describe('OpencodeServerManager (2.x) — ref-counting', () => {
   it('acquire×2 spawns once; release×2 ends once', async () => {
     const { manager, calls, hosts } = makeRig()
