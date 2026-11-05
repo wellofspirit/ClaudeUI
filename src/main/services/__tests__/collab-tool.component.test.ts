@@ -106,6 +106,27 @@ describe('createCollabServer', () => {
     expect(server.tools[0].description).toContain('use your own Agent tool instead')
   })
 
+  it('dispatches from the directory the session works in at the call, read live', async () => {
+    const dispatchSpy = vi
+      .spyOn(crossEngineDispatcher, 'dispatch')
+      .mockResolvedValue({ text: 'ok', sessionId: 'oc-1' })
+    let working = '/tmp/project'
+    const server = createCollabServer(makeCtx({ getWorkingDirectory: () => working }))
+    const args = { engine: 'opencode', prompt: 'x' }
+
+    await server.tools[0].handler(args, makeExtra())
+    expect(dispatchSpy.mock.calls[0][1]).toMatchObject({ cwd: '/tmp/project' })
+    expect(dispatchSpy.mock.calls[0][1]).not.toHaveProperty('originCwd')
+
+    // The session entered a worktree after the server was built.
+    working = '/tmp/project/.claude/worktrees/wt'
+    await server.tools[0].handler(args, makeExtra())
+    expect(dispatchSpy.mock.calls[1][1]).toMatchObject({
+      cwd: '/tmp/project/.claude/worktrees/wt',
+      originCwd: '/tmp/project'
+    })
+  })
+
   it('happy path: delegates to the dispatcher with the full context and appends the agent ref', async () => {
     const dispatchSpy = vi
       .spyOn(crossEngineDispatcher, 'dispatch')

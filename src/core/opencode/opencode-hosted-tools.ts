@@ -88,7 +88,13 @@ import type {
  * cycle note below.
  */
 export interface CallerSessionHandle {
+  /** The caller's identity (spawn) directory. */
   cwd: string
+  /**
+   * The directory the caller works in NOW (the worktree it moved into), read at each dispatch.
+   * A dispatched target runs there; absent means `cwd`.
+   */
+  readonly workingDirectory?: string
   /** The caller's Claude-style permission mode, read LIVE at every dispatch
    *  decision (ADR-088) — not a snapshot taken when the handle was built. */
   getAutonomyMode: () => string
@@ -610,6 +616,7 @@ export function createOpencodeHostedToolsServer(
 
       const workdirArg = dispatchWorkdirArg(workdir)
       const background = runsInBackground(run_in_background, callerIsRoot, identity.callId)
+      const workingDirectory = caller.workingDirectory || caller.cwd
       const result = await deps.dispatch(
         {
           engine,
@@ -625,7 +632,8 @@ export function createOpencodeHostedToolsServer(
         {
           fromEngine: 'opencode',
           fromRoutingId: routingId,
-          cwd: caller.cwd,
+          cwd: workingDirectory,
+          ...(workingDirectory !== caller.cwd ? { originCwd: caller.cwd } : {}),
           getAutonomyMode: caller.getAutonomyMode,
           getMessages: caller.getMessages,
           ...(caller.getQueuedUserTurns ? { getQueuedUserTurns: caller.getQueuedUserTurns } : {}),

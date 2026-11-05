@@ -44,9 +44,12 @@ import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { PERSISTED_SESSIONS_DIR } from './persisted-sessions-dir'
 import { logger } from './logger'
+import { loadSessionConfig } from './ui-config'
+import { samePath } from './worktree-root'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { HIDDEN_OPENCODE_SESSION_TITLES } from '../../shared/dispatch-session'
-import type { EngineHistoryLoad, ModelRef, SessionInfo } from '../../shared/types'
+import { isCreatedWorktree } from '../../shared/linked-worktree'
+import type { EngineHistoryLoad, ModelRef, SessionInfo, WorktreeInfo } from '../../shared/types'
 
 /**
  * opencode stamps newly-created sessions with a default placeholder title
@@ -99,12 +102,37 @@ async function readLease(): Promise<ServerConnection> {
   )
 }
 
+/**
+ * The directory a session is listed under. opencode reports its LOCATION, which for a session that
+ * moved into a worktree is the worktree; the identity directory is where it was started. When the
+ * session's OWN record (keyed by its id, never by worktree path: other sessions sharing that
+ * worktree stay under it) is a detected entry for exactly this location, list it under that
+ * entry's `originalCwd`, as `OpencodeSession`'s `identityCwd` does once it is opened.
+ */
+function listingCwd(
+  sessionId: string,
+  location: string,
+  worktrees: Record<string, WorktreeInfo> | undefined
+): string {
+  const info = worktrees?.[sessionId]
+  if (info && !isCreatedWorktree(info) && info.originalCwd && samePath(info.worktreePath, location))
+    return info.originalCwd
+  return location
+}
+
 /** 2.x sessions → the sidebar's SessionInfo[] (archived ones left out), newest first. */
 export function toOpencodeSessionInfos(sessions: readonly Session_Info[]): SessionInfo[] {
+  let worktrees: Record<string, WorktreeInfo> | undefined
+  try {
+    worktrees = loadSessionConfig().worktreeInfoMap
+  } catch {
+    // an unreadable record lists every session under its location
+  }
   const result: SessionInfo[] = []
   for (const session of sessions) {
-    const cwd = session.location?.directory
-    if (!cwd || session.time.archived !== undefined) continue
+    const location = session.location?.directory
+    if (!location || session.time.archived !== undefined) continue
+    const cwd = listingCwd(session.id, location, worktrees)
     if (session.title && HIDDEN_TITLES.has(session.title.trim())) continue
     const timestamp = session.time.updated ?? session.time.created ?? 0
     result.push({

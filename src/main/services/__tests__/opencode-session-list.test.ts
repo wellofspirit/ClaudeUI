@@ -23,7 +23,8 @@ const {
   mockDeleteSession,
   mockDeleteSessionFiles,
   mockWarmCache,
-  mockBuildAccountRef
+  mockBuildAccountRef,
+  mockLoadSessionConfig
 } = vi.hoisted(() => ({
   mockAcquire: vi.fn(),
   mockAcquireIfRunning: vi.fn(),
@@ -36,7 +37,8 @@ const {
   mockDeleteSession: vi.fn(),
   mockDeleteSessionFiles: vi.fn(),
   mockWarmCache: vi.fn(),
-  mockBuildAccountRef: vi.fn()
+  mockBuildAccountRef: vi.fn(),
+  mockLoadSessionConfig: vi.fn()
 }))
 
 vi.mock('../../../core/opencode/OpencodeServerManager', () => ({
@@ -62,6 +64,11 @@ vi.mock('../../../core/services/db', () => ({
 // the suite. No account ref → 'unknown', which is what these tests assume.
 vi.mock('../../../core/auth/OpencodeAuthProvider', () => ({
   opencodeAuthProvider: { buildAccountRef: mockBuildAccountRef, warmCache: mockWarmCache }
+}))
+// The listing reads each session's worktree record; never the real config on the machine.
+vi.mock('../../../core/services/ui-config', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/services/ui-config')>()),
+  loadSessionConfig: mockLoadSessionConfig
 }))
 vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: mockDeleteSessionFiles
@@ -116,6 +123,7 @@ beforeEach(() => {
   mockDeleteSessionFiles.mockReset().mockResolvedValue(undefined)
   mockWarmCache.mockReset().mockResolvedValue(undefined)
   mockBuildAccountRef.mockReset().mockReturnValue(null)
+  mockLoadSessionConfig.mockReset().mockReturnValue({})
   MockOpencodeClient.mockReset().mockImplementation(function () {
     return {
       listMessages: mockListMessages,
@@ -157,6 +165,56 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 5; i++) await Promise.resolve()
   await new Promise((done) => setImmediate(done))
 }
+
+describe('a session that moved into a worktree (cold listing)', () => {
+  const info = (over: Record<string, unknown>): Record<string, unknown> => ({
+    worktreePath: '/repo/.claude/worktrees/wt',
+    worktreeBranch: 'b',
+    worktreeName: 'wt',
+    originalCwd: '/repo',
+    gitRoot: '/repo',
+    originalHeadCommit: '',
+    createdAt: 1,
+    origin: 'detected',
+    ...over
+  })
+  const sessions = [
+    apiSession('ses_moved', '/repo/.claude/worktrees/wt', 5),
+    apiSession('ses_other', '/repo/.claude/worktrees/wt', 4)
+  ]
+  const cwds = async (): Promise<Record<string, string>> =>
+    Object.fromEntries(
+      (await readOpencodeSessions({ listSessions: async () => sessions } as never)).map((i) => [
+        i.sessionId,
+        i.cwd
+      ])
+    )
+
+  it('lists it under its identity cwd; another session in the same worktree stays under the worktree', async () => {
+    mockLoadSessionConfig.mockReturnValue({ worktreeInfoMap: { ses_moved: info({}) } })
+    expect(await cwds()).toEqual({
+      ses_moved: '/repo',
+      ses_other: '/repo/.claude/worktrees/wt'
+    })
+  })
+
+  it('a created worktree entry does not change the listing', async () => {
+    mockLoadSessionConfig.mockReturnValue({
+      worktreeInfoMap: { ses_moved: info({ origin: 'created' }) }
+    })
+    expect(await cwds()).toEqual({
+      ses_moved: '/repo/.claude/worktrees/wt',
+      ses_other: '/repo/.claude/worktrees/wt'
+    })
+  })
+
+  it('an entry for another worktree than the location does not apply', async () => {
+    mockLoadSessionConfig.mockReturnValue({
+      worktreeInfoMap: { ses_moved: info({ worktreePath: '/repo/.claude/worktrees/elsewhere' }) }
+    })
+    expect((await cwds()).ses_moved).toBe('/repo/.claude/worktrees/wt')
+  })
+})
 
 describe('the opencode session list (2.x API, ADR-097 §6; onInteraction policy)', () => {
   it('maps root sessions → SessionInfo[] (cwd from location, title fallback, archived and ClaudeUI throwaways left out, newest first)', async () => {

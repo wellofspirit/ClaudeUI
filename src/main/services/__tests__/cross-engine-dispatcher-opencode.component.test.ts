@@ -3741,6 +3741,96 @@ describe('opencode target — workdir', () => {
       expect(rules).toContainEqual({ action: 'shell', resource: 'npm publish*', effect: 'ask' })
     })
 
+    // The caller works in a worktree it entered (`cwd`); `originCwd` is where it was started.
+    describe('a caller that works in a worktree', () => {
+      it('the target starts in the worktree, not the identity directory', async () => {
+        const { parent, wt } = tree()
+        const { dispatcher, serverManager } = makeHarness()
+        await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x' },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(serverManager.acquire).toHaveBeenCalledWith(wt)
+      })
+
+      it('a deny rule only the identity directory has still binds the target', async () => {
+        const { parent, wt } = tree()
+        const { dispatcher, client } = makeHarness({
+          loadUserRules: (cwd) =>
+            cwd === parent ? userRules({ deny: [PARENT_DENY] }) : userRules()
+        })
+        await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x' },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(createdRules(client)).toContainEqual({
+          action: 'shell',
+          resource: 'rm *',
+          effect: 'deny'
+        })
+      })
+
+      it('a message to a finished X-Agent rebuilds the context with the parent’s identity directory', async () => {
+        const { parent, wt } = tree()
+        const { dispatcher, client, ledger } = makeHarness({
+          loadUserRules: (cwd) =>
+            cwd === parent ? userRules({ deny: [PARENT_DENY] }) : userRules(),
+          parents: {
+            session: () => ({ getAutonomyMode: () => 'default', getMessages: () => [] }),
+            emit: () => {},
+            // canonical state: the parent was started in `parent`
+            identityCwd: () => parent
+          }
+        })
+        // The launch ran from the worktree; the ledger row holds only that.
+        await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx({ cwd: wt }))
+        expect(createdRules(client)).not.toContainEqual({
+          action: 'shell',
+          resource: 'rm *',
+          effect: 'deny'
+        })
+        const id = ledger.rowFor('opencode', 'oc-sess-1')!.id
+        const from = { routingId: 'routing-1', engine: 'claude' as const, title: 'Boss' }
+        const sent = await dispatcher.messageXAgent({ ledgerId: id, text: 'more', from })
+        expect(sent.kind).not.toBe('refused')
+        await tick(6)
+        expect(client.setSessionPermissions.mock.calls.at(-1)![1]).toContainEqual({
+          action: 'shell',
+          resource: 'rm *',
+          effect: 'deny'
+        })
+      })
+
+      it('a workdir in the identity directory but outside the worktree is refused', async () => {
+        const { parent, wt } = tree()
+        mkdirSync(join(parent, 'other'))
+        const { dispatcher, serverManager } = makeHarness()
+        const result = await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x', workdir: join(parent, 'other') },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(result.isError).toBe(true)
+        expect(result.text).toContain('is not inside your working directory')
+        expect(serverManager.acquire).not.toHaveBeenCalled()
+      })
+
+      it('unless the user listed it as an additional directory', async () => {
+        const { parent, wt } = tree()
+        const other = join(parent, 'other')
+        mkdirSync(other)
+        const { dispatcher, serverManager } = makeHarness({
+          loadUserRules: (cwd) =>
+            cwd === wt ? userRules({ additionalDirectories: [other] }) : userRules()
+        })
+        const result = await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x', workdir: other },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(result.isError).toBeUndefined()
+        expect(serverManager.acquire).toHaveBeenCalledWith(uiPath(realpathSync.native(other)))
+      })
+    })
+
     it('B3/B7: the additional directories become external_directory allows; the user’s allow tier still adds nothing', async () => {
       const { parent, wt, granted } = tree()
       const rulesWithAllow = (cwd: string): MergedClaudeRules => ({

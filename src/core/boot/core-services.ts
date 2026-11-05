@@ -194,6 +194,10 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     if (!session || session.engineId !== 'opencode') return undefined
     return {
       cwd: session.cwd,
+      // A getter: the session moves after this handle is built.
+      get workingDirectory() {
+        return session.workingDirectory ?? session.cwd
+      },
       // Both read the LIVE session on every call (ADR-088): a target follows
       // the caller's mode switches and the judge reads its current transcript.
       getAutonomyMode: () => session.getAutonomyMode?.() ?? 'default',

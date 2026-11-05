@@ -151,6 +151,28 @@ describe('a harness arriving, at the boot seam', () => {
     expect(unsubscribe).toHaveBeenCalledOnce()
   })
 
+  it('the opencode caller handle follows the live session into a worktree (dispatch starts where it works)', async () => {
+    const { startCoreServices } = await import('../core-services')
+    const { opencodeServerManager } = await import('../../opencode/OpencodeServerManager')
+    const live = { engineId: 'opencode', cwd: '/repo', workingDirectory: '/repo' }
+    const sessions = bootMocks.sessionManager as unknown as { get: (id: string) => unknown }
+    const original = sessions.get
+    sessions.get = (id) => (id === 'ses_1' ? live : undefined)
+    try {
+      startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })
+      const lookup = vi.mocked(opencodeServerManager.setCallerSessionLookup).mock.calls[0][0]
+      const handle = lookup('ses_1')!
+      expect(handle.cwd).toBe('/repo')
+      expect(handle.workingDirectory).toBe('/repo')
+      live.workingDirectory = '/repo/.claude/worktrees/wt'
+      // the same handle, read again after the move
+      expect(handle.workingDirectory).toBe('/repo/.claude/worktrees/wt')
+      expect(handle.cwd).toBe('/repo')
+    } finally {
+      sessions.get = original
+    }
+  })
+
   it('a failed provider delivery still feeds the credential', async () => {
     const { startCoreServices } = await import('../core-services')
     startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })

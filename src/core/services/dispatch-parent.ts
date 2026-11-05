@@ -70,6 +70,12 @@ export interface DispatchParentLookup {
   session(parentId: string): LiveParentSession | undefined
   /** Emit under the parent's routing (`emitEvent(channel, [parentId, data])`). */
   emit(parentId: string, channel: string, data: unknown): void
+  /**
+   * The parent's identity (spawn) directory, from canonical state: `undefined` once the parent is
+   * unknown. A context rebuilt from a ledger row (which stores only the working directory the
+   * launch ran from) takes `originCwd` from it.
+   */
+  identityCwd?(parentId: string): string | undefined
   /** The parent's transcript in canonical state (empty once evicted on disconnect). */
   canonicalMessages?(parentId: string): ChatMessage[]
   /** Read the parent's transcript from its engine's history (`readSessionHistory`). */
@@ -117,6 +123,7 @@ export function makeRunContext(opts: {
       return parentId()
     },
     cwd: base.cwd,
+    ...(base.originCwd ? { originCwd: base.originCwd } : {}),
     getAutonomyMode: mode,
     getMessages,
     // The judge's transcript: live, then canonical, and only then the engine's own history
