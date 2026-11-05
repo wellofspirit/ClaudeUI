@@ -248,6 +248,9 @@ import { forgetLinkedWorktrees } from '../../services/worktree-root'
 
 const CWD = '/repo/app'
 const SID = 'ses_own'
+/** Claude's absolute path-rule spelling: `//abs` on POSIX, the drive form `C:/x` on Windows. */
+const absSpec = (p: string): string =>
+  process.platform === 'win32' ? p.replaceAll('\\', '/') : `/${p}`
 const CHILD = 'ses_child'
 const MSG = 'msg_a1'
 const TOKENS = { input: 100, output: 20, reasoning: 5, cache: { read: 10, write: 0 } }
@@ -2732,10 +2735,10 @@ describe('location, leases and re-root (worktree parity S1)', () => {
 
   it('session.moved re-roots: an ask during the re-root waits and is then judged at the new location; rules are rebuilt for it; the old lease is released', async () => {
     // A spawn-cwd absolute deny compiles to a different form inside the worktree.
-    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    h.projectPermissions[repo] = { deny: [`Edit(${absSpec(repo)}/secrets/**)`] }
     // A rule that exists ONLY in the worktree's settings: the verdict depends on the location.
     h.projectPermissions[worktree] = {
-      deny: [`Edit(/${repo}/secrets/**)`, 'Bash(ls:*)']
+      deny: [`Edit(${absSpec(repo)}/secrets/**)`, 'Bash(ls:*)']
     }
     locationAware()
     session = sessionAt(repo)
@@ -2776,7 +2779,7 @@ describe('location, leases and re-root (worktree parity S1)', () => {
       {
         allow: [],
         ask: [],
-        deny: [`Edit(/${repo}/secrets/**)`],
+        deny: [`Edit(${absSpec(repo)}/secrets/**)`],
         additionalDirectories: [],
         defaultMode: undefined
       },
@@ -3268,7 +3271,7 @@ describe('the worktree tools: claudeui_enter_worktree / claudeui_exit_worktree (
 
   it('enter by name: create, then lease, then the transition PATCH, then the move (steer); the result names the path and branch', async () => {
     // An absolute deny compiles differently per base, so the transition ruleset differs from the current one.
-    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    h.projectPermissions[repo] = { deny: [`Edit(${absSpec(repo)}/secrets/**)`] }
     locationAware()
     session = sessionAt(repo)
     await startTurn()
@@ -3313,7 +3316,7 @@ describe('the worktree tools: claudeui_enter_worktree / claudeui_exit_worktree (
 
   it('exit: the transition PATCH carries the user deny for the NEW base (the main checkout) and no new allow', async () => {
     // Absolute spelling: inside the worktree it compiles to a pattern that misses the main checkout.
-    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    h.projectPermissions[repo] = { deny: [`Edit(${absSpec(repo)}/secrets/**)`] }
     locationAware()
     session = sessionAt(repo)
     await startTurn()
@@ -3378,7 +3381,7 @@ describe('the worktree tools: claudeui_enter_worktree / claudeui_exit_worktree (
   })
 
   it('a mode switch between the transition PATCH and session.moved still carries the transition rules; session.moved drops them', async () => {
-    h.projectPermissions[repo] = { deny: [`Edit(/${repo}/secrets/**)`] }
+    h.projectPermissions[repo] = { deny: [`Edit(${absSpec(repo)}/secrets/**)`] }
     locationAware()
     session = sessionAt(repo)
     await startTurn()

@@ -134,6 +134,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '
 const ALLOW_ALL = { action: '*', resource: '*', effect: 'allow' as const }
 /** The user's `Read(/<repo>/private/**)` deny, as the PATCHed rules spell it for a session in `<repo>/.claude/worktrees/<n>`. */
 const WORKTREE_PRIVATE = '../../../private/**'
+/** Claude's absolute path-rule spelling: `//abs` on POSIX, the drive form `C:/x` on Windows. */
+const absSpec = (p: string): string =>
+  process.platform === 'win32' ? p.replaceAll('\\', '/') : `/${p}`
 const WORKTREE_TOOLS = ['claudeui_enter_worktree', 'claudeui_exit_worktree']
 
 const git = (cwd: string, ...args: string[]) =>
@@ -471,7 +474,7 @@ describeV2('opencode 2.x contract: the production session enters and exits a wor
 
   it('enter: no approval, the worktree is created on its branch, the next edit lands in it, status.cwd and the PATCHed rules follow', async () => {
     const repo = newRepo()
-    holder.deny = [`Read(/${repo}/private/**)`]
+    holder.deny = [`Read(${absSpec(repo)}/private/**)`]
     try {
       const session = newSession(repo)
       const tag = nonce('enter')
@@ -501,7 +504,7 @@ describeV2('opencode 2.x contract: the production session enters and exits a wor
 
   it('the user deny before the move has no worktree-relative spelling (the rules really changed)', async () => {
     const repo = newRepo()
-    holder.deny = [`Read(/${repo}/private/**)`]
+    holder.deny = [`Read(${absSpec(repo)}/private/**)`]
     try {
       const session = newSession(repo)
       await turn(session, `plain hello ${nonce('before')}`)
