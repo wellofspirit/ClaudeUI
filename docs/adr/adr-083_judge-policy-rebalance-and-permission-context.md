@@ -109,6 +109,7 @@ candidate let such a push through in 2 of 3 runs.
   harvested real cases, × 3 each) showed no accuracy gain once the full-review shapes skip stage 1,
   and a slower tail: stage-1 p90 2.1 s vs 1.9 s synthetic, 6.0 s vs 2.2 s real. Stage 1 is the speed
   path, so it stays at the floor. Stage 2 stays at `low`.
+  2026-11-06: a ChatGPT workspace that refuses the `none`/`minimal` reasoning effort (HTTP 403, 'reasoning level isn't available') is retried once at `low`, and `low` is then the floor for that route and account until restart.
 - OpenAI's `max_completion_tokens` counts reasoning tokens. Stage 2 reasons at `low`, and so does
   stage 1 on a model whose floor is not `none` (`minimal` on gpt-5, `low` on the o-series); a reply cut
   off mid-reasoning is unparseable. Reasoning models on that route get 2048 tokens of server-side

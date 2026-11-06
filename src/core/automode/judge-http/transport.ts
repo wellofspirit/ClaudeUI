@@ -5,9 +5,11 @@
  * Per call: resolve the route (keys rotate, tokens refresh), POST one streamed
  * request, read the stream with the route's wire reader, report usage, return
  * the completion text. Every failure throws, which `classify()` turns into
- * `unavailable` → the human decides. There are no retries except one: an HTTP
- * 401 on a route that can `reauthorize` (ChatGPT) retries once with a freshly
- * refreshed token.
+ * `unavailable` → the human decides. There are no retries except two, both on
+ * ChatGPT: an HTTP 401 on a route that can `reauthorize` retries once with a
+ * freshly refreshed token, and a 403 refusing the `none`/`minimal` reasoning
+ * effort retries once at `low` and raises that route's effort floor
+ * (`effort-floor.ts`).
  *
  * Credential hygiene: the route's headers carry the key or token, so nothing
  * here logs, and every thrown message is built from the route's
@@ -18,7 +20,8 @@
  */
 
 import type { JudgeRequest, JudgeTransport } from '../classifier'
-import { judgeCacheKey } from './caps'
+import { judgeCacheKey, reasoningFields } from './caps'
+import { effortFloor, raiseEffortFloor } from './effort-floor'
 import { pickJudgeFetch } from './net'
 import { readSseFrames } from './sse'
 import { buildChatBody, readChatStream } from './wire-chat'
@@ -53,6 +56,11 @@ export interface HttpJudgeTransportOptions {
    * It must not block: the verdict never waits on it.
    */
   onCall?: (record: JudgeCallCapture) => void
+  /**
+   * Called when a workspace refused a reasoning effort and the call stepped up (`from` → `to`).
+   * A throw is swallowed. `label` is the route's credential-free label.
+   */
+  onEffortRaised?: (label: string, from: string, to: string) => void
 }
 
 /** What one capturing call collects on the way; turned into a {@link JudgeCallCapture} at its end. */
@@ -69,6 +77,8 @@ interface CallTrace {
   raw: string
   reasoning: string
   reasoningTruncated: boolean
+  /** Efforts the workspace refused in this call, in order. */
+  refusedEfforts: string[]
 }
 
 /** The judge model has no route ClaudeUI can call (ADR-081 §3: no fallback). */
@@ -195,6 +205,50 @@ export function judgeRouteKey(route: ResolvedJudgeRoute): string {
   return `${route.label}|${route.account.accountKey}`
 }
 
+/** The ChatGPT backend's refusal of a reasoning effort: a 403 whose JSON `detail` says so. */
+const EFFORT_REFUSED = /reasoning level isn.t available/i
+
+function refusesEffort(excerpt: string): boolean {
+  try {
+    const detail = (JSON.parse(excerpt) as { detail?: unknown } | null)?.detail
+    return typeof detail === 'string' && EFFORT_REFUSED.test(detail)
+  } catch {
+    return false
+  }
+}
+
+/** The reasoning effort a request at `stage` sends on this route, when it sends one. */
+function effortOf(route: ResolvedJudgeRoute, stage: JudgeRequest['stage']): string | undefined {
+  const reasoning = reasoningFields(route.caps, stage).reasoning
+  const effort = (reasoning as { effort?: unknown } | undefined)?.effort
+  return typeof effort === 'string' ? effort : undefined
+}
+
+/**
+ * The route to send with: a ChatGPT route with a learned floor sends `low` where its stage
+ * would send `none`/`minimal`. A copy; `capsFor`'s object is never mutated.
+ */
+function withEffortFloor(
+  route: ResolvedJudgeRoute,
+  stage: JudgeRequest['stage']
+): ResolvedJudgeRoute {
+  if (route.kind !== 'chatgpt' || !effortFloor(judgeRouteKey(route))) return route
+  const effort = effortOf(route, stage)
+  if (effort !== 'none' && effort !== 'minimal') return route
+  const key = stage ?? 'thinking'
+  const fields = route.caps.reasoning[key]
+  return {
+    ...route,
+    caps: {
+      ...route.caps,
+      reasoning: {
+        ...route.caps.reasoning,
+        [key]: { ...fields, reasoning: { ...(fields.reasoning as object), effort: 'low' } }
+      }
+    }
+  }
+}
+
 /** Prefix a failure with the route's label, keeping its status/code/recovery time, and name the route. */
 function labelled(route: ResolvedJudgeRoute, err: unknown): JudgeWireError {
   const wire = err instanceof JudgeWireError ? err : undefined
@@ -229,6 +283,14 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
     return headers
   }
 
+  const reportEffortRaised = (label: string, from: string, to: string): void => {
+    try {
+      opts.onEffortRaised?.(label, from, to)
+    } catch {
+      // A logging failure must never fail the verdict.
+    }
+  }
+
   const wantsCapture = (): boolean => {
     if (!opts.onCall) return false
     try {
@@ -254,13 +316,14 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
 
     let route = resolved.route
     let reauthorized = false
+    let steppedUp = false
     let res: Response
     for (;;) {
       if (req.signal?.aborted) throw new Error(ABORTED_MESSAGE)
-      const body =
-        route.wire === 'chat' ? buildChatBody(route, req) : buildResponsesBody(route, req)
+      const sent = withEffortFloor(route, req.stage)
+      const body = sent.wire === 'chat' ? buildChatBody(sent, req) : buildResponsesBody(sent, req)
       if (trace) {
-        trace.route = route
+        trace.route = sent
         trace.fetched = true
         delete trace.status
       }
@@ -293,6 +356,20 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
           route = fresh
           continue
         }
+      }
+      const sentEffort = effortOf(sent, req.stage)
+      if (
+        route.kind === 'chatgpt' &&
+        res.status === 403 &&
+        !steppedUp &&
+        (sentEffort === 'none' || sentEffort === 'minimal') &&
+        refusesEffort(excerpt)
+      ) {
+        steppedUp = true
+        trace?.refusedEfforts.push(sentEffort)
+        raiseEffortFloor(judgeRouteKey(route))
+        reportEffortRaised(route.label, sentEffort, 'low')
+        continue
       }
       const hint = res.status === 429 ? rateLimitHint(res, excerpt) : ''
       const retryAtMs =
@@ -360,6 +437,7 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
     failure: { error: unknown; aborted: boolean } | null
   ): JudgeCallCapture => {
     const system = req.system
+    const effort = effortOf(route, req.stage)
     return {
       ts: new Date(trace.startedAt).toISOString(),
       durationMs: Date.now() - trace.startedAt,
@@ -381,7 +459,9 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
       ...(!failure && trace.text !== undefined ? { text: trace.text } : {}),
       raw: trace.raw,
       ...(trace.reasoning ? { reasoning: trace.reasoning } : {}),
-      ...(trace.reasoningTruncated ? { reasoningTruncated: true as const } : {})
+      ...(trace.reasoningTruncated ? { reasoningTruncated: true as const } : {}),
+      ...(effort !== undefined ? { effort } : {}),
+      ...(trace.refusedEfforts.length ? { refusedEfforts: [...trace.refusedEfforts] } : {})
     }
   }
 
@@ -394,7 +474,8 @@ export function makeHttpJudgeTransport(opts: HttpJudgeTransportOptions): JudgeTr
           usage: null,
           raw: '',
           reasoning: '',
-          reasoningTruncated: false
+          reasoningTruncated: false,
+          refusedEfforts: []
         }
       : null
     let failure: { error: unknown; aborted: boolean } | null = null
