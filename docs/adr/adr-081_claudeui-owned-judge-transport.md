@@ -89,6 +89,7 @@ Both wires stream. There is one SSE accumulator per wire. A stream that ends wit
 event, a mid-stream error event, or an empty text channel is a transport error, so `classify()`
 returns `unavailable` and the human decides. There are no retries, except one on an HTTP 401 from
 the ChatGPT backend, after a forced token refresh.
+2026-11-06: a ChatGPT workspace that refuses the `none`/`minimal` reasoning effort (HTTP 403, 'reasoning level isn't available') is retried once at `low`, and `low` is then the floor for that route and account until restart.
 
 **Responses (ChatGPT backend).**
 

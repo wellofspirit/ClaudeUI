@@ -203,6 +203,10 @@ export interface JudgeCallCapture {
   /** Plain-text reasoning deltas, when the wire carried any (capped at {@link JUDGE_CAPTURE_REASONING_MAX_CHARS}). */
   reasoning?: string
   reasoningTruncated?: true
+  /** The reasoning effort the final attempt sent, when the route sends one. */
+  effort?: string
+  /** Efforts the workspace refused in this call, in order (each was retried at a higher one). */
+  refusedEfforts?: string[]
 }
 
 /** Longest `reasoning` a capture keeps, in characters (≈256 KiB of ASCII). */
@@ -222,8 +226,9 @@ export const JUDGE_EMPTY_REPLY_CODE = 'judge:empty'
 
 /**
  * A judge call failed on the wire: a non-2xx status, an error event, a stream
- * that ended early or carried no text. Never retried (ADR-081 §4) — the one 401
- * retry happens before any of these is thrown. The message is credential-free
+ * that ended early or carried no text. Never retried (ADR-081 §4) — the 401
+ * retry and the one reasoning-effort step-up (`effort-floor.ts`) happen before any of these is
+ * thrown. The message is credential-free
  * by construction: it is built from response bodies and our own copy, never
  * from request headers.
  */

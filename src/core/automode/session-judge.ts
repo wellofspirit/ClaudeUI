@@ -11,6 +11,7 @@
 
 import { engineMeta } from '../../shared/engine-meta'
 import { hostAppVersion } from '../host'
+import { logger } from '../services/logger'
 import type { JudgeTransport } from './classifier'
 import { activeChatgptAccountId, chatgptAccountPlan } from './judge-accounts'
 import { judgeCaptureEnabled, writeJudgeCapture } from './judge-capture'
@@ -101,6 +102,11 @@ export function makeSessionJudgeTransport(opts: SessionJudgeOptions): JudgeTrans
         routingId: opts.routingId,
         sessionId: opts.sessionId()
       }),
+    onEffortRaised: (label, from, to) =>
+      logger.info(
+        'AutoModeJudge',
+        `${label}: workspace refused reasoning effort ${from}; using ${to}`
+      ),
     userAgent: `ClaudeUI/${hostAppVersion()}`
   })
   // A call that fails (HTTP 429, an outage, a network error) throws, and `classify()` turns the
