@@ -1859,6 +1859,144 @@ describe('CrossEngineDispatcher — M3 (Claude direction: streaming/progress/not
 })
 
 // ---------------------------------------------------------------------------
+// A Claude target's model switch (docs/protocol-cc/04-system-subtypes.md §4.20–4.21): on its
+// card, never the parent's. Seen live: Opus 5.5 refused an X-Agent's task, cli.js went on with
+// Opus 4.8, and the card never said so.
+// ---------------------------------------------------------------------------
+
+describe('CrossEngineDispatcher — a Claude target’s model fallback', () => {
+  const noticesOn = (emit: ReturnType<typeof vi.fn>): unknown[] =>
+    emit.mock.calls
+      .filter(
+        ([channel, payload]) =>
+          channel === 'session:subagent-message' &&
+          (payload as { message: ChatMessage }).message.content.some((b) => b.type === 'notice')
+      )
+      .map(([, payload]) => payload)
+
+  it('takes the refused partial off the card and shows the switch there', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'opus' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'pi', toolUseId: 'xagent-card' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-fb-1' } as SDKMessage)
+    target.push({
+      type: 'assistant',
+      uuid: '11111111-2222-3333-4444-555555555555',
+      message: { id: 'refused-msg', role: 'assistant', content: [{ type: 'text', text: 'Sure' }] }
+    } as unknown as SDKMessage)
+    // A per-block derived uuid: cli.js matches on the first 24 characters.
+    target.push({
+      type: 'system',
+      subtype: 'model_refusal_fallback',
+      uuid: 'fallback-frame',
+      original_model: 'claude-opus-5-5',
+      fallback_model: 'claude-opus-4-8',
+      content: "Opus 5.5's safeguards flagged this session. Switched to Opus 4.8.",
+      retracted_message_uuids: ['11111111-2222-3333-4444-5555ffffffff']
+    } as unknown as SDKMessage)
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    expect(ctx.emit).toHaveBeenCalledWith('session:messages-retracted', {
+      messageIds: ['refused-msg'],
+      ownerToolUseId: 'xagent-card'
+    })
+    expect(noticesOn(ctx.emit)).toEqual([
+      {
+        toolUseId: 'xagent-card',
+        message: expect.objectContaining({
+          id: 'notice-fallback-frame',
+          role: 'system',
+          content: [
+            {
+              type: 'notice',
+              text: "Opus 5.5's safeguards flagged this session. Switched to Opus 4.8."
+            }
+          ]
+        })
+      }
+    ])
+    // The parent's own transcript, streams and banner are not the target's.
+    for (const [channel, payload] of ctx.emit.mock.calls) {
+      expect(channel).not.toBe('session:warning')
+      if (channel === 'session:messages-retracted')
+        expect(payload).toHaveProperty('ownerToolUseId', 'xagent-card')
+    }
+  })
+
+  // The refused message's streams are already closed (cli.js ends them before the frame); an empty
+  // retraction could only cut the card's other live streams.
+  it('sends no retraction for a refusal that names nothing it has seen', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'opus' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'pi', toolUseId: 'xagent-card' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-fb-3' } as SDKMessage)
+    target.push({
+      type: 'system',
+      subtype: 'model_refusal_fallback',
+      original_model: 'claude-opus-5-5',
+      fallback_model: 'claude-opus-4-8',
+      retracted_message_uuids: []
+    } as unknown as SDKMessage)
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    expect(noticesOn(ctx.emit)).toHaveLength(1)
+    expect(ctx.emit.mock.calls.map(([channel]) => channel)).not.toContain(
+      'session:messages-retracted'
+    )
+  })
+
+  it('shows an availability switch with a sentence of its own, and retracts nothing', async () => {
+    const target = makeFakeClaudeTarget()
+    const { dispatcher } = makeHarness({
+      loadEngineConfig: vi.fn(() => ({ dispatch: { defaultModel: 'opus' } })),
+      spawnClaudeQuery: target.spawnClaudeQuery
+    })
+    const ctx = makeCtx({ fromEngine: 'opencode', toolUseId: 'xagent-card' })
+    const pending = dispatcher.dispatch({ engine: 'claude', prompt: 'x' }, ctx)
+    await tick()
+    target.push({ type: 'system', subtype: 'init', session_id: 'claude-fb-2' } as SDKMessage)
+    target.push({
+      type: 'system',
+      subtype: 'model_fallback',
+      trigger: 'overloaded',
+      original_model: 'claude-opus-5-5',
+      fallback_model: 'claude-sonnet-5-5'
+    } as unknown as SDKMessage)
+    target.push(resultMsg({ result: 'done' }))
+    await pending
+
+    expect(noticesOn(ctx.emit)).toEqual([
+      {
+        toolUseId: 'xagent-card',
+        message: expect.objectContaining({
+          content: [
+            {
+              type: 'notice',
+              text: 'claude-opus-5-5 is unavailable — using claude-sonnet-5-5 for this turn.'
+            }
+          ]
+        })
+      }
+    ])
+    expect(ctx.emit.mock.calls.map(([channel]) => channel)).not.toContain(
+      'session:messages-retracted'
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
 // ADR-033 M3 — durable stop-intent (armIfUnknown): the renderer's Stop click
 // can arrive BEFORE dispatch() is even invoked (opencode marks the tool part
 // "running" milliseconds after ctx.ask resolves, while the MCP tools/call

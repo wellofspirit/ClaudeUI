@@ -855,6 +855,7 @@ The outer filter at char `12822512` lists subtypes excluded from `--output-forma
 - **`plugin_install`** — show install progress UI when the env var is set.
 - **`model_refusal_fallback`** — render a persistent warning banner (the model switch is sticky for the session); evict `retracted_message_uuids` from transcript state; update any model indicator. See §4.20.
 - **`model_fallback`** — render a warning for the current turn only (turn-scoped swap). See §4.21.
+- **Either, from a dispatch target (ClaudeUI):** the X-Agent's card gets it, not the parent: a `notice` block in the card's transcript, and a refusal's retraction scoped to that card (`session:messages-retracted` with `ownerToolUseId`, sent only when a retracted uuid names a message the card has). `CrossEngineDispatcher.noteClaudeTargetFallback`.
 - **`thinking_tokens`** — optional spinner/pill progress; not authoritative token counts.
 - **`commands_changed`** — REPLACE the cached slash-command list with the payload (a re-fetch returns the stale init list).
 - **`elicitation_complete`** — dismiss any pending MCP elicitation UI.

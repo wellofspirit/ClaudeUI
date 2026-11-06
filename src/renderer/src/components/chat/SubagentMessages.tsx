@@ -70,6 +70,34 @@ const ContentBlockView = memo(function ContentBlockView({
   if (block.type === 'context_note') {
     return <ContextNoteBlock block={block} />
   }
+  // What the child's engine said about the run (a Claude target's model switch): its own
+  // words, verbatim — never markdown.
+  if (block.type === 'notice' && block.text) {
+    return (
+      <div
+        data-testid="SubagentMessages.notice"
+        role="note"
+        className="flex items-start gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-[12px] text-warning leading-[1.5] whitespace-pre-wrap break-words"
+      >
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          className="shrink-0 mt-[2px]"
+          aria-hidden="true"
+        >
+          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" />
+          <line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+        <span>{block.text}</span>
+      </div>
+    )
+  }
   return null
 })
 

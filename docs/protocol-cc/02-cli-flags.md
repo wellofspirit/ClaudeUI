@@ -88,7 +88,7 @@ Pre-parse argv scan at char `12940601` (`Bt1`) intercepts `--handle-uri`, `-p`, 
 - **Effect (2.1.280 source):**
   1. Foreground Agent: the progress callback forwards every content block of the subagent's messages. Without the flag it skips all but tool_use/tool_result (`if(!Kt&&J.type!=="tool_use"&&J.type!=="tool_result")continue;`). The blocks arrive as complete `assistant`/`user` messages with `parent_tool_use_id` set to the Agent call's id, with no `stream_event` deltas (those still need patch/subagent-streaming).
   2. The same callback forwards nested progress (`agent_progress`/`skill_progress` from the subagent's own Agent or Skill calls) instead of dropping it. Forked skills (`context: fork`) get the same two changes in their own loop, and background subagents write nested progress to their relay (their own messages are relayed without the flag).
-  3. Without the flag, a non-interactive session forces subagent thinking to `display:"omitted"` unless `--thinking-display` was explicit. ClaudeUI always passes `--thinking-display summarized`, so this changes nothing for us.
+  3. Without the flag, a non-interactive session forces subagent thinking to `display:"omitted"` unless `--thinking-display` was explicit. ClaudeUI passes `--thinking-display summarized` on a session and a dispatch target (`claudeThinkingRequest`) and on an automation run (its own config), so this changes nothing for us.
 - **On the patched binary:** subagent-streaming Patch A deletes the `continue` in (1), so the flag adds nothing there and nothing arrives twice; only the nested and forked-skill messages of (2) are new. Live check 2026-09-25 (2.1.280, Haiku 4.5, one foreground Agent turn whose subagent runs one Bash call): official with the flag, 4 subagent `assistant` frames (2 thinking, 1 text, 1 tool_use) and 0 subagent `stream_event`s; patched without it, 5 frames (the model wrote one more text block) and 112 `stream_event`s; patched with it, 4 frames and 101 `stream_event`s. In both patched runs each subagent API message produced as many forwarded blocks as streamed `content_block_start`s, with no repeated uuid or content.
 
 ### `--session-mirror` (hidden)
@@ -375,6 +375,7 @@ Pre-parse argv scan at char `12940601` (`Bt1`) intercepts `--handle-uri`, `-p`, 
 - **Type:** enum: `summarized` | `omitted`
 - **Default:** config-resolved
 - **Effect:** How thinking blocks appear in response. `omitted` hides them.
+- **ClaudeUI:** `summarized` on a session and a dispatch target (`claudeThinkingRequest` in `src/shared/model-capabilities.ts`) and on an automation run (`automation-manager.ts`). Without it, Opus 4.7+ thinking arrives as a signature with empty text (seen 2026-11-06 on a 2.1.317 dispatch target running Opus 4.8: 8,084 thinking tokens, no text).
 - **Anchor:** parseOpt `12947940`.
 
 ### `--max-thinking-tokens <tokens>` (hidden, DEPRECATED)

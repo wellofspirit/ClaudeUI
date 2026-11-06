@@ -302,6 +302,13 @@ export type ContentBlock =
    */
   | { type: 'context_note'; title: string; fragments: { text: string; label?: string }[] }
   /**
+   * What a dispatched agent's engine reported about the run that no message of the agent
+   * carries, shown in its card's transcript — today a Claude target's model switch
+   * (`model_refusal_fallback` / `model_fallback`, which a root session shows as a warning).
+   * The engine's own text, rendered verbatim, never through the markdown pipeline.
+   */
+  | { type: 'notice'; text: string }
+  /**
    * Claude Code holding (or having held) a message another Claude session sent
    * this one over its own socket — `system/peer_message_hold`. One row per
    * message (`holdId` is cli.js's message uuid), updated in place: `held` waits for
