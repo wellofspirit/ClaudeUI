@@ -87,9 +87,10 @@ _Amended 2026-10-23 ([ADR-107](adr-107_judge-outage-and-fallback-judge.md)): the
 
 Both wires stream. There is one SSE accumulator per wire. A stream that ends without a terminal
 event, a mid-stream error event, or an empty text channel is a transport error, so `classify()`
-returns `unavailable` and the human decides. There are no retries, except one on an HTTP 401 from
-the ChatGPT backend, after a forced token refresh.
-2026-11-06: a ChatGPT workspace that refuses the `none`/`minimal` reasoning effort (HTTP 403, 'reasoning level isn't available') is retried once at `low`, and `low` is then the floor for that route and account until restart.
+returns `unavailable` and the human decides. There are no retries except two, both on the ChatGPT
+backend: one on an HTTP 401, after a forced token refresh, and one at `low` when a workspace refuses
+the `none`/`minimal` reasoning effort (HTTP 403, "reasoning level isn't available"), after which `low`
+is the floor for that route and account until restart (2026-11-06: the second retry added).
 
 **Responses (ChatGPT backend).**
 

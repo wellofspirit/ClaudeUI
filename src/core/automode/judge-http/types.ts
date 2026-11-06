@@ -203,7 +203,7 @@ export interface JudgeCallCapture {
   /** Plain-text reasoning deltas, when the wire carried any (capped at {@link JUDGE_CAPTURE_REASONING_MAX_CHARS}). */
   reasoning?: string
   reasoningTruncated?: true
-  /** The reasoning effort the final attempt sent, when the route sends one. */
+  /** The `reasoning.effort` the final attempt sent (Responses wire); absent on the chat wire. */
   effort?: string
   /** Efforts the workspace refused in this call, in order (each was retried at a higher one). */
   refusedEfforts?: string[]

@@ -756,6 +756,12 @@ const judge: JudgeTransport = guarded(
       }
       return resolved
     },
+    // A workspace that refuses stage 1's floor effort is measured at `low` from then on:
+    // say so, since ADR-083 §2's stage-1 numbers are at the floor.
+    onEffortRaised: (label, from, to) =>
+      console.error(
+        `judge-eval: ${label}: workspace refused reasoning effort ${from}; using ${to}`
+      ),
     userAgent: 'ClaudeUI-judge-eval'
   })
 )
