@@ -1015,4 +1015,50 @@ describe('CredentialSync corrupted accounts', () => {
     expect((await sync.injectionTokenFor(a.id))?.chatgptAccountId).toBe('ws-a')
     sync.stop()
   })
+
+  it('a sign-in on one row of a duplicated workspace keeps it flagged until the twin is removed', async () => {
+    const { vault, a, b } = await twoAccounts()
+    // The second shape: A refreshed with B's token before the upgrade, so it now stores ws-b too.
+    tamper((list) => {
+      list[0].accountId = 'ws-b'
+      list[0].credential.accountId = 'ws-b'
+      list[0].credential.access = tok('ws-b', 'dup')
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
+    await sync.start()
+    const login = vi.spyOn(vault, 'completeLogin')
+    const signInB = async (tag: string, refresh: string): Promise<void> => {
+      login.mockImplementationOnce(
+        async () =>
+          (
+            await vault.upsertAccount(
+              CHATGPT_PROVIDER_ID,
+              cred({ ws: 'ws-b', access: tok('ws-b', tag), refresh, expires: FUTURE + 120_000 })
+            )
+          ).credential
+      )
+      await sync.completeLogin()
+    }
+
+    await signInB('b2', 'r-b2')
+
+    // The sign-in landed on one row; its twin still shares the workspace.
+    expect((await sync.getStatus()).accounts.map((x) => x.needsReauth)).toEqual([true, true])
+    expect(await sync.injectionTokenFor(a.id)).toBeNull()
+    expect(await sync.injectionTokenFor(b.id)).toBeNull()
+
+    // The remedy: remove the twin, then sign in again.
+    const twin = (await vault.listAccounts(CHATGPT_PROVIDER_ID)).find(
+      (x) => x.credential.refresh !== 'r-b2'
+    )
+    await sync.removeAccount(twin!.id)
+    await signInB('b3', 'r-b3')
+
+    const after = await sync.getStatus()
+    expect(after.accounts).toHaveLength(1)
+    expect(after.accounts[0].needsReauth).toBe(false)
+    expect((await sync.injectionTokenFor(after.accounts[0].id))?.chatgptAccountId).toBe('ws-b')
+    sync.stop()
+  })
 })

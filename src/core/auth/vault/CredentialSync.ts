@@ -758,6 +758,7 @@ export class CredentialSync {
         )
         if (result.kind === 'superseded') return null
       }
+      if (!this.isCurrent(generation)) return null
       await this.feedAll(vaultCred)
       return this.isCurrent(generation) ? vaultCred : null
     }
@@ -905,6 +906,9 @@ export class CredentialSync {
       await this.feedAll(cred)
     }
     this.scheduleRefresh(key, cred)
+    // A sign-in onto one row of a duplicated workspace leaves its twin beside it:
+    // still corrupted, so the flag (and no timer) stays until the twin is removed.
+    if (key !== LEGACY_ACCOUNT_KEY && (await this.isCorrupted(key))) this.flagCorrupted(key)
     this.startWatchers()
     // ADR-070 §2: a stored credential is the one thing that means "this provider
     // works now". Rung AFTER the cancellation check above, so a login the user
