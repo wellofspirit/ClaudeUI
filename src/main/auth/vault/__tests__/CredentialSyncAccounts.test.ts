@@ -15,7 +15,7 @@
  * reaches auth.openai.com — and every token string is an obvious fake.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -25,7 +25,12 @@ vi.mock('node:os', async () => {
   return { ...actual, homedir: () => home.value, default: { ...actual, homedir: () => home.value } }
 })
 
-import { AuthVault, CHATGPT_PROVIDER_ID } from '../../../../core/auth/vault/AuthVault'
+import {
+  AuthVault,
+  CHATGPT_PROVIDER_ID,
+  vaultPath,
+  type VaultAccount
+} from '../../../../core/auth/vault/AuthVault'
 import {
   CredentialSync,
   REFRESH_MARGIN_MS,
@@ -35,6 +40,7 @@ import {
 } from '../../../../core/auth/vault/CredentialSync'
 import type { VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
 import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
+import { fakeChatgptJwt } from './fixtures/fake-jwt'
 
 let testHome: string
 beforeEach(() => {
@@ -560,6 +566,453 @@ describe('CredentialSync — a credential expiring beyond the setTimeout cap', (
     // Into the margin: exactly one refresh.
     await vi.advanceTimersByTimeAsync(2_000)
     expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    sync.stop()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Identity: an engine's entry belongs to the account its token names, and an
+// account holding another workspace's (or a duplicated) credential is never
+// refreshed, injected or adopted into. Tokens are JWT-shaped fakes whose
+// workspace claim is what the code under test reads.
+// ---------------------------------------------------------------------------
+
+const tok = (ws: string, tag: string, user = `user-${ws.slice(3)}`): string =>
+  fakeChatgptJwt({ ws, user, plan: 'pro', tag })
+
+/** A (active, expires an hour after B) and B, both healthy and unexpired. */
+async function twoAccounts(): Promise<{
+  vault: AuthVault
+  a: VaultAccount
+  b: VaultAccount
+}> {
+  const vault = new AuthVault()
+  const a = await vault.upsertAccount(
+    CHATGPT_PROVIDER_ID,
+    cred({
+      ws: 'ws-a',
+      access: tok('ws-a', 'a1'),
+      refresh: 'r-a',
+      expires: FUTURE + 3_600_000,
+      email: 'a@example.test',
+      planType: 'pro',
+      userId: 'user-a'
+    })
+  )
+  const b = await vault.upsertAccount(
+    CHATGPT_PROVIDER_ID,
+    cred({
+      ws: 'ws-b',
+      access: tok('ws-b', 'b1'),
+      refresh: 'r-b',
+      expires: FUTURE,
+      email: 'b@example.test'
+    })
+  )
+  return { vault, a, b }
+}
+
+const accountOf = async (vault: AuthVault, id: string): Promise<VaultAccount> =>
+  (await vault.listAccounts(CHATGPT_PROVIDER_ID)).find((account) => account.id === id)!
+
+const refreshesOf = async (vault: AuthVault): Promise<string[]> =>
+  (await vault.listAccounts(CHATGPT_PROVIDER_ID)).map((account) => account.credential.refresh)
+
+/** Rewrite the plaintext vault file in place: how a corrupted vault is forged. */
+function tamper(edit: (accounts: VaultAccount[]) => void): void {
+  const file = JSON.parse(readFileSync(vaultPath(), 'utf8')) as {
+    accounts: Record<string, { list: VaultAccount[] }>
+  }
+  edit(file.accounts[CHATGPT_PROVIDER_ID].list)
+  writeFileSync(vaultPath(), JSON.stringify(file))
+}
+
+type Internals = {
+  runtimes: Map<string, { refreshTimer?: unknown }>
+  watchers: Map<string, unknown>
+  handleExternalChange(engine: 'pi'): Promise<void>
+}
+const internals = (sync: CredentialSync): Internals => sync as unknown as Internals
+
+/** Every refresh token a feed spy was called with. */
+const fedRefreshes = (feed: ReturnType<typeof vi.fn>): string[] =>
+  feed.mock.calls.map((call) => (call[1] as ChatgptCredentialInput).refresh)
+
+describe('CredentialSync adoption follows the entry owner', () => {
+  it('a switch while pi still holds the outgoing account leaves both vault entries alone', async () => {
+    const { vault, a, b } = await twoAccounts()
+    const before = await vault.listAccounts(CHATGPT_PROVIDER_ID)
+    // pi holds A's token (what was fed while A was active); it outlives B's.
+    const pi = fakeTarget({
+      access: a.credential.access,
+      refresh: a.credential.refresh,
+      expires: a.credential.expires
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
+
+    await sync.switchActiveAccount(b.id)
+
+    expect(await vault.listAccounts(CHATGPT_PROVIDER_ID)).toEqual(before)
+    expect(fedRefreshes(pi.feed)).toEqual(['r-b'])
+    sync.stop()
+  })
+
+  it("a switch adopts the outgoing account's newer rotation into IT, and never feeds it", async () => {
+    const { vault, a, b } = await twoAccounts()
+    const bBefore = await accountOf(vault, b.id)
+    const pi = fakeTarget({
+      access: tok('ws-a', 'a2', 'user-a2'),
+      refresh: 'r-a2',
+      expires: a.credential.expires + 60_000
+    })
+    const opencode = fakeOpencodeTarget()
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    await sync.switchActiveAccount(b.id)
+
+    expect((await accountOf(vault, a.id)).credential).toMatchObject({
+      refresh: 'r-a2',
+      accountId: 'ws-a'
+    })
+    expect(await accountOf(vault, b.id)).toEqual(bBefore)
+    expect(fedRefreshes(pi.feed)).toEqual(['r-b'])
+    expect(fedRefreshes(opencode.feed)).toEqual(['r-b'])
+    // Its refresh timer now runs off the adopted credential.
+    expect(internals(sync).runtimes.get(a.id)?.refreshTimer).toBeDefined()
+    sync.stop()
+  })
+
+  it("the watcher adopts a background account's rotation into it and re-vends the active one", async () => {
+    const { vault, a, b } = await twoAccounts()
+    await vault.setActiveAccount(CHATGPT_PROVIDER_ID, b.id)
+    const bBefore = await accountOf(vault, b.id)
+    const pi = fakeTarget({
+      access: tok('ws-a', 'a2'),
+      refresh: 'r-a2',
+      expires: a.credential.expires + 60_000
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
+
+    await internals(sync).handleExternalChange('pi')
+
+    expect((await accountOf(vault, a.id)).credential.refresh).toBe('r-a2')
+    expect(await accountOf(vault, b.id)).toEqual(bBefore)
+    expect(fedRefreshes(pi.feed)).toEqual(['r-b'])
+    sync.stop()
+  })
+
+  it('the watcher adopts nothing when no account, or several, own the entry', async () => {
+    const { vault, a } = await twoAccounts()
+    const newer = a.credential.expires + 60_000
+    const unowned = fakeTarget({ access: tok('ws-x', 'x1'), refresh: 'r-x', expires: newer })
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: unowned.target, opencode: fakeOpencodeTarget().target })
+
+    await internals(sync).handleExternalChange('pi') // a workspace nobody holds
+    expect(await refreshesOf(vault)).toEqual(['r-a', 'r-b'])
+
+    // Two accounts store the same workspace: ambiguous, so nobody's.
+    tamper((list) => {
+      // B now stores A's workspace too (the account's id follows its credential).
+      list[1].credential.accountId = 'ws-a'
+    })
+    const ambiguous = fakeTarget({ access: tok('ws-a', 'a3'), refresh: 'r-a3', expires: newer })
+    sync.configure({ pi: ambiguous.target })
+    await internals(sync).handleExternalChange('pi')
+
+    expect(await refreshesOf(vault)).toEqual(['r-a', 'r-b'])
+    expect(unowned.feed).not.toHaveBeenCalled()
+    expect(ambiguous.feed).not.toHaveBeenCalled()
+    sync.stop()
+  })
+
+  it('reconcile on start adopts into the owner, keeps the active credential and feeds it', async () => {
+    vi.useFakeTimers()
+    const { vault, a, b } = await twoAccounts()
+    await vault.setActiveAccount(CHATGPT_PROVIDER_ID, b.id)
+    const bBefore = await accountOf(vault, b.id)
+    const pi = fakeTarget({
+      access: tok('ws-a', 'a2'),
+      refresh: 'r-a2',
+      expires: a.credential.expires + 60_000
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
+
+    await sync.start()
+
+    expect((await accountOf(vault, a.id)).credential.refresh).toBe('r-a2')
+    expect(await accountOf(vault, b.id)).toEqual(bBefore)
+    expect(fedRefreshes(pi.feed)).toEqual(['r-b'])
+    expect(internals(sync).runtimes.get(a.id)?.refreshTimer).toBeDefined()
+    expect(internals(sync).runtimes.get(b.id)?.refreshTimer).toBeDefined()
+    sync.stop()
+  })
+
+  it('reconcile on start with a foreign entry that is not newer just re-vends the active account', async () => {
+    const { vault, a, b } = await twoAccounts()
+    await vault.setActiveAccount(CHATGPT_PROVIDER_ID, b.id)
+    const before = await vault.listAccounts(CHATGPT_PROVIDER_ID)
+    const pi = fakeTarget({
+      access: a.credential.access,
+      refresh: 'r-a',
+      expires: a.credential.expires
+    })
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
+
+    await sync.start()
+
+    expect(await vault.listAccounts(CHATGPT_PROVIDER_ID)).toEqual(before)
+    expect(fedRefreshes(pi.feed)).toEqual(['r-b'])
+    sync.stop()
+  })
+
+  it("stores identity off the adopted token, falling back to the owner's stored fields", async () => {
+    const { vault, a } = await twoAccounts()
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    const newer = a.credential.expires + 60_000
+    const rich = fakeTarget({
+      access: fakeChatgptJwt({ ws: 'ws-a', plan: 'team', user: 'user-a2', tag: 'a2' }),
+      refresh: 'r-a2',
+      expires: newer
+    })
+    sync.configure({ pi: rich.target, opencode: fakeOpencodeTarget().target })
+    await internals(sync).handleExternalChange('pi')
+    expect((await accountOf(vault, a.id)).credential).toMatchObject({
+      refresh: 'r-a2',
+      accountId: 'ws-a',
+      planType: 'team',
+      userId: 'user-a2',
+      email: 'a@example.test'
+    })
+
+    // A claim-less entry (the legacy single slot) keeps every stored field.
+    const bare = fakeTarget({ access: 'fake-bare', refresh: 'r-a3', expires: newer + 60_000 })
+    sync.configure({ pi: bare.target })
+    await internals(sync).handleExternalChange('pi')
+    expect((await accountOf(vault, a.id)).credential).toMatchObject({
+      access: 'fake-bare',
+      refresh: 'r-a3',
+      accountId: 'ws-a',
+      planType: 'team',
+      userId: 'user-a2',
+      email: 'a@example.test'
+    })
+    sync.stop()
+  })
+
+  it('an account with no stored workspace id owns the entry whose token names it', async () => {
+    const { vault, b } = await twoAccounts()
+    await vault.setActiveAccount(CHATGPT_PROVIDER_ID, b.id)
+    const bootstrapped = await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({ access: tok('ws-x', 'x1'), refresh: 'r-x', expires: FUTURE })
+    )
+    expect(bootstrapped.accountId).toBeUndefined()
+    const pi = fakeTarget({ access: tok('ws-x', 'x2'), refresh: 'r-x2', expires: FUTURE + 60_000 })
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
+
+    await internals(sync).handleExternalChange('pi')
+
+    expect(await accountOf(vault, bootstrapped.id)).toMatchObject({
+      accountId: 'ws-x',
+      credential: { refresh: 'r-x2', accountId: 'ws-x' }
+    })
+    sync.stop()
+  })
+})
+
+describe('CredentialSync refuses to store another workspace', () => {
+  it('a refresh the vault refuses leaves the account needing sign-in, with no feed or reschedule', async () => {
+    vi.useFakeTimers()
+    const now = Date.now()
+    const vault = new AuthVault()
+    const a = await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({
+        ws: 'ws-a',
+        access: tok('ws-a', 'a1'),
+        refresh: 'r-a',
+        expires: now + REFRESH_MARGIN_MS + 1_000
+      })
+    )
+    // The token endpoint answers with ANOTHER workspace's token.
+    const refreshAccessToken = vi.fn(async () => ({
+      access_token: tok('ws-b', 'b9'),
+      refresh_token: 'r-b9',
+      expires_in: 3600
+    }))
+    const pi = fakeTarget()
+    const opencode = fakeOpencodeTarget()
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+    await sync.start()
+    pi.feed.mockClear()
+    opencode.feed.mockClear()
+
+    await vi.advanceTimersByTimeAsync(1_001)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect((await accountOf(vault, a.id)).credential.refresh).toBe('r-a')
+    expect(pi.feed).not.toHaveBeenCalled()
+    expect(opencode.feed).not.toHaveBeenCalled()
+    expect((await sync.getStatus()).accounts[0].needsReauth).toBe(true)
+    sync.stop()
+  })
+
+  it('start keeps the vault credential when adopting the engine entry is refused', async () => {
+    class RefusingVault extends AuthVault {
+      override async saveAccountCredential(): Promise<void> {
+        throw new Error(
+          "Refusing to store another ChatGPT workspace's credential on vault account x"
+        )
+      }
+    }
+    const vault = new RefusingVault()
+    const a = await vault.upsertAccount(
+      CHATGPT_PROVIDER_ID,
+      cred({ ws: 'ws-a', access: tok('ws-a', 'a1'), refresh: 'r-a', expires: FUTURE })
+    )
+    const piDir = join(testHome, 'pi')
+    mkdirSync(piDir)
+    const pi = fakeTarget({ access: tok('ws-a', 'a2'), refresh: 'r-a2', expires: FUTURE + 60_000 })
+    pi.target.authFilePath = () => join(piDir, 'auth.json')
+    const opencode = fakeOpencodeTarget()
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: pi.target, opencode: opencode.target })
+
+    await sync.start()
+
+    // Not behaving as disconnected: opencode vended, timer and watcher armed.
+    expect(fedRefreshes(opencode.feed)).toEqual(['r-a'])
+    expect(internals(sync).runtimes.get(a.id)?.refreshTimer).toBeDefined()
+    expect(internals(sync).watchers.has('pi')).toBe(true)
+    sync.stop()
+  })
+})
+
+describe('CredentialSync corrupted accounts', () => {
+  /**
+   * The shape the bug left behind: A holds B's exact token pair (B's workspace)
+   * beside its own stored ws-a. A is cross-wired; B is genuine, healthy and due.
+   */
+  async function crossWired(): Promise<{ vault: AuthVault; a: VaultAccount; b: VaultAccount }> {
+    const now = Date.now()
+    const { vault, a, b } = await twoAccounts()
+    await vault.setActiveAccount(CHATGPT_PROVIDER_ID, b.id)
+    tamper((list) => {
+      list[0].credential.access = list[1].credential.access
+      list[0].credential.refresh = list[1].credential.refresh
+      list[0].credential.expires = now + REFRESH_MARGIN_MS + 1_000
+      list[1].credential.expires = now + REFRESH_MARGIN_MS + 1_000
+    })
+    return { vault, a, b }
+  }
+
+  it('flags a cross-wired account at start and never spends its refresh token', async () => {
+    vi.useFakeTimers()
+    const { vault, a, b } = await crossWired()
+    const refreshAccessToken = vi.fn(async (refresh: string) => ({
+      access_token: tok('ws-b', `${refresh}-next`),
+      refresh_token: `${refresh}-next`,
+      expires_in: 3600
+    }))
+    const sync = new CredentialSync({ vault, refreshAccessToken })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
+
+    await sync.start()
+    const status = await sync.getStatus()
+    expect(status.accounts.find((x) => x.id === a.id)?.needsReauth).toBe(true)
+    expect(status.accounts.find((x) => x.id === b.id)?.needsReauth).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(10_000) // time passes: only B is due
+    await sync.switchActiveAccount(a.id) // a switch to it arms a timer ...
+    await vi.advanceTimersByTimeAsync(10_000) // ... that must not refresh
+    await sync.refreshNow()
+    const token = await sync.injectionTokenFor(a.id, 24 * 60 * 60 * 1000)
+
+    expect(token).toBeNull()
+    // Only B's tokens were ever spent (refreshNow forces B a second time).
+    expect(refreshAccessToken.mock.calls.map((call) => call[0])).toEqual(['r-b', 'r-b-next'])
+    expect((await sync.getStatus()).accounts.find((x) => x.id === a.id)?.needsReauth).toBe(true)
+    // The healthy account injects as before.
+    expect((await sync.injectionTokenFor(b.id))?.chatgptAccountId).toBe('ws-b')
+    sync.stop()
+  })
+
+  it('flags both accounts of a duplicate workspace, or of a shared refresh token', async () => {
+    vi.useFakeTimers()
+    const refreshAccessToken = vi.fn()
+    const forgeries: Array<(list: VaultAccount[]) => void> = [
+      (list) => {
+        // B now stores and holds A's workspace.
+        list[1].accountId = 'ws-a'
+        list[1].credential.accountId = 'ws-a'
+        list[1].credential.access = tok('ws-a', 'dup')
+      },
+      (list) => {
+        list[1].credential.refresh = list[0].credential.refresh
+      }
+    ]
+    for (const forge of forgeries) {
+      const { vault, a, b } = await twoAccounts()
+      tamper((list) => {
+        forge(list)
+        for (const account of list) {
+          account.credential.expires = Date.now() + REFRESH_MARGIN_MS + 1_000
+        }
+      })
+      const pi = fakeTarget({ access: tok('ws-a', 'a2'), refresh: 'r-new', expires: FUTURE + 1 })
+      const sync = new CredentialSync({ vault, refreshAccessToken })
+      sync.configure({ pi: pi.target, opencode: fakeOpencodeTarget().target })
+      const before = await vault.listAccounts(CHATGPT_PROVIDER_ID)
+
+      await sync.start()
+      await vi.advanceTimersByTimeAsync(10_000)
+      await sync.refreshNow()
+
+      const status = await sync.getStatus()
+      expect(status.accounts.map((x) => x.needsReauth)).toEqual([true, true])
+      expect(await sync.injectionTokenFor(a.id)).toBeNull()
+      expect(await sync.injectionTokenFor(b.id)).toBeNull()
+      expect(refreshAccessToken).not.toHaveBeenCalled()
+      expect(await vault.listAccounts(CHATGPT_PROVIDER_ID)).toEqual(before) // nothing adopted
+      sync.stop()
+      rmSync(vaultPath())
+    }
+  })
+
+  it('re-signing in the cross-wired account clears the flag and injects it again', async () => {
+    const { vault, a } = await crossWired()
+    const sync = new CredentialSync({ vault, refreshAccessToken: vi.fn() })
+    sync.configure({ pi: fakeTarget().target, opencode: fakeOpencodeTarget().target })
+    await sync.start()
+    expect((await sync.getStatus()).accounts.find((x) => x.id === a.id)?.needsReauth).toBe(true)
+
+    vi.spyOn(vault, 'completeLogin').mockImplementation(
+      async () =>
+        (
+          await vault.upsertAccount(
+            CHATGPT_PROVIDER_ID,
+            cred({
+              ws: 'ws-a',
+              access: tok('ws-a', 'a2'),
+              refresh: 'r-a2',
+              expires: FUTURE + 120_000
+            })
+          )
+        ).credential
+    )
+    await sync.completeLogin()
+
+    expect((await sync.getStatus()).accounts.find((x) => x.id === a.id)?.needsReauth).toBe(false)
+    expect((await sync.injectionTokenFor(a.id))?.chatgptAccountId).toBe('ws-a')
     sync.stop()
   })
 })

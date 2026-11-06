@@ -275,6 +275,29 @@ export function computeResidencyFromToken(token: string): string | undefined {
   return residency
 }
 
+/**
+ * The workspace an access token is explicitly minted for: its `chatgpt_account_id`
+ * claim, auth namespace first, then top level. Deliberately NOT
+ * {@link extractAccountId}: that falls back to `organizations[0].id`, which names
+ * an org, not the workspace the token bills. Undefined for a non-JWT or a
+ * claim-less token.
+ */
+export function tokenWorkspace(accessToken: string): string | undefined {
+  const claims = parseJwtClaims(accessToken)
+  if (!claims) return undefined
+  return (
+    claims['https://api.openai.com/auth']?.chatgpt_account_id ||
+    claims.chatgpt_account_id ||
+    undefined
+  )
+}
+
+/** A stored workspace id that disagrees with the workspace its own access token names. */
+export function isCrossWired(cred: { access: string; accountId?: string }): boolean {
+  const workspace = tokenWorkspace(cred.access)
+  return workspace !== undefined && cred.accountId !== undefined && workspace !== cred.accountId
+}
+
 /** id_token preferred, access_token fallback; claim priority: chatgpt_account_id → the auth-namespace claim → organizations[0].id. */
 export function extractAccountId(tokens: {
   id_token?: string
@@ -460,7 +483,10 @@ export function buildVaultCredential(
     refresh: tokens.refresh_token,
     expires: now() + (tokens.expires_in ?? 3600) * 1000
   }
-  const accountId = extractAccountId(tokens) ?? prior?.accountId
+  // The access token's own workspace wins, so a stored id never disagrees with
+  // the token it sits beside (an id_token `organizations` fallback could).
+  const accountId =
+    tokenWorkspace(tokens.access_token) ?? extractAccountId(tokens) ?? prior?.accountId
   const email = extractEmail(tokens) ?? prior?.email
   const planType = extractPlanType(tokens) ?? prior?.planType
   const userId = extractUserId(tokens) ?? prior?.userId

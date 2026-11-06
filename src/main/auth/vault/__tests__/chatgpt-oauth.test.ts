@@ -25,10 +25,14 @@ import {
   extractAccountId,
   extractEmail,
   parsePastedCallback,
+  tokenWorkspace,
+  isCrossWired,
   ChatgptLoginFlow,
   type PkceCodes,
   type TokenResponse
 } from '../../../../core/auth/vault/chatgpt-oauth'
+
+import { fakeChatgptJwt } from './fixtures/fake-jwt'
 
 function makeJwt(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')
@@ -264,6 +268,51 @@ describe('buildVaultCredential', () => {
     )
     expect(cred.accountId).toBe('acct-fresh')
     expect(cred.email).toBe('fresh@example.com')
+  })
+})
+
+describe('tokenWorkspace / isCrossWired', () => {
+  it('reads the auth-namespace claim, then the top-level one', () => {
+    expect(tokenWorkspace(fakeChatgptJwt({ ws: 'ws-a' }))).toBe('ws-a')
+    expect(tokenWorkspace(makeJwt({ chatgpt_account_id: 'ws-top' }))).toBe('ws-top')
+    expect(
+      tokenWorkspace(
+        makeJwt({
+          chatgpt_account_id: 'ws-top',
+          'https://api.openai.com/auth': { chatgpt_account_id: 'ws-ns' }
+        })
+      )
+    ).toBe('ws-ns')
+  })
+
+  it('is undefined for an organizations-only, claim-less or malformed token', () => {
+    expect(tokenWorkspace(makeJwt({ organizations: [{ id: 'org-1' }] }))).toBeUndefined()
+    expect(tokenWorkspace(makeJwt({ email: 'a@example.test' }))).toBeUndefined()
+    expect(tokenWorkspace('fake-access')).toBeUndefined()
+    expect(tokenWorkspace('a.!!!.c')).toBeUndefined()
+  })
+
+  it('isCrossWired needs both ids known and different', () => {
+    const access = fakeChatgptJwt({ ws: 'ws-a' })
+    expect(isCrossWired({ access, accountId: 'ws-b' })).toBe(true)
+    expect(isCrossWired({ access, accountId: 'ws-a' })).toBe(false)
+    expect(isCrossWired({ access })).toBe(false)
+    expect(isCrossWired({ access: 'fake-access', accountId: 'ws-b' })).toBe(false)
+  })
+
+  it('buildVaultCredential prefers the access token workspace over an id_token organizations fallback', () => {
+    const cred = buildVaultCredential(
+      {
+        id_token: makeJwt({ organizations: [{ id: 'org-1' }] }),
+        access_token: fakeChatgptJwt({ ws: 'ws-a' }),
+        refresh_token: 'r',
+        expires_in: 100
+      },
+      () => 0,
+      { accountId: 'ws-prior' }
+    )
+    expect(cred.accountId).toBe('ws-a')
+    expect(isCrossWired(cred)).toBe(false)
   })
 })
 
