@@ -108,6 +108,7 @@ import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 import { transformAssistantMessage } from './assistant-message'
 import { extractToolResultContent } from './tool-result-content'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
+import { modelFallbackText, retractedMessageIds, retractionKey } from './claude-model-fallback'
 import type { ItemStreamOpen, ItemStreamSeal, ItemStreamTarget } from '../shared/sync/item-stream'
 // pi target primitives (ADR-033 M4c — pi as a dispatch TARGET). None of these
 // leaf modules import THIS file (or PiSession.ts, which does), so — same
@@ -162,6 +163,7 @@ import type {
   ResultMessage,
   SDKMessage,
   SdkToolExtra,
+  SystemMessage,
   ThinkingConfig
 } from '../sdk'
 import { logger } from './logger'
@@ -1299,6 +1301,12 @@ interface ClaudeTargetEntry extends TargetLedgerFields {
    * resolving both through this map puts them on one item-lane state.
    */
   agentRunAliases: Map<string, string>
+  /**
+   * The retraction key of each of the target's own assistant frames → its message id, so a
+   * `model_refusal_fallback` takes the refused partial off the card (`ClaudeSession`'s
+   * `wireUuidToMessageId`). Lives as long as the target's process.
+   */
+  wireUuids: Map<string, string>
 }
 
 /**
@@ -7027,9 +7035,19 @@ export class CrossEngineDispatcher {
         const nativeOwner = runOwner(
           (msg as unknown as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined
         )
+        if (nativeOwner === undefined && typeof msg.uuid === 'string')
+          entry.wireUuids.set(retractionKey(msg.uuid), chatMsg.id)
         if (entry.itemStreams.handleSnapshot(chatMsg, nativeOwner) === 'none')
           entry.ctx.emit('session:subagent-message', { toolUseId, message: chatMsg })
       }
+      return
+    }
+
+    if (
+      msg.type === 'system' &&
+      (msg.subtype === 'model_refusal_fallback' || msg.subtype === 'model_fallback')
+    ) {
+      this.noteClaudeTargetFallback(entry, msg, toolUseId)
       return
     }
 
@@ -7053,6 +7071,41 @@ export class CrossEngineDispatcher {
         })
       }
     }
+  }
+
+  /**
+   * The target's Claude Code switched models (docs/protocol-cc/04-system-subtypes.md §4.20–4.21):
+   * a refusal swaps it for the rest of its session, an availability error for the turn. A root
+   * session says so in a warning (`ClaudeSession.handleModelFallback`); here it goes on the
+   * card, as a notice in the target's transcript, so the user knows which model the X-Agent's
+   * work came from. A refusal also takes the refused partial off the card first, scoped to this
+   * card: the parent's own transcript and streams are not the target's.
+   */
+  private noteClaudeTargetFallback(
+    entry: ClaudeTargetEntry,
+    msg: SystemMessage,
+    toolUseId: string
+  ): void {
+    logger.warn(
+      'CrossEngineDispatcher',
+      `target ${entry.ledgerId} ${msg.subtype}: ${msg.original_model} -> ${msg.fallback_model} (trigger=${msg.trigger})`
+    )
+    if (msg.subtype === 'model_refusal_fallback') {
+      const messageIds = retractedMessageIds(msg, (key) => entry.wireUuids.get(key))
+      entry.itemStreams.retract(messageIds)
+      // Only what it names. cli.js has already closed the refused message's streams (§4.20
+      // "Ordering"), so an empty list could only clear the card's OTHER live streams (the
+      // target's own agents), and an older reducer would read it as "clear the parent's".
+      if (messageIds.length > 0)
+        entry.ctx.emit('session:messages-retracted', { messageIds, ownerToolUseId: toolUseId })
+    }
+    const notice: ChatMessage = {
+      id: `notice-${typeof msg.uuid === 'string' && msg.uuid ? msg.uuid : uuidv4()}`,
+      role: 'system',
+      content: [{ type: 'notice', text: modelFallbackText(msg) }],
+      timestamp: this.now()
+    }
+    entry.ctx.emit('session:subagent-message', { toolUseId, message: notice })
   }
 
   /**
@@ -7215,7 +7268,8 @@ export class CrossEngineDispatcher {
       turnToolUseIds: new Set(),
       itemStreams: undefined as unknown as ClaudeItemStreamLifecycle,
       agentOrigins: new Map(),
-      agentRunAliases: new Map()
+      agentRunAliases: new Map(),
+      wireUuids: new Map()
     }
     entry.itemStreams = new ClaudeItemStreamLifecycle({
       open: (target, message, startedAt) => {

@@ -168,8 +168,14 @@ export interface SyncEventMap {
     }
   ) => void
   'session:message': (routingId: string, msg: ChatMessage) => void
-  /** Refusal-fallback retraction (docs/protocol-cc/04-system-subtypes.md §4.20). */
-  'session:messages-retracted': (routingId: string, data: { messageIds: string[] }) => void
+  /**
+   * Refusal-fallback retraction (docs/protocol-cc/04-system-subtypes.md §4.20). With
+   * `ownerToolUseId`, a dispatched agent's: only that card's transcript and streams.
+   */
+  'session:messages-retracted': (
+    routingId: string,
+    data: { messageIds: string[]; ownerToolUseId?: string }
+  ) => void
   /**
    * Tool calls streamed but cut off before cli.js confirmed them (an output-limit
    * cut, an interrupted stream): removed with their keyed result/review/denial

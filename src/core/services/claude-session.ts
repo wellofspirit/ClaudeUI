@@ -86,6 +86,7 @@ import { accountState, buildClaudeAccountRef, updateClaudeAuthSource } from '../
 import { equivalentCostUsd } from '../../shared/pricing'
 import { withoutToolUses } from '../../shared/content-blocks'
 import { resolveUsageProvider } from './usage-provider'
+import { modelFallbackText, retractedMessageIds, retractionKey } from './claude-model-fallback'
 import {
   claudeThinkingRequest,
   isClaudeModelAlias,
@@ -110,13 +111,6 @@ export { getCliVersion } from '../sdk'
 export function getCliJsPath(): string {
   return locateBunClaude()
 }
-
-/**
- * cli.js compares retracted_message_uuids against frame uuids truncated to 24
- * chars (its `JWK` constant) so per-block derived uuids resolve to their base
- * frame. Mirror that here. See docs/protocol-cc/04-system-subtypes.md §4.20.
- */
-const RETRACTION_UUID_PREFIX_LEN = 24
 
 /**
  * SDK options for the CLI spawn. They name no executable: `query()` spawns the
@@ -1605,7 +1599,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
 
     if (chatMsg) {
       if (!parentToolUseId && typeof msg.uuid === 'string') {
-        this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
+        this.wireUuidToMessageId.set(retractionKey(msg.uuid), chatMsg.id)
       }
       const snapshot = this.itemStreams.handleSnapshot(chatMsg, parentToolUseId)
       if (snapshot !== 'none') {
@@ -1837,11 +1831,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    * Shapes in docs/protocol-cc/04-system-subtypes.md §4.20–4.21.
    */
   private handleModelFallback(msg: SystemMessage): void {
-    const fallbackText =
-      msg.subtype === 'model_refusal_fallback'
-        ? `${msg.original_model || 'The model'} refused this request — switched to ${msg.fallback_model || 'a fallback model'} for the rest of the session.`
-        : `${msg.original_model || 'The model'} is unavailable — using ${msg.fallback_model || 'a fallback model'} for this turn.`
-    const text = msg.content || fallbackText
+    const text = modelFallbackText(msg)
     logger.warn(
       'ClaudeSession',
       `${msg.subtype}: ${msg.original_model} -> ${msg.fallback_model} (trigger=${msg.trigger})`
@@ -1853,14 +1843,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     // Sent even when nothing resolves — the renderer also clears any streamed
     // partial text the retracted message left behind.
     if (msg.subtype === 'model_refusal_fallback') {
-      const retracted = msg.retracted_message_uuids ?? []
-      const messageIds = [
-        ...new Set(
-          retracted
-            .map((u) => this.wireUuidToMessageId.get(u.slice(0, RETRACTION_UUID_PREFIX_LEN)))
-            .filter((id): id is string => !!id)
-        )
-      ]
+      const messageIds = retractedMessageIds(msg, (key) => this.wireUuidToMessageId.get(key))
       if (messageIds.length > 0) {
         this.messageHistory = this.messageHistory.filter((m) => !messageIds.includes(m.id))
       }

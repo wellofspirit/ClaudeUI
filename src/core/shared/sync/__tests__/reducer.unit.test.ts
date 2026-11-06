@@ -1007,6 +1007,76 @@ describe('reducer — transcript', () => {
     expect(s.sessions['rid'].messages.map((m) => m.id)).toEqual(['m2'])
   })
 
+  describe("a dispatched agent's retraction (ownerToolUseId)", () => {
+    const say = (id: string): ChatMessage => assistant(id, [{ type: 'text', text: id }])
+    const open = (messageId: string, owner?: string): [string, ...unknown[]] => [
+      'session:item-open',
+      'rid',
+      {
+        target: {
+          messageId,
+          blockIndex: 0,
+          kind: 'text',
+          ...(owner ? { ownerToolUseId: owner } : {})
+        },
+        message: say(messageId)
+      }
+    ]
+    const streams = (s: ReturnType<typeof fold>): string[] =>
+      Object.values(s.sessions['rid'].itemStreams)
+        .map((i) => `${i.target.ownerToolUseId ?? 'root'}:${i.target.messageId}`)
+        .sort()
+    const sub = (owner: string, id: string): [string, ...unknown[]] => [
+      'session:subagent-message',
+      'rid',
+      { toolUseId: owner, message: say(id) }
+    ]
+
+    it("removes the named messages and streams from that card only, never the session's own", () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', say('refused')],
+        sub('card', 'refused'),
+        sub('card', 'kept'),
+        sub('other', 'refused'),
+        open('root-live'),
+        open('refused-live', 'card'),
+        open('card-live', 'card'),
+        open('refused-live', 'other'),
+        [
+          'session:messages-retracted',
+          'rid',
+          { messageIds: ['refused', 'refused-live'], ownerToolUseId: 'card' }
+        ]
+      ])
+      const session = s.sessions['rid']
+      expect(session.subagentMessages['card'].map((m) => m.id)).toEqual(['kept', 'card-live'])
+      expect(session.subagentMessages['other'].map((m) => m.id)).toEqual([
+        'refused',
+        'refused-live'
+      ])
+      expect(session.messages.map((m) => m.id)).toEqual(['refused', 'root-live'])
+      expect(streams(s)).toEqual(['card:card-live', 'other:refused-live', 'root:root-live'])
+    })
+
+    // Unlike the session's own retraction, where an empty list clears every stream: the card's
+    // other live streams (the target's own agents) must keep streaming.
+    it('with no ids, takes nothing back', () => {
+      const before = fold([
+        created(),
+        open('root-live'),
+        open('card-live', 'card'),
+        open('other-live', 'other')
+      ])
+      const after = fold(
+        [['session:messages-retracted', 'rid', { messageIds: [], ownerToolUseId: 'card' }]],
+        before
+      )
+      expect(after).toBe(before)
+      expect(streams(after)).toEqual(['card:card-live', 'other:other-live', 'root:root-live'])
+    })
+  })
+
   it('mints a DETERMINISTIC id for a user message (the payload carries none)', () => {
     // Recorded divergence: `session:user-message` has no id/timestamp on the wire,
     // so the renderer mints `msg-<uuid>`/Date.now() and core mints `user-<seq>`/0.
