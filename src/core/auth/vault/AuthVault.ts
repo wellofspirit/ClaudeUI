@@ -5,7 +5,12 @@ import { createHash, randomBytes } from 'node:crypto'
 import { validateSharedProviderId } from '../../../shared/shared-provider'
 import { logger } from '../../services/logger'
 import { hostOAuthLoopback } from '../../host'
-import { ChatgptLoginFlow, type LoginFlow, type VaultCredential } from './chatgpt-oauth'
+import {
+  ChatgptLoginFlow,
+  tokenWorkspace,
+  type LoginFlow,
+  type VaultCredential
+} from './chatgpt-oauth'
 import {
   ChatgptDeviceCodeFlow,
   type DeviceCodeFlowLike,
@@ -288,6 +293,13 @@ export class AuthVault {
     if (!entry || !existing) {
       logger.debug('AuthVault', `saveAccountCredential: no account ${id} under ${providerId}`)
       return
+    }
+    // Storage invariant: an account never holds another workspace's token.
+    const workspace = tokenWorkspace(credential.access)
+    if (existing.accountId && workspace && workspace !== existing.accountId) {
+      throw new Error(
+        `Refusing to store another ChatGPT workspace's credential on vault account ${id}`
+      )
     }
     const updated: VaultAccount = {
       ...existing,
