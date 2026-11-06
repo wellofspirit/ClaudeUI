@@ -149,6 +149,7 @@ import type { ResolvedCosts } from '../../shared/cost-rule'
 import { opencodeMessageCosts } from '../opencode/message-cost'
 import { piMessageCosts, type PiCostReport, type PiCostTokens } from '../pi/message-cost'
 import { ENGINE_META, engineMeta } from '../../shared/engine-meta'
+import { claudeThinkingRequest } from '../../shared/model-capabilities'
 import { query as sdkQuery, sendProgress } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import type {
@@ -160,7 +161,8 @@ import type {
   QueryHandle,
   ResultMessage,
   SDKMessage,
-  SdkToolExtra
+  SdkToolExtra,
+  ThinkingConfig
 } from '../sdk'
 import { logger } from './logger'
 // The ADR-071 §1 ledger half of a dispatched turn. Every one of these modules
@@ -547,6 +549,12 @@ export interface ClaudeQuerySpawnOpts {
   allowedTools?: string[]
   /** Every stream-json frame as it is read off the wire, before the dispatcher's own loop (who made a tool call). */
   onInboundFrame?: (frame: Record<string, unknown>) => void
+  /**
+   * `--thinking` / `--thinking-display` (`claudeThinkingRequest`): a root session's default
+   * (adaptive, summarized), so the card shows the target's thinking. Without the display the
+   * target's Opus 4.7+ thinking arrives as a bare signature with no text.
+   */
+  thinking?: ThinkingConfig
 }
 
 /**
@@ -2248,6 +2256,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
       ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
       ...(opts.onInboundFrame ? { onInboundFrame: opts.onInboundFrame } : {}),
+      ...(opts.thinking ? { thinking: opts.thinking } : {}),
       abortController: opts.abortController,
       canUseTool: opts.canUseTool,
       // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
@@ -7076,6 +7085,7 @@ export class CrossEngineDispatcher {
     entry.query = await this.spawnClaudeQuery({
       cwd,
       model,
+      thinking: claudeThinkingRequest(model, 'adaptive'),
       permissionMode: mode.permissionMode,
       allowDangerouslySkipPermissions: mode.allowDangerouslySkipPermissions,
       canUseTool: shell.canUseTool,

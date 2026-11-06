@@ -87,10 +87,9 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { withoutToolUses } from '../../shared/content-blocks'
 import { resolveUsageProvider } from './usage-provider'
 import {
+  claudeThinkingRequest,
   isClaudeModelAlias,
-  resolveThinkingMode,
-  resolveClaudeCapabilities,
-  type ThinkingMode
+  resolveClaudeCapabilities
 } from '../../shared/model-capabilities'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
@@ -1095,7 +1094,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
           abortController: this.abortController,
           onInboundFrame: (frame) => this.toolUseOwners.noteFrame(frame),
           includePartialMessages: true,
-          thinking: this.buildThinkingConfig(),
+          // The session's mode coerced for the model, with summarized display (Opus 4.7+ shows no
+          // thinking text without it).
+          thinking: claudeThinkingRequest(this.model, this.thinkingMode),
           effort: this.effort as 'low' | 'medium' | 'high',
           stderr: (chunk) => {
             const text = chunk.toString().trim()
@@ -2653,24 +2654,6 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     if (mode === 'adaptive' || mode === 'enabled' || mode === 'disabled') {
       this.thinkingMode = mode
     }
-  }
-
-  /**
-   * Build the SDK `thinking` option from the session's mode and current model.
-   * Always requests `display: 'summarized'` so Opus 4.7+ surfaces reasoning text;
-   * the field is silently ignored on models that don't honour it.
-   *
-   * `adaptive` is auto-coerced to `enabled` when the model lacks adaptive support
-   * (older models would otherwise reject the request).
-   */
-  private buildThinkingConfig():
-    | { type: 'adaptive'; display: 'summarized' }
-    | { type: 'enabled'; display: 'summarized' }
-    | { type: 'disabled' } {
-    const resolved: ThinkingMode = resolveThinkingMode(this.model, this.thinkingMode)
-    if (resolved === 'disabled') return { type: 'disabled' }
-    if (resolved === 'adaptive') return { type: 'adaptive', display: 'summarized' }
-    return { type: 'enabled', display: 'summarized' }
   }
 
   /**

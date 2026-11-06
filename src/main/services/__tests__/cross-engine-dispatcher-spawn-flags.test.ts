@@ -10,7 +10,8 @@
  * visible here, with the SDK's `query` replaced.
  */
 import { describe, expect, it, vi } from 'vitest'
-import type { QueryHandle, SDKMessage } from '../../../core/sdk'
+import type { QueryHandle, QueryOptions, SDKMessage } from '../../../core/sdk'
+import { buildArgs } from '../../../core/sdk/args'
 import { CrossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
 import type { DispatchContext } from '../../../core/services/cross-engine-dispatcher'
 import { makeFakeDispatchLedger } from '../../../test/helpers/fake-dispatch-ledger'
@@ -62,32 +63,36 @@ function ctx(): DispatchContext {
   }
 }
 
+function makeDispatcher(ledger: ReturnType<typeof makeFakeDispatchLedger>): CrossEngineDispatcher {
+  return withDefaultDescription(
+    new CrossEngineDispatcher({
+      serverManager: {
+        acquire: vi.fn(),
+        releaseIfCurrent: vi.fn(),
+        subscribeExit: vi.fn(() => () => {})
+      },
+      makeClient: vi.fn(),
+      loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
+      loadUserRules: () => ({
+        allow: [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      }),
+      resolveMaxConcurrent: () => 5,
+      ledger,
+      locateClaudeTranscript: () => '/projects/x.jsonl',
+      targetCwdExists: () => true
+    })
+  )
+}
+
 describe('the real Claude dispatch spawn (ADR-105)', () => {
   it('persists the session under the recorded uuid, and --resume-s it after the process is gone', async () => {
     mocks.query.mockReset()
     const ledger = makeFakeDispatchLedger()
-    const dispatcher = withDefaultDescription(
-      new CrossEngineDispatcher({
-        serverManager: {
-          acquire: vi.fn(),
-          releaseIfCurrent: vi.fn(),
-          subscribeExit: vi.fn(() => () => {})
-        },
-        makeClient: vi.fn(),
-        loadEngineConfig: () => ({ dispatch: { defaultModel: 'haiku' } }),
-        loadUserRules: () => ({
-          allow: [],
-          deny: [],
-          ask: [],
-          additionalDirectories: [],
-          defaultMode: undefined
-        }),
-        resolveMaxConcurrent: () => 5,
-        ledger,
-        locateClaudeTranscript: () => '/projects/x.jsonl',
-        targetCwdExists: () => true
-      })
-    )
+    const dispatcher = makeDispatcher(ledger)
 
     // The ledger row is there when `query` is called: the uuid it names is the one used.
     const rowAtSpawn: unknown[] = []
@@ -117,5 +122,32 @@ describe('the real Claude dispatch spawn (ADR-105)', () => {
     expect(resumed.sessionId).toBeUndefined()
     expect(resumed.persistSession).toBeUndefined()
     expect(resumed.cwd).toBe('/tmp/proj')
+  })
+
+  // A target spawned without `--thinking-display summarized` streamed its Opus 4.7+ thinking as a
+  // bare signature: the card showed nothing for minutes while the X-Agent was thinking.
+  it('asks for summarized thinking, like a root session, when created and when resumed', async () => {
+    mocks.query.mockReset()
+    const dispatcher = makeDispatcher(makeFakeDispatchLedger())
+    mocks.query.mockImplementation(() => oneTurnProcess('claude-sess-2'))
+
+    const first = await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'one', model: 'opus' },
+      ctx()
+    )
+    dispatcher.disposeFor('parent-A')
+    await dispatcher.dispatch(
+      { engine: 'claude', prompt: 'two', sessionId: first.sessionId },
+      ctx()
+    )
+
+    expect(mocks.query).toHaveBeenCalledTimes(2)
+    for (const [input] of mocks.query.mock.calls) {
+      const args = buildArgs((input as { options: QueryOptions }).options)
+      const at = args.indexOf('--thinking-display')
+      expect(at).toBeGreaterThan(-1)
+      expect(args[at + 1]).toBe('summarized')
+      expect(args[args.indexOf('--thinking') + 1]).toBe('adaptive')
+    }
   })
 })
