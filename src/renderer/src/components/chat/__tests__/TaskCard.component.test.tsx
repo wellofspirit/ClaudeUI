@@ -1946,17 +1946,22 @@ describe('TaskCard - a SubagentHandback report', () => {
     isError: false
   }
 
-  function renderEnded(extra: {
-    summary: string
-    handback?: 'send' | 'flagged' | 'withheld'
-    warning?: string
-  }): void {
-    seed.subagentMessage(ROUTE, 'call_task_1', {
-      id: 'child_m1',
-      role: 'assistant',
-      content: [{ type: 'text', text: 'looking around' }],
-      timestamp: Date.now()
-    })
+  function renderEnded(
+    extra: {
+      summary: string
+      handback?: 'send' | 'flagged' | 'withheld'
+      warning?: string
+    },
+    { withOutput = true }: { withOutput?: boolean } = {}
+  ): void {
+    if (withOutput) {
+      seed.subagentMessage(ROUTE, 'call_task_1', {
+        id: 'child_m1',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'looking around' }],
+        timestamp: Date.now()
+      })
+    }
     seed.taskNotification(ROUTE, {
       taskId: 'task-abc123',
       toolUseId: 'call_task_1',
@@ -1968,39 +1973,74 @@ describe('TaskCard - a SubagentHandback report', () => {
     fireEvent.click(screen.getByTestId('TaskCard.expand'))
   }
 
-  it('send: the report text is on the card, and no warning', () => {
+  // The agent's stream already holds the report (its "Hand back" tool call), so
+  // the card adds only what the stream cannot say.
+  it('send, stream on screen: no pinned report at all', () => {
     renderEnded({ summary: 'Found 3 files.', handback: 'send' })
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
+  })
+
+  it('send, no stream (transcript missing): the report text is on the card, and no warning', () => {
+    renderEnded({ summary: 'Found 3 files.', handback: 'send' }, { withOutput: false })
     expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
     expect(screen.getByTestId('HandbackReport.text')).toHaveTextContent('Found 3 files.')
     expect(screen.queryByTestId('HandbackReport.warning')).not.toBeInTheDocument()
   })
 
-  it('flagged: the security warning is shown above the report', () => {
+  it('flagged, stream on screen: the security warning stays, the report body does not', () => {
     renderEnded({
       summary: 'Found 3 files.',
       handback: 'flagged',
       warning: 'SECURITY WARNING: auto mode blocked this subagent’s report.'
     })
+    expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent(
+      'SECURITY WARNING: auto mode blocked'
+    )
+    expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+  })
+
+  it('flagged, no stream: the security warning is shown above the report', () => {
+    renderEnded(
+      {
+        summary: 'Found 3 files.',
+        handback: 'flagged',
+        warning: 'SECURITY WARNING: auto mode blocked this subagent’s report.'
+      },
+      { withOutput: false }
+    )
     const warning = screen.getByTestId('HandbackReport.warning')
     const text = screen.getByTestId('HandbackReport.text')
     expect(warning).toHaveTextContent('SECURITY WARNING: auto mode blocked')
     expect(warning.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('send with a note (no review ran, B-3c): the note is above the report, and it is not a security warning', () => {
+  it('send with a note (no review ran, B-3c), stream on screen: the note stays, not as a security warning', () => {
     renderEnded({
       summary: 'Found 3 files.',
       handback: 'send',
       warning: 'Note: the report could not be reviewed (HTTP 503). Please verify it carefully.'
     })
-    const note = screen.getByTestId('HandbackReport.note')
-    expect(note).toHaveTextContent('Note: the report could not be reviewed (HTTP 503)')
+    expect(screen.getByTestId('HandbackReport.note')).toHaveTextContent(
+      'Note: the report could not be reviewed (HTTP 503)'
+    )
     expect(screen.queryByTestId('HandbackReport.warning')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+  })
+
+  it('send with a note, no stream: the note is above the report', () => {
+    renderEnded(
+      {
+        summary: 'Found 3 files.',
+        handback: 'send',
+        warning: 'Note: the report could not be reviewed (HTTP 503). Please verify it carefully.'
+      },
+      { withOutput: false }
+    )
+    const note = screen.getByTestId('HandbackReport.note')
     expect(
       note.compareDocumentPosition(screen.getByTestId('HandbackReport.text')) &
         Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
-    expect(screen.getByTestId('HandbackReport')).toHaveAttribute('data-handback', 'send')
   })
 
   it('flagged without a warning text still says so', () => {
@@ -2017,6 +2057,41 @@ describe('TaskCard - a SubagentHandback report', () => {
       'ended without delivering a report'
     )
     expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+  })
+
+  // A resumed agent (ADR-073): run 1's notification stays the latest until run 2
+  // ends, so the card must not pin run 1's lines under run 2's live stream.
+  it('a resumed run hides the previous run’s hand-back, then shows its own once it ends', () => {
+    const notify = (summary: string, warning: string): void =>
+      seed.taskNotification(ROUTE, {
+        taskId: 'task-abc123',
+        toolUseId: 'call_task_1',
+        status: 'completed',
+        outputFile: '',
+        summary,
+        handback: 'flagged',
+        warning
+      })
+    const card = <TaskCard block={makeTaskBlock()} result={launched} view={defaultTaskView} />
+    notify('run 1 report', 'RUN 1 WARNING')
+    const { rerender } = render(card)
+    fireEvent.click(screen.getByTestId('TaskCard.expand'))
+    expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent('RUN 1 WARNING')
+
+    seed.taskStarted(ROUTE, {
+      toolUseId: 'call_task_1',
+      taskId: 'task-abc123',
+      taskType: 'local_agent',
+      runIndex: 2
+    })
+    rerender(card)
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
+
+    notify('run 2 report', 'RUN 2 WARNING')
+    rerender(card)
+    expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent('RUN 2 WARNING')
+    expect(screen.queryByText('RUN 1 WARNING')).not.toBeInTheDocument()
   })
 
   it('a foreground agent’s tool_result is not repeated under its hand-back report', () => {

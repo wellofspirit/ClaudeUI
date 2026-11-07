@@ -12,7 +12,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useSessionAgentTypes } from '../../hooks/useAgentRoster'
 import { ResumedBadge } from '../agents/ResumedBadge'
 import { MarkdownRenderer } from './MarkdownRenderer'
-import { HandbackReport, hasHandbackReport } from './HandbackReport'
+import { HandbackReport, handbackBodyShown, hasHandbackReport } from './HandbackReport'
 import { SubagentOutputBody, dispatchChildEngine } from './SubagentOutputBody'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 import { ApprovalButtons } from './ApprovalButtons'
@@ -939,11 +939,16 @@ export function TaskCard({
             ) : null}
           </div>
 
-          <HandbackReport
-            notification={bgNotification}
-            xAgent={isDispatch}
-            className="border-t border-border px-3 py-2"
-          />
+          {/* Body only when the stream above cannot show it; nothing while a resumed
+              run is going (the notification is the previous run's). */}
+          {!isRunning && !isQueued && (
+            <HandbackReport
+              notification={bgNotification}
+              xAgent={isDispatch}
+              showReport={handbackBodyShown(hasSubagentOutput, subagentPending, isDispatch)}
+              className="border-t border-border px-3 py-2"
+            />
+          )}
 
           {failureSummary && (
             <div
