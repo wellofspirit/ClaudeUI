@@ -14,9 +14,9 @@
  *
  * Consequences, all guarded below:
  *  - `resolvedModelId` stayed null, so a `default` session sized its context
- *    window with `getContextWindowSize('default')` → 200K. `default` really
- *    resolves to `claude-opus-5[1m]` (1M), so a 600K-token transcript rendered
- *    as 300% instead of 60%.
+ *    window from the alias table instead of the model cli.js actually runs.
+ *    (The table now sizes `default` at 1M; an account whose `default` runs a
+ *    200K model is the case the alias alone gets wrong.)
  *  - `slash_commands` and `skills` were never emitted. (Slash commands are
  *    masked by `saveSlashCommands` persistence; `session:skills` has no other
  *    Claude emitter, so the skills list was simply empty.)
@@ -250,7 +250,8 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
       type: 'system',
       subtype: 'init',
       session_id: 's-init-1',
-      model: 'claude-opus-5[1m]',
+      // A 200K model: the alias table alone says `default` is 1M.
+      model: 'claude-sonnet-4-6',
       slash_commands: ['review', 'context', 'compact'],
       skills: ['unslop', 'dataviz'],
       mcp_servers: [],
@@ -259,18 +260,16 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
     })
     handle.emit(ASSISTANT_600K)
 
-    // 600_000 / 1_000_000 — NOT 300, which is what the 200K `default` fallback
-    // produced while the init branch sat behind the sessionId latch.
-    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(60))
+    // 600_000 / 200_000 — NOT 60, which is what the alias table's 1M
+    // `default` produces while the init branch sits behind the sessionId latch.
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(300))
 
-    // Both halves of the field, not just the percentage derived from them.
-    // `contextWindowSize` used to carry the CONSUMPTION under a name that says
-    // window — here, 600_000 under the spelling that promised 1_000_000. The
-    // pair is now stated explicitly, in the one place the ambiguity was most
-    // dangerous: an alias whose real window is five times the fallback.
+    // Both halves of the field, not just the percentage derived from them:
+    // `contextWindowSize` once carried the CONSUMPTION under a name that says
+    // window, so the pair is stated explicitly.
     expect(statusLines(sent).at(-1)!.contextWindow).toEqual({
       used: 600_000,
-      size: 1_000_000
+      size: 200_000
     })
 
     // The rest of the init payload reached the renderer too.
@@ -382,5 +381,42 @@ describe('ClaudeSession follows system/init for every alias (ADR-100)', () => {
     // Haiku 4.5's 200K must not size the `sonnet` session it switched to.
     await session.setModel('sonnet')
     expect(lastUsedPercentage(sent)).toBe(60)
+  })
+})
+
+/**
+ * cli.js streams a synthetic assistant line of its own ("No response
+ * requested." after a resume or interrupt): `<synthetic>` model, all-zero
+ * usage. It is no API call, so it must not reset the context length to 0.
+ */
+describe('ClaudeSession ignores synthetic assistant lines for usage', () => {
+  it('keeps the context length of the last real turn', async () => {
+    const { sent, handle } = await startSession('r-synthetic', 'opus')
+
+    emitInit(handle, 's-synth-1', 'claude-opus-5-5')
+    handle.emit(ASSISTANT_600K)
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(60))
+
+    handle.emit({
+      type: 'assistant',
+      message: {
+        id: 'msg_synth',
+        model: '<synthetic>',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0
+        },
+        content: [{ type: 'text', text: 'No response requested.' }]
+      }
+    })
+    // A changed init model re-emits the status line from the accumulators
+    // (another 1M model, so only `used` can move).
+    const before = statusLines(sent).length
+    emitInit(handle, 's-synth-1', 'claude-opus-5')
+    await vi.waitFor(() => expect(statusLines(sent).length).toBeGreaterThan(before))
+
+    expect(statusLines(sent).at(-1)!.contextWindow).toEqual({ used: 600_000, size: 1_000_000 })
   })
 })

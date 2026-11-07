@@ -790,11 +790,13 @@ const IMPLICIT_1M_BASE_MODELS = [
  * Picker aliases that cli.js's baked catalog resolves to an implicit-1M base model:
  * "fable" → claude-fable-5-1, "opus" → claude-opus-5-5 (as of 2.1.280),
  * "sonnet" → claude-sonnet-5-5 (as of 2.1.285; Sonnet has been native-1M since 2.1.197),
- * "haiku" → claude-haiku-5-5 (as of 2.1.293). Only the fallback before cli.js
- * reports what an alias resolves to for this account (ADR-100); re-verify this
- * set on claudeCliVersion bumps.
+ * "haiku" → claude-haiku-5-5 (as of 2.1.293). `default` follows the plan's
+ * recommendation — Opus on Max, Sonnet on Pro, both native-1M — so it sizes at
+ * 1M too; before this a reloaded `default` session read 200K until its first
+ * system/init. Only the fallback before cli.js reports what an alias resolves
+ * to for this account (ADR-100); re-verify this set on claudeCliVersion bumps.
  */
-const IMPLICIT_1M_ALIASES = new Set(['fable', 'haiku', 'opus', 'sonnet'])
+const IMPLICIT_1M_ALIASES = new Set(['default', 'fable', 'haiku', 'opus', 'sonnet'])
 
 /**
  * Resolve a model value (picker alias or full id) to its context-window size,
@@ -807,11 +809,11 @@ const IMPLICIT_1M_ALIASES = new Set(['fable', 'haiku', 'opus', 'sonnet'])
  * description: implicit-1M models (Fable 5, Opus 4.8) carry no "1m" marker in
  * their description, so a description heuristic silently caps them at 200K.
  *
- * Opaque aliases are the flip side of that: `default` names no model family at
- * all and deliberately falls through to `CONTEXT_WINDOW_DEFAULT`, because only
- * cli.js knows what it points at. A caller holding a `ModelInfo` must therefore
- * pass `resolvedModel` (`default` → `claude-opus-5[1m]`) rather than `value`,
- * or a 1M session is sized at 200K.
+ * Aliases are the flip side of that: only cli.js knows what `default` or a
+ * family alias points at for this account, so the alias table above is a
+ * fallback. A caller holding a `ModelInfo` should pass `resolvedModel`
+ * (`default` → `claude-opus-5-5`) rather than `value` so the window follows
+ * what cli.js actually runs.
  */
 export function resolveContextWindow(modelValue: string | undefined | null): number {
   if (!modelValue) return CONTEXT_WINDOW_DEFAULT

@@ -63,6 +63,7 @@ import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
 import { scanSkills } from './skill-scanner'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
+import { isSyntheticModel } from './block-usage'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
@@ -3159,7 +3160,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    */
   private accumulateUsage(msg: Record<string, unknown>, isSidechain: boolean): boolean {
     const betaMessage = msg.message as Record<string, unknown> | undefined
-    if (!betaMessage) return false
+    // A synthetic line (cli.js's own, zero usage) would reset the context length to 0.
+    if (!betaMessage || isSyntheticModel(betaMessage.model)) return false
     const usage = betaMessage.usage as Record<string, number> | undefined
     if (!usage) return false
 

@@ -164,6 +164,16 @@ export function calculateCostFromTokens(
 }
 
 /**
+ * True for the model cli.js stamps on assistant lines it writes itself, never
+ * from an API call: "No response requested." after a resume or interrupt, and
+ * the API-error lines. They carry all-zero usage and name no model, so they
+ * must not stand in for the session's model or its latest context length.
+ */
+export function isSyntheticModel(model: unknown): boolean {
+  return model === '<synthetic>'
+}
+
+/**
  * Normalize model names so short forms ("sonnet", "haiku", "opus") and
  * full forms ("claude-sonnet-4-6", "claude-haiku-4-5-20251001") map to
  * the same canonical key. Filters out synthetic models.
@@ -171,7 +181,7 @@ export function calculateCostFromTokens(
 export function normalizeModelName(model: string): string | null {
   const lower = model.toLowerCase()
   // Filter out synthetic / invalid models
-  if (lower === '<synthetic>' || lower === 'unknown' || !model) return null
+  if (isSyntheticModel(lower) || lower === 'unknown' || !model) return null
   // Already a full name like "claude-opus-4-6" — return as-is
   if (lower.startsWith('claude-')) return model
   // Short name: "sonnet" → needs a full name, but we don't know the exact version.

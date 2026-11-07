@@ -95,10 +95,10 @@ describe('token fold memo — a hit is a fresh compute', () => {
     const main = writeMain()
     writeSub(main, 'agent-a.jsonl', [subLine('s1', 200_000)])
 
-    const first = await computeTokenMetrics(main, 'default')
+    const first = await computeTokenMetrics(main, 'claude-sonnet-4-6')
     expect(folds()).toBe(1)
     const opus = await computeTokenMetrics(main, 'opus')
-    const again = await computeTokenMetrics(main, 'default')
+    const again = await computeTokenMetrics(main, 'claude-sonnet-4-6')
     expect(folds()).toBe(1) // both were hits
 
     // The caller's model really is an input: it sizes the window differently...
@@ -107,7 +107,7 @@ describe('token fold memo — a hit is a fresh compute', () => {
     // ...and each hit equals what a cold compute says for that same model.
     expect(opus).toEqual(await fresh(main, 'opus'))
     expect(again).toEqual(first)
-    expect(first).toEqual(await fresh(main, 'default'))
+    expect(first).toEqual(await fresh(main, 'claude-sonnet-4-6'))
     // The subagent spend rode along: sonnet from the sidechain line, opus from the agent file.
     expect(first.modelCosts?.map((m) => m.modelId).sort()).toEqual([
       'claude-opus-4-8',
@@ -274,7 +274,7 @@ describe('token fold memo — concurrent callers share one read', () => {
 
     // Both start before either read can finish: the second sees the first in flight.
     const [first, second] = await Promise.all([
-      computeTokenMetrics(main, 'default', undefined, (d) => leaderDeltas.push(d)),
+      computeTokenMetrics(main, 'claude-sonnet-4-6', undefined, (d) => leaderDeltas.push(d)),
       computeTokenMetrics(main, 'opus', undefined, (d) => joinerDeltas.push(d))
     ])
 
@@ -282,7 +282,7 @@ describe('token fold memo — concurrent callers share one read', () => {
     // The joiner's own `model` still applies to the shared fold.
     expect(first.contextWindow.size).toBe(200_000)
     expect(second.contextWindow.size).toBe(1_000_000)
-    expect(first).toEqual(await fresh(main, 'default'))
+    expect(first).toEqual(await fresh(main, 'claude-sonnet-4-6'))
     expect(second).toEqual(await fresh(main, 'opus'))
     // Progress is not starved: the leader streams the bytes, the joiner gets the
     // whole total once, on completion (like a hit).

@@ -783,11 +783,12 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow(null)).toBe(DEFAULT)
   })
 
-  // The `default` alias names no model family, so it cannot resolve here by
-  // design — which is exactly why claudeModelCapabilities must be handed
-  // `resolvedModel` (next block).
-  it('leaves the opaque `default` alias at 200K — only cli.js knows its target', () => {
-    expect(resolveContextWindow('default')).toBe(DEFAULT)
+  // `default` follows the plan's recommendation (Opus on Max, Sonnet on Pro),
+  // both native-1M. The table is only the fallback before cli.js reports the
+  // real target, which is why claudeModelCapabilities prefers `resolvedModel`.
+  it('sizes the `default` alias at 1M, like the family aliases it points at', () => {
+    expect(resolveContextWindow('default')).toBe(ONE_M)
+    expect(resolveContextWindow('Default')).toBe(ONE_M)
   })
 })
 
@@ -795,15 +796,16 @@ describe('claudeModelCapabilities — sizing from resolvedModel', () => {
   const ONE_M = 1_000_000
   const DEFAULT = 200_000
 
-  it('sizes the opaque `default` alias from its resolvedModel', () => {
+  it('sizes the `default` alias from its resolvedModel over the alias table', () => {
     expect(
-      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-opus-5[1m]' })
+      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-sonnet-4-6' })
         .contextWindow
-    ).toBe(ONE_M)
+    ).toBe(DEFAULT)
   })
 
   it('falls back to `value` when no resolvedModel is present (non-Claude catalogs)', () => {
-    expect(claudeModelCapabilities({ value: 'default' }).contextWindow).toBe(DEFAULT)
+    expect(claudeModelCapabilities({ value: 'default' }).contextWindow).toBe(ONE_M)
+    expect(claudeModelCapabilities({ value: 'claude-sonnet-4-6' }).contextWindow).toBe(DEFAULT)
   })
 
   it('a resolvedModel that is genuinely 200K stays 200K', () => {
@@ -816,11 +818,11 @@ describe('claudeModelCapabilities — sizing from resolvedModel', () => {
   // maxOutput is routed through resolvedModel too: an account whose `haiku`
   // still runs Haiku 4.5 gets Haiku 4.5's ceiling, not the alias table's 5.5.
   it('resolveClaudeCapabilities sizes a `default` session from the init-reported id', () => {
-    expect(resolveClaudeCapabilities('default', 'claude-opus-5[1m]').contextWindow).toBe(ONE_M)
+    expect(resolveClaudeCapabilities('default', 'claude-sonnet-4-6').contextWindow).toBe(DEFAULT)
   })
 
-  it('resolveClaudeCapabilities is unchanged without the second argument', () => {
-    expect(resolveClaudeCapabilities('default').contextWindow).toBe(DEFAULT)
+  it('resolveClaudeCapabilities falls back to the alias table without the second argument', () => {
+    expect(resolveClaudeCapabilities('default').contextWindow).toBe(ONE_M)
   })
 
   /**
