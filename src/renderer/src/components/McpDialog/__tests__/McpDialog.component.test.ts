@@ -206,7 +206,7 @@ describe('McpDialog FC', () => {
     expect(toggleCalls[0].name).toBe(server.name)
   })
 
-  it('cold toggle of a plugin server writes its full plugin:<p>:<s> key', async () => {
+  it('cold toggle of an enabled plugin server disables it under its full plugin:<p>:<s> key', async () => {
     await openFC(null)
 
     const server = viewProps.servers.find((s) => s.scope === 'plugin')!
@@ -214,7 +214,28 @@ describe('McpDialog FC', () => {
       await viewProps.onToggleServer(server)
     })
 
-    expect(toggleDisabledCalls).toEqual([{ cwd: CWD, name: 'plugin:acme:search', enabled: true }])
+    expect(toggleDisabledCalls).toEqual([{ cwd: CWD, name: 'plugin:acme:search', enabled: false }])
+  })
+
+  // A dialog opened on a session that has not spawned yet still has a routing id; main
+  // answers "No active session" to the live toggle, so the cold write must take over.
+  it('falls back to the cold toggle when the live session is not running', async () => {
+    catalog = [{ name: 'user-srv', source: 'user', config: makeConfig(), disabled: true } as never]
+    app.bridge.ipcMain.removeHandler('mcp:toggle')
+    app.bridge.ipcMain.handle('mcp:toggle', async (_e, routingId: string, name: string) => {
+      toggleCalls.push({ routingId, name, enabled: true })
+      return { ok: false, error: 'No active session' }
+    })
+    await openFC(ROUTING_ID)
+
+    const server = viewProps.servers.find((s) => s.name === 'user-srv')!
+    expect(server.status).toBe('disabled')
+    await act(async () => {
+      await viewProps.onToggleServer(server)
+    })
+
+    expect(toggleCalls).toHaveLength(1)
+    expect(toggleDisabledCalls).toEqual([{ cwd: CWD, name: 'user-srv', enabled: true }])
   })
 
   it('a cold-disabled server stays listed as disabled and can be re-enabled', async () => {

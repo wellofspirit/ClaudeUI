@@ -188,14 +188,27 @@ export function McpDialog({
   const handleToggle = useCallback(
     async (server: McpServerInfo): Promise<void> => {
       setActionLoading(server.name)
+      // Cold: the config's disabled list. A live session's toggle can fail with
+      // "No active session" (a dialog opened on a session not yet spawned still has a
+      // routing id), so that falls back to the cold write too.
+      const toggleCold = async (): Promise<void> => {
+        if (!cwd) return
+        await window.api.mcpToggleDisabled(cwd, server.name, server.status === 'disabled')
+        await refreshServers()
+      }
       try {
-        const enable = server.status === 'disabled' || server.status === 'not_started'
         if (routingId) {
-          await window.api.mcpToggleServer(routingId, server.name, enable)
+          const enable = server.status === 'disabled' || server.status === 'not_started'
+          try {
+            await window.api.mcpToggleServer(routingId, server.name, enable)
+          } catch (err) {
+            if (!cwd) throw err
+            await toggleCold()
+            return
+          }
           refreshAfterAction()
-        } else if (cwd) {
-          await window.api.mcpToggleDisabled(cwd, server.name, enable)
-          await refreshServers()
+        } else {
+          await toggleCold()
         }
       } catch (err) {
         console.error(`[McpDialog] toggle ${server.name} FAILED:`, err)
