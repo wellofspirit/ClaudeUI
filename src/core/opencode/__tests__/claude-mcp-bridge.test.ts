@@ -180,6 +180,7 @@ import { collectClaudeMcpForOpencode } from '../claude-mcp-bridge'
 import { buildOpencodeConfigContent } from '../opencode-server-config'
 import { resolveClaudeMcpCatalog } from '../../services/claude-mcp-catalog'
 import { logger } from '../../services/logger'
+import { PERSISTED_SESSIONS_DIR } from '../../services/persisted-sessions-dir'
 
 const mockLogger = vi.mocked(logger)
 
@@ -199,6 +200,15 @@ const set = (servers: Record<string, McpServerConfig>): void => {
 describe('collectClaudeMcpForOpencode', () => {
   it('returns empty map when nothing is configured', () => {
     expect(collectClaudeMcpForOpencode(CWD)).toEqual({})
+  })
+
+  // opencode connects every configured server for each directory a request touches: the
+  // housekeeping server (session lists, credentials, model discovery) must start none at boot.
+  it("bridges nothing for ClaudeUI's housekeeping directory", () => {
+    set({ u1: { command: 'a' } })
+    expect(collectClaudeMcpForOpencode(PERSISTED_SESSIONS_DIR)).toEqual({})
+    expect(resolveClaudeMcpCatalog).not.toHaveBeenCalled()
+    expect(Object.keys(collectClaudeMcpForOpencode(CWD))).toEqual(['u1'])
   })
 
   it('does not bridge a server the catalog flags disabled, and logs skips at debug', () => {

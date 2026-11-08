@@ -30,6 +30,16 @@ import type { Mcp_LocalConfigEncoded, Mcp_RemoteConfigEncoded } from './protocol
 import { resolveClaudeMcpCatalog } from '../services/claude-mcp-catalog'
 import { expandClaudeEnvRefs } from '../services/claude-env-refs'
 import { logger } from '../services/logger'
+import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
+import * as path from 'node:path'
+
+function isHousekeepingDir(cwd: string): boolean {
+  const norm = (p: string): string => {
+    const r = path.resolve(p)
+    return process.platform === 'win32' ? r.toLowerCase() : r
+  }
+  return norm(cwd) === norm(PERSISTED_SESSIONS_DIR)
+}
 
 // ---------------------------------------------------------------------------
 // Types — opencode 2.x `Mcp.LocalConfig` / `Mcp.RemoteConfig`
@@ -108,11 +118,17 @@ export function translateClaudeMcpServer(
  * - Logs the catalog's own skips and unset `${VAR}` NAMES (never values).
  * - Wraps in try/catch — returns {} on any failure so a transient config-read
  *   error never blocks a spawn.
+ * - Nothing for ClaudeUI's own housekeeping directory (`PERSISTED_SESSIONS_DIR`:
+ *   session lists, credentials, model discovery, usage). opencode connects
+ *   every configured MCP server for each directory a request touches, so a
+ *   bridged catalog there would start the user's servers at app boot with no
+ *   session open.
  */
 export function collectClaudeMcpForOpencode(
   cwd: string,
   env: NodeJS.ProcessEnv = process.env
 ): Record<string, OpencodeMcpEntry> {
+  if (isHousekeepingDir(cwd)) return {}
   try {
     const catalog = resolveClaudeMcpCatalog(cwd)
     for (const { name, reason } of catalog.skipped) {
