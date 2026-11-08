@@ -16,7 +16,7 @@ import {
 
 let root: string
 beforeEach(() => {
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-paths-')))
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cc-paths-'))) // long form: git writes it into a worktree's .git file (8.3 temp dirs on CI)
 })
 afterEach(() => fs.rmSync(root, { recursive: true, force: true }))
 

@@ -55,7 +55,7 @@ const git = (cwd: string, ...args: string[]): void => {
 }
 
 beforeEach(() => {
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-catalog-')))
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-catalog-'))) // long form: git writes it into a worktree's .git file (8.3 temp dirs on CI)
   cfg = path.join(root, 'cfg')
   home = path.join(root, 'home')
   managed = path.join(root, 'managed')
