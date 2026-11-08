@@ -89,13 +89,20 @@ leading `!` → `$!`). opencode expands host-side too: opencode substitutes `{en
 `OPENCODE_CONFIG_CONTENT` text before parsing it, so ClaudeUI writes every `{` of such a token as `\u007b` and a
 value can never trigger a substitution.
 
+opencode connects every configured MCP server for each directory a request touches, so ClaudeUI's own housekeeping
+directory (`PERSISTED_SESSIONS_DIR`: session lists, credentials, model discovery, usage) gets no bridged catalog;
+otherwise the user's servers would start at app boot with no session open.
+
 ## McpDialog
 
 The cold list is the catalog, grouped by source: User, Project, Local, Plugin, Managed and "ClaudeUI (legacy)"; a
 live session's `mcp_status` list takes priority, with the catalog's source standing in for `dynamic`. Add and Remove
 for user/project/local run `<claude> mcp add-json -s <scope> -- <name> <json>` / `mcp remove -s <scope> -- <name>`
-with the session cwd (cli.js's own lock on the global file; argv, no shell; the JSON is never logged). A running
-stream-json cli.js does not watch its config files, so the dialog then sends `reload_plugins`, which adds and drops
-the difference. Legacy entries can be removed (from every legacy file) but not added; the removal does not touch the
+with the session cwd (cli.js's own lock on the global file; argv, no shell; the JSON is never logged); without a cwd
+only user scope is allowed. A running session then gets `reload_plugins`, which adds and drops the difference.
+cli.js caches `~/.claude.json` behind a watcher (a reload right after a user/local write saw the old file for
+240–860 ms in probes; `.mcp.json` is read fresh), so `reloadMcpUntil` (`claude-mcp-reload.ts`) checks `mcp_status`
+for the server and retries a few times within ~1.6 s. Disabled servers stay listed, flagged, so they can be
+re-enabled. Legacy entries can be removed (from every legacy file) but not added; the removal does not touch the
 live session, because `mcp_set_servers` replaces the whole dynamic set, ClaudeUI's hosted servers included. Plugin
 and managed entries are read-only. The cold enable/disable toggle writes `projects[key].disabledMcpServers`.
