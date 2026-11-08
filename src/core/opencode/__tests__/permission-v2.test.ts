@@ -296,6 +296,18 @@ describe('compileClaudeRulesV2 — MCP rules (ADR-085 §3)', () => {
     ])
   })
 
+  it('a rule on a bridged plugin server gates the call opencode asks with (mcp-catalog A7)', () => {
+    // opencode keeps `-` in the namespace: `<server>_<tool>` with the bridged name.
+    for (const effect of ['deny', 'ask'] as const) {
+      const rules = compile({ [effect]: ['mcp__plugin_fake_srv__ping'] })
+      expect(rules).toEqual([r('plugin_fake_srv_ping', effect)])
+      expect(evaluateV2Call(rules, 'plugin_fake_srv_ping', ['*'], 'linux')).toBe(effect)
+      expect(evaluateV2Call(rules, 'plugin_fake_srv_pong', ['*'], 'linux')).toBe('ask')
+    }
+    const hyphen = compile({ deny: ['mcp__plugin_ida-mcp_ida__reference'] })
+    expect(evaluateV2Call(hyphen, 'plugin_ida-mcp_ida_reference', ['*'], 'linux')).toBe('deny')
+  })
+
   it('server level deny/ask → `s_*` plus its two resource rules, known server or not; allow only for a live server', () => {
     expect(compile({ ask: ['mcp__jira'], deny: ['mcp__lsphub__*'] })).toEqual([
       r('jira_*', 'ask'),

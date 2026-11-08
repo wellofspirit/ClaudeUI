@@ -2,9 +2,9 @@
  * Tests for claude-mcp-bridge.ts
  *
  * Guards:
- * - translateClaudeMcpServer covers stdio / remote / type-less heuristics / null fallback.
- * - collectClaudeMcpForOpencode merges scopes with correct precedence, excludes disabled
- *   names, reserves "claudeui", and returns {} on total failure.
+ * - translateClaudeMcpServer covers stdio / remote / null fallback and ${VAR} expansion.
+ * - collectClaudeMcpForOpencode reads the shared catalog, reserves "claudeui", logs skips,
+ *   and returns {} on total failure.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -66,9 +66,8 @@ describe('translateClaudeMcpServer', () => {
     expect(result).toMatchObject({ type: 'local', command: ['uvx', 'mcp-server-fetch'] })
   })
 
-  it('type-less with url → treated as remote', () => {
-    const result = translateClaudeMcpServer({ url: 'http://remote/mcp' })
-    expect(result).toMatchObject({ type: 'remote', url: 'http://remote/mcp' })
+  it('type-less with url → null (the catalog refuses it, as Claude Code does)', () => {
+    expect(translateClaudeMcpServer({ url: 'http://remote/mcp' })).toBeNull()
   })
 
   it('every entry is opencode 2.x shaped: codemode:false (no Code Mode), no 1.x `enabled`', () => {
@@ -98,123 +97,129 @@ describe('translateClaudeMcpServer', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// collectClaudeMcpForOpencode — integration tests with mocked I/O
-// ---------------------------------------------------------------------------
+describe('translateClaudeMcpServer — ${VAR} expansion (mcp-catalog A9)', () => {
+  const env = { HOME_DIR: '/h', TOKEN: 'tok', EMPTY: '' }
 
-// Vitest module mocking: mock the Claude MCP service so no filesystem reads occur.
-vi.mock('../../services/claude-mcp', () => {
-  const loadMcpServers = vi.fn()
-  const readDisabledMcpServers = vi.fn()
-  // The three-scope merge moved into `claude-mcp.ts` so the other engine bridges can
-  // share it (ADR-068 §5). Re-expressed here over the SAME mocked reads, so
-  // every assertion below — precedence, the per-scope call args, the
-  // throwing-read case — keeps measuring what it always did.
-  const mergeClaudeMcpServers = vi.fn((cwd: string) => ({
-    ...(loadMcpServers('user') as object),
-    ...(loadMcpServers('project', cwd) as object),
-    ...(loadMcpServers('local', cwd) as object)
-  }))
-  return {
-    loadMcpServers,
-    readDisabledMcpServers,
-    mergeClaudeMcpServers,
-    // The merge-minus-disabled read every bridge shares (ADR-096), over the
-    // same mocked reads — so the disabled-list assertions keep measuring it.
-    readEnabledClaudeMcpServers: vi.fn((cwd: string) => {
-      const disabled = new Set((readDisabledMcpServers(cwd) as string[] | undefined) ?? [])
-      return Object.fromEntries(
-        Object.entries(mergeClaudeMcpServers(cwd)).filter(([name]) => !disabled.has(name))
+  it('expands ${VAR} and ${VAR:-default} in command, args, env, url and headers', () => {
+    expect(
+      translateClaudeMcpServer(
+        {
+          command: '${HOME_DIR}/bin/srv',
+          args: ['--k', '${TOKEN}', '${NOPE:-dflt}', '${EMPTY:-e}'],
+          env: { A: 'x-${TOKEN}' }
+        },
+        env
       )
+    ).toMatchObject({
+      command: ['/h/bin/srv', '--k', 'tok', 'dflt', 'e'],
+      environment: { A: 'x-tok' }
     })
-  }
+    expect(
+      translateClaudeMcpServer(
+        {
+          type: 'http',
+          url: 'https://x${HOME_DIR}/m',
+          headers: { Authorization: 'Bearer ${TOKEN}' }
+        },
+        env
+      )
+    ).toMatchObject({ url: 'https://x/h/m', headers: { Authorization: 'Bearer tok' } })
+  })
+
+  it('an unset variable with no default stays as written and is reported by name only', () => {
+    const missing = new Set<string>()
+    const entry = translateClaudeMcpServer({ command: 'x', args: ['${NOPE}'] }, env, missing)
+    expect(entry).toMatchObject({ command: ['x', '${NOPE}'] })
+    expect([...missing]).toEqual(['NOPE'])
+  })
+
+  it('a value with quotes and backslashes survives the config JSON round trip', () => {
+    const tricky = 'a"b\\c", "x": "'
+    const entry = translateClaudeMcpServer({ command: 'x', args: ['${V}'] }, { V: tricky })
+    expect(JSON.parse(JSON.stringify(entry)).command[1]).toBe(tricky)
+  })
 })
 
-// Also mock the logger to suppress output in tests.
+// ---------------------------------------------------------------------------
+// collectClaudeMcpForOpencode — with the shared catalog mocked
+// ---------------------------------------------------------------------------
+
+const catalog = vi.hoisted(() => ({
+  servers: {} as Record<string, unknown>,
+  skipped: [] as { name: string; reason: string }[],
+  fail: false
+}))
+vi.mock('../../services/claude-mcp-catalog', () => ({
+  resolveClaudeMcpCatalog: vi.fn(() => {
+    if (catalog.fail) throw new Error('filesystem gone')
+    return {
+      servers: Object.fromEntries(
+        Object.entries(catalog.servers).map(([name, config]) => [
+          name,
+          { name, claudeName: name, config, source: 'user' }
+        ])
+      ),
+      skipped: catalog.skipped
+    }
+  })
+}))
+
 vi.mock('../../services/logger', () => ({
   logger: { warn: vi.fn(), debug: vi.fn(), info: vi.fn(), error: vi.fn() }
 }))
 
 import type { McpServerConfig } from '../../../shared/types'
 import { collectClaudeMcpForOpencode } from '../claude-mcp-bridge'
-import { loadMcpServers, readDisabledMcpServers } from '../../services/claude-mcp'
+import { buildOpencodeConfigContent } from '../opencode-server-config'
+import { resolveClaudeMcpCatalog } from '../../services/claude-mcp-catalog'
 import { logger } from '../../services/logger'
 
-const mockLoadMcpServers = vi.mocked(loadMcpServers)
-const mockReadDisabledMcpServers = vi.mocked(readDisabledMcpServers)
 const mockLogger = vi.mocked(logger)
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mockReadDisabledMcpServers.mockReturnValue([])
+  catalog.servers = {}
+  catalog.skipped = []
+  catalog.fail = false
 })
 
 const CWD = '/work/proj'
+const set = (servers: Record<string, McpServerConfig>): void => {
+  catalog.servers = servers
+}
 
 describe('collectClaudeMcpForOpencode', () => {
   it('returns empty map when nothing is configured', () => {
-    mockLoadMcpServers.mockReturnValue({})
-    const result = collectClaudeMcpForOpencode(CWD)
-    expect(result).toEqual({})
+    expect(collectClaudeMcpForOpencode(CWD)).toEqual({})
   })
 
-  it('translates a user-scoped stdio server', () => {
-    mockLoadMcpServers.mockImplementation((scope): Record<string, McpServerConfig> => {
-      if (scope === 'user') return { myServer: { command: 'node', args: ['s.js'] } }
-      return {}
+  it('translates the catalog for the cwd', () => {
+    set({ myServer: { command: 'node', args: ['s.js'] } })
+    expect(collectClaudeMcpForOpencode(CWD).myServer).toMatchObject({
+      type: 'local',
+      command: ['node', 's.js']
     })
-    const result = collectClaudeMcpForOpencode(CWD)
-    expect(result).toHaveProperty('myServer')
-    expect(result.myServer).toMatchObject({ type: 'local', command: ['node', 's.js'] })
+    expect(vi.mocked(resolveClaudeMcpCatalog)).toHaveBeenCalledWith(CWD)
   })
 
-  it('local scope overrides project scope on name collision', () => {
-    mockLoadMcpServers.mockImplementation((scope): Record<string, McpServerConfig> => {
-      if (scope === 'project') return { shared: { command: 'proj-bin' } }
-      if (scope === 'local') return { shared: { command: 'local-bin' } }
-      return {}
+  it('bridges a plugin server under its plugin_<plugin>_<server> name, ${VAR} expanded against env', () => {
+    set({
+      'plugin_ida-mcp_ida': {
+        command: 'ida',
+        args: ['${HOME_X}/s'],
+        env: { CLAUDE_PLUGIN_ROOT: '/p' }
+      }
     })
-    const result = collectClaudeMcpForOpencode(CWD)
-    expect(result.shared).toMatchObject({ type: 'local', command: ['local-bin'] })
-  })
-
-  it('project scope overrides user scope on name collision', () => {
-    mockLoadMcpServers.mockImplementation((scope): Record<string, McpServerConfig> => {
-      if (scope === 'user') return { shared: { command: 'user-bin' } }
-      if (scope === 'project') return { shared: { command: 'proj-bin' } }
-      return {}
+    const result = collectClaudeMcpForOpencode(CWD, { HOME_X: '/u' })
+    expect(result['plugin_ida-mcp_ida']).toMatchObject({
+      type: 'local',
+      command: ['ida', '/u/s'],
+      environment: { CLAUDE_PLUGIN_ROOT: '/p' }
     })
-    const result = collectClaudeMcpForOpencode(CWD)
-    expect(result.shared).toMatchObject({ type: 'local', command: ['proj-bin'] })
-  })
-
-  it('local scope overrides both user and project scopes on name collision', () => {
-    mockLoadMcpServers.mockImplementation((scope): Record<string, McpServerConfig> => {
-      if (scope === 'user') return { shared: { command: 'user-bin' } }
-      if (scope === 'project') return { shared: { command: 'proj-bin' } }
-      if (scope === 'local') return { shared: { command: 'local-bin' } }
-      return {}
-    })
-    const result = collectClaudeMcpForOpencode(CWD)
-    expect(result.shared).toMatchObject({ type: 'local', command: ['local-bin'] })
-  })
-
-  it('excludes disabled server names', () => {
-    mockLoadMcpServers.mockReturnValue({
-      enabledServer: { command: 'bin-a' },
-      disabledServer: { command: 'bin-b' }
-    })
-    mockReadDisabledMcpServers.mockReturnValue(['disabledServer'])
-    const result = collectClaudeMcpForOpencode(CWD)
-    expect(result).toHaveProperty('enabledServer')
-    expect(result).not.toHaveProperty('disabledServer')
   })
 
   it('excludes a server named "claudeui" and logs a warning', () => {
-    mockLoadMcpServers.mockReturnValue({
-      claudeui: { url: 'http://attacker' },
-      legit: { command: 'bin' }
-    })
+    set({ claudeui: { type: 'http', url: 'http://attacker' }, legit: { command: 'bin' } })
     const result = collectClaudeMcpForOpencode(CWD)
     expect(result).not.toHaveProperty('claudeui')
     expect(result).toHaveProperty('legit')
@@ -224,37 +229,54 @@ describe('collectClaudeMcpForOpencode', () => {
     )
   })
 
-  it('skips entries with neither command nor url (null from translateClaudeMcpServer)', () => {
-    mockLoadMcpServers.mockReturnValue({
-      broken: {},
-      good: { command: 'bin' }
-    })
+  it('skips entries opencode cannot take and logs the catalog skips', () => {
+    set({ broken: {}, good: { command: 'bin' } })
+    catalog.skipped = [{ name: 'bad', reason: 'invalid entry' }]
     const result = collectClaudeMcpForOpencode(CWD)
     expect(result).not.toHaveProperty('broken')
     expect(result).toHaveProperty('good')
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      'ClaudeMcpBridge',
+      expect.stringContaining('"bad"')
+    )
   })
 
-  it('returns {} when loadMcpServers throws (best-effort, never blocks spawn)', () => {
-    mockLoadMcpServers.mockImplementation(() => {
-      throw new Error('filesystem gone')
-    })
-    const result = collectClaudeMcpForOpencode(CWD)
-    expect(result).toEqual({})
+  it('logs unset variable NAMES, never values', () => {
+    set({ s: { command: 'x', env: { K: '${UNSET_VAR_XYZ}' } } })
+    collectClaudeMcpForOpencode(CWD, { OTHER: 'secret-value' })
+    const logged = mockLogger.warn.mock.calls.flat().join(' ')
+    expect(logged).toContain('UNSET_VAR_XYZ')
+    expect(logged).not.toContain('secret-value')
+  })
+
+  it('returns {} when the catalog read throws (best-effort, never blocks spawn)', () => {
+    catalog.fail = true
+    expect(collectClaudeMcpForOpencode(CWD)).toEqual({})
     expect(mockLogger.warn).toHaveBeenCalled()
   })
+})
 
-  it('passes correct scopes to loadMcpServers', () => {
-    mockLoadMcpServers.mockReturnValue({})
-    collectClaudeMcpForOpencode(CWD)
-    // Verify all three scopes are queried
-    expect(mockLoadMcpServers).toHaveBeenCalledWith('user')
-    expect(mockLoadMcpServers).toHaveBeenCalledWith('project', CWD)
-    expect(mockLoadMcpServers).toHaveBeenCalledWith('local', CWD)
+describe('buildOpencodeConfigContent — opencode substitution tokens (mcp-catalog A9)', () => {
+  // opencode runs {env:} / {file:} substitution over this text before parsing it.
+  const HOSTED = { port: 1, token: 't' }
+
+  it('a literal {env:…} / {file:…} in a Claude value never appears as a token, and parses back unchanged', () => {
+    set({
+      s: { command: 'x', args: ['{env:SECRET}', 'a{file:/etc/passwd}'], env: { K: '{env:HOME}' } }
+    })
+    const bridgedMcp = collectClaudeMcpForOpencode(CWD, {})
+    const text = buildOpencodeConfigContent({ bridgedMcp }, HOSTED)
+    expect(text).not.toMatch(/\{(env|file):/)
+    const parsed = JSON.parse(text)
+    expect(parsed.mcp.servers.s.command).toEqual(['x', '{env:SECRET}', 'a{file:/etc/passwd}'])
+    expect(parsed.mcp.servers.s.environment).toEqual({ K: '{env:HOME}' })
   })
 
-  it('passes cwd to readDisabledMcpServers', () => {
-    mockLoadMcpServers.mockReturnValue({})
-    collectClaudeMcpForOpencode(CWD)
-    expect(mockReadDisabledMcpServers).toHaveBeenCalledWith(CWD)
+  it('a ${VAR} whose value holds a token is neutralised too (expansion runs first)', () => {
+    set({ s: { command: 'x', args: ['${V}'] } })
+    const bridgedMcp = collectClaudeMcpForOpencode(CWD, { V: '{file:/secret}' })
+    const text = buildOpencodeConfigContent({ bridgedMcp }, HOSTED)
+    expect(text).not.toContain('{file:')
+    expect(JSON.parse(text).mcp.servers.s.command).toEqual(['x', '{file:/secret}'])
   })
 })

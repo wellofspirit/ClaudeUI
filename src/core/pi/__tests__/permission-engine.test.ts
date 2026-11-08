@@ -1875,6 +1875,18 @@ describe('decide — MCP rules against pi-sanitized tool names (ADR-096)', () =>
   it('without the key the hyphenated rule stays inert (the gap this closes)', () => {
     expect(decide(TOOL, {}, ctx({ allow: ['mcp__my-server__get-issue'] }, false))).toBe('ask')
   })
+
+  // Plugin servers are bridged as `plugin_<plugin>_<server>` (the name Claude Code
+  // gives their tools), so the same Claude rule gates the call on pi (mcp-catalog A7).
+  it('a rule on a bridged plugin server binds, hyphenated plugin name included', () => {
+    const fake = 'mcp__plugin_fake_srv__ping'
+    expect(decide(fake, {}, ctx({ deny: [fake] }))).toBe('deny')
+    expect(decide(fake, {}, ctx({ ask: [fake], allow: ['mcp__plugin_fake_srv'] }))).toBe('ask')
+    const ida = 'mcp__plugin_ida_mcp_ida__reference'
+    expect(decide(ida, {}, ctx({ deny: ['mcp__plugin_ida-mcp_ida__reference'] }))).toBe('deny')
+    expect(decide(ida, {}, ctx({ ask: ['mcp__plugin_ida-mcp_ida'] }))).toBe('ask')
+    expect(decide(ida, {}, ctx({ deny: ['mcp__plugin_ida-mcp_other'] }))).toBe('ask')
+  })
 })
 
 // ---------------------------------------------------------------------------
