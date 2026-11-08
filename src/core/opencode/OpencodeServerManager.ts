@@ -1048,10 +1048,12 @@ export class OpencodeServerManager {
     // A borrowed server (another config's) is leased on a directory it already serves: the
     // routes that borrow are global, and opencode connects every configured MCP server for
     // each new directory a request touches, so `directory` would start them all again there.
+    // A directory with a live lease first; then one it served that still exists (a deleted
+    // worktree would answer `Location not found`).
     const served =
       handle === own
         ? undefined
-        : ([...handle.readiness.keys()][0] ?? [...handle.cwdRefs.keys()][0])
+        : ([...handle.cwdRefs.keys()][0] ?? [...handle.readiness.keys()].find((d) => existsSync(d)))
     return this.leaseOn(handle, served ?? directory, lease)
   }
 

@@ -12,6 +12,7 @@ import {
   SCOPE_META,
   SCOPE_ORDER,
   isRemovableScope,
+  isServerEnabled,
   type ServerGroup,
   type AddServerPayload
 } from './utils'
@@ -193,12 +194,12 @@ export function McpDialog({
       // routing id), so that falls back to the cold write too.
       const toggleCold = async (): Promise<void> => {
         if (!cwd) return
-        await window.api.mcpToggleDisabled(cwd, server.name, server.status === 'disabled')
+        await window.api.mcpToggleDisabled(cwd, server.name, !isServerEnabled(server))
         await refreshServers()
       }
       try {
         if (routingId) {
-          const enable = server.status === 'disabled' || server.status === 'not_started'
+          const enable = !isServerEnabled(server)
           try {
             await window.api.mcpToggleServer(routingId, server.name, enable)
           } catch (err) {

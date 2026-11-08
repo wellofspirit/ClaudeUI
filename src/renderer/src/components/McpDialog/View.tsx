@@ -7,7 +7,7 @@ import type {
   McpServerConfig
 } from '../../../../shared/types'
 import type { ServerGroup, AddServerPayload } from './utils'
-import { SCOPE_META, isRemovableScope } from './utils'
+import { SCOPE_META, isRemovableScope, isServerEnabled } from './utils'
 
 export type { ServerGroup, AddServerPayload }
 
@@ -457,14 +457,12 @@ function ServerDetail({
               onClick={() => onToggle(server)}
               disabled={isBusy}
               className={`px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-default disabled:opacity-40 ${
-                server.status === 'disabled' || server.status === 'not_started'
+                !isServerEnabled(server)
                   ? 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/30 text-emerald-400'
                   : 'bg-text-muted/10 hover:bg-text-muted/20 border-text-muted/20 text-text-muted'
               }`}
             >
-              {server.status === 'disabled' || server.status === 'not_started'
-                ? 'Enable'
-                : 'Disable'}
+              {isServerEnabled(server) ? 'Disable' : 'Enable'}
             </button>
             {isEditable && !confirmingDelete && (
               <button

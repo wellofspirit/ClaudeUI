@@ -292,10 +292,10 @@ describe('McpDialog mobile fork', () => {
       const toggles = screen.getAllByTestId('McpMobileView.toggle')
       const proj = toggles.find((t) => t.dataset.id === 'proj-srv')!
       const user = toggles.find((t) => t.dataset.id === 'user-srv')!
-      // read-disabled named proj-srv; user-srv is merely not_started, which the
-      // container also treats as "off" (its toggle enables).
+      // proj-srv is disabled; user-srv is merely not_started, which is an ENABLED server
+      // (its switch is on, and flipping it disables it).
       expect(proj).toHaveAttribute('data-on', 'false')
-      expect(user).toHaveAttribute('data-on', 'false')
+      expect(user).toHaveAttribute('data-on', 'true')
 
       await openDetail('proj-srv')
       expect(screen.getByTestId('McpMobileView.status')).toHaveAttribute('data-status', 'disabled')

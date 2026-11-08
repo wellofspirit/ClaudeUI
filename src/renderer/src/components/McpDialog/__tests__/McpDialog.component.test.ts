@@ -38,6 +38,18 @@ function makeConfig(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
   return { type: 'stdio', command: 'npx', ...overrides }
 }
 
+// The desktop label, the mobile switch and both toggle writes share this predicate: a cold
+// `not_started` row is an ENABLED server (its button reads "Disable"), never "off".
+describe('isServerEnabled', () => {
+  it('is off only for an explicitly disabled server', async () => {
+    const { isServerEnabled } = await import('../utils')
+    expect(isServerEnabled({ status: 'disabled' })).toBe(false)
+    expect(isServerEnabled({ status: 'not_started' })).toBe(true)
+    expect(isServerEnabled({ status: 'connected' })).toBe(true)
+    expect(isServerEnabled({ status: 'failed' })).toBe(true)
+  })
+})
+
 describe('McpDialog FC', () => {
   let app: TestApp
   let onClose: ReturnType<typeof vi.fn>
