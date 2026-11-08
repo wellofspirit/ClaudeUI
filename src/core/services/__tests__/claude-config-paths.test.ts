@@ -65,7 +65,7 @@ describe('project key', () => {
     const plain = path.join(root, 'plain')
     fs.mkdirSync(plain)
     expect(claudeProjectKey(plain)).toBe(plain.replace(/\\/g, '/'))
-  })
+  }, 30_000) // three real git spawns: past 5 s on a loaded box
 })
 
 describe('settings layers', () => {
@@ -116,5 +116,5 @@ describe('realpath rooting', () => {
     // spelling (drive-letter case) of an ordinary path is untouched
     expect(claudeProjectKey(repo)).toBe(want)
     expect(claudeProjectKey(repo).startsWith(repo.slice(0, 2).replace(/\\/g, '/'))).toBe(true)
-  })
+  }, 30_000) // a real git spawn
 })

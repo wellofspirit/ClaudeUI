@@ -191,7 +191,7 @@ describe('project key (A2)', () => {
     expect(names(catalog(repo))).toEqual(['l1'])
     expect(names(catalog(sub))).toEqual(['l1'])
     expect(names(catalog(wt))).toEqual(['l1'])
-  })
+  }, 30_000) // three real git spawns: well under a second idle, past 5 s on a loaded box
 
   it('keys by the cwd itself outside git', () => {
     writeGlobal({ projects: { [keyOf(repo)]: { mcpServers: { l1: stdio('l1') } } } })
