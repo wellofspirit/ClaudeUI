@@ -14,12 +14,28 @@ import type { McpServerConfig } from '../../../shared/types'
 
 const catalog = vi.hoisted(() => ({
   enabled: {} as Record<string, McpServerConfig>,
+  skipped: [] as { name: string; reason: string }[],
+  disabled: [] as string[],
   fail: false
 }))
-vi.mock('../../services/claude-mcp', () => ({
-  readEnabledClaudeMcpServers: vi.fn(() => {
+vi.mock('../../services/claude-mcp-catalog', () => ({
+  resolveClaudeMcpCatalog: vi.fn(() => {
     if (catalog.fail) throw new Error('unreadable')
-    return catalog.enabled
+    return {
+      servers: Object.fromEntries(
+        Object.entries(catalog.enabled).map(([name, config]) => [
+          name,
+          {
+            name,
+            claudeName: name,
+            config,
+            source: 'user',
+            ...(catalog.disabled.includes(name) ? { disabled: true } : {})
+          }
+        ])
+      ),
+      skipped: catalog.skipped
+    }
   })
 }))
 vi.mock('../../services/logger', () => ({
@@ -38,32 +54,32 @@ import {
   readPiNativeMcpServerNames,
   translateClaudeMcpServerForPi
 } from '../pi-mcp-bridge'
-import { readEnabledClaudeMcpServers } from '../../services/claude-mcp'
+import { resolveClaudeMcpCatalog } from '../../services/claude-mcp-catalog'
 import { logger } from '../../services/logger'
 
 beforeEach(() => {
   catalog.enabled = {}
+  catalog.skipped = []
+  catalog.disabled = []
   catalog.fail = false
   vi.mocked(logger.warn).mockClear()
 })
 
 describe('translateClaudeMcpServerForPi', () => {
-  it('stdio: command, args, env (and a cwd when given), always exposure "direct"', () => {
+  it('stdio: command, args, env, always exposure "direct"', () => {
     expect(
       translateClaudeMcpServerForPi('fs', {
         type: 'stdio',
         command: 'node',
         args: ['srv.js', '--x'],
-        env: { TOKEN: 'abc' },
-        cwd: 'tools'
-      } as McpServerConfig)
+        env: { TOKEN: 'abc' }
+      })
     ).toEqual({
       entry: {
         type: 'stdio',
         command: 'node',
         args: ['srv.js', '--x'],
         env: { TOKEN: 'abc' },
-        cwd: 'tools',
         exposure: 'direct'
       },
       missingEnv: []
@@ -192,12 +208,45 @@ describe('buildPiMcpCatalog', () => {
 })
 
 describe('collectClaudeMcpForPi', () => {
+  it('does not register a server the catalog flags disabled', () => {
+    catalog.enabled = { on: { command: 'a' }, off: { command: 'b' } }
+    catalog.disabled = ['off']
+    expect(Object.keys(collectClaudeMcpForPi('/work').servers)).toEqual(['on'])
+  })
+
   it('reads the shared enabled catalog for the cwd', () => {
     catalog.enabled = { a: { command: 'x' } }
     expect(collectClaudeMcpForPi('/work').servers).toEqual({
       a: { type: 'stdio', command: 'x', exposure: 'direct' }
     })
-    expect(vi.mocked(readEnabledClaudeMcpServers)).toHaveBeenCalledWith('/work')
+    expect(vi.mocked(resolveClaudeMcpCatalog)).toHaveBeenCalledWith('/work')
+  })
+
+  it("carries the catalog's own skips ahead of pi's, for the one session warning", () => {
+    catalog.enabled = { a: { command: 'x' }, s: { type: 'sse', url: 'https://x/sse' } }
+    catalog.skipped = [{ name: 'bad', reason: 'invalid entry' }]
+    expect(collectClaudeMcpForPi('/work').skipped.map((s) => s.name)).toEqual(['bad', 's'])
+  })
+
+  it('a plugin server bridges under its plugin_<plugin>_<server> name; a "-" shares the "_" namespace', () => {
+    catalog.enabled = {
+      'plugin_ida-mcp_ida': { type: 'stdio', command: 'ida', env: { CLAUDE_PLUGIN_ROOT: '/p' } },
+      plugin_ida_mcp_ida: { command: 'other' }
+    }
+    const result = collectClaudeMcpForPi('/work')
+    expect(Object.keys(result.servers)).toEqual(['plugin_ida-mcp_ida'])
+    expect(result.skipped).toEqual([
+      {
+        name: 'plugin_ida_mcp_ida',
+        reason: 'pi gives it the same tool names as "plugin_ida-mcp_ida"'
+      }
+    ])
+    expect(piMcpName('mcp__plugin_ida-mcp_ida__reference')).toBe(
+      'mcp__plugin_ida_mcp_ida__reference'
+    )
+    expect(claudeServerForPi('plugin_ida_mcp_ida', ['plugin_ida-mcp_ida'])).toBe(
+      'plugin_ida-mcp_ida'
+    )
   })
 
   it('degrades to an empty catalog on a read failure (never blocks a spawn)', () => {

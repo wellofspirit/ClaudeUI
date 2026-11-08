@@ -81,16 +81,20 @@ describe('McpDialog mobile fork', () => {
     removeCalls = []
     reconnectCalls = []
 
-    app.bridge.ipcMain.handle('mcp:load-servers', async (_e, scope: string) => {
-      if (scope === 'user') return { 'user-srv': stdio() }
-      if (scope === 'project') return { 'proj-srv': stdio({ command: 'node' }) }
-      return {}
-    })
+    app.bridge.ipcMain.handle('mcp:load-catalog', async () => ({
+      servers: [
+        { name: 'user-srv', source: 'user', config: stdio() },
+        { name: 'proj-srv', source: 'project', config: stdio({ command: 'node' }), disabled: true }
+      ],
+      skipped: []
+    }))
     app.bridge.ipcMain.handle('mcp:read-disabled', async () => ['proj-srv'])
     app.bridge.ipcMain.handle('mcp:status', async () => null)
-    app.bridge.ipcMain.handle('mcp:remove-server', async (_e, scope: string, name: string) => {
+    app.bridge.ipcMain.handle('mcp:cli-remove', async (_e, scope: string, name: string) => {
       removeCalls.push({ scope, name })
+      return {}
     })
+    app.bridge.ipcMain.handle('mcp:reload', async () => ({ ok: true, data: undefined }))
     app.bridge.ipcMain.handle(
       'mcp:toggle-disabled',
       async (_e, cwd: string, name: string, enabled: boolean) => {
@@ -288,10 +292,10 @@ describe('McpDialog mobile fork', () => {
       const toggles = screen.getAllByTestId('McpMobileView.toggle')
       const proj = toggles.find((t) => t.dataset.id === 'proj-srv')!
       const user = toggles.find((t) => t.dataset.id === 'user-srv')!
-      // read-disabled named proj-srv; user-srv is merely not_started, which the
-      // container also treats as "off" (its toggle enables).
+      // proj-srv is disabled; user-srv is merely not_started, which is an ENABLED server
+      // (its switch is on, and flipping it disables it).
       expect(proj).toHaveAttribute('data-on', 'false')
-      expect(user).toHaveAttribute('data-on', 'false')
+      expect(user).toHaveAttribute('data-on', 'true')
 
       await openDetail('proj-srv')
       expect(screen.getByTestId('McpMobileView.status')).toHaveAttribute('data-status', 'disabled')

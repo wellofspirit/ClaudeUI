@@ -82,6 +82,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     mcpToggleServer: vi.fn(async () => {}),
     mcpReconnectServer: vi.fn(async () => {}),
     mcpSetServers: vi.fn(async () => ({})),
+    mcpReloadServers: vi.fn(async () => {}),
     notifySettingsChanged: vi.fn(async () => {}),
     getPlanContent: vi.fn(() => null),
     getSessionLogPath: vi.fn(() => null),
@@ -187,10 +188,21 @@ vi.mock('../../../core/services/claude-settings', () => ({
   saveClaudePermissions: vi.fn()
 }))
 
+const mcpCli = vi.hoisted(() => ({
+  addMcpServerNative: vi.fn(async () => ({})),
+  removeMcpServerNative: vi.fn(async () => ({ error: 'No MCP server named "x" in user config' }))
+}))
+vi.mock('../../../core/services/claude-mcp-cli', () => mcpCli)
+
 vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
+  listMcpCatalog: vi.fn(() => ({
+    servers: [{ name: 'u', source: 'user', config: { command: 'x' } }],
+    skipped: []
+  })),
   saveMcpServers: vi.fn(),
   removeMcpServer: vi.fn(),
+  removeClaudeUiLegacyMcpServer: vi.fn(),
   readDisabledMcpServers: vi.fn(() => []),
   writeDisabledMcpServers: vi.fn()
 }))
@@ -948,6 +960,42 @@ describe('session.ipc', () => {
     it('mcp:status is registered and returns session status', async () => {
       const res = await harness.call('mcp:status', 'rid-1')
       expect(res).toEqual([])
+    })
+
+    it('mcp:load-catalog answers the catalog without an ok key', async () => {
+      const res = await harness.call<any>('mcp:load-catalog', '/repo')
+      expect(res).toEqual({
+        servers: [{ name: 'u', source: 'user', config: { command: 'x' } }],
+        skipped: []
+      })
+      expect('ok' in res).toBe(false)
+    })
+
+    it('mcp:cli-add / mcp:cli-remove hand cli.js its scope, name and the session cwd; the error text comes back as data', async () => {
+      const added = await harness.call<any>(
+        'mcp:cli-add',
+        'project',
+        'srv',
+        { command: 'x' },
+        '/repo'
+      )
+      expect(mcpCli.addMcpServerNative).toHaveBeenCalledWith(
+        'project',
+        'srv',
+        { command: 'x' },
+        '/repo'
+      )
+      expect(added).toEqual({})
+
+      const removed = await harness.call<any>('mcp:cli-remove', 'user', 'x', '/repo')
+      expect(mcpCli.removeMcpServerNative).toHaveBeenCalledWith('user', 'x', '/repo')
+      expect(removed).toEqual({ error: 'No MCP server named "x" in user config' })
+    })
+
+    it('mcp:reload asks the live session to re-read its config (safeHandler-wrapped)', async () => {
+      const res = await harness.call<any>('mcp:reload', 'rid-1')
+      expect(res.ok).toBe(true)
+      expect(sessionStub.mcpReloadServers).toHaveBeenCalled()
     })
 
     it('mcp:toggle is registered (safeHandler-wrapped)', async () => {

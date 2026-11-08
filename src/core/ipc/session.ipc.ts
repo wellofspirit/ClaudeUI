@@ -48,7 +48,7 @@ import {
   loadCleanupPeriodDays,
   isWorkspaceTrusted
 } from '../services/claude-settings'
-import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
+import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
@@ -388,6 +388,10 @@ const SESSION_IPC_CHANNELS = [
   'mcp:reconnect',
   'mcp:set-servers',
   'mcp:load-servers',
+  'mcp:load-catalog',
+  'mcp:cli-add',
+  'mcp:cli-remove',
+  'mcp:reload',
   'mcp:save-servers',
   'mcp:remove-server',
   'mcp:read-disabled',
@@ -1359,6 +1363,13 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     kind: 'query',
     handler: (scope: string, cwd?: string) =>
       loadMcpServers(scope as 'user' | 'project' | 'local', cwd)
+  })
+  // The catalog behind McpDialog's cold list: what a Claude session in `cwd` would load
+  handleIpc({
+    channel: 'mcp:load-catalog',
+    capability: 'config',
+    kind: 'query',
+    handler: (cwd?: string) => listMcpCatalog(cwd)
   })
   // MCP disabled state (direct ~/.claude.json access, no session needed)
   handleIpc({

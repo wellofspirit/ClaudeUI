@@ -2371,6 +2371,26 @@ interface McpAPI {
     cwd?: string
   ): Promise<void>
   removeMcpServer(scope: McpServerScope, serverName: string, cwd?: string): Promise<void>
+  /** `cwd` omitted: the home directory (user-scope view, no project). */
+  loadMcpCatalog(cwd?: string): Promise<McpCatalogResult>
+  /** Add through `claude mcp add-json -s <scope>` (cwd = the session cwd). */
+  mcpCliAdd(
+    scope: 'user' | 'project' | 'local',
+    name: string,
+    config: McpServerConfig,
+    cwd?: string
+  ): Promise<McpCliResult>
+  mcpCliRemove(
+    scope: 'user' | 'project' | 'local',
+    name: string,
+    cwd?: string
+  ): Promise<McpCliResult>
+  /** Make a live Claude session re-read its MCP config (after a native write). */
+  mcpReloadServers(
+    routingId: string,
+    /** Retry (bounded) until this server is / is no longer listed live. */
+    expect?: { name: string; present: boolean }
+  ): Promise<void>
   mcpReadDisabled(cwd: string): Promise<string[]>
   mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
@@ -4842,7 +4862,31 @@ export interface SkillInfo {
 // MCP Server types (MCP server management dialog)
 // ---------------------------------------------------------------------------
 
-export type McpServerScope = 'user' | 'project' | 'local' | 'claudeai' | 'managed'
+export type McpServerScope =
+  'user' | 'project' | 'local' | 'claudeai' | 'managed' | 'plugin' | 'claudeui'
+
+/** Where the catalog found an entry; `claudeui` is McpDialog's legacy files (cli.js ignores them). */
+export type McpCatalogSource = 'plugin' | 'user' | 'project' | 'local' | 'managed' | 'claudeui'
+
+export interface McpCatalogServer {
+  /** The name Claude Code knows it by (`plugin:p:s` for a plugin server). */
+  name: string
+  config: McpServerConfig
+  source: McpCatalogSource
+  /** Named in `disabledMcpServers`: listed so it can be re-enabled, but not loaded. */
+  disabled?: boolean
+}
+
+/** `mcp:load-catalog`. No `ok` key: preload `unwrap` treats `{ok}` envelopes specially. */
+export interface McpCatalogResult {
+  servers: McpCatalogServer[]
+  skipped: { name: string; reason: string }[]
+}
+
+/** `mcp:cli-add` / `mcp:cli-remove`: cli.js's own message when it refused. */
+export interface McpCliResult {
+  error?: string
+}
 export type McpServerConnectionStatus =
   'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_started'
 export type McpServerTransport = 'stdio' | 'sse' | 'http'

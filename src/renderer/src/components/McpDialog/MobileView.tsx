@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { McpServerConnectionStatus, McpServerInfo } from '../../../../shared/types'
 import type { McpDialogViewProps } from './View'
-import { SCOPE_META } from './utils'
+import { SCOPE_META, isRemovableScope, isServerEnabled } from './utils'
 
 /**
  * Mobile (viewport ≤768px) MCP UI — ADR-048's takeover + drill-down pattern.
@@ -72,10 +72,7 @@ export type McpMobileViewProps = Omit<McpDialogViewProps, 'onSelect'> & {
   onSelect: (name: string | null) => void
 }
 
-/** A server counts as "on" unless it is explicitly off for this session. */
-function isEnabled(server: McpServerInfo): boolean {
-  return server.status !== 'disabled' && server.status !== 'not_started'
-}
+const isEnabled = isServerEnabled
 
 /** One-line subtitle: transport, then tool count when the SDK reported any. */
 function subtitleFor(server: McpServerInfo): string {
@@ -236,7 +233,7 @@ export function McpMobileView({
   if (selectedServer) {
     const server = selectedServer
     const busy = actionLoading === server.name
-    const editable = !!server.scope && ['user', 'project', 'local'].includes(server.scope)
+    const editable = isRemovableScope(server.scope)
     const canReconnect =
       hasRoutingId && server.status !== 'not_started' && server.status !== 'pending'
     const config = server.config

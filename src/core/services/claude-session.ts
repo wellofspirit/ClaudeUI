@@ -59,7 +59,8 @@ import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { loadEngineConfig, saveSlashCommands } from './ui-config'
 import { claudeBehaviorSettings } from '../sdk/args'
-import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
+import { readDisabledMcpServers } from './claude-mcp'
+import { loadClaudeUiLegacyMcpServers } from './claude-mcp-files'
 import { scanSkills } from './skill-scanner'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
@@ -94,6 +95,7 @@ import {
 } from '../../shared/model-capabilities'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
+import { reloadMcpUntil, type McpReloadExpectation } from './claude-mcp-reload'
 import { locateBunClaude } from '../sdk'
 // Straight from the module, not the '../sdk' barrel: several suites replace the
 // barrel with a factory that lists only `query`, and `capabilities` is read on
@@ -860,16 +862,11 @@ export class ClaudeSession extends BaseSession {
       // initialize; passing config-file servers via mcpServers ensures they're
       // always available even if settingSources parsing differs.
       // The SDK deduplicates by name, so there are no duplicate connections.
-      this._mcpAllServers = {}
+      // Only the ClaudeUI legacy layer rides --mcp-config: cli.js reads
+      // `<cwd>/.mcp.json` itself (walk-up, disabledMcpjsonServers), and injecting
+      // it would bypass both. Same files as the catalog's legacy layer.
+      this._mcpAllServers = loadClaudeUiLegacyMcpServers(this.cwd)
       this._mcpDisabledServers.clear()
-      for (const scope of ['user', 'project', 'local'] as const) {
-        try {
-          const servers = loadMcpServers(scope, this.cwd)
-          Object.assign(this._mcpAllServers, servers)
-        } catch {
-          // Scope may not apply (e.g., project/local without cwd)
-        }
-      }
 
       // Read disabledMcpServers from ~/.claude.json's project entry for logging.
       // The CLI persists disabled state here via the TR() check. The SDK reads
@@ -3146,6 +3143,17 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     )
     logger.debug('ClaudeSession', `mcpSetServers result: ${JSON.stringify(result).slice(0, 500)}`)
     return result
+  }
+
+  /**
+   * Re-read the MCP config after a native `claude mcp add-json` / `remove` wrote it.
+   * A running stream-json cli.js does not watch those files (probed 2.1.317);
+   * `reload_plugins` re-resolves every scope and adds/removes the difference.
+   */
+  async mcpReloadServers(expect?: McpReloadExpectation): Promise<void> {
+    if (!this.activeQuery) throw new Error('No active session')
+    const ok = await reloadMcpUntil(this.activeQuery, expect)
+    if (!ok) logger.warn('ClaudeSession', 'mcpReloadServers: change not visible yet, giving up')
   }
 
   /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */

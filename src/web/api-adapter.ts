@@ -840,6 +840,17 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('mcp:save-servers', scope, servers, cwd) as Promise<void>,
     removeMcpServer: (scope, serverName, cwd?) =>
       connection.invoke('mcp:remove-server', scope, serverName, cwd) as Promise<void>,
+    loadMcpCatalog: (cwd) =>
+      connection.invoke('mcp:load-catalog', cwd) as ReturnType<ClaudeAPI['loadMcpCatalog']>,
+    mcpCliAdd: (scope, name, config, cwd?) =>
+      connection.invoke('mcp:cli-add', scope, name, config, cwd) as ReturnType<
+        ClaudeAPI['mcpCliAdd']
+      >,
+    mcpCliRemove: (scope, name, cwd?) =>
+      connection.invoke('mcp:cli-remove', scope, name, cwd) as ReturnType<
+        ClaudeAPI['mcpCliRemove']
+      >,
+    mcpReloadServers: (routingId, expect) => unwrap('mcp:reload', routingId, expect),
     mcpReadDisabled: (cwd) =>
       connection.invoke('mcp:read-disabled', cwd) as ReturnType<ClaudeAPI['mcpReadDisabled']>,
     mcpToggleDisabled: (cwd, serverName, enabled) =>

@@ -56,7 +56,7 @@ import {
   loadCleanupPeriodDays,
   isWorkspaceTrusted
 } from '../services/claude-settings'
-import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
+import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../shared-providers/chatgpt-rate-limits'
@@ -1101,6 +1101,12 @@ export function registerRemoteHandlers(
     kind: 'query',
     handler: async (scope: string, cwd?: string | null) =>
       loadMcpServers(scope as 'user' | 'project' | 'local', opt(cwd))
+  })
+  handleRemote({
+    channel: 'mcp:load-catalog',
+    capability: 'config',
+    kind: 'query',
+    handler: async (cwd?: string | null) => listMcpCatalog(cwd)
   })
   handleRemote({
     channel: 'mcp:read-disabled',

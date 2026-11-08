@@ -1,9 +1,9 @@
 /**
  * Bridge ClaudeUI's ONE shared MCP catalog into pi (ADR-096).
  *
- * The catalog is the Claude-scoped server list McpDialog manages (user /
- * project / local, minus the cwd's `disabledMcpServers`) — the same read the
- * opencode bridge inherits (`readEnabledClaudeMcpServers`). pi 1.0
+ * The catalog is the server list a Claude Code session in the cwd would load
+ * (`resolveClaudeMcpCatalog`: plugin / user / project / local / managed, minus
+ * the disabled list) — the same read the opencode bridge makes. pi 1.0
  * takes a server at runtime through the extension API
  * `pi.registerMcpServer(name, config)` (session-only, never written to pi's
  * `mcp.json`; `vendor/pi-src/packages/coding-agent/src/core/mcp-servers.ts`), so
@@ -39,7 +39,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { McpServerConfig } from '../../shared/types'
-import { readEnabledClaudeMcpServers } from '../services/claude-mcp'
+import { resolveClaudeMcpCatalog } from '../services/claude-mcp-catalog'
+import { expandClaudeEnvRefs } from '../services/claude-env-refs'
 import { logger } from '../services/logger'
 
 /** pi's stdio entry (`McpStdioServerConfig`), as ClaudeUI registers it. */
@@ -48,7 +49,6 @@ export type PiMcpStdioEntry = {
   command: string
   args?: string[]
   env?: Record<string, string>
-  cwd?: string
   exposure: 'direct'
 }
 
@@ -108,6 +108,8 @@ export function piMcpNamespace(server: string): string {
  */
 export const piMcpRuleKey = piMcpName
 
+export { expandClaudeEnvRefs }
+
 /**
  * A subagent definition's `tools` / `disallowedTools` entry as pi's `--tools` /
  * `--exclude-tools` must spell it. Non-MCP entries pass through. An MCP entry is
@@ -119,28 +121,6 @@ export function piSubagentToolEntry(entry: string): string {
   const rest = entry.slice('mcp__'.length)
   const spelled = `mcp__${rest.replace(/[^A-Za-z0-9_*]/g, '_')}`
   return rest.includes('__') ? spelled : `${spelled}__*`
-}
-
-const CLAUDE_ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g
-
-/**
- * Claude Code's `${VAR}` / `${VAR:-default}` expansion of an `.mcp.json`
- * string, against `env`. A variable that is unset (or empty) with no default
- * stays as written, and its NAME is collected in `missing` — the value itself
- * is never logged.
- */
-export function expandClaudeEnvRefs(
-  value: string,
-  env: NodeJS.ProcessEnv,
-  missing: Set<string>
-): string {
-  return value.replace(CLAUDE_ENV_REF, (whole, name: string, fallback: string | undefined) => {
-    const set = env[name]
-    if (set !== undefined && set !== '') return set
-    if (fallback !== undefined) return fallback
-    missing.add(name)
-    return whole
-  })
 }
 
 /**
@@ -220,11 +200,6 @@ export function translateClaudeMcpServerForPi(
     }
     if (cfg.args && cfg.args.length > 0) entry.args = cfg.args.map(expand)
     if (cfg.env && Object.keys(cfg.env).length > 0) entry.env = piTemplateMap(cfg.env, env, missing)
-    // Not in Claude's documented shape, but pi takes it and a hand-written
-    // `.mcp.json` may carry it. Relative paths resolve against the session cwd
-    // in pi, which is also where Claude Code runs a server.
-    const cwd = (cfg as { cwd?: unknown }).cwd
-    if (typeof cwd === 'string' && cwd !== '') entry.cwd = expand(cwd)
     return { entry, missingEnv: [...missing] }
   }
 
@@ -294,9 +269,19 @@ export function buildPiMcpCatalog(
  */
 export function collectClaudeMcpForPi(cwd: string): PiMcpCatalog {
   try {
-    const catalog = buildPiMcpCatalog(readEnabledClaudeMcpServers(cwd))
+    const resolved = resolveClaudeMcpCatalog(cwd)
+    const catalog = buildPiMcpCatalog(
+      Object.fromEntries(
+        Object.entries(resolved.servers)
+          .filter(([, e]) => !e.disabled)
+          .map(([name, e]) => [name, e.config])
+      )
+    )
+    // The catalog's own skips (invalid entries, a url-less typeless one) are
+    // not engine-specific: surfaced with pi's, in the same one-time warning.
+    catalog.skipped.unshift(...resolved.skipped)
     for (const { name, reason } of catalog.skipped) {
-      logger.info('PiMcpBridge', `MCP server "${name}" not bridged to pi: ${reason}`)
+      logger.debug('PiMcpBridge', `MCP server "${name}" not bridged to pi: ${reason}`)
     }
     return catalog
   } catch (err) {
