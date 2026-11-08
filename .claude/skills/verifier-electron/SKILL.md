@@ -265,6 +265,13 @@ managed: true})`, then `window.api.setSharedProviderApiKey(id, key)`, then
   worktree has no `vendor/`), set `loadVendorConfig('anthropic')` → `endpoint:
 {enabled, baseUrl, authToken}` → `saveVendorConfig` to a local `/v1/messages` SSE
   stand-in (answer `count_tokens` too; one short turn makes about six requests).
+- **Worktree-isolated sessions can't build fixtures outside the worktree.** Their Bash
+  guard refuses any `git` call outside the worktree (a fixture `git init` in the
+  scratchpad) and some heredocs whose JS/JSON content it misreads as git commands. Put the
+  fixture tree, its git repo and the driver under the worktree's gitignored
+  `.work/<arc>/verify/`, and have them written with the Write tool (the orchestrator
+  pre-creates them, or the verifier gets Write scoped to that folder). Never obfuscate a
+  command to get past the guard.
 - **A worktree installed with `--ignore-scripts`** has `node_modules/electron` without
   `dist/`: launch the main checkout's `electron.exe` with the worktree as the app
   path, and check `process.versions.electron` matches the worktree's pin.
