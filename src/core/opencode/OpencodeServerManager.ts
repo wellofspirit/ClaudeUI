@@ -1045,7 +1045,14 @@ export class OpencodeServerManager {
           : undefined
     if (!handle) return null
     const { anyConfig: _anyConfig, ...lease } = options
-    return this.leaseOn(handle, directory, lease)
+    // A borrowed server (another config's) is leased on a directory it already serves: the
+    // routes that borrow are global, and opencode connects every configured MCP server for
+    // each new directory a request touches, so `directory` would start them all again there.
+    const served =
+      handle === own
+        ? undefined
+        : ([...handle.readiness.keys()][0] ?? [...handle.cwdRefs.keys()][0])
+    return this.leaseOn(handle, served ?? directory, lease)
   }
 
   /**

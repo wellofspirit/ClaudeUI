@@ -210,6 +210,31 @@ describe('OpencodeServerManager (2.x) — keying', () => {
     expect(calls[1].child.killed).toBe(true)
   })
 
+  // opencode connects every configured MCP server per directory a request touches: a global
+  // read that borrows another config's server must not open a new directory on it.
+  it('anyConfig borrows a foreign server on a directory it already serves; its own server keeps the asked one', async () => {
+    const { manager, configs } = makeRig()
+    configs.set('/proj/a', {
+      pluginDir: '/res/claudeui-xeng',
+      bridgedMcp: { u1: { type: 'local', command: ['x'], codemode: false } }
+    })
+    const project = await manager.acquire('/proj/a')
+    const borrowed = await manager.acquireIfRunning('/housekeeping', {
+      waitForHostedTools: false,
+      anyConfig: true
+    })
+    expect(borrowed?.baseUrl).toBe(project.baseUrl)
+    expect(borrowed?.directory).toBe(dir('/proj/a'))
+
+    const own = await manager.acquire('/proj/b')
+    const ownRead = await manager.acquireIfRunning('/proj/c', {
+      waitForHostedTools: false,
+      anyConfig: true
+    })
+    expect(ownRead?.baseUrl).toBe(own.baseUrl)
+    expect(ownRead?.directory).toBe(dir('/proj/c'))
+  })
+
   it('normalizes cwd: relative + absolute forms of one dir are one lease directory', async () => {
     const { manager } = makeRig()
     const rel = await manager.acquire('.')
