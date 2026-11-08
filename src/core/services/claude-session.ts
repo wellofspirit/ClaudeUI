@@ -3151,6 +3151,17 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     return result
   }
 
+  /**
+   * Re-read the MCP config after a native `claude mcp add-json` / `remove` wrote it.
+   * A running stream-json cli.js does not watch those files (probed 2.1.317);
+   * `reload_plugins` re-resolves every scope and adds/removes the difference.
+   */
+  async mcpReloadServers(): Promise<void> {
+    if (!this.activeQuery) throw new Error('No active session')
+    logger.debug('ClaudeSession', 'mcpReloadServers')
+    await this.activeQuery.reloadPlugins()
+  }
+
   /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
   discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
     return scanSkills(cwd)

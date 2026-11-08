@@ -8,7 +8,13 @@ import type {
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { McpDialogView } from './View'
 import { McpMobileView } from './MobileView'
-import { SCOPE_META, SCOPE_ORDER, type ServerGroup, type AddServerPayload } from './utils'
+import {
+  SCOPE_META,
+  SCOPE_ORDER,
+  isRemovableScope,
+  type ServerGroup,
+  type AddServerPayload
+} from './utils'
 
 interface McpDialogProps {
   open: boolean
@@ -33,26 +39,21 @@ export function McpDialog({
 
   const loadFromConfig = useCallback(async (): Promise<McpServerInfo[]> => {
     const results: McpServerInfo[] = []
-    const scopes: Array<{ scope: McpServerScope; needsCwd: boolean }> = [
-      { scope: 'user', needsCwd: false },
-      { scope: 'project', needsCwd: true },
-      { scope: 'local', needsCwd: true }
-    ]
-    for (const { scope, needsCwd } of scopes) {
-      if (needsCwd && !cwd) continue
-      try {
-        const cfgServers = await window.api.loadMcpServers(scope, cwd ?? undefined)
-        for (const [name, config] of Object.entries(cfgServers)) {
-          results.push({
-            name,
-            status: 'not_started',
-            config,
-            scope
-          })
+    try {
+      if (cwd) {
+        // Everything a Claude session in `cwd` would load, labelled by source
+        const { servers } = await window.api.loadMcpCatalog(cwd)
+        for (const s of servers) {
+          results.push({ name: s.name, status: 'not_started', config: s.config, scope: s.source })
         }
-      } catch {
-        // Scope may not exist — fine
+      } else {
+        const cfgServers = await window.api.loadMcpServers('user')
+        for (const [name, config] of Object.entries(cfgServers)) {
+          results.push({ name, status: 'not_started', config, scope: 'user' })
+        }
       }
+    } catch {
+      // Config unreadable — show whatever the live session reports
     }
 
     if (cwd) {
@@ -236,24 +237,34 @@ export function McpDialog({
     [routingId, refreshAfterAction]
   )
 
+  // A running stream-json cli.js does not watch its config files (probed 2.1.317):
+  // after a native write, ask it to re-read them.
+  const reloadLiveServers = useCallback(async (): Promise<void> => {
+    if (!routingId) return
+    try {
+      await window.api.mcpReloadServers(routingId)
+    } catch {
+      // SDK may not be ready — the write landed in the config regardless
+    }
+  }, [routingId])
+
   const handleDelete = useCallback(
     async (server: McpServerInfo): Promise<void> => {
-      const isEditable = server.scope && ['user', 'project', 'local'].includes(server.scope)
-      if (!server.scope || !isEditable) return
+      if (!server.scope || !isRemovableScope(server.scope)) return
       setActionLoading(server.name)
       try {
-        const scope = server.scope as 'user' | 'project' | 'local'
-
-        await window.api.removeMcpServer(scope, server.name, cwd ?? undefined)
-
-        if (routingId) {
-          try {
-            const remaining = await window.api.loadMcpServers(scope, cwd ?? undefined)
-            await window.api.mcpSetServers(routingId, remaining)
-          } catch {
-            // SDK may not be ready — server is removed from config regardless
-          }
+        if (server.scope === 'claudeui') {
+          // ClaudeUI's own legacy files. A live session holds these as dynamic
+          // servers, but `mcp_set_servers` REPLACES the whole dynamic set, the
+          // hosted claude-ui servers included, which the renderer can't rebuild.
+          // So no live push: the server stops at the next session start.
+          await window.api.removeMcpServer('claudeui', server.name, cwd ?? undefined)
+        } else {
+          const scope = server.scope as 'user' | 'project' | 'local'
+          const result = await window.api.mcpCliRemove(scope, server.name, cwd ?? undefined)
+          if (result.error) throw new Error(result.error)
         }
+        await reloadLiveServers()
 
         setSelected(null)
         await refreshServers()
@@ -262,31 +273,21 @@ export function McpDialog({
         setActionLoading(null)
       }
     },
-    [cwd, routingId, refreshServers]
+    [cwd, refreshServers, reloadLiveServers]
   )
 
   const handleSubmitAddForm = useCallback(
     async (payload: AddServerPayload): Promise<{ error?: string } | void> => {
       const { name, scope, config } = payload
-      const existing = await window.api.loadMcpServers(scope, cwd ?? undefined)
-      if (existing[name]) {
-        return { error: `Server "${name}" already exists in ${scope} scope` }
-      }
-      existing[name] = config
-      await window.api.saveMcpServers(scope, existing, cwd ?? undefined)
+      // Claude Code's own writer: right file for the scope, locked, validated
+      const result = await window.api.mcpCliAdd(scope, name, config, cwd ?? undefined)
+      if (result.error) return { error: result.error }
 
-      if (routingId) {
-        try {
-          await window.api.mcpSetServers(routingId, existing)
-        } catch {
-          // SDK may not be ready — server is saved to config file regardless
-        }
-      }
-
+      await reloadLiveServers()
       setShowAddForm(false)
       await refreshServers()
     },
-    [cwd, routingId, refreshServers]
+    [cwd, refreshServers, reloadLiveServers]
   )
 
   /**

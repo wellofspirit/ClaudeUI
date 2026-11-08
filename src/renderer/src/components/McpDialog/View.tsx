@@ -7,7 +7,7 @@ import type {
   McpServerConfig
 } from '../../../../shared/types'
 import type { ServerGroup, AddServerPayload } from './utils'
-import { SCOPE_META } from './utils'
+import { SCOPE_META, isRemovableScope } from './utils'
 
 export type { ServerGroup, AddServerPayload }
 
@@ -346,7 +346,7 @@ function ServerDetail({
 }): React.JSX.Element {
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const isActionable = hasRoutingId
-  const isEditable = server.scope && ['user', 'project', 'local'].includes(server.scope)
+  const isEditable = isRemovableScope(server.scope)
   const isBusy = actionLoading === server.name
 
   const config = server.config

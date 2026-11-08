@@ -351,6 +351,11 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
     removeMcpServer: (scope, serverName, cwd?) =>
       ipcRenderer.invoke('mcp:remove-server', scope, serverName, cwd),
+    loadMcpCatalog: (cwd) => ipcRenderer.invoke('mcp:load-catalog', cwd),
+    mcpCliAdd: (scope, name, config, cwd?) =>
+      ipcRenderer.invoke('mcp:cli-add', scope, name, config, cwd),
+    mcpCliRemove: (scope, name, cwd?) => ipcRenderer.invoke('mcp:cli-remove', scope, name, cwd),
+    mcpReloadServers: (routingId) => unwrap('mcp:reload', routingId),
     mcpReadDisabled: (cwd) => ipcRenderer.invoke('mcp:read-disabled', cwd),
     mcpToggleDisabled: (cwd, serverName, enabled) =>
       ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),

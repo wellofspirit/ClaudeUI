@@ -533,6 +533,12 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
   removeMcpServer: (scope: string, serverName: string, cwd?: string) =>
     ipcRenderer.invoke('mcp:remove-server', scope, serverName, cwd),
+  loadMcpCatalog: (cwd: string) => ipcRenderer.invoke('mcp:load-catalog', cwd),
+  mcpCliAdd: (scope: string, name: string, config: Record<string, unknown>, cwd?: string) =>
+    ipcRenderer.invoke('mcp:cli-add', scope, name, config, cwd),
+  mcpCliRemove: (scope: string, name: string, cwd?: string) =>
+    ipcRenderer.invoke('mcp:cli-remove', scope, name, cwd),
+  mcpReloadServers: (routingId: string) => unwrap('mcp:reload', routingId),
   mcpReadDisabled: (cwd: string) => ipcRenderer.invoke('mcp:read-disabled', cwd),
   mcpToggleDisabled: (cwd: string, serverName: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),

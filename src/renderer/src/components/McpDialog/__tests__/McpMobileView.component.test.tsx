@@ -81,16 +81,20 @@ describe('McpDialog mobile fork', () => {
     removeCalls = []
     reconnectCalls = []
 
-    app.bridge.ipcMain.handle('mcp:load-servers', async (_e, scope: string) => {
-      if (scope === 'user') return { 'user-srv': stdio() }
-      if (scope === 'project') return { 'proj-srv': stdio({ command: 'node' }) }
-      return {}
-    })
+    app.bridge.ipcMain.handle('mcp:load-catalog', async () => ({
+      servers: [
+        { name: 'user-srv', source: 'user', config: stdio() },
+        { name: 'proj-srv', source: 'project', config: stdio({ command: 'node' }) }
+      ],
+      skipped: []
+    }))
     app.bridge.ipcMain.handle('mcp:read-disabled', async () => ['proj-srv'])
     app.bridge.ipcMain.handle('mcp:status', async () => null)
-    app.bridge.ipcMain.handle('mcp:remove-server', async (_e, scope: string, name: string) => {
+    app.bridge.ipcMain.handle('mcp:cli-remove', async (_e, scope: string, name: string) => {
       removeCalls.push({ scope, name })
+      return {}
     })
+    app.bridge.ipcMain.handle('mcp:reload', async () => ({ ok: true, data: undefined }))
     app.bridge.ipcMain.handle(
       'mcp:toggle-disabled',
       async (_e, cwd: string, name: string, enabled: boolean) => {

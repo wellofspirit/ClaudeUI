@@ -9,7 +9,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import type { McpServerConfig } from '../../shared/types'
+import type { McpCatalogResult, McpServerConfig } from '../../shared/types'
 import {
   claudeGlobalConfigPath,
   claudeProjectKey,
@@ -39,6 +39,23 @@ export { loadMcpServers }
 export function readEnabledClaudeMcpServers(cwd: string): Record<string, McpServerConfig> {
   const { servers } = resolveClaudeMcpCatalog(cwd)
   return Object.fromEntries(Object.entries(servers).map(([name, e]) => [name, e.config]))
+}
+
+/**
+ * McpDialog's cold list: every entry the catalog resolved for `cwd`, labelled by
+ * source and keyed by the name Claude Code knows it by (`plugin:p:s` for a plugin
+ * server), which is also what a live `mcp_status` and `disabledMcpServers` use.
+ */
+export function listMcpCatalog(cwd: string): McpCatalogResult {
+  const { servers, skipped } = resolveClaudeMcpCatalog(cwd)
+  return {
+    servers: Object.values(servers).map((e) => ({
+      name: e.claudeName,
+      config: e.config,
+      source: e.source
+    })),
+    skipped
+  }
 }
 
 /**
@@ -106,11 +123,16 @@ export function writeDisabledMcpServers(
  * Unlike saveMcpServers (which writes to a single target file), this removes the
  * server key from both .mcp.json and settings.json so it doesn't reappear on reload.
  */
-export function removeMcpServer(scope: McpScope, serverName: string, cwd?: string): void {
-  const paths = configFilePaths(scope, cwd)
+export function removeMcpServer(
+  scope: McpScope,
+  serverName: string,
+  cwd?: string,
+  opts: { legacyLayer?: boolean; env?: Env } = {}
+): void {
+  const paths = configFilePaths(scope, cwd, opts.env)
 
-  // Remove from .mcp.json
-  if (paths.mcpJson) {
+  // Remove from .mcp.json (`<cwd>/.mcp.json` is cli.js's own file: not the legacy layer's)
+  if (paths.mcpJson && !(opts.legacyLayer && scope === 'project')) {
     const data = readJsonSafe(paths.mcpJson)
     if (data) {
       const servers = extractMcpServers(data)
@@ -141,6 +163,22 @@ export function removeMcpServer(scope: McpScope, serverName: string, cwd?: strin
       writeJsonAtomic(paths.settingsJson, settingsData, { indent: 2, trailingNewline: true })
       logger.debug('ClaudeMcp', `Removed "${serverName}" from ${paths.settingsJson}`)
     }
+  }
+}
+
+/**
+ * Remove `serverName` from the ClaudeUI legacy layer (McpDialog's own files, which
+ * cli.js ignores; see `claude-mcp-files.ts`) in every scope, leaving cli.js's
+ * native files alone. The catalog does not say which legacy file holds a name.
+ */
+export function removeClaudeUiLegacyMcpServer(
+  serverName: string,
+  cwd?: string,
+  env: Env = process.env
+): void {
+  for (const scope of ['user', 'project', 'local'] as const) {
+    if (scope !== 'user' && !cwd) continue
+    removeMcpServer(scope, serverName, cwd, { legacyLayer: true, env })
   }
 }
 

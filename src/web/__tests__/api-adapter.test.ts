@@ -724,6 +724,16 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     channel: 'mcp:toggle-disabled',
     args: ['/repo/app', 'lsphub', true]
   },
+  // McpDialog's native writes and catalog-backed list: the browser client drives the same
+  // channels as the desktop. The reload verb is safeHandler-wrapped (unwrapped); the rest are plain.
+  { method: 'loadMcpCatalog', channel: 'mcp:load-catalog', args: ['/repo/app'] },
+  {
+    method: 'mcpCliAdd',
+    channel: 'mcp:cli-add',
+    args: ['user', 'lsphub', { command: 'lsphub' }, '/repo/app']
+  },
+  { method: 'mcpCliRemove', channel: 'mcp:cli-remove', args: ['project', 'lsphub', '/repo/app'] },
+  { method: 'mcpReloadServers', channel: 'mcp:reload', args: ['sess-1'] },
 
   // The unified provider list (ADR-065 phase 6) — a READ, declared in the same
   // shared module as the writes below so the phone gets it too, and unwrapped

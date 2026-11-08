@@ -265,6 +265,8 @@ export interface ISession {
   mcpToggleServer?(serverName: string, enabled: boolean): Promise<void>
   mcpReconnectServer?(serverName: string): Promise<void>
   mcpSetServers?(servers: Record<string, unknown>): Promise<unknown>
+  /** Re-read the MCP config from disk (after a native `claude mcp add/remove`). */
+  mcpReloadServers?(): Promise<void>
 
   /** Hot-reload settings from disk. Claude-only; no capability flag. */
   notifySettingsChanged?(): Promise<void>

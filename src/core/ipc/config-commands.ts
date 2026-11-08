@@ -82,10 +82,16 @@ import {
 import type { SlashCommandCache } from '../services/ui-config'
 import {
   saveMcpServers,
+  removeClaudeUiLegacyMcpServer,
   removeMcpServer,
   readDisabledMcpServers,
   writeDisabledMcpServers
 } from '../services/claude-mcp'
+import {
+  addMcpServerNative,
+  removeMcpServerNative,
+  type NativeMcpScope
+} from '../services/claude-mcp-cli'
 import {
   createWorktree,
   getWorktreeStatus,
@@ -146,7 +152,8 @@ import type {
   SharedAutoModeConfig,
   OpencodeConfigSettings,
   ProxySettings,
-  RawConfigPatch
+  RawConfigPatch,
+  McpServerConfig
 } from '../../shared/types'
 
 // ---------------------------------------------------------------------------
@@ -959,8 +966,42 @@ export function configCommands(
       channel: 'mcp:remove-server',
       capability: 'config',
       kind: 'command',
-      handler: (scope: string, serverName: string, cwd?: string) =>
-        removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd)
+      // Legacy layer only (McpDialog's own files): cli.js's scopes go through `mcp:cli-remove`.
+      // `claudeui` = every legacy scope; a native scope name keeps the old per-scope meaning.
+      handler: (scope: string, serverName: string, cwd?: string) => {
+        if (scope === 'claudeui') return removeClaudeUiLegacyMcpServer(serverName, cwd)
+        removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd, {
+          legacyLayer: true
+        })
+      }
+    },
+    // Native writes: cli.js's own `mcp add-json` / `mcp remove` (claude-mcp-cli.ts)
+    {
+      channel: 'mcp:cli-add',
+      capability: 'config',
+      kind: 'command',
+      handler: (scope: string, name: string, config: McpServerConfig, cwd?: string) =>
+        addMcpServerNative(scope as NativeMcpScope, name, config, cwd)
+    },
+    {
+      channel: 'mcp:cli-remove',
+      capability: 'config',
+      kind: 'command',
+      handler: (scope: string, name: string, cwd?: string) =>
+        removeMcpServerNative(scope as NativeMcpScope, name, cwd)
+    },
+    {
+      channel: 'mcp:reload',
+      capability: 'config',
+      kind: 'command',
+      sessionIdArg: 0,
+      handler: safeHandler(async (routingId: string) => {
+        const session = manager.get(routingId)
+        if (!session) throw new Error('No active session')
+        if (!session.capabilities.hostedMcp || !session.mcpReloadServers)
+          throw new Error('Provider does not support hosted MCP')
+        await session.mcpReloadServers()
+      })
     },
     // MCP disabled state (direct ~/.claude.json access, no session needed)
     {

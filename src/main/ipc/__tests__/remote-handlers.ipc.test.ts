@@ -184,6 +184,7 @@ vi.mock('../../../core/services/claude-settings', () => ({
 
 vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
+  listMcpCatalog: vi.fn(() => ({ servers: [], skipped: [] })),
   readDisabledMcpServers: vi.fn(() => [])
 }))
 
@@ -870,6 +871,11 @@ describe('registerRemoteHandlers', () => {
   it('usage:fetch dispatches to usageFetcher.fetch', async () => {
     const res = await dispatcher.handle(makeRequest('usage:fetch'), remoteConn)
     expect(res).toEqual({ a: 1 })
+  })
+
+  it('mcp:load-catalog serves the catalog to a remote client', async () => {
+    const res = await dispatcher.handle(makeRequest('mcp:load-catalog', '/repo'), remoteConn)
+    expect(res).toEqual({ servers: [], skipped: [] })
   })
 
   it('mcp:status returns empty when session missing', async () => {
@@ -2070,6 +2076,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'git:unstage-all',
   'git:unstage-file',
   'mcp:load-servers',
+  'mcp:load-catalog',
   'mcp:read-disabled',
   'mcp:status',
   'mockup:read-html',
@@ -2340,6 +2347,9 @@ const S1B_SWEEP_CHANNELS = [
   'config:save-slash-commands',
   'config:save-vendor-config',
   'config:write-pi-native-text',
+  'mcp:cli-add',
+  'mcp:cli-remove',
+  'mcp:reload',
   'mcp:reconnect',
   'mcp:remove-server',
   'mcp:save-servers',
