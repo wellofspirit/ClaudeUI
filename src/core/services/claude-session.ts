@@ -860,11 +860,14 @@ export class ClaudeSession extends BaseSession {
       // initialize; passing config-file servers via mcpServers ensures they're
       // always available even if settingSources parsing differs.
       // The SDK deduplicates by name, so there are no duplicate connections.
+      // Only the ClaudeUI legacy layer rides --mcp-config: cli.js reads
+      // `<cwd>/.mcp.json` itself (walk-up, disabledMcpjsonServers), and injecting
+      // it would bypass both. Same files as the catalog's legacy layer.
       this._mcpAllServers = {}
       this._mcpDisabledServers.clear()
       for (const scope of ['user', 'project', 'local'] as const) {
         try {
-          const servers = loadMcpServers(scope, this.cwd)
+          const servers = loadMcpServers(scope, this.cwd, { legacyLayer: true })
           Object.assign(this._mcpAllServers, servers)
         } catch {
           // Scope may not apply (e.g., project/local without cwd)
