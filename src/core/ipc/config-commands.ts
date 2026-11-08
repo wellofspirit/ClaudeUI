@@ -995,13 +995,15 @@ export function configCommands(
       capability: 'config',
       kind: 'command',
       sessionIdArg: 0,
-      handler: safeHandler(async (routingId: string) => {
-        const session = manager.get(routingId)
-        if (!session) throw new Error('No active session')
-        if (!session.capabilities.hostedMcp || !session.mcpReloadServers)
-          throw new Error('Provider does not support hosted MCP')
-        await session.mcpReloadServers()
-      })
+      handler: safeHandler(
+        async (routingId: string, expect?: { name: string; present: boolean }) => {
+          const session = manager.get(routingId)
+          if (!session) throw new Error('No active session')
+          if (!session.capabilities.hostedMcp || !session.mcpReloadServers)
+            throw new Error('Provider does not support hosted MCP')
+          await session.mcpReloadServers(expect)
+        }
+      )
     },
     // MCP disabled state (direct ~/.claude.json access, no session needed)
     {

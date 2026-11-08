@@ -52,6 +52,7 @@ describe('McpDialog FC', () => {
   let addResult: { error?: string }
   let cliRemoveCalls: Array<{ scope: string; name: string; cwd: string | undefined }>
   let reloadCalls: string[]
+  let reloadExpects: unknown[]
   let setServerCalls: Array<Record<string, McpServerConfig>>
   let toggleCalls: Array<{ routingId: string; name: string; enabled: boolean }>
   let toggleDisabledCalls: Array<{ cwd: string; name: string; enabled: boolean }>
@@ -73,6 +74,7 @@ describe('McpDialog FC', () => {
     addResult = {}
     cliRemoveCalls = []
     reloadCalls = []
+    reloadExpects = []
     setServerCalls = []
     toggleCalls = []
     toggleDisabledCalls = []
@@ -94,8 +96,9 @@ describe('McpDialog FC', () => {
         return {}
       }
     )
-    app.bridge.ipcMain.handle('mcp:reload', async (_e, routingId: string) => {
+    app.bridge.ipcMain.handle('mcp:reload', async (_e, routingId: string, expect?: unknown) => {
       reloadCalls.push(routingId)
+      reloadExpects.push(expect)
       return { ok: true, data: undefined }
     })
     app.bridge.ipcMain.handle(
@@ -286,6 +289,8 @@ describe('McpDialog FC', () => {
     expect(cliRemoveCalls).toEqual([{ scope: 'project', name: 'proj-srv', cwd: CWD }])
     expect(removeCalls).toHaveLength(0)
     expect(reloadCalls).toEqual([ROUTING_ID])
+    // the reload waits (bounded, main-side) for the removed server to leave the live list
+    expect(reloadExpects).toEqual([{ name: 'proj-srv', present: false }])
     // cli.js's dynamic set is not replaced wholesale any more
     expect(setServerCalls).toHaveLength(0)
   })
@@ -341,6 +346,7 @@ describe('McpDialog FC', () => {
       { scope: 'project', name: 'new-server', config: makeConfig({ command: 'node' }), cwd: CWD }
     ])
     expect(reloadCalls).toEqual([ROUTING_ID])
+    expect(reloadExpects).toEqual([{ name: 'new-server', present: true }])
     expect(setServerCalls).toHaveLength(0)
   })
 

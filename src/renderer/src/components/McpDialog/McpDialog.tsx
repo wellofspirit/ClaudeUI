@@ -222,14 +222,17 @@ export function McpDialog({
 
   // A running stream-json cli.js does not watch its config files (probed 2.1.317):
   // after a native write, ask it to re-read them.
-  const reloadLiveServers = useCallback(async (): Promise<void> => {
-    if (!routingId) return
-    try {
-      await window.api.mcpReloadServers(routingId)
-    } catch {
-      // SDK may not be ready — the write landed in the config regardless
-    }
-  }, [routingId])
+  const reloadLiveServers = useCallback(
+    async (expect?: { name: string; present: boolean }): Promise<void> => {
+      if (!routingId) return
+      try {
+        await window.api.mcpReloadServers(routingId, expect)
+      } catch {
+        // SDK may not be ready — the write landed in the config regardless
+      }
+    },
+    [routingId]
+  )
 
   const handleDelete = useCallback(
     async (server: McpServerInfo): Promise<void> => {
@@ -247,7 +250,10 @@ export function McpDialog({
           const result = await window.api.mcpCliRemove(scope, server.name, cwd ?? undefined)
           if (result.error) throw new Error(result.error)
         }
-        await reloadLiveServers()
+        // a legacy (dynamic) entry never leaves the live list on reload: nothing to wait for
+        await reloadLiveServers(
+          server.scope === 'claudeui' ? undefined : { name: server.name, present: false }
+        )
 
         setSelected(null)
         await refreshServers()
@@ -266,7 +272,7 @@ export function McpDialog({
       const result = await window.api.mcpCliAdd(scope, name, config, cwd ?? undefined)
       if (result.error) return { error: result.error }
 
-      await reloadLiveServers()
+      await reloadLiveServers({ name, present: true })
       setShowAddForm(false)
       await refreshServers()
     },

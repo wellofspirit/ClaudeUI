@@ -538,7 +538,8 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mcp:cli-add', scope, name, config, cwd),
   mcpCliRemove: (scope: string, name: string, cwd?: string) =>
     ipcRenderer.invoke('mcp:cli-remove', scope, name, cwd),
-  mcpReloadServers: (routingId: string) => unwrap('mcp:reload', routingId),
+  mcpReloadServers: (routingId: string, expect?: { name: string; present: boolean }) =>
+    unwrap('mcp:reload', routingId, expect),
   mcpReadDisabled: (cwd: string) => ipcRenderer.invoke('mcp:read-disabled', cwd),
   mcpToggleDisabled: (cwd: string, serverName: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),

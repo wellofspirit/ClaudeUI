@@ -355,7 +355,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     mcpCliAdd: (scope, name, config, cwd?) =>
       ipcRenderer.invoke('mcp:cli-add', scope, name, config, cwd),
     mcpCliRemove: (scope, name, cwd?) => ipcRenderer.invoke('mcp:cli-remove', scope, name, cwd),
-    mcpReloadServers: (routingId) => unwrap('mcp:reload', routingId),
+    mcpReloadServers: (routingId, expect) => unwrap('mcp:reload', routingId, expect),
     mcpReadDisabled: (cwd) => ipcRenderer.invoke('mcp:read-disabled', cwd),
     mcpToggleDisabled: (cwd, serverName, enabled) =>
       ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),

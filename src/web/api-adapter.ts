@@ -850,7 +850,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('mcp:cli-remove', scope, name, cwd) as ReturnType<
         ClaudeAPI['mcpCliRemove']
       >,
-    mcpReloadServers: (routingId) => unwrap('mcp:reload', routingId),
+    mcpReloadServers: (routingId, expect) => unwrap('mcp:reload', routingId, expect),
     mcpReadDisabled: (cwd) =>
       connection.invoke('mcp:read-disabled', cwd) as ReturnType<ClaudeAPI['mcpReadDisabled']>,
     mcpToggleDisabled: (cwd, serverName, enabled) =>

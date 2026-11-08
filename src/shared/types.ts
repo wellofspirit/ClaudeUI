@@ -2386,7 +2386,11 @@ interface McpAPI {
     cwd?: string
   ): Promise<McpCliResult>
   /** Make a live Claude session re-read its MCP config (after a native write). */
-  mcpReloadServers(routingId: string): Promise<void>
+  mcpReloadServers(
+    routingId: string,
+    /** Retry (bounded) until this server is / is no longer listed live. */
+    expect?: { name: string; present: boolean }
+  ): Promise<void>
   mcpReadDisabled(cwd: string): Promise<string[]>
   mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>

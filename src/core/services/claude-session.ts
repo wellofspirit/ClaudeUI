@@ -95,6 +95,7 @@ import {
 } from '../../shared/model-capabilities'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
+import { reloadMcpUntil, type McpReloadExpectation } from './claude-mcp-reload'
 import { locateBunClaude } from '../sdk'
 // Straight from the module, not the '../sdk' barrel: several suites replace the
 // barrel with a factory that lists only `query`, and `capabilities` is read on
@@ -3149,10 +3150,10 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    * A running stream-json cli.js does not watch those files (probed 2.1.317);
    * `reload_plugins` re-resolves every scope and adds/removes the difference.
    */
-  async mcpReloadServers(): Promise<void> {
+  async mcpReloadServers(expect?: McpReloadExpectation): Promise<void> {
     if (!this.activeQuery) throw new Error('No active session')
-    logger.debug('ClaudeSession', 'mcpReloadServers')
-    await this.activeQuery.reloadPlugins()
+    const ok = await reloadMcpUntil(this.activeQuery, expect)
+    if (!ok) logger.warn('ClaudeSession', 'mcpReloadServers: change not visible yet, giving up')
   }
 
   /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
