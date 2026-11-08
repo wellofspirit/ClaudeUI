@@ -17,7 +17,8 @@ import { loadClaudeUiLegacyMcpServers } from '../claude-mcp-files'
 let root: string
 let cfg: string
 let repo: string
-const env = (): Record<string, string> => ({ CLAUDE_CONFIG_DIR: cfg })
+let home: string
+const env = (): Record<string, string> => ({ CLAUDE_CONFIG_DIR: cfg, HOME: home })
 const writeJson = (file: string, data: unknown): void => {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify(data))
@@ -29,6 +30,7 @@ beforeEach(() => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mcp-')))
   cfg = path.join(root, 'cfg')
   repo = path.join(root, 'repo')
+  home = path.join(root, 'home')
   fs.mkdirSync(cfg, { recursive: true })
   fs.mkdirSync(repo, { recursive: true })
 })
@@ -70,8 +72,10 @@ describe('ClaudeUI legacy layer on the spawn (A8)', () => {
   const server = (command: string): { command: string } => ({ command })
 
   beforeEach(() => {
-    writeJson(path.join(cfg, '.mcp.json'), { mcpServers: { cfg_mcp: server('a') } })
-    writeJson(path.join(cfg, 'settings.json'), { mcpServers: { cfg_settings: server('b') } })
+    writeJson(path.join(home, '.claude', '.mcp.json'), { mcpServers: { cfg_mcp: server('a') } })
+    writeJson(path.join(home, '.claude', 'settings.json'), {
+      mcpServers: { cfg_settings: server('b') }
+    })
     writeJson(path.join(repo, '.claude', 'settings.json'), {
       mcpServers: { proj_settings: server('c') }
     })

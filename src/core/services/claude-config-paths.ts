@@ -56,12 +56,24 @@ export function claudeManagedDir(platform: NodeJS.Platform = process.platform): 
 }
 
 /**
+ * cli.js roots everything at `realpathSync(process.cwd())`. The JS `realpathSync`
+ * (not `.native`, which would recase on Windows) keeps the spelling cli.js sees.
+ */
+export function realCwd(cwd: string): string {
+  try {
+    return fs.realpathSync(cwd)
+  } catch {
+    return path.resolve(cwd)
+  }
+}
+
+/**
  * The directory whose spelling keys `projects[...]` in the global config: the
  * git root (a linked worktree resolves to its main checkout), else `cwd`.
  * Walks up from `cwd` to the first directory holding `.git`.
  */
 export function claudeProjectRoot(cwd: string): string {
-  let dir = path.resolve(cwd)
+  let dir = realCwd(cwd)
   for (;;) {
     const dotGit = path.join(dir, '.git')
     let st: fs.Stats | undefined
@@ -73,7 +85,7 @@ export function claudeProjectRoot(cwd: string): string {
     if (st?.isDirectory()) return dir
     if (st?.isFile()) return mainCheckoutOf(dir, dotGit) ?? dir
     const parent = path.dirname(dir)
-    if (parent === dir) return path.resolve(cwd)
+    if (parent === dir) return realCwd(cwd)
     dir = parent
   }
 }

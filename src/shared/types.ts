@@ -2371,7 +2371,8 @@ interface McpAPI {
     cwd?: string
   ): Promise<void>
   removeMcpServer(scope: McpServerScope, serverName: string, cwd?: string): Promise<void>
-  loadMcpCatalog(cwd: string): Promise<McpCatalogResult>
+  /** `cwd` omitted: the home directory (user-scope view, no project). */
+  loadMcpCatalog(cwd?: string): Promise<McpCatalogResult>
   /** Add through `claude mcp add-json -s <scope>` (cwd = the session cwd). */
   mcpCliAdd(
     scope: 'user' | 'project' | 'local',
@@ -4868,6 +4869,8 @@ export interface McpCatalogServer {
   name: string
   config: McpServerConfig
   source: McpCatalogSource
+  /** Named in `disabledMcpServers`: listed so it can be re-enabled, but not loaded. */
+  disabled?: boolean
 }
 
 /** `mcp:load-catalog`. No `ok` key: preload `unwrap` treats `{ok}` envelopes specially. */

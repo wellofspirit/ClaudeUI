@@ -57,6 +57,30 @@ describe('claude-mcp-cli argv', () => {
   })
 })
 
+describe('claude-mcp-cli without a cwd', () => {
+  it('refuses project and local scope instead of running in the Electron cwd', async () => {
+    const run = fakeSpawn()
+    const deps = { launch, spawnFn: run.spawnFn }
+    for (const scope of ['project', 'local'] as const) {
+      expect(
+        (await addMcpServerNative(scope, 's', { command: 'x' }, undefined, deps)).error
+      ).toMatch(/need an open project/)
+      expect((await removeMcpServerNative(scope, 's', undefined, deps)).error).toMatch(
+        /need an open project/
+      )
+    }
+    expect(run.calls).toHaveLength(0)
+  })
+
+  it('still runs user scope', async () => {
+    const run = fakeSpawn()
+    const p = removeMcpServerNative('user', 's', undefined, { launch, spawnFn: run.spawnFn })
+    run.child.emit('close', 0)
+    await expect(p).resolves.toEqual({})
+    expect(run.calls).toHaveLength(1)
+  })
+})
+
 describe('claude-mcp-cli run', () => {
   it('spawns the resolved launch with no shell, the session cwd and the unattended env', async () => {
     const run = fakeSpawn()

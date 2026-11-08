@@ -84,7 +84,7 @@ describe('McpDialog mobile fork', () => {
     app.bridge.ipcMain.handle('mcp:load-catalog', async () => ({
       servers: [
         { name: 'user-srv', source: 'user', config: stdio() },
-        { name: 'proj-srv', source: 'project', config: stdio({ command: 'node' }) }
+        { name: 'proj-srv', source: 'project', config: stdio({ command: 'node' }), disabled: true }
       ],
       skipped: []
     }))

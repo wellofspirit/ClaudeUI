@@ -15,7 +15,8 @@ import { removeClaudeUiLegacyMcpServer, removeMcpServer } from '../claude-mcp'
 let root: string
 let cfg: string
 let repo: string
-const env = (): Record<string, string> => ({ CLAUDE_CONFIG_DIR: cfg })
+// The legacy user files live under <HOME>/.claude whatever CLAUDE_CONFIG_DIR says
+const env = (): Record<string, string> => ({ CLAUDE_CONFIG_DIR: cfg, HOME: root })
 const writeJson = (file: string, data: unknown): void => {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify(data))
@@ -34,16 +35,16 @@ afterEach(() => fs.rmSync(root, { recursive: true, force: true }))
 describe('removing a ClaudeUI legacy entry', () => {
   it('clears every legacy file but leaves <cwd>/.mcp.json (cli.js owns it)', () => {
     const entry = { command: 'x' }
-    writeJson(path.join(cfg, '.mcp.json'), { mcpServers: { dup: entry, keep: entry } })
-    writeJson(path.join(cfg, 'settings.json'), { mcpServers: { dup: entry } })
+    writeJson(path.join(root, '.claude', '.mcp.json'), { mcpServers: { dup: entry, keep: entry } })
+    writeJson(path.join(root, '.claude', 'settings.json'), { mcpServers: { dup: entry } })
     writeJson(path.join(repo, '.claude', 'settings.json'), { mcpServers: { dup: entry } })
     writeJson(path.join(repo, '.claude', 'settings.local.json'), { mcpServers: { dup: entry } })
     writeJson(path.join(repo, '.mcp.json'), { mcpServers: { dup: entry } })
 
     removeClaudeUiLegacyMcpServer('dup', repo, env())
 
-    expect(readJson(path.join(cfg, '.mcp.json')).mcpServers).toEqual({ keep: entry })
-    expect(readJson(path.join(cfg, 'settings.json')).mcpServers).toBeUndefined()
+    expect(readJson(path.join(root, '.claude', '.mcp.json')).mcpServers).toEqual({ keep: entry })
+    expect(readJson(path.join(root, '.claude', 'settings.json')).mcpServers).toBeUndefined()
     expect(readJson(path.join(repo, '.claude', 'settings.json')).mcpServers).toBeUndefined()
     expect(readJson(path.join(repo, '.claude', 'settings.local.json')).mcpServers).toBeUndefined()
     expect(readJson(path.join(repo, '.mcp.json')).mcpServers).toEqual({ dup: entry })

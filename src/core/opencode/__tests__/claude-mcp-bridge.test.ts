@@ -147,6 +147,7 @@ describe('translateClaudeMcpServer — ${VAR} expansion (mcp-catalog A9)', () =>
 const catalog = vi.hoisted(() => ({
   servers: {} as Record<string, unknown>,
   skipped: [] as { name: string; reason: string }[],
+  disabled: [] as string[],
   fail: false
 }))
 vi.mock('../../services/claude-mcp-catalog', () => ({
@@ -156,7 +157,13 @@ vi.mock('../../services/claude-mcp-catalog', () => ({
       servers: Object.fromEntries(
         Object.entries(catalog.servers).map(([name, config]) => [
           name,
-          { name, claudeName: name, config, source: 'user' }
+          {
+            name,
+            claudeName: name,
+            config,
+            source: 'user',
+            ...(catalog.disabled.includes(name) ? { disabled: true } : {})
+          }
         ])
       ),
       skipped: catalog.skipped
@@ -180,6 +187,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   catalog.servers = {}
   catalog.skipped = []
+  catalog.disabled = []
   catalog.fail = false
 })
 
@@ -191,6 +199,15 @@ const set = (servers: Record<string, McpServerConfig>): void => {
 describe('collectClaudeMcpForOpencode', () => {
   it('returns empty map when nothing is configured', () => {
     expect(collectClaudeMcpForOpencode(CWD)).toEqual({})
+  })
+
+  it('does not bridge a server the catalog flags disabled, and logs skips at debug', () => {
+    set({ on: { command: 'a' }, off: { command: 'b' } })
+    catalog.disabled = ['off']
+    catalog.skipped = [{ name: 'bad', reason: 'invalid entry' }]
+    expect(Object.keys(collectClaudeMcpForOpencode(CWD))).toEqual(['on'])
+    expect(mockLogger.info).not.toHaveBeenCalled()
+    expect(mockLogger.debug).toHaveBeenCalled()
   })
 
   it('translates the catalog for the cwd', () => {
@@ -235,7 +252,7 @@ describe('collectClaudeMcpForOpencode', () => {
     const result = collectClaudeMcpForOpencode(CWD)
     expect(result).not.toHaveProperty('broken')
     expect(result).toHaveProperty('good')
-    expect(mockLogger.info).toHaveBeenCalledWith(
+    expect(mockLogger.debug).toHaveBeenCalledWith(
       'ClaudeMcpBridge',
       expect.stringContaining('"bad"')
     )

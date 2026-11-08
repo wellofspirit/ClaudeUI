@@ -1,7 +1,7 @@
 /**
  * The MCP config files ClaudeUI's McpDialog reads and writes, per scope:
  *
- *   user    → <configDir>/.mcp.json  +  <configDir>/settings.json
+ *   user    → ~/.claude/.mcp.json    +  ~/.claude/settings.json
  *   project → <cwd>/.mcp.json        +  <cwd>/.claude/settings.json
  *   local   → <cwd>/.claude/settings.local.json (mcpServers key only)
  *
@@ -11,9 +11,10 @@
  */
 
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import type { McpServerConfig } from '../../shared/types'
-import { claudeConfigDir, type Env } from './claude-config-paths'
+import type { Env } from './claude-config-paths'
 import { logger } from './logger'
 
 export type McpScope = 'user' | 'project' | 'local'
@@ -26,7 +27,10 @@ export function configFilePaths(
 ): { mcpJson: string | null; settingsJson: string } {
   switch (scope) {
     case 'user': {
-      const dir = claudeConfigDir(env)
+      // Where McpDialog always wrote them (cli.js ignores these files), whatever CLAUDE_CONFIG_DIR says.
+      // An explicit env (tests) may carry its own HOME; the process env's HOME can be a POSIX-style path.
+      const home = env === process.env ? os.homedir() : env.HOME || env.USERPROFILE || os.homedir()
+      const dir = path.join(home, '.claude')
       return {
         mcpJson: path.join(dir, '.mcp.json'),
         settingsJson: path.join(dir, 'settings.json')

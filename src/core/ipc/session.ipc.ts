@@ -1369,7 +1369,7 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     channel: 'mcp:load-catalog',
     capability: 'config',
     kind: 'query',
-    handler: (cwd: string) => listMcpCatalog(cwd)
+    handler: (cwd?: string) => listMcpCatalog(cwd)
   })
   // MCP disabled state (direct ~/.claude.json access, no session needed)
   handleIpc({

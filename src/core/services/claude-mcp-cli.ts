@@ -124,6 +124,8 @@ function runMcpCli(
   })
 }
 
+const NEEDS_CWD = 'Project and local scope need an open project (no working directory)'
+
 export function addMcpServerNative(
   scope: NativeMcpScope,
   name: string,
@@ -131,6 +133,7 @@ export function addMcpServerNative(
   cwd: string | undefined,
   deps: McpCliDeps = {}
 ): Promise<McpCliResult> {
+  if (scope !== 'user' && !cwd) return Promise.resolve({ error: NEEDS_CWD })
   return runMcpCli(addJsonArgs(scope, name, config), cwd, `mcp add-json (${scope})`, deps)
 }
 
@@ -140,5 +143,6 @@ export function removeMcpServerNative(
   cwd: string | undefined,
   deps: McpCliDeps = {}
 ): Promise<McpCliResult> {
+  if (scope !== 'user' && !cwd) return Promise.resolve({ error: NEEDS_CWD })
   return runMcpCli(removeArgs(scope, name), cwd, `mcp remove (${scope})`, deps)
 }

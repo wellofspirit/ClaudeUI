@@ -1106,7 +1106,7 @@ export function registerRemoteHandlers(
     channel: 'mcp:load-catalog',
     capability: 'config',
     kind: 'query',
-    handler: async (cwd: string) => listMcpCatalog(cwd)
+    handler: async (cwd?: string | null) => listMcpCatalog(cwd)
   })
   handleRemote({
     channel: 'mcp:read-disabled',

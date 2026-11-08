@@ -40,36 +40,19 @@ export function McpDialog({
   const loadFromConfig = useCallback(async (): Promise<McpServerInfo[]> => {
     const results: McpServerInfo[] = []
     try {
-      if (cwd) {
-        // Everything a Claude session in `cwd` would load, labelled by source
-        const { servers } = await window.api.loadMcpCatalog(cwd)
-        for (const s of servers) {
-          results.push({ name: s.name, status: 'not_started', config: s.config, scope: s.source })
-        }
-      } else {
-        const cfgServers = await window.api.loadMcpServers('user')
-        for (const [name, config] of Object.entries(cfgServers)) {
-          results.push({ name, status: 'not_started', config, scope: 'user' })
-        }
+      // Everything a Claude session in `cwd` would load (the home dir without one),
+      // labelled by source; a cold-disabled server stays listed, flagged `disabled`
+      const { servers } = await window.api.loadMcpCatalog(cwd ?? undefined)
+      for (const s of servers) {
+        results.push({
+          name: s.name,
+          status: s.disabled ? 'disabled' : 'not_started',
+          config: s.config,
+          scope: s.source
+        })
       }
     } catch {
       // Config unreadable — show whatever the live session reports
-    }
-
-    if (cwd) {
-      try {
-        const disabledNames = await window.api.mcpReadDisabled(cwd)
-        if (disabledNames.length > 0) {
-          const disabledSet = new Set(disabledNames)
-          for (const server of results) {
-            if (disabledSet.has(server.name)) {
-              server.status = 'disabled'
-            }
-          }
-        }
-      } catch {
-        // Failed to read disabled list — leave all as not_started
-      }
     }
 
     return results

@@ -15,6 +15,7 @@ import type { McpServerConfig } from '../../../shared/types'
 const catalog = vi.hoisted(() => ({
   enabled: {} as Record<string, McpServerConfig>,
   skipped: [] as { name: string; reason: string }[],
+  disabled: [] as string[],
   fail: false
 }))
 vi.mock('../../services/claude-mcp-catalog', () => ({
@@ -24,7 +25,13 @@ vi.mock('../../services/claude-mcp-catalog', () => ({
       servers: Object.fromEntries(
         Object.entries(catalog.enabled).map(([name, config]) => [
           name,
-          { name, claudeName: name, config, source: 'user' }
+          {
+            name,
+            claudeName: name,
+            config,
+            source: 'user',
+            ...(catalog.disabled.includes(name) ? { disabled: true } : {})
+          }
         ])
       ),
       skipped: catalog.skipped
@@ -53,6 +60,7 @@ import { logger } from '../../services/logger'
 beforeEach(() => {
   catalog.enabled = {}
   catalog.skipped = []
+  catalog.disabled = []
   catalog.fail = false
   vi.mocked(logger.warn).mockClear()
 })
@@ -200,6 +208,12 @@ describe('buildPiMcpCatalog', () => {
 })
 
 describe('collectClaudeMcpForPi', () => {
+  it('does not register a server the catalog flags disabled', () => {
+    catalog.enabled = { on: { command: 'a' }, off: { command: 'b' } }
+    catalog.disabled = ['off']
+    expect(Object.keys(collectClaudeMcpForPi('/work').servers)).toEqual(['on'])
+  })
+
   it('reads the shared enabled catalog for the cwd', () => {
     catalog.enabled = { a: { command: 'x' } }
     expect(collectClaudeMcpForPi('/work').servers).toEqual({

@@ -27,9 +27,10 @@ import { readEnabledClaudeMcpServers } from '../claude-mcp'
 
 let root: string
 let cfg: string
+let home: string
 let managed: string
 let repo: string
-const env = (): Record<string, string> => ({ CLAUDE_CONFIG_DIR: cfg })
+const env = (): Record<string, string> => ({ CLAUDE_CONFIG_DIR: cfg, HOME: home })
 const catalog = (cwd = repo): ReturnType<typeof resolveClaudeMcpCatalog> =>
   resolveClaudeMcpCatalog(cwd, env(), { managedDir: managed })
 const names = (c = catalog()): string[] => Object.keys(c.servers).sort()
@@ -56,6 +57,7 @@ const git = (cwd: string, ...args: string[]): void => {
 beforeEach(() => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-catalog-')))
   cfg = path.join(root, 'cfg')
+  home = path.join(root, 'home')
   managed = path.join(root, 'managed')
   repo = path.join(root, 'work', 'repo')
   fs.mkdirSync(cfg, { recursive: true })
@@ -75,8 +77,8 @@ describe('layers and precedence', () => {
   })
 
   it('ignores the files cli.js ignores except through the ClaudeUI layer', () => {
-    writeJson(path.join(cfg, 'settings.json'), { mcpServers: { s_user: stdio('a') } })
-    writeJson(path.join(cfg, '.mcp.json'), { mcpServers: { cfg_mcp: stdio('b') } })
+    writeJson(path.join(home, '.claude', 'settings.json'), { mcpServers: { s_user: stdio('a') } })
+    writeJson(path.join(home, '.claude', '.mcp.json'), { mcpServers: { cfg_mcp: stdio('b') } })
     writeJson(path.join(repo, '.claude', 'settings.json'), { mcpServers: { s_proj: stdio('c') } })
     const c = catalog()
     expect(names(c)).toEqual(['cfg_mcp', 's_proj', 's_user'])
@@ -112,7 +114,7 @@ describe('layers and precedence', () => {
       config: { url: 'https://managed.example/mcp' }
     })
 
-    writeJson(path.join(cfg, '.mcp.json'), { mcpServers: { d: stdio('legacy-d') } })
+    writeJson(path.join(home, '.claude', '.mcp.json'), { mcpServers: { d: stdio('legacy-d') } })
     expect(catalog().servers.d).toMatchObject({
       source: 'claudeui',
       config: { command: 'legacy-d' }
@@ -199,7 +201,7 @@ describe('project key (A2)', () => {
 })
 
 describe('disabledMcpServers (A4)', () => {
-  it('removes the named servers of every scope under the git-root key', () => {
+  it('flags the named servers of every scope under the repo-root key, keeping them listed', () => {
     fs.mkdirSync(path.join(repo, '.git'))
     const sub = path.join(repo, 'sub')
     fs.mkdirSync(sub)
@@ -208,7 +210,24 @@ describe('disabledMcpServers (A4)', () => {
       projects: { [keyOf(repo)]: { disabledMcpServers: ['u1', 'p1'] } }
     })
     writeJson(path.join(repo, '.mcp.json'), { mcpServers: { p1: stdio('p1') } })
-    expect(names(catalog(sub))).toEqual(['u2'])
+    const c = catalog(sub)
+    expect(names(c)).toEqual(['p1', 'u1', 'u2'])
+    expect(
+      Object.values(c.servers)
+        .filter((e) => e.disabled)
+        .map((e) => e.name)
+        .sort()
+    ).toEqual(['p1', 'u1'])
+    // the bridges' shared read launches only the enabled ones
+    process.env.CLAUDE_CONFIG_DIR = cfg
+    try {
+      const enabled = Object.keys(readEnabledClaudeMcpServers(sub))
+      expect(enabled).toContain('u2')
+      expect(enabled).not.toContain('u1')
+      expect(enabled).not.toContain('p1')
+    } finally {
+      delete process.env.CLAUDE_CONFIG_DIR
+    }
   })
 
   it('matches a plugin server by its full key and exposes it under the bridged name', () => {
@@ -218,7 +237,9 @@ describe('disabledMcpServers (A4)', () => {
     ]
     writeGlobal({ projects: { [keyOf(repo)]: { disabledMcpServers: ['plugin:fake:off'] } } })
     const c = catalog()
-    expect(Object.keys(c.servers)).toEqual(['plugin_fake_inline-srv'])
+    expect(Object.keys(c.servers).sort()).toEqual(['plugin_fake_inline-srv', 'plugin_fake_off'])
+    expect(c.servers['plugin_fake_off'].disabled).toBe(true)
+    expect(c.servers['plugin_fake_inline-srv'].disabled).toBeUndefined()
     expect(c.servers['plugin_fake_inline-srv']).toMatchObject({
       name: 'plugin_fake_inline-srv',
       claudeName: 'plugin:fake:inline-srv',
@@ -300,7 +321,7 @@ describe('policy (A5)', () => {
 
   it('managed-mcp.json is exclusive: nothing else loads, not plugins or the ClaudeUI layer', () => {
     plugins.servers = [{ key: 'plugin:p:s', pluginId: 'p@m', root: '/r', config: stdio('px') }]
-    writeJson(path.join(cfg, '.mcp.json'), { mcpServers: { legacy: stdio('l') } })
+    writeJson(path.join(home, '.claude', '.mcp.json'), { mcpServers: { legacy: stdio('l') } })
     writeJson(path.join(repo, '.mcp.json'), { mcpServers: { proj: stdio('p') } })
     writeJson(path.join(managed, 'managed-settings.json'), {
       managedMcpServers: { ms: { type: 'sse', url: 'https://ms.example/sse' } }
@@ -411,6 +432,55 @@ describe('plugin servers', () => {
     ])
   })
 
+  it('dedups only against manual servers that are live: not disabled, not policy-blocked, not the ClaudeUI layer', () => {
+    writeGlobal({
+      mcpServers: {
+        off: stdio('c-off'),
+        denied: stdio('c-denied'),
+        live: stdio('c-live')
+      },
+      projects: { [keyOf(repo)]: { disabledMcpServers: ['off'] } }
+    })
+    writeJson(path.join(cfg, 'settings.json'), { deniedMcpServers: [{ serverName: 'denied' }] })
+    writeJson(path.join(home, '.claude', '.mcp.json'), {
+      mcpServers: { legacy: stdio('c-legacy') }
+    })
+    plugins.servers = [
+      p('plugin:x:off', stdio('c-off')),
+      p('plugin:x:denied', stdio('c-denied')),
+      p('plugin:x:live', stdio('c-live')),
+      p('plugin:x:legacy', stdio('c-legacy'))
+    ]
+    const c = catalog()
+    expect(c.skipped.filter((x) => x.reason.startsWith('duplicates')).map((x) => x.name)).toEqual([
+      'plugin:x:live'
+    ])
+    expect(Object.keys(c.servers)).toEqual(
+      expect.arrayContaining(['plugin_x_off', 'plugin_x_denied', 'plugin_x_legacy'])
+    )
+  })
+
+  it('tells plugins apart by env (bar the injected plugin vars) but not manual servers', () => {
+    writeGlobal({ mcpServers: { m: { type: 'stdio', command: 'same', env: { K: 'manual' } } } })
+    plugins.servers = [
+      p('plugin:a:one', {
+        type: 'stdio',
+        command: 'one',
+        env: { K: '1', CLAUDE_PLUGIN_ROOT: '/a' }
+      }),
+      p('plugin:b:one', {
+        type: 'stdio',
+        command: 'one',
+        env: { K: '1', CLAUDE_PLUGIN_ROOT: '/b' }
+      }),
+      p('plugin:c:one', { type: 'stdio', command: 'one', env: { K: '2' } }),
+      p('plugin:d:same', { type: 'stdio', command: 'same', env: { K: 'other' } })
+    ]
+    const c = catalog()
+    expect(names(c)).toEqual(['m', 'plugin_a_one', 'plugin_c_one'])
+    expect(c.skipped.map((x) => x.name).sort()).toEqual(['plugin:b:one', 'plugin:d:same'])
+  })
+
   it('does not displace a manual server whose name equals the bridged name', () => {
     writeGlobal({ mcpServers: { plugin_x_s: stdio('manual') } })
     plugins.servers = [p('plugin:x:s', stdio('plug'))]
@@ -432,7 +502,7 @@ describe('readEnabledClaudeMcpServers', () => {
     try {
       writeGlobal({ mcpServers: { u: stdio('u') } })
       plugins.servers = [{ key: 'plugin:p:s', pluginId: 'p@m', root: '/r', config: stdio('ps') }]
-      expect(readEnabledClaudeMcpServers(repo)).toEqual({
+      expect(readEnabledClaudeMcpServers(repo)).toMatchObject({
         u: stdio('u'),
         plugin_p_s: stdio('ps')
       })
@@ -440,5 +510,18 @@ describe('readEnabledClaudeMcpServers', () => {
       if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR
       else process.env.CLAUDE_CONFIG_DIR = prev
     }
+  })
+})
+
+describe('realpath rooting', () => {
+  it('walks .mcp.json and keys local scope from the target of a linked project dir', () => {
+    const target = path.join(root, 'target')
+    fs.mkdirSync(path.join(target, 'sub'), { recursive: true })
+    fs.mkdirSync(path.join(target, '.git'))
+    writeJson(path.join(target, '.mcp.json'), { mcpServers: { p: stdio('p') } })
+    writeGlobal({ projects: { [keyOf(target)]: { mcpServers: { l: stdio('l') } } } })
+    const link = path.join(root, 'link')
+    fs.symlinkSync(target, link, 'junction')
+    expect(names(catalog(path.join(link, 'sub')))).toEqual(['l', 'p'])
   })
 })

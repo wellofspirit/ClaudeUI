@@ -9,7 +9,8 @@
  *   < `managedMcpServers` < ClaudeUI legacy layer (McpDialog's own files, which
  *   cli.js ignores but a ClaudeUI session passes through `--mcp-config`).
  * A `managed-mcp.json` makes the managed set exclusive: no other layer, no plugins.
- * Then `disabledMcpServers` (per project key) and `allowed/deniedMcpServers` drop names.
+ * Then `allowed/deniedMcpServers` drop names; `disabledMcpServers` (per project key) flags them
+ * `disabled` (kept so McpDialog can re-enable them; launchers must skip them).
  *
  * Approval follows cli.js `-p` (what ClaudeUI runs): every project server loads
  * unless `disabledMcpjsonServers` names it. Entries are validated as cli.js does
@@ -32,6 +33,7 @@ import {
   readClaudeProjectEntry,
   readClaudeSettingsLayers,
   readJsonObject,
+  realCwd,
   type Env,
   type JsonObject
 } from './claude-config-paths'
@@ -49,6 +51,8 @@ export interface CatalogEntry {
   config: McpServerConfig
   source: CatalogSource
   plugin?: { id: string; root: string }
+  /** Listed in `disabledMcpServers`: shown to McpDialog, never launched or bridged. */
+  disabled?: boolean
 }
 
 export interface ClaudeMcpCatalog {
@@ -227,7 +231,7 @@ function managedServers(policy: JsonObject): JsonObject {
 /** `.mcp.json` from the filesystem root's child down to `cwd`; the closest file wins. */
 function readProjectMcpJson(cwd: string): JsonObject {
   const dirs: string[] = []
-  for (let d = path.resolve(cwd); d !== path.parse(d).root; d = path.dirname(d)) dirs.push(d)
+  for (let d = realCwd(cwd); d !== path.parse(d).root; d = path.dirname(d)) dirs.push(d)
   const out: JsonObject = {}
   for (const dir of dirs.reverse()) {
     const file = path.join(dir, '.mcp.json')
@@ -256,6 +260,17 @@ function signatureOf(c: McpServerConfig): string {
   return isStdio(c)
     ? `stdio:${JSON.stringify(commandOf(c))}`
     : `url:${(c.url ?? '').trim().replace(/\/+$/, '')}`
+}
+
+const PLUGIN_ENV_VARS = new Set(['CLAUDE_PLUGIN_ROOT', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_PROJECT_DIR'])
+
+/** Plugin-vs-plugin signature: stdio includes env (minus the vars the catalog injects per plugin). */
+function pluginSignatureOf(c: McpServerConfig): string {
+  if (!isStdio(c)) return signatureOf(c)
+  const env = Object.entries(c.env ?? {})
+    .filter(([k]) => !PLUGIN_ENV_VARS.has(k))
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+  return `${signatureOf(c)}|${JSON.stringify(env)}`
 }
 
 // ---------------------------------------------------------------------------
@@ -346,39 +361,8 @@ function resolve(cwd: string, env: Env, opts: CatalogOptions): ClaudeMcpCatalog 
     add(loadClaudeUiLegacyMcpServers(cwd, env), 'claudeui')
   }
 
-  // Plugin servers: lowest precedence; suppressed when they duplicate a manual server or an earlier plugin.
-  const plugin = new Map<string, CatalogEntry>()
-  if (!exclusive) {
-    const sigs = new Map<string, string>()
-    for (const [name, c] of manual) sigs.set(signatureOf(c.config), name)
-    const { servers, skipped: pluginSkipped } = listPluginMcpServers(cwd, env)
-    skipped.push(...pluginSkipped)
-    for (const ps of servers) {
-      const v = validateMcpEntry(ps.config)
-      if ('reason' in v) {
-        skipped.push({ name: ps.key, reason: v.reason })
-        continue
-      }
-      const dupOf = sigs.get(signatureOf(v.config))
-      const bridged = bridgedServerName(ps.key)
-      if (dupOf !== undefined) {
-        skipped.push({ name: ps.key, reason: `duplicates "${dupOf}"` })
-      } else if (manual.has(bridged) || plugin.has(bridged)) {
-        skipped.push({ name: ps.key, reason: `name "${bridged}" is already taken` })
-      } else {
-        sigs.set(signatureOf(v.config), ps.key)
-        plugin.set(bridged, {
-          name: bridged,
-          claudeName: ps.key,
-          config: v.config,
-          source: 'plugin',
-          plugin: { id: ps.pluginId, root: ps.root }
-        })
-      }
-    }
-  }
-
-  // Filters: disabledMcpServers (silent: the user's choice), then policy.
+  // Filters: policy drops a server (with a skip reason); `disabledMcpServers` keeps it, flagged,
+  // so McpDialog can show and re-enable it. Consumers that launch servers skip `disabled`.
   const disabled = new Set(stringList(projectEntry.disabledMcpServers))
   const denied = [
     ...(policyEntries(settings.deniedMcpServers) ?? []),
@@ -391,20 +375,65 @@ function resolve(cwd: string, env: Env, opts: CatalogOptions): ClaudeMcpCatalog 
   )
 
   const servers: Record<string, CatalogEntry> = {}
-  const admit = (entry: CatalogEntry, exempt: boolean): void => {
-    if (disabled.has(entry.claudeName)) return
+  /** Whether the entry survives policy and is not disabled. */
+  const admit = (entry: CatalogEntry, exempt: boolean): boolean => {
     if (denied.some((e) => matchesEntry(e, entry.claudeName, entry.config))) {
       skipped.push({ name: entry.claudeName, reason: 'blocked by deniedMcpServers policy' })
-    } else if (!isAllowed(allowed, entry.claudeName, entry.config, exempt)) {
+      return false
+    }
+    if (!isAllowed(allowed, entry.claudeName, entry.config, exempt)) {
       skipped.push({ name: entry.claudeName, reason: 'not permitted by allowedMcpServers policy' })
-    } else {
-      servers[entry.name] = entry
+      return false
+    }
+    const off = disabled.has(entry.claudeName)
+    servers[entry.name] = off ? { ...entry, disabled: true } : entry
+    return !off
+  }
+
+  // Manual servers first: plugin dedup runs against the ones that survive.
+  const live: [string, McpServerConfig][] = []
+  for (const [name, c] of manual) {
+    const ok = admit({ name, claudeName: name, config: c.config, source: c.source }, c.exempt)
+    // cli.js dedups plugins against configured scopes, not the --mcp-config (dynamic) layer.
+    if (ok && c.source !== 'claudeui') live.push([name, c.config])
+  }
+
+  // Plugin servers: lowest precedence; suppressed when they duplicate a surviving manual
+  // server (command+args / url) or an earlier plugin (same, plus env bar the plugin vars).
+  if (!exclusive) {
+    const manualSigs = new Map<string, string>()
+    for (const [name, config] of live) manualSigs.set(signatureOf(config), name)
+    const pluginSigs = new Map<string, string>()
+    const { servers: found, skipped: pluginSkipped } = listPluginMcpServers(cwd, env)
+    skipped.push(...pluginSkipped)
+    for (const ps of found) {
+      const v = validateMcpEntry(ps.config)
+      if ('reason' in v) {
+        skipped.push({ name: ps.key, reason: v.reason })
+        continue
+      }
+      const bridged = bridgedServerName(ps.key)
+      const pluginSig = pluginSignatureOf(v.config)
+      const dupOf = manualSigs.get(signatureOf(v.config)) ?? pluginSigs.get(pluginSig)
+      if (dupOf !== undefined) {
+        skipped.push({ name: ps.key, reason: `duplicates "${dupOf}"` })
+      } else if (manual.has(bridged) || bridged in servers) {
+        skipped.push({ name: ps.key, reason: `name "${bridged}" is already taken` })
+      } else {
+        pluginSigs.set(pluginSig, ps.key)
+        admit(
+          {
+            name: bridged,
+            claudeName: ps.key,
+            config: v.config,
+            source: 'plugin',
+            plugin: { id: ps.pluginId, root: ps.root }
+          },
+          false
+        )
+      }
     }
   }
-  for (const [name, c] of manual) {
-    admit({ name, claudeName: name, config: c.config, source: c.source }, c.exempt)
-  }
-  for (const entry of plugin.values()) admit(entry, false)
 
   return { servers, skipped }
 }

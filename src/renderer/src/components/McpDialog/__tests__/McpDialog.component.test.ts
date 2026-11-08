@@ -214,6 +214,55 @@ describe('McpDialog FC', () => {
     expect(toggleDisabledCalls).toEqual([{ cwd: CWD, name: 'plugin:acme:search', enabled: true }])
   })
 
+  it('a cold-disabled server stays listed as disabled and can be re-enabled', async () => {
+    // The catalog flags what disabledMcpServers names; the toggle round-trips through it
+    let disabled = true
+    catalog = [{ name: 'user-srv', source: 'user', config: makeConfig(), disabled } as never]
+    app.bridge.ipcMain.handle('mcp:load-catalog', async () => ({
+      servers: [
+        {
+          name: 'user-srv',
+          source: 'user',
+          config: makeConfig(),
+          ...(disabled ? { disabled } : {})
+        }
+      ],
+      skipped: []
+    }))
+    app.bridge.ipcMain.handle(
+      'mcp:toggle-disabled',
+      async (_e, cwd: string, name: string, enabled: boolean) => {
+        toggleDisabledCalls.push({ cwd, name, enabled })
+        disabled = !enabled
+      }
+    )
+    await openFC(null)
+    expect(viewProps.servers.map((s) => [s.name, s.status])).toEqual([['user-srv', 'disabled']])
+
+    await act(async () => {
+      await viewProps.onToggleServer(viewProps.servers[0])
+    })
+
+    expect(toggleDisabledCalls).toEqual([{ cwd: CWD, name: 'user-srv', enabled: true }])
+    expect(viewProps.servers.map((s) => [s.name, s.status])).toEqual([['user-srv', 'not_started']])
+  })
+
+  it('without a cwd it lists the catalog for the home dir (no cwd sent)', async () => {
+    const seen: unknown[] = []
+    app.bridge.ipcMain.handle('mcp:load-catalog', async (_e, cwd?: string) => {
+      seen.push(cwd)
+      return { servers: [catalog[0]], skipped: [] }
+    })
+    await act(async () => {
+      await renderFC({ open: true, cwd: null, routingId: null })
+    })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(seen[0]).toBeUndefined()
+    expect(viewProps.servers.map((s) => s.scope)).toEqual(['user'])
+  })
+
   it('onReconnectServer calls mcpReconnectServer IPC', async () => {
     await openFC(ROUTING_ID)
 

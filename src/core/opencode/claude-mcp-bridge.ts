@@ -116,11 +116,12 @@ export function collectClaudeMcpForOpencode(
   try {
     const catalog = resolveClaudeMcpCatalog(cwd)
     for (const { name, reason } of catalog.skipped) {
-      logger.info('ClaudeMcpBridge', `MCP server "${name}" not bridged to opencode: ${reason}`)
+      logger.debug('ClaudeMcpBridge', `MCP server "${name}" not bridged to opencode: ${reason}`)
     }
 
     const result: Record<string, OpencodeMcpEntry> = {}
-    for (const [name, { config }] of Object.entries(catalog.servers)) {
+    for (const [name, { config, disabled }] of Object.entries(catalog.servers)) {
+      if (disabled) continue
       if (name === HOSTED_MCP_SERVER) {
         logger.warn(
           'ClaudeMcpBridge',

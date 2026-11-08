@@ -101,3 +101,20 @@ describe('settings layers', () => {
     ).toEqual({ a: ['x', 'y'], o: { k: 2, j: 1 }, s: 2 })
   })
 })
+
+describe('realpath rooting', () => {
+  it('keys a symlinked or junctioned project dir like its target, and keeps a plain path unchanged', () => {
+    const repo = path.join(root, 'real-repo')
+    fs.mkdirSync(path.join(repo, 'sub'), { recursive: true })
+    run(repo, 'init', '-q')
+    const link = path.join(root, 'link-repo')
+    // a junction needs no privilege on Windows; on POSIX it is an ordinary symlink
+    fs.symlinkSync(repo, link, 'junction')
+    const want = repo.replace(/\\/g, '/')
+    expect(claudeProjectKey(link)).toBe(want)
+    expect(claudeProjectKey(path.join(link, 'sub'))).toBe(want)
+    // spelling (drive-letter case) of an ordinary path is untouched
+    expect(claudeProjectKey(repo)).toBe(want)
+    expect(claudeProjectKey(repo).startsWith(repo.slice(0, 2).replace(/\\/g, '/'))).toBe(true)
+  })
+})

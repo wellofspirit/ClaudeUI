@@ -8,6 +8,7 @@
  */
 
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import type { McpCatalogResult, McpServerConfig } from '../../shared/types'
 import {
@@ -38,7 +39,11 @@ export { loadMcpServers }
  */
 export function readEnabledClaudeMcpServers(cwd: string): Record<string, McpServerConfig> {
   const { servers } = resolveClaudeMcpCatalog(cwd)
-  return Object.fromEntries(Object.entries(servers).map(([name, e]) => [name, e.config]))
+  return Object.fromEntries(
+    Object.entries(servers)
+      .filter(([, e]) => !e.disabled)
+      .map(([name, e]) => [name, e.config])
+  )
 }
 
 /**
@@ -46,13 +51,14 @@ export function readEnabledClaudeMcpServers(cwd: string): Record<string, McpServ
  * source and keyed by the name Claude Code knows it by (`plugin:p:s` for a plugin
  * server), which is also what a live `mcp_status` and `disabledMcpServers` use.
  */
-export function listMcpCatalog(cwd: string): McpCatalogResult {
-  const { servers, skipped } = resolveClaudeMcpCatalog(cwd)
+export function listMcpCatalog(cwd?: string | null): McpCatalogResult {
+  const { servers, skipped } = resolveClaudeMcpCatalog(cwd || os.homedir())
   return {
     servers: Object.values(servers).map((e) => ({
       name: e.claudeName,
       config: e.config,
-      source: e.source
+      source: e.source,
+      ...(e.disabled ? { disabled: true } : {})
     })),
     skipped
   }

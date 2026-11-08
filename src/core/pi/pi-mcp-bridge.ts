@@ -271,13 +271,17 @@ export function collectClaudeMcpForPi(cwd: string): PiMcpCatalog {
   try {
     const resolved = resolveClaudeMcpCatalog(cwd)
     const catalog = buildPiMcpCatalog(
-      Object.fromEntries(Object.entries(resolved.servers).map(([name, e]) => [name, e.config]))
+      Object.fromEntries(
+        Object.entries(resolved.servers)
+          .filter(([, e]) => !e.disabled)
+          .map(([name, e]) => [name, e.config])
+      )
     )
     // The catalog's own skips (invalid entries, a url-less typeless one) are
     // not engine-specific: surfaced with pi's, in the same one-time warning.
     catalog.skipped.unshift(...resolved.skipped)
     for (const { name, reason } of catalog.skipped) {
-      logger.info('PiMcpBridge', `MCP server "${name}" not bridged to pi: ${reason}`)
+      logger.debug('PiMcpBridge', `MCP server "${name}" not bridged to pi: ${reason}`)
     }
     return catalog
   } catch (err) {
