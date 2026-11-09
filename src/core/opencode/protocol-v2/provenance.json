@@ -1,10 +1,10 @@
 {
-  "version": "2.2.5",
-  "tag": "v2.2.5",
-  "commit": "9bbb8ce18c80f099e0e448775f59d965ead40a21",
+  "version": "2.2.6",
+  "tag": "v2.2.6",
+  "commit": "dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06",
   "spec": "GET /openapi.json",
-  "servedSpecSha256": "8c659644c2010a0770b58d451a6ec3f4414ae24ee5f9eb46674c1f9bb4f5c21f",
-  "binarySha256": "abe4d88594bffb12b364375b8a6732d2d1f7a977195ed1a35c5c76f8e89c9e0e",
+  "servedSpecSha256": "c132a72a29b64be26fe4492d0486c166be1dea710c4f7fc93599a8e3be988470",
+  "binarySha256": "90e4d03597b03d2051b65b4d793467764e55bacd8e22bf4824479c7233ea0e15",
   "platform": "darwin-arm64",
   "specInfo": {
     "title": "opencode HttpApi",
@@ -13,11 +13,11 @@
   "generator": "scripts/generate-opencode-protocol.mjs",
   "generatorVersion": 2,
   "counts": {
-    "schemas": 363,
-    "operations": 169
+    "schemas": 511,
+    "operations": 170
   },
   "files": {
-    "openapi.ts": "e643e5df79a60233d6708ea9d36caed00689c0f3c46be70816b0178a5e12221f",
-    "src/shared/opencode-config-schema.json": "853c586ff85f79d4b60be629b08e7ee72b4710832743eeb986e9108819c5e6ce"
+    "openapi.ts": "e568793da20109772d9c09fc404dc44be3b0bba638698383ecc5d0bf75460610",
+    "src/shared/opencode-config-schema.json": "1128fca5766cd599b0524a63accb9d479dbd5cc0897320e3b105448cf17396e4"
   }
 }
