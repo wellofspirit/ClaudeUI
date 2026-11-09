@@ -83,7 +83,6 @@ describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
         routingId: 'rid-integration',
         cwd,
         currentModel: () => MODEL,
-        skillDirsEnv: () => ({}),
         send: (channel, data) => {
           sent.push([channel, data])
         },

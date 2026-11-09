@@ -64,6 +64,16 @@ vi.mock('../../../core/pi/pi-mcp-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/pi/pi-mcp-bridge')>()),
   collectClaudeMcpForPi: mockCollectPiMcp
 }))
+// The shared Claude skill catalog a pi target lists: hermetic, empty unless a test says so.
+const { mockResolveSkills } = vi.hoisted(() => ({
+  mockResolveSkills: vi.fn((_cwd: string): { entries: unknown[]; skipped: [] } => ({
+    entries: [],
+    skipped: []
+  }))
+}))
+vi.mock('../../../core/services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: mockResolveSkills
+}))
 // ADR-088 — the target judge's ground truth and the shared trust lists stay
 // hermetic: no git subprocess, never the dev's own `~/.claude/ui/automode.json`.
 vi.mock('../../../core/automode/ground-truth', async (importOriginal) => ({
@@ -2707,6 +2717,38 @@ describe('CrossEngineDispatcher — pi direction (M4c): target lifecycle', () =>
     expect(target.spawnCalls[0].env?.({ url: 'u', token: 't' }).CLAUDEUI_PI_MCP).toBe('1')
   })
 
+  it("hands the target's bridge host the model-invocable Claude skills for the dispatch cwd", async () => {
+    const base = {
+      kind: 'skill',
+      source: 'user',
+      baseDir: '/s/x',
+      argumentNames: [],
+      body: '',
+      userInvocable: true,
+      claudeOnly: []
+    }
+    mockResolveSkills.mockReturnValueOnce({
+      entries: [
+        { ...base, name: 'x', description: 'does x', file: '/s/x/SKILL.md', modelInvocable: true },
+        { ...base, name: 'y', description: 'no', file: '/s/y/SKILL.md', modelInvocable: false }
+      ],
+      skipped: []
+    })
+    const target = makeFakePiTarget()
+    const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
+    const pending = dispatcher.dispatch(
+      { engine: 'pi', prompt: 'use skills' },
+      makeCtx({ fromEngine: 'claude' })
+    )
+    await tick()
+    target.pushEvent(PI_AGENT_SETTLED)
+    await pending
+    expect(mockResolveSkills).toHaveBeenCalledWith('/tmp/xeng-project')
+    expect(target.spawnCalls[0].skills).toEqual([
+      { name: 'x', description: 'does x', filePath: '/s/x/SKILL.md', baseDir: '/s/x' }
+    ])
+  })
+
   it('rejects a same-engine (pi → pi) dispatch as isError, no spawn', async () => {
     const target = makeFakePiTarget()
     const { dispatcher } = makeHarness({ spawnPiTarget: target.spawnPiTarget })
@@ -4589,13 +4631,12 @@ describe('CrossEngineDispatcher — pi direction (M4c): disposeFor', () => {
 })
 
 describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
-  it("explicitly overrides CLAUDEUI_PI_HOSTED_TOOLS/DISPATCH_ENABLED/SKILL_DIRS to empty string — never mere omission, since PiRpcClient spawns with {...process.env, ...opts.env} and would otherwise leak the parent shell's own flags through", () => {
+  it("explicitly overrides CLAUDEUI_PI_HOSTED_TOOLS/DISPATCH_ENABLED to empty string — never mere omission, since PiRpcClient spawns with {...process.env, ...opts.env} and would otherwise leak the parent shell's own flags through", () => {
     const env = buildPiTargetChildEnv({ url: 'http://127.0.0.1:54321', token: 'test-token' })
     expect(env.CLAUDEUI_PI_HOSTED_TOOLS).toBe('')
     expect(env.CLAUDEUI_PI_DISPATCH_ENABLED).toBe('')
     // S4: nor the dispatch description the bridge would register it with.
     expect(env.CLAUDEUI_PI_DISPATCH_DESCRIPTION).toBe('')
-    expect(env.CLAUDEUI_PI_SKILL_DIRS).toBe('')
     // ADR-089: a dispatch target never gets the `agent` tool either.
     expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
     // ADR-089 S3b: nor `send_message`.
@@ -4608,9 +4649,11 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     // ADR-096: a dispatch target registers the shared MCP catalog (served by
     // its bridge host, never carried in this env).
     expect(env.CLAUDEUI_PI_MCP).toBe('1')
+    // The Claude skill catalog, likewise served by the target's bridge host.
+    expect(env.CLAUDEUI_PI_SKILLS).toBe('1')
     expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:54321')
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
-    // Exactly these eleven keys — nothing else sneaks in either.
+    // Exactly these keys — nothing else sneaks in either.
     expect(Object.keys(env).sort()).toEqual([
       'CLAUDEUI_PI_AGENT_TOOL',
       'CLAUDEUI_PI_BRIDGE_TOKEN',
@@ -4622,7 +4665,7 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
       'CLAUDEUI_PI_MCP',
       'CLAUDEUI_PI_SEND_MESSAGE',
       'CLAUDEUI_PI_SESSION_TOOLS',
-      'CLAUDEUI_PI_SKILL_DIRS'
+      'CLAUDEUI_PI_SKILLS'
     ])
   })
 

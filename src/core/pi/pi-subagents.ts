@@ -86,6 +86,7 @@ import { PI_ASYNC_LAUNCHED_PREFIX, piAgentModelLine } from '../../shared/pi-agen
 import { piSubagentSessionsRoot, type PiAgentLinkRecord } from './pi-subagent-store'
 import { scratchpadPrompt } from './pi-scratchpad'
 import { piSubagentToolEntry, type PiMcpServerEntry } from './pi-mcp-bridge'
+import type { PiSkillDescriptor } from './pi-skill-bridge'
 
 /** Live children (all depths) one session may run at once. */
 export const MAX_CONCURRENT_PI_SUBAGENTS = 20
@@ -113,8 +114,11 @@ export interface PiSubagentHost {
    * parent's scope, so it is told to use the same one. Absent = none.
    */
   scratchpadDir?(): string | undefined
-  /** The parent's skill-dirs env (`CLAUDEUI_PI_SKILL_DIRS`), or `{}`. */
-  skillDirsEnv(): Record<string, string>
+  /**
+   * The parent's Claude skill catalog snapshot as pi descriptors — a child lists the same
+   * skills its parent did, as a Claude subagent does. Absent = none.
+   */
+  bridgedSkills?(): PiSkillDescriptor[]
   /**
    * The parent's MCP catalog snapshot (ADR-096) — a child registers the same
    * servers its parent did, as a Claude subagent sees its parent's MCP tools.
@@ -212,7 +216,7 @@ export function narrowMode(parentMode: string, definitionMode?: string): string 
  */
 export function buildPiSubagentChildEnv(
   bridge: { url: string; token: string },
-  opts: { childCanSpawn: boolean; listing: string; skillDirsEnv: Record<string, string> }
+  opts: { childCanSpawn: boolean; listing: string }
 ): NodeJS.ProcessEnv {
   return {
     CLAUDEUI_PI_BRIDGE_URL: bridge.url,
@@ -226,7 +230,8 @@ export function buildPiSubagentChildEnv(
     CLAUDEUI_PI_AGENT_TOOL: opts.childCanSpawn ? '1' : '',
     CLAUDEUI_PI_AGENT_LISTING: opts.childCanSpawn ? opts.listing : '',
     CLAUDEUI_PI_SEND_MESSAGE: '1',
-    CLAUDEUI_PI_SKILL_DIRS: opts.skillDirsEnv.CLAUDEUI_PI_SKILL_DIRS ?? '',
+    // The parent's Claude skill catalog (shared catalog), served by the child's own bridge host.
+    CLAUDEUI_PI_SKILLS: '1',
     // The parent's MCP catalog (ADR-096), served by the child's own bridge host.
     CLAUDEUI_PI_MCP: '1'
   }
@@ -952,6 +957,7 @@ export class PiSubagentManager {
           hostedToolHandler: this.childHostedTool(scope),
           onAbandoned: (info) => this.childAbandoned(scope, info),
           mcpServers: this.host.bridgedMcpServers?.() ?? {},
+          skills: this.host.bridgedSkills?.() ?? [],
           args: buildPiSubagentChildArgs({
             dir: record.dir,
             agentId: record.agentId,
@@ -962,8 +968,7 @@ export class PiSubagentManager {
           env: (bridge) =>
             buildPiSubagentChildEnv(bridge, {
               childCanSpawn: record.canSpawn,
-              listing: this.listing(),
-              skillDirsEnv: this.host.skillDirsEnv()
+              listing: this.listing()
             })
         },
         ownerToolUseId: () => toolUseId,

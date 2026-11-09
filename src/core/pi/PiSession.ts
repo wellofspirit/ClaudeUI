@@ -1,7 +1,5 @@
 import type { HostWindowHandle } from '../host'
-import { existsSync } from 'node:fs'
-import { join, delimiter } from 'node:path'
-import { homedir } from 'node:os'
+import { readFileSync } from 'node:fs'
 import { v4 as uuid } from 'uuid'
 import { BaseSession } from '../providers/BaseSession'
 import type { EngineSpawnOptions, NonUserItem, NonUserOutcome } from '../providers/ISession'
@@ -20,7 +18,8 @@ import type {
   PermissionSuggestion,
   PendingApproval,
   StatusLineData,
-  ToolReviewBlock
+  ToolReviewBlock,
+  SkillInfo
 } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
 import { PI_DEFAULT_MODEL } from '../../shared/engine-meta'
@@ -42,6 +41,7 @@ import type {
   PiGetLastAssistantTextData,
   PiGetSessionStatsData,
   PiGetStateData,
+  PiCommandEntry,
   PiRpcCommand
 } from './pi-protocol'
 import {
@@ -70,6 +70,13 @@ import {
   readPiNativeMcpServerNames,
   type PiMcpCatalog
 } from './pi-mcp-bridge'
+// The shared Claude skill catalog (typed `/name` expansion, the bridge's `/skills`).
+import {
+  resolveClaudeSkillCatalog,
+  type ClaudeSkillCatalog
+} from '../services/claude-skill-catalog'
+import { expandClaudeSkillInvocation, parseSkillInvocation } from '../services/claude-skill-invoke'
+import { buildPiSkillDescriptors, type PiSkillDescriptor } from './pi-skill-bridge'
 // Host-run subagents (ADR-089): the manager owns the children; this session
 // owns their gating (decideToolCall, parametrized by the child scope).
 import { loadPiAgentRegistry, type PiAgentRegistry } from './pi-agent-registry'
@@ -339,6 +346,18 @@ function buildSideQuestionPrompt(context: string, question: string): string {
   )
 }
 
+/** A pi skill file's body (no frontmatter) for the Skills dialog; '' when unreadable. */
+function readSkillBody(path: string): string {
+  if (!path) return ''
+  try {
+    return readFileSync(path, 'utf-8')
+      .replace(/^\uFEFF/, '')
+      .replace(/^---\s*\n[\s\S]*?---\s*\n?/, '')
+  } catch {
+    return ''
+  }
+}
+
 /**
  * PiSession — engine-neutral session backend for the pi coding agent.
  *
@@ -489,6 +508,16 @@ export class PiSession extends BaseSession {
    * handed to host-run subagents. Null until the first spawn.
    */
   private mcpCatalog: PiMcpCatalog | null = null
+  /**
+   * The Claude skill catalog this session's pi lists (shared skill catalog): read at each spawn,
+   * served by the bridge host's `/skills`, expanded host-side for a typed `/name`, and handed to
+   * host-run subagents. Empty until the first spawn.
+   */
+  private skillCatalog: ClaudeSkillCatalog = { entries: [], skipped: [] }
+  private skillDescriptors: PiSkillDescriptor[] = []
+  private readonly readSkillCatalog: (cwd: string) => ClaudeSkillCatalog
+  /** pi's own non-temporary commands at the last spawn (`get_commands`): a typed name that is one of them is pi's, never expanded. */
+  private piCommands: PiCommandEntry[] = []
   /** Bridged + pi-native MCP server names at the last spawn — what maps a pi tool's server back to its Claude name. */
   private knownMcpServers: string[] = []
   /** The skipped-servers warning is shown once per session, not on every respawn. */
@@ -660,6 +689,8 @@ export class PiSession extends BaseSession {
       spawnPiChild?: SpawnPiChildFn
       subagentsRoot?: string
       loadAgentRegistry?: (cwd: string) => PiAgentRegistry
+      /** The shared Claude skill catalog for a cwd (production: `resolveClaudeSkillCatalog`). */
+      loadSkillCatalog?: (cwd: string) => ClaudeSkillCatalog
       /** Where the scratchpad lives (tests); production uses the OS temp dir. */
       scratchpad?: Partial<ScratchpadEnv>
     } = {}
@@ -667,6 +698,7 @@ export class PiSession extends BaseSession {
     super(routingId, win, cwd)
     this.scratchpadEnv = deps.scratchpad
     this.loadAgentRegistry = deps.loadAgentRegistry ?? ((dir) => loadPiAgentRegistry({ cwd: dir }))
+    this.readSkillCatalog = deps.loadSkillCatalog ?? ((dir) => resolveClaudeSkillCatalog(dir))
     // The host reads this session LIVE (routingId changes on a rekey).
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const session = this
@@ -680,7 +712,7 @@ export class PiSession extends BaseSession {
         },
         currentModel: () => session._model,
         scratchpadDir: () => session.scratchpadDir,
-        skillDirsEnv: () => session.computeSkillDirsEnv(),
+        bridgedSkills: () => session.skillDescriptors,
         bridgedMcpServers: () => session.mcpCatalog?.servers ?? {},
         send: (channel, data) => session.send(channel, data),
         gateChild: (scope, payload) => session.gateChild(scope, payload),
@@ -882,30 +914,101 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * Shared-skills discovery (M3): the concrete, EXISTING skill directories to
-   * hand the bridge extension's `resources_discover` handler via env var
-   * (`CLAUDEUI_PI_SKILL_DIRS`, `path.delimiter`-joined — the extension just
-   * splits it, no fs access there; see pi-bridge-source.ts). Claude skills are
-   * SKILL.md dirs under `~/.claude/skills/*` and `<cwd>/.claude/skills/*` — the
-   * same agentskills convention pi itself uses
-   * (vendor/pi-src/packages/coding-agent/docs/skills.md's "Using Skills from
-   * Other Harnesses" documents exactly this
-   * `["~/.claude/skills", "../.claude/skills"]`-style settings array).
-   *
-   * Returns `{}` (key entirely ABSENT, not an empty-string value) when neither
-   * dir exists — keeps the bridge extension's own env-var-presence gate
-   * meaningful (an empty string would still be "present").
+   * Read the shared Claude skill catalog for this spawn and remember it, with the descriptors the
+   * bridge host serves. Never throws: a failed read is an empty catalog.
    */
-  private computeSkillDirsEnv(): Record<string, string> {
-    const candidates = [join(homedir(), '.claude', 'skills'), join(this.cwd, '.claude', 'skills')]
-    const existing = candidates.filter((dir) => {
+  private loadSkillCatalog(): ClaudeSkillCatalog {
+    let catalog: ClaudeSkillCatalog
+    try {
+      catalog = this.readSkillCatalog(this.cwd)
+    } catch (err) {
+      logger.warn(
+        'PiSession',
+        `Claude skill catalog failed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      catalog = { entries: [], skipped: [] }
+    }
+    this.skillCatalog = catalog
+    this.skillDescriptors = buildPiSkillDescriptors(catalog)
+    return catalog
+  }
+
+  /**
+   * `session:slash-commands`: pi's own entries, then the catalog's user-invocable ones as
+   * `/name` that pi does not already list (pi's wins a clash).
+   */
+  private slashCommandList(): Array<{ name: string; description?: string }> {
+    const list = this.piCommands.map((c) => ({ name: '/' + c.name, description: c.description }))
+    const taken = new Set(list.map((c) => c.name))
+    for (const entry of this.skillCatalog.entries) {
+      if (!entry.userInvocable || taken.has('/' + entry.name)) continue
+      list.push({ name: '/' + entry.name, description: entry.description })
+    }
+    return list
+  }
+
+  /** What pi receives for `prompt`: the expansion of a typed catalog `/name args`, else the text as typed. */
+  private expandTypedSkill(prompt: string): string {
+    if (this.skillCatalog.entries.length === 0) return prompt
+    try {
+      const invocation = parseSkillInvocation(prompt, this.skillCatalog)
+      if (!invocation) return prompt
+      const names = [invocation.entry.name, ...(invocation.entry.aliases ?? [])]
+      if (this.piCommands.some((c) => names.includes(c.name))) return prompt
+      return expandClaudeSkillInvocation(invocation, {
+        cwd: this.cwd,
+        ...(this.piSessionId ? { sessionId: this.piSessionId } : {})
+      })
+    } catch (err) {
+      logger.warn(
+        'PiSession',
+        `skill expansion failed, sending the text as typed: ${err instanceof Error ? err.message : String(err)}`
+      )
+      return prompt
+    }
+  }
+
+  /** ISession.discoverSkills: the catalog's entries plus pi's own skills (`source: 'engine'`). */
+  discoverSkills(cwd: string): Promise<SkillInfo[]> {
+    let catalog = this.skillCatalog
+    if (cwd !== this.cwd) {
       try {
-        return existsSync(dir)
+        catalog = this.readSkillCatalog(cwd)
       } catch {
-        return false
+        catalog = { entries: [], skipped: [] }
       }
-    })
-    return existing.length > 0 ? { CLAUDEUI_PI_SKILL_DIRS: existing.join(delimiter) } : {}
+    }
+    const engine: SkillInfo[] = this.piCommands
+      .filter((c) => c.source === 'skill')
+      .map((c) => {
+        const name = c.name.replace(/^skill:/, '')
+        const path = c.sourceInfo?.path ?? ''
+        return {
+          name,
+          description: c.description ?? '',
+          source: 'engine' as const,
+          path,
+          content: readSkillBody(path)
+        }
+      })
+    // The model sees pi's skill of a name pi already lists (R1), so the dialog shows that one.
+    const ownNames = new Set(engine.map((s) => s.name))
+    const shared: SkillInfo[] = catalog.entries
+      .filter((e) => !ownNames.has(e.name))
+      .map((e) => ({
+        name: e.name,
+        ...(e.displayName ? { displayName: e.displayName } : {}),
+        description: e.description,
+        source: e.source,
+        ...(e.pluginName ? { pluginName: e.pluginName } : {}),
+        path: e.file,
+        content: e.body,
+        kind: e.kind,
+        userInvocable: e.userInvocable,
+        modelInvocable: e.modelInvocable,
+        claudeOnly: e.claudeOnly
+      }))
+    return Promise.resolve([...shared, ...engine])
   }
 
   /**
@@ -977,10 +1080,17 @@ export class PiSession extends BaseSession {
     // extension fetches it from this host while pi loads (secrets never touch
     // an env var or a file), and a respawn picks up McpDialog's edits.
     const mcpCatalog = this.loadMcpCatalog()
+    // The shared Claude skill catalog, read fresh at every spawn the same way: served by the
+    // bridge host's `/skills` for the extension's `before_agent_start`.
+    this.loadSkillCatalog()
     const bridgeHost = new PiBridgeHost(
       this.gateToolCall,
       this.capabilities.hostedMcp ? this.handleHostedTool : undefined,
-      { onAbandoned: this.handleBridgeAbandoned, mcpServers: mcpCatalog.servers }
+      {
+        onAbandoned: this.handleBridgeAbandoned,
+        mcpServers: mcpCatalog.servers,
+        skills: this.skillDescriptors
+      }
     )
     let bridge: { url: string; token: string }
     try {
@@ -1036,6 +1146,8 @@ export class PiSession extends BaseSession {
           // The bridge registers the shared MCP catalog (ADR-096). Always on:
           // the configs themselves come over the host channel, not from here.
           CLAUDEUI_PI_MCP: '1',
+          // Likewise the Claude skill catalog (`/skills`, listed at before_agent_start).
+          CLAUDEUI_PI_SKILLS: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
           // The session tools (bridge v15), on the same two conditions as the hosted
           // tools above plus the host having wired the service.
@@ -1063,8 +1175,7 @@ export class PiSession extends BaseSession {
                 CLAUDEUI_PI_AGENT_LISTING: this.subagents.listing(),
                 CLAUDEUI_PI_SEND_MESSAGE: '1'
               }
-            : {}),
-          ...this.computeSkillDirsEnv()
+            : {})
         }
       })
       await client.start()
@@ -1317,11 +1428,8 @@ export class PiSession extends BaseSession {
 
         // EXACT contract as OpencodeSession.eagerConnect (names get the '/'
         // prefix; renderer slash menu is engine-neutral).
-        const slashCommands = persistent.map((c) => ({
-          name: '/' + c.name,
-          description: c.description
-        }))
-        this.send('session:slash-commands', slashCommands)
+        this.piCommands = persistent
+        this.send('session:slash-commands', this.slashCommandList())
 
         // session:skills — name list only, `skill:` prefix stripped (same
         // bare-name contract as OpencodeSession.eagerConnect's skillNames).
@@ -1335,6 +1443,10 @@ export class PiSession extends BaseSession {
         'PiSession',
         `get_commands failed (best-effort, discovery is optional): ${err instanceof Error ? err.message : String(err)}`
       )
+      // The catalog's commands are the host's own: still offered.
+      if (this.skillCatalog.entries.length > 0) {
+        this.send('session:slash-commands', this.slashCommandList())
+      }
     }
 
     // Fork excluded (mirrors ClaudeSession's identical "forks excluded" cost-
@@ -1562,7 +1674,8 @@ export class PiSession extends BaseSession {
       .filter((att) => att.mediaType.startsWith('image/'))
       .map((att) => ({ type: 'image' as const, data: att.base64Data, mimeType: att.mediaType }))
 
-    const command: PiRpcCommand = { type: 'prompt', message: prompt }
+    // A typed catalog `/name args` goes to pi expanded; the recorded message and the chat keep what was typed.
+    const command: PiRpcCommand = { type: 'prompt', message: this.expandTypedSkill(prompt) }
     if (images.length > 0) command.images = images
     // A prompt sent while already streaming REQUIRES streamingBehavior or pi
     // rejects it (verified — README.md "Commands"). 'steer' (M2b — Claude

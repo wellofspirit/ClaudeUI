@@ -136,7 +136,7 @@ function makeHost(over: Partial<PiSubagentHost> = {}) {
     routingId: 'rid-parent',
     cwd: '/parent/cwd',
     currentModel: () => 'openai-codex/parent-model',
-    skillDirsEnv: () => ({}),
+    bridgedSkills: () => [{ name: 'sk', description: 'd', filePath: '/f', baseDir: '/b' }],
     send: (channel, data) => {
       sent.push([channel, data])
     },
@@ -230,7 +230,7 @@ describe('buildPiSubagentChildEnv', () => {
   it('sets every gate var explicitly (exact keys), the agent tool only when the child may spawn', () => {
     const can = buildPiSubagentChildEnv(
       { url: 'u', token: 't' },
-      { childCanSpawn: true, listing: '- x: y', skillDirsEnv: { CLAUDEUI_PI_SKILL_DIRS: '/s' } }
+      { childCanSpawn: true, listing: '- x: y' }
     )
     expect(can).toEqual({
       CLAUDEUI_PI_BRIDGE_URL: 'u',
@@ -244,17 +244,17 @@ describe('buildPiSubagentChildEnv', () => {
       CLAUDEUI_PI_SEND_MESSAGE: '1',
       // Slice 2: a host-run child never gets the session tools (root agent only).
       CLAUDEUI_PI_SESSION_TOOLS: '',
-      CLAUDEUI_PI_SKILL_DIRS: '/s',
       // ADR-096: the parent's MCP catalog, served by the child's own bridge host.
-      CLAUDEUI_PI_MCP: '1'
+      CLAUDEUI_PI_MCP: '1',
+      // The parent's Claude skill catalog, likewise.
+      CLAUDEUI_PI_SKILLS: '1'
     })
     const cannot = buildPiSubagentChildEnv(
       { url: 'u', token: 't' },
-      { childCanSpawn: false, listing: '- x: y', skillDirsEnv: {} }
+      { childCanSpawn: false, listing: '- x: y' }
     )
     expect(cannot.CLAUDEUI_PI_AGENT_TOOL).toBe('')
     expect(cannot.CLAUDEUI_PI_AGENT_LISTING).toBe('')
-    expect(cannot.CLAUDEUI_PI_SKILL_DIRS).toBe('')
     expect(Object.keys(cannot).sort()).toEqual(Object.keys(can).sort())
   })
 })

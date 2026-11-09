@@ -10,7 +10,7 @@ import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-win
 import { clearSyncSubscribersForTests } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 import { mkdtemp, rmdir } from 'node:fs/promises'
-import { join, delimiter } from 'node:path'
+import { join } from 'node:path'
 import type { PiEvent } from '../pi-protocol'
 import type { DispatchContext } from '../../services/cross-engine-dispatcher'
 import type { ChatMessage, QueuedItem, StatusLineData } from '../../../shared/types'
@@ -271,12 +271,6 @@ const {
       defaultMode: undefined
     }),
     mockSaveClaudePermissions: vi.fn(),
-    // Skill-dirs env var (M3): defaults to "nothing exists" so every
-    // PRE-EXISTING test's exact env assertion (no CLAUDEUI_PI_SKILL_DIRS key)
-    // stays unaffected — dedicated tests below override this per-case.
-    // Skill-dirs env var (M3): defaults to "nothing exists" so every
-    // PRE-EXISTING test's exact env assertion (no CLAUDEUI_PI_SKILL_DIRS key)
-    // stays unaffected — dedicated tests below override this per-case.
     mockExistsSync: vi.fn().mockReturnValue(false),
     mockHomedir: vi.fn().mockReturnValue('/fake/home'),
     // piAuthProvider (M3): the module is mocked wholesale below (mirrors this
@@ -447,6 +441,22 @@ vi.mock('../pi-mcp-bridge', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../pi-mcp-bridge')>()),
   collectClaudeMcpForPi: mcpCatalogMock.collect,
   readPiNativeMcpServerNames: mcpCatalogMock.native
+}))
+
+// The shared Claude skill catalog: the resolver and the invocation expander are stubbed (the
+// developer's own ~/.claude is never read); the tests below hand-build the catalogs.
+const skillMock = vi.hoisted(() => ({
+  resolve: vi.fn((): unknown => ({ entries: [], skipped: [] })),
+  parse: vi.fn((): unknown => null),
+  expand: vi.fn((): string => 'EXPANDED')
+}))
+vi.mock('../../services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: skillMock.resolve
+}))
+vi.mock('../../services/claude-skill-invoke', () => ({
+  parseSkillInvocation: skillMock.parse,
+  expandClaudeSkillInvocation: skillMock.expand,
+  parseSkillInvocationEnvelope: () => null
 }))
 
 const mockCaptureGitConfigArmed = vi.hoisted(() => vi.fn())
@@ -855,6 +865,8 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_BRIDGE_TOKEN: 'test-bridge-token',
           // ADR-096: the shared MCP catalog, always registered by a session.
           CLAUDEUI_PI_MCP: '1',
+          // The shared Claude skill catalog, likewise.
+          CLAUDEUI_PI_SKILLS: '1',
           CLAUDEUI_PI_HOSTED_TOOLS: '1',
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
           CLAUDEUI_PI_DISPATCH_DESCRIPTION: expect.stringContaining('DIFFERENT engine'),
@@ -5080,61 +5092,232 @@ function lastSpawnOpts(): { cwd: string; args: string[]; env: Record<string, str
   return calls[calls.length - 1][1]
 }
 
-describe('PiSession — skill dirs env var (M3 shared skills)', () => {
-  it('omits CLAUDEUI_PI_SKILL_DIRS entirely when neither skill dir exists', async () => {
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-none', win as never, '/cwd', {})
-    await session.run('hi')
-    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
+function skillEntry(over: Record<string, unknown>): Record<string, unknown> {
+  return {
+    name: 's',
+    kind: 'skill',
+    source: 'user',
+    file: '/home/u/.claude/skills/s/SKILL.md',
+    baseDir: '/home/u/.claude/skills/s',
+    description: 'does s',
+    argumentNames: [],
+    body: 'body',
+    userInvocable: true,
+    modelInvocable: true,
+    claudeOnly: [],
+    ...over
+  }
+}
+
+function getCommandsResponse(commands: unknown[]): (cmd: { type: string }) => Promise<unknown> {
+  return (cmd) =>
+    cmd.type === 'get_commands'
+      ? Promise.resolve({
+          type: 'response',
+          command: 'get_commands',
+          success: true,
+          data: { commands }
+        })
+      : defaultRequestImpl(cmd)
+}
+
+function sentPrompt(): { message: string; streamingBehavior?: string } {
+  const prompts = mockRequest.mock.calls
+    .map((c) => c[0] as { type: string; message: string; streamingBehavior?: string })
+    .filter((c) => c.type === 'prompt')
+  return prompts[prompts.length - 1]
+}
+
+describe('PiSession — shared Claude skill catalog', () => {
+  beforeEach(() => {
+    skillMock.resolve.mockReset().mockReturnValue({ entries: [], skipped: [] })
+    skillMock.parse.mockReset().mockReturnValue(null)
+    skillMock.expand.mockReset().mockReturnValue('EXPANDED')
   })
 
-  it('sets CLAUDEUI_PI_SKILL_DIRS to the home skills dir when only it exists', async () => {
-    const homeSkills = join('/fake/home', '.claude', 'skills')
-    mockExistsSync.mockImplementation((p: string) => p === homeSkills)
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-home', win as never, '/cwd', {})
-    await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe(homeSkills)
+  const catalog = (...entries: Record<string, unknown>[]): { entries: unknown[]; skipped: [] } => ({
+    entries,
+    skipped: []
   })
 
-  it('sets CLAUDEUI_PI_SKILL_DIRS to the cwd skills dir when only it exists', async () => {
-    const cwdSkills = join('/cwd', '.claude', 'skills')
-    mockExistsSync.mockImplementation((p: string) => p === cwdSkills)
+  it('hands the model-invocable entries to the bridge host as descriptors and turns the skills block on; the legacy skill-dirs var is gone', async () => {
+    skillMock.resolve.mockReturnValue(
+      catalog(
+        skillEntry({ name: 'a', whenToUse: 'when a' }),
+        skillEntry({ name: 'hidden', modelInvocable: false })
+      )
+    )
     const win = new MockWindow()
-    const session = new PiSession('rid-skills-cwd', win as never, '/cwd', {})
+    const session = new PiSession('rid-skills-host', win as never, '/cwd', {})
     await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe(cwdSkills)
+    expect(skillMock.resolve).toHaveBeenCalledWith('/cwd')
+    const options = MockPiBridgeHost.mock.calls.at(-1)?.[2] as { skills?: unknown }
+    expect(options.skills).toEqual([
+      {
+        name: 'a',
+        description: 'does s - when a',
+        filePath: '/home/u/.claude/skills/s/SKILL.md',
+        baseDir: '/home/u/.claude/skills/s'
+      }
+    ])
+    const env = lastSpawnOpts().env
+    expect(env.CLAUDEUI_PI_SKILLS).toBe('1')
+    expect(env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
   })
 
-  it('joins BOTH dirs with path.delimiter (home first) when both exist', async () => {
-    const homeSkills = join('/fake/home', '.claude', 'skills')
-    const cwdSkills = join('/cwd', '.claude', 'skills')
-    mockExistsSync.mockReturnValue(true)
-    const win = new MockWindow()
-    const session = new PiSession('rid-skills-both', win as never, '/cwd', {})
-    await session.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_SKILL_DIRS).toBe([homeSkills, cwdSkills].join(delimiter))
-  })
-
-  it('treats a thrown existsSync (e.g. permission error) as "does not exist" rather than failing the spawn', async () => {
-    mockExistsSync.mockImplementation(() => {
-      throw new Error('EPERM')
+  it('a catalog read that throws is an empty catalog, not a failed spawn', async () => {
+    skillMock.resolve.mockImplementation(() => {
+      throw new Error('boom')
     })
     const win = new MockWindow()
     const session = new PiSession('rid-skills-throw', win as never, '/cwd', {})
     await expect(session.run('hi')).resolves.toBeUndefined()
-    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_SKILL_DIRS')
+    expect((MockPiBridgeHost.mock.calls.at(-1)?.[2] as { skills?: unknown }).skills).toEqual([])
   })
 
-  it('still sets the bridge env vars alongside the skill dirs var (both coexist)', async () => {
-    mockExistsSync.mockReturnValue(true)
+  it('sends a typed catalog /name expanded; the recorded message stays as typed', async () => {
+    const entry = skillEntry({ name: 'deploy' })
+    skillMock.resolve.mockReturnValue(catalog(entry))
+    skillMock.parse.mockReturnValue({ entry, args: 'prod' })
     const win = new MockWindow()
-    const session = new PiSession('rid-skills-coexist', win as never, '/cwd', {})
+    const session = new PiSession('rid-skills-expand', win as never, '/cwd', {})
+    await session.run('/deploy prod')
+    expect(skillMock.parse).toHaveBeenCalledWith('/deploy prod', catalog(entry))
+    expect(skillMock.expand).toHaveBeenCalledWith(
+      { entry, args: 'prod' },
+      expect.objectContaining({ cwd: '/cwd' })
+    )
+    expect(sentPrompt().message).toBe('EXPANDED')
+    expect(
+      session
+        .getMessages()
+        .filter((m) => m.role === 'user')
+        .map((m) => m.content)
+    ).toEqual([[{ type: 'text', text: '/deploy prod' }]])
+  })
+
+  it('a mid-turn follow-up (steer) is expanded the same way', async () => {
+    const entry = skillEntry({ name: 'deploy' })
+    skillMock.resolve.mockReturnValue(catalog(entry))
+    skillMock.parse.mockImplementation(((text: string) =>
+      text.startsWith('/deploy') ? { entry, args: '' } : null) as never)
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-steer', win as never, '/cwd', {})
+    await session.run('first')
+    await session.run('/deploy')
+    expect(sentPrompt()).toMatchObject({ message: 'EXPANDED', streamingBehavior: 'steer' })
+  })
+
+  it("leaves a typed name pi owns as typed (pi's own command wins)", async () => {
+    const entry = skillEntry({ name: 'fix-tests' })
+    skillMock.resolve.mockReturnValue(catalog(entry))
+    skillMock.parse.mockReturnValue({ entry, args: '' })
+    mockRequest.mockImplementation(
+      getCommandsResponse([
+        { name: 'fix-tests', description: 'pi template', source: 'prompt' }
+      ]) as never
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-pi-wins', win as never, '/cwd', {})
+    await session.run('/fix-tests')
+    expect(sentPrompt().message).toBe('/fix-tests')
+    expect(skillMock.expand).not.toHaveBeenCalled()
+  })
+
+  it('a native /skill:x is not a catalog match and goes through untouched', async () => {
+    skillMock.resolve.mockReturnValue(catalog(skillEntry({ name: 'deploy' })))
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-native', win as never, '/cwd', {})
+    await session.run('/skill:brave-search q')
+    expect(sentPrompt().message).toBe('/skill:brave-search q')
+  })
+
+  it("session:slash-commands is pi's list then the user-invocable catalog entries pi lacks", async () => {
+    skillMock.resolve.mockReturnValue(
+      catalog(
+        skillEntry({ name: 'deploy', description: 'ship it' }),
+        skillEntry({ name: 'fix-tests', description: 'dup of a pi template' }),
+        skillEntry({ name: 'quiet', userInvocable: false })
+      )
+    )
+    mockRequest.mockImplementation(
+      getCommandsResponse([
+        { name: 'fix-tests', description: 'pi template', source: 'prompt' }
+      ]) as never
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-slash', win as never, '/cwd', {})
     await session.run('hi')
-    const env = lastSpawnOpts().env
-    expect(env.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:9999')
-    expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-bridge-token')
-    expect(env.CLAUDEUI_PI_SKILL_DIRS).toBeTruthy()
+    expect(sentPayloads(win, 'session:slash-commands')[0]).toEqual([
+      { name: '/fix-tests', description: 'pi template' },
+      { name: '/deploy', description: 'ship it' }
+    ])
+  })
+
+  it('still offers the catalog commands when get_commands fails', async () => {
+    skillMock.resolve.mockReturnValue(catalog(skillEntry({ name: 'deploy' })))
+    mockRequest.mockImplementation((cmd: { type: string }) =>
+      cmd.type === 'get_commands' ? Promise.reject(new Error('timed out')) : defaultRequestImpl(cmd)
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-slash-fail', win as never, '/cwd', {})
+    await session.run('hi')
+    expect(sentPayloads(win, 'session:slash-commands')[0]).toEqual([
+      { name: '/deploy', description: 'does s' }
+    ])
+  })
+
+  it("discoverSkills: the catalog as SkillInfo plus pi's own skills as engine; pi's skill hides a same-named entry", async () => {
+    skillMock.resolve.mockReturnValue(
+      catalog(
+        skillEntry({
+          name: 'deploy',
+          source: 'plugin',
+          pluginName: 'p',
+          kind: 'command',
+          userInvocable: false,
+          modelInvocable: false,
+          claudeOnly: ['allowed-tools'],
+          body: 'deploy body'
+        }),
+        skillEntry({ name: 'brave-search' })
+      )
+    )
+    mockRequest.mockImplementation(
+      getCommandsResponse([
+        {
+          name: 'skill:brave-search',
+          description: 'Web search',
+          source: 'skill',
+          sourceInfo: { path: '/nonexistent/SKILL.md', scope: 'user' }
+        }
+      ]) as never
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-discover', win as never, '/cwd', {})
+    await session.run('hi')
+    const skills = await session.discoverSkills('/cwd')
+    expect(skills).toEqual([
+      {
+        name: 'deploy',
+        description: 'does s',
+        source: 'plugin',
+        pluginName: 'p',
+        path: '/home/u/.claude/skills/s/SKILL.md',
+        content: 'deploy body',
+        kind: 'command',
+        userInvocable: false,
+        modelInvocable: false,
+        claudeOnly: ['allowed-tools']
+      },
+      {
+        name: 'brave-search',
+        description: 'Web search',
+        source: 'engine',
+        path: '/nonexistent/SKILL.md',
+        content: ''
+      }
+    ])
   })
 })
 
