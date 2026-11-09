@@ -10,6 +10,7 @@ import {
   claudeConfigDir,
   claudeGlobalConfigPath,
   claudeProjectKey,
+  claudeProjectLocation,
   mergeSettings,
   readClaudeSettingsLayers
 } from '../claude-config-paths'
@@ -117,4 +118,99 @@ describe('realpath rooting', () => {
     expect(claudeProjectKey(repo)).toBe(want)
     expect(claudeProjectKey(repo).startsWith(repo.slice(0, 2).replace(/\\/g, '/'))).toBe(true)
   }, 30_000) // a real git spawn
+})
+
+describe('project location (cli.js kt port, fabricated layouts)', () => {
+  const mk = (p: string, file?: string, body = ''): string => {
+    if (file === undefined) fs.mkdirSync(p, { recursive: true })
+    else {
+      fs.mkdirSync(path.dirname(path.join(p, file)), { recursive: true })
+      fs.writeFileSync(path.join(p, file), body)
+    }
+    return p
+  }
+  /** A linked worktree `wt` of `common` (the common dir), laid out the way a worktree add does. */
+  const linkedWorktree = (
+    common: string,
+    wt: string,
+    o: { commondir?: string | null; back?: string | null; name?: string } = {}
+  ): string => {
+    const name = o.name ?? 'wt1'
+    const gitdir = path.join(common, 'worktrees', name)
+    mk(gitdir)
+    if (o.commondir !== null) {
+      fs.writeFileSync(path.join(gitdir, 'commondir'), o.commondir ?? '../..\n')
+    }
+    if (o.back !== null) {
+      fs.writeFileSync(path.join(gitdir, 'gitdir'), `${o.back ?? path.join(wt, '.git')}\n`)
+    }
+    mk(wt, '.git', `gitdir: ${gitdir}\n`)
+    return wt
+  }
+
+  it('plain repo and subdir resolve to the repo root; outside a repo is the cwd', () => {
+    const repo = mk(path.join(root, 'repo'))
+    mk(repo, '.git/HEAD')
+    const sub = mk(path.join(repo, 'a', 'b'))
+    expect(claudeProjectLocation(repo)).toEqual({ root: repo, worktree: false })
+    expect(claudeProjectLocation(sub)).toEqual({ root: repo, worktree: false })
+    const plain = mk(path.join(root, 'plain'))
+    expect(claudeProjectLocation(plain)).toEqual({ root: plain, worktree: false })
+  })
+
+  it('a linked worktree resolves to its main checkout, flagged worktree', () => {
+    const main = mk(path.join(root, 'main'))
+    mk(main, '.git/HEAD')
+    const wt = linkedWorktree(path.join(main, '.git'), path.join(root, 'wt'))
+    const sub = mk(path.join(wt, 'src'))
+    expect(claudeProjectLocation(wt)).toEqual({ root: main, worktree: true })
+    expect(claudeProjectLocation(sub)).toEqual({ root: main, worktree: true })
+  })
+
+  it.each([
+    ['a back-pointer naming another checkout', { back: '/elsewhere/.git' }],
+    ['a missing back-pointer', { back: null }],
+    ['a missing commondir', { commondir: null }],
+    ['a gitdir that is not under <common>/worktrees', { commondir: '..' }]
+  ])('a malformed worktree (%s) keeps the worktree own root', (_n, o) => {
+    const main = mk(path.join(root, 'main'))
+    mk(main, '.git/HEAD')
+    const wt = linkedWorktree(path.join(main, '.git'), path.join(root, 'wt'), o)
+    expect(claudeProjectLocation(wt)).toEqual({ root: wt, worktree: false })
+  })
+
+  it('a bare-common worktree resolves to the common dir; a common dir that holds .git does not', () => {
+    const bare = mk(path.join(root, 'bare.git'))
+    mk(bare, 'HEAD')
+    const wt = linkedWorktree(bare, path.join(root, 'wt'))
+    expect(claudeProjectLocation(wt)).toEqual({ root: bare, worktree: true })
+
+    const odd = mk(path.join(root, 'odd'))
+    mk(odd, '.git/HEAD')
+    const wt2 = linkedWorktree(odd, path.join(root, 'wt2'))
+    expect(claudeProjectLocation(wt2)).toEqual({ root: wt2, worktree: false })
+  })
+
+  it('a .git file without a commondir (a submodule) keeps its own directory', () => {
+    const sm = mk(path.join(root, 'sm'), '.git', 'gitdir: ../outer/.git/modules/sm\n')
+    expect(claudeProjectLocation(sm)).toEqual({ root: sm, worktree: false })
+  })
+
+  it('bails on a backslash in the paths on POSIX', () => {
+    if (process.platform === 'win32') return
+    const main = mk(path.join(root, 'main'))
+    mk(main, '.git/HEAD')
+    const wt = linkedWorktree(path.join(main, '.git'), path.join(root, 'wt'), {
+      commondir: '..\\..'
+    })
+    expect(claudeProjectLocation(wt).worktree).toBe(false)
+  })
+
+  it('keys are NFC, and the key spells backslashes as slashes', () => {
+    const decomposed = path.join(root, 'cafe\u0301')
+    mk(decomposed)
+    expect(claudeProjectLocation(decomposed).root.endsWith('caf\u00e9')).toBe(true)
+    expect(claudeProjectKey(decomposed)).toBe(claudeProjectLocation(decomposed).root)
+    expect(claudeProjectKey('C:\\proj\\x')).not.toContain('\\')
+  })
 })
