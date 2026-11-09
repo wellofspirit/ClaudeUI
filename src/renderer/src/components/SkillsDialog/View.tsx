@@ -9,13 +9,15 @@ interface SkillGroup {
   skills: SkillInfo[]
 }
 
-const SOURCE_ORDER: SkillSource[] = ['project', 'user', 'plugin', 'bundled']
+const SOURCE_ORDER: SkillSource[] = ['managed', 'project', 'user', 'plugin', 'engine', 'bundled']
 
 const SOURCE_META: Record<SkillSource, { label: string; icon: string }> = {
   project: { label: 'PROJECT', icon: '\u26A1' },
   user: { label: 'USER', icon: '\u26A1' },
   plugin: { label: 'PLUGINS', icon: '\uD83D\uDD0C' },
-  bundled: { label: 'BUNDLED', icon: '\uD83D\uDCE6' }
+  bundled: { label: 'BUNDLED', icon: '\uD83D\uDCE6' },
+  managed: { label: 'MANAGED', icon: '\u26A1' },
+  engine: { label: 'ENGINE', icon: '\u26A1' }
 }
 
 function sourcePathHint(source: SkillSource, cwd: string | null): string {
@@ -28,6 +30,10 @@ function sourcePathHint(source: SkillSource, cwd: string | null): string {
       return 'Installed plugins'
     case 'bundled':
       return 'Built-in'
+    case 'managed':
+      return 'Managed policy'
+    case 'engine':
+      return "This engine's own skills"
   }
 }
 
@@ -42,13 +48,17 @@ function SourceBadge({
     project: 'bg-accent/15 text-accent',
     user: 'bg-purple-500/15 text-purple-400',
     plugin: 'bg-emerald-500/15 text-emerald-400',
-    bundled: 'bg-text-muted/15 text-text-muted'
+    bundled: 'bg-text-muted/15 text-text-muted',
+    managed: 'bg-amber-500/15 text-amber-400',
+    engine: 'bg-text-muted/15 text-text-muted'
   }
   const labels: Record<SkillSource, string> = {
     project: 'Project',
     user: 'User',
     plugin: pluginName ? `Plugin: ${pluginName}` : 'Plugin',
-    bundled: 'Bundled'
+    bundled: 'Bundled',
+    managed: 'Managed',
+    engine: 'Engine'
   }
 
   return (

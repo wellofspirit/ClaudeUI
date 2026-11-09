@@ -33,27 +33,33 @@ import type { SkillsDialogViewProps } from './View'
  * byte-identical in this change; if it is ever touched, these and its private
  * SOURCE_ORDER/SOURCE_META should become one exported pair.
  */
-const SOURCE_ORDER: SkillSource[] = ['project', 'user', 'plugin', 'bundled']
+const SOURCE_ORDER: SkillSource[] = ['managed', 'project', 'user', 'plugin', 'engine', 'bundled']
 
 const SOURCE_LABELS: Record<SkillSource, string> = {
   project: 'PROJECT',
   user: 'USER',
   plugin: 'PLUGINS',
-  bundled: 'BUNDLED'
+  bundled: 'BUNDLED',
+  managed: 'MANAGED',
+  engine: 'ENGINE'
 }
 
 const SOURCE_BADGE_LABELS: Record<SkillSource, string> = {
   project: 'Project',
   user: 'User',
   plugin: 'Plugin',
-  bundled: 'Bundled'
+  bundled: 'Bundled',
+  managed: 'Managed',
+  engine: 'Engine'
 }
 
 const SOURCE_BADGE_COLORS: Record<SkillSource, string> = {
   project: 'bg-accent/15 text-accent',
   user: 'bg-purple-500/15 text-purple-400',
   plugin: 'bg-emerald-500/15 text-emerald-400',
-  bundled: 'bg-text-muted/15 text-text-muted'
+  bundled: 'bg-text-muted/15 text-text-muted',
+  managed: 'bg-amber-500/15 text-amber-400',
+  engine: 'bg-text-muted/15 text-text-muted'
 }
 
 function CrossIcon(): React.JSX.Element {
