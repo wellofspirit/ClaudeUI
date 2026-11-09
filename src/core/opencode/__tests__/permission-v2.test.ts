@@ -933,8 +933,9 @@ describe('the direct opencode_* tools (reachable since 2.2.0)', () => {
       home: HOME
     }).rules
 
-  // `tool/plugin/opencode.ts` at v2.2.5: these carry no permission check (`worktree_remove` is
-  // the exception — it asks `edit`, below), so only a deny can stop them.
+  // `tool/plugin/opencode.ts` at v2.2.6: these carry no permission check (`worktree_remove` is
+  // the exception — it asks `edit`, below; `session_move` asks `external_directory` for a
+  // destination outside the project), so only a deny can stop them.
   const direct = [
     'opencode_session_rename',
     'opencode_session_move',

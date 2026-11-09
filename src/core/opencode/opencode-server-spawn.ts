@@ -106,6 +106,12 @@ export function buildServerEnv(
   // opencode's own `.claude/skills` reader is off: the claudeui-xeng plugin serves the shared
   // Claude skill catalog under Claude's names instead (cli/src/server-process.ts `claude`).
   env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = '1'
+  // 2.2.6 reads OPENCODE_FLAGS (packages/core/src/flag.ts); `all` would switch on
+  // every registered flag (todo, background_compaction, media_blob, schedules,
+  // artifacts: packages/schema/src/config/flag.ts) in our server. Users opt in
+  // through their config instead (`experimental.<key>`, or `experimental.all_flags`),
+  // so an inherited value must not widen that.
+  delete env.OPENCODE_FLAGS
   return env
 }
 

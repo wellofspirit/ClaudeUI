@@ -2,12 +2,12 @@
  * The opencode 2.x permission key table (ADR-097 §3): which 2.x permission
  * `action` a ClaudeUI (Claude-form) rule targets, and how 2.x spells the
  * `resource` it asks with for that action. Read at the pinned tag
- * (`vendor/opencode-src` @ v2.2.5, `packages/core/src/tool/plugin/*.ts`).
+ * (`vendor/opencode-src` @ v2.2.6, `packages/core/src/tool/plugin/*.ts`).
  *
  * | Claude tool                     | 2.x tool id(s)        | action              | resource 2.x asks with                                                    |
  * | ------------------------------- | --------------------- | ------------------- | ------------------------------------------------------------------------- |
  * | Bash                            | shell                 | shell               | one per parsed statement: its source text (`shell/parse.ts`)              |
- * | Read, NotebookRead              | read                  | read                | path: location-relative inside the session dir/worktree, else absolute    |
+ * | Read, NotebookRead              | read                  | read                | path: location-relative inside the session dir/worktree, else absolute; a `skill://` path (2.2.6) asks `skill` (the skill id), then `read` with the URI |
  * | Edit, MultiEdit, Write, NotebookEdit | edit, write, patch | edit               | same path rule; `patch` asks once with every target                       |
  * | Glob                            | glob                  | glob                | the glob PATTERN argument (not a path)                                    |
  * | Grep                            | grep                  | grep                | the regex PATTERN argument (not a path)                                   |

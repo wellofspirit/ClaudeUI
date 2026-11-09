@@ -757,18 +757,23 @@ if (src.includes(patchBMarker)) {
 // ===========================================================================
 // Patch C: Add ZhA handler for agent_stream_event
 //
-// Injects as the FIRST `else if` of the SDK converter's `case"progress":` chain:
+// Injects directly after the dispatch head of the SDK converter's
+// `case"progress":` chain:
 //
-//   case"progress":if(PRED(e))yield*_Do(e,n);
-//   else if(e.data.type==="tool_heartbeat")yield{…}        ← the anchor (2.1.317+)
+//   case"progress":if(PRED(e))yield*FN(e,n);                ← the anchor
+//   else if(…)yield{…tool_heartbeat…}
 //
 // becomes
 //
-//   case"progress":if(PRED(e))yield*_Do(e,n);
+//   case"progress":if(PRED(e))yield*FN(e,n);
 //   /*PATCHED:subagent-C*/else if(e.data.type==="agent_stream_event"){
 //     yield{type:"stream_event",event:e.data.event,
 //       parent_tool_use_id:e.parentToolUseID,session_id:z(),uuid:e.uuid}
-//   }else if(e.data.type==="tool_heartbeat")yield{…}
+//   }else if(…)…
+//
+// The head is the stable part: the arm behind it changed shape in 2.1.317
+// (bash_progress -> tool_heartbeat) and again in 2.1.319 (a new first arm,
+// `le()&&e.data.type==="repl_tool_call"`), so the injection names no arm.
 // ===========================================================================
 
 console.log('\n--- Patch C: ZhA agent_stream_event handler ---')
@@ -778,112 +783,70 @@ const patchCMarker = '/*PATCHED:subagent-C*/'
 if (src.includes(patchCMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // The arm our `else if` is spliced in front of is the FIRST `else if` of the
-  // SDK converter's `case"progress":` chain, and upstream reshaped it in
-  // v2.1.317. Both forms are accepted so this file serves both bundles:
-  //
-  // <= v2.1.316: else if(e.data.type==="bash_progress"||e.data.type==="powershell_progress"){
-  //              (its body breaks unless CLAUDE_CODE_REMOTE / CLAUDE_CODE_CONTAINER_ID,
-  //               so dropping it in 2.1.317 loses nothing locally)
-  // v2.1.317:    else if(e.data.type==="tool_heartbeat")yield{type:"tool_progress",…,heartbeat:!0,…}
-  //
-  // Only the FIRST arm of a `case"progress":` chain is a candidate, so a bundle
-  // that carries both arms — every version through v2.1.316 does — still yields
-  // exactly one anchor, and the injected arm always lands in front of an arm the
-  // chain still has.
-  const CASE_PROGRESS = 'case"progress":'
-  const anchorArmRe = new RegExp(
-    `else if\\((${V})\\.data\\.type===` +
-      `(?:"bash_progress"(?:\\|\\|\\1\\.data\\.type==="powershell_progress")?` +
-      `|"tool_heartbeat")` +
-      `\\)`,
+  // `case"progress":if(PRED(e))yield*FN(e,n);` — names are minified and
+  // chunk-local; `$` is legal in them, hence V = [\w$]+ (captures are only used
+  // as a backreference and as injected text, never rebuilt into another RegExp).
+  const headRe = new RegExp(
+    `case"progress":if\\((${V})\\((${V})\\)\\)yield\\*(${V})\\(\\2,(${V})\\);`,
     'g'
   )
-  // A later arm of the same chain has an earlier `else if(` between the dispatch
-  // head and itself.
-  const isFirstArm = (m) => {
-    const ctx = prefixWindow(m.index, 1500)
-    const caseIdx = ctx.lastIndexOf(CASE_PROGRESS)
-    return caseIdx !== -1 && !ctx.slice(caseIdx + CASE_PROGRESS.length).includes('else if(')
-  }
-  const anchorMatches = [...src.matchAll(anchorArmRe)].filter(isFirstArm)
-  if (anchorMatches.length === 0) {
+  const headMatches = [...src.matchAll(headRe)]
+  if (headMatches.length === 0) {
     console.error(
-      'ERROR: Cannot locate the first `case"progress":` arm in ZhA (neither ' +
-        '`else if(X.data.type==="bash_progress"…)` nor `else if(X.data.type==="tool_heartbeat")`).'
+      'ERROR: Cannot locate the dispatch head `case"progress":if(PRED(e))yield*FN(e,n);` of the SDK converter.'
     )
     process.exit(1)
   }
-  if (anchorMatches.length > 1) {
+  if (headMatches.length > 1) {
     console.error(
-      `ERROR: ${anchorMatches.length} \`case"progress":\` first-arm handlers found ` +
-        `(at ${anchorMatches.map((m) => m.index).join(', ')}). Ambiguous — aborting.`
+      `ERROR: ${headMatches.length} \`case"progress":\` dispatch heads found ` +
+        `(at ${headMatches.map((m) => m.index).join(', ')}). Ambiguous — aborting.`
     )
     process.exit(1)
   }
-  const anchorIdx = anchorMatches[0].index
-  const progressVar = anchorMatches[0][1]
-  const anchorArm = anchorMatches[0][0].includes('"tool_heartbeat"')
-    ? 'tool_heartbeat'
-    : 'bash_progress'
+  const head = headMatches[0]
+  const headIdx = head.index
+  const headEnd = headIdx + head[0].length
+  const predName = head[1]
+  const progressVar = head[2]
 
-  // Verify we are inside the SDK converter's `case"progress":` dispatch chain
-  // (not some other bash_progress/tool_heartbeat consumer), and that the chain
-  // routes agent_progress — that branch is what Patch A's messages ride on, and
-  // our `else if` is spliced into the same chain. `dispatch` runs from the
-  // dispatch head up to (not including) the anchor arm.
-  const ctx = prefixWindow(anchorIdx, 1500)
-  const dispatch = ctx.slice(ctx.lastIndexOf(CASE_PROGRESS))
-
-  // <= v2.1.241 tested the literal inline: `if(A.data.type==="agent_progress")`.
-  // v2.1.261 extracted it into a predicate helper defined in the same chunk:
-  //   case"progress":if(lmn(e))yield*cmn(e,r);else if(...bash_progress...)
-  //   function lmn(e){return e.type==="progress"&&(e.data.type==="agent_progress"||e.data.type==="skill_progress")}
-  // v2.1.317 keeps the predicate but IMPORTS it from another chunk:
-  //   case"progress":if(O5(e))yield*_Do(e,n);else if(e.data.type==="tool_heartbeat")…
-  //   import{…,O5,…}from"/$bunfs/root/chunk-vrwkjdrd.js"
-  //   function O5(e){return e.type==="progress"&&(e.data.type==="agent_progress"||…)}
-  let routesAgentProgress = dispatch.includes('agent_progress')
-  if (!routesAgentProgress) {
-    const predMatch = dispatch.match(new RegExp(`^case"progress":if\\((${V})\\(${V}\\)\\)`))
-    if (predMatch) {
-      // Minified names are chunk-local — `findScopedFunction` resolves the
-      // predicate in the anchor's chunk, or in the one chunk it imports it from.
-      const pred = findScopedFunction(
-        anchorIdx,
-        predMatch[1],
-        '"agent_progress"',
-        `the case"progress" predicate ${predMatch[1]}()`
-      )
-      if (pred.error) {
-        console.error(`  Predicate lookup: ${pred.error}`)
-      } else {
-        routesAgentProgress = true
-        console.log(
-          `  agent_progress routed via predicate ${predMatch[1]}() (${pred.where}): ` +
-            `${pred.text.slice(0, 120)}`
-        )
-      }
-    }
-  }
-  if (!routesAgentProgress) {
+  // The chain must route agent_progress — that branch is what Patch A's
+  // messages ride on, and our `else if` joins the same chain. Minified names are
+  // chunk-local: `findScopedFunction` resolves the predicate in the head's
+  // chunk, or in the one chunk it imports it from.
+  //   v2.1.261+: function lmn(e){return e.type==="progress"&&(e.data.type==="agent_progress"||…)}
+  //   v2.1.317+: the predicate is imported (`import{…,O5,…}from"/$bunfs/root/chunk-….js"`)
+  const pred = findScopedFunction(
+    headIdx,
+    predName,
+    '"agent_progress"',
+    `the case"progress" predicate ${predName}()`
+  )
+  if (pred.error) {
     console.error(
-      `ERROR: the ${anchorArm} arm's \`case"progress":\` chain does not route agent_progress ` +
-        '(neither inline nor via a predicate helper defined in the anchor chunk or in the ' +
-        'chunk that chunk imports it from). Context mismatch.'
+      `ERROR: the \`case"progress":\` head's predicate does not route agent_progress: ${pred.error}`
     )
     process.exit(1)
   }
+  console.log(
+    `  agent_progress routed via predicate ${predName}() (${pred.where}): ${pred.text.slice(0, 120)}`
+  )
 
-  // Session-id function: take the NEAREST `session_id:X()` before the anchor —
-  // it is a sibling yield in the same switch arm, so its binding is guaranteed
-  // to be in scope (and in the same chunk) at the injection site.
-  const sessFnMatches = [...ctx.matchAll(/session_id:([\w$]+)\(\)/g)]
-  if (sessFnMatches.length === 0) {
-    console.error('ERROR: Cannot extract session ID function from ZhA.')
+  // Session-id function: the sibling arms of the same `case"progress":` yield
+  // `session_id:X()`, so X is bound in this switch (and chunk). Scan from the
+  // head to the next `;case"` / `;default:` (bounded) and require ONE name.
+  const armWindow = suffixWindow(headEnd, 4000)
+  const armEnd = armWindow.search(/;(?:case"|default:)/)
+  const arm = armEnd === -1 ? armWindow : armWindow.slice(0, armEnd)
+  const sessNames = new Set([...arm.matchAll(/session_id:([\w$]+)\(\)/g)].map((m) => m[1]))
+  if (sessNames.size !== 1) {
+    console.error(
+      `ERROR: ${sessNames.size} candidate session-id functions in the \`case"progress":\` arm ` +
+        `(expected 1): ${[...sessNames].join(', ') || 'none'}. Aborting.`
+    )
     process.exit(1)
   }
-  const sessFn = sessFnMatches[sessFnMatches.length - 1][1]
+  const sessFn = [...sessNames][0]
 
   const injection =
     `${patchCMarker}else if(${progressVar}.data.type==="agent_stream_event"){` +
@@ -891,10 +854,10 @@ if (src.includes(patchCMarker)) {
     `parent_tool_use_id:${progressVar}.parentToolUseID,session_id:${sessFn}(),uuid:${progressVar}.uuid}` +
     `}`
 
-  src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
+  src = src.slice(0, headEnd) + injection + src.slice(headEnd)
   patchCount++
   console.log(
-    `Applied before the ${anchorArm} arm at char ${anchorIdx}. Session ID function: ${sessFn}()`
+    `Applied after the dispatch head at char ${headIdx}. Session ID function: ${sessFn}()`
   )
 }
 
