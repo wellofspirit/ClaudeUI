@@ -4,9 +4,7 @@ import { logger } from '../services/logger'
 import type { SkillInfo } from '../../shared/types'
 import type { Agent_Info, Skill_Info } from './protocol-v2/openapi'
 import { evaluateV2Call } from './wildcard'
-
-// Per-cwd cache of discovered skills. Keyed by normalized absolute cwd.
-const skillCache = new Map<string, SkillInfo[]>()
+import { safeSkillCatalog } from './claude-skill-bridge'
 
 /**
  * Does EVERY agent of this directory deny `skill`? 2.x hides a skill a rule denies from
@@ -36,17 +34,17 @@ function noAgentOffers(skill: Skill_Info, agents: readonly Agent_Info[]): boolea
  * sends it as `x-opencode-directory`), mapping the result to SkillInfo[], then
  * releasing the server.
  *
- * Mirrors model-discovery.ts: acquire → fetch → release, cwd-keyed cache,
- * degrade to [] on any failure (opencode is optional — Claude must not break).
+ * Mirrors model-discovery.ts: acquire → fetch → release, degrade to [] on any
+ * failure (opencode is optional — Claude must not break). Not cached: the list
+ * follows the cwd's skill files, and the Skills dialog is opened rarely.
  *
- * opencode 2.x `Skill.Info { id, name, description?, path, content }` → SkillInfo with
- * `source: 'project'` (closest valid union value — opencode unifies project/user
- * sources; the dialog renders them identically, so the distinction doesn't matter).
+ * opencode 2.x `Skill.Info { id, name, description?, path, content }` → SkillInfo. A skill
+ * the plugin added from the shared Claude catalog (its id is a catalog name AND its path is
+ * the catalog entry's file: an engine skill of the same id wins the clash and keeps its own
+ * path) carries the catalog's source, kind, invocation flags and `claudeOnly`; every other
+ * one is the engine's own (`source: 'engine'`).
  */
 export async function discoverOpencodeSkills(cwd: string): Promise<SkillInfo[]> {
-  const hit = skillCache.get(cwd)
-  if (hit) return hit
-
   try {
     // Lists only — no turn, so no wait for the hosted MCP tools.
     const conn = await opencodeServerManager.acquire(cwd, { waitForHostedTools: false })
@@ -55,21 +53,34 @@ export async function discoverOpencodeSkills(cwd: string): Promise<SkillInfo[]> 
       const skills = await client.skills()
       // A skill every agent denies is not offered to any model: do not offer it here.
       const agents = await client.agents().catch(() => [] as readonly Agent_Info[])
-      const result: SkillInfo[] = skills
+      const catalog = new Map(safeSkillCatalog(cwd).entries.map((e) => [e.name, e]))
+      return skills
         .filter((s) => !noAgentOffers(s, agents))
-        .map((s) => ({
-          name: s.name,
-          displayName: s.name,
-          description: s.description ?? '',
-          // opencode doesn't expose a source taxonomy — use 'project' as a neutral
-          // "available in this workspace" value (all valid SkillSource values render
-          // identically in the Skills dialog).
-          source: 'project' as const,
-          path: s.path,
-          content: s.content
-        }))
-      skillCache.set(cwd, result)
-      return result
+        .map((s): SkillInfo => {
+          const entry = catalog.get(s.id)
+          if (!entry || entry.file !== s.path)
+            return {
+              name: s.name,
+              displayName: s.name,
+              description: s.description ?? '',
+              source: 'engine',
+              path: s.path,
+              content: s.content
+            }
+          return {
+            name: entry.name,
+            ...(entry.displayName ? { displayName: entry.displayName } : {}),
+            description: entry.description,
+            source: entry.source,
+            ...(entry.pluginName ? { pluginName: entry.pluginName } : {}),
+            path: entry.file,
+            content: entry.body,
+            kind: entry.kind,
+            userInvocable: entry.userInvocable,
+            modelInvocable: entry.modelInvocable,
+            claudeOnly: entry.claudeOnly
+          }
+        })
     } finally {
       opencodeServerManager.releaseIfCurrent(cwd, conn)
     }
@@ -79,14 +90,5 @@ export async function discoverOpencodeSkills(cwd: string): Promise<SkillInfo[]> 
       `Skill discovery failed for ${cwd} (opencode optional): ${err instanceof Error ? err.message : String(err)}`
     )
     return []
-  }
-}
-
-/** Invalidate the skill discovery cache for a specific cwd (e.g. on auth change). */
-export function invalidateOpencodeSkillCache(cwd?: string): void {
-  if (cwd) {
-    skillCache.delete(cwd)
-  } else {
-    skillCache.clear()
   }
 }

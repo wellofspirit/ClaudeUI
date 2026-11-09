@@ -123,6 +123,11 @@ import { opencodeAuthHooks } from './opencode-auth-hooks'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
+import { safeSkillCatalog } from './claude-skill-bridge'
+import {
+  expandClaudeSkillInvocation,
+  parseSkillInvocation
+} from '../services/claude-skill-invoke'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions } from '../services/claude-settings'
@@ -919,7 +924,8 @@ export class OpencodeSession extends BaseSession {
       ...(att.fileName ? { name: att.fileName } : {})
     }))
     const slash = text.match(/^\/(\S+)\s*([\s\S]*)$/)
-    if (slash && this.knownCommandNames.has(slash[1])) {
+    const isCommand = !!slash && this.knownCommandNames.has(slash[1])
+    if (slash && isCommand) {
       this.pendingCommandEchoes++
       try {
         await client.runCommand(sessionID, {
@@ -937,12 +943,23 @@ export class OpencodeSession extends BaseSession {
         )
       }
     }
+    // A typed `/name args` for a shared Claude skill (an opencode command of that name won above)
+    // goes out as cli.js's expansion; the renderer already shows the typed text.
+    const sent = !isCommand && text.startsWith('/') ? this.expandClaudeSkill(text, sessionID) : text
     await client.prompt(sessionID, {
       id: inboxID,
-      text,
+      text: sent,
       ...(files.length > 0 ? { files } : {}),
       delivery
     })
+  }
+
+  /** `text` as the shared Claude skill it types, expanded; unchanged when it types none. */
+  private expandClaudeSkill(text: string, sessionID: string): string {
+    const invocation = parseSkillInvocation(text, safeSkillCatalog(this.location))
+    return invocation
+      ? expandClaudeSkillInvocation(invocation, { cwd: this.location, sessionId: sessionID })
+      : text
   }
 
   /**
@@ -1198,10 +1215,14 @@ export class OpencodeSession extends BaseSession {
       })
     ])
     this.knownCommandNames = new Set(commands.map((c) => c.name))
-    this.send(
-      'session:slash-commands',
-      commands.map((c) => ({ name: '/' + c.name, description: c.description }))
+    // opencode's commands, then the shared Claude skills typed as `/name` (a command wins a clash).
+    const claude = safeSkillCatalog(this.location).entries.filter(
+      (e) => e.userInvocable && !this.knownCommandNames.has(e.name)
     )
+    this.send('session:slash-commands', [
+      ...commands.map((c) => ({ name: '/' + c.name, description: c.description })),
+      ...claude.map((e) => ({ name: '/' + e.name, description: e.description }))
+    ])
     this.send(
       'session:skills',
       skills.map((s) => s.name)

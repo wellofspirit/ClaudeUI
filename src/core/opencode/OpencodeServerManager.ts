@@ -870,6 +870,12 @@ export class OpencodeServerManager {
               `claudeui-xeng model allowlist NOT loaded on ${handle.baseUrl} for ${directory}: the plugin options did not parse — subagent calls with a model to check are refused`
             )
           }
+          if (result.state === 'active' && result.skillsLoaded === false) {
+            logger.warn(
+              'OpencodeServerManager',
+              `claudeui-xeng could not load the Claude skill catalog on ${handle.baseUrl} for ${directory}: sessions there run without the shared Claude skills`
+            )
+          }
           if (result.state !== 'active') {
             handle.guards.delete(directory)
             logger.error(

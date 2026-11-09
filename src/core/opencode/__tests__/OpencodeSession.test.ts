@@ -81,7 +81,9 @@ const h = vi.hoisted(() => {
     /** Replaces `sessionToolsGate` for one test (the real gate answers when null). */
     sessionGate: null as null | ((...args: unknown[]) => unknown),
     /** The persisted `sessions.json` the worktree recorder reads and writes. */
-    sessionConfig: {} as Record<string, unknown>
+    sessionConfig: {} as Record<string, unknown>,
+    /** The shared Claude skill catalog the session resolves for its location. */
+    skillCatalog: { entries: [] as Record<string, unknown>[], skipped: [] }
   }
 })
 
@@ -144,6 +146,22 @@ vi.mock('../model-discovery', () => ({
       ? { providerID: 'opencode', modelID: model }
       : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
   }
+}))
+// The catalog and its expansion are slice A's (their own suites); here only the wiring is under test.
+vi.mock('../../services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: () => h.skillCatalog
+}))
+vi.mock('../../services/claude-skill-invoke', () => ({
+  parseSkillInvocation: (text: string, catalog: typeof h.skillCatalog) => {
+    const m = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/)
+    const entry = catalog.entries.find((e) => e.name === m?.[1] && e.userInvocable)
+    return entry && m ? { entry, args: (m[2] ?? '').trim() } : null
+  },
+  expandClaudeSkillInvocation: (
+    invocation: { entry: { name: string }; args: string },
+    context: { cwd: string; sessionId?: string }
+  ) => `EXPANDED ${invocation.entry.name} [${invocation.args}] ${context.cwd} ${context.sessionId}`,
+  parseSkillInvocationEnvelope: () => null
 }))
 vi.mock('../command-skill-discovery', () => ({
   discoverOpencodeSkills: vi.fn().mockResolvedValue([])
@@ -453,6 +471,7 @@ beforeEach(() => {
   h.resolveRoute = null
   h.peekModels = null
   h.sessionGate = null
+  h.skillCatalog = { entries: [], skipped: [] }
 })
 
 afterEach(() => {
@@ -465,6 +484,72 @@ afterEach(() => {
   }
   for (const [, , message] of h.client.cancelForm?.mock.calls ?? [])
     expect(String(message ?? '').trim()).toBeTruthy()
+})
+
+// ─── The shared Claude skill catalog ────────────────────────────────────────
+
+describe('shared Claude skills', () => {
+  const skill = (name: string, extra: Record<string, unknown> = {}) => ({
+    name,
+    description: `Claude ${name}`,
+    userInvocable: true,
+    ...extra
+  })
+
+  it('a typed /name args is posted as its expansion (the engine never sees the typed text)', async () => {
+    h.skillCatalog.entries = [skill('deploy')]
+    session = makeSession()
+    await startTurn('/deploy prod --fast')
+    expect(h.client.runCommand).not.toHaveBeenCalled()
+    expect(h.client.prompt.mock.calls[0][1].text).toBe(
+      `EXPANDED deploy [prod --fast] ${CWD} ${SID}`
+    )
+  })
+
+  it('an opencode command of the same name wins: runCommand, no expansion', async () => {
+    h.skillCatalog.entries = [skill('review')]
+    session = makeSession()
+    await session.run(null)
+    await flush()
+    await startTurn('/review the diff')
+    expect(h.client.runCommand).toHaveBeenCalledWith(
+      SID,
+      expect.objectContaining({ name: 'review', text: 'the diff' })
+    )
+    expect(h.client.prompt).not.toHaveBeenCalled()
+  })
+
+  it('text that is no catalog entry (unknown name, not user-invocable, plain prompt) goes out as typed', async () => {
+    h.skillCatalog.entries = [skill('hidden', { userInvocable: false })]
+    session = makeSession()
+    await startTurn('/hidden x')
+    await session.run('/nope y')
+    await session.run('plain /deploy')
+    await flush()
+    expect(h.client.prompt.mock.calls.map(([, body]) => body.text)).toEqual([
+      '/hidden x',
+      '/nope y',
+      'plain /deploy'
+    ])
+  })
+
+  it("the slash list is opencode's commands then the user-invocable catalog entries (a command wins a clash)", async () => {
+    h.skillCatalog.entries = [
+      skill('review'),
+      skill('deploy'),
+      skill('p:fmt', { description: 'Format' }),
+      skill('hidden', { userInvocable: false })
+    ]
+    session = makeSession()
+    await session.run(null)
+    await flush()
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect(list).toEqual([
+      { name: '/review', description: 'Review' },
+      { name: '/deploy', description: 'Claude deploy' },
+      { name: '/p:fmt', description: 'Format' }
+    ])
+  })
 })
 
 // ─── Lifecycle ──────────────────────────────────────────────────────────────

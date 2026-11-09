@@ -35,6 +35,7 @@ import type {
 import { isImageMediaType } from '../../shared/types'
 import { blobStore } from '../services/blob-store'
 import { wrappedUserRowAsNote } from '../services/agent-note'
+import { parseSkillInvocationEnvelope } from '../services/claude-skill-invoke'
 import type {
   Form_Field,
   Form_Info,
@@ -260,6 +261,18 @@ export function userChatMessage(
   timestamp: number,
   fromHistory = false
 ): ChatMessage | null {
+  // A shared Claude skill typed as `/name args` was posted as its expansion behind cli.js's own
+  // envelope: a row that carries it (history, a catch-up read, another client's post) shows the typed
+  // command, as Claude's transcript does (`cli_command`). Our own live post is never painted from it.
+  const typed = parseSkillInvocationEnvelope(prompt.text)
+  if (typed) {
+    return {
+      id,
+      role: 'system',
+      content: [{ type: 'cli_command', ...typed }],
+      timestamp
+    }
+  }
   const content: ContentBlock[] = []
   for (const file of prompt.files ?? []) {
     const block = attachmentBlock(file)

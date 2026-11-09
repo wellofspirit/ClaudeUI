@@ -30,6 +30,13 @@ vi.mock('../OpencodeServerManager', () => ({
   }
 }))
 
+const { catalog } = vi.hoisted(() => ({
+  catalog: { entries: [] as unknown[], skipped: [] as unknown[] }
+}))
+vi.mock('../../services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: () => catalog
+}))
+
 vi.mock('../OpencodeClient', () => ({
   OpencodeClient: MockOpencodeClient
 }))
@@ -42,7 +49,8 @@ vi.mock('../../services/logger', () => ({
 // Import AFTER mocking
 // ---------------------------------------------------------------------------
 
-import { discoverOpencodeSkills, invalidateOpencodeSkillCache } from '../command-skill-discovery'
+import type { ClaudeSkillEntry } from '../../services/claude-skill-catalog'
+import { discoverOpencodeSkills } from '../command-skill-discovery'
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -54,8 +62,7 @@ beforeEach(() => {
   mockListSkills.mockReset()
   mockListAgents.mockReset()
   MockOpencodeClient.mockReset()
-  // Invalidate cache so each test starts fresh
-  invalidateOpencodeSkillCache()
+  catalog.entries = []
 
   mockAcquire.mockImplementation(async (cwd: string) => ({
     baseUrl: 'http://127.0.0.1:9000',
@@ -94,7 +101,7 @@ describe('discoverOpencodeSkills', () => {
       name: 'my-skill',
       displayName: 'my-skill',
       description: 'Does something useful',
-      source: 'project',
+      source: 'engine',
       path: '/home/user/.claude/skills/my-skill/SKILL.md',
       content: '# My Skill\nHelp text here.'
     })
@@ -103,7 +110,7 @@ describe('discoverOpencodeSkills', () => {
       name: 'no-description',
       displayName: 'no-description',
       description: '',
-      source: 'project',
+      source: 'engine',
       path: '/home/user/.agents/skills/no-description/SKILL.md',
       content: '# No Description'
     })
@@ -121,27 +128,72 @@ describe('discoverOpencodeSkills', () => {
     expect(mockRelease).toHaveBeenCalledWith('/my/project', conn)
   })
 
-  it('caches the result — second call does not re-acquire', async () => {
+  it('does not cache: a second call reads the server again (the list follows the skill files)', async () => {
     mockListSkills.mockResolvedValue([{ id: 's', name: 's', path: '/x', content: 'c' }])
-
-    const first = await discoverOpencodeSkills('/cached/cwd')
-    const second = await discoverOpencodeSkills('/cached/cwd')
-
-    expect(mockAcquire).toHaveBeenCalledTimes(1)
-    expect(first).toBe(second) // same reference
+    await discoverOpencodeSkills('/same/cwd')
+    await discoverOpencodeSkills('/same/cwd')
+    expect(mockAcquire).toHaveBeenCalledTimes(2)
   })
 
-  it('different cwds have separate cache entries', async () => {
-    mockListSkills
-      .mockResolvedValueOnce([{ id: 'skill-a', name: 'skill-a', path: '/a', content: 'a' }])
-      .mockResolvedValueOnce([{ id: 'skill-b', name: 'skill-b', path: '/b', content: 'b' }])
-
-    const a = await discoverOpencodeSkills('/cwd/a')
-    const b = await discoverOpencodeSkills('/cwd/b')
-
-    expect(a[0].name).toBe('skill-a')
-    expect(b[0].name).toBe('skill-b')
-    expect(mockAcquire).toHaveBeenCalledTimes(2)
+  it('a skill the Claude catalog supplied takes its source, kind, flags and claudeOnly; the rest are engine skills', async () => {
+    const entry = (name: string, extra: Partial<ClaudeSkillEntry>): ClaudeSkillEntry => ({
+      name,
+      kind: 'skill',
+      source: 'project',
+      file: `/proj/.claude/skills/${name}/SKILL.md`,
+      description: `claude ${name}`,
+      argumentNames: [],
+      body: `claude body ${name}`,
+      userInvocable: true,
+      modelInvocable: true,
+      claudeOnly: [],
+      ...extra
+    })
+    catalog.entries = [
+      entry('deploy', {
+        displayName: 'Deploy',
+        claudeOnly: ['allowed-tools'],
+        userInvocable: false
+      }),
+      entry('p:fmt', { source: 'plugin', pluginName: 'p', kind: 'command', modelInvocable: false }),
+      // The engine's own `.agents` skill of the same id won the clash: its path differs.
+      entry('clash', {})
+    ]
+    mockListSkills.mockResolvedValue([
+      { id: 'deploy', name: 'Deploy', path: '/proj/.claude/skills/deploy/SKILL.md', content: 'x' },
+      { id: 'p:fmt', name: 'p:fmt', path: '/proj/.claude/skills/p:fmt/SKILL.md', content: 'x' },
+      {
+        id: 'clash',
+        name: 'clash',
+        path: '/proj/.agents/skills/clash/SKILL.md',
+        content: 'engine'
+      },
+      { id: 'own', name: 'own', path: '/proj/.opencode/skills/own/SKILL.md', content: 'own' }
+    ])
+    const result = await discoverOpencodeSkills('/proj')
+    expect(result.find((s) => s.name === 'deploy')).toEqual({
+      name: 'deploy',
+      displayName: 'Deploy',
+      description: 'claude deploy',
+      source: 'project',
+      path: '/proj/.claude/skills/deploy/SKILL.md',
+      content: 'claude body deploy',
+      kind: 'skill',
+      userInvocable: false,
+      modelInvocable: true,
+      claudeOnly: ['allowed-tools']
+    })
+    expect(result.find((s) => s.name === 'clash')).toMatchObject({
+      source: 'engine',
+      content: 'engine'
+    })
+    expect(result.find((s) => s.name === 'own')).toMatchObject({ source: 'engine' })
+    expect(result.find((s) => s.name === 'p:fmt')).toMatchObject({
+      source: 'plugin',
+      pluginName: 'p',
+      kind: 'command',
+      modelInvocable: false
+    })
   })
 
   it('hides a skill EVERY agent denies (the browser plugin denies `Browser` on every agent)', async () => {
@@ -183,7 +235,6 @@ describe('discoverOpencodeSkills', () => {
     ])
 
     // A cold or failed `agent.list` filters nothing rather than emptying the dialog.
-    invalidateOpencodeSkillCache()
     mockListAgents.mockRejectedValue(new Error('agent.list → 500'))
     expect((await discoverOpencodeSkills('/skills/partial')).map((s) => s.name)).toEqual([
       'Browser',
@@ -207,34 +258,5 @@ describe('discoverOpencodeSkills', () => {
     expect(result).toEqual([])
     // Server was acquired + must be released even on failure
     expect(mockRelease).toHaveBeenCalledWith('/fail2/cwd', expect.anything())
-  })
-
-  it('invalidateOpencodeSkillCache(cwd) clears only that cwd', async () => {
-    mockListSkills.mockResolvedValue([{ id: 's', name: 's', path: '/x', content: '' }])
-
-    await discoverOpencodeSkills('/clear/this')
-    await discoverOpencodeSkills('/keep/this')
-
-    invalidateOpencodeSkillCache('/clear/this')
-
-    // '/clear/this' re-fetches; '/keep/this' still cached
-    mockListSkills.mockResolvedValue([{ id: 's2', name: 's2', path: '/y', content: '' }])
-    const re = await discoverOpencodeSkills('/clear/this')
-    expect(re[0].name).toBe('s2')
-    expect(mockAcquire).toHaveBeenCalledTimes(3) // original 2 + 1 re-fetch
-  })
-
-  it('invalidateOpencodeSkillCache() (no cwd) clears all', async () => {
-    mockListSkills.mockResolvedValue([{ id: 's', name: 's', path: '/x', content: '' }])
-    await discoverOpencodeSkills('/cwd1')
-    await discoverOpencodeSkills('/cwd2')
-
-    invalidateOpencodeSkillCache()
-
-    // Both are re-fetched
-    mockListSkills.mockResolvedValue([])
-    await discoverOpencodeSkills('/cwd1')
-    await discoverOpencodeSkills('/cwd2')
-    expect(mockAcquire).toHaveBeenCalledTimes(4)
   })
 })

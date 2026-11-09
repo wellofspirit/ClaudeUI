@@ -64,6 +64,20 @@
 //    own sessions, so `execute.before` throws (a Tool.Error the model reads)
 //    before the tool resolves a path or asks anything.
 //
+// 7. The shared Claude skill catalog (arc "shared Claude skill catalog"). ClaudeUI
+//    spawns the server with OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1, so opencode no
+//    longer reads `.claude/skills` itself; `setup` fetches the catalog the host
+//    resolved for THIS location (GET <options.skills.url>?directory=…, bearer
+//    options.skills.token) and a `skill.transform` adds every entry whose id is
+//    not already registered. External plugins run before opencode's post loaders
+//    (config / `.agents` skills), whose `add` of the same id replaces ours, and
+//    the built-ins are kept by the `get` check: the engine's own skills win. The
+//    transform is synchronous and re-run by `ctx.skill.reload()` (State.reload
+//    invalidates and every transform runs again on the next read,
+//    core/src/state.ts), so the `reloadSkills` RPC re-fetches into the closure's
+//    list and reloads. A failed fetch adds nothing and clears the guard's
+//    `skillsLoaded` (logged by ClaudeUI, never a refusal).
+//
 // Only the opencode process ClaudeUI spawns loads this plugin; the user's own
 // opencode keeps its own behaviour.
 
@@ -289,6 +303,51 @@ export async function gateSubagentModel(ctx, event, allowlist) {
   )
 }
 
+// ── The shared Claude skill catalog ────────────────────────────────────────
+
+const SKILLS_FETCH_TIMEOUT_MS = 5_000
+
+/** The plugin's `skills` option `{url, token}`, or null when missing or malformed. */
+export function readSkillsEndpoint(options) {
+  const skills = options && typeof options === 'object' ? options.skills : undefined
+  return skills && typeof skills.url === 'string' && typeof skills.token === 'string'
+    ? { url: skills.url, token: skills.token }
+    : null
+}
+
+/**
+ * The catalog the host resolved for `directory`, as `Skill.Info` values. Throws on a
+ * transport or shape failure; an entry without a string id, name, path or content
+ * is dropped.
+ */
+export async function fetchSkills(endpoint, directory, fetchFn = fetch) {
+  const response = await fetchFn(`${endpoint.url}?directory=${encodeURIComponent(directory)}`, {
+    headers: { authorization: `Bearer ${endpoint.token}` },
+    signal: AbortSignal.timeout(SKILLS_FETCH_TIMEOUT_MS)
+  })
+  if (!response.ok) throw new Error(`skills endpoint answered ${response.status}`)
+  const body = await response.json()
+  if (!body || !Array.isArray(body.skills)) throw new Error('skills endpoint answered no list')
+  return body.skills
+    .filter(
+      (s) =>
+        s &&
+        typeof s.id === 'string' &&
+        s.id !== '' &&
+        typeof s.name === 'string' &&
+        typeof s.path === 'string' &&
+        typeof s.content === 'string'
+    )
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      ...(typeof s.description === 'string' ? { description: s.description } : {}),
+      ...(typeof s.autoinvoke === 'boolean' ? { autoinvoke: s.autoinvoke } : {}),
+      path: s.path,
+      content: s.content
+    }))
+}
+
 export default {
   id: 'claudeui-xeng',
   setup: async (ctx) => {
@@ -313,7 +372,8 @@ export default {
       permissionHook: false,
       mcpDirect: false,
       modelGate: false,
-      allowlistLoaded: false
+      allowlistLoaded: false,
+      skillsLoaded: false
     }
     // The `execute.before` hook above is registered (a failed registration threw).
     guard.modelGate = true
@@ -328,6 +388,24 @@ export default {
       }
     })
     guard.mcpDirect = true
+    // The Claude skill catalog for this location. `catalog` is what the transform adds; the
+    // transform never awaits (it re-runs on every rebuild), so it only reads the closure.
+    const skillsEndpoint = readSkillsEndpoint(ctx.options)
+    const directory = ctx.location?.directory
+    let catalog = []
+    const loadCatalog = async () => {
+      if (!skillsEndpoint || typeof directory !== 'string') return false
+      try {
+        catalog = await fetchSkills(skillsEndpoint, directory)
+        return true
+      } catch {
+        return false
+      }
+    }
+    guard.skillsLoaded = await loadCatalog()
+    await ctx.skill.transform((editor) => {
+      for (const skill of catalog) if (!editor.get(skill.id)) editor.add(skill)
+    })
     await ctx.rpc.register(
       {
         id: 'claudeui-xeng',
@@ -348,9 +426,25 @@ export default {
                 permissionHook: { type: 'boolean' },
                 mcpDirect: { type: 'boolean' },
                 modelGate: { type: 'boolean' },
-                allowlistLoaded: { type: 'boolean' }
+                allowlistLoaded: { type: 'boolean' },
+                skillsLoaded: { type: 'boolean' }
               },
-              required: ['permissionHook', 'mcpDirect', 'modelGate', 'allowlistLoaded']
+              required: [
+                'permissionHook',
+                'mcpDirect',
+                'modelGate',
+                'allowlistLoaded',
+                'skillsLoaded'
+              ]
+            }
+          },
+          // Re-fetch the catalog and rebuild the skill registry (a failed fetch keeps the old list).
+          reloadSkills: {
+            input: { type: 'object' },
+            output: {
+              type: 'object',
+              properties: { loaded: { type: 'boolean' }, count: { type: 'number' } },
+              required: ['loaded', 'count']
             }
           }
         },
@@ -363,7 +457,13 @@ export default {
             .filter((id) => typeof id === 'string' && id.startsWith(HOSTED_PREFIX))
             .sort()
         }),
-        guard: async () => ({ ...guard })
+        guard: async () => ({ ...guard }),
+        reloadSkills: async () => {
+          const loaded = await loadCatalog()
+          guard.skillsLoaded = loaded
+          if (loaded) await ctx.skill.reload()
+          return { loaded, count: catalog.length }
+        }
       }
     )
   }
