@@ -518,7 +518,9 @@ describe('plugins', () => {
       }
     })
     const body = entry('fake:s')?.body
-    expect(body).toBe(`root ${pluginRoot} proj ${repo} r=eu t=\${user_config.token}`)
+    // Filled with forward slashes on every platform, as the MCP fill-in does.
+    const slash = (p: string): string => p.replace(/\\/g, '/')
+    expect(body).toBe(`root ${slash(pluginRoot)} proj ${slash(repo)} r=eu t=\${user_config.token}`)
   })
 })
 
