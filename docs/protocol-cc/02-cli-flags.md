@@ -457,6 +457,30 @@ ClaudeUI passes this **flag settings** source (never the user's `~/.claude/setti
 - **Effect:** Restricts setting scopes loaded.
 - **Anchors:** parseOpt `12954012`, handler `xt1` `12938670`.
 
+#### Workspace trust and the project/local scopes (2.1.317)
+
+- **What's gated:** while a workspace is untrusted, the permission-rule builder (`x()`, near `A("permissions.allow"`)
+  drops `allow` rules and `additionalDirectories` from `projectSettings`. It drops them from `localSettings` only when
+  `.claude/settings.local.json` (or `.claude/`) is tracked by git. Headless (`-p`) cli.js sets session trust (`QH(!0)`)
+  before it builds the permission context, so `gateLocal` falls through to the git-tracked check. Deny and ask rules,
+  and user-scope allows, always apply.
+- **The flag it reads:** `<globalConfig>#projects[K].hasTrustDialogAccepted === true`. This is one key, with no parent
+  walk for this gate (`ph()` → `oYe(hut(cwd))`).
+- **The key K:**
+  - It's `h4(kt(ur(cwd)) ?? NFC(resolve(cwd)))`. The starting cwd is `NFC(realpathSync(process.cwd()))`, the physical
+    path. Bun's `realpathSync` case-corrects like Node's `realpathSync.native` (probed on macOS).
+  - `ur` returns the first ancestor holding a `.git` file or directory.
+  - `kt` maps a linked worktree to its main checkout, after checks on its `gitdir`, `commondir` and back-pointer.
+  - `h4` rewrites `\` to `/` on Windows.
+  - It is the same key `projects[...]` uses for MCP state. ClaudeUI derives it in `claude-config-paths.ts`.
+- **How the dialog records trust:** `UTe(cwd)` gives home only session trust (`H(cwd)` compares the cwd, not the root,
+  with home). Anywhere else, `$hs` writes `projects[K].hasTrustDialogAccepted: true` under the global-config lock: a
+  proper-lockfile `mkdir` of `<config>.lock`, stale after 10 s. ClaudeUI writes it the same way
+  (`claude-workspace-trust.ts`, ADR-009).
+- **Live effect:** running cli.js polls the global config about every 1 s. `apply_flag_settings({})` rebuilds the rules
+  from the refreshed copy, so trusting and untrusting both take effect without a restart. One exception: added
+  directories are added live only on cli.js's own trust-flip path.
+
 ### `--plugin-dir <path>`
 
 - **Type:** repeatable string (custom accumulator)

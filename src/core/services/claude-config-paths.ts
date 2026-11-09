@@ -56,57 +56,101 @@ export function claudeManagedDir(platform: NodeJS.Platform = process.platform): 
 }
 
 /**
- * cli.js roots everything at `realpathSync(process.cwd())`. The JS `realpathSync`
- * (not `.native`, which would recase on Windows) keeps the spelling cli.js sees.
+ * cli.js roots everything at `NFC(realpathSync(process.cwd()))`. On macOS Bun's
+ * realpath case-corrects like Node's `realpathSync.native` (probed), so darwin
+ * uses `.native`. Elsewhere the JS `realpathSync` stays: identical on Linux, and
+ * on Windows `.native` would also expand 8.3 names and resolve subst drives,
+ * which is unprobed against Bun there.
  */
 export function realCwd(cwd: string): string {
+  const realpath = process.platform === 'darwin' ? fs.realpathSync.native : fs.realpathSync
+  let out: string
   try {
-    return fs.realpathSync(cwd)
+    out = realpath(cwd)
   } catch {
-    return path.resolve(cwd)
+    out = path.resolve(cwd)
+  }
+  return out.normalize('NFC')
+}
+
+function isRegularFile(p: string): boolean {
+  try {
+    return fs.statSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
+/** A regular file that is not itself a symlink (cli.js bails on a symlinked or special one). */
+function isPlainFile(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isFile()
+  } catch {
+    return false
   }
 }
 
 /**
- * The directory whose spelling keys `projects[...]` in the global config: the
- * git root (a linked worktree resolves to its main checkout), else `cwd`.
- * Walks up from `cwd` to the first directory holding `.git`.
+ * Port of cli.js's worktree canonicalisation (`kt`): a linked worktree's root
+ * becomes its main checkout; any failed check leaves `root` unchanged.
+ *
+ * The `.git` file's `gitdir:` must lead to a `commondir` whose `worktrees/`
+ * holds that gitdir, and the gitdir's `gitdir` back-pointer must name this
+ * root's `.git`, so a forged `.git` file cannot claim someone else's checkout.
  */
-export function claudeProjectRoot(cwd: string): string {
-  let dir = realCwd(cwd)
-  for (;;) {
-    const dotGit = path.join(dir, '.git')
-    let st: fs.Stats | undefined
-    try {
-      st = fs.statSync(dotGit)
-    } catch {
-      st = undefined
+function canonicalWorktreeRoot(root: string): string {
+  try {
+    const dotGit = path.join(root, '.git')
+    if (!isRegularFile(dotGit)) return root
+    const head = fs.readFileSync(dotGit, 'utf-8').trim()
+    if (!head.startsWith('gitdir:')) return root
+    const gitdirPath = path.resolve(root, head.slice('gitdir:'.length).trim())
+    const commondirFile = path.join(gitdirPath, 'commondir')
+    if (!isPlainFile(commondirFile)) return root
+    const common = path.resolve(gitdirPath, fs.readFileSync(commondirFile, 'utf-8').trim())
+    if (path.dirname(gitdirPath) !== path.join(common, 'worktrees')) return root
+    const backFile = path.join(gitdirPath, 'gitdir')
+    if (!isPlainFile(backFile)) return root
+    const back = path.resolve(gitdirPath, fs.readFileSync(backFile, 'utf-8').trim())
+    if (
+      process.platform !== 'win32' &&
+      [root, gitdirPath, common, back].some((p) => p.includes('\\'))
+    ) {
+      return root
     }
-    if (st?.isDirectory()) return dir
-    if (st?.isFile()) return mainCheckoutOf(dir, dotGit) ?? dir
+    if (fs.realpathSync.native(back) !== path.join(fs.realpathSync.native(root), '.git')) {
+      return root
+    }
+    if (path.basename(common) === '.git') return path.dirname(common)
+    return fs.existsSync(path.join(common, '.git')) ? root : common
+  } catch {
+    return root
+  }
+}
+
+/**
+ * Where cli.js records project state (`projects[...]` in the global config):
+ * the git root (a linked worktree resolves to its main checkout), else the
+ * cwd. `worktree` is true when canonicalisation moved the root. Walks up from
+ * `cwd` to the first directory holding a `.git` file or directory.
+ */
+export function claudeProjectLocation(cwd: string): { root: string; worktree: boolean } {
+  const start = realCwd(cwd)
+  let dir = start
+  for (;;) {
+    if (fs.existsSync(path.join(dir, '.git'))) {
+      const root = canonicalWorktreeRoot(dir).normalize('NFC')
+      return { root, worktree: root !== dir }
+    }
     const parent = path.dirname(dir)
-    if (parent === dir) return realCwd(cwd)
+    if (parent === dir) return { root: start, worktree: false }
     dir = parent
   }
 }
 
-/** `.git` file → `gitdir: <main>/.git/worktrees/<n>` → its `commondir` → `<main>`. */
-function mainCheckoutOf(worktreeDir: string, dotGitFile: string): string | undefined {
-  try {
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGitFile, 'utf-8'))
-    if (!m) return undefined
-    const gitDir = path.resolve(worktreeDir, m[1])
-    let common = gitDir
-    try {
-      common = path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'commondir'), 'utf-8').trim())
-    } catch {
-      // a submodule's gitdir has no commondir: the checkout itself is the root
-      return undefined
-    }
-    return path.basename(common) === '.git' ? path.dirname(common) : undefined
-  } catch {
-    return undefined
-  }
+/** The directory whose spelling keys `projects[...]`; see {@link claudeProjectLocation}. */
+export function claudeProjectRoot(cwd: string): string {
+  return claudeProjectLocation(cwd).root
 }
 
 /** The `projects[...]` key: {@link claudeProjectRoot} with `\` → `/` (drive letter kept as spelled). */

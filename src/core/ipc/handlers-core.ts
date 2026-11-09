@@ -5,6 +5,8 @@ import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
 import { scanSkills } from '../services/skill-scanner'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
+import { setWorkspaceTrust } from '../services/claude-workspace-trust'
+import { claudeProjectKey } from '../services/claude-config-paths'
 import type {
   AttachmentUpload,
   ClaudePermissions,
@@ -12,7 +14,8 @@ import type {
   JudgeModelSupport,
   ListPlacesResult,
   PermissionScope,
-  PromptOrigin
+  PromptOrigin,
+  WorkspaceTrust
 } from '../../shared/types'
 import { isEngineId } from '../../shared/engine-label'
 import {
@@ -905,6 +908,38 @@ export function savePermissionsAndNotify(
       session.notifySettingsChanged?.().catch(() => {})
     }
   })
+}
+
+/** cli.js polls the global config every 1 s; refresh after it has surely picked the change up. */
+export const TRUST_REFRESH_DELAY_MS = 2000
+
+/**
+ * Trust or untrust the workspace and, once, TRUST_REFRESH_DELAY_MS later, make
+ * every running Claude session on the same project key rebuild its permission
+ * rules (`apply_flag_settings({})`). Resolves with the new state without
+ * waiting for the refresh; a failed refresh only costs immediacy.
+ */
+export async function setWorkspaceTrustAndNotify(
+  manager: SessionManager,
+  cwd: string,
+  trusted: boolean
+): Promise<WorkspaceTrust> {
+  const state = await setWorkspaceTrust(cwd, trusted)
+  const key = claudeProjectKey(cwd)
+  // A timer callback that throws is an uncaught exception in the main process: guard each session.
+  const timer = setTimeout(() => {
+    manager.forEach((session) => {
+      try {
+        if (session.engineId === 'claude' && claudeProjectKey(session.cwd) === key) {
+          session.notifySettingsChanged?.().catch(() => {})
+        }
+      } catch (err) {
+        logger.warn('WorkspaceTrust', 'Trust refresh skipped a session', err)
+      }
+    })
+  }, TRUST_REFRESH_DELAY_MS)
+  timer.unref?.()
+  return state
 }
 
 // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)

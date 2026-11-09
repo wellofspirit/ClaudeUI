@@ -543,6 +543,10 @@ baseUrl, authToken}})`.
     loops the agent.
   - Deferred tools such as `EnterWorktree` still run when the stand-in emits their
     `tool_use`.
+  - A new session's first stand-in request did not carry the scripted user marker
+    (2026-11 trust drive): send a throwaway warm-up prompt first.
+- **Permissions dialog.** At desktop width it opens from `TopBar.permissions`;
+  `TopBar.overflowMenuPermissions` exists only below 768 px.
 - **Web client.**
   - Use the worktree's Playwright chromium; log in via `PasswordLogin.input` + Enter.
   - Phone: `isMobile` + `hasTouch` at 375×812, open the drawer with

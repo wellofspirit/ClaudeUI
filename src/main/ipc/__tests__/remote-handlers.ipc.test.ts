@@ -170,16 +170,24 @@ vi.mock('../../../core/services/socks-bridge', () => ({
 
 const claudeSettingsSpies = vi.hoisted(() => ({
   saveClaudePermissions: vi.fn(),
-  saveCleanupPeriodDays: vi.fn(),
-  isWorkspaceTrusted: vi.fn(() => true)
+  saveCleanupPeriodDays: vi.fn()
+}))
+
+const trustSpies = vi.hoisted(() => ({
+  getWorkspaceTrust: vi.fn(),
+  setWorkspaceTrust: vi.fn()
 }))
 
 vi.mock('../../../core/services/claude-settings', () => ({
   loadClaudePermissions: vi.fn(() => ({ allow: [], deny: [], ask: [] })),
   loadCleanupPeriodDays: vi.fn(() => 30),
   saveCleanupPeriodDays: claudeSettingsSpies.saveCleanupPeriodDays,
-  saveClaudePermissions: claudeSettingsSpies.saveClaudePermissions,
-  isWorkspaceTrusted: claudeSettingsSpies.isWorkspaceTrusted
+  saveClaudePermissions: claudeSettingsSpies.saveClaudePermissions
+}))
+
+vi.mock('../../../core/services/claude-workspace-trust', () => ({
+  getWorkspaceTrust: trustSpies.getWorkspaceTrust,
+  setWorkspaceTrust: trustSpies.setWorkspaceTrust
 }))
 
 vi.mock('../../../core/services/claude-mcp', () => ({
@@ -990,14 +998,33 @@ describe('registerRemoteHandlers', () => {
     })
   })
 
-  it('claude:workspace-trust reports the trust flag for a cwd', async () => {
-    claudeSettingsSpies.isWorkspaceTrusted.mockReturnValueOnce(false)
+  it('claude:workspace-trust reports the trust state for a cwd', async () => {
+    const state = { root: '/repo-a', trusted: false, worktree: false }
+    trustSpies.getWorkspaceTrust.mockReturnValueOnce(state)
     const res = await dispatcher.handle(
       makeRequest('claude:workspace-trust', '/repo-a'),
       remoteConn
     )
-    expect(claudeSettingsSpies.isWorkspaceTrusted).toHaveBeenCalledWith('/repo-a')
-    expect(res).toBe(false)
+    expect(trustSpies.getWorkspaceTrust).toHaveBeenCalledWith('/repo-a')
+    expect(res).toEqual(state)
+  })
+
+  it('claude:set-workspace-trust writes through setWorkspaceTrust and returns the new state', async () => {
+    // The delayed refresh timer must not outlive this test (it would fire in a later file).
+    vi.useFakeTimers()
+    try {
+      const state = { root: '/repo-a', trusted: true, worktree: false }
+      trustSpies.setWorkspaceTrust.mockResolvedValueOnce(state)
+      const res = await dispatcher.handle(
+        makeRequest('claude:set-workspace-trust', '/repo-a', true),
+        remoteConn
+      )
+      expect(trustSpies.setWorkspaceTrust).toHaveBeenCalledWith('/repo-a', true)
+      expect(res).toEqual(state)
+      vi.runOnlyPendingTimers()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('file:list-dir returns structured result on error (no throw)', async () => {
@@ -2045,6 +2072,7 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'claude:load-permissions',
   'claude:save-permissions',
   'claude:set-cleanup-period',
+  'claude:set-workspace-trust',
   'claude:workspace-trust',
   'config:load-sessions',
   'config:load-settings',

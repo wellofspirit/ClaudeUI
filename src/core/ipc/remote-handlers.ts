@@ -51,11 +51,8 @@ import type {
 } from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
-import {
-  loadClaudePermissions,
-  loadCleanupPeriodDays,
-  isWorkspaceTrusted
-} from '../services/claude-settings'
+import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
+import { getWorkspaceTrust } from '../services/claude-workspace-trust'
 import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
@@ -157,6 +154,7 @@ import {
   mcpStatus,
   setCleanupPeriod,
   savePermissionsAndNotify,
+  setWorkspaceTrustAndNotify,
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
@@ -1077,7 +1075,14 @@ export function registerRemoteHandlers(
     channel: 'claude:workspace-trust',
     capability: 'config',
     kind: 'query',
-    handler: async (cwd: string) => isWorkspaceTrusted(cwd)
+    handler: async (cwd: string) => getWorkspaceTrust(cwd)
+  })
+  handleRemote({
+    channel: 'claude:set-workspace-trust',
+    capability: 'config',
+    kind: 'command',
+    handler: async (cwd: string, trusted: boolean) =>
+      setWorkspaceTrustAndNotify(manager, cwd, trusted)
   })
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)

@@ -43,11 +43,8 @@ import {
   loadSlashCommands,
   startConfigWatcher
 } from '../services/ui-config'
-import {
-  loadClaudePermissions,
-  loadCleanupPeriodDays,
-  isWorkspaceTrusted
-} from '../services/claude-settings'
+import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
+import { getWorkspaceTrust } from '../services/claude-workspace-trust'
 import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
@@ -144,6 +141,7 @@ import {
   mcpStatus,
   setCleanupPeriod,
   savePermissionsAndNotify,
+  setWorkspaceTrustAndNotify,
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
@@ -1323,13 +1321,19 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
       )
   })
 
-  // Whether cli.js will honor this workspace's project/local ALLOW rules —
-  // read-only surfacing of the trust gate (see isWorkspaceTrusted).
+  // Whether cli.js will honor this workspace's project/local ALLOW rules, and
+  // the toggle that grants it (writes ~/.claude.json like cli.js's trust dialog).
   handleIpc({
     channel: 'claude:workspace-trust',
     capability: 'config',
     kind: 'query',
-    handler: (cwd: string) => isWorkspaceTrusted(cwd)
+    handler: (cwd: string) => getWorkspaceTrust(cwd)
+  })
+  handleIpc({
+    channel: 'claude:set-workspace-trust',
+    capability: 'config',
+    kind: 'command',
+    handler: (cwd: string, trusted: boolean) => setWorkspaceTrustAndNotify(manager, cwd, trusted)
   })
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)

@@ -11,7 +11,8 @@ import type {
   ApprovalDecision,
   ClaudeAPI,
   PermissionSuggestion,
-  TerminalAvailability
+  TerminalAvailability,
+  WorkspaceTrust
 } from '../shared/types'
 import type { IdeAvailability, IdeEntry, InvokeProgress } from '../shared/remote-protocol'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
@@ -806,8 +807,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >,
     saveClaudePermissions: (scope, permissions, cwd?) =>
       connection.invoke('claude:save-permissions', scope, permissions, cwd) as Promise<void>,
-    isWorkspaceTrusted: (cwd) =>
-      connection.invoke('claude:workspace-trust', cwd) as Promise<boolean>,
+    getWorkspaceTrust: (cwd) =>
+      connection.invoke('claude:workspace-trust', cwd) as Promise<WorkspaceTrust | null>,
+    setWorkspaceTrust: (cwd, trusted) =>
+      connection.invoke('claude:set-workspace-trust', cwd, trusted) as Promise<WorkspaceTrust>,
 
     // Transcript retention window (cleanupPeriodDays)
     getCleanupPeriodDays: () =>
