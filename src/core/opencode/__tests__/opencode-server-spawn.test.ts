@@ -95,6 +95,11 @@ describe('buildServerEnv', () => {
     expect(env.KEEP_ME).toBe('1')
   })
 
+  it('strips an inherited OPENCODE_FLAGS: experimental features are opted into through config only', () => {
+    const env = buildServerEnv({ PATH: '/bin', OPENCODE_FLAGS: 'all' }, 'pw', '{}')
+    expect(env).not.toHaveProperty('OPENCODE_FLAGS')
+  })
+
   it('never overrides the data dir (ADR-097 §6: shared with the user)', () => {
     const parent = { HOME: '/home/u', XDG_DATA_HOME: '/home/u/.xdg' }
     const env = buildServerEnv(parent, 'pw', '{}')

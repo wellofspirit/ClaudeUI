@@ -70,6 +70,16 @@ See `09-initialize.md` for full details. One-shot handshake, sent exactly once p
 
 ---
 
+### `set_has_subscribers` (2.1.319, `@internal`, not sent by ClaudeUI)
+
+`{subtype: "set_has_subscribers", has_subscribers: boolean | null}` (`cli.js@char3180182`): tells the
+CLI whether anybody watches the stream-json output the host passes on (`false` nobody, `true`
+somebody, `null` unknown, counts as `true`). It matters only in a CLI started with
+`CLAUDE_CODE_STREAM_EVENT_HOLD_MS`, which holds most `content_block_delta` and `thinking_tokens` lines to join
+them. ClaudeUI sets none of that, so it never sends it.
+
+---
+
 ### `interrupt`
 
 Abort the current turn. Instant.

@@ -443,6 +443,9 @@ Not a request — a one-way cancel signal. Documented here because it comes thro
 
 ---
 
+> **2.1.319:** `set_has_subscribers` is a host-to-CLI request (07 §7.3), not an inbound one; no inbound
+> subtype was added or changed.
+
 ## 8.10 Unknown inbound subtypes
 
 Our harness at `src/core/sdk/query.ts::handleControlRequest()` falls back to:

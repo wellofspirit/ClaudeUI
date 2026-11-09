@@ -25,8 +25,11 @@
  * - Since 2.2.0 (`tool.ts` `snapshot`) hiding `execute` does NOT hide the Code
  *   Mode tools: they are offered as DIRECT tools instead, and most of them
  *   carry no permission check at all — {@link DIRECT_TOOL_DENY_RULES}. The ones
- *   that do check ask `edit` (`opencode_worktree_remove`) or the MCP resource
- *   actions (`opencode_list_mcp_resources`, `opencode_read_mcp_resource`).
+ *   that do check ask `edit` (`opencode_worktree_remove`), the MCP resource
+ *   actions (`opencode_list_mcp_resources`, `opencode_read_mcp_resource`) or,
+ *   since 2.2.6, `external_directory` (`opencode_session_move`, for a
+ *   destination outside the project: `tool/plugin/opencode.ts`). ClaudeUI still
+ *   denies the whole `opencode_session_*` family.
  * - `experimental_image_generate` (`tool/plugin/image-generate.ts`, on by
  *   default since 2.2.2) is a direct tool that asks `experimental_image_generate`
  *   with the `provider/model` it will bill: a paid model call, gated like
@@ -320,8 +323,9 @@ export const EXECUTE_DENY_RULE: V2Rule = rule('execute', 'deny')
  * The tools that become DIRECT when `execute` is hidden (2.2.0+, `core/src/tool.ts`
  * `snapshot`: "Without Code Mode its tools would be unreachable, so expose them as
  * direct tools instead"). Most run with NO permission check of their own
- * (`tool/plugin/opencode.ts` at v2.2.5: `session_rename`, `session_move`,
- * `worktree_create`, `worktree_list`, `models`), so only a deny can stop them: in
+ * (`tool/plugin/opencode.ts` at v2.2.6: `session_rename`, `worktree_create`,
+ * `worktree_list`, `models`; `session_move` asks `external_directory` for a
+ * destination outside the project only), so only a deny can stop them: in
  * every mode the model must not rename or move the session, create or remove
  * worktrees, publish artifacts or schedule future turns behind the user's back.
  *

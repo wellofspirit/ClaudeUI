@@ -20,24 +20,24 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 
 ## 3.2 Catalog
 
-| Type                     | Emitted by                                      | Gate                                                                              | See                                        |
-| ------------------------ | ----------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------ |
-| `assistant`              | Generator                                       | Always                                                                            | §3.3                                       |
-| `user`                   | Generator (synthetic tool_result + replays)     | Always                                                                            | §3.4                                       |
-| `stream_event`           | Generator                                       | `--include-partial-messages`                                                      | §3.5, and `05-stream-events.md` for deltas |
-| `system`                 | Generator + vT queue + control channel          | Varies per subtype                                                                | §3.6 + `04-system-subtypes.md`             |
-| `result`                 | Generator                                       | Always (once per turn)                                                            | §3.7                                       |
-| `tool_progress`          | Generator                                       | `CLAUDE_CODE_REMOTE` or `CLAUDE_CODE_CONTAINER_ID` for bash/pwsh; always for REPL | §3.8                                       |
-| `tool_use_summary`       | Generator                                       | Always when tool_use_summary attachment produced                                  | §3.9                                       |
-| `rate_limit_event`       | Native, print loop (builder `bKe`, at 22241254) | OAuth sessions; when a window's rounded percentage or reset time moves            | §3.11                                      |
-| `bash_output`            | Patch `bash-output-streaming` (direct stdout)   | Rate-limited ≤1/200ms per tool                                                    | §3.12                                      |
-| `auth_status`            | Control channel                                 | `--enable-auth-status` flag                                                       | §3.13                                      |
-| `prompt_suggestion`      | Control channel                                 | `promptSuggestions: true` in initialize                                           | §3.14                                      |
-| `transcript_mirror`      | Direct write from file watcher                  | `sessionMirror: true` (ClaudeUI doesn't use)                                      | §3.15                                      |
-| `command_lifecycle`      | Native lifecycle forwarder (`mw`, at 22677075)  | The inbound `user` frame carried a `uuid` (ClaudeUI: every frame)                 | §3.21                                      |
-| `control_request`        | Control channel                                 | Per inbound subtype — see `08-control-inbound.md`                                 | §3.16                                      |
-| `control_response`       | Control channel                                 | One per inbound outbound control_request                                          | §3.17                                      |
-| `control_cancel_request` | Control channel                                 | On abort of pending inbound control_request                                       | §3.18                                      |
+| Type                     | Emitted by                                      | Gate                                                                                      | See                                        |
+| ------------------------ | ----------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `assistant`              | Generator                                       | Always                                                                                    | §3.3                                       |
+| `user`                   | Generator (synthetic tool_result + replays)     | Always                                                                                    | §3.4                                       |
+| `stream_event`           | Generator                                       | `--include-partial-messages`                                                              | §3.5, and `05-stream-events.md` for deltas |
+| `system`                 | Generator + vT queue + control channel          | Varies per subtype                                                                        | §3.6 + `04-system-subtypes.md`             |
+| `result`                 | Generator                                       | Always (once per turn)                                                                    | §3.7                                       |
+| `tool_progress`          | Generator                                       | `CLAUDE_CODE_REMOTE` or `CLAUDE_CODE_CONTAINER_ID` for bash/pwsh; Code Mode only for REPL | §3.8                                       |
+| `tool_use_summary`       | Generator                                       | Always when tool_use_summary attachment produced                                          | §3.9                                       |
+| `rate_limit_event`       | Native, print loop (builder `bKe`, at 22241254) | OAuth sessions; when a window's rounded percentage or reset time moves                    | §3.11                                      |
+| `bash_output`            | Patch `bash-output-streaming` (direct stdout)   | Rate-limited ≤1/200ms per tool                                                            | §3.12                                      |
+| `auth_status`            | Control channel                                 | `--enable-auth-status` flag                                                               | §3.13                                      |
+| `prompt_suggestion`      | Control channel                                 | `promptSuggestions: true` in initialize                                                   | §3.14                                      |
+| `transcript_mirror`      | Direct write from file watcher                  | `sessionMirror: true` (ClaudeUI doesn't use)                                              | §3.15                                      |
+| `command_lifecycle`      | Native lifecycle forwarder (`mw`, at 22677075)  | The inbound `user` frame carried a `uuid` (ClaudeUI: every frame)                         | §3.21                                      |
+| `control_request`        | Control channel                                 | Per inbound subtype — see `08-control-inbound.md`                                         | §3.16                                      |
+| `control_response`       | Control channel                                 | One per inbound outbound control_request                                                  | §3.17                                      |
+| `control_cancel_request` | Control channel                                 | On abort of pending inbound control_request                                               | §3.18                                      |
 
 ---
 
@@ -336,6 +336,9 @@ Emitted exactly once per turn, last message of the turn.
   "permission_denials": [...],
   "structured_output": {...},            // when --json-schema is used
   "terminal_reason": "...",              // from terminator (max-turns hook, cost gate, etc.)
+  "stopped_by_permission_check": true,   // 2.1.319 @internal: auto mode ended the turn itself after a run of no-verdict responses
+  "credential_expires_at": "ISO-8601",   // 2.1.319 @internal: end of a stored claude.ai login's refresh chain; absent for API-key / env-token / host-token spawns
+  "process_turn_threads": {...},         // 2.1.319 @internal: CPU ms of the turn by thread, keyed by process_turn_states + between_turns
   "fast_mode_state": {...},
   "uuid": "...",
   "errors": ["..."],
@@ -494,7 +497,12 @@ Periodic elapsed-time tick from a tool execution. Two variants.
 
 ### REPL variant
 
-**Gate:** Always when REPL tool is in use.
+**Gate:** Code Mode only (2.1.319): `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE` (`yM`, `cli.js@char1140276`)
+turns it on, and the opt-in is refused for an entrypoint other than `cli` or a non-interactive
+session, so a stream-json session (ClaudeUI) never gets it. The converter arm is
+`le()&&e.data.type==="repl_tool_call"` (`@18999683`); 2.1.319 also adds an `inner_call`
+member (`{tool_name, tool_input, tool_use_id, phase, input_withheld?}`, builder at `@35849642`) beside
+`repl_call`, which stays.
 
 ```jsonc
 {

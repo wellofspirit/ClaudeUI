@@ -15,10 +15,17 @@ imported from `auth.json` (`credential-store.ts`).
 
 ## Pin
 
-- opencode **2.2.5**, tag `v2.2.5`, commit `9bbb8ce18c80f099e0e448775f59d965ead40a21` (verified
-  against upstream's `refs/tags/v2.2.5`). The wire types come from the spec the 2.2.5 binary
+- opencode **2.2.6**, tag `v2.2.6`, commit `dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06` (verified
+  against upstream's `refs/tags/v2.2.6`). The wire types come from the spec the 2.2.6 binary
   SERVES, not from upstream's committed `packages/protocol/openapi.json` (see Generated types;
-  the two agree again at 2.2.5).
+  at 2.2.6 the served spec differs from the committed one in 16 added, 2 removed and 51 changed
+  components and 3 operations, all in the `Event`/`Session`/`Form`/`Shell` groups: informational).
+  The served spec is 511 schemas / 170 operations (2.2.5: 363 / 169): it now names every event
+  payload as its own schema (`V2Event` and the `session_*` family; the events ClaudeUI consumes
+  are still the hand-curated `events.ts`), adds `Job` (`experimental.job.list`) and
+  `Provider.CacheWarming`, and drops `Event.SeqEncoded` / `PersistentPty.ReadLinesEncoded`
+  (unused by ClaudeUI). Its `SessionLogItemEncoded` is the first schema to use `contentSchema`,
+  which the generator now treats as an annotation like `contentMediaType`.
   **2.1.0 changed public contracts on purpose** (upstream's "Breaking changes"): provider replay
   data is `native` everywhere (`state`, `providerState`, `resultState`, `providerContext` are
   gone; tool parts carry one `native` that the result shallow-merges into), `Credential.Key.configuration` is removed in favour of `metadata`, summary compactions reference their first
@@ -39,6 +46,15 @@ imported from `auth.json` (`credential-store.ts`).
   `session.interrupt` now 404s an unknown session, which every caller already tolerates (they
   race it against a session that may be gone). The generated schema renames are internal
   (`Session.Message.Native_1..4` → `Native`, `Form.Fields_1..3` → `Form.Fields`).
+  **2.2.6 is additive too** (event sources reviewed: only `packages/schema/src/provider.ts` changed,
+  adding `Provider.CacheWarming` and `Cache.warming`; `provider.updated` stays `EmptyData`): config
+  gains `warming`, provider-cache `warming`, MCP `pool`, `experimental.all_flags` / `part_rows` /
+  `codemode_vm` and the `websearch.use` policy action. Behaviour changes that reach ClaudeUI: an
+  unreachable host (ENOTFOUND, EAI_AGAIN, ENETUNREACH, EHOSTUNREACH, ENETDOWN; not ECONNREFUSED)
+  is retried for up to 1 h (`packages/core/src/model-retry.ts`); `read` of a `skill://` path asks
+  `skill` and then `read`; `opencode_session_move` asks `external_directory` for a destination
+  outside the project (ClaudeUI still denies the family, §Permissions); the server reads
+  `OPENCODE_FLAGS` (`packages/core/src/flag.ts`), which ClaudeUI strips from the spawn env.
 - **One pin.** The version is the harness manifest's `tested`
   (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
   and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
@@ -65,9 +81,9 @@ imported from `auth.json` (`credential-store.ts`).
 - Provenance (2.0.24): every package's `repository` is `anomalyco/opencode`, maintainer `thdxr`,
   published by GitHub Actions through npm trusted publishing (OIDC); the darwin binaries are signed
   `Developer ID Application: Anomaly Innovations, Inc. (5NZ4Q7NXJ4)`.
-- `--version` prints `opencode v2.2.5` (1.x printed the bare version; a source build without a
+- `--version` prints `opencode v2.2.6` (1.x printed the bare version; a source build without a
   version prints `opencode vlocal`). Detection reads both; a 1.x install is labelled too old
-  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.2.5 or newer)"), and
+  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.2.6 or newer)"), and
   `opencode2` is searched on PATH beside `opencode`. Homebrew's `opencode` formula is a 2.x source
   build with the version stamped in (`OPENCODE_VERSION`), found at `<prefix>/bin/opencode` as
   System and labelled by its version like any other.
@@ -79,7 +95,7 @@ imported from `auth.json` (`credential-store.ts`).
 | Command       | `opencode serve --stdio --hostname 127.0.0.1 --port 0` (never `--service`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Listen line   | The FIRST stdout line is JSON `{"url":"http://127.0.0.1:<port>"}`; only a loopback `http:` URL with a port is accepted                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Auth          | HTTP Basic `opencode:<password>`; the password goes in `OPENCODE_PASSWORD` (the legacy `OPENCODE_SERVER_PASSWORD` is deleted from the child env). In `--stdio` mode the server deletes both from its own env, so its tools cannot read it                                                                                                                                                                                                                                                                                                                     |
-| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`. No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                                                                                                                                                                                                |
+| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`; an inherited `OPENCODE_FLAGS` is deleted (2.2.6 reads it; `all` would enable experimental features the user did not opt into). No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                                                                 |
 | End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway                                                                                                                                                                                                                                                                                                                                                                       |
 | Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained)                                                                                                                                                                       |
 | Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn)                                                                                                                                                                                                                                                                        |
@@ -193,8 +209,9 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
 - **Since 2.2.0 hiding `execute` does NOT hide the Code Mode tools** (`packages/core/src/tool.ts`
   `snapshot`: "Without Code Mode its tools would be unreachable, so expose them as direct tools
   instead"): they are offered as DIRECT tools, and most carry no permission check of their own
-  (`packages/core/src/tool/plugin/opencode.ts` at v2.2.5: `session_rename`, `session_move`,
-  `worktree_create`, `worktree_list`, `models`; `worktree_remove` asks `edit`). So in EVERY mode
+  (`packages/core/src/tool/plugin/opencode.ts` at v2.2.6: `session_rename`,
+  `worktree_create`, `worktree_list`, `models`; `worktree_remove` asks `edit`; `session_move`
+  asks `external_directory` for a destination outside the project). So in EVERY mode
   ClaudeUI wholly denies `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*` and
   `opencode_schedule_*` (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`, next to the Code Mode deny
   and moved last by `wireOrder`, so no user allow re-opens them) — the model must not rename or
