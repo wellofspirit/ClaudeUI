@@ -2,8 +2,8 @@
 
 The skills and legacy custom commands a ClaudeUI Claude session in a cwd would load, resolved host-side so the
 opencode and pi engines see exactly that set under Claude's names, the way the MCP catalog does for servers
-([mcp-catalog.md](mcp-catalog.md), ADR-096). Built against cli.js 2.1.317; re-check the rules below on a Claude Code
-bump (`bump-harness`).
+([mcp-catalog.md](mcp-catalog.md), ADR-096). Decision: [ADR-115](../adr/adr-115_claude-skills-in-pi-and-opencode.md).
+Built against cli.js 2.1.317; re-check the rules below on a Claude Code bump (`bump-harness`).
 
 | Module                                          | Role                                                                                                                                                  |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
