@@ -26,6 +26,9 @@ vi.mock('../../../core/services/claude-settings', () => ({
   saveCleanupPeriodDays: vi.fn()
 }))
 
+const { setWorkspaceTrust } = vi.hoisted(() => ({ setWorkspaceTrust: vi.fn() }))
+vi.mock('../../../core/services/claude-workspace-trust', () => ({ setWorkspaceTrust }))
+
 vi.mock('../../../core/services/ui-config', () => ({
   saveSessionConfig: vi.fn(),
   // Pulled in transitively via claude-session → collab-tool →
@@ -102,7 +105,9 @@ import {
   judgeModelSupport,
   judgeRouteResting,
   sendPrompt,
-  allowPeerMessages
+  allowPeerMessages,
+  setWorkspaceTrustAndNotify,
+  TRUST_REFRESH_DELAY_MS
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
 import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
@@ -1825,5 +1830,54 @@ describe('allowPeerMessages — the session:allow-peer-messages body', () => {
       makeRemoteConnection('password', null)
     )
     expect(viaDispatcher).toEqual(await allowPeerMessages(manager, 'rid-1'))
+  })
+})
+
+describe('setWorkspaceTrustAndNotify — the claude:set-workspace-trust body', () => {
+  const STATE = { root: '/tmp/repo-a', trusted: true, worktree: false }
+  const refresh = () => vi.fn(async () => {})
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    setWorkspaceTrust.mockReset()
+    setWorkspaceTrust.mockResolvedValue(STATE)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('refreshes only Claude sessions on the same project, once, after the delay', async () => {
+    const same = makeSessionStub({ cwd: '/tmp/repo-a', notifySettingsChanged: refresh() })
+    const other = makeSessionStub({ cwd: '/tmp/repo-b', notifySettingsChanged: refresh() })
+    const oc = makeSessionStub({
+      engineId: 'opencode',
+      cwd: '/tmp/repo-a',
+      notifySettingsChanged: refresh()
+    })
+    const noSeam = makeSessionStub({ cwd: '/tmp/repo-a' }) // a session without the seam must not throw
+    // A session whose key cannot be derived must not abort the refresh (or throw in the main process).
+    const broken = makeSessionStub({ cwd: undefined as any, notifySettingsChanged: refresh() })
+    const all = [broken, same, other, oc, noSeam]
+    const manager = { forEach: (cb: (s: any) => void) => all.forEach(cb) } as any
+
+    await expect(setWorkspaceTrustAndNotify(manager, '/tmp/repo-a', true)).resolves.toEqual(STATE)
+    expect(setWorkspaceTrust).toHaveBeenCalledWith('/tmp/repo-a', true)
+    expect(same.notifySettingsChanged).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(TRUST_REFRESH_DELAY_MS - 1)
+    expect(same.notifySettingsChanged).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    vi.advanceTimersByTime(60_000)
+    expect(same.notifySettingsChanged).toHaveBeenCalledTimes(1)
+    expect(other.notifySettingsChanged).not.toHaveBeenCalled()
+    expect(oc.notifySettingsChanged).not.toHaveBeenCalled()
+  })
+
+  it('schedules nothing when the write fails', async () => {
+    setWorkspaceTrust.mockRejectedValueOnce(new Error('locked'))
+    const s = makeSessionStub({ cwd: '/tmp/repo-a', notifySettingsChanged: refresh() })
+    await expect(setWorkspaceTrustAndNotify(makeManager(s), '/tmp/repo-a', true)).rejects.toThrow(
+      'locked'
+    )
+    vi.advanceTimersByTime(TRUST_REFRESH_DELAY_MS * 2)
+    expect(s.notifySettingsChanged).not.toHaveBeenCalled()
   })
 })

@@ -1350,6 +1350,18 @@ export interface ClaudePermissions {
 
 export type PermissionScope = 'user' | 'project' | 'local'
 
+/**
+ * Claude Code's workspace trust for a cwd (`~/.claude.json#projects[root].hasTrustDialogAccepted`).
+ * Untrusted, cli.js drops every allow rule and added directory from the project and local scopes.
+ */
+export interface WorkspaceTrust {
+  /** The directory cli.js records trust on: the canonical git root (the main checkout for a linked worktree), else the cwd. */
+  root: string
+  trusted: boolean
+  /** The cwd is a linked git worktree; trust is recorded on its main checkout. */
+  worktree: boolean
+}
+
 // AskUserQuestion tool types
 export interface AskUserQuestionOption {
   label: string
@@ -2399,10 +2411,13 @@ interface McpAPI {
     permissions: ClaudePermissions,
     cwd?: string
   ): Promise<void>
-  /** Whether Claude Code honors this workspace's project/local ALLOW rules
-   *  (~/.claude.json#projects[cwd].hasTrustDialogAccepted). Untrusted → cli.js
-   *  silently drops them; deny/ask and user-scope allows still apply. */
-  isWorkspaceTrusted(cwd: string): Promise<boolean>
+  /** Whether Claude Code honors this workspace's project/local ALLOW rules, and the
+   *  directory that trust is recorded on. Untrusted → cli.js silently drops them;
+   *  deny/ask and user-scope allows still apply. null when there is no cwd. */
+  getWorkspaceTrust(cwd: string): Promise<WorkspaceTrust | null>
+  /** Trust or untrust the workspace (writes ~/.claude.json the way cli.js's own trust
+   *  dialog does) and refresh running Claude sessions on it. Resolves to the new state. */
+  setWorkspaceTrust(cwd: string, trusted: boolean): Promise<WorkspaceTrust>
   /** Transcript retention window (cleanupPeriodDays). undefined = not set (CLI default of 30). */
   getCleanupPeriodDays(): Promise<number | undefined>
   setCleanupPeriodDays(days: number): Promise<void>

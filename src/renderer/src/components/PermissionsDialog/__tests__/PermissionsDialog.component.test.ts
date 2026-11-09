@@ -16,10 +16,14 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
-import { render, act } from '@testing-library/react'
+import { render, act, cleanup } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import type { PermissionsDialogViewProps } from '../View'
-import type { ClaudePermissions, PermissionScope } from '../../../../../shared/types'
+import type {
+  ClaudePermissions,
+  PermissionScope,
+  WorkspaceTrust
+} from '../../../../../shared/types'
 
 let viewProps: PermissionsDialogViewProps
 vi.mock('../View', () => ({
@@ -76,8 +80,8 @@ describe('PermissionsDialog FC', () => {
       }
     )
 
-    // Default: trusted, so the trust banner stays out of the other tests' way.
-    app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => true)
+    // Default: unknown trust (null), so the trust row stays out of the other tests' way.
+    app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => null)
   })
 
   afterEach(() => {
@@ -350,16 +354,31 @@ describe('PermissionsDialog FC', () => {
     expect(viewProps.tabs).toEqual(['user'])
   })
 
-  // Untrusted workspace: cli.js silently discards project/local ALLOW rules,
-  // and suppresses its own warning non-interactively — so the dialog is the
-  // only place the user can learn the rules they are editing are inert.
+  // Workspace trust gates whether cli.js honors project/local ALLOW rules; the
+  // container probes it, and toggles it optimistically (revert on failure).
   describe('workspace trust', () => {
-    function stubTrust(trusted: boolean | Error): void {
+    const ROOT = '/d/repo'
+    let setCalls: Array<{ cwd: string; trusted: boolean }>
+    let setImpl: (trusted: boolean) => Promise<WorkspaceTrust>
+
+    function stubTrust(result: WorkspaceTrust | null | Error): void {
       app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => {
-        if (trusted instanceof Error) throw trusted
-        return trusted
+        if (result instanceof Error) throw result
+        return result
       })
     }
+
+    beforeEach(() => {
+      setCalls = []
+      setImpl = async (trusted) => ({ root: ROOT, trusted, worktree: false })
+      app.bridge.ipcMain.handle(
+        'claude:set-workspace-trust' as never,
+        async (_e: unknown, cwd: string, trusted: boolean) => {
+          setCalls.push({ cwd, trusted })
+          return setImpl(trusted)
+        }
+      )
+    })
 
     async function renderAndSettle(
       cwd: string | null,
@@ -373,28 +392,140 @@ describe('PermissionsDialog FC', () => {
       })
     }
 
-    it('reports untrusted to the View', async () => {
-      stubTrust(false)
+    it('passes the probed trust state to the View', async () => {
+      stubTrust({ root: ROOT, trusted: false, worktree: true })
       await renderAndSettle(CWD, 'project')
-      expect(viewProps.workspaceTrusted).toBe(false)
+      expect(viewProps.trust).toEqual({ root: ROOT, trusted: false, worktree: true })
     })
 
-    it('reports trusted to the View', async () => {
-      stubTrust(true)
-      await renderAndSettle(CWD, 'project')
-      expect(viewProps.workspaceTrusted).toBe(true)
-    })
-
-    it('leaves trust unknown (null) when there is no cwd to probe', async () => {
-      stubTrust(false)
+    it('leaves trust null when there is no cwd to probe', async () => {
+      stubTrust({ root: ROOT, trusted: false, worktree: false })
       await renderAndSettle(null)
-      expect(viewProps.workspaceTrusted).toBeNull()
+      expect(viewProps.trust).toBeNull()
     })
 
-    it('leaves trust unknown (null) when the probe fails — no false alarm', async () => {
+    it('leaves trust null when the probe returns null or fails — no false alarm', async () => {
+      stubTrust(null)
+      await renderAndSettle(CWD, 'project')
+      expect(viewProps.trust).toBeNull()
+      cleanup()
       stubTrust(new Error('IPC failed'))
       await renderAndSettle(CWD, 'project')
-      expect(viewProps.workspaceTrusted).toBeNull()
+      expect(viewProps.trust).toBeNull()
+    })
+
+    it('toggle is optimistic, calls the API, and adopts the response', async () => {
+      stubTrust({ root: ROOT, trusted: false, worktree: false })
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      setImpl = async (trusted) => {
+        await gate
+        return { root: ROOT, trusted, worktree: false }
+      }
+      await renderAndSettle(CWD, 'project')
+
+      let pending!: void
+      await act(async () => {
+        pending = viewProps.onToggleTrust()
+      })
+      expect(setCalls).toEqual([{ cwd: CWD, trusted: true }])
+      expect(viewProps.trustSaving).toBe(true)
+      expect(viewProps.trust?.trusted).toBe(true)
+
+      // A second click while saving is ignored.
+      await act(async () => {
+        viewProps.onToggleTrust()
+      })
+      expect(setCalls).toHaveLength(1)
+
+      await act(async () => {
+        release()
+        await pending
+      })
+      expect(viewProps.trustSaving).toBe(false)
+      expect(viewProps.trust?.trusted).toBe(true)
+      expect(viewProps.trustError).toBeNull()
+    })
+
+    it('reverts and reports a stripped error when the write fails', async () => {
+      stubTrust({ root: ROOT, trusted: true, worktree: false })
+      setImpl = async () => {
+        throw new Error('the file stayed locked by another Claude Code process')
+      }
+      await renderAndSettle(CWD, 'project')
+
+      await act(async () => {
+        await viewProps.onToggleTrust()
+      })
+      expect(setCalls).toEqual([{ cwd: CWD, trusted: false }])
+      expect(viewProps.trust?.trusted).toBe(true)
+      expect(viewProps.trustSaving).toBe(false)
+      expect(viewProps.trustError).toContain(
+        'the file stayed locked by another Claude Code process'
+      )
+      expect(viewProps.trustError).not.toContain('Error invoking remote method')
+    })
+
+    it('drops a save that lands after the cwd changed', async () => {
+      const OTHER = '/d/other'
+      app.bridge.ipcMain.handle(
+        'claude:workspace-trust' as never,
+        async (_e: unknown, cwd: string) => ({
+          root: cwd,
+          trusted: false,
+          worktree: false
+        })
+      )
+      let release!: () => void
+      const gate = new Promise<void>((r) => (release = r))
+      setImpl = async (trusted) => {
+        await gate
+        return { root: ROOT, trusted, worktree: false }
+      }
+      const { PermissionsDialog } = await import('../PermissionsDialog')
+      let result!: ReturnType<typeof render>
+      await act(async () => {
+        result = await renderFC({ open: true, cwd: CWD, initialTab: 'project' })
+      })
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0))
+      })
+
+      let pending!: void
+      await act(async () => {
+        pending = viewProps.onToggleTrust()
+      })
+      expect(viewProps.trust?.trusted).toBe(true)
+
+      await act(async () => {
+        result.rerender(
+          React.createElement(PermissionsDialog, {
+            open: true,
+            cwd: OTHER,
+            initialTab: 'project',
+            onClose: onClose as () => void
+          })
+        )
+        await new Promise((r) => setTimeout(r, 0))
+      })
+      expect(viewProps.trust).toEqual({ root: OTHER, trusted: false, worktree: false })
+
+      await act(async () => {
+        release()
+        await pending
+      })
+      expect(viewProps.trust).toEqual({ root: OTHER, trusted: false, worktree: false })
+      expect(viewProps.trustSaving).toBe(false)
+    })
+
+    it('does not touch the dialog dirty/save state', async () => {
+      stubTrust({ root: ROOT, trusted: false, worktree: false })
+      await renderAndSettle(CWD, 'project')
+      await act(async () => {
+        await viewProps.onToggleTrust()
+      })
+      expect(viewProps.hasDirty).toBe(false)
+      expect(saveCalls).toEqual([])
     })
   })
 
