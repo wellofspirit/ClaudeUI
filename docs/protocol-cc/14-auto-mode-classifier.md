@@ -14,6 +14,31 @@ names change, offsets shift, string landmarks survive. **(I)** marks a claim rea
 off the code but not traced end to end; **(unverified)** marks text carried over
 from the 2.1.220 revision that was not re-checked.
 
+**2.1.319 bounded drift check (2026-11-09):** the re-extracted stage-2 prompt differs from 2.1.317's
+only by one new interpolation slot, `${KAt}`, appended after the gated `${r}` slot inside
+`<cc_automode_session_rules>` (45,473 bytes from the extractor against 45,462: the extractor writes an
+unresolved slot as a visible `«${KAt}»` placeholder, which accounts for the difference; every other line
+is byte-identical). `KAt` is a runtime-gated rule text, defined in the same chunk (`cli.js@char10365526`): text
+under the voice-call marker line, or from a non-user source of kind `voice-call`, is a record of speech
+that never establishes user intent, meets a consent bar or lifts a boundary, and a tool call justified only
+by it is evaluated as fully autonomous (**I**: the gate that appends it was not traced). The default rule lists
+render the same: 21 environment, 1 hard-deny, 72 soft-deny and 16 allow. The prompt template sits at
+characters 13,241,485-13,285,544 of the **darwin-arm64** concat. Four new `permission_denied`
+`decision_reason_code` values name auto-mode stops (04 §4.25). This checks shipped text, not server-side
+rollout or classifier decisions.
+
+**Server-classifier role gating (2.1.319, `Ybr` at `cli.js@char9359414`).** Which classifier runs is a role
+(`off` / `arbiter` / `arbiterWithLocalFallback`), not a setting of its own. First party: `arbiter` (the server
+reviews) unless the user switch `CLAUDE_CODE_AUTO_MODE_SERVER` is false (`user_switch_off`), the feature flag
+`tengu_smooth_chipmunk` (the server-classifier rollout, default true) is false (`rollout_flag_off`), the kill
+switch `tengu_iridescent_crystal` is on, the refused latch is set, or batch file tools apply (each makes the
+role `off`). Third party: `arbiterWithLocalFallback` unless its own switch, the refused latch, batch file
+tools or the kill switch turn it `off`. New in 2.1.319 (`u7e` at `cli.js@char9346633`): when the served
+value can't be read because telemetry or feature flags are off (`DISABLE_TELEMETRY`, `DO_NOT_TRACK`,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` or `DISABLE_GROWTHBOOK`),
+the server check is forced to `"all"` with no local fallback, unless `CLAUDE_CODE_AUTO_MODE_SERVER=0`
+(2.1.317 used the local classifier there). ClaudeUI sets none of these on a session.
+
 **2.1.317 bounded drift check (2026-11-04):** the re-extracted stage-2 prompt is **byte-identical**
 to 2.1.308's (45,462 bytes from the extractor), and the environment / hard-deny / soft-deny lists
 render the same 21 / 1 / 72 entries. The allow list lost exactly one entry — the rule that opens

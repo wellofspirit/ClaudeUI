@@ -10,6 +10,8 @@ Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
 not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
 models, same context/pricing/capability records.
 
+**2.1.319 (2026-11-09):** the baked catalog is **byte-identical** to 2.1.317's; no mirror change in `src/shared/`.
+
 **2.1.317:** complete baked catalog compared model by model against 2.1.308: same 22 models,
 same ids, aliases (`opus` → `claude-opus-5-5`, `sonnet` → `claude-sonnet-5-5`, `haiku` →
 `claude-haiku-5-5`, `fable` → `claude-fable-5-1`) and `latest_per_family`, same `context`
