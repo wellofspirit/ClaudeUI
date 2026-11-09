@@ -49,7 +49,7 @@ function trustLocation(cwd: string): { root: string; worktree: boolean } | null 
   if (path.dirname(loc.root) === loc.root) return null
   // cli.js compares the CWD with home (not the root): a repo at ~ still gets projects[<home>]
   // for a folder under it, while ~ itself only ever gets session trust.
-  if (realCwd(cwd) === realOrSelf(os.homedir()).normalize('NFC')) return null
+  if (realCwd(cwd) === realCwd(os.homedir())) return null
   return loc
 }
 

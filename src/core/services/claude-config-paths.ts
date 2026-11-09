@@ -56,14 +56,17 @@ export function claudeManagedDir(platform: NodeJS.Platform = process.platform): 
 }
 
 /**
- * cli.js roots everything at `NFC(realpathSync(process.cwd()))` on every
- * platform (Bun's realpath is Node's `realpathSync.native`, which also
- * case-corrects on case-insensitive volumes).
+ * cli.js roots everything at `NFC(realpathSync(process.cwd()))`. On macOS Bun's
+ * realpath case-corrects like Node's `realpathSync.native` (probed), so darwin
+ * uses `.native`. Elsewhere the JS `realpathSync` stays: identical on Linux, and
+ * on Windows `.native` would also expand 8.3 names and resolve subst drives,
+ * which is unprobed against Bun there.
  */
 export function realCwd(cwd: string): string {
+  const realpath = process.platform === 'darwin' ? fs.realpathSync.native : fs.realpathSync
   let out: string
   try {
-    out = fs.realpathSync.native(cwd)
+    out = realpath(cwd)
   } catch {
     out = path.resolve(cwd)
   }

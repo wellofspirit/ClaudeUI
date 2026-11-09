@@ -243,7 +243,9 @@ describe('project location (cli.js kt port, fabricated layouts)', () => {
     const decomposed = path.join(root, 'cafe\u0301')
     mk(decomposed)
     expect(claudeProjectLocation(decomposed).root.endsWith('caf\u00e9')).toBe(true)
-    expect(claudeProjectKey(decomposed)).toBe(claudeProjectLocation(decomposed).root)
+    expect(claudeProjectKey(decomposed)).toBe(
+      claudeProjectLocation(decomposed).root.replace(/\\/g, '/')
+    )
     expect(claudeProjectKey('C:\\proj\\x')).not.toContain('\\')
   })
 })

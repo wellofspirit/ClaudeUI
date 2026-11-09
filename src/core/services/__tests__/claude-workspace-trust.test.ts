@@ -34,6 +34,8 @@ let cfgDir: string
 let cfg: string
 let env: Record<string, string>
 const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE }
+/** The projects[...] spelling of a path: cli.js writes `\` as `/` on Windows. */
+const K = (p: string): string => p.replace(/\\/g, '/')
 
 const mkdirs = (p: string): string => {
   fs.mkdirSync(p, { recursive: true })
@@ -73,7 +75,7 @@ describe('getWorkspaceTrust', () => {
   it('reads exactly the project key: the repo root, from a subdir too', () => {
     const r = repo('proj')
     const sub = mkdirs(path.join(r, 'a', 'b'))
-    writeCfg({ projects: { [r]: { hasTrustDialogAccepted: true } } })
+    writeCfg({ projects: { [K(r)]: { hasTrustDialogAccepted: true } } })
     expect(getWorkspaceTrust(r, env)).toEqual({ root: r, worktree: false, trusted: true })
     expect(getWorkspaceTrust(sub, env)).toEqual({ root: r, worktree: false, trusted: true })
   })
@@ -82,10 +84,13 @@ describe('getWorkspaceTrust', () => {
     const r = repo('proj')
     const sub = mkdirs(path.join(r, 'sub'))
     writeCfg({
-      projects: { [tmp]: { hasTrustDialogAccepted: true }, [sub]: { hasTrustDialogAccepted: true } }
+      projects: {
+        [K(tmp)]: { hasTrustDialogAccepted: true },
+        [K(sub)]: { hasTrustDialogAccepted: true }
+      }
     })
     expect(getWorkspaceTrust(r, env)?.trusted).toBe(false)
-    writeCfg({ projects: { [r]: { hasTrustDialogAccepted: false } } })
+    writeCfg({ projects: { [K(r)]: { hasTrustDialogAccepted: false } } })
     expect(getWorkspaceTrust(r, env)?.trusted).toBe(false)
     writeCfg('{ not json')
     expect(getWorkspaceTrust(r, env)?.trusted).toBe(false)
@@ -100,7 +105,7 @@ describe('getWorkspaceTrust', () => {
     fs.writeFileSync(path.join(gitdir, 'commondir'), '../..\n')
     fs.writeFileSync(path.join(gitdir, 'gitdir'), `${path.join(wt, '.git')}\n`)
     fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${gitdir}\n`)
-    writeCfg({ projects: { [main]: { hasTrustDialogAccepted: true } } })
+    writeCfg({ projects: { [K(main)]: { hasTrustDialogAccepted: true } } })
     expect(getWorkspaceTrust(wt, env)).toEqual({ root: main, worktree: true, trusted: true })
   })
 
@@ -118,7 +123,7 @@ describe('getWorkspaceTrust', () => {
   it('home that is itself a repo: its subfolder keys on home, home itself stays null', () => {
     mkdirs(path.join(home, '.git'))
     const sub = mkdirs(path.join(home, 'work', 'app'))
-    writeCfg({ projects: { [home]: { hasTrustDialogAccepted: true } } })
+    writeCfg({ projects: { [K(home)]: { hasTrustDialogAccepted: true } } })
     expect(getWorkspaceTrust(home, env)).toBeNull()
     expect(getWorkspaceTrust(sub, env)).toEqual({ root: home, worktree: false, trusted: true })
   })
@@ -134,7 +139,7 @@ describe('setWorkspaceTrust', () => {
       numStartups: 7,
       oauthAccount: { emailAddress: 'x' },
       projects: {
-        [r]: { allowedTools: ['Bash'], hasTrustDialogAccepted: false, mcpServers: { a: {} } },
+        [K(r)]: { allowedTools: ['Bash'], hasTrustDialogAccepted: false, mcpServers: { a: {} } },
         [other]: { hasTrustDialogAccepted: true }
       }
     }
@@ -142,10 +147,10 @@ describe('setWorkspaceTrust', () => {
     const state = await setWorkspaceTrust(r, true, { env, ...FAST })
     expect(state).toEqual({ root: r, worktree: false, trusted: true })
     const after = readCfg()
-    expect(after.projects[r]).toEqual({ ...before.projects[r], hasTrustDialogAccepted: true })
-    expect({ ...after, projects: { ...after.projects, [r]: undefined } }).toEqual({
+    expect(after.projects[K(r)]).toEqual({ ...before.projects[K(r)], hasTrustDialogAccepted: true })
+    expect({ ...after, projects: { ...after.projects, [K(r)]: undefined } }).toEqual({
       ...before,
-      projects: { ...before.projects, [r]: undefined }
+      projects: { ...before.projects, [K(r)]: undefined }
     })
     expect(fs.readFileSync(cfg, 'utf-8').endsWith('\n')).toBe(true)
     if (process.platform !== 'win32') expect(fs.statSync(cfg).mode & 0o777).toBe(0o600)
@@ -155,10 +160,10 @@ describe('setWorkspaceTrust', () => {
     const r = repo('proj')
     expect(fs.existsSync(cfg)).toBe(false)
     await setWorkspaceTrust(r, true, { env, ...FAST })
-    expect(readCfg()).toEqual({ projects: { [r]: { hasTrustDialogAccepted: true } } })
+    expect(readCfg()).toEqual({ projects: { [K(r)]: { hasTrustDialogAccepted: true } } })
     const state = await setWorkspaceTrust(r, false, { env, ...FAST })
     expect(state.trusted).toBe(false)
-    expect(readCfg().projects[r]).toEqual({ hasTrustDialogAccepted: false })
+    expect(readCfg().projects[K(r)]).toEqual({ hasTrustDialogAccepted: false })
   })
 
   it('records a worktree cwd on the main checkout', async () => {
@@ -170,12 +175,12 @@ describe('setWorkspaceTrust', () => {
     fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${gitdir}\n`)
     const state = await setWorkspaceTrust(wt, true, { env, ...FAST })
     expect(state).toEqual({ root: main, worktree: true, trusted: true })
-    expect(Object.keys(readCfg().projects)).toEqual([main])
+    expect(Object.keys(readCfg().projects)).toEqual([K(main)])
   })
 
   it('skips the write when the value is already set', async () => {
     const r = repo('proj')
-    writeCfg({ projects: { [r]: { hasTrustDialogAccepted: true } } })
+    writeCfg({ projects: { [K(r)]: { hasTrustDialogAccepted: true } } })
     const old = new Date(2020, 0, 1)
     fs.utimesSync(cfg, old, old)
     const raw = fs.readFileSync(cfg, 'utf-8')
@@ -194,7 +199,7 @@ describe('setWorkspaceTrust', () => {
     expect(fs.lstatSync(cfg).isSymbolicLink()).toBe(true)
     expect(JSON.parse(fs.readFileSync(real, 'utf-8'))).toEqual({
       keep: 1,
-      projects: { [r]: { hasTrustDialogAccepted: true } }
+      projects: { [K(r)]: { hasTrustDialogAccepted: true } }
     })
   })
 
@@ -230,7 +235,7 @@ describe('setWorkspaceTrust', () => {
     const sub = mkdirs(path.join(home, 'work'))
     const state = await setWorkspaceTrust(sub, true, { env, ...FAST })
     expect(state).toEqual({ root: home, worktree: false, trusted: true })
-    expect(readCfg().projects[home]).toEqual({ hasTrustDialogAccepted: true })
+    expect(readCfg().projects[K(home)]).toEqual({ hasTrustDialogAccepted: true })
     await expect(setWorkspaceTrust(home, true, { env, ...FAST })).rejects.toThrow(
       /cannot be recorded/
     )
@@ -338,6 +343,6 @@ describe('withClaudeConfigLock', () => {
     expect(fs.existsSync(cfg)).toBe(false)
     fs.rmdirSync(lockDir())
     await expect(p).resolves.toMatchObject({ trusted: true })
-    expect(readCfg().projects[r]).toEqual({ hasTrustDialogAccepted: true })
+    expect(readCfg().projects[K(r)]).toEqual({ hasTrustDialogAccepted: true })
   })
 })
