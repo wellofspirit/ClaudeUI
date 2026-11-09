@@ -71,7 +71,8 @@ const { mockResolveSkills } = vi.hoisted(() => ({
     skipped: []
   }))
 }))
-vi.mock('../../../core/services/claude-skill-catalog', () => ({
+vi.mock('../../../core/services/claude-skill-catalog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/services/claude-skill-catalog')>()),
   resolveClaudeSkillCatalog: mockResolveSkills
 }))
 // ADR-088 — the target judge's ground truth and the shared trust lists stay

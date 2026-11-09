@@ -151,6 +151,22 @@ interface Candidate {
   plugin?: { plugin: EnabledClaudePlugin; rootSkill?: boolean }
 }
 
+/** cli.js's `skillListingMaxDescChars` default. */
+export const SKILL_LISTING_MAX_DESC_CHARS = 1536
+
+/**
+ * The text an entry is listed with for the model, as cli.js lists it (`amr`): the description,
+ * then ` - ` + `when_to_use` when set, cut to {@link SKILL_LISTING_MAX_DESC_CHARS} with `…`.
+ */
+export function skillListingDescription(entry: ClaudeSkillEntry): string {
+  const text = entry.whenToUse
+    ? `${entry.description ? `${entry.description} - ` : ''}${entry.whenToUse}`
+    : entry.description
+  return text.length > SKILL_LISTING_MAX_DESC_CHARS
+    ? `${text.slice(0, SKILL_LISTING_MAX_DESC_CHARS - 1)}…`
+    : text
+}
+
 export function resolveClaudeSkillCatalog(
   cwd: string,
   options: SkillCatalogOptions = {}

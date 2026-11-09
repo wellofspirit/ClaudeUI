@@ -6,7 +6,7 @@
  * carries the path, not the body. Rules: docs/architecture/skill-catalog.md.
  */
 import { dirname } from 'path'
-import type { ClaudeSkillCatalog } from '../services/claude-skill-catalog'
+import { skillListingDescription, type ClaudeSkillCatalog } from '../services/claude-skill-catalog'
 
 export interface PiSkillDescriptor {
   /** Claude's name (`plugin:skill` for a plugin's). */
@@ -18,26 +18,14 @@ export interface PiSkillDescriptor {
   baseDir: string
 }
 
-/** Longest description the listing carries. */
-export const PI_SKILL_DESCRIPTION_MAX = 1536
-
-/** The catalog's model-invocable entries, as descriptors (description + ' - ' + whenToUse, cut with '…'). */
+/** The catalog's model-invocable entries, as descriptors listed with cli.js's description text. */
 export function buildPiSkillDescriptors(catalog: ClaudeSkillCatalog): PiSkillDescriptor[] {
-  const out: PiSkillDescriptor[] = []
-  for (const entry of catalog.entries) {
-    if (!entry.modelInvocable) continue
-    let description = entry.whenToUse
-      ? `${entry.description ? `${entry.description} - ` : ''}${entry.whenToUse}`
-      : entry.description
-    if (description.length > PI_SKILL_DESCRIPTION_MAX) {
-      description = `${description.slice(0, PI_SKILL_DESCRIPTION_MAX - 1)}…`
-    }
-    out.push({
+  return catalog.entries
+    .filter((entry) => entry.modelInvocable)
+    .map((entry) => ({
       name: entry.name,
-      description,
+      description: skillListingDescription(entry),
       filePath: entry.file,
       baseDir: entry.baseDir ?? dirname(entry.file)
-    })
-  }
-  return out
+    }))
 }

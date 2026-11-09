@@ -23,7 +23,10 @@ import { isAbsolute } from 'node:path'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { resolveClaudeSkillCatalog } from '../services/claude-skill-catalog'
+import {
+  resolveClaudeSkillCatalog,
+  skillListingDescription
+} from '../services/claude-skill-catalog'
 import type { ClaudeSkillCatalog } from '../services/claude-skill-catalog'
 import { isHousekeepingDir } from './claude-mcp-bridge'
 
@@ -59,7 +62,7 @@ function hostedSkills(
     .map((e) => ({
       id: e.name,
       name: e.displayName ?? e.name,
-      description: e.description,
+      description: skillListingDescription(e),
       autoinvoke: e.modelInvocable,
       path: e.file,
       content: e.body

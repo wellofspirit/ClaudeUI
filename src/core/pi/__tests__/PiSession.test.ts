@@ -450,7 +450,8 @@ const skillMock = vi.hoisted(() => ({
   parse: vi.fn((): unknown => null),
   expand: vi.fn((): string => 'EXPANDED')
 }))
-vi.mock('../../services/claude-skill-catalog', () => ({
+vi.mock('../../services/claude-skill-catalog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/claude-skill-catalog')>()),
   resolveClaudeSkillCatalog: skillMock.resolve
 }))
 vi.mock('../../services/claude-skill-invoke', () => ({

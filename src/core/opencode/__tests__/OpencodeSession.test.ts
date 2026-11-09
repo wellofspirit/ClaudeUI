@@ -148,7 +148,8 @@ vi.mock('../model-discovery', () => ({
   }
 }))
 // The catalog and its expansion are slice A's (their own suites); here only the wiring is under test.
-vi.mock('../../services/claude-skill-catalog', () => ({
+vi.mock('../../services/claude-skill-catalog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/claude-skill-catalog')>()),
   resolveClaudeSkillCatalog: () => h.skillCatalog
 }))
 vi.mock('../../services/claude-skill-invoke', () => ({

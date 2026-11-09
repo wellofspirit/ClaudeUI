@@ -33,7 +33,8 @@ vi.mock('../OpencodeServerManager', () => ({
 const { catalog } = vi.hoisted(() => ({
   catalog: { entries: [] as unknown[], skipped: [] as unknown[] }
 }))
-vi.mock('../../services/claude-skill-catalog', () => ({
+vi.mock('../../services/claude-skill-catalog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/claude-skill-catalog')>()),
   resolveClaudeSkillCatalog: () => catalog
 }))
 
