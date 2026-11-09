@@ -505,6 +505,10 @@ export class OpencodeSession extends BaseSession {
   private sessionRepoVisibilityPromise: Promise<RepoVisibility> | null = null
 
   private knownCommandNames = new Set<string>()
+  /** Catalog names opencode's own skill of that id won (set by `publishCommands`). */
+  private engineWonSkills = new Set<string>()
+  /** The connection `establishSession` last published the menu on: once per connection, not per turn. */
+  private publishedOn: ServerConnection | null = null
   private _cancelled = false
   private connectingPromise: Promise<void> | null = null
   private establishingPromise: Promise<void> | null = null
@@ -954,7 +958,11 @@ export class OpencodeSession extends BaseSession {
 
   /** `text` as the shared Claude skill it types, expanded; unchanged when it types none. */
   private expandClaudeSkill(text: string, sessionID: string): string {
-    const invocation = parseSkillInvocation(text, safeSkillCatalog(this.location))
+    const catalog = safeSkillCatalog(this.location)
+    const invocation = parseSkillInvocation(text, {
+      ...catalog,
+      entries: catalog.entries.filter((e) => !this.engineWonSkills.has(e.name))
+    })
     return invocation
       ? expandClaudeSkillInvocation(invocation, { cwd: this.location, sessionId: sessionID })
       : text
@@ -968,6 +976,13 @@ export class OpencodeSession extends BaseSession {
   private async establishSession(): Promise<void> {
     await this.ensureConnected()
     if (!this.client || this._cancelled) return
+
+    // The slash menu and the typed-name sets (`knownCommandNames`, `engineWonSkills`): nothing
+    // else calls `run(null)`, so without this a session's menu stays empty. Never throws.
+    if (this.publishedOn !== this.conn) {
+      this.publishedOn = this.conn
+      await this.publishCommands(this.client)
+    }
 
     // An eager resume in flight has set the id already: wait for its replay
     // (the mapper must be seeded before the feed starts).
@@ -1207,12 +1222,25 @@ export class OpencodeSession extends BaseSession {
       return []
     })
     this.knownCommandNames = new Set(commands.map((c) => c.name))
+    // A skill id opencode's registry holds with another path is the engine's own (an `.agents`,
+    // config or built-in skill won the id, R1): the model sees that one, so `/name` is not the
+    // Claude skill. A failed read offers the whole catalog.
+    const registry = await client.skills().catch((err) => {
+      logger.warn('OpencodeSession', `skills() failed: ${errText(err)}`)
+      return []
+    })
+    const entries = safeSkillCatalog(this.location).entries
+    this.engineWonSkills = new Set(
+      registry
+        .filter((r) => entries.some((e) => e.name === r.id && e.file !== r.path))
+        .map((r) => r.id)
+    )
     // opencode's commands, then the shared Claude skills typed as `/name` (a command wins a clash).
     this.send(
       'session:slash-commands',
       mergeSlashCommandLists(
         commands.map((c) => ({ name: '/' + c.name, description: c.description })),
-        claudeSkillSlashCommands(safeSkillCatalog(this.location).entries)
+        claudeSkillSlashCommands(entries.filter((e) => !this.engineWonSkills.has(e.name)))
       )
     )
   }

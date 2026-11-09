@@ -551,6 +551,45 @@ describe('shared Claude skills', () => {
       { name: '/p:fmt', description: 'Format' }
     ])
   })
+
+  it('the first prompt publishes the slash list: nothing in production calls run(null)', async () => {
+    h.skillCatalog.entries = [skill('deploy')]
+    session = makeSession()
+    await startTurn('hello')
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect(list).toEqual([
+      { name: '/review', description: 'Review' },
+      { name: '/deploy', description: 'Claude deploy' }
+    ])
+  })
+
+  it("an id opencode's registry holds with another path is the engine's (R1): not offered, not expanded", async () => {
+    h.skillCatalog.entries = [
+      skill('won', { file: '/cat/won/SKILL.md' }),
+      skill('mine', { file: '/cat/mine/SKILL.md' })
+    ]
+    h.client.skills.mockResolvedValue([
+      { id: 'won', name: 'won', path: '/proj/.agents/skills/won/SKILL.md' },
+      { id: 'mine', name: 'mine', path: '/cat/mine/SKILL.md' }
+    ] as never)
+    session = makeSession()
+    await startTurn('/won now')
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect((list as { name: string }[]).map((c) => c.name)).toEqual(['/review', '/mine'])
+    expect(h.client.prompt.mock.calls[0][1].text).toBe('/won now')
+    await session.run('/mine x')
+    await flush()
+    expect(h.client.prompt.mock.calls.at(-1)?.[1].text).toContain('EXPANDED mine')
+  })
+
+  it('a failing skills() read leaves the whole catalog offered', async () => {
+    h.skillCatalog.entries = [skill('deploy', { file: '/cat/deploy/SKILL.md' })]
+    h.client.skills.mockRejectedValue(new Error('down'))
+    session = makeSession()
+    await startTurn('hello')
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect((list as { name: string }[]).map((c) => c.name)).toEqual(['/review', '/deploy'])
+  })
 })
 
 // ─── Lifecycle ──────────────────────────────────────────────────────────────

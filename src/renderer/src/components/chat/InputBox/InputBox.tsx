@@ -49,6 +49,7 @@ import {
   spawnAnnouncement
 } from '../../../lib/session-effort'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
+import { useFallbackSlashCommands } from '../../../hooks/useFallbackSlashCommands'
 import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
@@ -192,9 +193,21 @@ export function InputBox(): React.JSX.Element {
   // capabilities.slashCommands: when the engine doesn't support slash commands, the
   // menu offers nothing and `/` types as literal text.
   const sessionSlashCommands = useActiveSession((s) => s.slashCommands)
+  const draftEngineId = useActiveSession((s) => s.selectedEngineId)
+  // A draft has no list until its first message: the host's built-ins and catalog fill the gap.
+  const fallbackSlashCommands = useFallbackSlashCommands(
+    cwd,
+    draftEngineId,
+    sessionSlashCommands.length === 0
+  )
   const mergedSlashCommands = useMemo(
-    () => (capabilities.slashCommands ? sessionSlashCommands : NO_SLASH_COMMANDS),
-    [capabilities.slashCommands, sessionSlashCommands]
+    () =>
+      capabilities.slashCommands
+        ? sessionSlashCommands.length > 0
+          ? sessionSlashCommands
+          : fallbackSlashCommands
+        : NO_SLASH_COMMANDS,
+    [capabilities.slashCommands, sessionSlashCommands, fallbackSlashCommands]
   )
 
   const {

@@ -8,7 +8,7 @@
  * (the session's), and a session never shows another session's commands (the
  * list used to be app-level, so the last session to report filled every menu).
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest'
 import { render, screen, act, fireEvent, cleanup } from '@testing-library/react'
 import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
@@ -145,5 +145,68 @@ describe('InputBox slash menu — the active session list is what renders', () =
     await typeSlash()
 
     expect(screen.queryByTestId('SlashCommandMenu')).toBeNull()
+  })
+})
+
+describe('InputBox slash menu — a draft with no list of its own yet', () => {
+  const DRAFT = 'draft-route'
+  let loadSkillDetails: Mock<(...args: any[]) => Promise<unknown>>
+  let loadSlashCommands: Mock<(...args: any[]) => Promise<unknown>>
+
+  async function openDraft(engineId: 'claude' | 'pi'): Promise<void> {
+    useSessionStore.getState().createNewSession(DRAFT, '/draft/cwd')
+    useSessionStore.setState((state) => ({
+      activeSessionId: DRAFT,
+      sessions: {
+        ...state.sessions,
+        [DRAFT]: { ...state.sessions[DRAFT], selectedEngineId: engineId }
+      }
+    }))
+    await act(async () => {
+      render(createElement(InputBox))
+    })
+  }
+
+  beforeEach(() => {
+    loadSkillDetails = vi.fn(async () => [
+      { name: 'deploy', description: 'ship it', userInvocable: true },
+      { name: 'hidden', description: 'x', userInvocable: false },
+      { name: 'clear', description: 'catalog clash', userInvocable: true }
+    ])
+    loadSlashCommands = vi.fn(async () => [{ name: '/clear', description: 'built-in' }])
+    app.bridge.ipcMain.handle('config:load-skill-details', loadSkillDetails)
+    app.bridge.ipcMain.handle('config:load-slash-commands', loadSlashCommands)
+  })
+
+  it('a draft Claude session shows the built-ins then the catalog (first list wins a name)', async () => {
+    await openDraft('claude')
+    await typeSlash()
+    expect(loadSkillDetails).toHaveBeenCalledTimes(1)
+    expect(loadSkillDetails.mock.calls[0].slice(1)).toEqual([null, '/draft/cwd'])
+    expect(renderedRows()).toEqual(['/clear', '/deploy'])
+  })
+
+  it('a draft pi session shows the catalog only, never the Claude built-ins', async () => {
+    await openDraft('pi')
+    await typeSlash()
+    expect(loadSlashCommands).not.toHaveBeenCalled()
+    expect(renderedRows()).toEqual(['/deploy', '/clear'])
+  })
+
+  it("the session's own list replaces the fallback", async () => {
+    await openDraft('pi')
+    await typeSlash()
+    expect(renderedRows()).toContain('/deploy')
+    await act(async () => {
+      app.emit('session:slash-commands', DRAFT, [{ name: '/own' }])
+    })
+    expect(renderedRows()).toEqual(['/own'])
+  })
+
+  it('a failing host read leaves an empty menu, not an error', async () => {
+    loadSkillDetails.mockRejectedValue(new Error('down'))
+    await openDraft('pi')
+    await typeSlash()
+    expect(renderedRows()).toEqual([])
   })
 })

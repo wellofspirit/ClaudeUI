@@ -944,14 +944,29 @@ export class PiSession extends BaseSession {
    */
   private slashCommandList(): Array<{ name: string; description?: string }> {
     const list = this.piCommands.map((c) => ({ name: '/' + c.name, description: c.description }))
-    return mergeSlashCommandLists(list, claudeSkillSlashCommands(this.skillCatalog.entries))
+    return mergeSlashCommandLists(list, claudeSkillSlashCommands(this.offeredCatalog().entries))
+  }
+
+  /**
+   * The catalog without the names pi's own skills hold (R1: pi's skill of that name is the one the
+   * model sees, so `/name` is neither offered nor expanded as the Claude one).
+   */
+  private offeredCatalog(): ClaudeSkillCatalog {
+    const own = new Set(
+      this.piCommands.filter((c) => c.source === 'skill').map((c) => c.name.replace(/^skill:/, ''))
+    )
+    if (own.size === 0) return this.skillCatalog
+    return {
+      ...this.skillCatalog,
+      entries: this.skillCatalog.entries.filter((e) => !own.has(e.name))
+    }
   }
 
   /** What pi receives for `prompt`: the expansion of a typed catalog `/name args`, else the text as typed. */
   private expandTypedSkill(prompt: string): string {
     if (this.skillCatalog.entries.length === 0) return prompt
     try {
-      const invocation = parseSkillInvocation(prompt, this.skillCatalog)
+      const invocation = parseSkillInvocation(prompt, this.offeredCatalog())
       if (!invocation) return prompt
       const names = [invocation.entry.name, ...(invocation.entry.aliases ?? [])]
       if (this.piCommands.some((c) => names.includes(c.name))) return prompt

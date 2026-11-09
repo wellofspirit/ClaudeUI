@@ -656,7 +656,9 @@ function CliCommandBlock({
   }
 
   // Command execution — show as user bubble with code block
-  const display = args ? `/${name} ${args}` : `/${name}`
+  // `commandName` may already carry its slash (cli.js's own transcripts store `/clear`).
+  const typed = name.startsWith('/') ? name : `/${name}`
+  const display = args ? `${typed} ${args}` : typed
   return (
     <div className="flex justify-end">
       <div className="max-w-[85%] bg-bg-tertiary rounded-2xl px-4 py-2.5 text-[13px] text-text-primary leading-[1.6]">

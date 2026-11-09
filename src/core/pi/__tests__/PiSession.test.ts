@@ -5250,6 +5250,32 @@ describe('PiSession — shared Claude skill catalog', () => {
     ])
   })
 
+  it("a catalog entry named like one of pi's own skills is neither offered nor expanded (R1)", async () => {
+    const own = skillEntry({ name: 'brave-search', description: 'claude copy' })
+    const other = skillEntry({ name: 'deploy', description: 'ship it' })
+    skillMock.resolve.mockReturnValue(catalog(own, other))
+    skillMock.parse.mockImplementation(((text: string, cat: { entries: { name: string }[] }) => {
+      const entry = cat.entries.find((e) => text.startsWith('/' + e.name))
+      return entry ? { entry, args: '' } : null
+    }) as never)
+    mockRequest.mockImplementation(
+      getCommandsResponse([
+        { name: 'skill:brave-search', description: 'pi skill', source: 'skill' }
+      ]) as never
+    )
+    const win = new MockWindow()
+    const session = new PiSession('rid-skills-r1', win as never, '/cwd', {})
+    await session.run('/brave-search q')
+    expect(sentPrompt().message).toBe('/brave-search q')
+    expect(skillMock.expand).not.toHaveBeenCalled()
+    expect(sentPayloads(win, 'session:slash-commands')[0]).toEqual([
+      { name: '/skill:brave-search', description: 'pi skill' },
+      { name: '/deploy', description: 'ship it' }
+    ])
+    await session.run('/deploy')
+    expect(sentPrompt().message).toBe('EXPANDED')
+  })
+
   it('still offers the catalog commands when get_commands fails', async () => {
     skillMock.resolve.mockReturnValue(catalog(skillEntry({ name: 'deploy' })))
     mockRequest.mockImplementation((cmd: { type: string }) =>

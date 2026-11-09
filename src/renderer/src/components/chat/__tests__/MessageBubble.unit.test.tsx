@@ -619,3 +619,21 @@ describe('MessageBubble — F20 rows', () => {
     expect(container.querySelector('.justify-end')).toBeNull()
   })
 })
+
+describe('MessageBubble — cli_command rows', () => {
+  const render1 = (commandName: string, commandArgs?: string): HTMLElement => {
+    const message = makeChatMessage({
+      role: 'system',
+      content: [{ type: 'cli_command', commandName, ...(commandArgs ? { commandArgs } : {}) }]
+    } as never)
+    return render(<MessageBubble message={message} pendingApprovals={[]} />).container
+  }
+
+  it('prints a slash-less name with one slash', () => {
+    expect(render1('clear', 'now').textContent).toBe('/clear now')
+  })
+
+  it('does not double the slash of a name that carries it (cold history of a skill or /clear)', () => {
+    expect(render1('/u-skill', 'alpha beta').textContent).toBe('/u-skill alpha beta')
+  })
+})
