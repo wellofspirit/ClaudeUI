@@ -701,15 +701,9 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         sdkActive: s.sdkActive,
         // The held inbox belongs to the session, not to its conversation.
         heldCount: s.heldCount,
-        // Carried, not reset. These per-session copies are vestigial — canonical
-        // holds ONE app-level list and `toSnapshot` fans it into every entry, so
-        // in practice both are always `[]` here — but the catalogs describe the
-        // ENGINE, not the conversation, and a bare remote clear (no cancel, no
-        // respawn) must not look like the slash menu went away. Blanking them
-        // would also be the one place this branch disagreed with the app-level
-        // fields it cannot see.
+        // Carried, not reset: the menu describes the ENGINE, not the conversation, and
+        // a bare remote clear (no cancel, no respawn) must not look like it went away.
         slashCommands: s.slashCommands,
-        sdkSkillNames: s.sdkSkillNames,
         permissionMode: data?.permissionMode ?? fresh.permissionMode,
         seeded: true
       }))
@@ -1381,18 +1375,13 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     }
 
     // -----------------------------------------------------------------------
-    // App-level catalogs
+    // Per-session slash menu (engine list + shared skill catalog, built by the session)
     // -----------------------------------------------------------------------
     case 'session:slash-commands': {
+      const routingId = routingIdOf(event)
       const commands = arg<SlashCommandInfo[]>(event, 1)
-      if (!Array.isArray(commands)) return state
-      return { ...state, slashCommands: commands }
-    }
-
-    case 'session:skills': {
-      const names = arg<string[]>(event, 1)
-      if (!Array.isArray(names)) return state
-      return { ...state, sdkSkillNames: names }
+      if (!routingId || !Array.isArray(commands)) return state
+      return withSession(state, routingId, () => ({ slashCommands: commands }))
     }
 
     // -----------------------------------------------------------------------

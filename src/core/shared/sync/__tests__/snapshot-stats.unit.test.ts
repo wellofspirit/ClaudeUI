@@ -30,17 +30,16 @@ function session(
 ): CanonicalSessionState {
   const { fill = 0, ...rest } = patch
   const s = emptySession(id, SECRET_CWD)
+  s.slashCommands = [
+    { name: '/compact', description: 'Summarize the conversation' },
+    { name: '/review' }
+  ]
   s.messages = Array.from({ length: fill }, (_, i) => message(`${id}-m${i}`, SECRET_TEXT))
   return { ...s, seeded: true, ...rest }
 }
 
 function fixture(): CanonicalState {
   const state = emptyCanonicalState()
-  state.slashCommands = [
-    { name: '/compact', description: 'Summarize the conversation' },
-    { name: '/review' }
-  ]
-  state.sdkSkillNames = ['skill-a', 'skill-b']
   state.customTitles = { live1: SECRET_TITLE }
   state.settings = { theme: 'dark' }
   state.sessions = {
@@ -132,10 +131,8 @@ describe('describeSnapshot', () => {
     ])
   })
 
-  it('prices the slashCommands/sdkSkillNames copy repeated in every entry', () => {
-    const perEntry =
-      JSON.stringify(snapshot.sessions.live1.slashCommands).length +
-      JSON.stringify(snapshot.sessions.live1.sdkSkillNames).length
+  it('prices the per-session slashCommands lists', () => {
+    const perEntry = JSON.stringify(snapshot.sessions.live1.slashCommands).length
     expect(stats.slashRepeat).toEqual({ perEntry, entries: 3, total: perEntry * 3 })
   })
 

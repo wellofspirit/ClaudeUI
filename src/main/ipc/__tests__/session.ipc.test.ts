@@ -207,14 +207,6 @@ vi.mock('../../../core/services/claude-mcp', () => ({
   writeDisabledMcpServers: vi.fn()
 }))
 
-vi.mock('../../../core/services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => [])
-}))
-
-vi.mock('../../../core/services/custom-command-scanner', () => ({
-  scanCustomCommands: vi.fn(async () => [])
-}))
-
 vi.mock('../../../core/services/delete-session-files', () => ({
   deleteSessionFiles: vi.fn(async () => {}),
   deleteProjectFiles: vi.fn(async () => {})

@@ -32,7 +32,7 @@
  * degrades to exactly that.
  */
 
-import { loadSettings, loadSessionConfig, loadSlashCommands } from './ui-config'
+import { loadSettings, loadSessionConfig } from './ui-config'
 import { pruneOrphanClaudeSessionMeta } from './session-meta-prune'
 import { seedLinkState } from './session-links'
 import { interruptStaleDispatchTargets } from './dispatch-target-ledger'
@@ -267,10 +267,8 @@ export function resetDirectoryRefreshStateForTests(): void {
  * Seed the app-level snapshot fields from disk, once at boot.
  *
  * Mirrors `hydrateConfigFromDisk` in the renderer store, field for field, minus
- * everything that is per-client view state. `sdkSkillNames` is deliberately NOT
- * seeded: the renderer does not populate it at boot either (it only ever arrives
- * on `session:skills`, at engine spawn), so seeding it would make canonical
- * DISAGREE with the replica it is about to become the source for.
+ * everything that is per-client view state. The slash menu is per session now and
+ * arrives on that session's `session:slash-commands`, so nothing about it is seeded.
  */
 export async function seedCanonicalAppState(): Promise<void> {
   try {
@@ -329,14 +327,6 @@ export async function seedCanonicalAppState(): Promise<void> {
     })
   } catch (err) {
     logger.warn(LOG_SOURCE, 'auto-mode gate seed failed', err)
-  }
-
-  try {
-    // The cached command list the renderer loads with `loadSlashCommands()`.
-    // A live engine replaces it wholesale on `session:slash-commands` at spawn.
-    syncCore.setAppState({ slashCommands: loadSlashCommands() })
-  } catch (err) {
-    logger.warn(LOG_SOURCE, 'slash-command seed failed', err)
   }
 
   await refreshCanonicalDirectories()

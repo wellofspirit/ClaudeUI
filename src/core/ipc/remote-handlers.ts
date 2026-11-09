@@ -54,7 +54,6 @@ import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
 import { getWorkspaceTrust } from '../services/claude-workspace-trust'
 import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
-import { scanCustomCommands } from '../services/custom-command-scanner'
 import { usageFetcher } from '../services/usage-fetcher'
 import { chatgptRateLimits } from '../shared-providers/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
@@ -1042,16 +1041,11 @@ export function registerRemoteHandlers(
     handler: async (id: string) => sharedProviderService.listProviderModels(id)
   })
   handleRemote({
-    channel: 'config:scan-custom-commands',
-    capability: 'config',
-    kind: 'query',
-    handler: async (cwd: string) => scanCustomCommands(cwd)
-  })
-  handleRemote({
     channel: 'config:load-skill-details',
     capability: 'config',
     kind: 'query',
-    handler: async (cwd: string) => loadSkillDetails(manager, cwd)
+    handler: async (routingId: string | null, cwd: string) =>
+      loadSkillDetails(manager, routingId, cwd)
   })
 
   // Claude permissions — full parity with the desktop handler (same

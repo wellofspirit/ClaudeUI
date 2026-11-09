@@ -124,7 +124,7 @@ Every feature must express each interaction as exactly one of these. There is no
 
 ### Measuring a full sync
 
-A `sync-full` is all of canonical state in one frame, and what it costs in a real install is measured, not guessed: every line is logged under one source, `SyncStats` (`core/services/sync-stats-log.ts`, `core/shared/sync/snapshot-stats.ts`, `sync-timing.ts`). The host writes one line per full answer on either transport — WS: `sync-full sent: transport=ws reason=… lastSeq=… seq=… ringOldest=… epochMatch=… e2e=… frameBytes=… encodeMs=… bufferedAmount=…` (`frameBytes` is the exact wire size, the base64 length under E2E; `warn` and "large sync-full sent" from 5 MB up), desktop port: `…transport=port … postMs=…` — and nothing for a catchup. Those lines cost nothing, so they are always built; the breakdown (`snapshot breakdown: …` — bytes by directories / settings / per session by messages, subagent transcripts, item streams, the `slashCommands` copy repeated in every entry, the top 5 sessions by routing id) serializes the snapshot a second time and is built only while the source is enabled at `info`, from the send callback after the frame line (so it never precedes the frame, on E2E either). The clients relay one `client sync-full applied: … hydrateMs=… totalMs=…` line each (the desktop's at `warn` past 2 s): the desktop through `window.api.logRelay` into the host log; the web client mirrors its line to the **browser console** (its `api.logRelay` has no host to write to) and reports the same four numbers to the host through the remote-only `sync:report-timing` query (`core/services/sync-timing-report.ts`), where the HOST formats the line (`transport=web`, same `formatSyncTiming` as the desktop's — but always written at `info`, with only the `slow ` prefix marking a total past 2 s, so a client cannot pick the log level) — numbers only, validated, 6 reports a minute per connection, nothing logged for anything malformed or over budget; see [security.md](security.md) §Capability grants.
+A `sync-full` is all of canonical state in one frame, and what it costs in a real install is measured, not guessed: every line is logged under one source, `SyncStats` (`core/services/sync-stats-log.ts`, `core/shared/sync/snapshot-stats.ts`, `sync-timing.ts`). The host writes one line per full answer on either transport — WS: `sync-full sent: transport=ws reason=… lastSeq=… seq=… ringOldest=… epochMatch=… e2e=… frameBytes=… encodeMs=… bufferedAmount=…` (`frameBytes` is the exact wire size, the base64 length under E2E; `warn` and "large sync-full sent" from 5 MB up), desktop port: `…transport=port … postMs=…` — and nothing for a catchup. Those lines cost nothing, so they are always built; the breakdown (`snapshot breakdown: …` — bytes by directories / settings / per session by messages, subagent transcripts, item streams, each entry's own `slashCommands`, the top 5 sessions by routing id) serializes the snapshot a second time and is built only while the source is enabled at `info`, from the send callback after the frame line (so it never precedes the frame, on E2E either). The clients relay one `client sync-full applied: … hydrateMs=… totalMs=…` line each (the desktop's at `warn` past 2 s): the desktop through `window.api.logRelay` into the host log; the web client mirrors its line to the **browser console** (its `api.logRelay` has no host to write to) and reports the same four numbers to the host through the remote-only `sync:report-timing` query (`core/services/sync-timing-report.ts`), where the HOST formats the line (`transport=web`, same `formatSyncTiming` as the desktop's — but always written at `info`, with only the `slow ` prefix marking a total past 2 s, so a client cannot pick the log level) — numbers only, validated, 6 reports a minute per connection, nothing logged for anything malformed or over budget; see [security.md](security.md) §Capability grants.
 
 **A chunked full sync is still ONE line.** When the web client opts in (`sync` with `chunked`; ADR-102 amendment) the host answers with `sync-full-chunk` frames instead of one `sync-full`, and logs a single `sync-full sent: …` line for the whole transfer with ` chunks=N` appended. `frameBytes` is then the SUM of the chunk frames' wire bytes (each chunk's own JSON wrapper and the re-escaping of its `data` included), `encodeMs` is the one stringify plus every chunk's own encode, and the `large` threshold is judged on that total. Under E2E `bufferedAmount` is read after the LAST chunk, so it reads lower than a single frame's did — the socket drains while the earlier chunks are encrypted one after another, not a regression. A transfer whose socket goes away mid-way logs nothing: not every chunk reached `ws.send`. The client's relayed numbers are the same sums (`frameChars` = Σ over the chunk frames, `decodeMs` = Σ decrypt/wrapper-parse + join + final parse). The progress bar under the overlay counts JSON characters (≈ MB), not wire bytes — E2E base64 is ~1.37× the characters.
 
@@ -286,8 +286,8 @@ Zustand in one `set()`. Consequences:
   interpretation of every replicated channel. What survives in the hook is the
   three things a reducer cannot own: the `canonical: false` transient channels, the
   host-local ones, and the SIDE-EFFECT halves of the old handlers (notifications,
-  attention marks, the disk load a resumed `session:created` triggers, the
-  custom-command re-scan) re-attached as **post-apply observers**.
+  attention marks, the disk load a resumed `session:created` triggers)
+  re-attached as **post-apply observers**.
 - **The projection is identity-diffed.** `applyEvent` is persistent, so an item delta
   rebuilds one session entry and writes nothing app-level.
   Without the diff every event would re-write `settings`, the registry config and
@@ -419,7 +419,7 @@ hydration:
   genuinely core-written now.
 - **`settings`, the session registry (`recentSessionIds`/`pinnedSessionIds`/
   `customTitles`/`worktreeInfoMap`/`hiddenSessions`/`hiddenProjects`/`sessionEngines`),
-  `autoModeDisabledBySettings`, `slashCommands`** — files every client used to read for
+  `autoModeDisabledBySettings`** — files every client used to read for
   itself, plus the session link tables (origin + `grouped`) (`sessionLinks`/`sessionRefs`, from SQLite via
   `seedLinkState`, slice 1b). `services/sync-seed.ts` seeds them from the same readers the renderer store
   uses, at the same point in boot. Without it, a phone connecting to a freshly-booted
@@ -743,12 +743,6 @@ background reconnect catches up without a `sync-full`.
   pre-spawn session lives only in its creating client's replica, so the echo the earlier
   design assumed does not exist), so a pre-spawn variant pick still reaches no other
   client.
-- **A zero-session `sync-full` cannot carry `slashCommands` / `sdkSkillNames`.**
-  `SyncCore.setAppState` seeds them app-level at boot, but `FullStateSnapshot` has no
-  app-level field — `toSnapshot` fans the one list into every PER-SESSION entry — so a
-  client that connects before any session exists receives neither. Surfaced concretely
-  by 4d's windowless smoke (which asserts the seed against canonical instead). Closing
-  it is a wire change, which phase 4 excluded by its non-goals.
 - **`session:rekey` survives as a main-side no-op shim** for phone bundles cached before
   4c stopped clients from invoking it. Removable once those are no longer a concern.
 

@@ -46,7 +46,6 @@ vi.mock('../../../core/opencode/opencode-spawn-prep', () => ({
 vi.mock('../../../core/pi/pi-spawn-prep', () => ({
   piSpawnPrep: vi.fn(async (model?: string) => ({ resolvedModel: model }))
 }))
-vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/claude-settings', () => ({ saveCleanupPeriodDays: vi.fn() }))
 vi.mock('../../../core/services/ui-config', () => ({
   loadEngineConfig: () => ({}),

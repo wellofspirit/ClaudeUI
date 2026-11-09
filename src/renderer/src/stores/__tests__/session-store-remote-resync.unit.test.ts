@@ -69,8 +69,7 @@ function baseSnapshotSession(routingId: string): FullStateSnapshot['sessions'][s
     thinkingMode: 'adaptive',
     reasoningVariant: null,
     statusLine: null,
-    slashCommands: [],
-    sdkSkillNames: []
+    slashCommands: []
   }
 }
 

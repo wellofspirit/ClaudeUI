@@ -805,9 +805,9 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     args: ['local', 'pi', 'local-1']
   },
 
-  // The three singletons. `saveSlashCommands` is the cache write
-  // `useClaudeEvents` makes when cli.js announces the command list (plain
-  // handler, bare invoke). The other two are safeHandler-wrapped and both act on
+  // The singletons. `saveSlashCommands` is the slash-menu cache write (plain
+  // handler, bare invoke); `loadSkillDetails` addresses a session by routing id.
+  // The other two are safeHandler-wrapped and both act on
   // the HOST rather than this browser — `proxy:test-connection` dials through the
   // host's proxy settings, `usage:refresh-prices` refreshes the host's price
   // cache — which is exactly why running them there is the right answer for a
@@ -816,6 +816,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     method: 'saveSlashCommands',
     channel: 'config:save-slash-commands',
     args: [[{ name: 'review', description: 'Review the diff' }]]
+  },
+  {
+    method: 'loadSkillDetails',
+    channel: 'config:load-skill-details',
+    args: ['route-1', '/repo']
   },
   {
     method: 'testProxyConnection',

@@ -46,7 +46,6 @@ import {
 import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
 import { getWorkspaceTrust } from '../services/claude-workspace-trust'
 import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
-import { scanCustomCommands } from '../services/custom-command-scanner'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import { gitServiceManager } from '../services/git-service'
 import { gitWatchRegistry } from '../services/git-watch-registry'
@@ -326,7 +325,6 @@ const SESSION_IPC_CHANNELS = [
   'config:save-sessions',
   'config:load-slash-commands',
   'config:save-slash-commands',
-  'config:scan-custom-commands',
   'config:load-skill-details',
   'config:load-opencode-settings',
   'config:save-opencode-settings',
@@ -1232,16 +1230,10 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     handler: () => loadSlashCommands()
   })
   handleIpc({
-    channel: 'config:scan-custom-commands',
-    capability: 'config',
-    kind: 'query',
-    handler: (cwd: string) => scanCustomCommands(cwd)
-  })
-  handleIpc({
     channel: 'config:load-skill-details',
     capability: 'config',
     kind: 'query',
-    handler: (cwd: string) => loadSkillDetails(manager, cwd)
+    handler: (routingId: string | null, cwd: string) => loadSkillDetails(manager, routingId, cwd)
   })
   // Cheap, deterministic engine availability check (the harness resolver's
   // answer, shared with the remote handler). Backs the renderer's "is this

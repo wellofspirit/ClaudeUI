@@ -2163,8 +2163,8 @@ interface SessionAPI {
   deleteProject(projectKey: string): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
-  scanCustomCommands(cwd: string): Promise<string[]>
-  loadSkillDetails(cwd: string): Promise<SkillInfo[]>
+  /** The session's own skills (its engine's plus the shared catalog); catalog for `cwd` with no live session. */
+  loadSkillDetails(routingId: string | null, cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   /**
    * Confirm the quit. `removeWorktreePaths`: worktree directories to delete AFTER the

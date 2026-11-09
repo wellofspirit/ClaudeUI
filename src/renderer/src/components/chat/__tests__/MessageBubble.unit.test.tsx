@@ -112,7 +112,8 @@ beforeEach(() => {
         btwQuestion: null,
         btwResponse: null,
         btwLoading: false,
-        authRequired: null
+        authRequired: null,
+        slashCommands: []
       }
     },
     settings: {

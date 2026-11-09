@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect } from 'react'
 import type { SkillInfo, SkillSource } from '../../../../shared/types'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
+import { SKILL_SOURCE_ORDER, claudeOnlyNote, skillTags } from './skill-display'
 
 interface SkillGroup {
   source: SkillSource
@@ -8,8 +9,6 @@ interface SkillGroup {
   pathHint: string
   skills: SkillInfo[]
 }
-
-const SOURCE_ORDER: SkillSource[] = ['managed', 'project', 'user', 'plugin', 'engine', 'bundled']
 
 const SOURCE_META: Record<SkillSource, { label: string; icon: string }> = {
   project: { label: 'PROJECT', icon: '\u26A1' },
@@ -25,7 +24,7 @@ function sourcePathHint(source: SkillSource, cwd: string | null): string {
     case 'project':
       return cwd ? `${cwd}/.claude/skills/` : '.claude/skills/'
     case 'user':
-      return '~/.claude/skills/'
+      return '~/.claude/skills/ and commands/'
     case 'plugin':
       return 'Installed plugins'
     case 'bundled':
@@ -70,6 +69,26 @@ function SourceBadge({
   )
 }
 
+function TagList({ skill }: { skill: SkillInfo }): React.JSX.Element | null {
+  const tags = skillTags(skill)
+  if (tags.length === 0) return null
+  return (
+    <span className="flex items-center gap-1 shrink-0">
+      {tags.map((t) => (
+        <span
+          key={t.id}
+          data-testid="SkillsDialog.tag"
+          data-id={t.id}
+          title={t.title}
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-bg-secondary text-text-muted border border-border"
+        >
+          {t.label}
+        </span>
+      ))}
+    </span>
+  )
+}
+
 function SkillRow({
   skill,
   selected,
@@ -100,6 +119,7 @@ function SkillRow({
         >
           {displayName}
         </span>
+        <TagList skill={skill} />
       </div>
       {skill.description && (
         <div className="text-[11px] text-text-muted truncate mt-0.5 pl-[22px]">
@@ -186,7 +206,7 @@ export function SkillsDialogView({
       list.push(s)
       map.set(s.source, list)
     }
-    return SOURCE_ORDER.filter((src) => map.has(src)).map((src) => ({
+    return SKILL_SOURCE_ORDER.filter((src) => map.has(src)).map((src) => ({
       source: src,
       label: SOURCE_META[src].label,
       pathHint: sourcePathHint(src, cwd),
@@ -333,10 +353,19 @@ export function SkillsDialogView({
                       source={selectedSkill.source}
                       pluginName={selectedSkill.pluginName}
                     />
+                    <TagList skill={selectedSkill} />
                   </div>
                   {selectedSkill.description && (
                     <p className="text-[11px] text-text-secondary mb-1.5">
                       {selectedSkill.description}
+                    </p>
+                  )}
+                  {claudeOnlyNote(selectedSkill) && (
+                    <p
+                      data-testid="SkillsDialog.claudeOnlyNote"
+                      className="text-[11px] text-amber-400 mb-1.5"
+                    >
+                      {claudeOnlyNote(selectedSkill)}
                     </p>
                   )}
                   {selectedSkill.path && (

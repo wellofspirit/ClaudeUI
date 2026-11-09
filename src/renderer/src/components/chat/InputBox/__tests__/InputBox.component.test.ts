@@ -2798,7 +2798,6 @@ describe('InputBox FC — billingType cost gating (ROADMAP #3)', () => {
         models: []
       }
     ])
-    app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
     app.bridge.ipcMain.handle('file:list-dir', () => [])
 
     useSessionStore.setState({
@@ -3208,7 +3207,6 @@ describe('InputBox FC — pi model fallback (C1 fix)', () => {
 
     app.bridge.ipcMain.handle('session:get-models', () => [])
     app.bridge.ipcMain.handle('session:get-engine-models', () => [])
-    app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
     app.bridge.ipcMain.handle('file:list-dir', () => [])
 
     useSessionStore.setState({

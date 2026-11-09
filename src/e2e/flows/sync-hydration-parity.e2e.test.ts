@@ -184,8 +184,6 @@ beforeEach(async () => {
     customTitles: {},
     worktreeInfoMap: {},
     sessionEngines: {},
-    slashCommands: [],
-    sdkSkillNames: [],
     // The replica derives this from the snapshot's settings (ADR-050),
     // and `createNewSession` seeds a new session's mode from it — so a test that
     // hydrates a snapshot would otherwise change the NEXT test's baseline mode.

@@ -3,7 +3,7 @@ import type { SessionManager } from '../services/session-manager'
 import { emitEvent } from '../services/sync-host'
 import { syncCore } from '../services/sync-host'
 import { seedCanonicalTranscript } from './seed-canonical-transcript'
-import { loadEngineConfig } from '../services/ui-config'
+import { loadEngineConfig, loadSlashCommands } from '../services/ui-config'
 import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 // Side-effect: guarantees the spawn-prep + session-factory registries are
 // populated wherever session:create runs (mirrors session-manager.ts's own
@@ -245,6 +245,17 @@ export async function prepareAndCreateSession(
       ...(createdBy ? { createdBy } : {})
     }
   ])
+  // A Claude session reports its commands only when cli.js starts (first prompt), so
+  // until then its menu is the last list a Claude session reported (the cache
+  // `ClaudeSession` writes). Claude's alone: another engine's list never fits.
+  if (resolvedEngineId === 'claude') {
+    try {
+      const cached = loadSlashCommands()
+      if (cached.length > 0) emitEvent('session:slash-commands', [routingId, cached])
+    } catch {
+      /* a missing cache only leaves the menu empty until the first turn */
+    }
+  }
   // A resumed session may have had items held for it while it was cold (slice 1a,
   // keyed by its engine session id): its replicas learn the count at birth.
   if (resumeSessionId) {

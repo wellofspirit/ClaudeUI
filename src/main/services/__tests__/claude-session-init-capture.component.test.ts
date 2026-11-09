@@ -34,7 +34,13 @@ import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-win
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 import type { StatusLineData } from '../../../shared/types'
 
-const { mockQuery } = vi.hoisted(() => ({ mockQuery: vi.fn() }))
+const { mockQuery, mockCatalog } = vi.hoisted(() => ({
+  mockQuery: vi.fn(),
+  mockCatalog: vi.fn((): { entries: unknown[]; skipped: unknown[] } => ({
+    entries: [],
+    skipped: []
+  }))
+}))
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
@@ -65,6 +71,9 @@ vi.mock('../../../core/services/ui-config', () => ({
   saveSlashCommands: vi.fn(),
   loadEngineConfig: vi.fn(() => ({}))
 }))
+vi.mock('../../../core/services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: mockCatalog
+}))
 vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
   readDisabledMcpServers: vi.fn(() => [])
@@ -73,7 +82,6 @@ vi.mock('../../../core/services/session-history', () => ({
   computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
   fallbackBlockText: vi.fn(() => '')
 }))
-vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 // NOTE: `context-window` is deliberately NOT mocked (the queue test stubs it to
 // a flat 200000). The whole point here is the real alias → window resolution.
@@ -281,6 +289,44 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
     const skills = sent.find(([c]) => c === 'session:skills')
     expect(skills).toBeDefined()
     expect(skills![2]).toEqual(['unslop', 'dataviz'])
+  })
+
+  it('adds the catalog user-invocable names cli.js lacks to the slash list', async () => {
+    const entry = (name: string, userInvocable: boolean, description = ''): unknown => ({
+      name,
+      description,
+      userInvocable
+    })
+    mockCatalog.mockReturnValue({
+      entries: [
+        entry('review', true, 'dup of a cli.js name'),
+        entry('deploy', true, 'Ship it'),
+        entry('hidden', false)
+      ],
+      skipped: []
+    })
+    const { sent, handle } = await startSession('r-init-catalog')
+
+    handle.emit({
+      type: 'system',
+      subtype: 'init',
+      session_id: 's-init-3',
+      model: 'claude-opus-5[1m]',
+      slash_commands: ['review', 'compact'],
+      skills: [],
+      mcp_servers: [],
+      uuid: 'u3'
+    })
+
+    await vi.waitFor(() => expect(sent.some(([c]) => c === 'session:slash-commands')).toBe(true))
+    const slash = sent.find(([c]) => c === 'session:slash-commands')!
+    // cli.js's own entries first and winning the clash; only invocable catalog names are added.
+    expect(slash[2]).toEqual([
+      { name: '/review' },
+      { name: '/compact' },
+      { name: '/deploy', description: 'Ship it' }
+    ])
+    mockCatalog.mockReturnValue({ entries: [], skipped: [] })
   })
 
   it('re-captures the resolved model on a LATER init, resizing the window', async () => {

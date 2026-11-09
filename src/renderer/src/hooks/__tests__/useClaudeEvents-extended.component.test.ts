@@ -67,10 +67,9 @@ beforeEach(async () => {
   // otherwise carry the previous test's sessions into this one.
   app = await bootTestApp()
   resetFactoryCounter()
-  // The hook's own `saveSlashCommands` / `confirmQuit` assertions need spies the
+  // The hook's own `confirmQuit` assertions need spies the
   // bridge-backed api does not provide.
   Object.assign(window.api, {
-    saveSlashCommands: vi.fn(),
     confirmQuit: vi.fn(),
     ackQuitPrompt: vi.fn(() => Promise.resolve())
   })
@@ -520,60 +519,29 @@ describe('useClaudeEvents extended component tests', () => {
   })
 
   describe('session:slash-commands', () => {
-    it('updates slashCommands in store', () => {
+    it('lands on the emitting session only', () => {
+      useSessionStore.getState().createNewSession('route-1', '/test')
+      useSessionStore.getState().createNewSession('route-2', '/test')
       const commands = [
-        { name: 'review', description: 'Review code', content: 'Please review' },
-        { name: 'test', description: 'Run tests', content: 'Run the tests' }
+        { name: '/review', description: 'Review code' },
+        { name: '/test', description: 'Run tests' }
       ]
 
-      app.emit('session:slash-commands', 'ignored', commands)
+      app.emit('session:slash-commands', 'route-1', commands)
 
-      expect(useSessionStore.getState().slashCommands).toEqual(commands)
+      const { sessions } = useSessionStore.getState()
+      expect(sessions['route-1'].slashCommands).toEqual(commands)
+      expect(sessions['route-2'].slashCommands).toEqual([])
     })
 
-    it('calls window.api.saveSlashCommands with the received commands', () => {
-      const commands = [{ name: 'deploy', description: 'Deploy', content: 'Deploy to prod' }]
+    it('replaces the list on a subsequent event', () => {
+      useSessionStore.getState().createNewSession('route-1', '/test')
+      app.emit('session:slash-commands', 'route-1', [{ name: '/old-cmd' }])
+      app.emit('session:slash-commands', 'route-1', [{ name: '/new-cmd' }])
 
-      app.emit('session:slash-commands', 'ignored', commands)
-
-      expect(window.api.saveSlashCommands as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
-        commands
-      )
-    })
-
-    it('replaces slash commands on subsequent event', () => {
-      app.emit('session:slash-commands', 'ignored', [
-        { name: 'old-cmd', description: 'old', content: 'old' }
+      expect(useSessionStore.getState().sessions['route-1'].slashCommands).toEqual([
+        { name: '/new-cmd' }
       ])
-      app.emit('session:slash-commands', 'ignored', [
-        { name: 'new-cmd', description: 'new', content: 'new' }
-      ])
-
-      const { slashCommands } = useSessionStore.getState()
-      expect(slashCommands).toHaveLength(1)
-      expect(slashCommands[0].name).toBe('new-cmd')
-    })
-  })
-
-  describe('session:skills', () => {
-    it('updates sdkSkillNames in store', () => {
-      app.emit('session:skills', 'ignored', ['bundle-analyzer', 'patch-readme'])
-
-      expect(useSessionStore.getState().sdkSkillNames).toEqual(['bundle-analyzer', 'patch-readme'])
-    })
-
-    it('replaces previous skill names on update', () => {
-      app.emit('session:skills', 'ignored', ['skill-a', 'skill-b'])
-      app.emit('session:skills', 'ignored', ['skill-c'])
-
-      expect(useSessionStore.getState().sdkSkillNames).toEqual(['skill-c'])
-    })
-
-    it('sets empty array when no skills provided', () => {
-      app.emit('session:skills', 'ignored', ['skill-a'])
-      app.emit('session:skills', 'ignored', [])
-
-      expect(useSessionStore.getState().sdkSkillNames).toEqual([])
     })
   })
 

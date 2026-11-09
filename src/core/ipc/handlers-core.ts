@@ -3,7 +3,8 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
-import { scanSkills } from '../services/skill-scanner'
+import { resolveClaudeSkillCatalog } from '../services/claude-skill-catalog'
+import { claudeSkillEntryToInfo } from '../services/claude-skill-info'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
 import { setWorkspaceTrust } from '../services/claude-workspace-trust'
 import { claudeProjectKey } from '../services/claude-config-paths'
@@ -46,6 +47,7 @@ import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
 import { liveProjectMembers, projectScope } from '../../shared/worktree-fold'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
+import type { SkillInfo } from '../../shared/types'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 import { normalizeContextPressure } from '../../shared/context-pressure'
 import { deleteSessionMeta, getSessionMeta } from '../services/db'
@@ -951,18 +953,20 @@ export function setCleanupPeriod(manager: SessionManager, days: number): void {
   })
 }
 
-export function loadSkillDetails(manager: SessionManager, cwd: string) {
-  // Delegate skill discovery to an active session for this cwd via the neutral
-  // ISession.discoverSkills seam. Preserve historical precedence: an opencode
-  // session on this cwd wins over Claude. With no active session (or only a
-  // Claude one) fall back to the Claude scanner — identical to
-  // ClaudeSession.discoverSkills, so behavior is unchanged.
-  let delegate: ISession | undefined
-  manager.forEach((session) => {
-    if (session.cwd !== cwd) return
-    if (!delegate || session.engineId === 'opencode') delegate = session
-  })
-  return delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)
+/**
+ * The Skills dialog's list for one session: that session's own `discoverSkills` (its
+ * engine's skills plus the shared catalog, `claudeOnly` filled in for non-Claude
+ * engines). With no live session under `routingId` (the dialog opened on a folder or
+ * a cold session) it is the catalog for `cwd`, which is what a Claude session there loads.
+ */
+export async function loadSkillDetails(
+  manager: SessionManager,
+  routingId: string | null | undefined,
+  cwd: string
+): Promise<SkillInfo[]> {
+  const session = routingId ? manager.get(routingId) : undefined
+  if (session?.discoverSkills) return session.discoverSkills(session.cwd || cwd)
+  return resolveClaudeSkillCatalog(cwd).entries.map((e) => claudeSkillEntryToInfo(e))
 }
 
 /**

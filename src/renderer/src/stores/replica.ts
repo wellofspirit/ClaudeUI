@@ -381,11 +381,6 @@ function persistRekeyedRegistry(newId: string): void {
  *    about (`loadHistoricalSession` reads disk, not canonical). Replacing the map
  *    would drop it and route the next prompt at a session that no longer exists.
  *    Snapshot entries still win where both sides know the session.
- *  - **App-level catalogs survive an empty snapshot.** `slashCommands` /
- *    `sdkSkillNames` ride the wire per SESSION, so a snapshot with no sessions
- *    cannot carry them at all (`shared/sync/state.ts` records the gap). Keeping
- *    the current value is what stops a cold desktop boot from blanking the slash
- *    menu that `hydrateConfigFromDisk` just filled in.
  *  - **A transcript the host did not carry** (`seeded: false`, ADR-087 §2). The
  *    entry arrives empty, and the sidebar reloads a session from disk only when the
  *    store marks it `evicted`, so every such session is marked — the same flag a
@@ -426,11 +421,7 @@ export function hydrateReplica(snapshot: FullStateSnapshot, isResync = false): H
   }
   const next: CanonicalState = {
     ...restored,
-    sessions,
-    slashCommands:
-      restored.slashCommands.length > 0 ? restored.slashCommands : canonical.slashCommands,
-    sdkSkillNames:
-      restored.sdkSkillNames.length > 0 ? restored.sdkSkillNames : canonical.sdkSkillNames
+    sessions
   }
   commit(next, { force: true, activeSessionId })
   markViewEvicted(dropped.filter((id) => id !== keptLocalId))
@@ -819,8 +810,6 @@ function buildPatch(
   if (force || prev.worktreeInfoMap !== next.worktreeInfoMap) {
     patch.worktreeInfoMap = next.worktreeInfoMap
   }
-  if (force || prev.slashCommands !== next.slashCommands) patch.slashCommands = next.slashCommands
-  if (force || prev.sdkSkillNames !== next.sdkSkillNames) patch.sdkSkillNames = next.sdkSkillNames
   if (force || prev.autoModeDisabledBySettings !== next.autoModeDisabledBySettings) {
     patch.autoModeDisabledBySettings = next.autoModeDisabledBySettings
   }
@@ -953,6 +942,7 @@ function projectSession(
     reasoningVariant: c.reasoningVariant,
     statusLine: c.statusLine,
     metering: c.metering,
+    slashCommands: c.slashCommands,
     sdkActive: c.sdkActive,
     selectedEngineId: c.selectedEngineId,
     selectedModel: c.selectedModel,

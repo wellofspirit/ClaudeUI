@@ -73,8 +73,8 @@ export interface CanonicalSessionState {
   statusLine: StatusLineData | null
   /** 4a addition (sanctioned): without it every resync dropped metering. */
   metering: MeteringSnapshot | null
+  /** This session's own slash menu (its engine's list plus the shared Claude skill catalog). */
   slashCommands: SlashCommandInfo[]
-  sdkSkillNames: string[]
   sdkActive: boolean
   selectedEngineId: EngineId
   selectedModel: string
@@ -126,13 +126,6 @@ export interface CanonicalState {
   sessionLinks: Record<string, SessionLinkInfo>
   /** sidebar id → ref for every session a link names (slice 1b). */
   sessionRefs: Record<string, string>
-  /**
-   * App-level lists the wire snapshot replicates PER SESSION (every session
-   * entry carries the same list). Held once here and fanned out by
-   * {@link toSnapshot}, which is what the renderer's snapshot builder does too.
-   */
-  slashCommands: SlashCommandInfo[]
-  sdkSkillNames: string[]
 }
 
 /** Capabilities a session is assumed to have before its first status event. */
@@ -173,7 +166,6 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
     statusLine: null,
     metering: null,
     slashCommands: [],
-    sdkSkillNames: [],
     sdkActive: false,
     selectedEngineId: 'claude',
     selectedModel: 'default',
@@ -197,9 +189,7 @@ export function emptyCanonicalState(): CanonicalState {
     hiddenSessions: [],
     hiddenProjects: [],
     sessionLinks: {},
-    sessionRefs: {},
-    slashCommands: [],
-    sdkSkillNames: []
+    sessionRefs: {}
   }
 }
 
@@ -219,13 +209,6 @@ export function emptyCanonicalState(): CanonicalState {
  * snapshot-fed session is never "still waiting for history", which would make a
  * restored core skip the comparator and re-seed over live content.
  *
- * One deliberate asymmetry, benign:
- *
- *  - **`slashCommands` / `sdkSkillNames`** are app-level here but the wire
- *    replicates them per session (every entry carries the same list, an as-built
- *    quirk `toSnapshot` preserves). They come back from the first entry, so a
- *    snapshot with NO sessions cannot carry them at all — an honest gap in the
- *    wire shape, recorded in docs/architecture/sync-channels.md.
  */
 export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
   const sessions: Record<string, CanonicalSessionState> = {}
@@ -253,13 +236,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       reasoningVariant: s.reasoningVariant ?? null,
       statusLine: s.statusLine,
       metering: s.metering ?? null,
-      // Empty, NOT `s.slashCommands` — canonical holds these once, app-level
-      // (below); the per-session copies exist only because the wire shape fans
-      // the one list into every entry, and no reducer branch ever writes them.
-      // Restoring them per session would make a restored state disagree with the
-      // live one it is supposed to equal.
-      slashCommands: [],
-      sdkSkillNames: [],
+      slashCommands: s.slashCommands ?? [],
       sdkActive: s.sdkActive ?? false,
       selectedEngineId: s.selectedEngineId ?? 'claude',
       selectedModel: s.selectedModel ?? 'default',
@@ -270,7 +247,6 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
       seeded: s.seeded ?? true
     }
   }
-  const first = Object.values(snapshot.sessions ?? {})[0]
   return {
     sessions,
     directories: snapshot.directories ?? [],
@@ -285,9 +261,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
     hiddenSessions: snapshot.hiddenSessions ?? [],
     hiddenProjects: snapshot.hiddenProjects ?? [],
     sessionLinks: snapshot.sessionLinks ?? {},
-    sessionRefs: snapshot.sessionRefs ?? {},
-    slashCommands: first?.slashCommands ?? [],
-    sdkSkillNames: first?.sdkSkillNames ?? []
+    sessionRefs: snapshot.sessionRefs ?? {}
   }
 }
 
@@ -323,8 +297,7 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
       reasoningVariant: s.reasoningVariant,
       statusLine: s.statusLine,
       metering: s.metering ?? undefined,
-      slashCommands: state.slashCommands,
-      sdkSkillNames: state.sdkSkillNames,
+      slashCommands: s.slashCommands,
       sdkActive: s.sdkActive,
       selectedEngineId: s.selectedEngineId,
       selectedModel: s.selectedModel,

@@ -466,8 +466,8 @@ const api: ClaudeAPI = {
   deleteProject: (projectKey: string) => unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
-  scanCustomCommands: (cwd: string) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
-  loadSkillDetails: (cwd: string) => ipcRenderer.invoke('config:load-skill-details', cwd),
+  loadSkillDetails: (routingId: string | null, cwd: string) =>
+    ipcRenderer.invoke('config:load-skill-details', routingId, cwd),
 
   // Account usage (5hr / 7-day rate limits)
   fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),

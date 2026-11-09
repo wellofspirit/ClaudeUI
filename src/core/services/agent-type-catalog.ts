@@ -30,7 +30,7 @@
  * key, pi's definition (`inherit` is none), opencode's native agent and the
  * injected agents' `harness.opencode.model` (variant dropped).
  *
- * Frontmatter is parsed by `skill-scanner`'s reader (a line scanner: nothing is
+ * Frontmatter is parsed by `frontmatter.ts`'s reader (a line scanner: nothing is
  * evaluated). The files come from whatever repository the user opened, so the
  * walk is bounded in depth, count and file size, and an unreadable file is
  * skipped rather than thrown.
@@ -45,7 +45,7 @@ import { loadOpencodeModelAllowlist } from '../opencode/model-allowlist'
 import { listAgents } from '../opencode/opencode-agents'
 import { opencodeNativeAgentNames } from '../opencode/opencode-config-sources'
 import { loadPiAgentRegistry } from '../pi/pi-agent-registry'
-import { parseFrontmatter } from './skill-scanner'
+import { parseFrontmatter } from './frontmatter'
 
 const MAX_DEPTH = 3
 const MAX_FILES = 200
