@@ -699,6 +699,28 @@ export function resolveThinkingMode(
   return desired
 }
 
+/** The `thinking` option a Claude Code process is spawned with (see {@link claudeThinkingRequest}). */
+export type ClaudeThinkingRequest =
+  | { type: 'adaptive'; display: 'summarized' }
+  | { type: 'enabled'; display: 'summarized' }
+  | { type: 'disabled' }
+
+/**
+ * The thinking a Claude Code process is spawned with for `desired` on `model`: the mode
+ * coerced to one the model accepts, always with `display: 'summarized'`. Without it Opus 4.7+
+ * returns its thinking as a signature with no text, and a non-interactive cli.js forces a
+ * subagent's thinking to `omitted` (docs/protocol-cc/02-cli-flags.md, `--thinking-display`).
+ * A session and a dispatch target use this; an automation builds its own (with a budget).
+ */
+export function claudeThinkingRequest(
+  model: string | undefined | null,
+  desired: ThinkingMode
+): ClaudeThinkingRequest {
+  const resolved = resolveThinkingMode(model, desired)
+  if (resolved === 'disabled') return { type: 'disabled' }
+  return { type: resolved === 'adaptive' ? 'adaptive' : 'enabled', display: 'summarized' }
+}
+
 /**
  * Coerce a user-chosen effort into one the current model accepts. Unsupported
  * tiers fall back to the model's default. Returns `null` if the model has no

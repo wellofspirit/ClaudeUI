@@ -769,9 +769,36 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
 
     case 'session:messages-retracted': {
       const routingId = routingIdOf(event)
-      const data = arg<{ messageIds?: string[] }>(event, 1)
+      const data = arg<{ messageIds?: string[]; ownerToolUseId?: string }>(event, 1)
       if (!routingId) return state
       const messageIds = data?.messageIds ?? []
+      // A dispatched agent's retraction names its card: only the named messages and their
+      // streams in that card, never the session's own. Nothing named, nothing taken back.
+      const owner = data?.ownerToolUseId
+      if (owner) {
+        if (messageIds.length === 0) return state
+        return withSession(state, routingId, (s) => {
+          const bucket = s.subagentMessages[owner]
+          return {
+            itemStreams: Object.fromEntries(
+              Object.entries(s.itemStreams).filter(
+                ([, stream]) =>
+                  stream.target.ownerToolUseId !== owner ||
+                  !messageIds.includes(stream.target.messageId)
+              )
+            ),
+            itemStreamRevision: event.seq ?? 0,
+            ...(bucket
+              ? {
+                  subagentMessages: {
+                    ...s.subagentMessages,
+                    [owner]: bucket.filter((m) => !messageIds.includes(m.id))
+                  }
+                }
+              : {})
+          }
+        })
+      }
       return withSession(state, routingId, (s) => ({
         itemStreams: Object.fromEntries(
           Object.entries(s.itemStreams).filter(

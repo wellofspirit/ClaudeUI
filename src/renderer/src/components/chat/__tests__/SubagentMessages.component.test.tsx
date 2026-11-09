@@ -82,6 +82,22 @@ describe('SubagentMessages — host-injected agent messages (ADR-089 S3)', () =>
   })
 })
 
+describe('SubagentMessages — an engine notice (a Claude target’s model switch)', () => {
+  it('shows the engine’s own words verbatim, never as markdown', () => {
+    const text = "Opus 5.5's safeguards flagged this session. **Switched** to Opus 4.8."
+    const notice: ChatMessage = {
+      id: 'notice-1',
+      role: 'system',
+      content: [{ type: 'notice', text }],
+      timestamp: Date.now()
+    }
+    render(<SubagentMessages messages={[notice]} />)
+    const shown = screen.getByTestId('SubagentMessages.notice')
+    expect(shown).toHaveTextContent(text)
+    expect(shown.querySelector('strong')).toBeNull()
+  })
+})
+
 /**
  * Subagent tool-result images. A subagent's results live in
  * `subagentMessages`, outside the chat's ImageGalleryProvider, so
