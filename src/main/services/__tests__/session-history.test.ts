@@ -286,10 +286,10 @@ describe('computeTokenMetrics — context window from transcript model', () => {
   }
 
   it('sizes the window from the transcript model, ignoring the caller alias', async () => {
-    // A 1M-context model used 300k tokens → 30%. The caller passes the
-    // ambiguous "default" alias, which alone would resolve to 200K (→ 150%).
+    // A 1M-context model used 300k tokens → 30%. The caller passes a 200K
+    // model, which alone would size it at 150%.
     const file = writeTranscript([assistant('claude-opus-4-8', 300_000)])
-    const m = await computeTokenMetrics(file, 'default')
+    const m = await computeTokenMetrics(file, 'claude-sonnet-4-6')
     fs.unlinkSync(file)
     expect(m.usedPercentage).toBe(30)
   })
@@ -308,6 +308,32 @@ describe('computeTokenMetrics — context window from transcript model', () => {
     const m = await computeTokenMetrics(file, 'default')
     fs.unlinkSync(file)
     expect(m.usedPercentage).toBe(50) // 100k / 200k
+  })
+
+  // cli.js writes this after a resume or an interrupt: not an API error, main
+  // chain, `<synthetic>` model, all-zero usage (shape copied from a real
+  // transcript). As the last assistant line it used to size the window at 200K
+  // and reset the context length to 0.
+  it('ignores a trailing synthetic "No response requested." line', async () => {
+    const synthetic = {
+      type: 'assistant',
+      isApiErrorMessage: false,
+      message: {
+        model: '<synthetic>',
+        content: [{ type: 'text', text: 'No response requested.' }],
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0
+        }
+      }
+    }
+    const file = writeTranscript([assistant('claude-opus-5-5', 300_000), synthetic])
+    const m = await computeTokenMetrics(file, 'claude-sonnet-4-6')
+    fs.unlinkSync(file)
+    expect(m.contextWindow).toEqual({ used: 300_000, size: 1_000_000 })
+    expect(m.usedPercentage).toBe(30)
   })
 })
 

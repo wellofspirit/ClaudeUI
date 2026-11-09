@@ -22,7 +22,7 @@ import { isPathInside } from './path-containment'
 import { getContextWindowSize } from './context-window'
 import { findForkAnchorUuid } from './fork-anchor'
 import { resolvePiForkAnchor } from './pi-session-list'
-import { calculateCostFromTokens, normalizeModelName } from './block-usage'
+import { calculateCostFromTokens, isSyntheticModel, normalizeModelName } from './block-usage'
 import { dispatchedCostsByRouting } from './db'
 import { isDispatchTargetSession } from './dispatch-target-ledger'
 import { cwdToProjectKey } from '../../shared/project-key'
@@ -638,7 +638,14 @@ function foldTranscriptTokens(
           cachedTokens +=
             (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
 
-          if (data.isSidechain !== true && !data.isApiErrorMessage) {
+          // Synthetic lines ("No response requested." after a resume) are not
+          // API calls: their zero usage and `<synthetic>` model would size the
+          // window at 200K and reset the context length to 0.
+          if (
+            data.isSidechain !== true &&
+            !data.isApiErrorMessage &&
+            !isSyntheticModel(data.message.model)
+          ) {
             mostRecentMainChainUsage = usage
             if (typeof data.message.model === 'string') transcriptModel = data.message.model
           }
