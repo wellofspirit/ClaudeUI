@@ -15,6 +15,18 @@ export const SCOPE_DESCRIPTIONS: Record<PermissionScope, string> = {
   user: '~/.claude/settings.json (user-wide)'
 }
 
+/**
+ * Footer note, both views. Saving notifies the SessionManager's sessions the
+ * scope can affect (`savePermissionsAndNotify`): Claude rebuilds allow/ask/deny
+ * and added directories live (`apply_flag_settings({})`, plus cli.js's own file
+ * watcher), opencode re-patches its session ruleset, pi re-reads on its next
+ * gate call. Unsaved edits reach no one, hence "Saved". Not covered: a
+ * cross-engine dispatch target already running (it is not a SessionManager
+ * session), and Project directories already listed when the workspace is
+ * trusted mid-session (cli.js adds those only on its own trust path).
+ */
+export const APPLY_NOTE = 'Saved changes apply to running sessions right away'
+
 // Common rule templates for the add helper
 export const RULE_TEMPLATES = [
   { label: 'Bash command', template: 'Bash(command:*)' },

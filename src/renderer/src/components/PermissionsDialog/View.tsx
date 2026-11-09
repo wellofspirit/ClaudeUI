@@ -7,6 +7,7 @@ import type {
 } from '../../../../shared/types'
 import { FileMentionMenu } from '../chat/FileMentionMenu'
 import {
+  APPLY_NOTE,
   RULE_TEMPLATES,
   SCOPE_DESCRIPTIONS,
   SCOPE_LABELS,
@@ -583,7 +584,10 @@ export function PermissionsDialogView({
 
         {/* Footer */}
         <div className="shrink-0 flex items-center justify-between px-5 py-3 border-t border-border bg-bg-secondary/30">
-          <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+          <div
+            data-testid="PermissionsDialog.applyNote"
+            className="flex items-center gap-1.5 text-[11px] text-text-muted"
+          >
             <svg
               width="12"
               height="12"
@@ -598,7 +602,7 @@ export function PermissionsDialogView({
               <path d="M12 16v-4" />
               <path d="M12 8h.01" />
             </svg>
-            Changes take effect on next session start
+            {APPLY_NOTE}
           </div>
           <div className="flex items-center gap-2">
             {hasDirty && (
