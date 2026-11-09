@@ -196,15 +196,48 @@ describe('project location (cli.js kt port, fabricated layouts)', () => {
     expect(claudeProjectLocation(sm)).toEqual({ root: sm, worktree: false })
   })
 
-  it('bails on a backslash in the paths on POSIX', () => {
+  it('a symlinked commondir or gitdir back-pointer file bails', () => {
     if (process.platform === 'win32') return
+    for (const name of ['commondir', 'gitdir']) {
+      const main = mk(path.join(root, `main-${name}`))
+      mk(main, '.git/HEAD')
+      const wt = linkedWorktree(path.join(main, '.git'), path.join(root, `wt-${name}`))
+      const file = path.join(main, '.git', 'worktrees', 'wt1', name)
+      const real = path.join(root, `real-${name}`)
+      fs.renameSync(file, real)
+      fs.symlinkSync(real, file)
+      expect(claudeProjectLocation(wt)).toEqual({ root: wt, worktree: false })
+    }
+  })
+
+  it('a .git file whose gitdir: line is not first bails', () => {
     const main = mk(path.join(root, 'main'))
     mk(main, '.git/HEAD')
-    const wt = linkedWorktree(path.join(main, '.git'), path.join(root, 'wt'), {
-      commondir: '..\\..'
-    })
-    expect(claudeProjectLocation(wt).worktree).toBe(false)
+    const wt = linkedWorktree(path.join(main, '.git'), path.join(root, 'wt'))
+    const gitdir = path.join(main, '.git', 'worktrees', 'wt1')
+    fs.writeFileSync(path.join(wt, '.git'), `# note\ngitdir: ${gitdir}\n`)
+    expect(claudeProjectLocation(wt)).toEqual({ root: wt, worktree: false })
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'a worktree directory whose own name holds a backslash bails on POSIX',
+    () => {
+      const main = mk(path.join(root, 'main'))
+      mk(main, '.git/HEAD')
+      const wt = linkedWorktree(path.join(main, '.git'), path.join(root, 'w\\t'))
+      expect(claudeProjectLocation(wt)).toEqual({ root: wt, worktree: false })
+    }
+  )
+
+  it.runIf(process.platform === 'darwin')(
+    'a mis-cased cwd yields the on-disk spelling (realpath.native)',
+    () => {
+      const dir = mk(path.join(root, 'proj'))
+      const wrong = path.join(root, 'PROJ')
+      if (!fs.existsSync(wrong)) return // case-sensitive volume: nothing to pin
+      expect(claudeProjectLocation(wrong).root).toBe(dir)
+    }
+  )
 
   it('keys are NFC, and the key spells backslashes as slashes', () => {
     const decomposed = path.join(root, 'cafe\u0301')

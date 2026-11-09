@@ -135,8 +135,11 @@ export function PermissionsDialog({
       if (generation === trustGeneration.current) setTrust(saved)
     } catch (e) {
       if (generation !== trustGeneration.current) return
-      setTrust(previous)
       setTrustError(ipcErrorMessage(e))
+      // A remote call can fail after the host already wrote (dropped connection,
+      // timeout): show what is on disk, not a guess. Fall back to the old state.
+      const actual = await window.api.getWorkspaceTrust(cwd).catch(() => null)
+      if (generation === trustGeneration.current) setTrust(actual ?? previous)
     } finally {
       if (generation === trustGeneration.current) setTrustSaving(false)
     }

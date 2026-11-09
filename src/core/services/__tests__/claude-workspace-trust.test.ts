@@ -114,6 +114,14 @@ describe('getWorkspaceTrust', () => {
     // a plain (non-git) folder under home is fine: only home itself is excluded
     expect(getWorkspaceTrust(mkdirs(path.join(home, 'work')), env)).not.toBeNull()
   })
+
+  it('home that is itself a repo: its subfolder keys on home, home itself stays null', () => {
+    mkdirs(path.join(home, '.git'))
+    const sub = mkdirs(path.join(home, 'work', 'app'))
+    writeCfg({ projects: { [home]: { hasTrustDialogAccepted: true } } })
+    expect(getWorkspaceTrust(home, env)).toBeNull()
+    expect(getWorkspaceTrust(sub, env)).toEqual({ root: home, worktree: false, trusted: true })
+  })
 })
 
 describe('setWorkspaceTrust', () => {
@@ -198,7 +206,7 @@ describe('setWorkspaceTrust', () => {
     expect(fs.existsSync(`${cfg}.lock`)).toBe(false)
   })
 
-  it('refuses the home directory, a filesystem root and an empty cwd', async () => {
+  it('refuses the home directory (and writes nothing), a filesystem root and an empty cwd', async () => {
     for (const bad of [home, path.parse(tmp).root, '']) {
       await expect(setWorkspaceTrust(bad, true, { env, ...FAST })).rejects.toThrow(
         /cannot be recorded/
@@ -215,6 +223,17 @@ describe('setWorkspaceTrust', () => {
       )
     }
     expect(fs.existsSync(cfg)).toBe(false)
+  })
+
+  it('home that is itself a repo: a subfolder records projects[<home>]', async () => {
+    mkdirs(path.join(home, '.git'))
+    const sub = mkdirs(path.join(home, 'work'))
+    const state = await setWorkspaceTrust(sub, true, { env, ...FAST })
+    expect(state).toEqual({ root: home, worktree: false, trusted: true })
+    expect(readCfg().projects[home]).toEqual({ hasTrustDialogAccepted: true })
+    await expect(setWorkspaceTrust(home, true, { env, ...FAST })).rejects.toThrow(
+      /cannot be recorded/
+    )
   })
 
   it('honours CLAUDE_CONFIG_DIR: the file next to settings, not ~/.claude.json', async () => {
@@ -311,16 +330,14 @@ describe('withClaudeConfigLock', () => {
     expect(fs.existsSync(lockDir())).toBe(false)
   })
 
-  it('serialises two writers: both trusts land', async () => {
-    const a = repo('a')
-    const b = repo('b')
-    await Promise.all([
-      setWorkspaceTrust(a, true, { env, ...T }),
-      setWorkspaceTrust(b, true, { env, ...T })
-    ])
-    expect(readCfg().projects).toEqual({
-      [a]: { hasTrustDialogAccepted: true },
-      [b]: { hasTrustDialogAccepted: true }
-    })
+  it('a write waits for a fresh lock holder and lands once it is released', async () => {
+    const r = repo('proj')
+    fs.mkdirSync(lockDir())
+    const p = setWorkspaceTrust(r, true, { env, ...T })
+    await new Promise((res) => setTimeout(res, 40))
+    expect(fs.existsSync(cfg)).toBe(false)
+    fs.rmdirSync(lockDir())
+    await expect(p).resolves.toMatchObject({ trusted: true })
+    expect(readCfg().projects[r]).toEqual({ hasTrustDialogAccepted: true })
   })
 })

@@ -466,6 +466,40 @@ describe('PermissionsDialog FC', () => {
       expect(viewProps.trustError).not.toContain('Error invoking remote method')
     })
 
+    it('after a failed write, shows what is on disk (the host may have written before the call failed)', async () => {
+      let onDisk: WorkspaceTrust = { root: ROOT, trusted: false, worktree: false }
+      app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => onDisk)
+      setImpl = async (trusted) => {
+        onDisk = { root: ROOT, trusted, worktree: false } // the host wrote...
+        throw new Error('connection lost') // ...but the reply never arrived
+      }
+      await renderAndSettle(CWD, 'project')
+      expect(viewProps.trust?.trusted).toBe(false)
+
+      await act(async () => {
+        await viewProps.onToggleTrust()
+      })
+      expect(viewProps.trust?.trusted).toBe(true)
+      expect(viewProps.trustError).toContain('connection lost')
+      expect(viewProps.trustSaving).toBe(false)
+    })
+
+    it('after a failed write and a failed re-probe, falls back to the previous state', async () => {
+      stubTrust({ root: ROOT, trusted: false, worktree: false })
+      await renderAndSettle(CWD, 'project')
+      app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => {
+        throw new Error('probe down')
+      })
+      setImpl = async () => {
+        throw new Error('write down')
+      }
+      await act(async () => {
+        await viewProps.onToggleTrust()
+      })
+      expect(viewProps.trust?.trusted).toBe(false)
+      expect(viewProps.trustError).toContain('write down')
+    })
+
     it('drops a save that lands after the cwd changed', async () => {
       const OTHER = '/d/other'
       app.bridge.ipcMain.handle(

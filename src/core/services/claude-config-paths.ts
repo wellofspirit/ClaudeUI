@@ -78,6 +78,15 @@ function isRegularFile(p: string): boolean {
   }
 }
 
+/** A regular file that is not itself a symlink (cli.js bails on a symlinked or special one). */
+function isPlainFile(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
 /**
  * Port of cli.js's worktree canonicalisation (`kt`): a linked worktree's root
  * becomes its main checkout; any failed check leaves `root` unchanged.
@@ -90,17 +99,20 @@ function canonicalWorktreeRoot(root: string): string {
   try {
     const dotGit = path.join(root, '.git')
     if (!isRegularFile(dotGit)) return root
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, 'utf-8'))
-    if (!m) return root
-    const gitdirPath = path.resolve(root, m[1])
+    const head = fs.readFileSync(dotGit, 'utf-8').trim()
+    if (!head.startsWith('gitdir:')) return root
+    const gitdirPath = path.resolve(root, head.slice('gitdir:'.length).trim())
     const commondirFile = path.join(gitdirPath, 'commondir')
-    if (!isRegularFile(commondirFile)) return root
+    if (!isPlainFile(commondirFile)) return root
     const common = path.resolve(gitdirPath, fs.readFileSync(commondirFile, 'utf-8').trim())
     if (path.dirname(gitdirPath) !== path.join(common, 'worktrees')) return root
     const backFile = path.join(gitdirPath, 'gitdir')
-    if (!isRegularFile(backFile)) return root
+    if (!isPlainFile(backFile)) return root
     const back = path.resolve(gitdirPath, fs.readFileSync(backFile, 'utf-8').trim())
-    if (process.platform !== 'win32' && [gitdirPath, common, back].some((p) => p.includes('\\'))) {
+    if (
+      process.platform !== 'win32' &&
+      [root, gitdirPath, common, back].some((p) => p.includes('\\'))
+    ) {
       return root
     }
     if (fs.realpathSync.native(back) !== path.join(fs.realpathSync.native(root), '.git')) {

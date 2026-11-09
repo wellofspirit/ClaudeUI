@@ -25,6 +25,7 @@ import {
   claudeGlobalConfigPath,
   claudeProjectKey,
   claudeProjectLocation,
+  realCwd,
   readClaudeGlobalConfig,
   readClaudeProjectEntry,
   type Env,
@@ -46,7 +47,9 @@ function trustLocation(cwd: string): { root: string; worktree: boolean } | null 
   if (!cwd) return null
   const loc = claudeProjectLocation(cwd)
   if (path.dirname(loc.root) === loc.root) return null
-  if (realOrSelf(loc.root) === realOrSelf(os.homedir())) return null
+  // cli.js compares the CWD with home (not the root): a repo at ~ still gets projects[<home>]
+  // for a folder under it, while ~ itself only ever gets session trust.
+  if (realCwd(cwd) === realOrSelf(os.homedir()).normalize('NFC')) return null
   return loc
 }
 
@@ -115,8 +118,8 @@ export async function withClaudeConfigLock<T>(
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') retryNow = true
       else throw err
     }
-    if (retryNow) continue
     if (Date.now() >= deadline) throw new Error(LOCKED_ERROR)
+    if (retryNow) continue
     await new Promise((r) => setTimeout(r, pollMin + Math.random() * (pollMax - pollMin)))
   }
   try {
