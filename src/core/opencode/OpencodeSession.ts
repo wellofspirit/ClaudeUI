@@ -936,6 +936,24 @@ export class OpencodeSession extends BaseSession {
           ...(files.length > 0 ? { files } : {}),
           delivery
         })
+        // `runCommand` takes no inbox id, so no `delivered` event will ever name a queued item
+        // that was a command: the accepted command is its delivery.
+        const itemId = this.inboxToItem.get(inboxID)
+        if (itemId) {
+          const item = this.queue.pending().find((candidate) => candidate.itemId === itemId)
+          if (item) {
+            // As `onInbox` does on delivery: the judge's transcript gets the user's word.
+            this.messageHistory.push({
+              id: `steer-${itemId}`,
+              role: 'user',
+              content: this.userMessageContent(item.text, this.queuedUploads(item)),
+              timestamp: Date.now()
+            })
+          }
+          this.inboxToItem.delete(inboxID)
+          this.itemToInbox.delete(itemId)
+          if (this.queue.consumeById(itemId)) this.queue.emit()
+        }
         return
       } catch (err) {
         this.pendingCommandEchoes--

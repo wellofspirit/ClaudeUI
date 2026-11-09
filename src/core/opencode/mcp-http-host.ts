@@ -28,6 +28,7 @@ import {
   skillListingDescription
 } from '../services/claude-skill-catalog'
 import type { ClaudeSkillCatalog } from '../services/claude-skill-catalog'
+import { fillVariables } from '../services/claude-skill-invoke'
 import { isHousekeepingDir } from './claude-mcp-bridge'
 
 export interface McpHttpHost {
@@ -65,7 +66,8 @@ function hostedSkills(
       description: skillListingDescription(e),
       autoinvoke: e.modelInvocable,
       path: e.file,
-      content: e.body
+      // As cli.js fills a skill the model loads; no session here, so `${CLAUDE_SESSION_ID}` stays.
+      content: fillVariables(e.body, e, { cwd: directory })
     }))
 }
 
@@ -123,7 +125,14 @@ export async function startMcpHttpHost(
     }
     // `GET /skills?directory=<abs path>`: the Claude skill catalog for the claudeui-xeng
     // plugin (not MCP). Same bearer check as above; a resolver failure is a 500.
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    let url: URL
+    try {
+      url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'malformed URL' }))
+      return
+    }
     if (req.method === 'GET' && url.pathname === '/skills') {
       const directory = url.searchParams.get('directory')
       if (!directory || !isAbsolute(directory)) {

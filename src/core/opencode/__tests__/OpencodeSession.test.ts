@@ -1043,6 +1043,22 @@ describe('queue via the inbox', () => {
     expect(h.client.prompt.mock.calls.map(([, body]) => body.text)).toEqual(['first', 'second'])
   })
 
+  it('a queued opencode command leaves the queue once runCommand accepts it (no inbox id to deliver)', async () => {
+    session = makeSession()
+    await startTurn()
+    session.enqueuePrompt('/review the diff')
+    await flush()
+    expect(h.client.runCommand).toHaveBeenCalledWith(
+      SID,
+      expect.objectContaining({ name: 'review', text: 'the diff' })
+    )
+    expect(queueItems().filter((i) => i.state === 'queued')).toEqual([])
+    // As on a delivered prompt, the judge's transcript gets the user's word.
+    const history = (session as unknown as { messageHistory: Array<{ id: string; role: string }> })
+      .messageHistory
+    expect(history.some((m) => m.role === 'user' && m.id.startsWith('steer-'))).toBe(true)
+  })
+
   it('teardown interrupts the running turn and takes ClaudeUI inbox items back BEFORE the lease ends', async () => {
     session = makeSession()
     await startTurn()

@@ -402,10 +402,15 @@ export default {
         return false
       }
     }
-    guard.skillsLoaded = await loadCatalog()
-    await ctx.skill.transform((editor) => {
-      for (const skill of catalog) if (!editor.get(skill.id)) editor.add(skill)
-    })
+    // A throwing skill API (an opencode bump) must not stop the guard RPC from registering.
+    try {
+      guard.skillsLoaded = await loadCatalog()
+      await ctx.skill.transform((editor) => {
+        for (const skill of catalog) if (!editor.get(skill.id)) editor.add(skill)
+      })
+    } catch {
+      guard.skillsLoaded = false
+    }
     await ctx.rpc.register(
       {
         id: 'claudeui-xeng',

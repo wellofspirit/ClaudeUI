@@ -36,13 +36,22 @@ export function claudeSkillEntryToInfo(
   }
 }
 
-/** The catalog's typed-`/name` entries as menu items. */
+const MENU_DESCRIPTION_MAX = 100
+
+/** The catalog's typed-`/name` entries as menu items (descriptions capped; the dialog keeps the full text). */
 export function claudeSkillSlashCommands(entries: readonly ClaudeSkillEntry[]): SlashCommandInfo[] {
   return entries
     .filter((e) => e.userInvocable)
     .map((e) => ({
       name: '/' + e.name,
-      ...(e.description ? { description: e.description } : {})
+      ...(e.description
+        ? {
+            description:
+              e.description.length > MENU_DESCRIPTION_MAX
+                ? e.description.slice(0, MENU_DESCRIPTION_MAX - 1) + '…'
+                : e.description
+          }
+        : {})
     }))
 }
 

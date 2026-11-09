@@ -78,6 +78,17 @@ describe('slash menu helpers', () => {
     ).toEqual([{ name: '/a', description: 'A' }, { name: '/b' }])
   })
 
+  it('caps a menu description at 100 characters with an ellipsis (the dialog keeps the full text)', () => {
+    const long = 'x'.repeat(250)
+    const [menu] = claudeSkillSlashCommands([entry({ name: 'long', description: long })])
+    expect(menu.description).toHaveLength(100)
+    expect(menu.description!.endsWith('…')).toBe(true)
+    expect(claudeSkillEntryToInfo(entry({ description: long })).description).toBe(long)
+    expect(
+      claudeSkillSlashCommands([entry({ description: 'y'.repeat(100) })])[0].description
+    ).toHaveLength(100)
+  })
+
   it('merge keeps the base first and wins a name clash', () => {
     expect(
       mergeSlashCommandLists(

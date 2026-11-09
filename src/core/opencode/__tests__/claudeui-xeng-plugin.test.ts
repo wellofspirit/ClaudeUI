@@ -568,6 +568,21 @@ describe('claudeui-xeng plugin: the shared Claude skill catalog', () => {
     await expect(rpc.handlers.guard({})).resolves.toMatchObject({ skillsLoaded: false })
   })
 
+  it('a throwing skill.transform still registers the guard, with skillsLoaded false', async () => {
+    stubFetch(() => ({ skills: [entry('a')] }))
+    const { rpc } = await load([], {
+      options: OPTIONS,
+      location: LOCATION,
+      skill: {
+        transform: async () => {
+          throw new Error('api moved')
+        },
+        reload: async () => {}
+      }
+    })
+    await expect(rpc.handlers.guard({})).resolves.toMatchObject({ skillsLoaded: false })
+  })
+
   it('no endpoint option: nothing fetched, skillsLoaded false', async () => {
     const { calls } = stubFetch(() => ({ skills: [entry('a')] }))
     const { rebuild, rpc } = await withSkills({ modelAllowlist: {} })

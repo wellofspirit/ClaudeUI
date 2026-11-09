@@ -18,6 +18,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { request as httpRequest } from 'node:http'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -465,6 +466,47 @@ describe('GET /skills (the Claude skill catalog for the claudeui-xeng plugin)', 
     expect(status).toBe(200)
     expect(body).toEqual({ skills: [] })
     expect(asked).toEqual([])
+  })
+
+  it('fills ${CLAUDE_SKILL_DIR} and ${CLAUDE_PROJECT_DIR} in the content, leaving the session id', async () => {
+    const host = await startMcpHttpHost(makeBlankServer, {
+      skillCatalog: () => ({
+        entries: [
+          entry('v', {
+            baseDir: '/proj/.claude/skills/v',
+            body: 'run ${CLAUDE_SKILL_DIR}/x in ${CLAUDE_PROJECT_DIR} for ${CLAUDE_SESSION_ID}'
+          })
+        ],
+        skipped: []
+      })
+    })
+    hosts.push(host)
+    const { body } = await get(host, '/work')
+    expect((body.skills as { content: string }[])[0].content).toBe(
+      'run /proj/.claude/skills/v/x in /work for ${CLAUDE_SESSION_ID}'
+    )
+  })
+
+  it('a malformed request URL is a 400, not an uncaught throw', async () => {
+    const host = await startMcpHttpHost(makeBlankServer, { skillCatalog: () => catalog })
+    hosts.push(host)
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: host.port,
+          path: '//',
+          headers: { authorization: `Bearer ${host.token}` }
+        },
+        (res) => {
+          res.resume()
+          resolve(res.statusCode ?? 0)
+        }
+      )
+      req.on('error', reject)
+      req.end()
+    })
+    expect(status).toBe(400)
   })
 
   it('a missing or relative directory is a 400; a throwing resolver a 500', async () => {

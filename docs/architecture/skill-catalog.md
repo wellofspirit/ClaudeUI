@@ -128,9 +128,13 @@ cwd's catalog, before cli.js has started.
 the only source of Claude-form skills. The per-server host serves `GET /skills?directory=` (bearer; the housekeeping
 directory gets an empty list). The claudeui-xeng plugin fetches it per location and adds the entries in a
 `skill.transform` hook; ids opencode already has win, so its own `.agents`, config and built-in skills beat the catalog.
-A `skillsLoaded` flag guards the fetch to once per location build. A `reloadSkills` RPC exists but nothing calls it: a
+`skillsLoaded` is only reported through the `guard` RPC; it does not limit fetches (a throwing skill API leaves it
+false and the guard still registers). A `reloadSkills` RPC exists but nothing calls it: a
 skill edited after opencode opened a folder applies when that location is rebuilt. A typed `/name` is expanded in
-`postPromptNow` (an opencode command of that name wins). Cold history maps the skill tool's output through `content.ts`.
+`postPromptNow` (an opencode command of that name wins). Cold history maps the user row's command envelope through `content.ts`. The session publishes the menu
+(`publishCommands`: commands, plus the catalog minus the ids opencode's own skills won) from `establishSession`, once per
+connection, so an opencode menu is empty until the first prompt; before that the renderer's fallback (catalog skills for
+the cwd) fills it. The served skill `content` has `${CLAUDE_SKILL_DIR}` and `${CLAUDE_PROJECT_DIR}` filled.
 
 **pi.** Bridge v27 serves `POST /skills`; the extension loads it only with `CLAUDEUI_PI_SKILLS=1` and the bridge
 credentials. Its `before_agent_start` handler appends the catalog's model-invocable skills to
@@ -149,7 +153,8 @@ folder); MCP prompts; skills discovered mid-session (nested `.claude/skills` und
 conditional `paths` activation; `--add-dir`; `context: fork`, `agent`, `background`, `allowed-tools`,
 `disallowed-tools`, skill hooks, `model`, `effort`, `shell`; shell-command execution (R4); `Skill(...)` permission
 rules; the model-listing budget and usage ranking; MDM / server-delivered policy; built-in and synced marketplaces;
-inline `content` entries in an object-form plugin `commands`.
+inline `content` entries in an object-form plugin `commands`; on pi, `${CLAUDE_SKILL_DIR}` and
+`${CLAUDE_PROJECT_DIR}` in a skill the model loads (it reads the raw file).
 
 ## Contract test
 

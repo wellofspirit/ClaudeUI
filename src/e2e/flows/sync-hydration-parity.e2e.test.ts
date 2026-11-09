@@ -142,8 +142,8 @@ function parityDiff(): string[] {
     if (r.messages.length === 0 && c.messages.length > 0) continue
     for (const key of Object.keys(c)) {
       // `seeded` only crosses the wire as `false`, and the replica's own strip sets
-      // it too; the catalogs live app-level on both sides and are compared above.
-      if (key === 'seeded' || key === 'slashCommands' || key === 'sdkSkillNames') continue
+      // it too.
+      if (key === 'seeded') continue
       const k = key as keyof typeof c
       if (!jsonEq(c[k], r[k])) diffs.push(`${id}.${key}`)
     }

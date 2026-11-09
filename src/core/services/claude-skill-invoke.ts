@@ -73,7 +73,7 @@ export function parseSkillInvocationEnvelope(
   return { commandName: m[1], ...(args ? { commandArgs: args } : {}) }
 }
 
-function fillVariables(
+export function fillVariables(
   text: string,
   entry: ClaudeSkillEntry,
   { cwd, sessionId }: SkillExpansionContext
