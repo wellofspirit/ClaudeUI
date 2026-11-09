@@ -309,12 +309,6 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     canonical: true,
     why: "The session's own slash menu (its engine list plus the shared Claude skill catalog), folded into that session's slashCommands."
   },
-  'session:skills': {
-    cls: 'replicated',
-    ring: true,
-    canonical: false,
-    why: 'Bare skill names an engine reports at spawn. Nothing reads them (the Skills dialog asks the session via loadSkillDetails), so no snapshot field; the engines still emit it.'
-  },
   'session:watch-update': {
     cls: 'replicated',
     ring: true,

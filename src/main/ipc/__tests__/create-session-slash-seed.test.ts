@@ -9,9 +9,15 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const { loadSlashCommands } = vi.hoisted(() => ({
-  loadSlashCommands: vi.fn((): Array<{ name: string }> => [])
+const { loadSlashCommands, resolveClaudeSkillCatalog } = vi.hoisted(() => ({
+  loadSlashCommands: vi.fn((): Array<{ name: string }> => []),
+  resolveClaudeSkillCatalog: vi.fn((_cwd: string) => ({
+    entries: [] as Array<{ name: string; description: string; userInvocable: boolean }>,
+    skipped: []
+  }))
 }))
+
+vi.mock('../../../core/services/claude-skill-catalog', () => ({ resolveClaudeSkillCatalog }))
 
 vi.mock('../../../core/services/claude-session', () => ({ ClaudeSession: class {} }))
 vi.mock('../../../core/opencode/OpencodeSession', () => ({ OpencodeSession: class {} }))
@@ -69,6 +75,36 @@ describe('pre-spawn slash menu', () => {
 
     expect(menu('claude-1')).toEqual([{ name: '/compact' }, { name: '/deploy' }])
     expect(menu('pi-1')).toEqual([])
+  })
+
+  it("adds the new session's folder skills to the cache, the cache winning a clash", async () => {
+    loadSlashCommands.mockReturnValue([{ name: '/compact' }, { name: '/deploy' }])
+    resolveClaudeSkillCatalog.mockReturnValueOnce({
+      entries: [
+        { name: 'deploy', description: 'folder', userInvocable: true },
+        { name: 'review', description: 'Review it', userInvocable: true },
+        { name: 'hidden', description: 'x', userInvocable: false }
+      ],
+      skipped: []
+    })
+
+    await create('claude-4', 'claude')
+
+    expect(resolveClaudeSkillCatalog).toHaveBeenCalledWith('/r/repo')
+    expect(menu('claude-4')).toEqual([
+      { name: '/compact' },
+      { name: '/deploy' },
+      { name: '/review', description: 'Review it' }
+    ])
+  })
+
+  it('a failing catalog still seeds the cache', async () => {
+    loadSlashCommands.mockReturnValue([{ name: '/compact' }])
+    resolveClaudeSkillCatalog.mockImplementationOnce(() => {
+      throw new Error('boom')
+    })
+    await create('claude-5', 'claude')
+    expect(menu('claude-5')).toEqual([{ name: '/compact' }])
   })
 
   it('an empty or unreadable cache leaves the menu empty without failing the create', async () => {

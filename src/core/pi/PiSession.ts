@@ -75,6 +75,11 @@ import {
   resolveClaudeSkillCatalog,
   type ClaudeSkillCatalog
 } from '../services/claude-skill-catalog'
+import {
+  claudeSkillEntryToInfo,
+  claudeSkillSlashCommands,
+  mergeSlashCommandLists
+} from '../services/claude-skill-info'
 import { expandClaudeSkillInvocation, parseSkillInvocation } from '../services/claude-skill-invoke'
 import { buildPiSkillDescriptors, type PiSkillDescriptor } from './pi-skill-bridge'
 // Host-run subagents (ADR-089): the manager owns the children; this session
@@ -939,12 +944,7 @@ export class PiSession extends BaseSession {
    */
   private slashCommandList(): Array<{ name: string; description?: string }> {
     const list = this.piCommands.map((c) => ({ name: '/' + c.name, description: c.description }))
-    const taken = new Set(list.map((c) => c.name))
-    for (const entry of this.skillCatalog.entries) {
-      if (!entry.userInvocable || taken.has('/' + entry.name)) continue
-      list.push({ name: '/' + entry.name, description: entry.description })
-    }
-    return list
+    return mergeSlashCommandLists(list, claudeSkillSlashCommands(this.skillCatalog.entries))
   }
 
   /** What pi receives for `prompt`: the expansion of a typed catalog `/name args`, else the text as typed. */
@@ -995,19 +995,7 @@ export class PiSession extends BaseSession {
     const ownNames = new Set(engine.map((s) => s.name))
     const shared: SkillInfo[] = catalog.entries
       .filter((e) => !ownNames.has(e.name))
-      .map((e) => ({
-        name: e.name,
-        ...(e.displayName ? { displayName: e.displayName } : {}),
-        description: e.description,
-        source: e.source,
-        ...(e.pluginName ? { pluginName: e.pluginName } : {}),
-        path: e.file,
-        content: e.body,
-        kind: e.kind,
-        userInvocable: e.userInvocable,
-        modelInvocable: e.modelInvocable,
-        claudeOnly: e.claudeOnly
-      }))
+      .map((e) => claudeSkillEntryToInfo(e, { includeClaudeOnly: true }))
     return Promise.resolve([...shared, ...engine])
   }
 
@@ -1430,13 +1418,6 @@ export class PiSession extends BaseSession {
         // prefix; renderer slash menu is engine-neutral).
         this.piCommands = persistent
         this.send('session:slash-commands', this.slashCommandList())
-
-        // session:skills — name list only, `skill:` prefix stripped (same
-        // bare-name contract as OpencodeSession.eagerConnect's skillNames).
-        const skillNames = persistent
-          .filter((c) => c.source === 'skill')
-          .map((c) => c.name.replace(/^skill:/, ''))
-        this.send('session:skills', skillNames)
       }
     } catch (err) {
       logger.warn(

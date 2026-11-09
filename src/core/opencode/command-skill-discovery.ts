@@ -5,6 +5,7 @@ import type { SkillInfo } from '../../shared/types'
 import type { Agent_Info, Skill_Info } from './protocol-v2/openapi'
 import { evaluateV2Call } from './wildcard'
 import { safeSkillCatalog } from './claude-skill-bridge'
+import { claudeSkillEntryToInfo } from '../services/claude-skill-info'
 
 /**
  * Does EVERY agent of this directory deny `skill`? 2.x hides a skill a rule denies from
@@ -67,19 +68,7 @@ export async function discoverOpencodeSkills(cwd: string): Promise<SkillInfo[]> 
               path: s.path,
               content: s.content
             }
-          return {
-            name: entry.name,
-            ...(entry.displayName ? { displayName: entry.displayName } : {}),
-            description: entry.description,
-            source: entry.source,
-            ...(entry.pluginName ? { pluginName: entry.pluginName } : {}),
-            path: entry.file,
-            content: entry.body,
-            kind: entry.kind,
-            userInvocable: entry.userInvocable,
-            modelInvocable: entry.modelInvocable,
-            claudeOnly: entry.claudeOnly
-          }
+          return claudeSkillEntryToInfo(entry, { includeClaudeOnly: true })
         })
     } finally {
       opencodeServerManager.releaseIfCurrent(cwd, conn)

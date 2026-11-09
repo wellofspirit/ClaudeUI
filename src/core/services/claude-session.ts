@@ -1519,17 +1519,19 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         // cli.js's list plus the catalog's typed-invocable names it lacks (the catalog is
         // what the other engines' menus are built from, so every engine offers the same set).
         let catalogCommands: ReturnType<typeof claudeSkillSlashCommands> = []
+        let catalogNames = new Set<string>()
         try {
-          catalogCommands = claudeSkillSlashCommands(resolveClaudeSkillCatalog(this.cwd).entries)
+          const { entries } = resolveClaudeSkillCatalog(this.cwd)
+          catalogCommands = claudeSkillSlashCommands(entries)
+          catalogNames = new Set(entries.map((e) => '/' + e.name))
         } catch (err) {
           logger.warn('ClaudeSession', `skill catalog failed: ${err}`)
         }
-        const slashCommands = mergeSlashCommandLists(cliCommands, catalogCommands)
-        this.send('session:slash-commands', slashCommands)
-        saveSlashCommands(slashCommands)
-
-        const skillNames = sys.skills || []
-        this.send('session:skills', skillNames)
+        this.send('session:slash-commands', mergeSlashCommandLists(cliCommands, catalogCommands))
+        // The cache seeds the next session, whatever its folder: keep cli.js's built-ins,
+        // bundled skills and MCP prompts, not this folder's skills (create-session re-adds
+        // the new folder's).
+        saveSlashCommands(cliCommands.filter((c) => !catalogNames.has(c.name)))
 
         const mcpServers = sys.mcp_servers || []
         this._initMcpServers = mcpServers

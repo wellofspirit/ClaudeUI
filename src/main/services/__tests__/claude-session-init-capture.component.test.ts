@@ -17,9 +17,8 @@
  *    window from the alias table instead of the model cli.js actually runs.
  *    (The table now sizes `default` at 1M; an account whose `default` runs a
  *    200K model is the case the alias alone gets wrong.)
- *  - `slash_commands` and `skills` were never emitted. (Slash commands are
- *    masked by `saveSlashCommands` persistence; `session:skills` has no other
- *    Claude emitter, so the skills list was simply empty.)
+ *  - `slash_commands` was never emitted. (Masked by `saveSlashCommands`
+ *    persistence.)
  *
  * And the second case pins the other half of the fix: cli.js re-emits
  * `system/init` at the head of every turn with the model actually in force, so
@@ -34,8 +33,9 @@ import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-win
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 import type { StatusLineData } from '../../../shared/types'
 
-const { mockQuery, mockCatalog } = vi.hoisted(() => ({
+const { mockQuery, mockCatalog, mockSaveSlash } = vi.hoisted(() => ({
   mockQuery: vi.fn(),
+  mockSaveSlash: vi.fn(),
   mockCatalog: vi.fn((): { entries: unknown[]; skipped: unknown[] } => ({
     entries: [],
     skipped: []
@@ -68,7 +68,7 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 vi.mock('../../../core/services/ui-config', () => ({
-  saveSlashCommands: vi.fn(),
+  saveSlashCommands: mockSaveSlash,
   loadEngineConfig: vi.fn(() => ({}))
 }))
 vi.mock('../../../core/services/claude-skill-catalog', () => ({
@@ -285,10 +285,6 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
     expect(slash).toBeDefined()
     // `context` is CLI-only and filtered out; the others gain their leading '/'.
     expect(slash![2]).toEqual([{ name: '/review' }, { name: '/compact' }])
-
-    const skills = sent.find(([c]) => c === 'session:skills')
-    expect(skills).toBeDefined()
-    expect(skills![2]).toEqual(['unslop', 'dataviz'])
   })
 
   it('adds the catalog user-invocable names cli.js lacks to the slash list', async () => {
@@ -326,6 +322,8 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
       { name: '/compact' },
       { name: '/deploy', description: 'Ship it' }
     ])
+    // The cache keeps cli.js's own list minus this folder's skill names, so it seeds any folder.
+    expect(mockSaveSlash).toHaveBeenLastCalledWith([{ name: '/compact' }])
     mockCatalog.mockReturnValue({ entries: [], skipped: [] })
   })
 

@@ -115,9 +115,32 @@ matches) is expanded the way cli.js's `getPromptForCommand` does, for engines th
 
 ## Per engine
 
-Delivery to pi and opencode (the bridge routes, the plugin, the slash menu, the Skills dialog, history mapping) is
-documented by their slices; this page covers the catalog they read. The engine's own skills win a name clash and are
-never edited (owner ruling R1).
+The engine's own skills win a name clash and are never edited (owner ruling R1). Every engine's slash menu and the
+Skills dialog are built from the same entries through `claude-skill-info.ts` (`claudeSkillEntryToInfo`,
+`claudeSkillSlashCommands`, `mergeSlashCommandLists`: the engine's list first, so it wins a clash).
+
+**Claude.** cli.js loads skills itself. The session adds the catalog's typed-invocable names its own `slash_commands`
+lacks to its menu; the Skills dialog reads the catalog. The slash-menu cache (`slash-commands.json`) holds cli.js's list
+minus this cwd's catalog names (built-ins, bundled skills, MCP prompts); a new session's menu is that cache plus its own
+cwd's catalog, before cli.js has started.
+
+**opencode.** `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` turns off opencode's own `.claude/skills` scan, so the catalog is
+the only source of Claude-form skills. The per-server host serves `GET /skills?directory=` (bearer; the housekeeping
+directory gets an empty list). The claudeui-xeng plugin fetches it per location and adds the entries in a
+`skill.transform` hook; ids opencode already has win, so its own `.agents`, config and built-in skills beat the catalog.
+A `skillsLoaded` flag guards the fetch to once per location build. A `reloadSkills` RPC exists but nothing calls it: a
+skill edited after opencode opened a folder applies when that location is rebuilt. A typed `/name` is expanded in
+`postPromptNow` (an opencode command of that name wins). Cold history maps the skill tool's output through `content.ts`.
+
+**pi.** Bridge v27 serves `POST /skills`; the extension loads it only with `CLAUDEUI_PI_SKILLS=1` and the bridge
+credentials. Its `before_agent_start` handler appends the catalog's model-invocable skills to
+`systemPromptOptions.skills` (pi's own names win); a failed fetch raises one notify. A typed `/name` is expanded in
+`PiSession.run` for prompt, steer and follow-up (a pi command of that name wins). Host-run subagents get the parent's
+snapshot; the dispatcher's pi target gets the dispatch cwd's catalog. Cold history maps through `pi-session-list.ts`.
+
+**UI.** The slash menu is per session (`session:slash-commands`, carrying the engine list plus the catalog). The Skills
+dialog asks the session (`discoverSkills`) and falls back to the catalog when there is no session. There is no separate
+skill-name channel.
 
 ## Not reproduced
 

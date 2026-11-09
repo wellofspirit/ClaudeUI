@@ -1201,16 +1201,12 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     `consumed` transition on `session:queue-changed`).
  *   - slashCommands:true, skills:true → SHIPPED in M2b via `get_commands`
  *     (doStart(), once per spawn): emits `session:slash-commands` (all
- *     non-temporary-scope entries, '/'-prefixed) and `session:skills` (source
- *     === 'skill' entries, `skill:` prefix stripped) — same wire contract as
- *     OpencodeSession's listCommands/listSkills emission. `skills:true` is
- *     `PiSession.discoverSkills` returns the shared
- *     Claude skill catalog plus pi's own skills (`source: 'engine'`);
- *     `session:skills` only drives the TopBar Skills-button availability hint.
- *     The Claude skills reach pi's system prompt through the bridge
+ *     non-temporary-scope entries, '/'-prefixed) plus the shared Claude
+ *     skill catalog's user-invocable entries. `PiSession.discoverSkills`
+ *     returns the catalog plus pi's own skills (`source: 'engine'`). The
+ *     Claude skills reach pi's system prompt through the bridge
  *     extension's `before_agent_start` handler (`CLAUDEUI_PI_SKILLS`, served
- *     by the bridge host's `/skills`), and the slash menu carries the
- *     catalog's user-invocable entries beside pi's `get_commands` list.
+ *     by the bridge host's `/skills`).
  *   - auth.canDriveLogin → flipped true in M6c. The "TUI-only, permanently
  *     false" note above is now obsolete for ONE vendor: `openai-codex`
  *     (ChatGPT). ClaudeUI's own auth vault (M6a AuthVault + M6b

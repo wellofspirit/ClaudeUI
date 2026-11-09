@@ -4864,7 +4864,7 @@ describe('PiSession — auto-mode classifier wiring (phase 4)', () => {
 })
 
 describe('PiSession — slash commands + skills discovery (get_commands, M2b)', () => {
-  it('emits session:slash-commands (/-prefixed) and session:skills (skill: prefix stripped), filtering sourceInfo.scope === "temporary" entries', async () => {
+  it('emits session:slash-commands (/-prefixed), filtering sourceInfo.scope === "temporary" entries', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) =>
       cmd.type === 'get_commands'
         ? Promise.resolve({
@@ -4927,13 +4927,9 @@ describe('PiSession — slash commands + skills discovery (get_commands, M2b)', 
       { name: '/fix-tests', description: 'Fix failing tests' },
       { name: '/skill:brave-search', description: 'Web search via Brave API' }
     ])
-
-    expect(sentChannels(win)).toContain('session:skills')
-    const [skillsPayload] = sentPayloads(win, 'session:skills') as [string[]]
-    expect(skillsPayload).toEqual(['brave-search'])
   })
 
-  it('a get_commands failure (success:false) never blocks the session — no slash-commands/skills emission, no crash', async () => {
+  it('a get_commands failure (success:false) never blocks the session — no slash-commands emission, no crash', async () => {
     mockRequest.mockImplementation((cmd: { type: string }) =>
       cmd.type === 'get_commands'
         ? Promise.resolve({
@@ -4950,7 +4946,6 @@ describe('PiSession — slash commands + skills discovery (get_commands, M2b)', 
     await expect(session.run('hi')).resolves.toBeUndefined()
 
     expect(sentChannels(win)).not.toContain('session:slash-commands')
-    expect(sentChannels(win)).not.toContain('session:skills')
   })
 
   it('a get_commands request rejection (process hiccup) never blocks the session', async () => {

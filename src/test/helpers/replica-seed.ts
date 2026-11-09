@@ -381,8 +381,6 @@ export const seed = {
   slashCommands: (routingId: string, commands: SlashCommandInfo[]) =>
     emitSync('session:slash-commands', [routingId, commands]),
 
-  skills: (routingId: string, names: string[]) => emitSync('session:skills', [routingId, names]),
-
   sessionsConfig: (config: Record<string, unknown>) =>
     emitSync('config:sessions-changed', [config]),
 

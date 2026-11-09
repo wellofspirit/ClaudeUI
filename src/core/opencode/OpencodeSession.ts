@@ -124,10 +124,8 @@ import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import { BashStreamGate } from './bash-stream-gate'
 import { discoverOpencodeSkills } from './command-skill-discovery'
 import { safeSkillCatalog } from './claude-skill-bridge'
-import {
-  expandClaudeSkillInvocation,
-  parseSkillInvocation
-} from '../services/claude-skill-invoke'
+import { claudeSkillSlashCommands, mergeSlashCommandLists } from '../services/claude-skill-info'
+import { expandClaudeSkillInvocation, parseSkillInvocation } from '../services/claude-skill-invoke'
 import { opencodeAuthProvider } from '../auth/OpencodeAuthProvider'
 import { recordUsageEvent } from '../services/usage-recorder'
 import { loadClaudePermissions } from '../services/claude-settings'
@@ -1202,30 +1200,20 @@ export class OpencodeSession extends BaseSession {
     await this.connectingPromise
   }
 
-  /** Read the location's commands and skills and publish them. Never throws. */
+  /** Read the location's commands and publish them with the shared Claude skills. Never throws. */
   private async publishCommands(client: OpencodeClient): Promise<void> {
-    const [commands, skills] = await Promise.all([
-      client.commands().catch((err) => {
-        logger.warn('OpencodeSession', `commands() failed: ${errText(err)}`)
-        return []
-      }),
-      client.skills().catch((err) => {
-        logger.warn('OpencodeSession', `skills() failed: ${errText(err)}`)
-        return []
-      })
-    ])
+    const commands = await client.commands().catch((err) => {
+      logger.warn('OpencodeSession', `commands() failed: ${errText(err)}`)
+      return []
+    })
     this.knownCommandNames = new Set(commands.map((c) => c.name))
     // opencode's commands, then the shared Claude skills typed as `/name` (a command wins a clash).
-    const claude = safeSkillCatalog(this.location).entries.filter(
-      (e) => e.userInvocable && !this.knownCommandNames.has(e.name)
-    )
-    this.send('session:slash-commands', [
-      ...commands.map((c) => ({ name: '/' + c.name, description: c.description })),
-      ...claude.map((e) => ({ name: '/' + e.name, description: e.description }))
-    ])
     this.send(
-      'session:skills',
-      skills.map((s) => s.name)
+      'session:slash-commands',
+      mergeSlashCommandLists(
+        commands.map((c) => ({ name: '/' + c.name, description: c.description })),
+        claudeSkillSlashCommands(safeSkillCatalog(this.location).entries)
+      )
     )
   }
 
