@@ -38,8 +38,9 @@ openai-codex --no-refresh --credentials`. The store's `<version>/pi` is a direct
 Since 1.5.1, `cacheWarming` defaults to `"idle"` (was `"streaming"`; owner, 2026-11-10: accept the
 default). pi sends billed prompt-cache refresh requests during runs and for up to 30 minutes
 between runs, when it estimates a refresh costs less than a cache miss. ClaudeUI keeps pi
-processes alive between turns, so these fire with no prompt in flight. A user can set
-`cacheWarming` in pi's global `settings.json`. Each successful warm is persisted as a session entry
+processes alive between turns, so these fire with no prompt in flight. Settings › pi › Session
+behavior › Prompt cache warming sets `cacheWarming` (`idle` / `streaming` / `off`) in pi's global
+`settings.json`, which is the only scope pi reads it from; choosing `idle` deletes the key. Each successful warm is persisted as a session entry
 and emitted as
 `{"type":"entry_appended","entry":{"type":"usage","kind":"cache_warm","provider","model","usage":{…,"cost"},"note"?,"id",…}}`
 (`cache-warmer.ts` `onWarmed`, `agent-session.ts`).
