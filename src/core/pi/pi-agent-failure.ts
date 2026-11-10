@@ -79,7 +79,7 @@ const NON_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /too many requests/i // Generic HTTP 429 style
 ]
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.5.0) ─────
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.5.1) ─────
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
   return new RegExp(patterns.join('|'), 'i')
 }
@@ -179,6 +179,9 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   'stream ended before a terminal response event',
   'http2 request did not get a response',
   'stream disconnected before completion',
+  // Magpie gateway relaying a dropped upstream Anthropic stream, e.g.
+  // "Claude Code's stream from Anthropic was cut short after the reply had begun" (#11879).
+  'cut short after the reply had begun',
   // Node ERR_HTTP2_STREAM_CANCEL: the HTTP/2 session died before the request was
   // sent, e.g. after the Bedrock SDK's 5-minute session timeout (#10379).
   'pending stream has been canceled',

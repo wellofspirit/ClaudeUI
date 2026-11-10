@@ -51,6 +51,31 @@ export interface TokenCostInput {
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_PRICING: PricingEntry[] = [
+  // Fable 5.2 / Mythos 5.2 — cli.js 2.1.321 `tier_8_40_cache_read_0_20`: $8/$40,
+  // cache write 5m $10 / 1h $16, cache read $0.20/MTok. Must precede the generic
+  // 'fable'/'mythos' entries (first substring match wins).
+  {
+    vendorId: 'anthropic',
+    match: 'fable-5-2',
+    pricing: {
+      inputPerMTok: 8,
+      outputPerMTok: 40,
+      cacheWritePerMTok: 10,
+      cacheWrite1hPerMTok: 16,
+      cacheReadPerMTok: 0.2
+    }
+  },
+  {
+    vendorId: 'anthropic',
+    match: 'mythos-5-2',
+    pricing: {
+      inputPerMTok: 8,
+      outputPerMTok: 40,
+      cacheWritePerMTok: 10,
+      cacheWrite1hPerMTok: 16,
+      cacheReadPerMTok: 0.2
+    }
+  },
   // Fable 5.1 / Mythos 5.1 — cli.js 2.1.261 `tier_10_50_cache_read_0_25`:
   // same $10/$50 as 5.0 but cache reads at $0.25/MTok (vs $1). Must precede
   // the generic 'fable'/'mythos' entries (first substring match wins).

@@ -1937,6 +1937,11 @@ export class PiSession extends BaseSession {
         // adds is its DISPLAY cost — pi's own figure only when the rule says
         // that is what the user was charged. The ledger row above keeps pi's
         // raw figure as `engineCostUsd`, unchanged.
+        //
+        // A cache warm (pi 1.5.1, often between runs) is billed spend, so it
+        // counts toward the headline and token sums too — the same totals a
+        // reopened session seeds from get_session_stats, which counts usage
+        // entries. It is not a conversation step, so the context meter stays.
         this.liveCostInputs.push(
           piCostInputs(output.provider, output.modelId, output.tokens, piCostReport(output.cost, 0))
         )
@@ -1944,8 +1949,13 @@ export class PiSession extends BaseSession {
         this.sumOutputTokens += output.tokens.output
         this.sumCacheReadTokens += output.tokens.cacheRead
         this.sumCacheWriteTokens += output.tokens.cacheWrite
-        this.lastContextLength = output.tokens.input + output.tokens.cacheRead
+        if (!output.cacheWarm) {
+          this.lastContextLength = output.tokens.input + output.tokens.cacheRead
+        }
         this.sendStatusLine()
+        // Between runs no 'result' follows to refresh session:status, which
+        // carries the headline too.
+        if (output.cacheWarm) this.sendStatus()
         break
       }
 

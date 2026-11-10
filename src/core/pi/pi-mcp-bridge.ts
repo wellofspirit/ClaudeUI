@@ -73,7 +73,7 @@ export const EMPTY_PI_MCP_CATALOG: PiMcpCatalog = Object.freeze({
   skipped: Object.freeze([]) as unknown as PiMcpCatalog['skipped']
 })
 
-/** pi's server-name rule (`SERVER_NAME` in mcp-servers.ts). */
+/** pi's server-name rule (`SERVER_NAME`, `vendor/pi-src/packages/mcp/src/config.ts` since 1.5.1; mcp-servers.ts before). */
 const PI_SERVER_NAME = /^[A-Za-z0-9_-]+$/
 
 /**

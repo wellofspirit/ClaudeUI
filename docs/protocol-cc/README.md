@@ -11,8 +11,8 @@ Reference documentation for the complete wire protocol between ClaudeUI's SDK ha
 ## Verified against
 
 ```
-cli.js version: 2.1.319
-upstream SDK:   @anthropic-ai/claude-code 2.1.319 (Bun 1.4.x standalone binary, chunked ESM graph)
+cli.js version: 2.1.321
+upstream SDK:   @anthropic-ai/claude-code 2.1.321 (Bun 1.4.x standalone binary, chunked ESM graph)
 ```
 
 > Bundle-format note: since 2.1.261 the vendored `vendor/claude-cli/cli.js` is a
@@ -30,6 +30,25 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 **2.1.290 bounded verification (2026-10-06):** bundled build and the compatibility floor (floor = tested = 2.1.290, owner ruling). Compared pristine darwin-arm64 concats and native `--help` against 2.1.289. Public-contract drift: 0 long flags added or removed (71 → 71; `attach`/`logs` also take a session name); zod `subtype` literals +1, `system/file_attachments_missing` (`@internal`, bridge-worker only, answers the `@internal` `file_attachments` ClaudeUI never sends); one optional `@internal` user-frame field `refused_message_id`; one print-mode control handler `set_proactivity_level {level, offer_bypass}` with no public schema; capability id `register_repo_root_v1` appears only in the cloud-hosted unavailable set, not in `system/init`. No removals; production OAuth constants and the model-id set are unchanged. 0 consumed-wire breaks. All three registry patches apply unchanged (2,252 chunks), `test:patch` passes 3/3 (subagent-streaming 9/9, voice-server-anchors 4/4, bash-output-streaming 9/9, Haiku 4.5), the voice start/connect/idempotent-start/native-fallback/stop probe passes, and the localhost SSE ordering fixtures pass. Hidden/provider/plugin surfaces were not manually re-verified, so the banner stays at 2.1.268.
 
 **2.1.293 bounded verification (2026-10-08):** bundled build and the compatibility floor (floor = tested = 2.1.293, ADR-082 §3). Compared pristine darwin-arm64 concats and native `--help` against 2.1.290. Public-contract drift: 0 long flags added or removed (71 → 71, `--help` byte-identical; `plugin install` gained `--marketplace <source>`, unused). Zod `subtype` literals +2: `system/permission_check_status` (`@internal`, on the wire in print mode when an auto-mode permission check runs past ~4 s; 04 §4.32; not consumed) and host→CLI `ui_prompt_autocomplete` (`@internal`, never sent). Additive public fields: `run_id` on every `task_*` frame and `background_tasks_changed` entry, `parent_task_id` on `task_started` and those entries, `subagent_type` on the entries (04 §4.5 note); `agent_id` on forwarded subagent `assistant`/`user` frames, which still carry `parent_tool_use_id`, so ClaudeUI's placement and turn-start checks are unaffected (03 §3.3). Additive `@internal`: `stream_event.abandoned_blocks` on cli.js's synthesized `message_stop` (05 §5.8), `result.safety_stops`, `api_error` value `usage_limit_reached`, `request_marker_lists_v1` in `system/init.capabilities`; `@internal` `result.system_prompt_detail` removed. No print-mode handler removed; production OAuth constants and the host-token contract anchors are unchanged. 0 consumed-wire breaks. Model catalog: new `claude-haiku-5-5`, and the first-party `haiku` alias moved to it (13 header note). All three registry patches apply unchanged (2,290 chunks), `test:patch` passes 3/3 (subagent-streaming 9/9, voice-server-anchors 4/4, bash-output-streaming 9/9, Haiku 4.5), the voice start/connect/idempotent-start/native-fallback/stop probe passes, and the localhost SSE ordering fixtures pass (5 tests). Hidden/provider/plugin surfaces were not manually re-verified, so the banner stays at 2.1.268.
+
+**2.1.321 bounded verification (2026-11-10, facts slice):** compared pristine darwin-arm64 concats
+and native `--help` against 2.1.319. `--help` is byte-identical (83 flag lines). The baked model
+catalog gains `claude-fable-5-2` and `claude-mythos-5-2` and the `fable` alias moves to Fable 5.2,
+mirrored in `src/shared/` (13). Zod `subtype` literals +2: `system/ui_notify` and `ui_notify_cancel`
+(plugin `$.ui` surface, emitted only when `CLAUDE_CODE_NOTIFICATIONS_HOST` is set; ClaudeUI sets
+none, like the already-present `ui_toast` / `ui_status`; not consumed). The
+`<task-notification>` envelope builder is byte-identical; a background command's description inside
+`<summary>` is now clipped to its first 500 and last 300 characters when over 1,000 (`src/core/services/task-notification-xml.ts`
+header). Hand-back sentences, OAuth constants, the OAuth login/refresh bodies (the exchange and
+refresh requests now run behind an abortable 30 s wrapper; bodies and headers unchanged), the
+host-token contract anchors, `DANGEROUS_*` lists, worktree result strings and the auto-mode
+stage-2 prompt and default rules (14) are unchanged. Patches: three anchors moved by one token
+each (subagent-streaming Patch C: the converter head's second argument is now a call,
+`FN(e,s())`; bash-output-streaming Part A: a late-callback guard opens `onProgress`; Part B:
+`startPolling(id,flag)` takes a second argument), re-anchored as described in each patch README.
+Boot probe ok; all three patches apply to the win32-x64, darwin-arm64 and linux-x64 bundles; live
+suites 3/3 on haiku (bash-output-streaming 9/9, subagent-streaming 9/9, voice-server anchors);
+`sdk-contract` 11/11.
 
 **2.1.319 bounded verification (2026-11-09):** bundled build and the compatibility floor are
 2.1.319; the banner names it. Compared pristine darwin-arm64 concats against 2.1.317. `--help`

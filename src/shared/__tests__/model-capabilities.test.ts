@@ -184,6 +184,10 @@ describe('defaultEffort', () => {
     expect(defaultEffort('claude-opus-5')).toBe('high')
     expect(defaultEffort('claude-sonnet-5')).toBe('high')
     expect(defaultEffort('claude-fable-5')).toBe('high')
+    expect(defaultEffort('claude-fable-5-1')).toBe('high')
+    // cli.js 2.1.321: Fable 5.2 / Mythos 5.2 carry default_effort "medium".
+    expect(defaultEffort('claude-fable-5-2')).toBe('medium')
+    expect(defaultEffort('claude-mythos-5-2')).toBe('medium')
     expect(defaultEffort('claude-opus-4-6')).toBe('high')
     expect(defaultEffort('claude-sonnet-4-5')).toBe('high')
   })
@@ -380,6 +384,14 @@ describe('canonicalizeModelValue', () => {
     // Fable's picker value carries the [1m] context suffix — it must normalise
     // to the bare id used as the modelEffortDefaults key (`claudeEffortKey`).
     expect(canonicalizeModelValue('claude-fable-5[1m]')).toBe('claude-fable-5')
+  })
+  it('maps the `fable` alias to Fable 5.2 (cli.js 2.1.321 baked catalog)', () => {
+    expect(canonicalizeModelValue('fable')).toBe('claude-fable-5-2')
+    expect(canonicalizeModelValue('fable[1m]')).toBe('claude-fable-5-2')
+    // The alias takes its default effort from the model it resolves to.
+    expect(defaultEffort('fable')).toBe('medium')
+    expect(supportsXhighEffort('fable')).toBe(true)
+    expect(maxOutputTokens('fable')).toBe(128_000)
   })
   it('leaves the `default` alias unmapped — its target depends on user config', () => {
     expect(canonicalizeModelValue('default')).toBe('default')
@@ -663,7 +675,9 @@ describe('maxOutputTokens (mirrors cli.js N0e upperLimit)', () => {
   it('128K models: Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6', () => {
     for (const m of [
       'claude-fable-5',
+      'claude-fable-5-2',
       'claude-mythos-5',
+      'claude-mythos-5-2',
       'claude-sonnet-5',
       'claude-opus-4-6',
       'claude-opus-4-7',
@@ -765,6 +779,8 @@ describe('resolveContextWindow', () => {
 
   it('resolves implicit-1M full ids by substring (dated / Bedrock)', () => {
     expect(resolveContextWindow('claude-fable-5')).toBe(ONE_M)
+    expect(resolveContextWindow('claude-fable-5-2')).toBe(ONE_M)
+    expect(resolveContextWindow('claude-mythos-5-2')).toBe(ONE_M)
     expect(resolveContextWindow('claude-opus-4-8-20251201')).toBe(ONE_M)
     expect(resolveContextWindow('us.anthropic.claude-opus-4-8-20251201-v1:0')).toBe(ONE_M)
     expect(resolveContextWindow('claude-sonnet-5')).toBe(ONE_M)

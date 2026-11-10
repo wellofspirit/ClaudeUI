@@ -3800,7 +3800,7 @@ export const SECTIONS: Section[] = [
         key: 'piSessionBehavior',
         label: 'Session behavior',
         keywords:
-          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise thinkingBudgets thinking budget tokens effort',
+          'pi compaction enabled reserveTokens keepRecentTokens branchSummary retry maxRetries baseDelayMs provider timeoutMs maxRetryDelayMs backoff context window compact summarise thinkingBudgets thinking budget tokens effort cacheWarming prompt cache warming warm idle streaming',
         render: () => <PiSessionBehaviorSection />
       }
     ]

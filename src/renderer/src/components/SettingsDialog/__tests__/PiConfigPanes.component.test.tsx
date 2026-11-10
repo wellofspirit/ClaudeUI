@@ -619,6 +619,25 @@ describe('pi Configuration panes', () => {
     })
   })
 
+  describe('cacheWarming select (pi 1.5.1)', () => {
+    it('shows idle when the key is absent (pi’s default) and writes streaming', async () => {
+      await renderPane(<PiSessionBehaviorSection />)
+      expect(selectValue('cacheWarming')).toBe('idle')
+      await pickSelect('cacheWarming', 'streaming')
+      expect(onlyPatch()).toEqual({ path: ['cacheWarming'], value: 'streaming' })
+    })
+
+    it('choosing idle (pi’s default) deletes the key', async () => {
+      currentConfig = { cacheWarming: 'off' }
+      await renderPane(<PiSessionBehaviorSection />)
+      expect(selectValue('cacheWarming')).toBe('off')
+      await pickSelect('cacheWarming', 'idle')
+      const patch = onlyPatch()
+      expect(patch.path).toEqual(['cacheWarming'])
+      expect('value' in patch).toBe(false)
+    })
+  })
+
   // ── 9. trackingId is never a control ───────────────────────────────
 
   it('never surfaces trackingId — pi generates it, so Raw config is its only home', async () => {
@@ -757,6 +776,7 @@ describe('pi Configuration panes', () => {
         'compaction.reserveTokens',
         'compaction.keepRecentTokens',
         'branchSummary.reserveTokens',
+        'cacheWarming',
         'thinkingBudgets'
       ])
       cleanup()

@@ -152,6 +152,12 @@ export type PiMapperOutput =
        */
       cost: PiUsage['cost'] | undefined
       messageId: string
+      /**
+       * A prompt-cache warm (pi 1.5.1 `entry_appended` UsageEntry) rather than an
+       * assistant message: ledger spend only, outside any turn. `messageId` is
+       * the entry's id.
+       */
+      cacheWarm?: true
     }
   | { kind: 'result'; totalCostUsd: number; durationMs: number; sessionId: string | null }
   | { kind: 'error'; message: string }
@@ -398,13 +404,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
             kind: 'usage',
             provider: msg.provider,
             modelId: msg.model,
-            tokens: {
-              input: usage.input,
-              output: usage.output,
-              cacheRead: usage.cacheRead,
-              cacheWrite: usage.cacheWrite,
-              ...(usage.reasoning != null ? { reasoning: usage.reasoning } : {})
-            },
+            tokens: piUsageTokens(usage),
             cost: usage.cost,
             messageId
           })
@@ -591,6 +591,11 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       // must not read as idle through it.
       return [{ kind: 'turn_start' }]
 
+    // pi 1.5.1 persists each successful prompt-cache warm as a UsageEntry and
+    // emits it here, even between runs. Other entry types stay ignored.
+    case 'entry_appended':
+      return mapUsageEntry((ev as { entry?: unknown }).entry, state.sessionId)
+
     // agent_end, turn_start/turn_end, tool_execution_start/end
     // (start carries nothing new — the arguments are already in the
     // toolcall_end message_update above; end is fully covered by the
@@ -600,6 +605,49 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     default:
       return [{ kind: 'ignore' }]
   }
+}
+
+function piUsageTokens(usage: PiUsage): PiUsageTokens {
+  return {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    ...(usage.reasoning != null ? { reasoning: usage.reasoning } : {})
+  }
+}
+
+/** A `{type:'usage'}` session entry → its ledger output; anything else, or a malformed one, → ignore. */
+function mapUsageEntry(entry: unknown, sessionId: string | null): PiMapperOutput[] {
+  const e = entry as
+    | { type?: unknown; id?: unknown; provider?: unknown; model?: unknown; usage?: unknown }
+    | null
+    | undefined
+  if (!e || e.type !== 'usage') return [{ kind: 'ignore' }]
+  const u = e.usage as PiUsage | null | undefined
+  if (
+    typeof e.id !== 'string' ||
+    typeof e.provider !== 'string' ||
+    typeof e.model !== 'string' ||
+    !u ||
+    typeof u !== 'object' ||
+    ![u.input, u.output, u.cacheRead, u.cacheWrite].every((n) => typeof n === 'number')
+  ) {
+    return [{ kind: 'ignore' }]
+  }
+  return [
+    {
+      kind: 'usage',
+      provider: e.provider,
+      modelId: e.model,
+      tokens: piUsageTokens(u),
+      cost: u.cost,
+      // pi entry ids are 8 hex chars, unique only within one session, while the
+      // ledger's message_id is globally unique (insert-or-ignore): namespace it.
+      messageId: sessionId ? `pi-warm:${sessionId}:${e.id}` : `pi-warm:${e.id}`,
+      cacheWarm: true
+    }
+  ]
 }
 
 /** Seal a received partial when the native process ends before message_end. */

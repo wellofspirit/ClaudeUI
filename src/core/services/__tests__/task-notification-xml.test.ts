@@ -6,7 +6,12 @@
  * (probed 2026-09-23) plus the older `key: N` usage form.
  */
 import { describe, it, expect } from 'vitest'
-import { parseNotificationUsage, parseTaskNotificationXml } from '../task-notification-xml'
+import {
+  liveTaskNoteSummary,
+  parseNotificationUsage,
+  parseTaskNotificationXml,
+  taskNotificationNoteTitle
+} from '../task-notification-xml'
 
 const CURRENT =
   '<task-notification>\n<task-id>a63d5f10b49aadaff</task-id>\n' +
@@ -58,6 +63,45 @@ describe('parseTaskNotificationXml', () => {
     expect(
       parseTaskNotificationXml('<task-notification><status>completed</status></task-notification>')
     ).toBeNull()
+  })
+})
+
+describe('a background command over 1,000 characters (cli.js 2.1.321)', () => {
+  // 2.1.321 keeps the envelope but clips the description inside `<summary>`
+  // to its first 500 and last 300 characters around a multi-line marker.
+  const command = `echo ${'x'.repeat(1200)} && sleep 1`
+  const clipped =
+    `${command.slice(0, 500)}\n\n... [${command.length - 800} characters truncated] ...\n\n` +
+    command.slice(-300)
+  const xml =
+    '<task-notification>\n<task-id>bq1</task-id>\n<tool-use-id>toolu_01A</tool-use-id>\n' +
+    '<output-file>/tmp/tasks/bq1.output</output-file>\n<status>completed</status>\n' +
+    `<summary>Background command "${clipped}" completed (exit code 0)</summary>\n</task-notification>`
+
+  it('parses the multi-line summary whole', () => {
+    const parsed = parseTaskNotificationXml(xml)
+    expect(parsed?.taskId).toBe('bq1')
+    expect(parsed?.status).toBe('completed')
+    expect(parsed?.summary).toContain('characters truncated')
+    expect(parsed?.summary.endsWith('completed (exit code 0)')).toBe(true)
+  })
+
+  it('titles the note like the live frame does, from the unclipped description', () => {
+    const live = liveTaskNoteSummary({
+      taskType: 'local_bash',
+      description: command,
+      status: 'completed'
+    })
+    const history = taskNotificationNoteTitle(parseTaskNotificationXml(xml))
+    expect(history).toBe(
+      taskNotificationNoteTitle({
+        taskId: 'bq1',
+        status: 'completed',
+        summary: live!,
+        outputFile: '',
+        raw: ''
+      })
+    )
   })
 })
 

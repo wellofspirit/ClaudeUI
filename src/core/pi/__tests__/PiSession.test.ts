@@ -1059,6 +1059,68 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     expect(resultPayload.totalCostUsd).toBeCloseTo(0.003)
   })
 
+  it('records an idle-time cache warm once and counts it in the headline, not the context meter', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-warm', win as never, '/cwd', {})
+    await session.run('hi')
+    const handler = lastEventHandler()
+    handler({ type: 'agent_end', messages: [], willRetry: false })
+    handler({ type: 'agent_settled' })
+    mockRecordUsageEvent.mockClear()
+    const sentBefore = win.webContents.send.mock.calls.length
+    const messagesBefore = session.getMessages().length
+    const statusBefore = session.status
+
+    handler({
+      type: 'entry_appended',
+      entry: {
+        type: 'usage',
+        kind: 'cache_warm',
+        id: 'warm-1',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 1,
+          output: 0,
+          cacheRead: 900,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0.0003, cacheWrite: 0, total: 0.0003 }
+        }
+      }
+    })
+
+    expect(mockRecordUsageEvent).toHaveBeenCalledTimes(1)
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        engineId: 'pi',
+        vendorId: 'anthropic',
+        modelId: 'claude-sonnet-4-6',
+        messageId: expect.stringMatching(/^pi-warm:(?:.+:)?warm-1$/),
+        origin: 'session',
+        parentRoutingId: null,
+        engineCostUsd: 0.0003,
+        tokens: expect.objectContaining({ input: 1, cacheRead: 900 })
+      })
+    )
+    // No transcript row, no processing flip.
+    expect(session.getMessages().length).toBe(messagesBefore)
+    expect(session.status.state).toBe(statusBefore.state)
+    // The headline moves: a fresh status line and status, each carrying the warm.
+    const sent = win.webContents.send.mock.calls.slice(sentBefore)
+    expect(sent.map((c) => c[0])).toEqual(['session:status-line', 'session:status'])
+    // send(channel, routingId, payload)
+    const line = sent[0][2] as {
+      totalCostUsd: number | null
+      cachedTokens: number
+      contextWindow: { used: number }
+    }
+    expect(line.totalCostUsd ?? 0).toBeGreaterThan(statusBefore.totalCostUsd ?? 0)
+    expect(line.cachedTokens).toBe(900)
+    // ...but a warm is not a conversation step: the context meter stays put.
+    expect(line.contextWindow.used).toBe(0)
+    expect((sent[1][2] as { totalCostUsd: number | null }).totalCostUsd).toBe(line.totalCostUsd)
+  })
+
   it('stamps durationMs on the addressed thinking block', async () => {
     vi.useFakeTimers()
     try {

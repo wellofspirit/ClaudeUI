@@ -64,7 +64,7 @@ export interface EnteredWorktreeText {
 /**
  * Parse an `EnterWorktree` tool result. Returns null when the text declares no path.
  *
- * cli.js 2.1.317: `<Created|Entered|Reused|Resumed> worktree at “<path>”[ on branch “<branch>”].`
+ * cli.js 2.1.317 (strings unchanged through 2.1.321): `<Created|Entered|Reused|Resumed> worktree at “<path>”[ on branch “<branch>”].`
  * followed by sentences of its own (Reused/Resumed add one after the branch). The quotes are
  * curly (`Qj()`), and either name may carry ` (not its exact spelling)`. Straight quotes and no
  * quotes (the pre-2.1.306 shape) stay accepted, as do the `worktreePath:` line and JSON field

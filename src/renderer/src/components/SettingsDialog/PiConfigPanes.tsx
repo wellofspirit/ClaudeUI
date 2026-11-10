@@ -542,6 +542,17 @@ function ThinkingBudgetsRow({ api }: { api: PiNativeConfigLeaf }): React.JSX.Ele
   )
 }
 
+/**
+ * pi's `cacheWarming` (global setting only; 1.5.1 default "idle"). Choosing the
+ * default deletes the key so pi's own default stays in charge. Warms are
+ * recorded in the usage ledger (docs/protocol-pi › Cache warming).
+ */
+const CACHE_WARMING_OPTIONS = [
+  { value: 'idle', label: 'idle (default)' },
+  { value: 'streaming', label: 'streaming' },
+  { value: 'off', label: 'off' }
+]
+
 export function PiSessionBehaviorSection(): React.JSX.Element {
   const api = usePiNativeConfigLeaf()
   return (
@@ -576,6 +587,15 @@ export function PiSessionBehaviorSection(): React.JSX.Element {
         helper="Tokens reserved when a forked branch is summarised."
         placeholder="16384"
         unit="tokens"
+      />
+      <SelectRow
+        api={api}
+        path={['cacheWarming']}
+        label="Prompt cache warming"
+        helper="Keep the provider's prompt cache warm. Idle also refreshes it for up to 30 minutes between turns; each refresh is a billed request, shown in usage."
+        options={CACHE_WARMING_OPTIONS}
+        defaultValue="idle"
+        width="min-w-[180px]"
       />
       <ThinkingBudgetsRow api={api} />
     </PaneShell>

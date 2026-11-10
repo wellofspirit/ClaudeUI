@@ -776,6 +776,12 @@ export class PiChildRunner {
     // return here is what keeps it out of the stream, exactly as the switch's
     // own `case` did.
     if (out.kind === 'usage') {
+      // A cache warm (possibly between turns) is ledger spend only: it must not
+      // enter the turn's totals, cap or cost rule.
+      if (out.cacheWarm) {
+        this.opts.onUsage?.(out)
+        return
+      }
       this.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
       // The split the ledger row needs, accumulated beside the total across
       // the turn's several assistant messages. The four fields pi reports

@@ -1802,4 +1802,69 @@ describe('mapPiEvent — the model a message ran on', () => {
     )
     expect(state.currentMessageModel).toBe('anthropic/claude-haiku-4-5')
   })
+
+  describe('entry_appended usage entries (pi 1.5.1 cache warming)', () => {
+    const warm = (over: Record<string, unknown> = {}): PiEvent => ({
+      type: 'entry_appended',
+      entry: {
+        type: 'usage',
+        kind: 'cache_warm',
+        id: 'warm-1',
+        parentId: null,
+        timestamp: '2026-11-10T00:00:00Z',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 1,
+          output: 0,
+          cacheRead: 900,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0.0003, cacheWrite: 0, total: 0.0003 }
+        },
+        ...over
+      }
+    })
+
+    it('maps a usage entry to a cacheWarm usage output without touching mapper state', () => {
+      const state = createPiMapperState()
+      expect(mapPiEvent(warm(), state)).toEqual([
+        {
+          kind: 'usage',
+          provider: 'anthropic',
+          modelId: 'claude-sonnet-4-6',
+          tokens: { input: 1, output: 0, cacheRead: 900, cacheWrite: 0 },
+          cost: { input: 0, output: 0, cacheRead: 0.0003, cacheWrite: 0, total: 0.0003 },
+          messageId: 'pi-warm:warm-1',
+          cacheWarm: true
+        }
+      ])
+      expect(state.totalCostUsd).toBe(0)
+    })
+
+    it('namespaces the ledger key with the pi session id (entry ids repeat across sessions)', () => {
+      const state = createPiMapperState()
+      state.sessionId = 'sess-a'
+      const [out] = mapPiEvent(warm(), state)
+      expect(out).toMatchObject({ kind: 'usage', messageId: 'pi-warm:sess-a:warm-1' })
+    })
+
+    it('ignores non-usage entries', () => {
+      const ev: PiEvent = { type: 'entry_appended', entry: { type: 'message', id: 'm1' } }
+      expect(mapPiEvent(ev, createPiMapperState())).toEqual([{ kind: 'ignore' }])
+    })
+
+    it('ignores malformed usage entries without throwing', () => {
+      const state = createPiMapperState()
+      for (const ev of [
+        { type: 'entry_appended' } as PiEvent,
+        { type: 'entry_appended', entry: null } as PiEvent,
+        warm({ usage: undefined }),
+        warm({ usage: { input: 'x' } }),
+        warm({ id: undefined }),
+        warm({ provider: 3 })
+      ]) {
+        expect(mapPiEvent(ev, state)).toEqual([{ kind: 'ignore' }])
+      }
+    })
+  })
 })

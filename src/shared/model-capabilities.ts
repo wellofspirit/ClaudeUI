@@ -55,12 +55,11 @@ function normaliseModelId(model: string | undefined | null): string {
 
 /**
  * Map a model picker value to its canonical id. Mirrors cli.js's baked model
- * catalog aliases at the time of writing (2.1.293):
+ * catalog aliases at the time of writing (2.1.321):
  *   `opus` → `claude-opus-5-5` (default provider), `sonnet` → `claude-sonnet-5-5`,
- *   `haiku` → `claude-haiku-5-5`. (Upstream also maps `fable` →
- *   `claude-fable-5-1`; there has never been a `fable` case here — a bare
- *   `fable` value falls through to the unknown-family "assume modern"
- *   defaults, which match Fable's actual capabilities.)
+ *   `haiku` → `claude-haiku-5-5`, `fable` → `claude-fable-5-2`. (`fable` had no
+ *   case until 2.1.321: the unknown-family defaults matched Fable 5.1, but Fable
+ *   5.2's `default_effort` is `medium`, so the alias needs its target.)
  *
  * The `default` alias intentionally has no mapping — it resolves at the cli.js
  * layer to whatever the user (or environment) has configured. Returns the
@@ -83,6 +82,9 @@ export function canonicalizeModelValue(value: string | undefined | null): string
       return 'claude-sonnet-5-5'
     case 'haiku':
       return 'claude-haiku-5-5'
+    case 'fable':
+    case 'fable[1m]':
+      return 'claude-fable-5-2'
     default:
       return normaliseModelId(value) || value
   }
@@ -666,14 +668,20 @@ export function supportedEffortLevels(model: string | undefined | null): EffortL
 }
 
 /**
- * Mirrors the catalog's `default_effort` (cli.js 2.1.293): `xhigh` for Opus
- * 4.7, `medium` for Opus 5.5, Sonnet 5.5 and Haiku 5.5, `high` for everything
- * else. Picker aliases are resolved through the baked alias table first.
+ * Mirrors the catalog's `default_effort` (cli.js 2.1.321): `xhigh` for Opus
+ * 4.7, `medium` for Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.2 and Mythos 5.2,
+ * `high` for everything else. Picker aliases are resolved through the baked alias table first.
  */
 export function defaultEffort(model: string | undefined | null): EffortLevel {
   const id = normaliseModelId(canonicalizeModelValue(model))
   if (id.includes('opus-4-7')) return 'xhigh'
-  if (id.includes('opus-5-5') || id.includes('sonnet-5-5') || id.includes('haiku-5-5'))
+  if (
+    id.includes('opus-5-5') ||
+    id.includes('sonnet-5-5') ||
+    id.includes('haiku-5-5') ||
+    id.includes('fable-5-2') ||
+    id.includes('mythos-5-2')
+  )
     return 'medium'
   return 'high'
 }
@@ -795,8 +803,8 @@ export const CONTEXT_WINDOW_DEFAULT = 200_000
  * Base models that get a 1M window without a "[1m]" suffix — cli.js's
  * per-model capabilities registry (`context:{window:1e6,native_1m:!0}`
  * entries; hardcoded `UE()` list before 2.1.261). Matched by substring like
- * cli.js's normaliser, so dated ids, point releases (claude-fable-5-1,
- * claude-mythos-5-1) and provider-prefixed ids (Bedrock) resolve too.
+ * cli.js's normaliser, so dated ids, point releases (claude-fable-5-2,
+ * claude-mythos-5-2) and provider-prefixed ids (Bedrock) resolve too.
  */
 const IMPLICIT_1M_BASE_MODELS = [
   'claude-fable-5',
@@ -810,7 +818,7 @@ const IMPLICIT_1M_BASE_MODELS = [
 
 /**
  * Picker aliases that cli.js's baked catalog resolves to an implicit-1M base model:
- * "fable" → claude-fable-5-1, "opus" → claude-opus-5-5 (as of 2.1.280),
+ * "fable" → claude-fable-5-2 (as of 2.1.321; claude-fable-5-1 before), "opus" → claude-opus-5-5 (as of 2.1.280),
  * "sonnet" → claude-sonnet-5-5 (as of 2.1.285; Sonnet has been native-1M since 2.1.197),
  * "haiku" → claude-haiku-5-5 (as of 2.1.293). `default` follows the plan's
  * recommendation — Opus on Max, Sonnet on Pro, both native-1M — so it sizes at

@@ -433,6 +433,28 @@ describe('PiChildRunner output handling', () => {
     expect(runner.trajectory.size).toBe(1)
   })
 
+  it('forwards an idle cache-warm entry to onUsage without entering turn totals', async () => {
+    const child = makeFakeChild()
+    const onUsage = vi.fn()
+    const emit = vi.fn()
+    const runner = await PiChildRunner.start(runnerOpts(child, { onUsage, emit: () => emit }))
+    child.push({
+      type: 'entry_appended',
+      entry: {
+        type: 'usage',
+        kind: 'cache_warm',
+        id: 'warm-1',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: { input: 1, output: 0, cacheRead: 900, cacheWrite: 0 }
+      }
+    })
+    expect(onUsage).toHaveBeenCalledTimes(1)
+    expect(onUsage.mock.calls[0][0]).toMatchObject({ kind: 'usage', cacheWarm: true })
+    expect(runner.turnTotalTokens).toBe(0)
+    expect(emit).not.toHaveBeenCalled()
+  })
+
   it('records assistant messages only in the trajectory and fires onUsage/onToolResult', async () => {
     const child = makeFakeChild()
     const onUsage = vi.fn()
