@@ -9,14 +9,20 @@ import type { JudgeTransport } from '../classifier'
 import { JudgeSetup, type JudgeSetupOptions } from '../judge-setup'
 import type { SessionJudgeOptions } from '../session-judge'
 
-const { mockLogger, ground } = vi.hoisted(() => ({
+const { mockLogger, ground, accountPlan } = vi.hoisted(() => ({
   mockLogger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   ground: {
     remotes: vi.fn(async () => [] as unknown[]),
     visibility: vi.fn(async () => 'private')
-  }
+  },
+  // The plan a fallback judge's label names (`<model> (<Plan> account)`).
+  accountPlan: vi.fn((_accountId: string): string | undefined => undefined)
 }))
 vi.mock('../../services/logger', () => ({ logger: mockLogger }))
+vi.mock('../judge-accounts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../judge-accounts')>()),
+  chatgptAccountPlan: accountPlan
+}))
 vi.mock('../ground-truth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../ground-truth')>()),
   captureGitRemotes: ground.remotes,
@@ -63,6 +69,7 @@ function make(autoMode: AutoModeConfig, extra: Partial<JudgeSetupOptions> = {}):
 
 beforeEach(() => {
   vi.clearAllMocks()
+  accountPlan.mockImplementation(() => undefined)
 })
 
 describe('config memoization', () => {
@@ -226,6 +233,31 @@ describe('route-unavailable banners', () => {
     h.built[1].onUnavailable('down again')
     expect(seen).toEqual([[FALLBACK, 'down again']])
     expect(h.reports).toHaveLength(1)
+  })
+
+  it('names the fallback by the label in force when its failure is reported, not when it was built', () => {
+    // The plan behind the label can change between building the fallback judge and its failure
+    // (the accounts snapshot refreshes). Every owner reports with the label as it is then.
+    const h = make({
+      judgeModel: PRIMARY,
+      fallbackJudgeModel: FALLBACK,
+      fallbackJudgeAccount: 'acct-1'
+    })
+    accountPlan.mockImplementation(() => 'plus')
+    const seen: Array<[string, string]> = []
+    const fallback = h.setup.fallbackJudge((label, reason) => seen.push([label, reason]))
+    // The label the pipeline is handed is still the one built with the judge.
+    expect(fallback?.label).toBe(`${FALLBACK} (Plus account)`)
+    accountPlan.mockImplementation(() => 'pro')
+    h.built[0].onUnavailable('down')
+    expect(seen).toEqual([[`${FALLBACK} (Pro account)`, 'down']])
+
+    // The banner path, without an override.
+    h.setup.fallbackJudge()
+    accountPlan.mockImplementation(() => 'team')
+    h.built[1].onUnavailable('down')
+    expect(h.reports).toHaveLength(1)
+    expect(h.reports[0]).toContain(`${FALLBACK} (Team account)`)
   })
 
   it('fallbackJudge is undefined when no fallback is in effect', () => {
