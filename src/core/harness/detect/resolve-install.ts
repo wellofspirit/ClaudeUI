@@ -10,15 +10,12 @@
  *   (`<name>.shim`'s `path = "..."`, `<name>.bunx`'s UTF-16 relative path).
  * - A native file (PE, ELF, Mach-O) is taken as-is.
  * - A text file inside a harness's npm package (a placeholder `bin/*.exe`
- *   stub, pi's `cli.js`, Codex's `codex.js`) resolves through the package:
+ *   stub, pi's `cli.js`) resolves through the package:
  *     Claude Code, opencode  `<pkg>/bin/<name>.exe` when native (opencode 2.x's
  *                            postinstall links its binary there on every OS),
  *                            else the platform package's binary
  *                            (`createRequire` from the realpath'd package, as
  *                            their postinstall does)
- *     Codex                  `@openai/codex-<os>-<arch>` → `vendor/<triple>/bin/codex`,
- *                            falling back to `<pkg>/vendor/…` (`codex.js`'s
- *                            `findCodexExecutable`)
  *     pi                     `<pkg>/dist/bundle/cli.js`, run by a node that
  *                            `node-choice.ts` picks (`nodeFor`)
  * - pi.dev's managed install (`managed-install.json` + `current-version`)
@@ -32,7 +29,7 @@ import { createRequire } from 'node:module'
 import * as path from 'node:path'
 import type { HarnessId, HarnessInstallKind, HarnessLaunch } from '../../../shared/harness-types'
 import { nativeLaunch } from '../launch'
-import { codexTriple, HARNESS_PACKAGES, type Candidate } from './candidates'
+import { HARNESS_PACKAGES, type Candidate } from './candidates'
 import {
   isDir,
   isFile,
@@ -92,8 +89,7 @@ const NODE_NAMES: ReadonlySet<string> = new Set(['node', 'node.exe'])
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
+  pi: 'pi'
 }
 
 function exe(name: string, platform: NodeJS.Platform): string {
@@ -110,7 +106,6 @@ const KIND_PATTERNS: [HarnessInstallKind, string[]][] = [
   ['npm', ['/node_modules/']],
   ['scoop', ['/scoop/']],
   ['winget', ['/microsoft/winget/']],
-  ['standalone', ['/.codex/packages/standalone/', '/programs/openai/codex/']],
   ['native-installer', ['/.local/share/claude/', '/.local/bin/claude', '/.opencode/bin/']]
 ]
 
@@ -258,19 +253,6 @@ export function opencodePlatformPackages(
     if (arch === 'x64') names.push(`${base}-baseline-musl`)
   }
   return names
-}
-
-/** `@openai/codex`'s platform package for a triple (`codex.js`). */
-export function codexPlatformPackage(triple: string): string | null {
-  const byTriple: Record<string, string> = {
-    'x86_64-unknown-linux-musl': '@openai/codex-linux-x64',
-    'aarch64-unknown-linux-musl': '@openai/codex-linux-arm64',
-    'x86_64-apple-darwin': '@openai/codex-darwin-x64',
-    'aarch64-apple-darwin': '@openai/codex-darwin-arm64',
-    'x86_64-pc-windows-msvc': '@openai/codex-win32-x64',
-    'aarch64-pc-windows-msvc': '@openai/codex-win32-arm64'
-  }
-  return byTriple[triple] ?? null
 }
 
 // ── Results ───────────────────────────────────────────────────────────────────
@@ -513,22 +495,6 @@ export function resolvePackage(
       const found = firstNative(files)
       if (found) return nativeResolved(id, displayPath, found)
       return missing(`${LABELS[id]}'s native executable is not in its npm package`)
-    }
-    case 'codex': {
-      const triple = codexTriple(platform, arch)
-      const platformPkg = triple ? codexPlatformPackage(triple) : null
-      if (!triple || !platformPkg) {
-        return unsupported(id, displayPath, realPkg, `Codex has no build for ${platform}-${arch}`)
-      }
-      const vendorRoots: string[] = []
-      const dir = requirePackageDir(realPkg, platformPkg)
-      if (dir) vendorRoots.push(path.join(dir, 'vendor'))
-      vendorRoots.push(path.join(realPkg, 'vendor'))
-      const found = firstNative(
-        vendorRoots.map((root) => path.join(root, triple, 'bin', exe('codex', platform)))
-      )
-      if (found) return nativeResolved(id, displayPath, found)
-      return missing(`Codex's platform package ${platformPkg} is not installed`)
     }
     case 'pi':
       return piFromPackage(displayPath, pkgDir, realPkg, deps)

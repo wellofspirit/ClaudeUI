@@ -189,7 +189,9 @@ describe('mapPiEvent — full happy turn', () => {
       provider: 'anthropic',
       modelId: 'claude-sonnet-4-6',
       tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
-      costUsd: 0.003,
+      // pi's `usage.cost` verbatim (the cost rule reads its components and
+      // `totalFromProvider`; the ledger reads `total`).
+      cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
       messageId
     })
     expect(state.currentMessageId).toBeNull()
@@ -669,8 +671,42 @@ describe('mapPiEvent — usage extraction incl. reasoning tokens', () => {
         cacheWrite: 0,
         reasoning: 15
       })
-      expect(usageOutput.costUsd).toBeCloseTo(0.03)
+      expect(usageOutput.cost?.total).toBeCloseTo(0.03)
     }
+  })
+
+  it('carries usage.cost verbatim, including a provider-billed totalFromProvider (pi 1.5.0)', () => {
+    const state = createPiMapperState()
+    mapPiEvent({ type: 'message_start', message: assistantMsg() }, state)
+    const msg = assistantMsg({
+      usage: {
+        input: 100,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 120,
+        cost: {
+          input: 0.01,
+          output: 0.02,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0.5,
+          totalFromProvider: true
+        }
+      }
+    })
+    const out = mapPiEvent({ type: 'message_end', message: msg }, state)
+    const usageOutput = out.find((o) => o.kind === 'usage')
+    if (usageOutput?.kind !== 'usage') throw new Error('no usage output')
+    // The cost rule needs the components and the flag; the ledger needs `total`.
+    expect(usageOutput.cost).toEqual({
+      input: 0.01,
+      output: 0.02,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0.5,
+      totalFromProvider: true
+    })
   })
 
   it('omits tokens.reasoning entirely when usage.reasoning is absent', () => {
@@ -1765,5 +1801,70 @@ describe('mapPiEvent — the model a message ran on', () => {
       state
     )
     expect(state.currentMessageModel).toBe('anthropic/claude-haiku-4-5')
+  })
+
+  describe('entry_appended usage entries (pi 1.5.1 cache warming)', () => {
+    const warm = (over: Record<string, unknown> = {}): PiEvent => ({
+      type: 'entry_appended',
+      entry: {
+        type: 'usage',
+        kind: 'cache_warm',
+        id: 'warm-1',
+        parentId: null,
+        timestamp: '2026-11-10T00:00:00Z',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 1,
+          output: 0,
+          cacheRead: 900,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0.0003, cacheWrite: 0, total: 0.0003 }
+        },
+        ...over
+      }
+    })
+
+    it('maps a usage entry to a cacheWarm usage output without touching mapper state', () => {
+      const state = createPiMapperState()
+      expect(mapPiEvent(warm(), state)).toEqual([
+        {
+          kind: 'usage',
+          provider: 'anthropic',
+          modelId: 'claude-sonnet-4-6',
+          tokens: { input: 1, output: 0, cacheRead: 900, cacheWrite: 0 },
+          cost: { input: 0, output: 0, cacheRead: 0.0003, cacheWrite: 0, total: 0.0003 },
+          messageId: 'pi-warm:warm-1',
+          cacheWarm: true
+        }
+      ])
+      expect(state.totalCostUsd).toBe(0)
+    })
+
+    it('namespaces the ledger key with the pi session id (entry ids repeat across sessions)', () => {
+      const state = createPiMapperState()
+      state.sessionId = 'sess-a'
+      const [out] = mapPiEvent(warm(), state)
+      expect(out).toMatchObject({ kind: 'usage', messageId: 'pi-warm:sess-a:warm-1' })
+    })
+
+    it('ignores non-usage entries', () => {
+      const ev: PiEvent = { type: 'entry_appended', entry: { type: 'message', id: 'm1' } }
+      expect(mapPiEvent(ev, createPiMapperState())).toEqual([{ kind: 'ignore' }])
+    })
+
+    it('ignores malformed usage entries without throwing', () => {
+      const state = createPiMapperState()
+      for (const ev of [
+        { type: 'entry_appended' } as PiEvent,
+        { type: 'entry_appended', entry: null } as PiEvent,
+        warm({ usage: undefined }),
+        warm({ usage: { input: 'x' } }),
+        warm({ id: undefined }),
+        warm({ provider: 3 })
+      ]) {
+        expect(mapPiEvent(ev, state)).toEqual([{ kind: 'ignore' }])
+      }
+    })
   })
 })

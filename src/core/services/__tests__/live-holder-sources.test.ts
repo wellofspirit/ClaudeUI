@@ -19,7 +19,6 @@ function row(over: Partial<DispatchTargetRow>): DispatchTargetRow {
     model: 'm',
     launchMode: 'default',
     accountKey: null,
-    codexAccountId: null,
     callerRestriction: null,
     name: null,
     description: null,

@@ -16,13 +16,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CredentialSync,
-  OPENCODE_CODEX_VENDOR_ID,
-  PI_CODEX_VENDOR_ID,
-  type CodexEntrySnapshot,
-  type CodexFeedTarget,
+  OPENCODE_CHATGPT_VENDOR_ID,
+  PI_CHATGPT_VENDOR_ID,
+  type ChatgptEntrySnapshot,
+  type ChatgptFeedTarget,
   type VaultLike
 } from '../../../../core/auth/vault/CredentialSync'
-import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
 import { storeBackedOpencode } from './fixtures/fake-opencode-target'
 
 type Engine = 'pi' | 'opencode'
@@ -55,14 +55,14 @@ function setup(vaultCred: VaultCredential | null, running: Record<Engine, boolea
   }
   /** pi's store, so what a removal took out is really gone for the next read. */
   const piTarget = () => {
-    const store = new Map<string, CodexEntrySnapshot>()
-    const feed = vi.fn(async (vendorId: string, input: CodexEntrySnapshot) => {
+    const store = new Map<string, ChatgptEntrySnapshot>()
+    const feed = vi.fn(async (vendorId: string, input: ChatgptEntrySnapshot) => {
       store.set(vendorId, input)
     })
     const read = vi.fn(async (vendorId: string) => store.get(vendorId) ?? null)
     const remove = vi.fn(async (vendorId: string) => void store.delete(vendorId))
     // An EXISTING directory, so a watcher would really be armed.
-    const t: CodexFeedTarget = {
+    const t: ChatgptFeedTarget = {
       authFilePath: () => join(dir, 'pi-auth.json'),
       feedOauthCredential: feed,
       readOauthEntry: read,
@@ -92,7 +92,7 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
     expect(result).toEqual({ pi: false, opencode: true })
     expect(h.pi.feed).not.toHaveBeenCalled()
     expect(h.pi.read).not.toHaveBeenCalled()
-    expect(h.opencode.feed).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID, expect.anything())
+    expect(h.opencode.feed).toHaveBeenCalledWith(OPENCODE_CHATGPT_VENDOR_ID, expect.anything())
     expect(h.opencode.held()).toBe('access-r1')
     expect(h.watching('pi')).toBe(false)
     // opencode 2.x has no auth file to watch (ADR-097 §5).
@@ -112,7 +112,7 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
 
     expect(h.pi.feed).toHaveBeenCalledTimes(1)
     expect(h.pi.feed).toHaveBeenCalledWith(
-      PI_CODEX_VENDOR_ID,
+      PI_CHATGPT_VENDOR_ID,
       expect.objectContaining({ refresh: 'r1' })
     )
     expect(h.opencode.feed).not.toHaveBeenCalled()
@@ -138,17 +138,17 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
 
   it('a disconnect takes pi’s copy out at once and records opencode’s, which goes when opencode can run', async () => {
     const h = setup(cred('r1'), { pi: false, opencode: false })
-    h.pi.store.set(PI_CODEX_VENDOR_ID, cred('r1'))
+    h.pi.store.set(PI_CHATGPT_VENDOR_ID, cred('r1'))
     await h.opencode.holdsOurs('r1')
 
     await h.sync.disconnectChatgpt()
 
     // pi's auth.json is a file edit whether or not pi runs.
-    expect(h.pi.remove).toHaveBeenCalledWith(PI_CODEX_VENDOR_ID)
+    expect(h.pi.remove).toHaveBeenCalledWith(PI_CHATGPT_VENDOR_ID)
     expect(h.pi.store.size).toBe(0)
     // opencode 2.x: no server without opencode — the removal waits in
     // ClaudeUI's record, and runs before the next operation once it can.
-    expect(h.opencode.remove).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID)
+    expect(h.opencode.remove).toHaveBeenCalledWith(OPENCODE_CHATGPT_VENDOR_ID)
     expect(h.opencode.ours()).toHaveLength(1)
     h.running.opencode = true
     await h.sync.harnessArrived('opencode')
@@ -159,7 +159,7 @@ describe('the ChatGPT feed and a harness that does not run (ADR-082 §8, S7d)', 
     const h = setup(cred('r1'), { pi: true, opencode: true })
     await h.opencode.holdsOurs('r1')
     await h.sync.disconnectChatgpt()
-    expect(h.opencode.remove).toHaveBeenCalledWith(OPENCODE_CODEX_VENDOR_ID)
+    expect(h.opencode.remove).toHaveBeenCalledWith(OPENCODE_CHATGPT_VENDOR_ID)
     expect(h.opencode.ours()).toEqual([])
   })
 

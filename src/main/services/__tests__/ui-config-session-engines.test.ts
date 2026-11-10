@@ -59,20 +59,17 @@ async function fresh(): Promise<{
 }
 
 describe('saveSessionConfig — sessionEngines durability (H15)', () => {
-  it('does not erase or reclassify verified native identity from a stale client projection', async () => {
+  it('drops a client entry naming an engine this build does not ship, and keeps the rest', async () => {
     const { db, ui } = await fresh()
     try {
-      db.setSessionMeta('native', { engineId: 'codex' })
-      db.ensureCodexSessionOverrides('native')
-      db.setCodexSessionOverrides('native', { model: 'gpt-native', effort: 'ultra' })
-      ui.saveSessionConfig({ sessionEngines: { other: { engineId: 'claude' } } })
-      expect(db.getSessionMeta('native')?.engineId).toBe('codex')
-      ui.saveSessionConfig({ sessionEngines: { native: { engineId: 'claude' } } })
-      expect(db.getSessionMeta('native')?.engineId).toBe('codex')
-      expect(db.getCodexSessionOverrides('native')).toEqual({
-        model: 'gpt-native',
-        effort: 'ultra'
+      ui.saveSessionConfig({
+        sessionEngines: {
+          stale: { engineId: 'codex' as never },
+          fresh: { engineId: 'pi' }
+        }
       })
+      expect(db.getSessionMeta('stale')).toBeUndefined()
+      expect(db.getSessionMeta('fresh')?.engineId).toBe('pi')
     } finally {
       db.closeDb()
     }
@@ -112,15 +109,15 @@ describe('saveSessionConfig — sessionEngines durability (H15)', () => {
     try {
       // A session another client / core created: the saving client's snapshot
       // predates it, so its map names other sessions and not this one.
-      db.setSessionMeta('remote-codex', { engineId: 'codex' })
+      db.setSessionMeta('remote-pi', { engineId: 'pi' })
       db.setSessionMeta('real-1', { engineId: 'opencode', model: OPENCODE_MODEL })
 
       ui.saveSessionConfig({
         sessionEngines: { 'real-1': { engineId: 'opencode', model: OPENCODE_MODEL } }
       })
 
-      expect(Object.keys(db.allSessionMeta()).sort()).toEqual(['real-1', 'remote-codex'])
-      expect(db.getSessionMeta('remote-codex')?.engineId).toBe('codex')
+      expect(Object.keys(db.allSessionMeta()).sort()).toEqual(['real-1', 'remote-pi'])
+      expect(db.getSessionMeta('remote-pi')?.engineId).toBe('pi')
     } finally {
       db.closeDb()
     }

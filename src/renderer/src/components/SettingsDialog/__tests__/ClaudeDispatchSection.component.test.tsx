@@ -7,7 +7,7 @@
  *
  * Claude itself is always installed, but dispatch INTO Claude can only be called
  * FROM another harness, so (ADR-033 M4-A) the dispatch page offers this target
- * only while one of opencode, pi or Codex runs (ADR-082 §8; SettingsDialogView's
+ * only while one of opencode or pi runs (ADR-082 §8; SettingsDialogView's
  * page test). The section itself never asks.
  *
  * Tested flows:

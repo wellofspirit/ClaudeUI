@@ -45,7 +45,8 @@ export function isOpenAIReasoningModel(id: string): boolean {
  * destructive and shipping shapes skip stage 1 (`requiresFullReview` in
  * classifier.ts),
  * and a slower tail (p90 2.1 s vs 1.9 s synthetic, 6.0 s vs 2.2 s real). Stage 1
- * is the speed path, so it stays at the floor.
+ * is the speed path, so it stays at the floor. A ChatGPT workspace may still refuse that
+ * effort; the transport then steps up to `low` for the route (`effort-floor.ts`).
  */
 export function lowestReasoningEffort(id: string): 'none' | 'minimal' | 'low' {
   const bare = bareOpenAIId(id)

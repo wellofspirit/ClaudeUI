@@ -3,6 +3,7 @@
 **Status:** Accepted (2026-09-30). Built on branch `harnesses` in the 3.6 line, five slices (S1–S5),
 plus a follow-up that keeps opencode's `DeniedError` rule dump out of the model's context (§3 "No
 server-side rule dump").
+**Amended 2026-10-28:** the Codex engine was removed (ADR-066); the rules below now hold on claude, opencode and pi, and every Codex passage is historical.
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-23: a dispatch target's deny/ask rules are the union of the dispatcher's and the target's directories; targets still get no allow rules or additional directories in any ruleset)
 **Amended by:** [ADR-108](adr-108_dispatch-workdir-and-target-judge-context.md) (2026-10-24 amendment: a target's additional directories, plus the dispatcher's directory when it runs elsewhere, are real scope on every engine; allow rules stay excluded)
 **Amended by:** [ADR-110](adr-110_pi-path-containment-and-judge-off.md) §7a (2026-10-25: on pi, with a path scope, an edit of an agent-control path asks before the allow tier, so a user allow rule no longer allows it; the ladder reads deny → plan → hosted → ask → human-only → session allow → sensitive-edit ask → allow → mode base)
@@ -116,11 +117,11 @@ a miss lets a command the user said "never" run.
   lexer, which refuses redirections, newlines, `$` and every construct the dialects split
   differently. Both are word-boundary prefix or exact, case-sensitive, un-normalised (`Bash(git:*)`
   does not cover `git-lfs`; `Bash(bun run test:*)` does not cover `bun run test:unit`).
-- **Predicates** for §4 and Codex: `isClassifierBypassingRule` (cli.js `ZIe` parity over the union of
+- **Predicates** for §4: `isClassifierBypassingRule` (cli.js `ZIe` parity over the union of
   the Bash and PowerShell launcher lists, `python -m dotted.module:*` excepted, `Agent`/`Task`/
   `Monitor`/`AppifactRepl`), `isCarvedOut` (positional: same program and one rule's positional words
-  are a prefix of the other's — `git:*` ⊃ `git push --force`, both directions; program strength for
-  Codex: any deny/ask on the same program family), `canLaunchOtherPrograms`, `isLauncherShapedSegment`
+  are a prefix of the other's — `git:*` ⊃ `git push --force`, both directions; the program strength
+  Codex's rules-sync used was removed 2026-10-29), `canLaunchOtherPrograms`, `isLauncherShapedSegment`
   (a segment that runs code its own words do not show: `npx`, `bunx`, `bun x|run|-e`, `node -e`,
   `python -c`, shells with `-c`/`-Command`/`-EncodedCommand`/`/c`, `eval`, `exec`, `env`, `xargs`,
   `sudo`, `ssh`, `docker exec|run`, `git -c`, `find -exec`, `sed … e`, `awk system(`, the PowerShell

@@ -168,7 +168,7 @@ const installName = (p: HarnessInstallProgress): string => `${HARNESS_LABEL[p.id
 
 const VERSION_WIDTH = 'w-[168px]'
 
-/** A value the user cannot change: Bundled Claude Code, ClaudeUI's Codex. */
+/** A value the user cannot change: Bundled Claude Code. */
 function LockedVersion({ text, title }: { text: string; title: string }): React.JSX.Element {
   return (
     <span
@@ -353,7 +353,7 @@ function HarnessRow({
     version = (
       <LockedVersion
         text={entry.manifest.tested}
-        title="The exact Codex version this ClaudeUI release speaks"
+        title="The exact version this ClaudeUI release speaks"
       />
     )
   } else {

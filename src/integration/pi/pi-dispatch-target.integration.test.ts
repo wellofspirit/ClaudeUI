@@ -56,7 +56,7 @@ const SKIP = !process.env.PI_INTEGRATION_TESTS
 const ROUTING_ID = 'routing-pi-dispatch-target-integration'
 
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
-function hasCodexCredentials(): boolean {
+function hasChatgptCredentials(): boolean {
   try {
     const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent')
     const raw = readFileSync(join(agentDir, 'auth.json'), 'utf-8')
@@ -70,7 +70,7 @@ function hasCodexCredentials(): boolean {
 // Evaluated once at collection time so describe.skipIf can gate on it even
 // when PI_INTEGRATION_TESTS=1 is set — "skip gracefully", not a hard failure.
 const BINARY_MISSING = !locatePiBinary()
-const CREDENTIALS_MISSING = !hasCodexCredentials()
+const CREDENTIALS_MISSING = !hasChatgptCredentials()
 
 describe.skipIf(SKIP || BINARY_MISSING || CREDENTIALS_MISSING)(
   'pi dispatch TARGET integration (ADR-033 M4c)',

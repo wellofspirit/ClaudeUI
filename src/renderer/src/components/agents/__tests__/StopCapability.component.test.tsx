@@ -1,6 +1,5 @@
 /**
- * L2 — Stop on a running task follows the engine. A NATIVE task (opencode's `subagent`, Codex's
- * `spawn_agent`) is stopped through the session (`session:stop-task` -> the session's own
+ * L2 — Stop on a running task follows the engine. A NATIVE task (opencode's `subagent`) is stopped through the session (`session:stop-task` -> the session's own
  * `stopTask`), which only engines with `capabilities.backgroundTasks` implement: on the others
  * the click could only ever fail with "Provider does not support background tasks". A DISPATCH
  * (X-Agent) is stopped through the dispatcher whatever the engine, so it keeps Stop.
@@ -123,7 +122,6 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
         <MessageBubble
           message={assistant(nativeUse('toolu_n'), dispatchUse('toolu_d'))}
           pendingApprovals={[]}
-          isLastAssistant
         />
       )
       expect(screen.getAllByTestId('TaskCard')).toHaveLength(2)
@@ -142,7 +140,6 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
         <MessageBubble
           message={assistant(nativeUse('toolu_n', 'subagent'))}
           pendingApprovals={[]}
-          isLastAssistant
         />
       )
       const stop = cardFor(0).querySelector('[data-testid="TaskCard.stop"]')
@@ -158,11 +155,7 @@ describe('Stop on a running task follows capabilities.backgroundTasks (native) a
     it('an engine WITH background tasks keeps Stop on the native task', () => {
       setSession([assistant(nativeUse('toolu_n', 'Agent'))], 'claude', true)
       render(
-        <MessageBubble
-          message={assistant(nativeUse('toolu_n', 'Agent'))}
-          pendingApprovals={[]}
-          isLastAssistant
-        />
+        <MessageBubble message={assistant(nativeUse('toolu_n', 'Agent'))} pendingApprovals={[]} />
       )
       expect(cardFor(0).querySelector('[data-testid="TaskCard.stop"]')).not.toBeNull()
     })

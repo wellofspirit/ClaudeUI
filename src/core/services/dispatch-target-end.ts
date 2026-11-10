@@ -5,7 +5,7 @@
  * deleted. The dispatcher does the live part (stop the run, release the process, dismiss
  * its approvals); what is left is state on disk that a row can name: the ledger row goes
  * `stopped` (never resumed again) and the harness's own session is removed where the
- * engine allows it. Claude's transcript and Codex's thread stay (the user's to delete).
+ * engine allows it. Claude's transcript stays (the user's to delete).
  *
  * This is also what the boot sweep uses for a parent that no longer exists, so it lives
  * apart from the dispatcher (which cannot be imported at seed time).

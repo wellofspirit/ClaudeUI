@@ -47,6 +47,7 @@ import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
 import { logger } from './logger'
+import { parseSkillInvocationEnvelope } from './claude-skill-invoke'
 import { removePiScratchpad } from '../pi/pi-scratchpad'
 import { blobStore } from './blob-store'
 import {
@@ -299,7 +300,8 @@ export function findPiSessionFile(sessionId: string): string | null {
  * opencode's cold history follows too, `opencode/history.ts`).
  *
  * Mapping (same field conventions as the live mapper — src/main/pi/event-mapper.ts):
- *   user      → role 'user', string/array content → text/image blocks
+ *   user      → role 'user', string/array content → text/image blocks; a Claude skill's
+ *               expansion envelope → role 'system' with a `cli_command` block
  *   assistant → role 'assistant', text/thinking/toolCall → text/thinking/tool_use
  *               blocks; a completed toolCall ALSO gets a `tool_result` block
  *               immediately after it (looked up via `toolResultsByCallId`) —
@@ -331,6 +333,18 @@ export function convertPiEntryMessage(
   if (message.role === 'user') {
     const content = convertPiTextOrImageContent(message.content)
     if (content.length === 0) return null
+    // A typed Claude skill `/name args` reached pi as its expansion (the envelope); show what was
+    // typed, as Claude's own history does.
+    const first = content[0]
+    const typed = first.type === 'text' ? parseSkillInvocationEnvelope(first.text) : null
+    if (typed) {
+      return {
+        id: entryId,
+        role: 'system',
+        content: [{ type: 'cli_command', ...typed }],
+        timestamp: message.timestamp
+      }
+    }
     return { id: entryId, role: 'user', content, timestamp: message.timestamp }
   }
 
@@ -434,7 +448,7 @@ export function convertPiSessionEntries(entries: PiSessionEntry[]): ChatMessage[
     } else if (e.type === 'custom_message' && e.display) {
       // An extension injected this into the model's context. It was dropped
       // entirely, so the transcript disagreed with what the model saw. Same row
-      // Codex's hook fragments take, titled by the extension that wrote it, and
+      // type as any injected context, titled by the extension that wrote it, and
       // rendered VERBATIM — an extension's text is third-party text. The live
       // mapper uses the same converter (ADR-089 S3), and ClaudeUI's own agent
       // messages are recognised there by customType + details, never by text.

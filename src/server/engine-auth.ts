@@ -14,7 +14,6 @@
  *    ADR-068 §3 reserved it for the headless server — and paste-back (ADR-057)
  *    works here too. Refusing it was the last thing standing between a headless
  *    user and a ChatGPT account.
- *  · `codex` — ALLOWED, as before. Its provider reads the same vault.
  *  · `claude` — refused. The flow runs INSIDE cli.js, driven by the desktop's
  *    AuthManager, and there is no headless equivalent yet.
  *  · `opencode` — refused. Its loopback lives inside the host's opencode server
@@ -28,7 +27,6 @@
  */
 import type { EngineId } from '../shared/types'
 import type { EngineAuthProvider } from '../core/auth/EngineAuthProvider'
-import { codexAuthProvider } from '../core/auth/CodexAuthProvider'
 import { piAuthProvider } from '../core/auth/PiAuthProvider'
 
 /** Refusal text for the two engines whose flows really are desktop-bound. */
@@ -39,7 +37,6 @@ export const DESKTOP_ONLY_SIGN_IN_MESSAGE =
 
 /** The headless server's `AuthCommandDeps.requireEngineAuth`. Throws for an engine it cannot drive. */
 export function requireServerEngineAuth(engineId: EngineId): EngineAuthProvider {
-  if (engineId === 'codex') return codexAuthProvider
   if (engineId === 'pi') return piAuthProvider
   throw new Error(DESKTOP_ONLY_SIGN_IN_MESSAGE)
 }

@@ -598,14 +598,14 @@ describe('ToolCard — tool-result images strip', () => {
 /**
  * F18 — a permission judge's verdict on the card it judged. Collapsed, it is one
  * chip in the header; expanded, a review strip between the header and the body.
- * Both carry the same three facts: who decided, how, and (Codex) at what risk.
+ * Both carry the same facts: who decided, and how.
  */
 describe('ToolCard — review verdict', () => {
-  const codexReview = (over: Partial<ToolReviewBlock> = {}): ToolReviewBlock => ({
+  const autoReview = (over: Partial<ToolReviewBlock> = {}): ToolReviewBlock => ({
     type: 'tool_review',
     toolUseId: 'tu-1',
     reviewId: 'rv-1',
-    reviewer: 'codex-auto-review',
+    reviewer: 'auto-mode',
     decision: 'approved',
     riskLevel: 'medium',
     rationale: 'Builds inside the workspace.',
@@ -626,25 +626,6 @@ describe('ToolCard — review verdict', () => {
     )
   }
 
-  it('shows the Codex chip with decision and risk, collapsed', () => {
-    renderCard(codexReview(), false)
-    expect(screen.getByTestId('ToolCard.reviewChip')).toHaveTextContent(
-      'Auto-review · approved · medium'
-    )
-    // Collapsed: the chip only — the strip belongs to the expanded card.
-    expect(screen.queryByTestId('ToolCard.review')).not.toBeInTheDocument()
-  })
-
-  it('shows the strip between header and body once expanded', () => {
-    renderCard(codexReview())
-    const strip = screen.getByTestId('ToolCard.review')
-    expect(strip).toHaveTextContent('Codex auto-review approved this action')
-    expect(strip).toHaveTextContent('medium risk')
-    expect(strip).toHaveTextContent('Builds inside the workspace.')
-    // The chip stays in the header when expanded too.
-    expect(screen.getByTestId('ToolCard.reviewChip')).toBeInTheDocument()
-  })
-
   it.each([
     ['approved', 'text-success'],
     ['denied', 'text-danger'],
@@ -652,15 +633,8 @@ describe('ToolCard — review verdict', () => {
     ['aborted', 'text-warning'],
     ['inProgress', 'text-warning']
   ] as const)('colours the %s chip with %s', (decision, tone) => {
-    renderCard(codexReview({ decision }), false)
+    renderCard(autoReview({ decision }), false)
     expect(screen.getByTestId('ToolCard.reviewChip').className).toContain(tone)
-  })
-
-  it('words an unfinished Codex review as one', () => {
-    renderCard(codexReview({ decision: 'timedOut' }))
-    expect(screen.getByTestId('ToolCard.review')).toHaveTextContent(
-      'Codex auto-review did not finish reviewing this action'
-    )
   })
 
   it("names ClaudeUI's own judge and its corpus rule, with no risk level", () => {
@@ -697,7 +671,7 @@ describe('ToolCard — review verdict', () => {
    * is plain text, never markdown: the asterisks must survive as asterisks.
    */
   it('renders the rationale verbatim, never through markdown', () => {
-    renderCard(codexReview({ rationale: 'It writes **only** to dist/.' }))
+    renderCard(autoReview({ rationale: 'It writes **only** to dist/.' }))
     expect(screen.getByTestId('ToolCard.review')).toHaveTextContent('It writes **only** to dist/.')
     expect(screen.queryByTestId('MarkdownRenderer')).not.toBeInTheDocument()
   })
@@ -768,11 +742,6 @@ describe('ToolCard — review verdict', () => {
 
     it.each([
       ['an allowed verdict', blocked({ decision: 'approved' }), {}],
-      [
-        "Codex's own review (it keeps its native Approve anyway)",
-        blocked({ reviewer: 'codex-auto-review' }),
-        {}
-      ],
       ['a historical session', blocked(), { isHistorical: true }],
       [
         'a call with a card still pending (the held block answers it)',

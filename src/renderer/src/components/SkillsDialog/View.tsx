@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo, useEffect } from 'react'
 import type { SkillInfo, SkillSource } from '../../../../shared/types'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
+import { SKILL_SOURCE_ORDER, claudeOnlyNote, skillTags } from './skill-display'
 
 interface SkillGroup {
   source: SkillSource
@@ -9,13 +10,13 @@ interface SkillGroup {
   skills: SkillInfo[]
 }
 
-const SOURCE_ORDER: SkillSource[] = ['project', 'user', 'plugin', 'bundled']
-
 const SOURCE_META: Record<SkillSource, { label: string; icon: string }> = {
   project: { label: 'PROJECT', icon: '\u26A1' },
   user: { label: 'USER', icon: '\u26A1' },
   plugin: { label: 'PLUGINS', icon: '\uD83D\uDD0C' },
-  bundled: { label: 'BUNDLED', icon: '\uD83D\uDCE6' }
+  bundled: { label: 'BUNDLED', icon: '\uD83D\uDCE6' },
+  managed: { label: 'MANAGED', icon: '\u26A1' },
+  engine: { label: 'ENGINE', icon: '\u26A1' }
 }
 
 function sourcePathHint(source: SkillSource, cwd: string | null): string {
@@ -23,11 +24,15 @@ function sourcePathHint(source: SkillSource, cwd: string | null): string {
     case 'project':
       return cwd ? `${cwd}/.claude/skills/` : '.claude/skills/'
     case 'user':
-      return '~/.claude/skills/'
+      return '~/.claude/skills/ and commands/'
     case 'plugin':
       return 'Installed plugins'
     case 'bundled':
       return 'Built-in'
+    case 'managed':
+      return 'Managed policy'
+    case 'engine':
+      return "This engine's own skills"
   }
 }
 
@@ -42,13 +47,17 @@ function SourceBadge({
     project: 'bg-accent/15 text-accent',
     user: 'bg-purple-500/15 text-purple-400',
     plugin: 'bg-emerald-500/15 text-emerald-400',
-    bundled: 'bg-text-muted/15 text-text-muted'
+    bundled: 'bg-text-muted/15 text-text-muted',
+    managed: 'bg-amber-500/15 text-amber-400',
+    engine: 'bg-text-muted/15 text-text-muted'
   }
   const labels: Record<SkillSource, string> = {
     project: 'Project',
     user: 'User',
     plugin: pluginName ? `Plugin: ${pluginName}` : 'Plugin',
-    bundled: 'Bundled'
+    bundled: 'Bundled',
+    managed: 'Managed',
+    engine: 'Engine'
   }
 
   return (
@@ -56,6 +65,26 @@ function SourceBadge({
       className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${colors[source]}`}
     >
       {labels[source]}
+    </span>
+  )
+}
+
+function TagList({ skill }: { skill: SkillInfo }): React.JSX.Element | null {
+  const tags = skillTags(skill)
+  if (tags.length === 0) return null
+  return (
+    <span className="flex items-center gap-1 shrink-0">
+      {tags.map((t) => (
+        <span
+          key={t.id}
+          data-testid="SkillsDialog.tag"
+          data-id={t.id}
+          title={t.title}
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-bg-secondary text-text-muted border border-border"
+        >
+          {t.label}
+        </span>
+      ))}
     </span>
   )
 }
@@ -90,6 +119,7 @@ function SkillRow({
         >
           {displayName}
         </span>
+        <TagList skill={skill} />
       </div>
       {skill.description && (
         <div className="text-[11px] text-text-muted truncate mt-0.5 pl-[22px]">
@@ -176,7 +206,7 @@ export function SkillsDialogView({
       list.push(s)
       map.set(s.source, list)
     }
-    return SOURCE_ORDER.filter((src) => map.has(src)).map((src) => ({
+    return SKILL_SOURCE_ORDER.filter((src) => map.has(src)).map((src) => ({
       source: src,
       label: SOURCE_META[src].label,
       pathHint: sourcePathHint(src, cwd),
@@ -323,10 +353,19 @@ export function SkillsDialogView({
                       source={selectedSkill.source}
                       pluginName={selectedSkill.pluginName}
                     />
+                    <TagList skill={selectedSkill} />
                   </div>
                   {selectedSkill.description && (
                     <p className="text-[11px] text-text-secondary mb-1.5">
                       {selectedSkill.description}
+                    </p>
+                  )}
+                  {claudeOnlyNote(selectedSkill) && (
+                    <p
+                      data-testid="SkillsDialog.claudeOnlyNote"
+                      className="text-[11px] text-amber-400 mb-1.5"
+                    >
+                      {claudeOnlyNote(selectedSkill)}
                     </p>
                   )}
                   {selectedSkill.path && (

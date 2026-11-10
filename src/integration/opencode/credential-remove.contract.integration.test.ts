@@ -45,10 +45,19 @@ function storeOn(rig: () => Rig, claimedBySharedRoute?: (id: string) => boolean)
         activate: (id) => c.activateCredential(id),
         relabel: (id, label) => c.updateCredentialLabel(id, label)
       },
+      // The harness's server ran the first-contact hook: its leases are clean (the store
+      // refuses `create` on an unclean one — 2.2.5 boots a location on create).
+      cleaned: true,
       release: () => {}
     }
   }
-  return new OpencodeCredentialStore({ connect, memory, claimedBySharedRoute })
+  // The recogniser a create needs (its proven-copy cleanup cannot be proven done without one).
+  return new OpencodeCredentialStore({
+    connect,
+    memory,
+    claimedBySharedRoute,
+    isClaudeuiToken: () => false
+  })
 }
 
 const rows = async (rig: Rig, integrationID: string) =>

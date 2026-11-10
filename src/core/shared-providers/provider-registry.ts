@@ -230,9 +230,6 @@ export async function listProviderRegistry(): Promise<ProviderRegistrySnapshot> 
     statuses,
     chatgptAccounts: {
       activeId: vaultStatus.activeId,
-      perSession:
-        definitions.find((definition) => definition.id === CHATGPT_PROVIDER_ID)?.accounts
-          ?.perSession === true,
       // `needsReauth` rides along because a stored account IS the credential
       // (`sharedCredential`): without it a revoked refresh token still reads
       // `connected` everywhere downstream. It is a boolean the vault already
@@ -392,14 +389,6 @@ function sharedEntry(
   const chatgptSubscription =
     definition.id === CHATGPT_PROVIDER_ID && definition.kind === 'subscription'
   const accounts = chatgptSubscription ? (sources.chatgptAccounts ?? undefined) : undefined
-  // Codex is not a ROUTE — it is fed by vault injection (ADR-068 §1), so it can
-  // never appear in `HARNESSES` and the loop above will never produce it. Say it
-  // here instead: without the chip the row lists `opencode · pi` and reads as
-  // "this subscription is not available to Codex", which is the opposite of the
-  // truth. `enabled` is whether there is an ACTIVE account, because that is the
-  // one Codex is injected with; a stored-but-inactive account reaches no
-  // process.
-  if (chatgptSubscription) engines.codex = { enabled: accounts?.activeId != null }
   return {
     id: definition.id,
     name: definition.name,

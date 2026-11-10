@@ -641,6 +641,40 @@ describe('TaskEntry — a SubagentHandback report (S6)', () => {
     render(<TaskEntry toolUseId={TOOL_USE_ID} />)
     expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
   })
+
+  // The panel streams the agent's output, whose "Hand back" tool call already
+  // holds the report: no copy is pinned below it, and a resumed run (ADR-073)
+  // shows nothing of the previous run's hand-back until it ends with its own.
+  it('pins no report under the stream, and none of run 1 while run 2 streams', () => {
+    seed.subagentMessage(ROUTE, TOOL_USE_ID, {
+      id: 'child_m1',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'looking around' }],
+      timestamp: Date.now()
+    })
+    ended({ summary: 'run 1 report', handback: 'send' })
+    const { rerender } = render(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
+    expect(screen.queryByText('run 1 report')).not.toBeInTheDocument()
+
+    ended({ summary: 'run 1 report', handback: 'flagged', warning: 'RUN 1 WARNING' })
+    rerender(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent('RUN 1 WARNING')
+    expect(screen.queryByTestId('HandbackReport.text')).not.toBeInTheDocument()
+
+    seed.taskStarted(ROUTE, {
+      toolUseId: TOOL_USE_ID,
+      taskId: 'task-abc123',
+      taskType: 'local_agent',
+      runIndex: 2
+    })
+    rerender(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.queryByTestId('HandbackReport')).not.toBeInTheDocument()
+
+    ended({ summary: 'run 2 report', handback: 'flagged', warning: 'RUN 2 WARNING' })
+    rerender(<TaskEntry toolUseId={TOOL_USE_ID} />)
+    expect(screen.getByTestId('HandbackReport.warning')).toHaveTextContent('RUN 2 WARNING')
+  })
 })
 
 /**

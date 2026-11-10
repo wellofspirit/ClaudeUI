@@ -23,9 +23,8 @@
  * still puts a `null` on the wire.
  *
  * `null` is not "unset" to the shared code behind these handlers — several
- * places distinguish unset with `=== undefined` (`CodexSession.validateEffort`
- * threw "Codex reasoning effort is unavailable for the selected model" on every
- * fresh web-client Codex session because of exactly this), and the rest declare
+ * places distinguish unset with `=== undefined` (an effort check that
+ * treated `null` as a value once rejected every fresh web-client session), and the rest declare
  * the parameter `?: T`, which `null` does not satisfy. So every optional
  * argument is put back through here at the handler boundary rather than
  * teaching each service to accept two spellings of "nothing".
@@ -47,7 +46,7 @@
  *    which rejects an explicit `null`.
  *
  * Deliberately NOT applied where `null` is a MEANINGFUL value the caller sent
- * on purpose — `session:set-account`, `session:set-reasoning-variant`,
+ * on purpose — `session:set-reasoning-variant`,
  * `usage:set-account-filter`, `webauthn:rename` all declare `T | null` and mean
  * "clear it" by it — nor where the parameter is only tested for truthiness and
  * `null` already reads as the omitted case (`session:stop-task`'s `isDispatch`,

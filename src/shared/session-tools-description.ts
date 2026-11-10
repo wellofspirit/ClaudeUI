@@ -52,7 +52,7 @@ export const SESSION_TOOLS_SERVER_NAME = 'claude-ui-sessions'
 /**
  * The prefixes the engines put in front of the bare `session_*` name: Claude's
  * MCP form, opencode's `claudeui_` (its hosted server, ADR-033), and none (pi's
- * and Codex's own tools carry the bare name).
+ * own tools carry the bare name).
  */
 const SESSION_TOOL_PREFIXES = [`mcp__${SESSION_TOOLS_SERVER_NAME}__`, 'claudeui_', ''] as const
 

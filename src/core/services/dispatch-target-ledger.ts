@@ -7,7 +7,7 @@
  * it imports `db.ts` and the ref-minting rule and nothing else — because three
  * readers that sit under the dispatcher's own import graph need the one question
  * "is this harness session a dispatch target?" (the Claude history list, block
- * usage's per-file parse, the Codex history list): the dispatcher reaches
+ * usage's per-file parse): the dispatcher reaches
  * `block-usage` through `claude-session`, so a helper living in either would be an
  * import cycle.
  *

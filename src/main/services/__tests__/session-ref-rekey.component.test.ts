@@ -48,7 +48,7 @@ function status(sessionId: string): SessionStatus {
     model: null,
     cwd: null,
     totalCostUsd: 0,
-    engineId: 'codex',
+    engineId: 'pi',
     account: null
   } as SessionStatus
 }
@@ -83,12 +83,12 @@ describe('a session ref follows a rekey (host-side)', { timeout: 30_000 }, () =>
   it('rebinds the stored ref, the replicated ref map and the child link to the engine id', async () => {
     const { db, links, manager, emitEvent, syncCore } = await fresh()
     try {
-      emitEvent('session:created', ['parent-1', { cwd: '/x', engineId: 'codex' }])
-      emitEvent('session:created', ['temp-1', { cwd: '/x', engineId: 'codex' }])
+      emitEvent('session:created', ['parent-1', { cwd: '/x', engineId: 'pi' }])
+      emitEvent('session:created', ['temp-1', { cwd: '/x', engineId: 'pi' }])
       const { childRef } = links.linkChild({
         parent: 'parent-1',
         childRoutingId: 'temp-1',
-        engine: 'codex',
+        engine: 'pi',
         kind: 'started',
         createdBy: 'agent',
         grouped: true

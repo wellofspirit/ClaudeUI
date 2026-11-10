@@ -122,6 +122,98 @@ function findSessionIdFn(off, label) {
   return fn
 }
 
+/**
+ * The named imports of one chunk body, as `localName -> {imported, from}`.
+ *
+ * A chunk uses many helpers as imported bindings
+ * (`import{…,O5,…}from"/$bunfs/root/chunk-….js"`). The rename form
+ * (`import{a as b}from"…"`) is the interesting case: the EXPORTING chunk defines
+ * the function under its original name `a`, while the importing chunk only knows
+ * `b`.
+ *
+ * Both captures are bounded — the clause cannot contain braces, the path cannot
+ * contain a quote or a newline — so a match can never cross a chunk boundary.
+ */
+function chunkImports(body) {
+  const out = new Map()
+  for (const m of body.matchAll(/import\{([^{}]*)\}from"([^"\n]*)"/g)) {
+    for (const spec of m[1].split(',')) {
+      const [imported, local = imported] = spec.split(' as ').map((s) => s.trim())
+      if (imported) out.set(local, { imported, from: m[2] })
+    }
+  }
+  return out
+}
+
+/**
+ * The one chunk whose `// @bun-chunk` delimiter ends in `path`'s basename.
+ *
+ * Import specifiers and delimiters spell the same path
+ * (`import{…}from"/$bunfs/root/chunk-vrwkjdrd.js"`,
+ * `// @bun-chunk /$bunfs/root/chunk-vrwkjdrd.js`), but the prefix is
+ * platform-dependent (`B:/~BUN/root/…` on Windows), so only the basename is
+ * compared. Chunk hashes are unique, so more than one is an error.
+ */
+function chunkByPath(path) {
+  const base = path.slice(path.lastIndexOf('/') + 1)
+  const re = new RegExp(`^${CHUNK_MARK}(?:[^\\n]*/)?${reEsc(base)}$`, 'gm')
+  const hits = [...src.matchAll(re)]
+  if (hits.length !== 1) {
+    return { error: `${hits.length} chunks named ${base} (import target of ${path})` }
+  }
+  // Land inside the delimiter line, so `chunkAt` reports this very chunk.
+  return { chunk: chunkAt(hits[0].index + CHUNK_MARK.length) }
+}
+
+/**
+ * Resolve a helper's DEFINITION that is in scope at `off`, as `{ text, where }`
+ * — or `{ error }` when it is missing or ambiguous.
+ *
+ * Minified identifiers are chunk-local, so a bundle-wide search happily returns
+ * a same-named function from an unrelated module: in v2.1.308 `aee` is the
+ * progress predicate, a foreign-thinking-keep logger AND an http hostname
+ * helper. `needle` (a string literal from the function's body) keeps every
+ * candidate anchored on the helper we actually mean.
+ *
+ * Lookup order:
+ *   1. the anchor's own chunk;
+ *   2. failing that, the ONE chunk the anchor's chunk imports the name from —
+ *      v2.1.317 stopped defining the `case"progress":` predicate locally and
+ *      imports it (`import{…,O5,…}from"/$bunfs/root/chunk-vrwkjdrd.js"`).
+ * A name that is neither local nor imported is an error, never a global search.
+ */
+function findScopedFunction(off, name, needle, label) {
+  const defRe = (fn) => new RegExp(`function ${reEsc(fn)}\\(${V}\\)\\{[^{}]*${reEsc(needle)}`, 'g')
+  const inChunk = (chunk, fn) => [...src.slice(chunk.start, chunk.end).matchAll(defRe(fn))]
+
+  const local = chunkAt(off)
+  const localHits = inChunk(local, name)
+  if (localHits.length > 1) {
+    return { error: `${localHits.length} definitions of ${label} in chunk ${local.name}` }
+  }
+  if (localHits.length === 1) return { text: localHits[0][0], where: `chunk ${local.name}` }
+
+  const imported = chunkImports(src.slice(local.start, local.end)).get(name)
+  if (!imported) {
+    return { error: `${label} is neither defined in chunk ${local.name} nor imported by it` }
+  }
+  const target = chunkByPath(imported.from)
+  if (target.error) return target
+  const hits = inChunk(target.chunk, imported.imported)
+  if (hits.length !== 1) {
+    return {
+      error:
+        `${hits.length} definitions of ${label} (${imported.imported}` +
+        `${imported.imported === name ? '' : ` as ${name}`} imported from ${imported.from}) ` +
+        `in chunk ${target.chunk.name}`
+    }
+  }
+  return {
+    text: hits[0][0],
+    where: `chunk ${target.chunk.name}${imported.imported === name ? '' : ` (as ${name})`}, imported`
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Step 1: Read cli.js
 // ---------------------------------------------------------------------------
@@ -665,11 +757,24 @@ if (src.includes(patchBMarker)) {
 // ===========================================================================
 // Patch C: Add ZhA handler for agent_stream_event
 //
-// Injects before the bash_progress handler:
-//   else if(A.data.type==="agent_stream_event"){
-//     yield{type:"stream_event",event:A.data.event,
-//       parent_tool_use_id:A.parentToolUseID,session_id:U6(),uuid:A.uuid}
-//   }
+// Injects directly after the dispatch head of the SDK converter's
+// `case"progress":` chain:
+//
+//   case"progress":if(PRED(e))yield*FN(e,n);                ← the anchor
+//                                    (2.1.321: the 2nd arg is a call, FN(e,s()))
+//   else if(…)yield{…tool_heartbeat…}
+//
+// becomes
+//
+//   case"progress":if(PRED(e))yield*FN(e,n);
+//   /*PATCHED:subagent-C*/else if(e.data.type==="agent_stream_event"){
+//     yield{type:"stream_event",event:e.data.event,
+//       parent_tool_use_id:e.parentToolUseID,session_id:z(),uuid:e.uuid}
+//   }else if(…)…
+//
+// The head is the stable part: the arm behind it changed shape in 2.1.317
+// (bash_progress -> tool_heartbeat) and again in 2.1.319 (a new first arm,
+// `le()&&e.data.type==="repl_tool_call"`), so the injection names no arm.
 // ===========================================================================
 
 console.log('\n--- Patch C: ZhA agent_stream_event handler ---')
@@ -679,85 +784,70 @@ const patchCMarker = '/*PATCHED:subagent-C*/'
 if (src.includes(patchCMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // The bash_progress handler anchor uses a variable name that changes between
-  // versions (A in v2.1.47, q in v2.1.87). Use regex to find it dynamically.
-  //
-  // v2.1.47: else if(A.data.type==="bash_progress"){
-  // v2.1.49: else if(A.data.type==="bash_progress"||A.data.type==="powershell_progress"){
-  // v2.1.87: else if(q.data.type==="bash_progress"||q.data.type==="powershell_progress"){
-  // v2.1.261: else if(e.data.type==="bash_progress"||e.data.type==="powershell_progress"){
-  const anchorRe = new RegExp(
-    `else if\\((${V})\\.data\\.type==="bash_progress"` +
-      `(?:\\|\\|\\1\\.data\\.type==="powershell_progress")?\\)\\{`,
+  // `case"progress":if(PRED(e))yield*FN(e,n);` (2.1.321: `…FN(e,s());`) — names are minified and
+  // chunk-local; `$` is legal in them, hence V = [\w$]+ (captures are only used
+  // as a backreference and as injected text, never rebuilt into another RegExp).
+  const headRe = new RegExp(
+    `case"progress":if\\((${V})\\((${V})\\)\\)yield\\*(${V})\\(\\2,${V}(?:\\(\\))?\\);`,
     'g'
   )
-  const anchorMatches = [...src.matchAll(anchorRe)]
-  if (anchorMatches.length === 0) {
-    console.error('ERROR: Cannot locate bash_progress handler in ZhA.')
-    process.exit(1)
-  }
-  if (anchorMatches.length > 1) {
+  const headMatches = [...src.matchAll(headRe)]
+  if (headMatches.length === 0) {
     console.error(
-      `ERROR: ${anchorMatches.length} bash_progress else-if handlers found ` +
-        `(at ${anchorMatches.map((m) => m.index).join(', ')}). Ambiguous — aborting.`
+      'ERROR: Cannot locate the dispatch head `case"progress":if(PRED(e))yield*FN(e,n);` of the SDK converter.'
     )
     process.exit(1)
   }
-  const anchorIdx = anchorMatches[0].index
-  const progressVar = anchorMatches[0][1]
-
-  // Verify we are inside the SDK converter's `case"progress":` dispatch chain
-  // (not some other bash_progress consumer), and that the chain routes
-  // agent_progress — that branch is what Patch A's messages ride on, and our
-  // `else if` is spliced into the same chain.
-  const ctx = prefixWindow(anchorIdx, 1500)
-  const caseIdx = ctx.lastIndexOf('case"progress":')
-  if (caseIdx === -1) {
+  if (headMatches.length > 1) {
     console.error(
-      'ERROR: bash_progress found but no `case"progress":` dispatch within 1500 chars before it. ' +
-        'Not the ZhA/WOe SDK converter — aborting.'
+      `ERROR: ${headMatches.length} \`case"progress":\` dispatch heads found ` +
+        `(at ${headMatches.map((m) => m.index).join(', ')}). Ambiguous — aborting.`
     )
     process.exit(1)
   }
-  const dispatch = ctx.slice(caseIdx)
+  const head = headMatches[0]
+  const headIdx = head.index
+  const headEnd = headIdx + head[0].length
+  const predName = head[1]
+  const progressVar = head[2]
 
-  // <= v2.1.241 tested the literal inline: `if(A.data.type==="agent_progress")`.
-  // v2.1.261 extracted it into a predicate helper defined in the same chunk:
-  //   case"progress":if(lmn(e))yield*cmn(e,r);else if(...bash_progress...)
-  //   function lmn(e){return e.type==="progress"&&(e.data.type==="agent_progress"||e.data.type==="skill_progress")}
-  let routesAgentProgress = dispatch.includes('agent_progress')
-  if (!routesAgentProgress) {
-    const predMatch = dispatch.match(new RegExp(`^case"progress":if\\((${V})\\(${V}\\)\\)`))
-    if (predMatch) {
-      // Minified names are chunk-local — resolve the predicate inside the
-      // anchor's own chunk, never across the whole concatenated bundle.
-      const predDefRe = new RegExp(
-        `function ${reEsc(predMatch[1])}\\(${V}\\)\\{[^{}]*"agent_progress"`
-      )
-      const { name: chunkName, start, end } = chunkAt(anchorIdx)
-      if (predDefRe.test(src.slice(start, end))) {
-        routesAgentProgress = true
-        console.log(`  agent_progress routed via predicate ${predMatch[1]}() (chunk ${chunkName})`)
-      }
-    }
-  }
-  if (!routesAgentProgress) {
+  // The chain must route agent_progress — that branch is what Patch A's
+  // messages ride on, and our `else if` joins the same chain. Minified names are
+  // chunk-local: `findScopedFunction` resolves the predicate in the head's
+  // chunk, or in the one chunk it imports it from.
+  //   v2.1.261+: function lmn(e){return e.type==="progress"&&(e.data.type==="agent_progress"||…)}
+  //   v2.1.317+: the predicate is imported (`import{…,O5,…}from"/$bunfs/root/chunk-….js"`)
+  const pred = findScopedFunction(
+    headIdx,
+    predName,
+    '"agent_progress"',
+    `the case"progress" predicate ${predName}()`
+  )
+  if (pred.error) {
     console.error(
-      'ERROR: bash_progress found but its `case"progress":` chain does not route agent_progress ' +
-        '(neither inline nor via a predicate helper defined in the same chunk). Context mismatch.'
+      `ERROR: the \`case"progress":\` head's predicate does not route agent_progress: ${pred.error}`
     )
     process.exit(1)
   }
+  console.log(
+    `  agent_progress routed via predicate ${predName}() (${pred.where}): ${pred.text.slice(0, 120)}`
+  )
 
-  // Session-id function: take the NEAREST `session_id:X()` before the anchor —
-  // it is a sibling yield in the same switch arm, so its binding is guaranteed
-  // to be in scope (and in the same chunk) at the injection site.
-  const sessFnMatches = [...ctx.matchAll(/session_id:([\w$]+)\(\)/g)]
-  if (sessFnMatches.length === 0) {
-    console.error('ERROR: Cannot extract session ID function from ZhA.')
+  // Session-id function: the sibling arms of the same `case"progress":` yield
+  // `session_id:X()`, so X is bound in this switch (and chunk). Scan from the
+  // head to the next `;case"` / `;default:` (bounded) and require ONE name.
+  const armWindow = suffixWindow(headEnd, 4000)
+  const armEnd = armWindow.search(/;(?:case"|default:)/)
+  const arm = armEnd === -1 ? armWindow : armWindow.slice(0, armEnd)
+  const sessNames = new Set([...arm.matchAll(/session_id:([\w$]+)\(\)/g)].map((m) => m[1]))
+  if (sessNames.size !== 1) {
+    console.error(
+      `ERROR: ${sessNames.size} candidate session-id functions in the \`case"progress":\` arm ` +
+        `(expected 1): ${[...sessNames].join(', ') || 'none'}. Aborting.`
+    )
     process.exit(1)
   }
-  const sessFn = sessFnMatches[sessFnMatches.length - 1][1]
+  const sessFn = [...sessNames][0]
 
   const injection =
     `${patchCMarker}else if(${progressVar}.data.type==="agent_stream_event"){` +
@@ -765,9 +855,11 @@ if (src.includes(patchCMarker)) {
     `parent_tool_use_id:${progressVar}.parentToolUseID,session_id:${sessFn}(),uuid:${progressVar}.uuid}` +
     `}`
 
-  src = src.slice(0, anchorIdx) + injection + src.slice(anchorIdx)
+  src = src.slice(0, headEnd) + injection + src.slice(headEnd)
   patchCount++
-  console.log(`Applied. Session ID function: ${sessFn}()`)
+  console.log(
+    `Applied after the dispatch head at char ${headIdx}. Session ID function: ${sessFn}()`
+  )
 }
 
 // ===========================================================================

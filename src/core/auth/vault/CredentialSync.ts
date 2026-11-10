@@ -1,6 +1,6 @@
 /**
  * CredentialSync — feed-forward, sole-refresher, fs-watch resync for the M6a
- * AuthVault's Codex (ChatGPT) credential (M6b).
+ * AuthVault's ChatGPT credential (M6b).
  *
  * SEPARATION FROM AuthVault (DECISION): this is a SIBLING service that HOLDS
  * an AuthVault (`VaultLike`, see below), not new methods bolted onto
@@ -18,7 +18,7 @@
  * this service (oauthAuthorize/oauthCallback → beginLogin/completeLogin), and
  * this service must feed INTO piAuthProvider/opencodeAuthProvider — a naive
  * two-way static import would cycle. This module defines its OWN narrow
- * structural interfaces (`VaultLike`, `CodexFeedTarget`) instead of importing
+ * structural interfaces (`VaultLike`, `ChatgptFeedTarget`) instead of importing
  * AuthVault/PiAuthProvider/OpencodeAuthProvider's concrete classes, and the
  * concrete engine targets are wired in from OUTSIDE via `configure()` — the
  * SAME dependency-injection shape already used for
@@ -31,14 +31,18 @@
  * ACCOUNTS (ADR-068 §2). The vault holds N ChatGPT accounts with one ACTIVE.
  * This service refreshes EVERY stored account on its own timer (a background
  * account's refresh token dies on its own clock), but vends only the ACTIVE one
- * to pi and opencode, whose auth stores hold a single Codex entry each. Switching
- * re-vends both and rings `onActiveAccountChanged` so the boot seam can move the
- * sessions that follow the active account off the Codex host they were on
- * (ADR-069 §4) without this module importing a session. Reconcile-on-start and the
- * fs-watch adoption still operate on the ACTIVE account alone: an engine store
- * holds the credential WE vended, so a rotation found there belongs to that
- * account and to no other. A `VaultLike` with no account methods is driven
- * exactly as before — one credential, one timer.
+ * to pi and opencode, whose auth stores hold a single ChatGPT entry each. Switching
+ * re-vends both. Adoption (reconcile-on-start, the fs-watch, the pre-feed
+ * compare) goes to the account that OWNS the engine's entry, never blindly to
+ * the active one: pi's single slot can still hold the account that was active
+ * before a switch. The owner is the one account whose workspace the entry's
+ * access token names ({@link CredentialSync.ownerOf}); a claim-less token
+ * belongs to the active account (the legacy single slot). No owner or an
+ * ambiguous one means nothing is adopted. Accounts whose stored credential
+ * disagrees with its own token, or duplicates another account's, are flagged
+ * needs-sign-in and never refreshed, injected or adopted into. A `VaultLike`
+ * with no account methods is driven exactly as before — one credential, one
+ * timer.
  *
  * OPENCODE 2.x (ADR-097 §5). opencode no longer reads a file: ClaudeUI vends
  * the active account into its credential table as an access-token-only row it
@@ -54,10 +58,10 @@
  * system resume, and the slot handed back on quit
  * ({@link CredentialSync.prepareQuit}).
  *
- * HARD SAFETY NOTE (same as AuthVault.ts / codex-oauth.ts): no test may let
+ * HARD SAFETY NOTE (same as AuthVault.ts / chatgpt-oauth.ts): no test may let
  * `refreshAccessToken` reach the real auth.openai.com — every scheduler test
  * injects a fake `refreshAccessToken`; every watcher test uses fake
- * CodexFeedTarget objects backed by temp files, never `~/.pi` or the real
+ * ChatgptFeedTarget objects backed by temp files, never `~/.pi` or the real
  * opencode data dir.
  */
 import fs from 'node:fs'
@@ -67,24 +71,29 @@ import { authVault, CHATGPT_PROVIDER_ID, type VaultAccount } from './AuthVault'
 import { redactSecrets } from '../../services/redact-secrets'
 import {
   buildVaultCredential,
+  extractEmail,
+  extractPlanType,
+  extractUserId,
+  isCrossWired,
   parseJwtClaims,
+  tokenWorkspace,
   refreshAccessToken as defaultRefreshAccessToken,
   type TokenResponse,
   type VaultCredential
-} from './codex-oauth'
-import type { DeviceCodeStart } from './codex-device-code'
+} from './chatgpt-oauth'
+import type { DeviceCodeStart } from './chatgpt-device-code'
 import { memoryFedTokenHistory, type FedTokenHistory } from './fed-token-history'
-import { chatgptAccountIdentity, codexNativeIdentity } from '../account-identity'
+import { chatgptAccountIdentity, chatgptNativeIdentity } from '../account-identity'
 import type { AccountIdentity } from '../../../shared/account-key'
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/** pi's auth.json key for the Codex credential (PiAuthProvider.ts's PI_SUBSCRIPTION_VENDOR_IDS). */
-export const PI_CODEX_VENDOR_ID = 'openai-codex'
+/** pi's auth.json key for the ChatGPT credential (PiAuthProvider.ts's PI_SUBSCRIPTION_VENDOR_IDS). */
+export const PI_CHATGPT_VENDOR_ID = 'openai-codex'
 /** opencode's integration for the ChatGPT credential — its openai provider id (NOT 'openai-codex'). */
-export const OPENCODE_CODEX_VENDOR_ID = 'openai'
+export const OPENCODE_CHATGPT_VENDOR_ID = 'openai'
 
 /**
  * After a `provider.auth` turn, how long before another one may trigger a
@@ -164,7 +173,7 @@ export interface VaultLike {
 }
 
 /** What feedAll() writes into one engine's store. */
-export interface CodexCredentialInput {
+export interface ChatgptCredentialInput {
   access: string
   refresh: string
   expires: number
@@ -172,7 +181,7 @@ export interface CodexCredentialInput {
 }
 
 /** What readOauthEntry() reads back from one engine's store. */
-export interface CodexEntrySnapshot {
+export interface ChatgptEntrySnapshot {
   access: string
   refresh: string
   expires: number
@@ -184,13 +193,13 @@ export interface CodexEntrySnapshot {
  * (PiAuthProvider implements it structurally; no import here). opencode 2.x
  * has no file: see {@link OpencodeChatgptTarget}.
  */
-export interface CodexFeedTarget {
+export interface ChatgptFeedTarget {
   /** Absolute path to this engine's OWN auth-store file — used to derive the fs.watch dir + filename filter. */
   authFilePath(): string
-  /** RMW-merge a Codex OAuth credential into this engine's auth store under `vendorId`. */
-  feedOauthCredential(vendorId: string, cred: CodexCredentialInput): Promise<void>
-  /** Read this engine's current Codex entry, or null if absent/non-oauth/malformed. */
-  readOauthEntry(vendorId: string): Promise<CodexEntrySnapshot | null>
+  /** RMW-merge a ChatGPT OAuth credential into this engine's auth store under `vendorId`. */
+  feedOauthCredential(vendorId: string, cred: ChatgptCredentialInput): Promise<void>
+  /** Read this engine's current ChatGPT entry, or null if absent/non-oauth/malformed. */
+  readOauthEntry(vendorId: string): Promise<ChatgptEntrySnapshot | null>
   /** Remove this vendor's native credential and invalidate the target's auth cache. */
   removeVendorAuth(vendorId: string): Promise<void>
   /**
@@ -211,7 +220,7 @@ export interface CodexFeedTarget {
 export interface OpencodeChatgptTarget {
   /** Vend the ACTIVE account (access-only, padded expiry, rotate-by-replace, active). */
   vendChatgpt(
-    cred: CodexCredentialInput,
+    cred: ChatgptCredentialInput,
     isClaudeuiToken: (refresh: string) => Promise<boolean>
   ): Promise<void>
   /**
@@ -229,7 +238,7 @@ export interface OpencodeChatgptTarget {
   vendedChatgpt(): { access: string; realExpires: number } | null
 }
 
-export interface CodexEnabledRoutes {
+export interface ChatgptEnabledRoutes {
   pi: boolean
   opencode: boolean
 }
@@ -239,15 +248,7 @@ export interface CredentialSyncDeps {
   now?: () => number
   refreshAccessToken?: (refreshToken: string) => Promise<TokenResponse>
   watchDebounceMs?: number
-  getEnabledRoutes?: () => CodexEnabledRoutes
-  /**
-   * Rung AFTER the active account changed and both engine stores were re-fed.
-   * The boot seam wires it (`core/boot/core-services.ts`) without this module
-   * importing a session or an engine; the default is a no-op. Codex's hosts are
-   * the one consumer today (ADR-069 §4) — opencode recycles from its own auth
-   * provider's mutation points instead (ADR-047).
-   */
-  onActiveAccountChanged?: () => void | Promise<void>
+  getEnabledRoutes?: () => ChatgptEnabledRoutes
   /**
    * Rung once AFTER a ChatGPT login has been applied — the one post-completion
    * tail every login path runs ({@link CredentialSync.applyCompletedLogin}), so
@@ -257,13 +258,13 @@ export interface CredentialSyncDeps {
    * INJECTED rather than an `emitEvent` import (ADR-070 §2): this class is
    * unit-tested with almost nothing mocked, and importing `sync-host` would drag
    * the service graph into those tests. Same posture, same boot seam and same
-   * no-op default as {@link CredentialSyncDeps.onActiveAccountChanged} above.
+   * no-op default as {@link CredentialSyncDeps.harnessRuns} below.
    *
    * A throw is caught and logged, never propagated: by the time this rings, the
    * credential is stored and vended, so failing the login would be a lie.
    *
    * `accountId` is the VAULT account key the credential landed on — the same
-   * id-space {@link CodexInjectionToken.vaultAccountId} reports, so the two
+   * id-space {@link ChatgptInjectionToken.vaultAccountId} reports, so the two
    * halves of ADR-070 §2 compare on one id. It matters because a provider holds
    * several accounts: adding account B must not announce that the sessions
    * broken on account A are fixed. `undefined` for a vault with no named
@@ -316,14 +317,14 @@ export interface CredentialAccountStatus {
 }
 
 /**
- * What ONE Codex process is injected with (ADR-068 §1). The ONLY shape in this
+ * What one direct ChatGPT backend call is made with (ADR-068 §1). The ONLY shape in this
  * module that carries token material across its boundary — see
  * {@link CredentialSync.injectionTokenFor}.
  */
-export interface CodexInjectionToken {
-  /** The ChatGPT access token (a JWT). Never logged, never persisted by Codex. */
+export interface ChatgptInjectionToken {
+  /** The ChatGPT access token (a JWT). Never logged. */
   accessToken: string
-  /** The workspace id Codex keys the account on (`chatgpt_account_id`). */
+  /** The workspace id the backend keys the account on (`chatgpt_account_id`). */
   chatgptAccountId: string
   chatgptPlanType: string | null
   /** The VAULT account id this token came from — not the workspace id. */
@@ -333,13 +334,59 @@ export interface CodexInjectionToken {
 export type EngineKey = 'pi' | 'opencode'
 
 /** What one engine store is fed from a vault credential. */
-function feedInput(cred: VaultCredential): CodexCredentialInput {
+function feedInput(cred: VaultCredential): ChatgptCredentialInput {
   return {
     access: cred.access,
     refresh: cred.refresh,
     expires: cred.expires,
     accountId: cred.accountId
   }
+}
+
+/** The workspace a credential bills: its access token's explicit claim, else the stored id. */
+function credentialWorkspace(cred: { access: string; accountId?: string }): string | undefined {
+  return tokenWorkspace(cred.access) ?? cred.accountId
+}
+
+/**
+ * The accounts whose stored credential cannot be trusted: it names a workspace
+ * other than the one stored beside it (cross-wired), or — among the rest — its
+ * workspace or refresh token is shared with another account. A cross-wired
+ * account is left out of the sharing check: its token is the other account's,
+ * and that account (whose stored id matches) stays healthy. Every member of a
+ * shared group is flagged — which twin holds the live token is unknowable.
+ */
+function corruptedAccountIds(accounts: VaultAccount[]): Set<string> {
+  const flagged = new Set(
+    accounts.filter((account) => isCrossWired(account.credential)).map((account) => account.id)
+  )
+  const sound = accounts.filter((account) => !flagged.has(account.id))
+  for (const account of sound) {
+    const workspace = credentialWorkspace(account.credential)
+    const shared = sound.some(
+      (other) =>
+        other.id !== account.id &&
+        (other.credential.refresh === account.credential.refresh ||
+          (workspace !== undefined && credentialWorkspace(other.credential) === workspace))
+    )
+    if (shared) flagged.add(account.id)
+  }
+  return flagged
+}
+
+/** The engine's entry strictly beats `held`: a DIFFERENT refresh token (not our own prior write) AND a newer expiry. */
+function engineBeats(entry: ChatgptEntrySnapshot, held: { refresh: string; expires: number }) {
+  return entry.refresh !== held.refresh && entry.expires > held.expires
+}
+
+/** How an adoption ended: stored, refused by the vault, or overtaken by a disconnect. */
+type AdoptResult =
+  { kind: 'adopted'; cred: VaultCredential } | { kind: 'refused' } | { kind: 'superseded' }
+
+/** The account an engine's entry belongs to. */
+interface EntryOwner {
+  key: string
+  cred: VaultCredential
 }
 
 function rawMessage(err: unknown): string {
@@ -375,7 +422,7 @@ export function tokenExpiry(cred: { access: string; expires: number }): number {
  * Critically the RFC returns invalid_grant with HTTP **400**, not 401, so a
  * 401-only check (the original M6b logic) would misclassify every real
  * revocation as transient and retry a dead token forever while never setting
- * needsReauth — the bug Finding B fixes. codex-oauth.ts's refreshAccessToken
+ * needsReauth — the bug Finding B fixes. chatgpt-oauth.ts's refreshAccessToken
  * now appends the response body to the thrown error so the `invalid_grant`
  * match can fire.
  *
@@ -399,11 +446,11 @@ export class CredentialSync {
   private readonly now: () => number
   private readonly refreshAccessTokenFn: (refreshToken: string) => Promise<TokenResponse>
   private readonly watchDebounceMs: number
-  private getEnabledRoutes: () => CodexEnabledRoutes
+  private getEnabledRoutes: () => ChatgptEnabledRoutes
   private hasConfiguredRoutePolicy: boolean
   private lifecycleGeneration = 0
 
-  private piTarget: CodexFeedTarget | undefined
+  private piTarget: ChatgptFeedTarget | undefined
   private opencodeTarget: OpencodeChatgptTarget | undefined
   /** When the last `provider.auth` recovery ran (cooldown). */
   private lastAuthRecovery = Number.NEGATIVE_INFINITY
@@ -418,7 +465,6 @@ export class CredentialSync {
    * every path that learns the active id refreshes it.
    */
   private activeKey: string = LEGACY_ACCOUNT_KEY
-  private onActiveAccountChanged: () => void | Promise<void>
   private onCredentialStored: (accountId: string | undefined) => void
   private harnessRuns: (engine: EngineKey) => boolean
   private fedTokens: FedTokenHistory
@@ -442,27 +488,23 @@ export class CredentialSync {
     this.watchDebounceMs = deps.watchDebounceMs ?? DEFAULT_WATCH_DEBOUNCE_MS
     this.getEnabledRoutes = deps.getEnabledRoutes ?? (() => ({ pi: true, opencode: true }))
     this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
-    this.onActiveAccountChanged = deps.onActiveAccountChanged ?? ((): void => {})
     this.onCredentialStored = deps.onCredentialStored ?? ((): void => {})
     this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
     this.fedTokens = deps.fedTokens ?? memoryFedTokenHistory()
   }
 
   /**
-   * Wire the engine feed targets and the account-switch hook in from the
-   * composition roots. Safe to call more than once (e.g. hot-reload), and
+   * Wire the engine feed targets in from the composition roots. Safe to call more than once (e.g. hot-reload), and
    * ADDITIVE: every field is optional and an absent one leaves what is already
    * wired alone, because the wiring comes from two places — the desktop's
    * provider registrar supplies the two feed targets (`register-auth-providers
    * .ts`, which is the only module that may import both those providers and
-   * this one), while the Electron-free boot seam supplies the switch hook,
-   * which needs the session graph.
+   * this one), while the Electron-free boot seam supplies the rest.
    */
   configure(targets: {
-    pi?: CodexFeedTarget
+    pi?: ChatgptFeedTarget
     opencode?: OpencodeChatgptTarget
-    getEnabledRoutes?: () => CodexEnabledRoutes
-    onActiveAccountChanged?: () => void | Promise<void>
+    getEnabledRoutes?: () => ChatgptEnabledRoutes
     onCredentialStored?: (accountId: string | undefined) => void
     harnessRuns?: (engine: EngineKey) => boolean
     fedTokens?: FedTokenHistory
@@ -473,7 +515,6 @@ export class CredentialSync {
       this.getEnabledRoutes = targets.getEnabledRoutes
       this.hasConfiguredRoutePolicy = true
     }
-    if (targets.onActiveAccountChanged) this.onActiveAccountChanged = targets.onActiveAccountChanged
     if (targets.onCredentialStored) this.onCredentialStored = targets.onCredentialStored
     if (targets.harnessRuns) this.harnessRuns = targets.harnessRuns
     if (targets.fedTokens) this.fedTokens = targets.fedTokens
@@ -528,6 +569,43 @@ export class CredentialSync {
       logger.warn('CredentialSync', `getActiveAccountId failed: ${errMessage(err)}`)
     }
     return this.activeKey
+  }
+
+  /** Whether this account is flagged by {@link corruptedAccountIds}; never true for the legacy key. */
+  private async isCorrupted(key: string): Promise<boolean> {
+    if (key === LEGACY_ACCOUNT_KEY) return false
+    return corruptedAccountIds(await this.accounts()).has(key)
+  }
+
+  /**
+   * The ONE rule for whose an engine's entry is. An entry whose workspace is
+   * unknown (a claim-less token, the legacy single slot) is the ACTIVE
+   * account's. Otherwise it is the single account storing that workspace id, or
+   * failing that the single account with no stored id whose credential names it.
+   * No match, several matches, or a corrupted owner: null, and nothing is
+   * adopted (a sign-in made in the engine, a removed account, a duplicate).
+   */
+  private async ownerOf(snapshot: ChatgptEntrySnapshot): Promise<EntryOwner | null> {
+    if (!this.supportsAccounts()) {
+      const cred = await this.vault.load()
+      return cred ? { key: LEGACY_ACCOUNT_KEY, cred } : null
+    }
+    const accounts = await this.accounts()
+    const workspace = credentialWorkspace(snapshot)
+    let owner: EntryOwner | null = null
+    if (!workspace) {
+      const cred = await this.vault.load()
+      if (cred) owner = { key: await this.readActiveKey(), cred }
+    } else {
+      let matches = accounts.filter((account) => account.accountId === workspace)
+      if (matches.length === 0) {
+        matches = accounts.filter(
+          (account) => !account.accountId && credentialWorkspace(account.credential) === workspace
+        )
+      }
+      if (matches.length === 1) owner = { key: matches[0].id, cred: matches[0].credential }
+    }
+    return owner && !corruptedAccountIds(accounts).has(owner.key) ? owner : null
   }
 
   // -------------------------------------------------------------------------
@@ -593,9 +671,25 @@ export class CredentialSync {
       this.scheduleRefresh(LEGACY_ACCOUNT_KEY, activeCred)
       return
     }
+    const corrupted = corruptedAccountIds(accounts)
     for (const account of accounts) {
+      if (corrupted.has(account.id)) {
+        this.flagCorrupted(account.id)
+        continue
+      }
       this.scheduleRefresh(account.id, account.id === activeKey ? activeCred : account.credential)
     }
+  }
+
+  /** A corrupted account needs a sign-in and gets no refresh: its token may be another workspace's. */
+  private flagCorrupted(key: string): void {
+    this.runtime(key).needsReauth = true
+    this.clearRefreshTimer(key)
+    this.clearRetryTimer(key)
+    logger.warn(
+      'CredentialSync',
+      `vault account ${key} holds a mismatched or duplicated ChatGPT credential — needs sign-in`
+    )
   }
 
   /**
@@ -626,18 +720,47 @@ export class CredentialSync {
     if (!this.isCurrent(generation)) return null
 
     if (vaultCred) {
-      const engineBeatsVault =
-        newestEngine !== null &&
-        newestEngine.refresh !== vaultCred.refresh &&
-        newestEngine.expires > vaultCred.expires
-      if (engineBeatsVault) {
+      if (newestEngine === null) return vaultCred
+      const owner = await this.ownerOf(newestEngine)
+      const activeKey = await this.readActiveKey()
+      if (!this.isCurrent(generation)) return null
+      if (owner?.key === activeKey) {
+        if (!engineBeats(newestEngine, vaultCred)) return vaultCred // vault is the newest (or tied) — keep it
         logger.info(
           'CredentialSync',
           'reconcileOnStart: engine store holds a newer credential than the vault — adopting'
         )
-        return this.persistAdopted(newestEngine, vaultCred, generation, newestEngine.engine)
+        const result = await this.persistAdopted(
+          newestEngine,
+          vaultCred,
+          owner.key,
+          generation,
+          newestEngine.engine
+        )
+        if (result.kind === 'superseded') return null
+        if (result.kind === 'refused') return vaultCred // not a disconnect: the vault credential stands
+        await this.feedAll(result.cred)
+        return this.isCurrent(generation) ? result.cred : null
       }
-      return vaultCred // vault is the newest (or tied) — keep it
+      // The engine holds another account's token (or none of ours): that account
+      // may take it, but the ACTIVE credential stays the start credential and is
+      // vended so the engine does not stay on another account.
+      if (owner && engineBeats(newestEngine, owner.cred)) {
+        logger.info(
+          'CredentialSync',
+          `reconcileOnStart: engine store holds a newer credential for vault account ${owner.key} — adopting`
+        )
+        const result = await this.adoptIntoBackground(
+          newestEngine,
+          owner,
+          generation,
+          newestEngine.engine
+        )
+        if (result.kind === 'superseded') return null
+      }
+      if (!this.isCurrent(generation)) return null
+      await this.feedAll(vaultCred)
+      return this.isCurrent(generation) ? vaultCred : null
     }
 
     // Vault empty: bootstrap from an engine store if one has a credential.
@@ -646,16 +769,24 @@ export class CredentialSync {
         'CredentialSync',
         `reconcileOnStart: ${recoveringLegacyVault ? 'recovering unreadable legacy vault from' : 'vault empty, adopting'} existing engine credential`
       )
-      return this.persistAdopted(newestEngine, null, generation)
+      const result = await this.persistAdopted(
+        newestEngine,
+        null,
+        await this.readActiveKey(),
+        generation
+      )
+      if (result.kind !== 'adopted') return null
+      await this.feedAll(result.cred)
+      return this.isCurrent(generation) ? result.cred : null
     }
     if (recoveringLegacyVault) await this.removeChatgptCredential()
     return null
   }
 
-  /** Read both engines' Codex entries (best-effort) and return the one with the strictly-largest expiry, and whose it is, or null if neither has one. */
+  /** Read both engines' ChatGPT entries (best-effort) and return the one with the strictly-largest expiry, and whose it is, or null if neither has one. */
   private async readNewestEngineEntry(
     includeDisabled = false
-  ): Promise<(CodexEntrySnapshot & { engine: EngineKey }) | null> {
+  ): Promise<(ChatgptEntrySnapshot & { engine: EngineKey }) | null> {
     const routes = this.routes()
     // A harness that does not run is not adopted from (ADR-082 §8, S7d); a
     // legacy-vault recovery still reads it — it may be the only copy left.
@@ -666,11 +797,11 @@ export class CredentialSync {
     const snapshots = await Promise.all(
       (['pi'] as const).map(async (engine) => {
         if (!reads(engine)) return null
-        const snap = await this.safeReadEntry(engine, this.piTarget, PI_CODEX_VENDOR_ID)
+        const snap = await this.safeReadEntry(engine, this.piTarget, PI_CHATGPT_VENDOR_ID)
         return snap ? { ...snap, engine } : null
       })
     )
-    let newest: (CodexEntrySnapshot & { engine: EngineKey }) | null = null
+    let newest: (ChatgptEntrySnapshot & { engine: EngineKey }) | null = null
     for (const snap of snapshots) {
       if (snap && (!newest || snap.expires > newest.expires)) newest = snap
     }
@@ -679,9 +810,9 @@ export class CredentialSync {
 
   private async safeReadEntry(
     label: EngineKey,
-    target: CodexFeedTarget | undefined,
+    target: ChatgptFeedTarget | undefined,
     vendorId: string
-  ): Promise<CodexEntrySnapshot | null> {
+  ): Promise<ChatgptEntrySnapshot | null> {
     if (!target) return null
     try {
       return await target.readOauthEntry(vendorId)
@@ -775,6 +906,9 @@ export class CredentialSync {
       await this.feedAll(cred)
     }
     this.scheduleRefresh(key, cred)
+    // A sign-in onto one row of a duplicated workspace leaves its twin beside it:
+    // still corrupted, so the flag (and no timer) stays until the twin is removed.
+    if (key !== LEGACY_ACCOUNT_KEY && (await this.isCorrupted(key))) this.flagCorrupted(key)
     this.startWatchers()
     // ADR-070 §2: a stored credential is the one thing that means "this provider
     // works now". Rung AFTER the cancellation check above, so a login the user
@@ -811,10 +945,7 @@ export class CredentialSync {
   }
 
   /**
-   * Make `id` the active account: vend it to both engines, then ring the hook so
-   * the boot seam can act on the switch (ADR-069 §4 — every Codex session that
-   * FOLLOWS the active account leaves the host it was on and continues on the
-   * new account's at its next prompt; a pinned session is untouched).
+   * Make `id` the active account and vend it to both engines.
    */
   async switchActiveAccount(id: string): Promise<void> {
     if (!this.vault.setActiveAccount || !this.vault.listAccounts) {
@@ -827,7 +958,6 @@ export class CredentialSync {
       await this.feedAll(account.credential)
       this.scheduleRefresh(id, account.credential)
     }
-    await this.onActiveAccountChanged()
   }
 
   /**
@@ -860,10 +990,6 @@ export class CredentialSync {
     if (promoted) {
       await this.feedAll(promoted.credential)
       this.scheduleRefresh(promoted.id, promoted.credential)
-      // What the engines are vended just changed, exactly as it does on a
-      // switch, so opencode has to drop the credential it is still holding in
-      // process for the account that is gone (ADR-047).
-      await this.onActiveAccountChanged()
       return
     }
     await Promise.all(
@@ -876,10 +1002,6 @@ export class CredentialSync {
         )
       )
     )
-    // Same reason on the empty path, and more sharply: ClaudeUI's copies are out
-    // of the engine files, but a running opencode server would keep serving the
-    // deleted credential.
-    await this.onActiveAccountChanged()
   }
 
   cancelLogin(): void {
@@ -982,11 +1104,11 @@ export class CredentialSync {
 
   /**
    * The ADR-071 §3 account key and label for one vault account — what a usage
-   * row stores so spend through Codex lands on the same subscription as spend
+   * row stores so spend through any engine lands on the same subscription as spend
    * through opencode or pi.
    *
    * `null` means the active account. An account whose credential is gone, or
-   * whose credential never learned a workspace id, is Codex signed in on its
+   * whose credential never learned a workspace id, is ChatGPT signed in on its
    * own as far as metering is concerned: the native key, not a half key.
    *
    * CREDENTIAL BOUNDARY: this is a member of the token-free half of the class,
@@ -1000,7 +1122,7 @@ export class CredentialSync {
   async accountIdentity(vaultAccountId: string | null): Promise<AccountIdentity> {
     const key = vaultAccountId ?? (await this.readActiveKey())
     const cred = await this.loadForKey(key)
-    if (!cred?.accountId) return codexNativeIdentity()
+    if (!cred?.accountId) return chatgptNativeIdentity()
     return chatgptAccountIdentity({
       accountId: cred.accountId,
       accessToken: cred.access,
@@ -1013,28 +1135,22 @@ export class CredentialSync {
   /**
    * **The one method on this class that returns TOKEN MATERIAL.** Everything
    * else here is deliberately token-free (`getStatus`, and the
-   * `provider-account:*` commands built on it); this exists because Codex is fed
-   * by INJECTION rather than by file (ADR-068 §1) and the host has to hand the
-   * app-server an access token over the wire.
+   * `provider-account:*` commands built on it); this exists because the
+   * auto-mode judge route and the ChatGPT usage-limits read call ChatGPT's
+   * backend directly with the vaulted access token (ADR-068 §1).
    *
    * Nothing in it logs, and its result must never reach a log line, an IPC
-   * result or a snapshot. The two callers are the inject and refresh halves of
-   * `codex-auth-hook.ts`.
+   * result or a snapshot. The callers are `automode/judge-route.ts` and
+   * `shared-providers/chatgpt-rate-limits.ts`.
    *
    * `accountId` null means the ACTIVE account. Returns null when the vault holds
    * no credential for that account, or when the credential carries no workspace
-   * id: `account/login/start {type:'chatgptAuthTokens'}` REQUIRES
-   * `chatgptAccountId`, so a workspace-less credential cannot be injected at all
-   * and the process is left on whatever Codex's own store holds.
+   * id: the backend requires a `ChatGPT-Account-Id`, so a workspace-less
+   * credential cannot be used at all.
    *
-   * `refreshMarginMs` decides how eagerly it refreshes first:
-   *
-   *  - at INJECT time the default {@link REFRESH_MARGIN_MS} applies, so a
-   *    process never starts on a token that is about to die mid-turn;
-   *  - the REFRESH server request passes 0, because Codex gives the host 10
-   *    seconds to answer and a cached-but-still-valid token is the answer it
-   *    wants (ADR-068 §1). Only a genuinely expired credential is worth a
-   *    network round trip there.
+   * `refreshMarginMs` decides how eagerly it refreshes first: the default
+   * {@link REFRESH_MARGIN_MS} keeps a caller from starting on a token about to
+   * die mid-request; 0 refreshes only a genuinely expired credential.
    *
    * The refresh goes through the same per-account single-flight as every
    * scheduled one, so two processes starting at once cause ONE token request.
@@ -1042,10 +1158,12 @@ export class CredentialSync {
   async injectionTokenFor(
     accountId: string | null,
     refreshMarginMs: number = REFRESH_MARGIN_MS
-  ): Promise<CodexInjectionToken | null> {
+  ): Promise<ChatgptInjectionToken | null> {
     const key = accountId ?? (await this.readActiveKey())
     let cred = await this.loadForKey(key)
     if (!cred) return null
+    // A corrupted account's token may bill another subscription: never vended.
+    if (await this.isCorrupted(key)) return null
     if (cred.expires - refreshMarginMs <= this.now()) {
       await this.runRefresh(key)
       cred = await this.loadForKey(key)
@@ -1211,7 +1329,7 @@ export class CredentialSync {
   async feedAll(cred: VaultCredential): Promise<{ pi: boolean; opencode: boolean }> {
     const input = feedInput(cred)
     const [pi, opencode] = await Promise.all([
-      this.feedOne('pi', this.piTarget, PI_CODEX_VENDOR_ID, input),
+      this.feedOne('pi', this.piTarget, PI_CHATGPT_VENDOR_ID, input),
       this.vendOpencode(input)
     ])
     logger.info('CredentialSync', `feedAll: pi=${pi} opencode=${opencode}`)
@@ -1220,9 +1338,9 @@ export class CredentialSync {
 
   private async feedOne(
     label: EngineKey,
-    target: CodexFeedTarget | undefined,
+    target: ChatgptFeedTarget | undefined,
     vendorId: string,
-    cred: CodexCredentialInput
+    cred: ChatgptCredentialInput
   ): Promise<boolean> {
     if (!this.routes()[label]) {
       logger.info('CredentialSync', `feedAll: ${label} route disabled — skipping`)
@@ -1275,7 +1393,7 @@ export class CredentialSync {
    * active `openai` row. Skipped like a feed (route off, harness not running,
    * no target); a failure is logged and leaves `false`.
    */
-  private async vendOpencode(cred: CodexCredentialInput): Promise<boolean> {
+  private async vendOpencode(cred: ChatgptCredentialInput): Promise<boolean> {
     if (this.quitting) return false
     // An expired token is never vended (L7): the refresh that follows vends.
     if (tokenExpiry(cred) <= this.now()) {
@@ -1368,12 +1486,13 @@ export class CredentialSync {
    */
   private async engineOutranksFeed(
     label: EngineKey,
-    target: CodexFeedTarget,
+    target: ChatgptFeedTarget,
     vendorId: string,
-    cred: CodexCredentialInput
+    cred: ChatgptCredentialInput
   ): Promise<boolean> {
     if (this.adoptingFromFeed.has(label)) return false
-    let entry: CodexEntrySnapshot | null
+    const generation = this.lifecycleGeneration
+    let entry: ChatgptEntrySnapshot | null
     try {
       entry = await target.readOauthEntry(vendorId)
     } catch (err) {
@@ -1384,7 +1503,32 @@ export class CredentialSync {
       return false
     }
     if (!entry) return false
-    return entry.refresh !== cred.refresh && entry.expires > cred.expires
+    // Whose entry is it? Only the account being fed (the active one) can make
+    // the feed defer; another account's newer rotation is adopted into THAT
+    // account and the feed then writes over the entry as usual — the re-vend.
+    const owner = await this.ownerOf(entry)
+    if (!owner) return false
+    if (owner.key === (await this.readActiveKey())) return engineBeats(entry, cred)
+    if (engineBeats(entry, owner.cred)) {
+      logger.info(
+        'CredentialSync',
+        `feedAll: ${label} holds a newer credential for vault account ${owner.key} — adopting it there`
+      )
+      await this.adoptIntoBackground(entry, owner, generation, label)
+    }
+    return false
+  }
+
+  /** Adopt an engine's entry into a NON-active owner and re-arm its timer. Never feeds: the caller's feed is the re-vend. */
+  private async adoptIntoBackground(
+    entry: ChatgptEntrySnapshot,
+    owner: EntryOwner,
+    generation: number,
+    source: EngineKey
+  ): Promise<AdoptResult> {
+    const result = await this.persistAdopted(entry, owner.cred, owner.key, generation, source)
+    if (result.kind === 'adopted') this.scheduleRefresh(owner.key, result.cred)
+    return result
   }
 
   /**
@@ -1523,6 +1667,13 @@ export class CredentialSync {
       logger.debug('CredentialSync', 'doRefresh: no vault credential — nothing to refresh')
       return
     }
+    // Before any network call: a corrupted account's refresh token may belong to
+    // another workspace's sign-in, and spending it would kill that one too.
+    // (Guarded on the key so the legacy path keeps its microtask depth.)
+    if (key !== LEGACY_ACCOUNT_KEY && (await this.isCorrupted(key))) {
+      if (this.isCurrent(generation)) this.flagCorrupted(key)
+      return
+    }
     // Identity of the credential we are about to refresh. The generation guard
     // below only covers a disconnect (which bumps lifecycleGeneration); it does
     // NOT cover a watch-adoption or another refresh landing a DIFFERENT vault
@@ -1561,10 +1712,23 @@ export class CredentialSync {
       userId: cred.userId
     })
     if (!this.isCurrent(generation)) return
-    await this.persistForKey(key, next)
+    try {
+      await this.persistForKey(key, next)
+    } catch (err) {
+      // The vault refused (e.g. the token names another workspace). The old
+      // refresh token is already spent server-side: nothing to feed or reschedule.
+      if (this.isCurrent(generation)) {
+        logger.warn(
+          'CredentialSync',
+          `doRefresh: vault account ${key} did not store the refreshed credential — needs sign-in: ${errMessage(err)}`
+        )
+        runtime.needsReauth = true
+      }
+      return
+    }
     if (!this.isCurrent(generation)) return
     // Only the ACTIVE account reaches pi and opencode: their stores hold one
-    // Codex entry each, so feeding a background rotation would silently switch
+    // ChatGPT entry each, so feeding a background rotation would silently switch
     // the engines to another subscription.
     if (key === LEGACY_ACCOUNT_KEY || key === (await this.readActiveKey())) {
       await this.feedAll(next)
@@ -1653,7 +1817,7 @@ export class CredentialSync {
    * filtering by filename sidesteps both failure modes and survives the
    * watched file not existing yet at watch-start time.
    */
-  private startWatcher(engine: EngineKey, target: CodexFeedTarget | undefined): void {
+  private startWatcher(engine: EngineKey, target: ChatgptFeedTarget | undefined): void {
     if (!target || this.watchers.has(engine)) return
     // Not armed while the harness does not run; its arrival arms it.
     if (!this.harnessRuns(engine)) return
@@ -1751,11 +1915,12 @@ export class CredentialSync {
 
   /**
    * Reconcile after a debounced change to one engine's auth file. Adopts the
-   * on-disk credential into the vault ONLY if it's both DIFFERENT (guards
-   * against the vault's own feedAll write re-triggering this watcher — an
-   * identical refresh token means "this is our own write, or nothing
-   * changed") and NEWER (never regress to an older credential, e.g. a stale
-   * write racing behind the current one).
+   * on-disk credential into the account that OWNS it ({@link ownerOf}) ONLY if
+   * it's both DIFFERENT (guards against the vault's own feedAll write
+   * re-triggering this watcher — an identical refresh token means "this is our
+   * own write, or nothing changed") and NEWER than that owner's copy (never
+   * regress to an older credential, e.g. a stale write racing behind the
+   * current one). An entry nobody owns is left alone.
    */
   private async handleExternalChange(engine: EngineKey): Promise<void> {
     const generation = this.lifecycleGeneration
@@ -1763,7 +1928,7 @@ export class CredentialSync {
     const { target, vendorId } = this.slot(engine)
     if (!target) return
 
-    let entry: CodexEntrySnapshot | null
+    let entry: ChatgptEntrySnapshot | null
     try {
       entry = await target.readOauthEntry(vendorId)
     } catch (err) {
@@ -1775,14 +1940,21 @@ export class CredentialSync {
     }
     if (!entry || !this.isCurrent(generation)) return
 
-    const vaultCred = await this.vault.load()
+    const owner = await this.ownerOf(entry)
+    if (!this.isCurrent(generation)) return
     // Nothing to reconcile against: the first credential arrives through
     // completeLogin() (or the start's bootstrap). So a watcher never signs an
     // empty vault in, and a disconnect (S7e) is honoured here by construction.
-    if (!this.isCurrent(generation) || !vaultCred) return
+    if (!owner) {
+      logger.info(
+        'CredentialSync',
+        `handleExternalChange(${engine}): no vault account owns the entry — not adopting`
+      )
+      return
+    }
 
-    if (entry.refresh === vaultCred.refresh) return // our own write (loop guard) or genuinely unchanged
-    if (entry.expires <= vaultCred.expires) {
+    if (entry.refresh === owner.cred.refresh) return // our own write (loop guard) or genuinely unchanged
+    if (entry.expires <= owner.cred.expires) {
       logger.debug(
         'CredentialSync',
         `handleExternalChange(${engine}): ignoring older/stale credential`
@@ -1792,64 +1964,83 @@ export class CredentialSync {
 
     logger.info(
       'CredentialSync',
-      `handleExternalChange(${engine}): adopting externally-rotated credential`
+      `handleExternalChange(${engine}): adopting externally-rotated credential into vault account ${owner.key}`
     )
-    const adopted = await this.persistAdopted(entry, vaultCred, generation, engine)
-    if (adopted && this.isCurrent(generation)) {
-      this.scheduleRefresh(await this.readActiveKey(), adopted)
+    if (owner.key !== (await this.readActiveKey())) {
+      const result = await this.adoptIntoBackground(entry, owner, generation, engine)
+      // Re-vend the ACTIVE credential only once the owner took the entry: the
+      // engine slot still holds the owner's token, and must hold the active one.
+      if (result.kind !== 'adopted' || !this.isCurrent(generation)) return
+      const active = await this.vault.load()
+      if (active && this.isCurrent(generation)) await this.feedAll(active)
+      return
     }
+    const result = await this.persistAdopted(entry, owner.cred, owner.key, generation, engine)
+    if (result.kind !== 'adopted') return
+    await this.feedAll(result.cred)
+    if (this.isCurrent(generation)) this.scheduleRefresh(owner.key, result.cred)
   }
 
   /**
-   * Adopt an engine-store credential snapshot into the vault: save it, clear
-   * any transient/needsReauth failure state, and re-feed BOTH stores so the
-   * one we did NOT read from is re-synced (and the source store's own
-   * subsequent watch event self-cancels via the loop guard, since its refresh
-   * token now equals the vault's). Carries forward the prior accountId/email
-   * when the snapshot omits them. Does NOT schedule — the caller
-   * (handleExternalChange / start) owns scheduling so start() schedules
-   * exactly once. Shared by Finding A's reconcile-on-start and the fs-watch
-   * resync path.
+   * Adopt an engine-store credential snapshot into the vault account `key` (its
+   * owner, {@link ownerOf}): save it and clear that account's transient/
+   * needsReauth failure state. Identity comes from the snapshot's access token
+   * first, then the snapshot, then the owner's stored fields: pi's snapshot
+   * never carries a workspace id, and the token is what says which workspace it
+   * bills. Does NOT feed or schedule — the caller owns both (only an ACTIVE
+   * owner is fed; start() schedules exactly once). Shared by reconcile-on-start,
+   * the fs-watch resync and the pre-feed compare.
    *
    * `source` is the engine the snapshot was read from. A ROTATION (a `prior`
    * credential exists) is a rotation of ClaudeUI's own copy there, so its
    * token joins that engine's history (S7e); a bootstrap is not recorded here.
+   *
+   * A vault that refuses the credential is `refused`; only a disconnect
+   * (generation change) is `superseded`. An empty vault is bootstrapped by
+   * `save()` through the (absent) active key.
    */
   private async persistAdopted(
-    snapshot: CodexEntrySnapshot,
+    snapshot: ChatgptEntrySnapshot,
     prior: VaultCredential | null,
+    key: string,
     generation: number,
     source?: EngineKey
-  ): Promise<VaultCredential | null> {
+  ): Promise<AdoptResult> {
     const adopted: VaultCredential = {
       type: 'oauth',
       access: snapshot.access,
       refresh: snapshot.refresh,
       expires: snapshot.expires
     }
-    const accountId = snapshot.accountId ?? prior?.accountId
+    const claims = { access_token: snapshot.access }
+    const accountId = tokenWorkspace(snapshot.access) ?? snapshot.accountId ?? prior?.accountId
+    const email = extractEmail(claims) ?? prior?.email
+    const planType = extractPlanType(claims) ?? prior?.planType
+    const userId = extractUserId(claims) ?? prior?.userId
     if (accountId) adopted.accountId = accountId
-    if (prior?.email) adopted.email = prior.email
-    if (prior?.planType) adopted.planType = prior.planType
+    if (email) adopted.email = email
+    if (planType) adopted.planType = planType
+    if (userId) adopted.userId = userId
 
-    if (!this.isCurrent(generation)) return null
+    if (!this.isCurrent(generation)) return { kind: 'superseded' }
     if (prior && source) this.recordFed(source, snapshot.refresh)
-    // The ACTIVE account, explicitly: an engine store holds the credential WE
-    // vended, so a rotation found there belongs to the account in use and to no
-    // other (ADR-068 §2). An empty vault has no active account yet, and save()
-    // is then the bootstrap that creates the first one.
-    const activeKey = await this.readActiveKey()
-    if (!this.isCurrent(generation)) return null
-    await this.persistForKey(activeKey, adopted)
-    if (!this.isCurrent(generation)) return null
-    const runtime = this.runtime(activeKey)
+    try {
+      await this.persistForKey(key, adopted)
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `persistAdopted: vault account ${key} refused the credential: ${errMessage(err)}`
+      )
+      return { kind: 'refused' }
+    }
+    if (!this.isCurrent(generation)) return { kind: 'superseded' }
+    const runtime = this.runtime(key)
     runtime.needsReauth = false
     runtime.retryCount = 0
-    await this.feedAll(adopted)
-    return this.isCurrent(generation) ? adopted : null
+    return { kind: 'adopted', cred: adopted }
   }
 
-  private routes(): CodexEnabledRoutes {
+  private routes(): ChatgptEnabledRoutes {
     try {
       return this.getEnabledRoutes()
     } catch (err) {
@@ -1866,10 +2057,10 @@ export class CredentialSync {
   }
 
   /**
-   * On start, remove the Codex copy from any DISABLED route — but only the one
+   * On start, remove the ChatGPT copy from any DISABLED route — but only the one
    * ClaudeUI actually MANAGED (ADR-037: "removes only its ClaudeUI-managed
    * credential"). Provenance is the vault credential: with no vault credential
-   * ClaudeUI has vended nothing, and a disabled route's Codex entry is the
+   * ClaudeUI has vended nothing, and a disabled route's ChatGPT entry is the
    * user's own (e.g. a manual `pi /login`); a matching refresh token proves the
    * entry is the one we vended. Removing an unmanaged / mismatched entry would
    * destroy a credential we never owned (M-AT3).
@@ -1907,7 +2098,7 @@ export class CredentialSync {
   }
 
   /**
-   * Remove `engine`'s Codex entry ONLY when it is a credential ClaudeUI vended —
+   * Remove `engine`'s ChatGPT entry ONLY when it is a credential ClaudeUI vended —
    * its refresh token is in `managed` ({@link managedRefreshTokens}, the vault's
    * now) or in that engine's fed-token history (a stale copy of ClaudeUI's: the
    * vault rotated while the harness did not run). Any other entry is a sign-in
@@ -1932,7 +2123,7 @@ export class CredentialSync {
     }
     const { target, vendorId } = this.slot(engine)
     if (!target) return
-    let entry: CodexEntrySnapshot | null
+    let entry: ChatgptEntrySnapshot | null
     try {
       entry = await target.readOauthEntry(vendorId)
     } catch (err) {
@@ -2014,10 +2205,10 @@ export class CredentialSync {
    * The file-backed feed target and the vendor id its auth store keys ChatGPT
    * under — pi's; opencode 2.x has none (its rows go through `opencodeTarget`).
    */
-  private slot(engine: EngineKey): { target: CodexFeedTarget | undefined; vendorId: string } {
+  private slot(engine: EngineKey): { target: ChatgptFeedTarget | undefined; vendorId: string } {
     return engine === 'pi'
-      ? { target: this.piTarget, vendorId: PI_CODEX_VENDOR_ID }
-      : { target: undefined, vendorId: OPENCODE_CODEX_VENDOR_ID }
+      ? { target: this.piTarget, vendorId: PI_CHATGPT_VENDOR_ID }
+      : { target: undefined, vendorId: OPENCODE_CHATGPT_VENDOR_ID }
   }
 
   private isCurrent(generation: number): boolean {
@@ -2026,7 +2217,7 @@ export class CredentialSync {
 
   private async removeOne(
     label: EngineKey,
-    target: CodexFeedTarget | undefined,
+    target: ChatgptFeedTarget | undefined,
     vendorId: string
   ): Promise<void> {
     if (!target) return

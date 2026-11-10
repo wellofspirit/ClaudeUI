@@ -18,7 +18,7 @@ const session = (engineId: EngineId | undefined, voice: boolean) => ({
 
 describe('voiceRefusal', () => {
   it('is null whenever the session can take voice', () => {
-    for (const engineId of ['claude', 'opencode', 'pi', 'codex'] as const) {
+    for (const engineId of ['claude', 'opencode', 'pi'] as const) {
       expect(voiceRefusal(session(engineId, true))).toBeNull()
     }
   })
@@ -27,7 +27,7 @@ describe('voiceRefusal', () => {
     expect(voiceRefusal(session('claude', false))).toBe(VOICE_NEEDS_PATCHED_HARNESS)
   })
 
-  it.each(['opencode', 'pi', 'codex'] as const)(
+  it.each(['opencode', 'pi'] as const)(
     '%s without voice means the host has no speech runtime — and says so',
     (engineId) => {
       const message = onHostPlatform('win32', 'arm64', () => voiceRefusal(session(engineId, false)))

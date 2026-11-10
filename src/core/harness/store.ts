@@ -3,8 +3,7 @@
  *
  *   ~/.claude/ui/harnesses/<id>/<version>/
  *     <payload>       the release's payload (opencode: the binary; pi: its
- *                     whole release directory; Codex: `codex` +
- *                     `codex-code-mode-host` + LICENSE)
+ *                     whole release directory)
  *     install.json    HarnessInstallRecord, written last
  *     last-used       touched when the resolver picks this version (GC)
  *   ~/.claude/ui/harnesses/.staging/   installs in progress (`install/store-writer.ts`)

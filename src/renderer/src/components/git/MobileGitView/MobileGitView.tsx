@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import type { GitFileStatus } from '../../../../../shared/types'
 import { FilterTabs } from '../GitPanel/FilterTabs'
 import { GitFileTree } from '../GitFileTree'
@@ -28,7 +29,7 @@ import { filterAndSortFiles, isStaged } from '../GitFileTree/utils'
  */
 export function MobileGitView(): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const cwd = useActiveSession((s) => s.cwd)
+  const cwd = useActiveSession(sessionWorkdir)
   const gitStatus = useActiveSession((s) => s.gitStatus)
   const gitFileFilter = useActiveSession((s) => s.gitFileFilter)
   const gitSelectedFile = useActiveSession((s) => s.gitSelectedFile)

@@ -418,11 +418,9 @@ describe('reducer — session:conversation-cleared', () => {
     expect(session.seeded).toBe(true)
   })
 
-  it('carries the per-session catalogs over rather than blanking them (R10)', () => {
-    // Vestigial in canonical (the app-level lists are the real ones and
-    // `toSnapshot` fans them out), but they describe the ENGINE, not the
-    // conversation — a bare remote clear must not look like the slash menu went
-    // away.
+  it('carries the slash menu over rather than blanking it (R10)', () => {
+    // It describes the ENGINE, not the conversation — a bare remote clear must not
+    // look like the slash menu went away.
     const before = dirty()
     const seeded: CanonicalState = {
       ...before,
@@ -430,14 +428,12 @@ describe('reducer — session:conversation-cleared', () => {
         ...before.sessions,
         rid: {
           ...before.sessions['rid'],
-          slashCommands: [{ name: '/compact' }] as never,
-          sdkSkillNames: ['dataviz']
+          slashCommands: [{ name: '/compact' }] as never
         }
       }
     }
     const s = fold([['session:conversation-cleared', 'rid', {}]], seeded)
     expect(s.sessions['rid'].slashCommands).toEqual([{ name: '/compact' }])
-    expect(s.sessions['rid'].sdkSkillNames).toEqual(['dataviz'])
   })
 
   it('takes the fresh-run permission mode from the event', () => {
@@ -697,7 +693,7 @@ describe('reducer — transcript', () => {
    * and that bucket is where its card renders. A verdict or denial for it binds
    * there when the top-level transcript has no such call: tool-use ids are
    * unique, so the owning bucket is found by searching, never named by the
-   * producer. Every engine benefits — Codex, opencode and pi reviews of subagent
+   * producer. Every engine benefits — opencode and pi reviews of subagent
    * calls used to be dropped here too.
    */
   describe('a decision on a call made inside a subagent', () => {
@@ -1007,6 +1003,76 @@ describe('reducer — transcript', () => {
     expect(s.sessions['rid'].messages.map((m) => m.id)).toEqual(['m2'])
   })
 
+  describe("a dispatched agent's retraction (ownerToolUseId)", () => {
+    const say = (id: string): ChatMessage => assistant(id, [{ type: 'text', text: id }])
+    const open = (messageId: string, owner?: string): [string, ...unknown[]] => [
+      'session:item-open',
+      'rid',
+      {
+        target: {
+          messageId,
+          blockIndex: 0,
+          kind: 'text',
+          ...(owner ? { ownerToolUseId: owner } : {})
+        },
+        message: say(messageId)
+      }
+    ]
+    const streams = (s: ReturnType<typeof fold>): string[] =>
+      Object.values(s.sessions['rid'].itemStreams)
+        .map((i) => `${i.target.ownerToolUseId ?? 'root'}:${i.target.messageId}`)
+        .sort()
+    const sub = (owner: string, id: string): [string, ...unknown[]] => [
+      'session:subagent-message',
+      'rid',
+      { toolUseId: owner, message: say(id) }
+    ]
+
+    it("removes the named messages and streams from that card only, never the session's own", () => {
+      const s = fold([
+        created(),
+        ['session:message', 'rid', say('refused')],
+        sub('card', 'refused'),
+        sub('card', 'kept'),
+        sub('other', 'refused'),
+        open('root-live'),
+        open('refused-live', 'card'),
+        open('card-live', 'card'),
+        open('refused-live', 'other'),
+        [
+          'session:messages-retracted',
+          'rid',
+          { messageIds: ['refused', 'refused-live'], ownerToolUseId: 'card' }
+        ]
+      ])
+      const session = s.sessions['rid']
+      expect(session.subagentMessages['card'].map((m) => m.id)).toEqual(['kept', 'card-live'])
+      expect(session.subagentMessages['other'].map((m) => m.id)).toEqual([
+        'refused',
+        'refused-live'
+      ])
+      expect(session.messages.map((m) => m.id)).toEqual(['refused', 'root-live'])
+      expect(streams(s)).toEqual(['card:card-live', 'other:refused-live', 'root:root-live'])
+    })
+
+    // Unlike the session's own retraction, where an empty list clears every stream: the card's
+    // other live streams (the target's own agents) must keep streaming.
+    it('with no ids, takes nothing back', () => {
+      const before = fold([
+        created(),
+        open('root-live'),
+        open('card-live', 'card'),
+        open('other-live', 'other')
+      ])
+      const after = fold(
+        [['session:messages-retracted', 'rid', { messageIds: [], ownerToolUseId: 'card' }]],
+        before
+      )
+      expect(after).toBe(before)
+      expect(streams(after)).toEqual(['card:card-live', 'other:other-live', 'root:root-live'])
+    })
+  })
+
   it('mints a DETERMINISTIC id for a user message (the payload carries none)', () => {
     // Recorded divergence: `session:user-message` has no id/timestamp on the wire,
     // so the renderer mints `msg-<uuid>`/Date.now() and core mints `user-<seq>`/0.
@@ -1282,7 +1348,7 @@ describe('reducer — cost + metering REPLACE, never accumulate (invariant 6)', 
     // coerced (`?? 0`) would launder the former into the latter on every hop.
     const s = fold([
       created(),
-      ['session:status', 'rid', status({ engineId: 'codex', totalCostUsd: null })],
+      ['session:status', 'rid', status({ engineId: 'pi', totalCostUsd: null })],
       ['session:status-line', 'rid', line(null)]
     ])
     expect(s.sessions['rid'].status.totalCostUsd).toBeNull()
@@ -1654,17 +1720,28 @@ describe('reducer — app-level config', () => {
     expect(s.sessionEngines).toEqual({})
   })
 
-  it('slash commands and skills are app-level and fan out per session', () => {
+  it('slash commands are per session: two sessions, two lists, no bleed', () => {
     const s = fold([
       created('a'),
       created('b'),
       ['session:slash-commands', 'a', [{ name: '/foo' }]],
-      ['session:skills', 'a', ['skill-x']]
+      ['session:slash-commands', 'b', [{ name: '/bar', description: 'pi one' }]],
+      ['session:slash-commands', 'a', [{ name: '/foo' }, { name: '/baz' }]]
     ])
     const snap = toSnapshot(s, 1)
-    expect(snap.sessions['a'].slashCommands).toEqual([{ name: '/foo' }])
-    expect(snap.sessions['b'].slashCommands).toEqual([{ name: '/foo' }])
-    expect(snap.sessions['b'].sdkSkillNames).toEqual(['skill-x'])
+    expect(snap.sessions['a'].slashCommands).toEqual([{ name: '/foo' }, { name: '/baz' }])
+    expect(snap.sessions['b'].slashCommands).toEqual([{ name: '/bar', description: 'pi one' }])
+    expect(fromSnapshot(snap).sessions['b'].slashCommands).toEqual(snap.sessions['b'].slashCommands)
+  })
+
+  it('a slash-commands event for an unknown session changes nothing', () => {
+    const before = fold([created('a')])
+    const after = applyEvent(before, {
+      channel: 'session:slash-commands',
+      args: ['ghost', [{ name: '/x' }]],
+      seq: 99
+    })
+    expect(after).toBe(before)
   })
 })
 
@@ -1682,7 +1759,6 @@ describe('snapshot restore — fromSnapshot (phase 4b)', () => {
       ['session:metering', 'rid', { tokens: { total: 3 } } as never],
       ['session:config-changed', 'rid', { model: 'opus', effort: 'high' }],
       ['session:slash-commands', 'rid', [{ name: '/foo' }]],
-      ['session:skills', 'rid', ['skill-x']],
       ['config:settings-changed', { theme: 'monokai' }]
     ])
     const restored = fromSnapshot(toSnapshot(live, 42))
@@ -1727,8 +1803,7 @@ describe('snapshot restore — fromSnapshot (phase 4b)', () => {
           permissionMode: 'default',
           effort: null,
           statusLine: null,
-          slashCommands: [],
-          sdkSkillNames: []
+          slashCommands: []
         }
       },
       directories: [],
@@ -2342,8 +2417,8 @@ describe('session:auth-required — one event, on the wire (ADR-068 §4, slice 3
   /**
    * GUARD — the retry belongs to a turn this failure actually killed.
    *
-   * Codex's host fans one failed refresh to EVERY session attached to the
-   * process (ADR-069 §8), so a session that has been idle for hours hears about
+   * A host can fan one failed refresh to EVERY session attached to the
+   * process, so a session that has been idle for hours hears about
    * a credential it was not using. Capturing its last prompt there meant the
    * sign-in dialog then offered to "retry" a turn that completed long ago.
    */

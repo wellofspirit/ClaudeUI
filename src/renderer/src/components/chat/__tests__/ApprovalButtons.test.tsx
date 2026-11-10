@@ -199,86 +199,8 @@ describe('ApprovalButtons', () => {
     expect(onApproval).toHaveBeenCalledWith('allow', undefined)
   })
 
-  // A guardian-denial override (ADR-067, 2026-09-12). There is no native request
-  // parked behind it and nothing to always-allow, so the two exits are "leave it
-  // denied" and "tell Codex to allow that exact action".
-  describe('Codex guardian denial override', () => {
-    const override = (overrides?: Partial<PendingApproval>): PendingApproval =>
-      makeApproval({
-        toolUseId: 'codex:["root","turn","esc"]',
-        toolName: 'commandExecution',
-        input: { command: 'rm -rf x', cwd: '/w' },
-        decisionReason: 'Codex auto-review denied this action. Unacceptable risk.',
-        codex: { guardianOverride: true },
-        ...overrides
-      })
-
-    it('replaces Deny/Allow with Dismiss and Approve anyway, and shows the reason', () => {
-      render(
-        <ApprovalButtons
-          approval={override()}
-          permissionMode="auto"
-          onApproval={vi.fn().mockResolvedValue(undefined)}
-        />
-      )
-      expect(screen.getByTestId('ApprovalButtons.dismiss')).toHaveTextContent('Dismiss')
-      expect(screen.getByTestId('ApprovalButtons.approveAnyway')).toHaveTextContent(
-        'Approve anyway'
-      )
-      expect(screen.queryByTestId('ApprovalButtons.allow')).not.toBeInTheDocument()
-      expect(screen.queryByTestId('ApprovalButtons.deny')).not.toBeInTheDocument()
-      expect(
-        screen.getByText('Codex auto-review denied this action. Unacceptable risk.')
-      ).toBeInTheDocument()
-    })
-
-    it('never offers always-allow rules for a one-off override', () => {
-      const suggestions: PermissionSuggestion[] = [
-        {
-          type: 'addRules',
-          destination: 'projectSettings',
-          rules: [{ toolName: 'Bash', ruleContent: 'rm *' }]
-        }
-      ]
-      render(
-        <ApprovalButtons
-          approval={override({ suggestions })}
-          permissionMode="auto"
-          onApproval={vi.fn().mockResolvedValue(undefined)}
-        />
-      )
-      expect(screen.queryByText(/Permission rules/i)).not.toBeInTheDocument()
-    })
-
-    it.each([
-      ['ApprovalButtons.approveAnyway', 'allow'],
-      ['ApprovalButtons.dismiss', 'deny']
-    ])('sends %s as the %s decision', async (testid, decision) => {
-      const onApproval = vi.fn().mockResolvedValue(undefined)
-      render(
-        <ApprovalButtons approval={override()} permissionMode="auto" onApproval={onApproval} />
-      )
-      await act(async () => {
-        fireEvent.click(screen.getByTestId(testid))
-      })
-      expect(onApproval).toHaveBeenCalledWith(decision, undefined)
-    })
-
-    it('shows no hold countdown', () => {
-      render(
-        <ApprovalButtons
-          approval={override()}
-          permissionMode="auto"
-          onApproval={vi.fn().mockResolvedValue(undefined)}
-        />
-      )
-      expect(screen.queryByTestId('ApprovalButtons.holdCountdown')).not.toBeInTheDocument()
-      expect(screen.queryByTestId('ApprovalButtons.keepBlocked')).not.toBeInTheDocument()
-    })
-  })
-
   // ADR-091 §3 — ClaudeUI's own judge HOLDS its block for the user: the same
-  // one-call override as Codex's, labelled Keep blocked / Approve anyway, with a
+  // one-call override, labelled Keep blocked / Approve anyway, with a
   // live countdown to the host's Keep-blocked expiry.
   describe('held auto-mode block', () => {
     const NOW = 1_700_000_000_000

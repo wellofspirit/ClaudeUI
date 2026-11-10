@@ -11,8 +11,7 @@
  *     → `--version`, isolated (`probe.ts`), at most `concurrency` at once
  *     → classify: `classifyVersion` (`../version-gate.ts`), plus
  *       `unsupported` (cannot be run) and `failed` (the probe did not answer
- *       with a version). A Codex without its `codex-code-mode-host`
- *       (`codexHostFor`) is `unsupported` even at a good version.
+ *       with a version).
  *
  * The scheduler (`./scheduler.ts`) runs it in the background and caches the
  * result (`./detection-cache.ts`), which the resolver reads for a System
@@ -29,7 +28,6 @@ import type {
 } from '../../../shared/harness-types'
 import { HARNESS_IDS } from '../../../shared/harness-types'
 import { ELECTRON_NODE_ENV, nodeScriptLaunch } from '../launch'
-import { codexHostFor } from '../resolve'
 import { classifyVersion, versionReason } from '../version-gate'
 import { harnessCandidates } from './candidates'
 import { fingerprintOf } from './fs-util'
@@ -199,20 +197,6 @@ async function finish(r: InstallResolution, ctx: Context): Promise<DetectedInsta
 
   const version = probe.version
   const verdict = classifyVersion(r.id, version)
-  if (
-    r.id === 'codex' &&
-    (verdict === 'tested' || verdict === 'untested') &&
-    codexHostFor(r.realPath) === null
-  ) {
-    return {
-      ...base,
-      ...withNode,
-      launch,
-      version,
-      verdict: 'unsupported',
-      reason: 'codex-code-mode-host not found beside it'
-    }
-  }
   const reason = versionReason(r.id, version, verdict)
   return { ...base, ...withNode, launch, version, verdict, ...(reason ? { reason } : {}) }
 }

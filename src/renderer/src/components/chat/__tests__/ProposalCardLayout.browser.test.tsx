@@ -32,7 +32,7 @@ const LONG = 'a-rather-long-proposal-title-that-keeps-going-and-going-and-going-
 const LONG_PATH =
   '/work/an-unbroken-path-segment-without-any-spaces-at-all-that-would-push-the-card-sideways/and/more'
 const PLACEMENT: ProposalPlacement = {
-  engine: 'codex',
+  engine: 'pi',
   model: 'a-very-long-model-name-from-a-custom-endpoint-config-1234567890',
   effort: 'high',
   permission_mode: 'acceptEdits',

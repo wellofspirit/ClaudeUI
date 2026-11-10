@@ -4,12 +4,8 @@ import * as os from 'os'
 import { logger } from './logger'
 import { emitEvent } from './sync-host'
 import { writeFileAtomicSync } from './write-json-atomic'
-import {
-  allSessionMeta,
-  setSessionMeta,
-  importSessionEnginesOnce,
-  hasCodexSessionOverrides
-} from './db'
+import { allSessionMeta, setSessionMeta, importSessionEnginesOnce } from './db'
+import { isEngineId } from '../../shared/engine-label'
 import { assertSafeIdSegment, isPathInside } from './path-containment'
 import { normalizePiEngineConfig } from '../../shared/pi-model-allowlist'
 
@@ -425,15 +421,16 @@ export function saveSessionConfig(config: UISessionConfig): void {
   if (config.sessionEngines) {
     // Add/update entries present in the incoming map
     for (const [sessionId, meta] of Object.entries(config.sessionEngines)) {
-      // Native-discovered identity is authoritative; a stale client projection cannot change its engine.
-      if (meta.engineId !== 'codex' && hasCodexSessionOverrides(sessionId)) continue
+      // A client's map is untrusted wire input: an engine this build does not ship (a stale
+      // client still naming `codex`) is dropped rather than stored.
+      if (!isEngineId(meta?.engineId)) continue
       setSessionMeta(sessionId, meta)
     }
 
     // Entries ABSENT from the incoming map are left alone. A client's map is its
     // own snapshot, not the registry: a session another client or core created a
     // moment ago is simply unknown to it, and the delete-absent loop that used to
-    // follow here wiped that session's engine/model row (a remote-created Codex
+    // follow here wiped that session's engine/model row (a remote-created
     // session reverted to Claude on every connected client). The deletions that
     // loop stood in for happen host-side on the event that causes them — the
     // rekey (`SessionManager.rekey`) and an explicit delete

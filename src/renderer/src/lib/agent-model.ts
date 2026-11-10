@@ -5,20 +5,17 @@
  * First match wins:
  *  1. the newest message of the agent's own transcript THAT HAS a `model`
  *     ({@link latestMessageModel}): what the engine reports it ran on. A newer
- *     message without one (an error row, a Codex message) does not clear it;
+ *     message without one (an error row) does not clear it;
  *  2. the model the spawn asked for (`view.model`; for pi the host-written result
  *     line, which is the model the child was actually started on);
- *  3. Codex only: the parent session's model, which its children run on;
- *  4. none.
- * No parent fallback for the other engines: a Claude `Explore` child runs Haiku by
- * definition, and the parent's model would be wrong until the first message and
- * then flip.
+ *  3. none.
+ * No parent fallback: a Claude `Explore` child runs Haiku by definition, and the
+ * parent's model would be wrong until the first message and then flip.
  *
  * A cross-engine dispatch is the actual model if any message has one, else the
  * `dispatch.model` it asked the target engine for.
  */
 import type { ChatMessage, EngineId, ModelInfo } from '../../../shared/types'
-import { useActiveSession } from '../stores/session-store'
 import { shortModelName } from '../components/usage/usage-utils'
 import { modelDisplayName } from './model-display-name'
 
@@ -52,8 +49,6 @@ export interface AgentModelInput {
   /** The spawn's model (`view.model`). */
   requested?: string
   engine?: EngineId
-  /** The parent session's model; used for Codex only. */
-  parentModel?: string
   /** Set for a cross-engine dispatch. */
   dispatch?: { engine: string; model?: string }
 }
@@ -62,19 +57,7 @@ export function resolveAgentModel(input: AgentModelInput): string | undefined {
   if (input.latestModel) return input.latestModel
   if (input.dispatch) return input.dispatch.model || undefined
   if (input.requested) return input.requested
-  if (input.engine === 'codex' && input.parentModel) return input.parentModel
   return undefined
-}
-
-/**
- * The active session's own model, for {@link resolveAgentModel}'s Codex fallback:
- * what `thread/started` reported the thread runs on. Undefined on every other
- * engine, which never uses it.
- */
-export function useParentModel(): string | undefined {
-  return useActiveSession((s) =>
-    s.status.engineId === 'codex' ? s.status.model?.modelId || undefined : undefined
-  )
 }
 
 /**

@@ -54,9 +54,7 @@ beforeEach(() => {
     worktreeInfoMap: {},
     sessionEngines: {},
     hiddenSessionIds: [],
-    hiddenProjectKeys: [],
-    slashCommands: [],
-    sdkSkillNames: []
+    hiddenProjectKeys: []
   })
   ;(window as unknown as { api: unknown }).api = {}
 })
@@ -196,7 +194,7 @@ describe('the fold projects into the store', () => {
 
   describe('a session whose cwd is a linked worktree (marker on the directory listing)', () => {
     const linked = {
-      worktreePath: 'C:/Users/me/.codex/worktrees/ab12/repo',
+      worktreePath: 'C:/Users/me/.local/share/opencode/worktree/ab12/repo',
       repoRoot: 'C:/Users/me/repo',
       name: 'ab12/repo',
       branch: ''
@@ -206,7 +204,7 @@ describe('the fold projects into the store', () => {
     ]
 
     it('projects a synthesised worktree info, matched across separators and drive-letter case', () => {
-      seed.created('r1', { cwd: 'c:\\users\\me\\.codex\\worktrees\\ab12\\repo' })
+      seed.created('r1', { cwd: 'c:\\users\\me\\.local\\share\\opencode\\worktree\\ab12\\repo' })
       expect(store().sessions['r1'].worktreeInfo).toBeNull()
       seed.directories(listing(linked.worktreePath))
       expect(store().sessions['r1'].worktreeInfo).toMatchObject({
@@ -518,14 +516,17 @@ describe('hydration', () => {
     expect(store().activeSessionId).toBe('local-only')
   })
 
-  it('a snapshot with no sessions cannot blank the app-level catalogs', () => {
-    // They ride the wire PER SESSION (an as-built quirk `toSnapshot` preserves), so
-    // an empty snapshot genuinely cannot carry them — see shared/sync/state.ts.
-    seed.skills('r1', ['skill-a'])
-    expect(store().sdkSkillNames).toEqual(['skill-a'])
+  it('keeps each session own slash menu through a snapshot', () => {
+    seed.created('r1', { cwd: '/p' })
+    seed.created('r2', { cwd: '/q' })
+    seed.slashCommands('r1', [{ name: '/a' }])
+    seed.slashCommands('r2', [{ name: '/b' }])
+    expect(store().sessions['r1'].slashCommands).toEqual([{ name: '/a' }])
+    expect(store().sessions['r2'].slashCommands).toEqual([{ name: '/b' }])
 
-    hydrateReplica(toSnapshot({ ...getReplicaState(), sessions: {} }, 11), true)
+    hydrateReplica(toSnapshot(getReplicaState(), 11), true)
 
-    expect(store().sdkSkillNames).toEqual(['skill-a'])
+    expect(store().sessions['r1'].slashCommands).toEqual([{ name: '/a' }])
+    expect(store().sessions['r2'].slashCommands).toEqual([{ name: '/b' }])
   })
 })

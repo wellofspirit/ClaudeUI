@@ -4,7 +4,7 @@
  * Three callers record limit readings and none of them may invent its own
  * identity for a window: the active Claude poll (`UsageFetcher`), the limits
  * provider's on-demand read of an INACTIVE Claude account, and the ChatGPT
- * store when a live Codex session pushes a snapshot. They agree here on the two
+ * store when it reads a vault account's limits. They agree here on the two
  * things that make a sample comparable — the canonical window end (ADR-011's
  * snap rule, now applied to every window kind, not only the 5-hour one) and the
  * `(account_key, window_kind)` the row is filed under.

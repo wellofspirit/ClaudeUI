@@ -5,7 +5,6 @@ import {
   carriesPicksIntoNewSessions,
   claudeAliasForModel,
   claudeConfigWithAliases,
-  codexPublishesEffort,
   resolveClaudeCapabilities
 } from '../../../shared/model-capabilities'
 import type { EffortLevel } from '../../../shared/model-capabilities'
@@ -17,6 +16,15 @@ import type { ItemStreams } from '../../../core/shared/sync/item-stream'
 import type { TranscriptLoadProgress } from '../lib/transcript-load-progress'
 import type { CanonicalSessionState, CanonicalState } from '../../../core/shared/sync/state'
 import type { SessionLinkInfo } from '../../../shared/session-links'
+import {
+  effectiveStartInWorktree,
+  generateWorktreeName,
+  isManagedWorktreePath,
+  type PendingWorktree,
+  type WorktreeProjectChoice
+} from '../../../shared/worktree-start'
+import { cwdToProjectKey } from '../../../shared/project-key'
+import { liveProjectMembers, projectScope } from '../../../shared/worktree-fold'
 import type {
   ContextPressureBanner,
   ContextPressureSetting
@@ -81,6 +89,7 @@ import type {
   ChatgptRateLimits,
   SubagentIndexEntry
 } from '../../../shared/types'
+import { isEngineId } from '../../../shared/engine-label'
 import { HARNESS_IDS } from '../../../shared/harness-types'
 // The harness snapshot (ADR-082 §8): whether a new session's harness runs.
 // `harness-store` imports nothing from this module, so there is no cycle.
@@ -176,9 +185,6 @@ function perEngineDefaultModel(
 ): string | undefined {
   if (engineId === 'opencode') return defaults.opencodeDefaultModel
   if (engineId === 'pi') return defaults.piDefaultModel
-  // Codex's is the empty string when nothing is configured, and
-  // `defaultModelValue` turns that back into '' — "say nothing on the wire".
-  if (engineId === 'codex') return defaults.codexDefaultModel
   return undefined
 }
 
@@ -197,13 +203,6 @@ export interface EngineDefaultModels {
   piDefaultModel: string
   piDefaultModelConfigured: boolean
   /**
-   * `engines/codex.json#codexConfig.defaultModel`, or '' when unset. Unlike the
-   * other two there is NO fallback constant behind it: blank means ClaudeUI
-   * names no model on `turn/start` and Codex's own layers decide (ADR-068 §6).
-   */
-  codexDefaultModel: string
-  codexDefaultModelConfigured: boolean
-  /**
    * `engines/claude.json#claudeConfig.defaultModel`, or '' when unset (ADR-074
    * §8). Unset is Claude's own `default` alias — exactly today's behaviour — so
    * the flag, not the string, is what switches the Claude branch on.
@@ -218,8 +217,6 @@ export function engineDefaultModels(state: {
   opencodeDefaultModelConfigured: boolean
   piDefaultModel: string
   piDefaultModelConfigured: boolean
-  codexDefaultModel: string
-  codexDefaultModelConfigured: boolean
   claudeDefaultModel: string
   claudeDefaultModelConfigured: boolean
 }): EngineDefaultModels {
@@ -228,8 +225,6 @@ export function engineDefaultModels(state: {
     opencodeDefaultModelConfigured: state.opencodeDefaultModelConfigured,
     piDefaultModel: state.piDefaultModel,
     piDefaultModelConfigured: state.piDefaultModelConfigured,
-    codexDefaultModel: state.codexDefaultModel,
-    codexDefaultModelConfigured: state.codexDefaultModelConfigured,
     claudeDefaultModel: state.claudeDefaultModel,
     claudeDefaultModelConfigured: state.claudeDefaultModelConfigured
   }
@@ -257,27 +252,6 @@ export function resolveEngineDefaultModel(
   models: ModelInfo[],
   defaults: EngineDefaultModels
 ): string | null {
-  if (engineId === 'codex') {
-    const codex = models.filter((model) => isModelForEngine(model, 'codex'))
-    // An EMPTY catalog keeps answering null whether or not a default is
-    // configured — unlike opencode and pi, Codex has its own diagnosis for that
-    // state (a broken install, or a ChatGPT credential the API refused) and
-    // `reportStaleDefaultModel` probes the vendor to tell them apart. Letting a
-    // configured value through here would swallow that banner.
-    if (codex.length === 0) return null
-    // From here it is the opencode/pi rule: a CONFIGURED default the catalog no
-    // longer lists resolves to null — the picker stays unset and banners the
-    // name — never to a substitute whose capabilities differ (ADR-059).
-    if (defaults.codexDefaultModelConfigured) {
-      return codex.some((model) => model.value === defaults.codexDefaultModel)
-        ? defaults.codexDefaultModel
-        : null
-    }
-    // Nothing configured: the catalog head, which the session then omits from
-    // `turn/start` (`codexModelExplicit` stays false) so Codex's own configured
-    // model actually runs. The value exists only so the picker has a row.
-    return codex[0].value
-  }
   if (engineId === 'opencode') {
     const oc = models.filter((model) => isModelForEngine(model, 'opencode'))
     if (defaults.opencodeDefaultModelConfigured && oc.length > 0) {
@@ -317,72 +291,13 @@ export function resolveEngineDefaultModel(
   return engineMeta(engineId).defaultModelValue()
 }
 
-/**
- * What model discovery says when the identity Codex runs under is what was
- * refused (ADR-070 §1).
- *
- * It used to be an exported CONSTANT pushed onto `errors[]`, with `FloatingError`
- * matching the exact string to attach a Sign in button — a third card for the
- * same fact the auth event already carries, and a renderer-side rule coupled to
- * an engine-authored string. Now it is the `message` of one `authRequired`, so
- * discovery and a failed turn produce the same one row with the same one action.
- * The engine's words stop at the fact; the ACTION is the UI's.
- */
-const CODEX_DISCOVERY_REFUSED_MESSAGE =
-  'ChatGPT rejected the credential Codex runs under, so no Codex models could be read.'
-
-/**
- * Banner the missing default model, asking WHY first when the answer changes the
- * advice.
- *
- * Every engine but Codex is answered synchronously from the configured value.
- * An empty CODEX catalog is the one case with two causes that need opposite
- * advice — a broken installation, or the vault's ChatGPT credential being
- * refused — and only `vendorAuthProbe('codex')` can tell them apart
- * (`CodexAuthProvider` reports `unauthenticated` when the stored account cannot
- * read the catalog). A probe that fails or says nothing keeps the generic hint:
- * an unanswered question is not evidence.
- *
- * The two causes now take two different ROUTES, not two strings on one list: a
- * refused credential is the auth fact (ADR-070 §1), and everything else stays an
- * ordinary error, because "check the installation" is not fixed by signing in.
- */
+/** Banner the missing default model. */
 function reportStaleDefaultModel(routingId: string, engineId: EngineId, model: string): void {
-  const generic = staleDefaultModelMessage(engineId, model)
-  const addError = (text: string): void => useSessionStore.getState().addError(routingId, text)
-  if (engineId !== 'codex' || model) return addError(generic)
-  void window.api
-    .vendorAuthProbe('codex')
-    .then((probe) => {
-      if (probe.openai?.authState !== 'unauthenticated') return addError(generic)
-      // `authRequired` is SEALED: the reducer owns it, and `patchLocalSession` is
-      // the one sanctioned local write (the same escape hatch `clearAuthRequired`
-      // uses). Local-only is honest here — this is THIS client's own discovery
-      // read, not a host event, and the host raises the replicated fact itself the
-      // moment a turn actually tries to run.
-      patchLocalSession(routingId, {
-        // The literal, as every other renderer sign-in site spells it: the core
-        // constant lives beside `AuthVault`, which reaches `node:fs`.
-        authRequired: { providerId: 'chatgpt', message: CODEX_DISCOVERY_REFUSED_MESSAGE }
-      })
-    })
-    .catch(() => addError(generic))
+  useSessionStore.getState().addError(routingId, staleDefaultModelMessage(engineId, model))
 }
 
 /** The configured-but-missing default model for `engineId`, for error copy. */
-function configuredDefaultModelOf(
-  engineId: EngineId,
-  defaults: EngineDefaultModels,
-  models: ModelInfo[]
-): string {
-  // Codex answers '' for the EMPTY-catalog failure, which is what tells
-  // `reportStaleDefaultModel` to probe the vendor and choose between "check the
-  // installation" and "sign in again". A configured model the catalog reported
-  // WITHOUT is a different failure with different advice, so it is named.
-  if (engineId === 'codex') {
-    const hasCatalog = models.some((model) => isModelForEngine(model, 'codex'))
-    return hasCatalog && defaults.codexDefaultModelConfigured ? defaults.codexDefaultModel : ''
-  }
+function configuredDefaultModelOf(engineId: EngineId, defaults: EngineDefaultModels): string {
   if (engineId === 'claude') return defaults.claudeDefaultModel
   return engineId === 'pi' ? defaults.piDefaultModel : defaults.opencodeDefaultModel
 }
@@ -393,8 +308,6 @@ function configuredDefaultModelOf(
  * found" is what made the silent substitute look preferable in the first place.
  */
 export function staleDefaultModelMessage(engineId: EngineId, model: string): string {
-  if (engineId === 'codex' && !model)
-    return 'No Codex models were discovered. Check installation and native account/model settings.'
   // Claude's default lives on Models & providers, not on its engine page.
   if (engineId === 'claude')
     return (
@@ -405,6 +318,16 @@ export function staleDefaultModelMessage(engineId: EngineId, model: string): str
     `The configured ${engineMeta(engineId).label} default model "${model}" is no longer available. ` +
     `Pick a model in the picker, or change the default in Settings › Models & providers › Default models (${engineMeta(engineId).label}).`
   )
+}
+
+/**
+ * The engine the welcome screen starts on. A stored value can name an engine this
+ * build no longer has (`engineMeta` throws on it), so anything unknown is dropped.
+ */
+export function loadLastSelectedEngineId(): EngineId {
+  const stored =
+    localStorage.getItem('lastSelectedEngineId') ?? localStorage.getItem('lastSelectedProvider')
+  return isEngineId(stored) ? stored : 'claude'
 }
 
 /** localStorage key holding the last model picked for one engine. */
@@ -462,6 +385,7 @@ function claudePicksOnAliases(
 export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
+import { sessionWorkdir } from '../lib/session-workdir'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
 
@@ -502,7 +426,7 @@ export { carriesPicksIntoNewSessions }
 function pickSeedModel(
   state: SessionState,
   engineId: EngineId
-): { model: string | null; stale: string | null; sticky: string | undefined } {
+): { model: string | null; stale: string | null } {
   const defaults = engineDefaultModels(state)
   // The user's last pick on THIS engine wins over the engine default — the
   // model twin of `lastSelectedEngineId` — unless the user chose the
@@ -516,20 +440,11 @@ function pickSeedModel(
   // `null` = the user's CONFIGURED default named a model this engine no longer
   // offers. Seed the picker's unset state and say so, rather than substituting
   // a model whose capabilities differ from the one the user asked for.
-  let model = stickyAvailable
+  const model = stickyAvailable
     ? (sticky as string)
     : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
-  if (engineId === 'codex' && sticky) {
-    const hasCatalog = state.availableModels.some((m) => m.engineId === 'codex')
-    model = hasCatalog && !stickyAvailable ? null : sticky
-  }
-  const stale =
-    model === null
-      ? engineId === 'codex' && sticky
-        ? sticky
-        : configuredDefaultModelOf(engineId, defaults, state.availableModels)
-      : null
-  return { model, stale, sticky }
+  const stale = model === null ? configuredDefaultModelOf(engineId, defaults) : null
+  return { model, stale }
 }
 
 export interface AppSettings {
@@ -570,7 +485,7 @@ export interface AppSettings {
   voiceLanguage: VoiceLanguageCode
   /**
    * Per-model STARTING effort — Claude's (pi keeps its own in
-   * `engineEffortDefaults`; opencode and Codex remember none). Keyed by
+   * `engineEffortDefaults`; opencode remembers none). Keyed by
    * `claudeEffortKey` (`shared/model-capabilities`): the family alias (`opus`, `sonnet`) for an alias row, else the resolved model id
    * (`claude-opus-4-7`, `claude-fable-5`). Written by the Settings table and by a
    * composer effort pick ("remembered per model"). When set, overrides the
@@ -659,6 +574,13 @@ export interface AppSettings {
    * session spawns, so turning it off applies to new sessions.
    */
   sessionTools?: boolean
+  /**
+   * "Start new sessions in a worktree": the global default. Absent from {@link DEFAULT_SETTINGS}:
+   * unset is off, and Reset deletes the key. See `shared/worktree-start.ts`.
+   */
+  startInWorktree?: boolean
+  /** Per-project override of {@link startInWorktree}, keyed by the sidebar group's project key; a missing key uses the default. */
+  worktreeByProject?: Record<string, WorktreeProjectChoice>
   /**
    * Colour an agent's name in the roster, and the task card's model chip, by the
    * tier of the model it runs on (`shared/model-tier.ts`). On by default.
@@ -838,16 +760,13 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   let [
     savedSettings,
     sessionConfig,
-    slashCommands,
     loadedEngineConfig,
     opencodeSettings,
     piEngineConfig,
-    codexEngineConfig,
     userPermissions
   ] = await Promise.all([
     window.api.loadSettings(),
     window.api.loadSessionConfig(),
-    window.api.loadSlashCommands(),
     window.api
       .loadEngineConfig('claude')
       .catch((): import('../../../shared/types').EngineConfig => ({})),
@@ -856,9 +775,6 @@ export async function hydrateConfigFromDisk(): Promise<void> {
       .catch((): import('../../../shared/types').OpencodeConfigSettings => ({})),
     window.api
       .loadEngineConfig('pi')
-      .catch((): import('../../../shared/types').EngineConfig => ({})),
-    window.api
-      .loadEngineConfig('codex')
       .catch((): import('../../../shared/types').EngineConfig => ({})),
     // `permissions.defaultMode` (user scope) seeds the mode of sessions created
     // in this app run. Remote-registered channel, so the web client hydrates
@@ -944,11 +860,6 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     opencodeDefaultModelConfigured: !!opencodeSettings?.model,
     piDefaultModel: piEngineConfig?.piConfig?.defaultModel || PI_DEFAULT_MODEL,
     piDefaultModelConfigured: !!piEngineConfig?.piConfig?.defaultModel,
-    // No builtin fallback for Codex: blank stays blank, which is what makes the
-    // native `model` win (ADR-068 §6).
-    codexDefaultModel: codexEngineConfig?.codexConfig?.defaultModel || '',
-    codexDefaultModelConfigured: !!codexEngineConfig?.codexConfig?.defaultModel,
-    codexDefaultEffort: codexEngineConfig?.codexConfig?.defaultEffort || '',
     // No builtin fallback either: blank is Claude's own `default` alias.
     claudeDefaultModel: loadedEngineConfig?.claudeConfig?.defaultModel || '',
     claudeDefaultModelConfigured: !!loadedEngineConfig?.claudeConfig?.defaultModel
@@ -975,8 +886,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
     hiddenSessions: sessionConfig.hiddenSessions ?? [],
     hiddenProjects: sessionConfig.hiddenProjects ?? [],
-    sessionEngines: sessionConfig.sessionEngines ?? {},
-    slashCommands: slashCommands ?? []
+    sessionEngines: sessionConfig.sessionEngines ?? {}
   })
 }
 
@@ -1059,7 +969,7 @@ function forgetDroppedSession(state: PersistedSessionFields, routingId: string):
  * {@link SessionState.beginTranscriptLoad} so the sidebar's loading placeholder
  * carries exactly what the finished load would have given the entry — a
  * placeholder built from `emptySession` defaults would show Claude's defaults on a
- * Codex session until the transcript landed, and a prompt sent meanwhile would
+ * non-default session until the transcript landed, and a prompt sent meanwhile would
  * spawn with them.
  *
  * `base` is the entry the load starts from (see the comment inside).
@@ -1150,6 +1060,12 @@ export interface PerSessionState {
    *  <anchor> --fork-session`, minting a new branch seeded with messages 1..N.
    *  Read only while `!sdkActive`; the fork materializes lazily on first prompt. */
   forkOrigin: { sourceSessionId: string; anchorUuid: string } | null
+  /**
+   * "Start in a worktree" for a session that has not spawned: the toggle, the name, and where
+   * creating it stands. The worktree is made at the first send (`lib/worktree-start.ts`), then this
+   * is cleared. View state: per client, never persisted.
+   */
+  pendingWorktree?: PendingWorktree | null
   messages: ChatMessage[]
   itemStreams: ItemStreams
   itemStreamRevision: number
@@ -1220,8 +1136,7 @@ export interface PerSessionState {
    * default); non-null = the
    * tier the session runs at — the user's pick, or the starting effort frozen at
    * spawn (the birth event's `announce`). Canonical `effort` is `string | null`
-   * (sync/state.ts): Claude's five rungs for Claude/opencode/pi, an engine-native
-   * tier (Codex's `minimal`…`xhigh`) for Codex.
+   * (sync/state.ts).
    */
   effort: string | null
   /** null = use model default; non-null = user explicitly chose this mode */
@@ -1232,6 +1147,8 @@ export interface PerSessionState {
   statusLine: StatusLineData | null
   /** Engine-neutral metering snapshot (Phase 7 Pass 2). Additive to statusLine. */
   metering: MeteringSnapshot | null
+  /** This session's slash menu: its engine's list plus the shared Claude skill catalog (replicated). */
+  slashCommands: SlashCommandInfo[]
   /** Queue of record, replicated from main (ADR-053). Only `queued` items live
    *  here — a consumed item has already become a chat message. */
   queuedItems: QueuedItem[]
@@ -1246,7 +1163,6 @@ export interface PerSessionState {
    *  in session A can never be sent from B, and is restored on return to A. */
   draftAttachments: FileAttachment[]
   selectedModel: string
-  codexModelExplicit?: boolean
   /** Engine chosen at session-creation time. Immutable after the session spawns. */
   selectedEngineId: EngineId
   // Worktree state
@@ -1297,6 +1213,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   sdkActive: false,
   isHistorical: false,
   forkOrigin: null,
+  pendingWorktree: null,
   messages: [],
   itemStreams: {},
   itemStreamRevision: 0,
@@ -1341,6 +1258,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   reasoningVariant: null,
   statusLine: null,
   metering: null,
+  slashCommands: [],
   queuedItems: [],
   heldCount: 0,
   contextPressure: null,
@@ -1457,7 +1375,7 @@ let vendorOAuthFlowToken = 0
  * Slice 7). The WAIT cannot be one long invoke: `web/connection.ts` rejects any
  * invoke that outlives `INVOKE_TIMEOUT_MS` (30 s) and a device code lives for
  * fifteen minutes, on the one client that uses this flow. Three seconds is well
- * inside Codex's own default poll cadence and costs a `config` query each time.
+ * inside the host's default poll cadence.
  */
 export const DEVICE_CODE_POLL_MS = 3000
 
@@ -1939,21 +1857,11 @@ export interface SessionState {
   piDefaultModel: string
   /** The pi twin of {@link opencodeDefaultModelConfigured}. */
   piDefaultModelConfigured: boolean
-  /** Configurable Codex default model (engines/codex.json `codexConfig.defaultModel`,
-   *  ADR-068 §6). '' = say nothing on `turn/start` and let Codex's own layers decide. */
-  codexDefaultModel: string
-  /** The Codex twin of {@link opencodeDefaultModelConfigured}. There is no builtin
-   *  constant behind it, so this is simply "the key is non-empty". */
-  codexDefaultModelConfigured: boolean
   /** Configurable Claude default model (engines/claude.json `claudeConfig.defaultModel`,
    *  ADR-074 §8). '' = Claude's own `default` alias, the pre-ADR behaviour. */
   claudeDefaultModel: string
   /** The Claude twin of {@link opencodeDefaultModelConfigured}: "the key is non-empty". */
   claudeDefaultModelConfigured: boolean
-  /** Configurable Codex reasoning tier (engines/codex.json `codexConfig.defaultEffort`).
-   *  A NATIVE tier value from the model catalog, not an {@link EffortLevel}; '' = the
-   *  model's own default. */
-  codexDefaultEffort: string
   /** `settings.defaultAutonomyMode` mapped to a renderer PermissionMode. A
    *  SESSION-BOOTSTRAP concern only: it seeds the mode of sessions created from
    *  here on. Running sessions keep the mode they were spawned with (cli.js
@@ -1980,9 +1888,6 @@ export interface SessionState {
   engineConfig: EngineConfig
   settings: AppSettings
   availableModels: ModelInfo[]
-  slashCommands: SlashCommandInfo[]
-  customCommands: SlashCommandInfo[]
-  sdkSkillNames: string[]
   accountUsage: AccountUsage | null
   /**
    * The ChatGPT vault's stored accounts and the per-session policy over them
@@ -2094,8 +1999,6 @@ export interface SessionState {
   setPiDefaultModel: (model: string) => void
   /** Update the configurable Claude default model (mirrors claudeConfig.defaultModel). */
   setClaudeDefaultModel: (model: string) => void
-  /** Update the configurable Codex session defaults (mirrors codexConfig, ADR-068 §6). */
-  setCodexDefaults: (defaults: { model?: string; effort?: string }) => void
   /** Mirror a Settings-dialog `permissions.defaultMode` write so sessions created
    *  later in THIS app run pick it up without a restart. */
   setDefaultPermissionMode: (mode: PermissionMode) => void
@@ -2231,8 +2134,7 @@ export interface SessionState {
    * rejects corrects itself instead of being optimistically shown and reverted.
    */
   changePermissionMode: (routingId: string, next: PermissionMode) => void
-  /** Canonical `effort` is `string | null` (sync/state.ts): engine-native
-   *  ladders (Codex's `minimal`…`xhigh`) are not the Claude five. */
+  /** Canonical `effort` is `string | null` (sync/state.ts). */
   setEffort: (effort: string | null, routingId?: string) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setReasoningVariant: (variant: string | null, routingId?: string) => void
@@ -2245,11 +2147,10 @@ export interface SessionState {
   setDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
   /** Set the active session's model picker value within its selected engine. */
   setSelectedModel: (model: string) => void
-  setCustomCommands: (commands: SlashCommandInfo[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
   /**
    * Replace ONE engine's slice of `availableModels` (a model without `engineId`
-   * is Claude's), keeping the others and the claude, opencode, pi, codex order
+   * is Claude's), keeping the others and the claude, opencode, pi order
    * whatever order the per-engine answers arrive in.
    */
   setEngineModels: (engineId: EngineId, models: ModelInfo[]) => void
@@ -2261,6 +2162,8 @@ export interface SessionState {
   clearConversation: (routingId: string) => Promise<void>
   // Worktree actions
   setWorktreeInfo: (routingId: string, info: WorktreeInfo | null) => void
+  /** Patch a not-yet-spawned session's pending worktree; null clears it. */
+  setPendingWorktree: (routingId: string, patch: Partial<PendingWorktree> | null) => void
   setQuitWorktrees: (
     sessions: Array<{ routingId: string; worktreeInfo: WorktreeInfo }> | null
   ) => void
@@ -2379,11 +2282,9 @@ export interface SessionState {
   clearDiffComments: (routingId: string) => void
   // Plan review actions
   /**
-   * `approvalRequestId` is null for an engine whose plan item carries no
-   * approval (Codex native plan mode). The review bar then SENDS the comments
-   * as a prompt instead of denying an approval with them.
+   * `approvalRequestId` is the approval the review bar's comments deny.
    */
-  openPlanPanel: (routingId: string, planContent: string, approvalRequestId: string | null) => void
+  openPlanPanel: (routingId: string, planContent: string, approvalRequestId: string) => void
   closePlanPanel: (routingId: string) => void
   addPlanComment: (routingId: string, comment: PlanComment) => void
   updatePlanComment: (routingId: string, commentId: string, text: string) => void
@@ -2423,32 +2324,24 @@ export const useSessionStore = create<SessionState>((set) => ({
   sessionEngines: {},
   sessionLinks: {},
   sessionRefs: {},
-  lastSelectedEngineId:
-    ((localStorage.getItem('lastSelectedEngineId') ??
-      localStorage.getItem('lastSelectedProvider')) as EngineId | null) ?? 'claude',
+  lastSelectedEngineId: loadLastSelectedEngineId(),
   lastSelectedModelByEngine: loadLastSelectedModels(),
   opencodeDefaultModel: OPENCODE_DEFAULT_MODEL,
   opencodeDefaultModelConfigured: false,
   piDefaultModel: PI_DEFAULT_MODEL,
   piDefaultModelConfigured: false,
-  codexDefaultModel: '',
-  codexDefaultModelConfigured: false,
   claudeDefaultModel: '',
   claudeDefaultModelConfigured: false,
-  codexDefaultEffort: '',
   // Pre-hydration seed only. `hydrate()` overwrites this from
   // `settings.defaultAutonomyMode` before any session can be created; 'default'
   // is the conservative placeholder for the window in between.
   defaultPermissionMode: 'default' as PermissionMode,
   autoModeDisabledBySettings: false,
   modelReloadNonce: 0,
-  engineModelReloadNonces: { claude: 0, opencode: 0, pi: 0, codex: 0 },
+  engineModelReloadNonces: { claude: 0, opencode: 0, pi: 0 },
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
-  slashCommands: [],
-  customCommands: [],
-  sdkSkillNames: [],
   accountUsage: null,
   providerAccounts: null,
   chatgptLimits: null,
@@ -2537,11 +2430,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       let engineId = state.lastSelectedEngineId
       if (harnessStore.readiness(engineId) === 'unavailable-here') engineId = 'claude'
       const harnessRuns = harnessCanRun(harnessStore.readiness(engineId))
-      const defaults = engineDefaultModels(state)
-      const seed = harnessRuns
-        ? pickSeedModel(state, engineId)
-        : { model: null, stale: null, sticky: undefined }
-      const sticky = seed.sticky
+      const seed = harnessRuns ? pickSeedModel(state, engineId) : { model: null, stale: null }
       let defaultModel = seed.model
       const staleDefault = seed.stale
       if (
@@ -2578,17 +2467,6 @@ export const useSessionStore = create<SessionState>((set) => ({
           permissionMode: bootstrapPermissionMode(state, engineId),
           selectedEngineId: engineId,
           selectedModel: seededModel,
-          // A CONFIGURED default is an explicit choice as much as a sticky pick
-          // is (ADR-059): both name a model the user chose, and both must ride
-          // `turn/start` rather than letting Codex's own layers decide. Gated on
-          // a resolved value so an orphaned default (seededModel '') does not
-          // claim to be explicit about nothing.
-          ...(engineId === 'codex'
-            ? {
-                codexModelExplicit:
-                  !!seededModel && (!!sticky || defaults.codexDefaultModelConfigured)
-              }
-            : {}),
           // Seed status.engineId/capabilities to match so they're correct before spawn
           status: {
             ...EMPTY_SESSION_STATE.status,
@@ -2609,6 +2487,21 @@ export const useSessionStore = create<SessionState>((set) => ({
       saveSessionConfig(state, { recentSessionIds, sessionEngines })
       if (switchTo) {
         set({ activeSessionId: routingId, activeView: { type: 'chat' } as ActiveView })
+      }
+      // The worktree intent starts at the project's effective setting; a session already inside a
+      // managed worktree (a /clear there) stays where it is.
+      if (cwd) {
+        set((s) => ({
+          sessions: updateSession(s.sessions, routingId, () => ({
+            pendingWorktree: {
+              enabled:
+                !isManagedWorktreePath(cwd) &&
+                effectiveStartInWorktree(state.settings, cwdToProjectKey(cwd)),
+              name: generateWorktreeName(),
+              phase: 'idle' as const
+            }
+          }))
+        }))
       }
       // A brand-new session's git status is known from the cwd cache, and that is
       // view state the projection does not carry.
@@ -2695,11 +2588,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       selectedEngineId: engineId,
       selectedModel: model,
       reasoningVariant: null,
-      // Switching TO codex lands on whatever `resolveEngineDefaultModel` just
-      // returned; that is an explicit pick only when the user CONFIGURED it.
-      ...(engineId === 'codex'
-        ? { codexModelExplicit: !!model && defaults.codexDefaultModelConfigured }
-        : {}),
       // Engine-neutral: a mode the TARGET engine cannot offer would otherwise
       // survive the switch and show a pill the Shift+Tab cycle skips over.
       permissionMode:
@@ -2714,11 +2602,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       }
     })
     if (resolved === null) {
-      reportStaleDefaultModel(
-        id,
-        engineId,
-        configuredDefaultModelOf(engineId, defaults, state.availableModels)
-      )
+      reportStaleDefaultModel(id, engineId, configuredDefaultModelOf(engineId, defaults))
     }
     patchLocalApp({ sessionEngines })
     saveSessionConfig(state, { sessionEngines })
@@ -2731,12 +2615,11 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (session.sdkActive || session.status.sessionId || session.isHistorical) return
     const engineId = session.selectedEngineId
     if (!harnessCanRun(harnessStore.readiness(engineId))) return
-    const { model, stale, sticky } = pickSeedModel(state, engineId)
+    const { model, stale } = pickSeedModel(state, engineId)
     if (model === null) {
       if (stale !== null) reportStaleDefaultModel(routingId, engineId, stale)
       return
     }
-    const defaults = engineDefaultModels(state)
     const modelInfo = state.availableModels.find(
       (candidate) => candidate.value === model && isModelForEngine(candidate, engineId)
     )
@@ -2746,9 +2629,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     }
     patchLocalSession(routingId, {
       selectedModel: model,
-      ...(engineId === 'codex'
-        ? { codexModelExplicit: !!sticky || defaults.codexDefaultModelConfigured }
-        : {}),
       status: {
         ...session.status,
         engineId,
@@ -2770,15 +2650,6 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   setClaudeDefaultModel: (model) =>
     set({ claudeDefaultModel: model, claudeDefaultModelConfigured: !!model }),
-
-  // One action for both keys, because the settings pane writes them into one
-  // `codexConfig` block and a partial update must not reset the other half.
-  setCodexDefaults: ({ model, effort }) =>
-    set((state) => ({
-      codexDefaultModel: model ?? state.codexDefaultModel,
-      codexDefaultModelConfigured: (model ?? state.codexDefaultModel) !== '',
-      codexDefaultEffort: effort ?? state.codexDefaultEffort
-    })),
 
   setDefaultPermissionMode: (mode) => set({ defaultPermissionMode: mode }),
 
@@ -3011,8 +2882,12 @@ export const useSessionStore = create<SessionState>((set) => ({
     // that spawn a session, so it goes through the replica; `isHistorical` is view
     // state and stays here.
     patchLocalSession(routingId, { sdkActive: true })
+    // A spawned session is past choosing a worktree, whichever path spawned it.
     set((state) => ({
-      sessions: updateSession(state.sessions, routingId, () => ({ isHistorical: false }))
+      sessions: updateSession(state.sessions, routingId, () => ({
+        isHistorical: false,
+        pendingWorktree: null
+      }))
     }))
   },
 
@@ -3151,20 +3026,34 @@ export const useSessionStore = create<SessionState>((set) => ({
     // group on the next listing refresh. `handlers-core.deleteProject` does that
     // sweep main-side now (pi included), which is also the only way the REMOTE
     // surface ever got it — a phone has no such follow-up loop.
+    //
+    // The project is what the sidebar shows for it: its own group plus the linked-worktree groups
+    // folded into it (`projectScope`, the rule main deletes by). Read BEFORE the await: main
+    // replicates the removal while the call is in flight, and the groups would already be gone.
+    const before = useSessionStore.getState()
+    const scope = projectScope(before.directories, projectKey)
+    const memberGroups = [...(scope.group ? [scope.group] : []), ...scope.children]
+    const memberKeys = new Set(memberGroups.map((g) => g.projectKey))
     await window.api.deleteProject(projectKey)
     // Collect all session IDs in this project (both on-disk group members and live in-memory
-    // sessions sharing the project's cwd) so we can purge them from every piece of state.
+    // sessions sharing the project's or a folded worktree's cwd) so we can purge them from every
+    // piece of state.
     const state = useSessionStore.getState()
-    const group = state.directories.find((g) => g.projectKey === projectKey)
-    const projectCwd = group?.cwd
-    const projectSessionIds = new Set(group?.sessions.map((s) => s.sessionId) ?? [])
-    if (projectCwd) {
-      for (const [id, sess] of Object.entries(state.sessions)) {
-        if (sess.cwd === projectCwd) projectSessionIds.add(id)
-      }
+    const projectSessionIds = new Set(
+      memberGroups.flatMap((g) => g.sessions.map((s) => s.sessionId))
+    )
+    for (const id of liveProjectMembers(
+      before.directories,
+      scope,
+      projectKey,
+      Object.entries(state.sessions)
+    ).ids) {
+      projectSessionIds.add(id)
     }
-    const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
-    const directories = state.directories.filter((g) => g.projectKey !== projectKey)
+    const hiddenProjects = state.hiddenProjectKeys.filter(
+      (k) => k !== projectKey && !memberKeys.has(k)
+    )
+    const directories = state.directories.filter((g) => !memberKeys.has(g.projectKey))
     set((s) => {
       const sessions = { ...s.sessions }
       for (const id of projectSessionIds) delete sessions[id]
@@ -3537,7 +3426,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     // Always reset reasoningVariant on model change — different models have different variants.
     patchLocalSession(id, {
       selectedModel: model,
-      ...(targetEngine === 'codex' ? { codexModelExplicit: true } : {}),
       reasoningVariant: null,
       ...(reseedCapabilities && session
         ? {
@@ -3554,8 +3442,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       saveSessionConfig(state, { sessionEngines })
     }
   },
-
-  setCustomCommands: (commands) => set({ customCommands: commands }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
 
@@ -3831,7 +3717,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     }
     const { engineId, vendorId, method, instructions } = flow
     // A failed paste is TERMINAL for the flow, not a retryable field error:
-    // CodexLoginFlow.completeFromPastedInput() calls terminate() on every
+    // The login flow's completeFromPastedInput() calls terminate() on every
     // failure path (missing code, state mismatch, exchange error), so the
     // host-held PKCE verifier is already gone. Dropping to `error` — which the
     // surfaces render as an outcome plus their own start-over affordance — is
@@ -3879,22 +3765,9 @@ export const useSessionStore = create<SessionState>((set) => ({
     // the prior opencode session regardless of whether messages are preloaded locally).
     const isOpencode = session.selectedEngineId === 'opencode'
     const resumeId = hasResumableTranscript(session) || isOpencode ? routingId : undefined
-    // A Codex pick is a NATIVE tier and the store keeps the user's last one at
-    // every lifecycle stage (F15); `CodexSession.validateEffort` refuses a start
-    // on a tier the model never published, so only a published one may ride
-    // the respawn — the same gate the composer's own spawn path applies.
-    const effort =
-      session.selectedEngineId === 'codex'
-        ? codexPublishesEffort(
-            useSessionStore.getState().availableModels.filter((m) => m.engineId === 'codex'),
-            session.selectedModel,
-            session.effort
-          )
-          ? (session.effort ?? undefined)
-          : undefined
-        : // The composer's own resolver: a null pick falls to the per-model
-          // starting effort, not to cli.js's heuristic by way of `undefined`.
-          sessionSpawnEffort(useSessionStore.getState(), session)
+    // The composer's own resolver: a null pick falls to the per-model
+    // starting effort, not to cli.js's heuristic by way of `undefined`.
+    const effort = sessionSpawnEffort(useSessionStore.getState(), session)
     await window.api.createSession(
       routingId,
       session.cwd || '',
@@ -3985,6 +3858,21 @@ export const useSessionStore = create<SessionState>((set) => ({
     saveSessionConfig(state, { worktreeInfoMap })
   },
 
+  setPendingWorktree: (routingId, patch) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, routingId, (s) => ({
+        pendingWorktree: patch
+          ? {
+              enabled: false,
+              name: generateWorktreeName(),
+              phase: 'idle' as const,
+              ...s.pendingWorktree,
+              ...patch
+            }
+          : null
+      }))
+    })),
+
   setQuitWorktrees: (sessions) => set({ quitWorktrees: sessions }),
 
   // Git actions
@@ -3996,7 +3884,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setGitStatus: (routingId, status) =>
     set((state) => {
       const session = state.sessions[routingId]
-      if (session?.cwd) setCapped(gitStatusCache, session.cwd, status, GIT_STATUS_CACHE_MAX)
+      const workdir = session ? sessionWorkdir(session) : ''
+      if (workdir) setCapped(gitStatusCache, workdir, status, GIT_STATUS_CACHE_MAX)
       return { sessions: updateSession(state.sessions, routingId, () => ({ gitStatus: status })) }
     }),
 
@@ -4310,22 +4199,23 @@ harnessStore.followRunChanges((changed) => {
 })
 
 // ---------------------------------------------------------------------------
-// Terminal selectors (derive from active session's cwd)
+// Terminal selectors (derive from active session's workdir)
 // ---------------------------------------------------------------------------
 
 function getActiveCwd(state: SessionState): string | null {
   const id = state.activeSessionId
-  return id ? (state.sessions[id]?.cwd ?? null) : null
+  const session = id ? state.sessions[id] : undefined
+  return session ? sessionWorkdir(session) || null : null
 }
 
-/** Terminal tabs for the active session's cwd. */
+/** Terminal tabs for the active session's workdir. */
 export function selectVisibleTerminalTabs(state: SessionState): TerminalTab[] {
   const cwd = getActiveCwd(state)
   if (!cwd) return []
   return state.terminalGroups[normalizeCwd(cwd)]?.tabs ?? []
 }
 
-/** Active terminal ID for the active session's cwd. */
+/** Active terminal ID for the active session's workdir. */
 export function selectActiveTerminalId(state: SessionState): string | null {
   const cwd = getActiveCwd(state)
   if (!cwd) return null

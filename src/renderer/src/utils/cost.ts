@@ -4,7 +4,7 @@
  * `StatusLineData.totalCostUsd`, `AutomationRun.totalCostUsd`).
  *
  * Those fields are `number | null`, and the null is load-bearing: it means the
- * engine could NOT price the turn (Codex on a model with no published price,
+ * engine could NOT price the turn (a model with no published price,
  * for one), NOT that the turn was free. A known zero still renders as a real
  * `$0.00` — only null gets {@link COST_UNKNOWN}.
  */

@@ -11,6 +11,11 @@ import { useEscapeLayer } from './use-escape-layer'
  * dialog — the settings dialog root is z-50 and nested dialogs sit at z-[100],
  * so a confirm launched from one of those must clear it.
  *
+ * `tone="primary"` is for a confirmation that is not destructive (a pull, a
+ * branch switch): the confirm button is the accent colour rather than red.
+ * `secondary` adds one more action beside it - "Merge" next to "Rebase" - that
+ * shares the busy state and the inline error with the confirm.
+ *
  * ESCAPE IS CANCEL, on the same terms as the scrim: never while the action is in
  * flight, and it dismisses the confirm ONLY — whatever opened it stays open for
  * the next press (`useEscapeLayer`).
@@ -24,6 +29,8 @@ export function ConfirmModal({
   errorTitle = 'Could not complete',
   stackedAbove = false,
   testId = 'ConfirmModal',
+  tone = 'danger',
+  secondary,
   onConfirm,
   onCancel
 }: {
@@ -38,6 +45,9 @@ export function ConfirmModal({
   /** True when rendered above another dialog (z-[110] instead of z-[100]). */
   stackedAbove?: boolean
   testId?: string
+  tone?: 'danger' | 'primary'
+  /** A second action beside the confirm; may reject exactly like `onConfirm`. */
+  secondary?: { label: string; onClick: () => Promise<void> }
   /** May reject; the rejection is surfaced inline and the action can be retried. */
   onConfirm: () => Promise<void>
   onCancel: () => void
@@ -47,11 +57,11 @@ export function ConfirmModal({
 
   useEscapeLayer(onCancel, !busy)
 
-  const handleConfirm = async (): Promise<void> => {
+  const run = async (action: () => Promise<void>): Promise<void> => {
     setBusy(true)
     setError(null)
     try {
-      await onConfirm()
+      await action()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
@@ -90,11 +100,23 @@ export function ConfirmModal({
           >
             {error ? 'Close' : 'Cancel'}
           </button>
+          {secondary && !error && (
+            <button
+              data-testid={`${testId}.secondary`}
+              onClick={() => run(secondary.onClick)}
+              disabled={busy}
+              className="px-3 py-1.5 rounded-md text-[12px] text-text-primary border border-border hover:bg-bg-hover disabled:opacity-50 transition-colors cursor-default"
+            >
+              {secondary.label}
+            </button>
+          )}
           <button
             data-testid={`${testId}.confirm`}
-            onClick={handleConfirm}
+            onClick={() => run(onConfirm)}
             disabled={busy}
-            className="px-3 py-1.5 rounded-md text-[12px] text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors cursor-default"
+            className={`px-3 py-1.5 rounded-md text-[12px] text-white disabled:opacity-50 transition-colors cursor-default ${
+              tone === 'primary' ? 'bg-accent hover:bg-accent-hover' : 'bg-red-600 hover:bg-red-700'
+            }`}
           >
             {busy ? busyLabel : error ? 'Retry' : confirmLabel}
           </button>

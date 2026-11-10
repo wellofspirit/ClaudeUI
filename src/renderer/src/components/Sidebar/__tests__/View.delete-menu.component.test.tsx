@@ -2,10 +2,8 @@
  * The sidebar's delete entry points, through the REAL context menus.
  *
  * `Sidebar.component.test.ts` mocks the View and calls `onDeleteSession`
- * directly, so it cannot see whether a row actually offers the action. That is
- * how Codex delete shipped unreachable: the subtree walk and its confirmation
- * existed, but the session menu and the project menu both still carried the
- * guard that predated them. These tests right-click the rows.
+ * directly, so it cannot see whether a row actually offers the action. These
+ * tests right-click the rows.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
@@ -54,7 +52,6 @@ function renderView(
     renamingKey: null,
     worktreesModalCwd: null,
     deleteTarget: null,
-    deletePlan: null,
     cleanupWorktree: null,
     onNewSession: noop,
     onNewSessionDblClick: noop,
@@ -98,7 +95,7 @@ function groupOf(...sessions: SessionInfo[]): DirectoryGroup {
 afterEach(cleanup)
 
 describe('SidebarView delete menus', () => {
-  it.each<EngineId>(['claude', 'opencode', 'pi', 'codex'])(
+  it.each<EngineId>(['claude', 'opencode', 'pi'])(
     'offers "Delete session..." on a %s row and hands the row upstream',
     (engineId) => {
       const row = session('s-1', engineId)
@@ -114,8 +111,8 @@ describe('SidebarView delete menus', () => {
     }
   )
 
-  it('offers "Delete project..." on a project that holds a Codex session', () => {
-    const group = groupOf(session('cl-1', 'claude'), session('cx-1', 'codex'))
+  it('offers "Delete project..." on a project that holds sessions of several engines', () => {
+    const group = groupOf(session('cl-1', 'claude'), session('pi-1', 'pi'))
     const props = renderView(group)
 
     const dir = screen.getByTestId('DirectoryItem')
@@ -133,7 +130,6 @@ describe('SidebarView delete menus', () => {
   it.each<[EngineId | undefined, string]>([
     ['claude', `~/.claude/projects/${PROJECT_KEY}/s-1.jsonl`],
     [undefined, `~/.claude/projects/${PROJECT_KEY}/s-1.jsonl`],
-    ['codex', 's-1'],
     ['opencode', 's-1'],
     ['pi', 's-1']
   ])(

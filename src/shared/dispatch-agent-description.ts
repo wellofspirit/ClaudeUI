@@ -1,7 +1,7 @@
 /**
  * The one description of the cross-engine `dispatch_agent` tool (ADR-033,
  * amended by ADR-089's messaging v2). Every engine registers its own copy of
- * the tool (Claude's collab MCP server, opencode's and Codex's hosted tools,
+ * the tool (Claude's collab MCP server, opencode's hosted tools,
  * pi's bridge extension) and each used to carry its own prose. The prose lives
  * here once; a caller supplies only what differs: the target engines, its OWN
  * built-in subagent tool, and the per-target model hints it builds from its
@@ -17,28 +17,24 @@
 import type { EngineId } from './types'
 
 /** Engines a session can dispatch to (a session never dispatches to its own). */
-export type DispatchTargetEngine = Extract<EngineId, 'claude' | 'opencode' | 'pi' | 'codex'>
+export type DispatchTargetEngine = Extract<EngineId, 'claude' | 'opencode' | 'pi'>
 
 /** What each target is, in the description's own words. */
 export const DISPATCH_TARGET_BLURBS: Record<DispatchTargetEngine, string> = {
   claude: "Anthropic's models",
   opencode: 'fronts non-Anthropic model vendors, e.g. GPT or Gemini models',
-  pi: 'an alternative coding-agent harness',
-  codex: "OpenAI's own coding agent"
+  pi: 'an alternative coding-agent harness'
 }
 
 /**
  * Each engine's own built-in subagent tool, as the model sees it (verified:
  * Claude Code's `Agent`; pi's bridge `agent`; opencode's
- * `vendor/opencode-src/packages/core/src/tool/plugin/subagent.ts`, name `subagent`; Codex's
- * `vendor/codex-src/codex-rs/core/src/tools/handlers/multi_agents_spec.rs`
- * `spawn_agent`).
+ * `vendor/opencode-src/packages/core/src/tool/plugin/subagent.ts`, name `subagent`).
  */
-export const OWN_SUBAGENT_TOOL: Record<'claude' | 'pi' | 'opencode' | 'codex', string> = {
+export const OWN_SUBAGENT_TOOL: Record<DispatchTargetEngine, string> = {
   claude: 'Agent',
   pi: 'agent',
-  opencode: 'subagent',
-  codex: 'spawn_agent'
+  opencode: 'subagent'
 }
 
 /** `a (blurb), b (blurb) or c (blurb)` */
@@ -71,7 +67,7 @@ export const DISPATCH_FOLLOW_UP_GUIDANCE =
 /**
  * The error a `dispatch_agent` call that still passes the removed `session_id` gets (nothing is
  * launched). The registrations no longer list the parameter, so a model only sends it from an
- * older transcript or a Codex thread started before the removal.
+ * older transcript.
  */
 export const DISPATCH_SESSION_ID_REMOVED_TEXT =
   "dispatch_agent no longer continues an agent; message it with session_message (session: '<name or ref>')."

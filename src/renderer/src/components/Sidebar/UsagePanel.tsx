@@ -139,7 +139,7 @@ function chatgptWindowLabel(kind: string): string {
  * ChatGPT subscription usage, one block per stored vault account (ADR-068 §2).
  *
  * Beside Claude's rather than instead of it: a ClaudeUI user can be paying for
- * both, and the Codex sessions in the sidebar spend the ChatGPT one. Each block
+ * both, and the pi and opencode sessions in the sidebar can spend the ChatGPT one. Each block
  * names the account, because the whole point of several accounts is knowing
  * which one is close to its limit.
  *
@@ -248,7 +248,7 @@ export function UsagePanel({
   const setActiveView = useSessionStore((s) => s.setActiveView)
   // ADR-068 §2: read when the panel OPENS, and again on Refresh — no polling
   // timer, because a subscription's limits are only interesting while somebody
-  // is looking at them, and live Codex sessions push updates for free.
+  // is looking at them.
   const chatgptLimits = useSessionStore((s) => s.chatgptLimits)
   const loadChatgptLimits = useSessionStore((s) => s.loadChatgptLimits)
   useEffect(() => {

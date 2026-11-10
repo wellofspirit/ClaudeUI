@@ -341,16 +341,6 @@ describe('modelLabel', () => {
       })
     ).toEqual({ shortName: 'GPT-5.5', detail: 'OpenAI' })
   })
-  it('names a Codex row by displayName, never its marketing description', () => {
-    expect(
-      modelLabel({
-        value: 'gpt-5.5',
-        displayName: 'GPT-5.5',
-        description: 'Our most capable model for complex work',
-        engineId: 'codex'
-      })
-    ).toEqual({ shortName: 'GPT-5.5', detail: undefined })
-  })
   it('falls back to displayName, then value, without a description', () => {
     expect(modelLabel({ value: 'x', displayName: 'X', description: '' })).toEqual({
       shortName: 'X'

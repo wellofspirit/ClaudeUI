@@ -210,12 +210,81 @@ describe('OpencodeServerManager (2.x) — keying', () => {
     expect(calls[1].child.killed).toBe(true)
   })
 
+  // opencode connects every configured MCP server per directory a request touches: a global
+  // read that borrows another config's server must not open a new directory on it.
+  it('anyConfig borrows a foreign server on a directory it already serves; its own server keeps the asked one', async () => {
+    const { manager, configs } = makeRig()
+    configs.set('/proj/a', {
+      pluginDir: '/res/claudeui-xeng',
+      bridgedMcp: { u1: { type: 'local', command: ['x'], codemode: false } }
+    })
+    const project = await manager.acquire('/proj/a')
+    const borrowed = await manager.acquireIfRunning('/housekeeping', {
+      waitForHostedTools: false,
+      anyConfig: true
+    })
+    expect(borrowed?.baseUrl).toBe(project.baseUrl)
+    expect(borrowed?.directory).toBe(dir('/proj/a'))
+
+    const own = await manager.acquire('/proj/b')
+    const ownRead = await manager.acquireIfRunning('/proj/c', {
+      waitForHostedTools: false,
+      anyConfig: true
+    })
+    expect(ownRead?.baseUrl).toBe(own.baseUrl)
+    expect(ownRead?.directory).toBe(dir('/proj/c'))
+  })
+
   it('normalizes cwd: relative + absolute forms of one dir are one lease directory', async () => {
     const { manager } = makeRig()
     const rel = await manager.acquire('.')
     const abs = await manager.acquire(process.cwd())
     expect(rel.directory).toBe(abs.directory)
     expect(rel.directory).toBe(process.cwd())
+  })
+})
+
+describe('OpencodeServerManager (2.x) — leaseSameServer (a moved session)', () => {
+  it('leases another directory on the SAME server, even when that directory would pick another one', async () => {
+    const { manager, calls, configs, waits } = makeRig()
+    configs.set('/proj/b', {
+      pluginDir: '/res/claudeui-xeng',
+      bridgedMcp: { local: { type: 'local', command: ['x'], codemode: false } }
+    })
+    const a = await manager.acquire('/proj/a')
+    const b = await manager.leaseSameServer(a, '/proj/b')
+    expect(calls).toHaveLength(1)
+    expect(b.baseUrl).toBe(a.baseUrl)
+    expect(b.directory).toBe(dir('/proj/b'))
+    // The readiness (and guard) wait ran for the new directory.
+    expect(waits.map((w) => w.directory)).toContain(dir('/proj/b'))
+    manager.releaseIfCurrent('/proj/a', a)
+    expect(calls[0].child.killed).toBe(false)
+    manager.releaseIfCurrent('/proj/b', b)
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('a guard failure in the new directory throws, leaves the held lease alone and holds nothing', async () => {
+    const { manager, calls } = makeRig({
+      waitGuardFn: async (_endpoint, directory) =>
+        directory === dir('/proj/b')
+          ? { state: 'missing', reason: 'no hook there', elapsedMs: 0 }
+          : { state: 'active', elapsedMs: 0 }
+    })
+    const a = await manager.acquire('/proj/a')
+    const err = await manager.leaseSameServer(a, '/proj/b').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(OpencodePermissionGuardError)
+    expect(calls[0].child.killed).toBe(false)
+    // Only /proj/a is still held: releasing it ends the server.
+    manager.releaseIfCurrent('/proj/a', a)
+    expect(calls[0].child.killed).toBe(true)
+  })
+
+  it('throws when the connection’s server is gone', async () => {
+    const { manager } = makeRig()
+    const a = await manager.acquire('/proj/a')
+    manager.releaseIfCurrent('/proj/a', a)
+    await expect(manager.leaseSameServer(a, '/proj/b')).rejects.toThrow(/is gone/)
   })
 })
 
@@ -313,7 +382,13 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     expect(cfg.mcp.servers.claudeui.url).toBe(`http://127.0.0.1:${hosts[0].port}/mcp`)
     expect(cfg.mcp.servers.claudeui.headers.Authorization).toBe(`Bearer ${hosts[0].token}`)
     expect(cfg.plugins).toEqual([
-      { package: '/res/claudeui-xeng', options: { modelAllowlist: {} } }
+      {
+        package: '/res/claudeui-xeng',
+        options: {
+          modelAllowlist: {},
+          skills: { url: `http://127.0.0.1:${hosts[0].port}/skills`, token: hosts[0].token }
+        }
+      }
     ])
   })
 
@@ -1018,7 +1093,7 @@ describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
     const { manager, calls } = makeShimRig(() => ({ agents: {}, injected: [], diagnostics: [] }))
     await manager.acquire('/proj/a')
     expect(JSON.parse(calls[0].configContent).plugins).toHaveLength(1)
-    expect(JSON.parse(calls[0].configContent).plugins[0].options).toEqual({
+    expect(JSON.parse(calls[0].configContent).plugins[0].options).toMatchObject({
       modelAllowlist: { openai: ['gpt-a'] }
     })
     await manager.acquire('/proj/a')
@@ -1026,7 +1101,7 @@ describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
     allowlist = { openai: ['gpt-a', 'gpt-b'] }
     await manager.acquire('/proj/a')
     expect(calls).toHaveLength(2)
-    expect(JSON.parse(calls[1].configContent).plugins[0].options).toEqual({
+    expect(JSON.parse(calls[1].configContent).plugins[0].options).toMatchObject({
       modelAllowlist: { openai: ['gpt-a', 'gpt-b'] }
     })
     // The old server keeps serving its holder until its last release.

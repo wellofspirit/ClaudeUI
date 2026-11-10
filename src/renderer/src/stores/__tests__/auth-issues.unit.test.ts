@@ -90,7 +90,7 @@ describe('auth-issues — the proactive half is scoped to providers IN USE', () 
 
   /**
    * The compound failure the owner actually saw: a Claude-only install signs in
-   * to Claude, and the pill stays amber "Sign-in needed · Blocks Codex" instead
+   * to Claude, and the pill stays amber "Sign-in needed" instead
    * of going green, because the unused ChatGPT row outranked the resolution.
    */
   it('an unused unauthenticated provider does not outrank a resolution', () => {
@@ -295,16 +295,16 @@ describe('auth-issues — ordering is stable', () => {
 })
 
 describe('auth-issues — what a credential blocks', () => {
-  it('ChatGPT blocks Codex always and pi/opencode only on an enabled route', () => {
+  it('ChatGPT blocks pi/opencode only on an enabled route', () => {
     const off = summarizeAuthIssues(input({ providerAuth: { chatgpt: 'unauthenticated' } }))
-    expect(off.issues[0].blocks).toEqual(['Codex'])
+    expect(off.issues[0].blocks).toEqual([])
 
     const on = summarizeAuthIssues(
       input({
         providerAuth: { chatgpt: 'unauthenticated', chatgptRoutes: { pi: true, opencode: false } }
       })
     )
-    expect(on.issues[0].blocks).toEqual(['Codex', 'pi'])
+    expect(on.issues[0].blocks).toEqual(['pi'])
   })
 
   it('Anthropic blocks Claude', () => {

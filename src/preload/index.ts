@@ -118,14 +118,6 @@ async function invokeWithProgress<T>(
 }
 
 const api: ClaudeAPI = {
-  codexApproval: (id, requestId, decision) =>
-    unwrap('session:codex-approval', id, requestId, decision),
-  codexAuthStatus: () => unwrap('codex:auth-status'),
-  readCodexConfig: () => unwrap('codex-config:read'),
-  writeCodexConfig: (edits, expectedVersion) =>
-    unwrap('codex-config:write', edits, expectedVersion),
-  recompileCodexRules: () => unwrap('codex:recompile-rules'),
-  codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
   platform: process.platform,
   // Resolved here, in the one process that sees BOTH forms of the opt-in: the
   // env var (inherited from main) and the `--claudeui-verifier-hooks` switch main
@@ -294,8 +286,6 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('session:set-model', routingId, model),
   setEffort: (routingId: string, effort: string) =>
     ipcRenderer.invoke('session:set-effort', routingId, effort),
-  setSessionAccount: (routingId: string, accountId: string | null) =>
-    ipcRenderer.invoke('session:set-account', routingId, accountId),
   setThinkingMode: (routingId: string, mode: string) =>
     ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
   setReasoningVariant: (routingId: string, variant: string | null) =>
@@ -390,7 +380,11 @@ const api: ClaudeAPI = {
   onTerminalDetached: () => () => {},
 
   // Worktree operations — all use safeHandler
-  createWorktree: (cwd: string, name: string) => unwrap('worktree:create', cwd, name),
+  // Declared `withProgress` like removeWorktree: always on the progress path, no callback.
+  createWorktree: (cwd: string, name: string, opts?: { base?: 'head' | 'default' }) =>
+    invokeWithProgress('worktree:create', [cwd, name, opts], () => {}).then((r) =>
+      unwrapResult('worktree:create', r)
+    ),
   getWorktreeStatus: (worktreePath: string, originalHead: string) =>
     unwrap('worktree:status', worktreePath, originalHead),
   // Declared `withProgress` (the remote client's timeout slides on it), so it always rides the
@@ -427,7 +421,8 @@ const api: ClaudeAPI = {
   gitGetStatus: (cwd: string) => unwrap('git:status', cwd),
   gitGetBranches: (cwd: string) => unwrap('git:branches', cwd),
   gitCheckout: (cwd: string, branch: string) => unwrap('git:checkout', cwd, branch),
-  gitCreateBranch: (cwd: string, name: string) => unwrap('git:create-branch', cwd, name),
+  gitCreateBranch: (cwd: string, name: string, base?: string | null) =>
+    unwrap('git:create-branch', cwd, name, base),
   gitGetFilePatch: (cwd: string, filePath: string, staged: boolean, ignoreWhitespace: boolean) =>
     unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
   gitGetFileContents: (cwd: string, filePath: string, staged: boolean) =>
@@ -441,7 +436,9 @@ const api: ClaudeAPI = {
   gitPush: (cwd: string) => unwrap('git:push', cwd),
   gitPushWithUpstream: (cwd: string, branch: string) =>
     unwrap('git:push-with-upstream', cwd, branch),
-  gitPull: (cwd: string) => unwrap('git:pull', cwd),
+  gitPull: (cwd: string, mode?: 'merge' | 'rebase') => unwrap('git:pull', cwd, mode),
+  gitStashPush: (cwd: string) => unwrap('git:stash-push', cwd),
+  gitStashRestore: (cwd: string, sha: string) => unwrap('git:stash-restore', cwd, sha),
   gitFetch: (cwd: string) => unwrap('git:fetch', cwd),
   // Per-connection git interest (phase 5 S2): a REPLACE set, not a
   // start/stop pair. Real IPC on the desktop too — the renderer is one
@@ -469,8 +466,8 @@ const api: ClaudeAPI = {
   deleteProject: (projectKey: string) => unwrap<void>('session:delete-project', projectKey),
   loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
   saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
-  scanCustomCommands: (cwd: string) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
-  loadSkillDetails: (cwd: string) => ipcRenderer.invoke('config:load-skill-details', cwd),
+  loadSkillDetails: (routingId: string | null, cwd: string) =>
+    ipcRenderer.invoke('config:load-skill-details', routingId, cwd),
 
   // Account usage (5hr / 7-day rate limits)
   fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
@@ -516,7 +513,9 @@ const api: ClaudeAPI = {
   loadClaudePermissions: (scope, cwd?) => ipcRenderer.invoke('claude:load-permissions', scope, cwd),
   saveClaudePermissions: (scope, permissions, cwd?) =>
     ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
-  isWorkspaceTrusted: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
+  getWorkspaceTrust: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
+  setWorkspaceTrust: (cwd, trusted) =>
+    ipcRenderer.invoke('claude:set-workspace-trust', cwd, trusted),
 
   // Transcript retention window (cleanupPeriodDays in ~/.claude/settings.json)
   getCleanupPeriodDays: () => ipcRenderer.invoke('claude:get-cleanup-period'),
@@ -536,6 +535,13 @@ const api: ClaudeAPI = {
     ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
   removeMcpServer: (scope: string, serverName: string, cwd?: string) =>
     ipcRenderer.invoke('mcp:remove-server', scope, serverName, cwd),
+  loadMcpCatalog: (cwd?: string) => ipcRenderer.invoke('mcp:load-catalog', cwd),
+  mcpCliAdd: (scope: string, name: string, config: Record<string, unknown>, cwd?: string) =>
+    ipcRenderer.invoke('mcp:cli-add', scope, name, config, cwd),
+  mcpCliRemove: (scope: string, name: string, cwd?: string) =>
+    ipcRenderer.invoke('mcp:cli-remove', scope, name, cwd),
+  mcpReloadServers: (routingId: string, expect?: { name: string; present: boolean }) =>
+    unwrap('mcp:reload', routingId, expect),
   mcpReadDisabled: (cwd: string) => ipcRenderer.invoke('mcp:read-disabled', cwd),
   mcpToggleDisabled: (cwd: string, serverName: string, enabled: boolean) =>
     ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
@@ -649,8 +655,6 @@ const api: ClaudeAPI = {
     unwrap('provider-account:switch', providerId, accountId),
   removeProviderAccount: (providerId: string, accountId: string) =>
     unwrap('provider-account:remove', providerId, accountId),
-  setProviderAccountsPerSession: (providerId: string, enabled: boolean) =>
-    unwrap('provider-account:set-per-session', providerId, enabled),
   listSharedProviders: () => unwrap('shared-provider:list'),
   getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
   listSharedProviderModels: (id: string) => unwrap('shared-provider:models', id),

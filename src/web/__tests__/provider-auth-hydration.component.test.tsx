@@ -11,7 +11,7 @@
  * off `hydrateConfigFromDisk()`, and `renderer/src/main.tsx` is the only entry
  * that runs it. The WEB client hydrates through the replica on `sync-full` and
  * never went near it, so `providerAuth.chatgpt` stayed `'unknown'` for the whole
- * session: on the headless server, a user with NO ChatGPT account saw Codex's
+ * session: on the headless server, a user with NO ChatGPT account saw ChatGPT's
  * models undimmed, no "Sign in to ChatGPT" item, and no composer hint. A
  * hermetic-server drive is what caught it.
  *

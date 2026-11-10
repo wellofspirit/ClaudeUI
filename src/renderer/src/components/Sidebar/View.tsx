@@ -5,8 +5,8 @@ import type {
   WorktreeInfo,
   ActiveView
 } from '../../../../shared/types'
-import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import type { ClaudeProjectDeletePlan } from '../../../../shared/claude-project-delete'
+import type { FoldedWorktreeSummary, ViewDirectoryGroup } from '../../../../shared/worktree-fold'
 import { WorktreesModal } from '../WorktreesModal'
 import { WorktreeCleanupModal } from '../WorktreeCleanupModal'
 import { NavItem, SafeSvgIcon } from './NavItem'
@@ -32,6 +32,10 @@ export type DeleteTarget =
       /** Which Claude files the delete removes — the rule main runs, computed
        *  from the same listing, so the dialog can name them. */
       claudeFiles: ClaudeProjectDeletePlan
+      /** The listing has no group for this repository: only its worktrees' sessions are here. */
+      synthesized?: boolean
+      /** Sessions of linked worktrees folded into this project, deleted with it. */
+      worktrees?: FoldedWorktreeSummary | null
     }
 
 export interface SidebarViewProps {
@@ -46,8 +50,10 @@ export interface SidebarViewProps {
   pinnedSessions: SessionInfo[]
   watchingSessions: SessionInfo[]
   recentSessions: SessionInfo[]
-  augmentedDirs: DirectoryGroup[]
+  augmentedDirs: ViewDirectoryGroup[]
   hiddenSessionSet: Set<string>
+  /** Hidden marks for the Projects list (the user's plus hidden worktrees'); defaults to `hiddenSessionSet`. */
+  directoryHiddenSessionSet?: Set<string>
   hiddenProjectSet: Set<string>
   hasAnyHidden: boolean
   showHidden: boolean
@@ -55,8 +61,6 @@ export interface SidebarViewProps {
   renamingKey: string | null
   worktreesModalCwd: string | null
   deleteTarget: DeleteTarget | null
-  /** The Codex subtree the pending delete would remove; null for every other engine. */
-  deletePlan: CodexDeletePlan | null
   cleanupWorktree: { sessionId: string; worktreeInfo: WorktreeInfo } | null
   onToggleCollapse?: () => void
   onNewSession: () => void
@@ -82,7 +86,7 @@ export interface SidebarViewProps {
   onDeleteSession: (info: SessionInfo) => void
   onHideProject: (key: string) => void
   onUnhideProject: (key: string) => void
-  onDeleteProject: (group: DirectoryGroup) => void
+  onDeleteProject: (group: ViewDirectoryGroup) => void
   onConfirmDelete: () => Promise<void>
   onCancelDelete: () => void
   onWorktreeCleanupKeep: () => void
@@ -105,6 +109,7 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
     recentSessions,
     augmentedDirs,
     hiddenSessionSet,
+    directoryHiddenSessionSet,
     hiddenProjectSet,
     hasAnyHidden,
     showHidden,
@@ -112,7 +117,6 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
     renamingKey,
     worktreesModalCwd,
     deleteTarget,
-    deletePlan,
     cleanupWorktree,
     onToggleCollapse,
     onNewSession,
@@ -424,7 +428,7 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
                           : undefined
                       }
                       onDelete={group.projectKey ? () => onDeleteProject(group) : undefined}
-                      hiddenSessionIds={hiddenSessionSet}
+                      hiddenSessionIds={directoryHiddenSessionSet ?? hiddenSessionSet}
                       showHidden={showHidden}
                       onHideSession={onHideSession}
                       onUnhideSession={onUnhideSession}
@@ -454,19 +458,13 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
             deleteTarget.kind !== 'session'
               ? `~/.claude/projects/${deleteTarget.projectKey}/`
               : // Only a Claude session has a file under `~/.claude/projects`:
-                // Codex and opencode keep theirs in the engine's own store, pi
-                // under `~/.pi`. Naming one here would be a fabricated path, so
+                // opencode keeps its in the engine's own store, pi under `~/.pi`. Naming one here would be a fabricated path, so
                 // for every other engine the session id is the honest detail.
                 deleteTarget.engineId && deleteTarget.engineId !== 'claude'
                 ? deleteTarget.sessionId
                 : `~/.claude/projects/${deleteTarget.projectKey}/${deleteTarget.sessionId}.jsonl`
           }
           sessionCount={deleteTarget.kind === 'project' ? deleteTarget.sessionCount : undefined}
-          branches={
-            deleteTarget.kind === 'session' && deleteTarget.engineId === 'codex'
-              ? (deletePlan?.nodes.filter((node) => node.depth > 0) ?? [])
-              : undefined
-          }
           sessionPaths={
             deleteTarget.kind === 'project'
               ? deleteTarget.claudeFiles.sessionFiles.map(
@@ -475,6 +473,8 @@ export function SidebarView(props: SidebarViewProps): React.JSX.Element {
               : undefined
           }
           folderKept={deleteTarget.kind === 'project' && !deleteTarget.claudeFiles.removeDir}
+          folderUnlisted={deleteTarget.kind === 'project' && !!deleteTarget.synthesized}
+          worktrees={deleteTarget.kind === 'project' ? deleteTarget.worktrees : undefined}
           onConfirm={onConfirmDelete}
           onCancel={onCancelDelete}
         />

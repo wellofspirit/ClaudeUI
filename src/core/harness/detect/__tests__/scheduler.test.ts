@@ -156,13 +156,13 @@ describe('detection scheduler', () => {
       }
     })
     const first = h.next()
-    const done = h.scheduler.request(['codex'], 'user')
+    const done = h.scheduler.request(['pi'], 'user')
     ;(await first).fail(new Error('boom'))
     await expect(done).resolves.toBeUndefined()
-    expect(h.invalidated).toEqual(['codex'])
+    expect(h.invalidated).toEqual(['pi'])
 
     const second = h.next()
-    const again = h.scheduler.request(['codex'], 'user')
+    const again = h.scheduler.request(['pi'], 'user')
     ;(await second).finish()
     await expect(again).resolves.toBeUndefined()
     expect(h.scheduler.status().running).toBe(false)

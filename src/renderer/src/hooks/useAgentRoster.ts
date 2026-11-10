@@ -3,9 +3,9 @@
  * shells that are running now (ADR-073, §7).
  *
  * Agents come from the `task` ToolView kind rather than from Claude's
- * `activeTasks`, so they are engine-neutral by construction: all four engines
+ * `activeTasks`, so they are engine-neutral by construction: all three engines
  * normalize their spawn tools to that kind (Claude `Task`/`Agent`, opencode
- * `task`, pi `subagent`, Codex `collab:spawnAgent`, and `dispatch_agent` on
+ * `task`, pi `subagent`, and `dispatch_agent` on
  * every engine). Claude contributes exact lifecycle events; the others fall
  * through to ADR-040's legacy heuristic inside `deriveTaskState`, exactly as
  * the cards do.
@@ -50,7 +50,7 @@ import {
   latestNotification
 } from '../components/chat/task-state'
 import { findTaskBlocks } from '../components/TaskDetailPanel/utils'
-import { latestMessageModel, resolveAgentModel, useParentModel } from '../lib/agent-model'
+import { latestMessageModel, resolveAgentModel } from '../lib/agent-model'
 
 type ToolUseBlock = Extract<ContentBlock, { type: 'tool_use' }>
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -112,7 +112,7 @@ export interface AgentRosterRow {
   startedAt?: number
   /**
    * The model this agent runs on (`resolveAgentModel`): the newest model its own
-   * messages report, else the one its spawn asked for, else (Codex) the parent's.
+   * messages report, else the one its spawn asked for.
    * Absent for a shell and when nothing says.
    */
   model?: string
@@ -279,8 +279,6 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         view?.name ||
         (view?.dispatch ? callerDescription || dispatchLabel(view.dispatch) : undefined) ||
         view?.subagent ||
-        // A Codex v1 spawn names no type and no path, only its model: it has
-        // always been listed under that, not as a bare "Agent".
         view?.model ||
         map.displayName(block.toolName)
       return {
@@ -292,15 +290,7 @@ function scanTranscript(messages: ChatMessage[], engineId: EngineId): ScannedEnt
         // views fill `name` with the TYPE when the call named no one (Claude
         // `name ?? subagent_type`, opencode's `agent`, pi), so a `name` equal to
         // the type says nothing about this agent either.
-        hasExplicitName:
-          !!view?.dispatch ||
-          (!!view?.name && view.name !== view.subagent) ||
-          // Codex v1 only: its normalizer's description is the placeholder "Agent",
-          // and a spawn that names no one and has no type carries just its model,
-          // which is what these rows have always been listed under. That model IS
-          // their identity. On any other engine a `model` is an override on an
-          // otherwise anonymous agent, and the description says more.
-          (engineId === 'codex' && !view?.name && !view?.subagent && !!view?.model),
+        hasExplicitName: !!view?.dispatch || (!!view?.name && view.name !== view.subagent),
         ...(view?.subagent ? { type: view.subagent } : {}),
         ...(view?.dispatch ? { dispatch: view.dispatch } : {}),
         description: (view?.dispatch ? callerDescription : view?.description) || view?.prompt || '',
@@ -338,8 +328,8 @@ export function scanAgentTree(
   rosterScanStats.trees++
   const out: RosterEntry[] = []
   const placed = new Set<string>()
-  // A dispatch child's transcript speaks the TARGET engine's tool names (a Codex X-Agent's
-  // `collab:spawnAgent` is no `Agent` call), and so does everything nested in it: each bucket
+  // A dispatch child's transcript speaks the TARGET engine's tool names (an opencode X-Agent's
+  // `task` is no `Agent` call), and so does everything nested in it: each bucket
   // is read with the map of the engine that wrote it.
   const walk = (
     entries: ScannedEntry[],
@@ -465,8 +455,6 @@ function toRow(
       { elapsedTimeSeconds: number; lastToolName?: string; usage?: AgentRosterRow['usage'] }
     >
     engineId: EngineId
-    /** The parent session's model, for Codex (`useParentModel`). */
-    parentModel?: string
     /** The session's turn is running: a dispatch is held queued only inside one. */
     turnRunning: boolean
   }
@@ -490,7 +478,6 @@ function toRow(
           latestModel: entry.latestModel,
           requested: entry.requestedModel,
           engine: opts.engineId,
-          parentModel: opts.parentModel,
           dispatch: entry.dispatch
         })
       : undefined
@@ -537,8 +524,8 @@ function toRow(
  * row nothing reported on must not claim it completed.
  *
  * That row is running only by ADR-040's legacy heuristic (no result yet), and
- * on some engines the result never comes: a refused Codex v2 grandchild's
- * `started` card, or a pi/opencode child aborted mid-call. A row WITH a record
+ * on some engines the result never comes: a pi/opencode child aborted
+ * mid-call. A row WITH a record
  * is never touched — a Claude agent that runs on after its parent went idle is
  * exactly what §7 exists to show. The tree is depth-first, so a parent's final
  * state is known before its children are settled.
@@ -628,7 +615,7 @@ function unifyRows(
  * descendant under a non-running agent is always one with a record: Claude Code
  * (a nested agent's `task_started` is top-level and outlives the spawner,
  * protocol-cc 04 §4.5) and pi's host-run subagents (a grandchild outlives the
- * child's run). opencode and Codex emit no records, so they never get here.
+ * child's run). opencode emits no records, so they never get here.
  */
 function withRunningDescendants(agents: readonly AgentRosterRow[]): AgentRosterRow[] {
   const byId = new Map(agents.map((a) => [a.toolUseId, a]))
@@ -723,7 +710,6 @@ export function useAgentRoster(): AgentRoster {
   const openedTaskToolUseIds = useActiveSession((s) => s.openedTaskToolUseIds)
   const isHistorical = useActiveSession((s) => s.isHistorical)
   const turnRunning = useActiveSession((s) => s.status.state === 'running')
-  const parentModel = useParentModel()
 
   // The tree — deliberately NOT dependent on the live maps. Each bucket's walk
   // is shared with the other surfaces through scanTranscriptCached.
@@ -755,7 +741,6 @@ export function useAgentRoster(): AgentRoster {
       notifications: taskNotifications ?? [],
       progress: taskProgressMap ?? {},
       engineId: engineId ?? 'claude',
-      parentModel,
       turnRunning
     }
     const settled = settleOrphans(tree, (entry) => toRow(entry, opts), opts)
@@ -788,7 +773,6 @@ export function useAgentRoster(): AgentRoster {
     taskProgressMap,
     isHistorical,
     engineId,
-    parentModel,
     turnRunning
   ])
 }

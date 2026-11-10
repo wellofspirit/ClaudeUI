@@ -49,6 +49,7 @@ export function makeDispatchParentLookup(deps: DispatchParentLookupDeps): Dispat
     ...(deliverResult ? { deliver: (parentId, item) => deliverResult(parentId, item) } : {}),
     session: (parentId) => deps.getSession(parentId),
     emit: (parentId, channel, data) => deps.emitEvent(channel, [parentId, data]),
+    identityCwd: (parentId) => deps.canonical(parentId)?.cwd || undefined,
     canonicalMessages: (parentId) => deps.canonical(parentId)?.messages ?? [],
     readMessages: async (parentId) => {
       // Canonical's cwd and engine name the history to read; with neither there is nothing to read.

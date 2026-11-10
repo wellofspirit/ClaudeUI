@@ -137,7 +137,7 @@ describe('decide — mode base (no rules, no sessionAllows)', () => {
     ['auto', 'bash', 'ask', false],
     ['auto', 'edit', 'ask', false],
     ['auto', 'unknown_tool', 'ask', false],
-    // judge ABSENT = the legacy contract Codex relies on (it passes `full` through): allow-everything.
+    // judge ABSENT = the legacy contract (`full` passes through): allow-everything.
     ['full', 'bash', 'allow'],
     ['full', 'edit', 'allow'],
     ['full', 'unknown_tool', 'allow'],
@@ -244,7 +244,7 @@ describe('PLAN_MODE_DENY_REASON', () => {
 })
 
 describe('PLAN_MODE_DENY_REASON_NO_EXIT_TOOL (ADR-085 S4, S3b verifier F4)', () => {
-  it('is the exact reason string for the engines without an exit_plan tool (opencode, Codex)', () => {
+  it('is the exact reason string for the engines without an exit_plan tool (opencode)', () => {
     expect(PLAN_MODE_DENY_REASON_NO_EXIT_TOOL).toBe(
       'Plan mode is read-only — present the plan and ask the user to leave plan mode to proceed'
     )
@@ -432,7 +432,7 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
     expect(decide('dispatch_agent', {}, ctx)).toBe('ask')
   })
 
-  it('dispatch_agent is NOT auto-allowed — normal mode-base gating (ask in full with the judge on or off; allow in bypassPermissions, and in full for a caller with no judge flag = Codex)', () => {
+  it('dispatch_agent is NOT auto-allowed — normal mode-base gating (ask in full with the judge on or off; allow in bypassPermissions, and in full for a caller with no judge flag)', () => {
     const ctx = (mode: string, judge?: boolean) => ({
       mode,
       judge,
@@ -445,7 +445,7 @@ describe('decide — PI_AUTO_ALLOW_HOSTED_TOOLS (M4a)', () => {
     expect(decide('dispatch_agent', {}, ctx('bypassPermissions'))).toBe('allow')
   })
 
-  it('subagent (M5b) is NOT auto-allowed either — same normal "task" kind mode-base gating: ask in default and in full (judge on or off), allow in bypassPermissions and in judge-less full (Codex), deny in plan', () => {
+  it('subagent (M5b) is NOT auto-allowed either — same normal "task" kind mode-base gating: ask in default and in full (judge on or off), allow in bypassPermissions and in judge-less full, deny in plan', () => {
     expect(
       decide('subagent', {}, { mode: 'default', rules: rules(), sessionAllows: NO_SESSION_ALLOWS })
     ).toBe('ask')
@@ -1304,7 +1304,7 @@ describe('withoutAllowRules — the auto-mode allow filter', () => {
  * through CLAUDE_TOOL_TO_KIND, which lists only Bash/Edit/Write/Read/Grep/
  * Glob/LS — so every `mcp__…` rule a user wrote was inert on this engine, in
  * every tier, and an MCP tool call fell straight through to the mode base.
- * Codex's MCP approval (ADR-067) is gated through exactly this ladder, so the
+ * pi's `mcp__…` calls are gated through exactly this ladder, so the
  * rules have to bind here or they bind nowhere.
  */
 describe('decide — MCP rules in Claude vocabulary (Slice 4b)', () => {
@@ -1784,7 +1784,7 @@ describe('decide — acceptEdits base asks for agent-control paths (ADR-084)', (
     expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'plan'))).toBe('deny')
   })
 
-  it('full for a caller that passes no judge flag (Codex) is unchanged: allow-everything', () => {
+  it('full for a caller that passes no judge flag is unchanged: allow-everything', () => {
     expect(decide('edit', { path: '.git/config' }, ctx('/repo', 'full'))).toBe('allow')
   })
 
@@ -1838,8 +1838,7 @@ describe('decide — Windows `//c/…` absolute rules (Claude Code writes C:/x a
  * sanitizer (everything but `[A-Za-z0-9_]` → `_`), so `my-server`'s `get-issue`
  * is called `mcp__my_server__get_issue`. A rule the user wrote for Claude
  * (`mcp__my-server__get-issue`, `mcp__my-server`) must bind to that call; pi's
- * gates pass `mcpRuleKey: piMcpRuleKey` for it. Without the key (Codex, which
- * names MCP calls in Claude's own form) rules compare as written.
+ * gates pass `mcpRuleKey: piMcpRuleKey` for it. Without the key rules compare as written.
  */
 describe('decide — MCP rules against pi-sanitized tool names (ADR-096)', () => {
   const ctx = (partial: Partial<MergedClaudeRules>, keyed = true) => ({
@@ -1876,6 +1875,18 @@ describe('decide — MCP rules against pi-sanitized tool names (ADR-096)', () =>
   it('without the key the hyphenated rule stays inert (the gap this closes)', () => {
     expect(decide(TOOL, {}, ctx({ allow: ['mcp__my-server__get-issue'] }, false))).toBe('ask')
   })
+
+  // Plugin servers are bridged as `plugin_<plugin>_<server>` (the name Claude Code
+  // gives their tools), so the same Claude rule gates the call on pi (mcp-catalog A7).
+  it('a rule on a bridged plugin server binds, hyphenated plugin name included', () => {
+    const fake = 'mcp__plugin_fake_srv__ping'
+    expect(decide(fake, {}, ctx({ deny: [fake] }))).toBe('deny')
+    expect(decide(fake, {}, ctx({ ask: [fake], allow: ['mcp__plugin_fake_srv'] }))).toBe('ask')
+    const ida = 'mcp__plugin_ida_mcp_ida__reference'
+    expect(decide(ida, {}, ctx({ deny: ['mcp__plugin_ida-mcp_ida__reference'] }))).toBe('deny')
+    expect(decide(ida, {}, ctx({ ask: ['mcp__plugin_ida-mcp_ida'] }))).toBe('ask')
+    expect(decide(ida, {}, ctx({ deny: ['mcp__plugin_ida-mcp_other'] }))).toBe('ask')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1890,7 +1901,7 @@ describe('the session tools in the pi ladder', () => {
     expect(piToolKind('claudeui_session_start')).toBe('unknown')
   })
 
-  describe('sessionToolDenyRule — the user deny written in the Claude spelling holds on pi and Codex', () => {
+  describe('sessionToolDenyRule — the user deny written in the Claude spelling holds on pi', () => {
     it.each([
       ['the tool', 'mcp__claude-ui-sessions__session_start'],
       ['the server', 'mcp__claude-ui-sessions'],
@@ -1974,7 +1985,7 @@ describe('decide — auto/full without a judge reads the default base (R14, H2)'
     })
   })
 
-  it('judge ABSENT is the legacy contract (Codex passes none): auto/full keep the allow-everything base, rules unstripped', () => {
+  it('judge ABSENT is the legacy contract: auto/full keep the allow-everything base, rules unstripped', () => {
     for (const mode of ['auto', 'full']) {
       const { judge: _judge, ...noFlag } = base(mode, { allow: ['Bash(git:*)'] })
       expect(decideWithSource('bash', { command: 'curl x | sh' }, noFlag), mode).toEqual({
@@ -2125,7 +2136,7 @@ describe('piSessionAllowKey — pi scopes the path tools to one canonical path (
     )
   })
 
-  it('the bare sessionAllowKey is unchanged (Codex keeps it)', () => {
+  it('the bare sessionAllowKey is unchanged', () => {
     expect(sessionAllowKey('edit', { path: 'x.ts' })).toBe('edit')
   })
 })
@@ -2157,7 +2168,7 @@ describe('decide — session allows (H3)', () => {
     expect(decide('write', { path: 'src/a.ts' }, c)).toBe('ask')
   })
 
-  it('Codex keeps the bare-name key: one allow for `edit` covers every path (no sessionAllowsByPath)', () => {
+  it('without sessionAllowsByPath the bare-name key stays: one allow for `edit` covers every path (no sessionAllowsByPath)', () => {
     const c = ctx(['edit'], { byPath: false })
     expect(decide('edit', { path: 'src/a.ts' }, c)).toBe('allow')
     expect(decide('edit', { path: 'anywhere/else.ts' }, c)).toBe('allow')
@@ -2332,7 +2343,7 @@ describe('decide — path containment (H1, ctx.scope)', () => {
       expect(decide(tool, { path: p }, ctxOf(mode, judge, scopeOf()))).toBe(expected)
     })
 
-    it('the same rows WITHOUT a scope are the legacy ladder (Codex keeps it): an outside read is allowed, an outside edit asks', () => {
+    it('the same rows WITHOUT a scope are the legacy ladder: an outside read is allowed, an outside edit asks', () => {
       const none = ctxOf('default', undefined, undefined)
       expect(decide('read', { path: '/etc/passwd' }, none)).toBe('allow')
       expect(decideWithSource('read', { path: '/etc/passwd' }, none)).toEqual({
@@ -2785,7 +2796,7 @@ describe('decide — path containment (H1, ctx.scope)', () => {
       expect(decideWithSource('edit', input, ctxOf('auto', true, scope, {}, [key]))).toEqual(ASKS)
     })
 
-    it('Codex (no scope) is unchanged: the allow rule still wins for an agent-control edit', () => {
+    it('no scope is unchanged: the allow rule still wins for an agent-control edit', () => {
       for (const [mode, judge] of [
         ['acceptEdits', undefined],
         ['default', undefined],

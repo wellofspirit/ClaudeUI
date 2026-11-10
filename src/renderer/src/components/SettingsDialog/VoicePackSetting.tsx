@@ -34,7 +34,7 @@ import {
 } from '../../lib/voice/preview-preference'
 
 export const VOICE_PREVIEW_HELP_TEXT =
-  'Shows words as you speak for opencode, pi and Codex sessions; the final text arrives when you let go'
+  'Shows words as you speak for opencode and pi sessions; the final text arrives when you let go'
 
 /** "~700 MB" from the download's size. */
 function approxSize(bytes: number): string {
@@ -147,7 +147,7 @@ export function VoicePackSetting(): React.JSX.Element {
       label="On-device speech model"
       description={
         <>
-          {`${status?.label ?? 'Parakeet'}. Lets opencode, pi and Codex sessions transcribe on this host — the audio never leaves it. Claude Code sessions use Claude's own transcription.`}
+          {`${status?.label ?? 'Parakeet'}. Lets opencode and pi sessions transcribe on this host — the audio never leaves it. Claude Code sessions use Claude's own transcription.`}
           {denied && (
             <span data-testid="VoicePackSetting.denied" className="block mt-1 text-text-secondary">
               {VOICE_PACK_ADMIN_MESSAGE}

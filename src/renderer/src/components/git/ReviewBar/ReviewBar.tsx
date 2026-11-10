@@ -35,12 +35,8 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
       const resumeId = isHistorical ? activeSessionId : undefined
       const state = useSessionStore.getState()
       // The spawn's own resolver, so the review respawn runs what the composer
-      // shows (per-model starting effort, not a hardcoded 'medium'). Codex's
-      // native tiers are not the Claude ladder: it keeps the old fallback.
-      const effort =
-        session && selectedEngineId !== 'codex'
-          ? sessionSpawnEffort(state, session)
-          : (session?.effort ?? 'medium')
+      // shows (per-model starting effort, not a hardcoded 'medium').
+      const effort = session ? sessionSpawnEffort(state, session) : 'medium'
       await window.api.createSession(
         activeSessionId,
         session?.cwd || '',

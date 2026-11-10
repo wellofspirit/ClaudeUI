@@ -1,5 +1,5 @@
 import { ConfirmModal } from '../shared/ConfirmModal'
-import type { CodexDeleteNode } from '../../../../shared/codex-types'
+import type { FoldedWorktreeSummary } from '../../../../shared/worktree-fold'
 
 /**
  * Session/project delete confirmation. A thin wrapper over the shared
@@ -12,9 +12,10 @@ export function DeleteConfirmModal({
   name,
   path,
   sessionCount,
-  branches,
   sessionPaths,
   folderKept,
+  folderUnlisted,
+  worktrees,
   onConfirm,
   onCancel
 }: {
@@ -26,19 +27,11 @@ export function DeleteConfirmModal({
   /** For project deletes, number of sessions that will also be removed */
   sessionCount?: number
   /**
-   * Codex only: the branches cut from this session, which the delete has to
-   * take with it. Codex refuses to delete a thread while a fork still
-   * references its history, so this is a statement of fact, not an option.
-   * `undefined` for every other engine; empty for an unbranched Codex session.
-   */
-  branches?: CodexDeleteNode[]
-  /**
    * Project deletes: Claude session files removed ONE BY ONE rather than with
-   * the project folder (`planClaudeProjectDelete`). Normally these are members
-   * cli.js's `EnterWorktree` moved into a worktree's project folder — the
-   * sidebar lists them under this project, but deleting this project's folder
-   * does not reach them. Empty/undefined in the common case, which renders
-   * exactly as before.
+   * the project folder (`planClaudeProjectDelete`): members cli.js's
+   * `EnterWorktree` moved into a worktree's project folder, and the sessions of
+   * the worktrees folded into this project (each under its own folder). Empty
+   * in the common case, which renders as before.
    */
   sessionPaths?: string[]
   /**
@@ -47,6 +40,14 @@ export function DeleteConfirmModal({
    * individually instead.
    */
   folderKept?: boolean
+  /**
+   * Project deletes: the project is a repository the listing has no group for (it is shown only
+   * because its worktrees have sessions). Its folder holds Claude's saved project memory and is
+   * never removed.
+   */
+  folderUnlisted?: boolean
+  /** Project deletes: the linked worktrees folded into this project, whose sessions go with it. */
+  worktrees?: FoldedWorktreeSummary | null
   /** Async — may reject; the modal surfaces the error inline */
   onConfirm: () => Promise<void>
   onCancel: () => void
@@ -54,9 +55,7 @@ export function DeleteConfirmModal({
   const confirmLabel =
     kind === 'project' && sessionCount && sessionCount > 0
       ? `Delete all ${sessionCount} session${sessionCount === 1 ? '' : 's'}`
-      : branches?.length
-        ? `Delete all ${branches.length + 1}`
-        : 'Delete'
+      : 'Delete'
 
   return (
     <ConfirmModal
@@ -74,31 +73,10 @@ export function DeleteConfirmModal({
             This will permanently delete{' '}
             {/* Engine-neutral on purpose: every engine's delete takes the
                 session's agents with it (Claude's subagent dir, opencode's child
-                sessions, pi's agent sessions, Codex's spawn subtree), and not
-                every engine keeps them on disk. */}
+                sessions, pi's agent sessions), and not every engine keeps them on
+                disk. */}
             <span className="font-medium text-text-primary">&quot;{name}&quot;</span> and its
             subagents. This cannot be undone.
-            {branches?.length ? (
-              <span data-testid="DeleteConfirmModal.branches" className="mt-2 block">
-                Also deletes {branches.length} branch
-                {branches.length === 1 ? '' : 'es'} cut from it — Codex will not delete a session
-                while a branch still references it:
-                <span className="mt-1 block">
-                  {branches.map((branch) => (
-                    <span
-                      key={branch.threadId}
-                      data-testid="DeleteConfirmModal.branch"
-                      className="block truncate text-text-primary"
-                    >
-                      {branch.title ?? branch.threadId}
-                      {branch.live ? (
-                        <span className="text-text-muted"> — running, will be stopped</span>
-                      ) : null}
-                    </span>
-                  ))}
-                </span>
-              </span>
-            ) : null}
           </>
         ) : (
           <>
@@ -117,11 +95,30 @@ export function DeleteConfirmModal({
               ''
             )}
             . This cannot be undone.
+            {worktrees ? (
+              <span data-testid="DeleteConfirmModal.worktrees" className="mt-2 block">
+                Includes {worktrees.sessionCount} session{worktrees.sessionCount === 1 ? '' : 's'}{' '}
+                in {worktrees.names.length} worktree{worktrees.names.length === 1 ? '' : 's'}:{' '}
+                {worktrees.names.join(', ')}. The worktree folders are not deleted.
+              </span>
+            ) : null}
+            {folderUnlisted ? (
+              <span data-testid="DeleteConfirmModal.memoryKept" className="mt-2 block">
+                Claude&apos;s folder for this repository, with its saved project memory, is not
+                touched.
+              </span>
+            ) : !folderKept ? (
+              <span data-testid="DeleteConfirmModal.memory" className="mt-2 block">
+                This also removes Claude&apos;s saved project memory for this folder.
+              </span>
+            ) : null}
             {sessionPaths?.length ? (
               <span data-testid="DeleteConfirmModal.relocated" className="mt-2 block">
-                {folderKept
-                  ? `Its session${sessionPaths.length === 1 ? ' is' : 's are'} deleted one by one — the folder also holds another project's session, so it is kept:`
-                  : `Also deletes ${sessionPaths.length} session${sessionPaths.length === 1 ? '' : 's'} that moved into a worktree folder:`}
+                {folderUnlisted
+                  ? `Deletes ${sessionPaths.length} Claude session file${sessionPaths.length === 1 ? '' : 's'} one by one:`
+                  : folderKept
+                    ? `Its session${sessionPaths.length === 1 ? ' is' : 's are'} deleted one by one — the folder also holds another project's session, so it is kept:`
+                    : `Also deletes ${sessionPaths.length} session file${sessionPaths.length === 1 ? '' : 's'} stored in other Claude project folders (moved or worktree sessions):`}
                 <span className="mt-1 block">
                   {sessionPaths.map((sessionPath) => (
                     <span

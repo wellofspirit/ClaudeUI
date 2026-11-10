@@ -308,7 +308,7 @@ describe('removeWorktrees: refusals', () => {
     const sources: HolderSources = {
       sessions: () => [{ id: 'cold', engine: 'pi', live: false, cwds: [info.worktreePath] }],
       xAgents: () => [
-        { id: 'x', engine: 'codex', label: 'reviewer', cwd: info.worktreePath, live: false }
+        { id: 'x', engine: 'pi', label: 'reviewer', cwd: info.worktreePath, live: false }
       ],
       terminals: () => []
     }
@@ -497,24 +497,6 @@ describe('removeWorktrees: refusals', () => {
 })
 
 describe('removeWorktrees: out-of-repo layouts (R5)', () => {
-  it('removes a Codex-layout worktree and then its EMPTY <4hex> bucket, but not a bucket that holds anything else', async () => {
-    const emptyBucket = path.join(scratch.base, '.codex', 'worktrees', 'ab12')
-    const sharedBucket = path.join(scratch.base, '.codex', 'worktrees', 'cd34')
-    const a = path.join(emptyBucket, 'myrepo')
-    const b = path.join(sharedBucket, 'myrepo')
-    await addWorktreeAt(repo, a)
-    await addWorktreeAt(repo, b)
-    fs.mkdirSync(path.join(sharedBucket, 'sibling'))
-    fs.writeFileSync(path.join(sharedBucket, 'sibling', 'file.txt'), 'x')
-
-    const results = await removeWorktrees(repo.path, [idOf(a), idOf(b)], () => {}, noHolders)
-
-    expect(results.map((r) => r.outcome)).toEqual(['removed', 'removed'])
-    expect(fs.existsSync(emptyBucket)).toBe(false)
-    expect(fs.existsSync(path.join(sharedBucket, 'sibling', 'file.txt'))).toBe(true)
-    expect(await registeredPaths(repo)).toEqual([idOf(repo.path)])
-  })
-
   it('removes an opencode-layout worktree', async () => {
     const wt = path.join(scratch.base, 'share', 'worktree', 'abcdef', 'brave-fox')
     await addWorktreeAt(repo, wt)
@@ -635,7 +617,7 @@ describe('removeWorktrees: partial removal and retry', () => {
   it.skipIf(process.platform !== 'win32')(
     'an out-of-repo worktree whose ROOT is a process cwd keeps its .git pointer (partial, still listed), and retries cleanly',
     async () => {
-      const wt = path.join(scratch.base, '.codex', 'worktrees', 'ab12', 'myrepo')
+      const wt = path.join(scratch.base, 'share', 'worktree', 'abcdef', 'myrepo')
       await addWorktreeAt(repo, wt)
       fs.writeFileSync(path.join(wt, 'file.txt'), 'x')
       const child = await holdAsCwd(wt)
@@ -648,14 +630,14 @@ describe('removeWorktrees: partial removal and retry', () => {
       expect(fs.existsSync(path.join(wt, 'file.txt'))).toBe(false)
       const inv = await inventoryWorktrees(repo.path)
       const entry = inv.entries.find((e) => e.id === idOf(wt))
-      expect(entry).toMatchObject({ kind: 'worktree', location: 'codex' })
+      expect(entry).toMatchObject({ kind: 'worktree', location: 'opencode' })
       expect(entry?.invalidReason).toBeUndefined()
 
       await release(child)
       const [second] = await removeWorktrees(repo.path, [idOf(wt)], () => {}, noHolders)
 
       expect(second.outcome).toBe('removed')
-      expect(fs.existsSync(path.join(scratch.base, '.codex', 'worktrees', 'ab12'))).toBe(false)
+      expect(fs.existsSync(wt)).toBe(false)
       expect(await registeredPaths(repo)).toEqual([idOf(repo.path)])
     }
   )

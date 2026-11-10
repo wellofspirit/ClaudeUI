@@ -9,8 +9,6 @@
  *                directories at import), autoupdate and models fetch off
  *   pi           `PI_CODING_AGENT_DIR` = a fresh directory, offline, no
  *                version check, no telemetry
- *   Codex        `CODEX_HOME` = a fresh directory (it loads `CODEX_HOME/.env`
- *                and creates alias directories there); stdout only
  *
  * Every probe starts from `minimalEnv` (never the whole parent environment),
  * has a 10 s timeout
@@ -74,13 +72,10 @@ export function isolationEnv(id: HarnessId, probeDir: string): Record<string, st
         PI_SKIP_VERSION_CHECK: '1',
         PI_TELEMETRY: '0'
       }
-    case 'codex':
-      return { CODEX_HOME: probeDir }
   }
 }
 
 const CLAUDE_VERSION = /^(\d+\.\d+\.\d+\S*)\s+\(Claude Code\)/
-const CODEX_VERSION = /^codex-cli (\S+)$/
 /** opencode 2.x: `opencode v2.0.24` (a source build without a version: `opencode vlocal`). */
 const OPENCODE_V2_VERSION = /^opencode v(\S+)$/
 
@@ -97,9 +92,6 @@ export function parseVersionOutput(id: HarnessId, stdout: string): ProbeResult {
   for (const line of lines) {
     if (id === 'claude') {
       const m = CLAUDE_VERSION.exec(line)
-      if (m) return { status: 'ok', version: m[1] }
-    } else if (id === 'codex') {
-      const m = CODEX_VERSION.exec(line)
       if (m) return { status: 'ok', version: m[1] }
     } else if (HARNESS_VERSION_RE.test(line)) {
       return { status: 'ok', version: line }

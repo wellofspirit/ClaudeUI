@@ -96,8 +96,7 @@ describe('spawnAnnouncement', () => {
       thinkingMode: null
     })
   })
-  it('is undefined for Codex and for no session', () => {
-    expect(spawnAnnouncement(state(), { ...base, selectedEngineId: 'codex' })).toBeUndefined()
+  it('is undefined for no session', () => {
     expect(spawnAnnouncement(state(), undefined)).toBeUndefined()
   })
 })
@@ -139,17 +138,15 @@ describe('pi remembers effort in its own map', () => {
       rememberedEffortPatch(state(), { ...piSession, selectedModel: 'gone/model' }, 'high')
     ).toBeUndefined()
   })
-  it('opencode and codex picks write nothing', () => {
-    for (const selectedEngineId of ['opencode', 'codex']) {
-      const row = { ...PI_OPUS, engineId: selectedEngineId as 'opencode' | 'codex' }
-      expect(
-        rememberedEffortPatch(
-          { availableModels: [row], settings: {} },
-          { ...piSession, selectedEngineId },
-          'high'
-        )
-      ).toBeUndefined()
-    }
+  it('opencode picks write nothing', () => {
+    const row = { ...PI_OPUS, engineId: 'opencode' as const }
+    expect(
+      rememberedEffortPatch(
+        { availableModels: [row], settings: {} },
+        { ...piSession, selectedEngineId: 'opencode' },
+        'high'
+      )
+    ).toBeUndefined()
   })
   it('a new pi session on that model spawns (and so displays) the remembered effort', () => {
     const settings = { engineEffortDefaults: { pi: { 'anthropic/claude-opus-5-5': 'low' } } }

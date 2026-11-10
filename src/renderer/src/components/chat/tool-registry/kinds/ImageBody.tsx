@@ -1,5 +1,5 @@
 /**
- * Image kind body — Codex `imageGeneration` (no other harness has one).
+ * Image kind body — an engine's image-generation call.
  *
  * The PICTURE is not rendered here: it rides the shared `ToolResultImages`
  * strip `ToolCard` places for every standard kind, from the blob ref (ADR-087)

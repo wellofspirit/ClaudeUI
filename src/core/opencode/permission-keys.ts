@@ -2,12 +2,12 @@
  * The opencode 2.x permission key table (ADR-097 §3): which 2.x permission
  * `action` a ClaudeUI (Claude-form) rule targets, and how 2.x spells the
  * `resource` it asks with for that action. Read at the pinned tag
- * (`vendor/opencode-src` @ v2.0.24, `packages/core/src/tool/plugin/*.ts`).
+ * (`vendor/opencode-src` @ v2.2.6, `packages/core/src/tool/plugin/*.ts`).
  *
  * | Claude tool                     | 2.x tool id(s)        | action              | resource 2.x asks with                                                    |
  * | ------------------------------- | --------------------- | ------------------- | ------------------------------------------------------------------------- |
  * | Bash                            | shell                 | shell               | one per parsed statement: its source text (`shell/parse.ts`)              |
- * | Read, NotebookRead              | read                  | read                | path: location-relative inside the session dir/worktree, else absolute    |
+ * | Read, NotebookRead              | read                  | read                | path: location-relative inside the session dir/worktree, else absolute; a `skill://` path (2.2.6) asks `skill` (the skill id), then `read` with the URI |
  * | Edit, MultiEdit, Write, NotebookEdit | edit, write, patch | edit               | same path rule; `patch` asks once with every target                       |
  * | Glob                            | glob                  | glob                | the glob PATTERN argument (not a path)                                    |
  * | Grep                            | grep                  | grep                | the regex PATTERN argument (not a path)                                   |
@@ -18,6 +18,8 @@
  * | mcp__s__t / mcp__s / mcp__s__*  | s_t                   | s_t / s_*           | `*` (sanitized `[^a-zA-Z0-9_-]` → `_`, `tool/mcp.ts`)                    |
  * | additionalDirectories           | (any file tool)       | external_directory  | `<dir>/*` of the target's directory, absolute (`file-access.ts`)         |
  * | (none)                          | question              | question            | `*`                                                                       |
+ * | (none)                          | opencode.<session\|worktree\|artifact\|schedule>.* | opencode_<tool> | `*` — wholly denied and hidden (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`); `worktree_remove` asks `edit` |
+ * | (none)                          | experimental_image_generate | experimental_image_generate | `providerID/modelID` (the model the call will bill)                  |
  * | (none)                          | execute (Code Mode)   | (never asserted)    | visibility only — `whollyDisabled("execute")`                             |
  * | (none)                          | list/read_mcp_resource| opencode_list_mcp_resources / opencode_read_mcp_resource | server names / `server:uri` |
  *
@@ -98,9 +100,12 @@ export function v2ActionForV1Key(key: string): string | null {
 /**
  * The built-in 2.x permission ids and tool ids (`tool/plugin/*.ts` names and
  * `permission` options, `file-access.ts`, `mcp-resource.ts`, the `opencode`
- * namespace's Code Mode tools, Code Mode's `execute`). A server-level MCP
- * ALLOW glob (`s_*`) that matches one of these is never emitted — an allow on
- * `opencode_*` would also grant `opencode_read_mcp_resource`.
+ * namespace's tools — Code Mode tools only while `execute` is visible, DIRECT
+ * tools since 2.2.0 — Code Mode's `execute`, and `experimental_image_generate`).
+ * A server-level MCP ALLOW glob (`s_*`) that matches one of these is never
+ * emitted — an allow on `opencode_*` would also grant
+ * `opencode_read_mcp_resource`. At v2.2.5 (`tool/plugin/opencode.ts`,
+ * `artifact.ts`, `schedule.ts`, `image-generate.ts`).
  */
 export const V2_BUILTIN_ACTIONS: readonly string[] = [
   'shell',
@@ -121,7 +126,20 @@ export const V2_BUILTIN_ACTIONS: readonly string[] = [
   'opencode_read_mcp_resource',
   'opencode_session_rename',
   'opencode_session_move',
-  'opencode_models'
+  'opencode_worktree_create',
+  'opencode_worktree_list',
+  'opencode_worktree_remove',
+  'opencode_models',
+  'opencode_artifact_create',
+  'opencode_artifact_read',
+  'opencode_artifact_update',
+  'opencode_artifact_delete',
+  'opencode_schedule_create',
+  'opencode_schedule_list',
+  'opencode_schedule_pause',
+  'opencode_schedule_resume',
+  'opencode_schedule_delete',
+  'experimental_image_generate'
 ]
 
 /** True when some built-in action satisfies `matches` (e.g. a glob test). */

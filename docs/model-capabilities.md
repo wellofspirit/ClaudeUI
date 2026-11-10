@@ -65,8 +65,7 @@ sessions start on** is "configured default" (ADR-074 §10), in which case a pick
 changes only its own session and nothing is remembered. Claude and pi remember; Claude
 uses the setting above (`modelEffortDefaults`), pi keeps its own per-model map
 (`engineEffortDefaults.pi`, keyed by the `provider/model` value, no Settings table),
-and a pi value is clamped to the levels that model offers. opencode (no effort) and
-Codex (native tiers) remember nothing. The starting effort **freezes into the
+and a pi value is clamped to the levels that model offers. opencode (no effort) remembers nothing. The starting effort **freezes into the
 session at spawn**: a session shows, on every client, the effort its process runs,
 and a later change to the per-model value only affects sessions that have not
 started. A model switch on a session that has not started drops its effort so the

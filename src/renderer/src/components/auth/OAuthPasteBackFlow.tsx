@@ -13,10 +13,10 @@
  * The pasted string is posted VERBATIM (trimmed only): the BACKEND owns the
  * URL-vs-code decision and the shape-dependent CSRF rule
  * (`parsePastedCallback` / `completeFromPastedInput` in
- * `core/auth/vault/codex-oauth.ts`). Pre-parsing here would fork that rule.
+ * `core/auth/vault/chatgpt-oauth.ts`). Pre-parsing here would fork that rule.
  *
  * Two variants, because two vendors return the code differently:
- *  - `url`  — Codex/opencode: the redirect lands on a dead `localhost:1455`
+ *  - `url`  — ChatGPT/opencode: the redirect lands on a dead `localhost:1455`
  *             page whose ADDRESS BAR holds the code (mockup state 2);
  *  - `code` — Claude: claude.ai displays the code on the page (mockup state 3).
  *
@@ -64,7 +64,7 @@ export const DESKTOP_ONLY_COPY =
  * reworded backend message fails a test instead of silently degrading to the
  * verbatim branch:
  *
- *  - state mismatch — `codex-oauth.ts`'s `'Invalid state - potential CSRF
+ *  - state mismatch — `chatgpt-oauth.ts`'s `'Invalid state - potential CSRF
  *    attack'` (both the loopback and the paste path throw it), plus cli.js's
  *    own wording for the Claude flow, which we have not pinned and match
  *    loosely;

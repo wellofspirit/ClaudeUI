@@ -20,6 +20,7 @@
  * Imports no session class and not the dispatcher (require-cycle rule): only
  * the pi transport leaves, the automode trajectory leaf and the logger.
  */
+import type { PiSkillDescriptor } from './pi-skill-bridge'
 import { v4 as uuidv4 } from 'uuid'
 import type { ChatMessage } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
@@ -31,7 +32,8 @@ import { createPiMapperState, finishPiMessage, mapPiEvent } from './event-mapper
 import type { PiMapperOutput, PiMapperState } from './event-mapper'
 import { PiBridgeHost, writeBridgeExtension } from './PiBridgeHost'
 import type { PiBridgeAbandoned, PiBridgeHandler, PiHostedToolHandler } from './PiBridgeHost'
-import { locatePiLaunch } from './pi-locate'
+import { piCostReport } from './message-cost'
+import { PI_APPROVE_ARGS, locatePiLaunch } from './pi-locate'
 import { deliveryCommand, isReservedPiCommandText, PI_RESERVED_COMMAND_PREFIX } from './pi-delivery'
 import type { PiAgentDelivery } from './pi-delivery'
 import type {
@@ -59,6 +61,8 @@ export interface PiChildSpawnOpts {
   onAbandoned?: (info: PiBridgeAbandoned) => void
   /** The MCP servers the child's bridge host serves at `/mcp-servers` (ADR-096; subagents: the parent's catalog). */
   mcpServers?: Record<string, unknown>
+  /** The Claude skills the child's bridge host serves at `/skills` (subagents: the parent's catalog snapshot; dispatch targets: the dispatch cwd's). */
+  skills?: PiSkillDescriptor[]
   /** Flags after `--mode rpc -e <bridge>` (dispatch: `['--no-session']`). */
   args?: string[]
   /**
@@ -94,7 +98,9 @@ export function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.
     // The session tools are for a session's root agent only.
     CLAUDEUI_PI_SESSION_TOOLS: '',
     // No bridged MCP catalog unless the consumer's env asks for it (ADR-096).
-    CLAUDEUI_PI_MCP: ''
+    CLAUDEUI_PI_MCP: '',
+    // Likewise no Claude skill catalog.
+    CLAUDEUI_PI_SKILLS: ''
   }
 }
 
@@ -108,7 +114,8 @@ export const defaultSpawnPiChild: SpawnPiChildFn = async (opts) => {
   if (!launch) throw new Error(harnessUnavailableMessage('pi'))
   const bridgeHost = new PiBridgeHost(opts.gateHandler, opts.hostedToolHandler, {
     ...(opts.onAbandoned ? { onAbandoned: opts.onAbandoned } : {}),
-    ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {})
+    ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+    ...(opts.skills ? { skills: opts.skills } : {})
   })
   let bridge: { url: string; token: string }
   try {
@@ -119,7 +126,7 @@ export const defaultSpawnPiChild: SpawnPiChildFn = async (opts) => {
   const bridgePath = writeBridgeExtension()
   const client = new PiRpcClient(launch, {
     cwd: opts.cwd,
-    args: ['--mode', 'rpc', '-e', bridgePath, ...(opts.args ?? [])],
+    args: ['--mode', 'rpc', ...PI_APPROVE_ARGS, '-e', bridgePath, ...(opts.args ?? [])],
     env: (opts.env ?? defaultChildEnv)(bridge)
   })
   try {
@@ -276,6 +283,18 @@ export class PiChildRunner {
    *  has no column for them (they are billed as output) but `piCostInputs`
    *  prices them — the same fold `PiSession` makes for its own turns. */
   turnReasoningTokens = 0
+  /** The turn's `usage.cost` COMPONENT figures summed — pi's catalog list
+   *  price — accumulated beside the tokens so a provider-billed total can be
+   *  priced against its list-price equivalent (message-cost.ts). NULL as soon
+   *  as any message of the turn reported none: a sum of the rest would claim a
+   *  list price the turn does not have, and `piCostInputs` falls back to
+   *  ClaudeUI's pricing table on null. Reset to 0 (not null) with the tokens. */
+  turnCostComponentsUsd: number | null = 0
+  /** Whether any of the turn's messages carried a provider-billed total
+   *  (`usage.cost.totalFromProvider`, pi 1.5.0 / OpenRouter). Reset with the
+   *  tokens; one model per turn in practice, so the turn's delta is the
+   *  provider's figure whenever this is true. */
+  turnCostFromProvider = false
   /**
    * Mirrors `ClaudeTargetEntry.lastReportedTotalCostUsd` — VERIFIED WIRE FACT
    * (event-mapper.ts's `agent_settled` case echoes `state.totalCostUsd`, which
@@ -411,6 +430,8 @@ export class PiChildRunner {
     this.turnTotalTokens = 0
     this.turnTokens = zeroTurnTokens()
     this.turnReasoningTokens = 0
+    this.turnCostComponentsUsd = 0
+    this.turnCostFromProvider = false
     this.lastActivityAt = startedAt
   }
 
@@ -755,6 +776,12 @@ export class PiChildRunner {
     // return here is what keeps it out of the stream, exactly as the switch's
     // own `case` did.
     if (out.kind === 'usage') {
+      // A cache warm (possibly between turns) is ledger spend only: it must not
+      // enter the turn's totals, cap or cost rule.
+      if (out.cacheWarm) {
+        this.opts.onUsage?.(out)
+        return
+      }
       this.turnTotalTokens += out.tokens.input + out.tokens.output + (out.tokens.reasoning ?? 0)
       // The split the ledger row needs, accumulated beside the total across
       // the turn's several assistant messages. The four fields pi reports
@@ -766,6 +793,16 @@ export class PiChildRunner {
       this.turnTokens.cacheWrite += out.tokens.cacheWrite
       this.turnTokens.cacheRead += out.tokens.cacheRead
       this.turnReasoningTokens += out.tokens.reasoning ?? 0
+      // `usage.cost` reaches the cost rule through the same accumulation: the
+      // turn's list-price components, and whether its total was a bill. One
+      // message with no components makes the turn's list price unknown (null):
+      // a partial sum would understate it instead.
+      const report = piCostReport(out.cost)
+      this.turnCostComponentsUsd =
+        this.turnCostComponentsUsd === null || report.componentsUsd == null
+          ? null
+          : this.turnCostComponentsUsd + report.componentsUsd
+      this.turnCostFromProvider ||= report.fromProvider === true
       this.opts.onUsage?.(out)
       return
     }

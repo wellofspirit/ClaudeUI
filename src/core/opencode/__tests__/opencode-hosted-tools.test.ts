@@ -63,7 +63,7 @@ describe('createOpencodeHostedToolsServer', () => {
     expect(server).toBeInstanceOf(McpServer)
   })
 
-  it('registers exactly 4 tools: render_mermaid, create_mockup, show_mockup, dispatch_agent', () => {
+  it('registers exactly 6 tools: render_mermaid, create_mockup, show_mockup, dispatch_agent, enter_worktree, exit_worktree', () => {
     const server = createOpencodeHostedToolsServer(tmp)
     // Access the internal tool registry via the server's _registeredTools map
     // (internal API, but necessary for unit verification without a full MCP session).
@@ -73,6 +73,8 @@ describe('createOpencodeHostedToolsServer', () => {
     expect(toolNames.sort()).toEqual([
       'create_mockup',
       'dispatch_agent',
+      'enter_worktree',
+      'exit_worktree',
       'render_mermaid',
       'show_mockup'
     ])
@@ -230,6 +232,31 @@ describe('createOpencodeHostedToolsServer — dispatch_agent (ADR-033 M2)', () =
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('ai.opencode/sessionID')
     expect(result.content[0].text).toContain('claudeui-xeng')
+  })
+
+  it('dispatches into the caller’s working directory (a moved session), keeping its identity directory', async () => {
+    const dispatch = vi.fn<DispatchAgentFn>(async () => ({ text: 'ok', sessionId: 'c-1' }))
+    let working = '/proj'
+    const tool = getDispatchTool(tmp, {
+      lookupCallerSession: () => ({
+        ...callerHandle(),
+        get workingDirectory() {
+          return working
+        }
+      }),
+      dispatch
+    })
+    const call = (): Promise<unknown> =>
+      tool.handler({ engine: 'claude', prompt: 'x', __xeng_caller_session: 'ses_1' }, makeExtra())
+    await call()
+    expect(dispatch.mock.calls[0][1]).toMatchObject({ cwd: '/proj' })
+    expect(dispatch.mock.calls[0][1]).not.toHaveProperty('originCwd')
+    working = '/proj/.claude/worktrees/wt'
+    await call()
+    expect(dispatch.mock.calls[1][1]).toMatchObject({
+      cwd: '/proj/.claude/worktrees/wt',
+      originCwd: '/proj'
+    })
   })
 
   it('unknown/expired caller session id → isError (lookup returns undefined)', async () => {
@@ -655,7 +682,7 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     expect(def.inputSchema.shape.model.description).toContain('sonnet')
   })
 
-  it('steers opencode to its own subagent tool first (S4) and lists claude, pi and codex as targets', () => {
+  it('steers opencode to its own subagent tool first (S4) and lists claude and pi as targets', () => {
     vi.mocked(loadEngineConfig).mockReturnValue({})
     const { description } = getDispatchToolDef(tmp)
     expect(description).toContain(
@@ -663,8 +690,9 @@ describe('createOpencodeHostedToolsServer — dispatch_agent model hint (ADR-033
     )
     expect(description).toContain('use your own subagent tool instead')
     expect(description).toContain(
-      "claude (Anthropic's models), pi (an alternative coding-agent harness) or codex"
+      "claude (Anthropic's models) or pi (an alternative coding-agent harness)"
     )
+    expect(description).not.toContain('codex (')
   })
 
   it('falls back to the generic Claude-alias hint when nothing is configured', () => {

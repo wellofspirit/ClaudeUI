@@ -7,7 +7,7 @@
  *    installing, Install installs each checked harness and answers, Escape
  *    only closes it, and a connection without `admin` never sees it;
  *  - the composer banner in each state, and its buttons;
- *  - the harness picker's marks: every harness listed (Codex too), a chip on
+ *  - the harness picker's marks: every harness listed, a chip on
  *    one that is not installed, disabled where it cannot run.
  *
  * Settings for a harness that does not run are hidden or cannot be opened
@@ -47,8 +47,7 @@ function fire(channel: string, ...args: unknown[]): void {
 const TESTED: Record<HarnessId, string> = {
   claude: '2.1.280',
   opencode: '1.18.32',
-  pi: '0.87.4',
-  codex: '0.156.0'
+  pi: '0.87.4'
 }
 
 function ready(id: HarnessId): HarnessStateEntry {
@@ -98,7 +97,6 @@ function snapshot(
       claude: ready('claude'),
       opencode: ready('opencode'),
       pi: ready('pi'),
-      codex: ready('codex'),
       ...harnesses
     },
     detection: { running: false },
@@ -109,17 +107,16 @@ function snapshot(
   }
 }
 
-/** opencode (14 sessions) and pi (3) missing, Codex (2) missing: the sheet's three rows. */
+/** opencode (14 sessions) and pi (3) missing: the sheet's two rows. */
 function pendingSheet(): HarnessStateSnapshot {
   return snapshot(
-    { opencode: missing('opencode'), pi: missing('pi'), codex: missing('codex') },
+    { opencode: missing('opencode'), pi: missing('pi') },
     {
       upgradePrompt: {
         pending: true,
         candidates: [
           { id: 'opencode', sessions: 14 },
-          { id: 'pi', sessions: 3 },
-          { id: 'codex', sessions: 2 }
+          { id: 'pi', sessions: 3 }
         ]
       }
     }
@@ -189,12 +186,12 @@ describe('HarnessUpgradeSheet', () => {
   it('lists each candidate with its version and session count, every row unchecked', async () => {
     await renderSheet()
     const rows = screen.getAllByTestId('HarnessUpgradeSheet.row')
-    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['opencode', 'pi', 'codex'])
+    expect(rows.map((r) => r.getAttribute('data-id'))).toEqual(['opencode', 'pi'])
     expect(within(rows[0]).getByTestId('HarnessUpgradeSheet.version')).toHaveTextContent('1.18.32')
     expect(within(rows[0]).getByTestId('HarnessUpgradeSheet.sessions')).toHaveTextContent(
       '14 sessions'
     )
-    for (const id of ['opencode', 'pi', 'codex'] as const) expect(checkbox(id).checked).toBe(false)
+    for (const id of ['opencode', 'pi'] as const) expect(checkbox(id).checked).toBe(false)
     // No download sizes anywhere.
     expect(screen.getByTestId('HarnessUpgradeSheet').textContent).not.toMatch(/MB/)
   })
@@ -205,10 +202,10 @@ describe('HarnessUpgradeSheet', () => {
     expect(install).toBeDisabled()
     expect(install).toHaveTextContent(/^Install$/)
     fireEvent.click(checkbox('opencode'))
-    fireEvent.click(checkbox('codex'))
+    fireEvent.click(checkbox('pi'))
     expect(install).toBeEnabled()
     expect(install).toHaveTextContent('Install 2')
-    fireEvent.click(checkbox('codex'))
+    fireEvent.click(checkbox('pi'))
     expect(install).toHaveTextContent('Install 1')
   })
 
@@ -225,17 +222,17 @@ describe('HarnessUpgradeSheet', () => {
   it('Install installs each checked harness at its version, answers, and closes', async () => {
     await renderSheet()
     fireEvent.click(checkbox('opencode'))
-    fireEvent.click(checkbox('codex'))
+    fireEvent.click(checkbox('pi'))
     fireEvent.click(screen.getByTestId('HarnessUpgradeSheet.install'))
     await flush()
     expect(api.installHarness.mock.calls).toEqual([
       ['opencode', '1.18.32'],
-      ['codex', '0.156.0']
+      ['pi', '0.87.4']
     ])
     expect(api.answerHarnessUpgradePrompt).toHaveBeenCalledTimes(1)
     expect(screen.queryByTestId('HarnessUpgradeSheet')).toBeNull()
     // Progress continues in the shared install list (the pill, the banner).
-    expect(harnessStore.getState().installs.map((p) => p.id)).toEqual(['opencode', 'codex'])
+    expect(harnessStore.getState().installs.map((p) => p.id)).toEqual(['opencode', 'pi'])
   })
 
   it('Escape closes it for this run without answering', async () => {
@@ -392,19 +389,19 @@ describe('HarnessInstallBanner', () => {
   })
 
   it('says why a harness cannot run on this computer, with no button', async () => {
-    const codex = missing('codex', {
+    const pi = missing('pi', {
       installable: false,
       resolved: {
         source: 'managed',
         version: null,
         path: null,
-        reason: 'Codex is not available for win32-arm64',
+        reason: 'pi is not available for win32-arm64',
         available: false
       }
     })
-    await renderBanner(snapshot({ codex }), 'codex')
+    await renderBanner(snapshot({ pi }), 'pi')
     expect(banner()).toHaveAttribute('data-state', 'unavailable-here')
-    expect(banner()).toHaveTextContent('Codex is not available for win32-arm64')
+    expect(banner()).toHaveTextContent('pi is not available for win32-arm64')
     expect(within(banner()).queryAllByRole('button')).toHaveLength(0)
   })
 
@@ -431,7 +428,7 @@ describe('EnginePicker marks (ADR-082 §8)', () => {
   it('lists every harness; one not installed carries a chip and can still be picked', async () => {
     const onSelectEngine = vi.fn()
     api.harnessState.mockResolvedValue(
-      snapshot({ opencode: missing('opencode'), codex: missing('codex') })
+      snapshot({ opencode: missing('opencode'), pi: missing('pi') })
     )
     render(
       <EnginePicker selectedEngineId="claude" locked={false} onSelectEngine={onSelectEngine} />
@@ -441,30 +438,27 @@ describe('EnginePicker marks (ADR-082 §8)', () => {
     expect(screen.getAllByTestId('EnginePicker.option').map((el) => el.dataset.engine)).toEqual([
       'claude',
       'opencode',
-      'pi',
-      'codex'
+      'pi'
     ])
     const chips = screen.getAllByTestId('EnginePicker.notInstalled').map((el) => el.dataset.engine)
-    expect(chips).toEqual(['opencode', 'codex'])
-    expect(option('codex')).toBeEnabled()
-    fireEvent.click(option('codex'))
-    expect(onSelectEngine).toHaveBeenCalledWith('codex')
+    expect(chips).toEqual(['opencode', 'pi'])
+    expect(option('pi')).toBeEnabled()
+    fireEvent.click(option('pi'))
+    expect(onSelectEngine).toHaveBeenCalledWith('pi')
   })
 
   it('disables a harness this computer cannot run, with the reason as its title', async () => {
     const onSelectEngine = vi.fn()
-    api.harnessState.mockResolvedValue(
-      snapshot({ codex: missing('codex', { installable: false }) })
-    )
+    api.harnessState.mockResolvedValue(snapshot({ pi: missing('pi', { installable: false }) }))
     render(
       <EnginePicker selectedEngineId="claude" locked={false} onSelectEngine={onSelectEngine} />
     )
     await flush()
     fireEvent.click(screen.getByTestId('EnginePicker.trigger'))
-    expect(option('codex')).toBeDisabled()
-    expect(option('codex')).toHaveAttribute('title', 'Not available on this computer')
+    expect(option('pi')).toBeDisabled()
+    expect(option('pi')).toHaveAttribute('title', 'Not available on this computer')
     expect(screen.queryByTestId('EnginePicker.notInstalled')).toBeNull()
-    fireEvent.click(option('codex'))
+    fireEvent.click(option('pi'))
     expect(onSelectEngine).not.toHaveBeenCalled()
   })
 
@@ -472,7 +466,7 @@ describe('EnginePicker marks (ADR-082 §8)', () => {
     api.harnessState.mockImplementation(() => new Promise(() => {}))
     render(<EnginePicker selectedEngineId="claude" locked={false} onSelectEngine={() => {}} />)
     fireEvent.click(screen.getByTestId('EnginePicker.trigger'))
-    expect(screen.getAllByTestId('EnginePicker.option')).toHaveLength(4)
+    expect(screen.getAllByTestId('EnginePicker.option')).toHaveLength(3)
     expect(screen.queryByTestId('EnginePicker.notInstalled')).toBeNull()
   })
 })

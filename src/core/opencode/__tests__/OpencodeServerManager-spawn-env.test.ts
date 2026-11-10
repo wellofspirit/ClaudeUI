@@ -125,6 +125,11 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
     expect(env.OPENCODE_DISABLE_SHARE).toBe('1')
   })
 
+  it("turns off opencode's own .claude/skills reader (the Claude skill catalog replaces it)", async () => {
+    const { env } = await spawnOnce()
+    expect(env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS).toBe('1')
+  })
+
   it('injects the 2.x config: hosted claudeui + plugin dir, no continue_loop_on_deny', async () => {
     const { env } = await spawnOnce()
     const cfg = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? '{}') as {
@@ -140,7 +145,13 @@ describe('opencode serve --stdio spawn (default spawn path)', () => {
       codemode: false
     })
     expect(cfg.plugins).toEqual([
-      { package: '/res/opencode/claudeui-xeng', options: { modelAllowlist: {} } }
+      {
+        package: '/res/opencode/claudeui-xeng',
+        options: {
+          modelAllowlist: {},
+          skills: { url: 'http://127.0.0.1:19998/skills', token: 'hosted-token' }
+        }
+      }
     ])
     expect(cfg).not.toHaveProperty('experimental')
     expect(cfg).not.toHaveProperty('autoupdate')

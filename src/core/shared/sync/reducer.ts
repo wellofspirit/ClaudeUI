@@ -143,7 +143,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * binding rule is ONE rule, not two: search from the END (a repeated identical
  * call must annotate its latest card, not the first one that ever ran), append
  * once, and DROP rather than park when no message holds the call. Parking is
- * the producer's job — CodexSession holds a verdict until its target item
+ * the producer's job — hold a verdict until its target item
  * lands — and a reducer-side queue would be a second, divergent copy of that
  * rule.
  *
@@ -595,8 +595,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
               data && 'thinkingMode' in data ? (data.thinkingMode ?? null) : base.thinkingMode,
             permissionMode: data?.permissionMode ?? base.permissionMode,
             selectedEngineId: data?.engineId ?? base.selectedEngineId,
-            selectedModel: data?.model ?? (data?.engineId === 'codex' ? '' : base.selectedModel),
-            ...(data?.engineId === 'codex' ? { codexModelExplicit: data.model !== undefined } : {}),
+            selectedModel: data?.model ?? base.selectedModel,
             sdkActive: true,
             // A resumed session's transcript arrives via seedSession (a query);
             // a fresh one has nothing to seed, so it is already complete.
@@ -702,15 +701,9 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         sdkActive: s.sdkActive,
         // The held inbox belongs to the session, not to its conversation.
         heldCount: s.heldCount,
-        // Carried, not reset. These per-session copies are vestigial — canonical
-        // holds ONE app-level list and `toSnapshot` fans it into every entry, so
-        // in practice both are always `[]` here — but the catalogs describe the
-        // ENGINE, not the conversation, and a bare remote clear (no cancel, no
-        // respawn) must not look like the slash menu went away. Blanking them
-        // would also be the one place this branch disagreed with the app-level
-        // fields it cannot see.
+        // Carried, not reset: the menu describes the ENGINE, not the conversation, and
+        // a bare remote clear (no cancel, no respawn) must not look like it went away.
         slashCommands: s.slashCommands,
-        sdkSkillNames: s.sdkSkillNames,
         permissionMode: data?.permissionMode ?? fresh.permissionMode,
         seeded: true
       }))
@@ -761,14 +754,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       if (!session) return state
       let next = state
 
-      const idx = session.messages.findIndex(
-        (m) =>
-          m.id === message.id ||
-          (session.selectedEngineId === 'codex' &&
-            message.role === 'user' &&
-            m.role === 'user' &&
-            m.id === message.replacesMessageId)
-      )
+      const idx = session.messages.findIndex((m) => m.id === message.id)
       next = withSession(next, routingId, (current) =>
         commitMessage(current, message, undefined, undefined, idx)
       )
@@ -777,9 +763,36 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
 
     case 'session:messages-retracted': {
       const routingId = routingIdOf(event)
-      const data = arg<{ messageIds?: string[] }>(event, 1)
+      const data = arg<{ messageIds?: string[]; ownerToolUseId?: string }>(event, 1)
       if (!routingId) return state
       const messageIds = data?.messageIds ?? []
+      // A dispatched agent's retraction names its card: only the named messages and their
+      // streams in that card, never the session's own. Nothing named, nothing taken back.
+      const owner = data?.ownerToolUseId
+      if (owner) {
+        if (messageIds.length === 0) return state
+        return withSession(state, routingId, (s) => {
+          const bucket = s.subagentMessages[owner]
+          return {
+            itemStreams: Object.fromEntries(
+              Object.entries(s.itemStreams).filter(
+                ([, stream]) =>
+                  stream.target.ownerToolUseId !== owner ||
+                  !messageIds.includes(stream.target.messageId)
+              )
+            ),
+            itemStreamRevision: event.seq ?? 0,
+            ...(bucket
+              ? {
+                  subagentMessages: {
+                    ...s.subagentMessages,
+                    [owner]: bucket.filter((m) => !messageIds.includes(m.id))
+                  }
+                }
+              : {})
+          }
+        })
+      }
       return withSession(state, routingId, (s) => ({
         itemStreams: Object.fromEntries(
           Object.entries(s.itemStreams).filter(
@@ -1061,13 +1074,6 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
         // schedule (ADR-068 §4). `disconnected` returns above and must not
         // clear it: the reason the process died may be exactly this.
         ...(status.state === 'running' ? { authRequired: null } : {}),
-        ...(status.engineId === 'codex' && status.model
-          ? {
-              selectedModel: status.codex?.overrides?.model ?? status.model.modelId,
-              selectedEngineId: 'codex',
-              ...(status.codex?.overrides?.model ? { codexModelExplicit: true } : {})
-            }
-          : {}),
         ...((status.engineId === 'opencode' || status.engineId === 'pi') &&
         status.model?.engineId === status.engineId
           ? {
@@ -1080,9 +1086,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
 
       if (
         status.model &&
-        (status.engineId === 'codex' ||
-          ((status.engineId === 'opencode' || status.engineId === 'pi') &&
-            status.model.engineId === status.engineId))
+        (status.engineId === 'opencode' || status.engineId === 'pi') &&
+        status.model.engineId === status.engineId
       )
         next = {
           ...next,
@@ -1090,13 +1095,7 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
             ...next.sessionEngines,
             [id]: {
               engineId: status.engineId,
-              model: {
-                ...status.model,
-                modelId:
-                  status.engineId === 'codex'
-                    ? (status.codex?.overrides?.model ?? status.model.modelId)
-                    : status.model.modelId
-              }
+              model: status.model
             }
           }
         }
@@ -1128,10 +1127,9 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
       return withSession(state, routingId, (s) => {
         // The retry belongs to a turn this failure actually KILLED, and the
         // canonical status is the only thing here that knows whether there was
-        // one: Codex's host fans a failed refresh to every session attached to
-        // the process (ADR-069 §8), so a session idle for hours hears about a
-        // credential it was not using, and offering to retry its last prompt
-        // offers to re-run a turn that completed. Every emitter still reads
+        // one: a session idle for hours can hear about a credential it was not
+        // using, and offering to retry its last prompt offers to re-run a turn
+        // that completed. Every emitter still reads
         // `running` at this point — each one sends this event BEFORE the
         // `sendStatus()` that reports the turn over — so a real failure keeps it.
         const retryPrompt = s.status.state === 'running' ? lastUserPrompt(s) : undefined
@@ -1377,18 +1375,13 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     }
 
     // -----------------------------------------------------------------------
-    // App-level catalogs
+    // Per-session slash menu (engine list + shared skill catalog, built by the session)
     // -----------------------------------------------------------------------
     case 'session:slash-commands': {
+      const routingId = routingIdOf(event)
       const commands = arg<SlashCommandInfo[]>(event, 1)
-      if (!Array.isArray(commands)) return state
-      return { ...state, slashCommands: commands }
-    }
-
-    case 'session:skills': {
-      const names = arg<string[]>(event, 1)
-      if (!Array.isArray(names)) return state
-      return { ...state, sdkSkillNames: names }
+      if (!routingId || !Array.isArray(commands)) return state
+      return withSession(state, routingId, () => ({ slashCommands: commands }))
     }
 
     // -----------------------------------------------------------------------

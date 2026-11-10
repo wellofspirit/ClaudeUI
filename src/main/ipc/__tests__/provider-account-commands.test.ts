@@ -22,8 +22,7 @@ const syncMocks = vi.hoisted(() => ({
   removeAccount: vi.fn()
 }))
 const serviceMocks = vi.hoisted(() => ({
-  listDefinitions: vi.fn(),
-  setAccountsPerSession: vi.fn()
+  listDefinitions: vi.fn()
 }))
 
 vi.mock('../../../core/auth/vault/CredentialSync', () => ({
@@ -50,8 +49,7 @@ const chatgpt: SharedProviderDefinition = {
   routes: {
     pi: { enabled: true, providerId: 'openai-codex' },
     opencode: { enabled: true, providerId: 'openai' }
-  },
-  accounts: { perSession: true }
+  }
 }
 
 const custom: SharedProviderDefinition = {
@@ -107,20 +105,15 @@ beforeEach(() => {
   })
   syncMocks.switchActiveAccount.mockResolvedValue(undefined)
   syncMocks.removeAccount.mockResolvedValue(undefined)
-  serviceMocks.setAccountsPerSession.mockResolvedValue(undefined)
 })
 
 describe('provider-account:* registrations', () => {
-  it('are four `config` commands, declared exactly once each', () => {
+  it('are three `config` commands, declared exactly once each', () => {
     expect(commandFor('provider-account:list')).toMatchObject({
       capability: 'config',
       kind: 'query'
     })
-    for (const channel of [
-      'provider-account:switch',
-      'provider-account:remove',
-      'provider-account:set-per-session'
-    ]) {
+    for (const channel of ['provider-account:switch', 'provider-account:remove']) {
       expect(commandFor(channel)).toMatchObject({ capability: 'config', kind: 'command' })
       expect(commands.filter((c) => c.channel === channel)).toHaveLength(1)
     }
@@ -128,12 +121,11 @@ describe('provider-account:* registrations', () => {
 })
 
 describe('provider-account:list', () => {
-  it('answers the vault status plus the definition’s per-session flag', async () => {
+  it('answers the vault status', async () => {
     await expect(call('provider-account:list', 'chatgpt')).resolves.toEqual({
       ok: true,
       data: {
         activeId: 'acc-1',
-        perSession: true,
         accounts: [
           {
             id: 'acc-1',
@@ -193,11 +185,6 @@ describe('provider-account mutations', () => {
     expect(syncMocks.removeAccount).toHaveBeenCalledWith('acc-2')
   })
 
-  it('set-per-session routes to the definition writer', async () => {
-    await call('provider-account:set-per-session', 'chatgpt', true)
-    expect(serviceMocks.setAccountsPerSession).toHaveBeenCalledWith('chatgpt', true)
-  })
-
   it('refuses every mutation for a provider with no accounts', async () => {
     await expect(call('provider-account:switch', 'ollama-local', 'x')).resolves.toMatchObject({
       ok: false
@@ -205,12 +192,8 @@ describe('provider-account mutations', () => {
     await expect(call('provider-account:remove', 'ollama-local', 'x')).resolves.toMatchObject({
       ok: false
     })
-    await expect(
-      call('provider-account:set-per-session', 'ollama-local', true)
-    ).resolves.toMatchObject({ ok: false })
     expect(syncMocks.switchActiveAccount).not.toHaveBeenCalled()
     expect(syncMocks.removeAccount).not.toHaveBeenCalled()
-    expect(serviceMocks.setAccountsPerSession).not.toHaveBeenCalled()
   })
 
   it('carries a failure back as a refusal instead of a silent no-op', async () => {

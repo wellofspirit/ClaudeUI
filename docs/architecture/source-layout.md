@@ -33,12 +33,6 @@ src/
                          model-discovery, PiBridgeHost (loopback approval + hosted-tool
                          host), pi-bridge-source (the -e extension), permission-engine,
                          pi-locate, pi-protocol (ADR-035)
-    codex/             — Codex backend: CodexAppServerClient (stdio JSONL),
-                         CodexClient (typed methods), CodexService (read-only
-                         catalog/history/auth), CodexSession, event-mapper,
-                         history, settings, model-discovery, model-selection,
-                         codex-locate, protocol/ (generated) + __tests__
-                         (ADR-066/067)
     automode/          — engine-neutral auto-mode judge: classifier.ts, rules/,
                          ground-truth.ts (redirect facts), redirect-measure.ts
                          (fs measurement), action-meta.ts (per-action meta),
@@ -47,7 +41,7 @@ src/
                          (fallback-account snapshot), judge-capture.ts
                          (opt-in prompt+reply JSONL) (ADR-023/050/106/107)
     auth/              — EngineAuthProvider + opencode/pi implementations; vault/
-                         (AuthVault, CredentialSync, codex-oauth — ADR-036/037)
+                         (AuthVault, CredentialSync, chatgpt-oauth — ADR-036/037)
     shared-providers/  — canonical provider/model routing + native projections (ADR-037)
     ipc/               — the registrars (session/terminal/automation/webauthn/authcfg)
                          + command-registry, remote-handlers, the shared command
@@ -58,7 +52,7 @@ src/
     shared/sync/       — the wire types both sides fold: channels.ts (the closed
                          channel set), reducer.ts, state.ts, stream.ts, sync-client.ts,
                          sync-decision.ts, client-registry.ts, events.ts
-    voice/             — on-device speech-to-text for opencode, pi and Codex (ADR-101):
+    voice/             — on-device speech-to-text for opencode and pi (ADR-101):
                          worker/ (the voice worker: protocol server, LocalAgreement preview,
                          segmented final pass, sherpa loader), local-voice-server.ts (the
                          host's one worker), pack-store.ts + pack-installer.ts (the speech
@@ -113,8 +107,8 @@ src/
   e2e/flows/           — layer-3 E2E tests
   integration/         — layer-4 integration tests (real engine binaries, gated)
 vendor/                — rebundled bun-claude + engine source checkouts (not checked in);
-                         opencode, pi and Codex live in ~/.claude/ui/harnesses (ADR-082)
-scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode/pi/codex
+                         opencode and pi live in ~/.claude/ui/harnesses (ADR-082)
+scripts/               — build-time helpers (extract-cli, rebundle-cli, ensure-opencode/pi
                          over the harness installer,
                          build-server.mjs for the two server artifacts,
                          verify-bun-sqlite.ts for driver conformance,
@@ -177,11 +171,11 @@ Key modules in `src/core/services/`:
 | `db.ts`                                                                                                         | Operational SQLite DB — migrations + typed repos, on the driver seam (below)                                                                                                                         |
 | `sqlite-driver.ts` + `sqlite/`                                                                                  | The storage seam: one API, three engines (`better-sqlite3-driver`, `bun-sqlite-driver`, `node-sqlite-driver`); the ENTRYPOINT installs one (ADR-058)                                                 |
 | `ui-config.ts`                                                                                                  | Plain-text config: settings.json, engines/vendors JSON, sessions, slash commands                                                                                                                     |
-| `claude-settings.ts` / `claude-mcp.ts`                                                                          | Claude's own settings.json / .mcp.json edited in place (plane ②, ADR-009)                                                                                                                            |
-| `skill-scanner.ts` / `custom-command-scanner.ts`                                                                | Scans project/user/plugin skill and slash-command directories                                                                                                                                        |
+| `claude-settings.ts` / `claude-mcp.ts`                                                                          | Claude's own settings.json edited in place (plane ②, ADR-009); MCP: `claude-mcp*.ts` / `claude-plugin-mcp.ts`, see [mcp-catalog.md](mcp-catalog.md)                                                  |
+| `frontmatter.ts` / `claude-skill-info.ts`                                                                       | Line-scanner frontmatter reader (agent types); catalog entry → `SkillInfo` / slash-menu mapping shared by every engine session                                                                       |
 | `sync-host.ts`                                                                                                  | SyncCore's host adapter: the process-wide core, the subscriber registry (every client is one sink), the stream registry, and `emitEvent` — the ONE place a domain event leaves the process (ADR-051) |
 | `host-window.ts`                                                                                                | The desktop window handle, or `null` — read at use time, never captured (phase 4d)                                                                                                                   |
-| `sync-seed.ts`                                                                                                  | Seeds canonical state's file/query-sourced fields at boot (settings, session registry, slash commands, sidebar directories) so a `sync-full` is complete before any client connects (phase 4b)       |
+| `sync-seed.ts`                                                                                                  | Seeds canonical state's file/query-sourced fields at boot (settings, session registry, sidebar directories) so a `sync-full` is complete before any client connects (phase 4b)                       |
 | `logger.ts`                                                                                                     | File + ring-buffer logging (the debug WINDOW is `src/main/services/log-viewer.ts`)                                                                                                                   |
 | `mermaid-tool.ts` / `mockup-tool.ts`                                                                            | Hosted MCP tools for diagram + UI-mockup rendering (ADR-007)                                                                                                                                         |
 | `voice-stream-client.ts`                                                                                        | The cli.js voice-server TCP protocol; the base of the relay's push-fed client                                                                                                                        |

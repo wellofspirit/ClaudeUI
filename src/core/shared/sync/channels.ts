@@ -307,13 +307,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: true,
-    why: 'App-level slashCommands list (the snapshot carries it per session, sourced from one app-level list).'
-  },
-  'session:skills': {
-    cls: 'replicated',
-    ring: true,
-    canonical: true,
-    why: 'App-level sdkSkillNames, same shape as slash-commands.'
+    why: "The session's own slash menu (its engine list plus the shared Claude skill catalog), folded into that session's slashCommands."
   },
   'session:watch-update': {
     cls: 'replicated',

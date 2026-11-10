@@ -1,13 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ClaudePermissions, PermissionScope, DirEntry } from '../../../../shared/types'
+import type {
+  ClaudePermissions,
+  PermissionScope,
+  DirEntry,
+  WorkspaceTrust
+} from '../../../../shared/types'
 import { FileMentionMenu } from '../chat/FileMentionMenu'
 import {
+  APPLY_NOTE,
   RULE_TEMPLATES,
   SCOPE_DESCRIPTIONS,
   SCOPE_LABELS,
   useDirSuggestions,
   type RuleCategory
 } from './shared'
+import { TrustRow } from './TrustRow'
 
 export type { RuleCategory }
 
@@ -19,8 +26,12 @@ export interface PermissionsDialogViewProps {
   perms: ClaudePermissions
   dirty: Record<PermissionScope, boolean>
   hasDirty: boolean
-  /** ~/.claude.json trust flag for the current cwd; null = unknown/not probed. */
-  workspaceTrusted: boolean | null
+  cwd: string | null
+  /** Trust state of the current cwd; null = unknown/not probed (row hidden). */
+  trust: WorkspaceTrust | null
+  trustSaving: boolean
+  trustError: string | null
+  onToggleTrust: () => void
   onListDir: (path: string) => Promise<{ entries: DirEntry[]; isRoot: boolean }>
   onChangeTab: (scope: PermissionScope) => Promise<void>
   onUpdateRule: (category: RuleCategory, index: number, value: string) => void
@@ -404,7 +415,11 @@ export function PermissionsDialogView({
   perms,
   dirty,
   hasDirty,
-  workspaceTrusted,
+  cwd,
+  trust,
+  trustSaving,
+  trustError,
+  onToggleTrust,
   onListDir,
   onChangeTab,
   onUpdateRule,
@@ -416,10 +431,6 @@ export function PermissionsDialogView({
   onSaveAll,
   onClose
 }: PermissionsDialogViewProps): React.JSX.Element {
-  // Untrusted workspace: cli.js drops project/local ALLOW rules on the floor
-  // (silently — the warning is suppressed non-interactively). Only worth saying
-  // on the tabs those rules live in.
-  const showTrustWarning = workspaceTrusted === false && activeTab !== 'user'
   return (
     <div
       data-testid="PermissionsDialog"
@@ -501,35 +512,16 @@ export function PermissionsDialogView({
           </span>
         </div>
 
-        {/* Untrusted-workspace warning */}
-        {showTrustWarning && (
-          <div
-            data-testid="PermissionsDialog.trustWarning"
-            className="shrink-0 flex items-start gap-2 px-5 py-2.5 border-b border-warning/30 bg-warning/10 text-[11px] leading-relaxed text-warning"
-          >
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="shrink-0 mt-[1px]"
-            >
-              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-              <path d="M12 9v4" />
-              <path d="M12 17h.01" />
-            </svg>
-            <span>
-              This workspace is not trusted, so Claude Code ignores every{' '}
-              <strong className="font-semibold">Allow</strong> rule from the Local and Project
-              scopes. Deny and Ask rules still apply, as do Global allows. To trust it, run{' '}
-              <code className="font-mono">claude</code> in this directory once and accept the trust
-              prompt.
-            </span>
-          </div>
+        {/* Workspace trust toggle */}
+        {trust && activeTab !== 'user' && (
+          <TrustRow
+            trust={trust}
+            saving={trustSaving}
+            error={trustError}
+            cwd={cwd}
+            onToggle={onToggleTrust}
+            padX="px-5"
+          />
         )}
 
         {/* Content */}
@@ -592,7 +584,10 @@ export function PermissionsDialogView({
 
         {/* Footer */}
         <div className="shrink-0 flex items-center justify-between px-5 py-3 border-t border-border bg-bg-secondary/30">
-          <div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+          <div
+            data-testid="PermissionsDialog.applyNote"
+            className="flex items-center gap-1.5 text-[11px] text-text-muted"
+          >
             <svg
               width="12"
               height="12"
@@ -607,7 +602,7 @@ export function PermissionsDialogView({
               <path d="M12 16v-4" />
               <path d="M12 8h.01" />
             </svg>
-            Changes take effect on next session start
+            {APPLY_NOTE}
           </div>
           <div className="flex items-center gap-2">
             {hasDirty && (

@@ -8,8 +8,7 @@
  *
  * They lived in settings-sections.tsx until the pi Configuration panes needed
  * them too. settings-sections.tsx IMPORTS the pane modules, so a pane importing
- * these back from it would close an import cycle — the same reason
- * `use-engine-installed.ts` is its own module.
+ * these back from it would close an import cycle.
  */
 
 import type { ModelInfo } from '../../../../shared/types'

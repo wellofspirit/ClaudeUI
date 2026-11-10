@@ -1,33 +1,33 @@
 {
   "id": "opencode",
-  "tested": "2.1.2",
-  "floor": "2.1.2",
+  "tested": "2.2.6",
+  "floor": "2.2.6",
   "ceiling": "3.0.0",
   "platforms": {
     "win32-x64": {
       "package": "@opencode/cli-windows-x64",
-      "integrity": "sha512-r2DUwYbPe++6y4vWRuHX7slVCMIHyLyC8YAgJO7YAKX7dMgfXe4RDlJK7eZ6KHNBdpIY62Nxd6DPzKiCOP8uMg==",
-      "binarySha256": "bffa56f2d179cb4d02007febd79c0874b696a11b23b36a56357c882abfe7aaaa"
+      "integrity": "sha512-Wcmduf9DaGQgJG3GMliHilaI+YvdckW7O6aLzRwz1r3iIkP82MSoUlSU+ovlOEDj8O+Gy5Ywy5LL6Iv77YuzFw==",
+      "binarySha256": "98cb0aa854c7c015cf6febafa7afb872c359bfe5a823a526f3b4fd347a9e9677"
     },
     "darwin-arm64": {
       "package": "@opencode/cli-darwin-arm64",
-      "integrity": "sha512-H8Nx7ksbHpd5u0Q9BQMj2Mt5vs+dC/t3AslxrmJDY5TZbPyHt6OKJ5TMJc6nQZAFKPrVFGOA+TdzQ9tU5qt6Sg==",
-      "binarySha256": "b6dc81ec33e062a443e9d3eb1033e42f5d3e16acc4409970320cd26b9a215d0c"
+      "integrity": "sha512-OZwkLtiDOvcsfWkRS4e0o/Vpgb7vw12xBLlIFyuDZfglsCmOSNzihS3Akg0Wh3kbob8JKDngIbktctgbfHmF8w==",
+      "binarySha256": "90e4d03597b03d2051b65b4d793467764e55bacd8e22bf4824479c7233ea0e15"
     },
     "darwin-x64": {
       "package": "@opencode/cli-darwin-x64",
-      "integrity": "sha512-ARVkU6v/nvJ9+5ymbHo9WERimPM2wdRK70XikpKgQu849DdBAehopLqhD9FJj4SbroBNVivfSR8ZWHx0H0khHQ==",
-      "binarySha256": "4d0baadd0c574af7388ae819f98678eac512c93959ee3d3de63a325bf2a16e4a"
+      "integrity": "sha512-wZ+5gMEV11Fbzk+ElfJmYvZ+UseCw82jxBB5DhqNZOELG9SZNNPVco5B1ZY5ZpKq72GPWEmH6/KgTi5bjSC/MQ==",
+      "binarySha256": "6273561d1f9b3ff20d350aba47874fd12b2c4aed7ee62c1979f579c9570ef1fc"
     },
     "linux-x64": {
       "package": "@opencode/cli-linux-x64",
-      "integrity": "sha512-O8/8JT8SNmMReDmpYDsm04KmkrQQ2dzaKgaw06zCoUfh50ARGHs58E6zCh16GIUyEL8abrdSe268K5/ExE89Gw==",
-      "binarySha256": "cf5841e6666aeb469abec8b39ca494cef07a637756454a34a742b2f4996e1675"
+      "integrity": "sha512-g1NShGt+20y/7nzQvqAnO7bQshC8nZGaz8WC7J8vjgXIOZ1uzoxz5OiLnCbUWertf2CM3Dlh9tzrmZJf0ic9Aw==",
+      "binarySha256": "50503d24577fa4117a7c95ee85b2cd679606a87eacf20ca54ed5db5c9e1cf895"
     },
     "linux-arm64": {
       "package": "@opencode/cli-linux-arm64",
-      "integrity": "sha512-294IA9S1sXOAzOBRPMcnFuYpXlFeUaKTlpTk0a7TMvuc7cJbfS52poTw3AlIu7ycbn8TGmTmj27OOxsMmBCLEg==",
-      "binarySha256": "ffca8d78413cefaf4abd9e177c1b89061a396e594d265b2cf918df2c7c2640ff"
+      "integrity": "sha512-/Hr0ZBwHY4t4NSoakRu6SrR4SZiXIQx5Qbgwrsfn6JoZ1/REvTo8ZhOJ2cJjCzoQLt1oToS1tLJgMJBHAdF4Vg==",
+      "binarySha256": "ce4f5e7502b6e32ccd8b05654410e8e8607b9660737222b0b1279621bcea2b03"
     }
   }
 }

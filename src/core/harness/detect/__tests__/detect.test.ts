@@ -3,7 +3,7 @@
  *
  * The detection pipeline end to end over temp-directory layouts, with the
  * `--version` and `node --version` runners stubbed: de-duplication,
- * classification (ADR-082 §3), pi's node, Codex's host, and
+ * classification (ADR-082 §3), pi's node, and
  * `bestSystemInstall`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -20,7 +20,6 @@ import { cmdShim, writeNative, writePackage, writeText } from './layout'
 /** Tested manifest versions: what a "tested" install reports. */
 const CLAUDE_TESTED = harnessManifest('claude').tested
 const OPENCODE_TESTED = harnessManifest('opencode').tested
-const CODEX_TESTED = harnessManifest('codex').tested
 const PI_TESTED = harnessManifest('pi').tested
 
 const WIN = process.platform === 'win32'
@@ -161,27 +160,6 @@ describe('de-duplication', () => {
     const installs = mine(await detectHarness('claude', deps))
     expect(installs).toHaveLength(1)
     expect(installs[0]).toMatchObject({ displayPath: shim, realPath: exe, verdict: 'tested' })
-  })
-})
-
-describe('Codex', () => {
-  it('needs codex-code-mode-host beside it', async () => {
-    const dir = path.join(home, '.codex', 'packages', 'standalone', 'current', 'bin')
-    const bin = writeNative(path.join(dir, `codex${EXE}`))
-    const answers = { [bin]: `codex-cli ${CODEX_TESTED}\n` }
-    const [without] = mine(await detectHarness('codex', depsFor(answers)))
-    expect(without).toMatchObject({
-      version: CODEX_TESTED,
-      verdict: 'unsupported',
-      reason: 'codex-code-mode-host not found beside it'
-    })
-    writeNative(path.join(dir, `codex-code-mode-host${EXE}`))
-    const [withHost] = mine(await detectHarness('codex', depsFor(answers)))
-    expect(withHost).toMatchObject({
-      version: CODEX_TESTED,
-      verdict: 'tested',
-      installKind: 'standalone'
-    })
   })
 })
 
@@ -326,7 +304,7 @@ describe('detectHarnesses', () => {
     })
     const deps = depsFor({}, { probeRun, pathEntries: [path.join(tmp, 'bin')], concurrency: 1 })
     const detections = await detectHarnesses(undefined, deps)
-    expect(detections.map((d) => d.id)).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(detections.map((d) => d.id)).toEqual(['claude', 'opencode', 'pi'])
     expect(mine(detections[0])[0]).toMatchObject({ realPath: claude, verdict: 'tested' })
     expect(mine(detections[1])[0]).toMatchObject({ realPath: opencode, verdict: 'tested' })
     expect(peak).toBe(1)

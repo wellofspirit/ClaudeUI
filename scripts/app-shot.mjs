@@ -1,6 +1,6 @@
 // Launch the built ClaudeUI Electron app under Playwright control, capture a
 // screenshot + renderer console errors, and report how many times a needle
-// (default "Codex") appears in the live DOM. Node-only — Playwright's _electron
+// (default "ClaudeUI") appears in the live DOM. Node-only — Playwright's _electron
 // driver has no Python binding, and the renderer needs the real preload bridge
 // (window.api), so a headless browser can't substitute.
 //
@@ -93,7 +93,7 @@ const arg = (name, def) => {
 const has = (name) => args.includes(`--${name}`)
 
 const outPath = arg('out', join(root, '.cache', 'screenshots', 'app.png'))
-const needle = arg('needle', 'Codex')
+const needle = arg('needle', 'ClaudeUI')
 const settle = parseInt(arg('settle', '3000'), 10)
 // Collect every step flag in COMMAND-LINE order; replayed sequentially before the
 // shot. Selectors accept Playwright syntax incl. `text=...` and `[title="..."]`;

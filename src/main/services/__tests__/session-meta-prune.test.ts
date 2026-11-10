@@ -124,9 +124,8 @@ describe('pruneOrphanClaudeSessionMeta', () => {
       transcript('-p', 'anchor')
       db.setSessionMeta('oc', { engineId: 'opencode' })
       db.setSessionMeta('pi-1', { engineId: 'pi' })
-      db.setSessionMeta('cx', { engineId: 'codex' })
       expect(prune.pruneOrphanClaudeSessionMeta()).toEqual([])
-      expect(ids(db)).toEqual(['cx', 'oc', 'pi-1'])
+      expect(ids(db)).toEqual(['oc', 'pi-1'])
     } finally {
       db.closeDb()
     }
@@ -136,25 +135,12 @@ describe('pruneOrphanClaudeSessionMeta', () => {
     const { db, prune } = await fresh()
     try {
       transcript('-p', 'anchor')
-      // A newer build's engine id: rowToMeta clamps it to 'claude', the prune must not.
+      // A newer build's engine id: allSessionMeta hides it, and the prune must not read it as claude.
       db.setSessionMeta('future', { engineId: 'gemini' as never })
-      expect(db.allSessionMeta()['future'].engineId).toBe('claude')
+      expect(db.allSessionMeta()['future']).toBeUndefined()
       expect(prune.pruneOrphanClaudeSessionMeta()).toEqual([])
-      expect(ids(db)).toEqual(['future'])
-    } finally {
-      db.closeDb()
-    }
-  })
-
-  it('keeps a row with a context reading or a Codex override', async () => {
-    const { db, prune } = await fresh()
-    try {
-      transcript('-p', 'anchor')
-      db.setSessionMeta('metered', { engineId: 'claude', contextUsed: 10, contextWindow: 200 })
-      db.setSessionMeta('overridden', { engineId: 'claude' })
-      db.ensureCodexSessionOverrides('overridden')
-      expect(prune.pruneOrphanClaudeSessionMeta()).toEqual([])
-      expect(ids(db)).toEqual(['metered', 'overridden'])
+      // allSessionMeta hides it, so count by the stored engine id: the row is still there.
+      expect(db.sessionCountsByEngine()).toEqual({ gemini: 1 })
     } finally {
       db.closeDb()
     }

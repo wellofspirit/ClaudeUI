@@ -10,6 +10,7 @@ import { agentWhollyDenies, evaluateChildCall, childSessionRuleset } from '../su
 import {
   buildSessionRuleset,
   SESSION_TOOLS_DENY_RULE,
+  WORKTREE_TOOLS_DENY_RULES,
   wireOrder,
   type V2Rule
 } from '../permission-v2'
@@ -97,6 +98,28 @@ describe('2.x subagent children — childSessionRuleset / agentWhollyDenies', ()
     expect(child.slice(0, session.length - 1)).toEqual(session.slice(0, -1))
   })
 
+  it('a child never sees the worktree tools, whatever its agent and the parent allow', () => {
+    // auto mode's parent rules carry a `claudeui_*` allow
+    const session = buildSessionRuleset({
+      mode: 'auto',
+      autoMode: true,
+      permissions: {
+        allow: [],
+        deny: [],
+        ask: [],
+        additionalDirectories: [],
+        defaultMode: undefined
+      },
+      mcpServers: ['claudeui']
+    }).rules
+    const child = childSessionRuleset(session, [v('*', 'allow')], 'linux')
+    for (const tool of ['claudeui_enter_worktree', 'claudeui_exit_worktree']) {
+      expect(evaluateV2Call(child, tool, ['*'], 'linux'), tool).toBe('deny')
+      expect(v2ToolHidden(child, tool, 'linux'), tool).toBe(true)
+    }
+    expect(v2ToolHidden(child, 'claudeui_render_mermaid', 'linux')).toBe(false)
+  })
+
   it('a custom agent that denies shell stays shell-less under a parent that allows a command', () => {
     const custom = [...DEFAULTS, v('shell', 'deny')]
     const session = parent('default', [], ['Bash(git status)'])
@@ -109,7 +132,13 @@ describe('2.x subagent children — childSessionRuleset / agentWhollyDenies', ()
     const session = parent('default')
     const child = childSessionRuleset(session, GENERAL_V2, 'linux')
     expect(child).toEqual(
-      wireOrder([...session, v('question', 'deny'), v('subagent', 'deny'), SESSION_TOOLS_DENY_RULE])
+      wireOrder([
+        ...session,
+        v('question', 'deny'),
+        v('subagent', 'deny'),
+        SESSION_TOOLS_DENY_RULE,
+        ...WORKTREE_TOOLS_DENY_RULES
+      ])
     )
     expect(v2ToolHidden(effective(GENERAL_V2, child), 'question', 'linux')).toBe(true)
     expect(evaluateV2Call(effective(GENERAL_V2, child), 'edit', ['a.ts'], 'linux')).toBe('ask')

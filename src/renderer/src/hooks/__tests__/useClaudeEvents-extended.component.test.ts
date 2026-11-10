@@ -67,10 +67,9 @@ beforeEach(async () => {
   // otherwise carry the previous test's sessions into this one.
   app = await bootTestApp()
   resetFactoryCounter()
-  // The hook's own `saveSlashCommands` / `confirmQuit` assertions need spies the
+  // The hook's own `confirmQuit` assertions need spies the
   // bridge-backed api does not provide.
   Object.assign(window.api, {
-    saveSlashCommands: vi.fn(),
     confirmQuit: vi.fn(),
     ackQuitPrompt: vi.fn(() => Promise.resolve())
   })
@@ -520,60 +519,29 @@ describe('useClaudeEvents extended component tests', () => {
   })
 
   describe('session:slash-commands', () => {
-    it('updates slashCommands in store', () => {
+    it('lands on the emitting session only', () => {
+      useSessionStore.getState().createNewSession('route-1', '/test')
+      useSessionStore.getState().createNewSession('route-2', '/test')
       const commands = [
-        { name: 'review', description: 'Review code', content: 'Please review' },
-        { name: 'test', description: 'Run tests', content: 'Run the tests' }
+        { name: '/review', description: 'Review code' },
+        { name: '/test', description: 'Run tests' }
       ]
 
-      app.emit('session:slash-commands', 'ignored', commands)
+      app.emit('session:slash-commands', 'route-1', commands)
 
-      expect(useSessionStore.getState().slashCommands).toEqual(commands)
+      const { sessions } = useSessionStore.getState()
+      expect(sessions['route-1'].slashCommands).toEqual(commands)
+      expect(sessions['route-2'].slashCommands).toEqual([])
     })
 
-    it('calls window.api.saveSlashCommands with the received commands', () => {
-      const commands = [{ name: 'deploy', description: 'Deploy', content: 'Deploy to prod' }]
+    it('replaces the list on a subsequent event', () => {
+      useSessionStore.getState().createNewSession('route-1', '/test')
+      app.emit('session:slash-commands', 'route-1', [{ name: '/old-cmd' }])
+      app.emit('session:slash-commands', 'route-1', [{ name: '/new-cmd' }])
 
-      app.emit('session:slash-commands', 'ignored', commands)
-
-      expect(window.api.saveSlashCommands as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
-        commands
-      )
-    })
-
-    it('replaces slash commands on subsequent event', () => {
-      app.emit('session:slash-commands', 'ignored', [
-        { name: 'old-cmd', description: 'old', content: 'old' }
+      expect(useSessionStore.getState().sessions['route-1'].slashCommands).toEqual([
+        { name: '/new-cmd' }
       ])
-      app.emit('session:slash-commands', 'ignored', [
-        { name: 'new-cmd', description: 'new', content: 'new' }
-      ])
-
-      const { slashCommands } = useSessionStore.getState()
-      expect(slashCommands).toHaveLength(1)
-      expect(slashCommands[0].name).toBe('new-cmd')
-    })
-  })
-
-  describe('session:skills', () => {
-    it('updates sdkSkillNames in store', () => {
-      app.emit('session:skills', 'ignored', ['bundle-analyzer', 'patch-readme'])
-
-      expect(useSessionStore.getState().sdkSkillNames).toEqual(['bundle-analyzer', 'patch-readme'])
-    })
-
-    it('replaces previous skill names on update', () => {
-      app.emit('session:skills', 'ignored', ['skill-a', 'skill-b'])
-      app.emit('session:skills', 'ignored', ['skill-c'])
-
-      expect(useSessionStore.getState().sdkSkillNames).toEqual(['skill-c'])
-    })
-
-    it('sets empty array when no skills provided', () => {
-      app.emit('session:skills', 'ignored', ['skill-a'])
-      app.emit('session:skills', 'ignored', [])
-
-      expect(useSessionStore.getState().sdkSkillNames).toEqual([])
     })
   })
 
@@ -995,6 +963,40 @@ describe('useClaudeEvents extended component tests', () => {
 
       expect(useSessionStore.getState().sessions['route-1'].gitStatus?.branch).toBe('feature')
       expect(useSessionStore.getState().sessions['route-2'].gitStatus?.branch).toBe('feature')
+    })
+
+    // The watcher states the session's WORKDIR (worktree, else cwd), so the status
+    // for it must land on that session, and the spawn cwd's must not.
+    it('routes by the worktree path for a session that entered a worktree', () => {
+      const routingId = 'route-1'
+      // Its own cwd: the module-level status cache is keyed by path and would seed
+      // gitStatus for one an earlier test used.
+      useSessionStore.getState().createNewSession(routingId, '/project/wt-routing')
+      useSessionStore.getState().setWorktreeInfo(routingId, {
+        worktreePath: '/project/wt-routing/.claude/worktrees/wt',
+        worktreeBranch: 'wt',
+        worktreeName: 'wt',
+        originalCwd: '/project/wt-routing',
+        gitRoot: '/project/wt-routing',
+        originalHeadCommit: '',
+        createdAt: 0
+      })
+      mirrorStoreIntoReplica()
+      // `setWorktreeInfo` also patches the local cwd; put it back so the test is
+      // about the worktree path alone.
+      useSessionStore.setState((s) => ({
+        sessions: {
+          ...s.sessions,
+          [routingId]: { ...s.sessions[routingId], cwd: '/project/wt-routing' }
+        }
+      }))
+      const status = { branch: 'wt', files: [] } as unknown as GitStatusData
+
+      app.emit('git:status-update', { cwd: '/project/wt-routing', status })
+      expect(useSessionStore.getState().sessions[routingId].gitStatus).toBeNull()
+
+      app.emit('git:status-update', { cwd: '/project/wt-routing/.claude/worktrees/wt', status })
+      expect(useSessionStore.getState().sessions[routingId].gitStatus?.branch).toBe('wt')
     })
   })
 
@@ -1801,9 +1803,12 @@ describe('useClaudeEvents extended component tests', () => {
         expect(body).not.toContain('dispatch:')
       })
 
-      it('an X-Agent hand_back ask', () => {
-        const body = ask('dispatch:hand_back', 'dispatch:codex')
-        expect(body).toContain('Hand back needs approval')
+      it('an X-Agent hand_back ask, spelled bare by pi and claudeui_-prefixed by opencode', () => {
+        expect(ask('dispatch:hand_back', 'dispatch:pi')).toContain('Hand back needs approval')
+        notified.mockClear()
+        expect(ask('dispatch:claudeui_hand_back', 'dispatch:opencode')).toContain(
+          'Hand back needs approval'
+        )
       })
 
       it('a Claude X-Agent’s mcp__ ask is read by the Claude map', () => {
@@ -1812,27 +1817,13 @@ describe('useClaudeEvents extended component tests', () => {
         expect(body).not.toContain('mcp__')
       })
 
-      // Codex's map collapses every `mcp__…` name to the kind word "MCP": a first-party tool
-      // keeps its label, a third-party one must still say which tool it asks to run.
+      // A first-party tool keeps its label; a third-party one must say which tool it asks to run.
       it('a third-party MCP tool names its server and tool, on every engine', () => {
-        for (const engine of ['claude', 'codex', 'pi', 'opencode'] as const) {
+        for (const engine of ['claude', 'pi', 'opencode'] as const) {
           notified.mockClear()
           const body = ask('mcp__github__create_issue', undefined, engine)
           expect(body).toContain('github / create_issue needs approval')
         }
-      })
-
-      it('a Codex parent’s first-party tool keeps its label, in either spelling', () => {
-        for (const wire of ['dispatch_agent', 'mcp__claude-ui-collab__dispatch_agent']) {
-          notified.mockClear()
-          expect(ask(wire, undefined, 'codex')).toContain('X-Agent needs approval')
-        }
-      })
-
-      it('a Codex X-Agent’s forwarded third-party MCP ask names its server and tool', () => {
-        const body = ask('dispatch:mcp__github__create_issue', 'dispatch:codex', 'claude')
-        expect(body).toContain('github / create_issue needs approval')
-        expect(body).not.toContain('dispatch:')
       })
     })
 
@@ -2130,7 +2121,6 @@ describe('useClaudeEvents extended component tests', () => {
     it('chatgpt re-reads the VAULT account list, so a second client is not stale', async () => {
       const VAULT = {
         activeId: 'v1',
-        perSession: false,
         accounts: [{ id: 'v1', email: 'vault@example.com', expiresAt: 0, needsReauth: false }]
       }
       useSessionStore.setState({ providerAccounts: null })
@@ -2152,7 +2142,6 @@ describe('useClaudeEvents extended component tests', () => {
     it('tolerates an accountId on the payload without changing what it reads', async () => {
       const listProviderAccounts = vi.fn(async () => ({
         activeId: 'v1',
-        perSession: false,
         accounts: []
       }))
       const listProviderRegistry = vi.fn(async () => ({ entries: [], opencodeInstalled: false }))

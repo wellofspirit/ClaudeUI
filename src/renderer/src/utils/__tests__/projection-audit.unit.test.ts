@@ -303,7 +303,7 @@ describe('the audit rides the real replica', () => {
     expect(() => vi.advanceTimersByTime(PROJECTION_AUDIT_DELAY_MS)).not.toThrow()
   })
 
-  it('reports no `retired` finding for a Codex-style rekey', () => {
+  it('reports no `retired` finding for a rekey to the stable session id', () => {
     seed.created('minted-1', { cwd: '/p' })
     seed.userMessage('minted-1', { id: 'u1', prompt: 'hi' })
     // The engine reports its stable id on the status that also ends the turn.
@@ -374,13 +374,13 @@ describe('the audit rides the real replica', () => {
   })
 
   /**
-   * The first Codex turn of a session runs under the MINTED routing id until the
-   * engine reports its thread id, and that rekey rides a `session:status` that is
+   * The first turn of a session runs under the MINTED routing id until the
+   * engine reports its stable session id, and that rekey rides a `session:status` that is
    * usually still `running`. The baseline taken at the first `running` must
    * survive both the rekey (carried to the new id) and the later `running`
    * echo (not re-taken), or a resync inside that window is never attributed.
    */
-  it('attributes a resync that landed before the rekey of the first Codex turn', () => {
+  it('attributes a resync that landed before the rekey of the first turn', () => {
     seed.created('minted-1', { cwd: '/p' })
     seed.status('minted-1', makeSessionStatus({ state: 'running' }))
     seed.userMessage('minted-1', { id: 'u1', prompt: 'hi' })

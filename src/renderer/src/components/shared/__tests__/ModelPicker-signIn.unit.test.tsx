@@ -26,13 +26,13 @@ const claudeModel: ModelDisplay = {
   vendorId: 'anthropic'
 }
 
-const codexModel: ModelDisplay = {
-  value: 'gpt-5.6-codex',
-  displayName: 'GPT-5.6 Codex',
-  description: 'GPT-5.6 Codex · OpenAI',
-  shortName: 'GPT-5.6 Codex',
-  engineId: 'codex',
-  vendorId: 'openai'
+const chatgptModel: ModelDisplay = {
+  value: 'openai-codex/gpt-5.6-luna',
+  displayName: 'GPT-5.6 Luna',
+  description: 'GPT-5.6 Luna · OpenAI',
+  shortName: 'GPT-5.6 Luna',
+  engineId: 'pi',
+  vendorId: 'openai-codex'
 }
 
 const zenModel: ModelDisplay = {
@@ -91,8 +91,10 @@ describe('ModelPicker — sign-in entry point', () => {
   })
 
   it('clicking it opens the dialog in reauth mode and closes the picker', () => {
-    setAuth({ chatgpt: 'unauthenticated' })
-    render(<ModelPicker models={[codexModel]} selectedModel={codexModel} onSelectModel={vi.fn()} />)
+    setAuth({ chatgpt: 'unauthenticated', chatgptRoutes: { pi: true } })
+    render(
+      <ModelPicker models={[chatgptModel]} selectedModel={chatgptModel} onSelectModel={vi.fn()} />
+    )
     openDropdown()
 
     fireEvent.click(screen.getByTestId('ModelPicker.signIn'))

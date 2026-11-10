@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * The body of `bun run ensure-{opencode,pi,codex}` and `update-*` (ADR-082 §8):
+ * The body of `bun run ensure-{opencode,pi}` and `update-*` (ADR-082 §8):
  * install the release manifest's tested version of a harness into ClaudeUI's
  * managed store (`~/.claude/ui/harnesses/<id>/<version>/`, or
  * `CLAUDEUI_HARNESS_STORE`) through the app's own installer
@@ -24,9 +24,8 @@
  *                           nothing, only when the move itself is refused
  *   --quiet                 only the result line
  *
- * A harness ClaudeUI cannot install on this host (`harnessInstallable`: Codex
- * without reviewed digests on Windows arm64 and macOS x64, or a platform the
- * manifest has no release for) is skipped with one line and exit 0, so
+ * A harness ClaudeUI cannot install on this host (`harnessInstallable`: a
+ * platform the manifest has no release for) is skipped with one line and exit 0, so
  * `postinstall` succeeds there.
  *
  * Bumping a harness: set `tested` (and `floor`) in
@@ -36,9 +35,7 @@
  * `PIN_COMMIT` in `scripts/generate-opencode-protocol.mjs` and
  * `bun run generate-opencode-protocol` once the new version is installed: it
  * generates from the spec that installed binary serves; pi: each asset's SHA-256 from the release's
- * `SHA256SUMS`; Codex: every host's archive and binary digests, the source
- * commit and the LICENSE digest, then `bun run generate-codex-protocol`), and
- * run `bun run ensure-<id>`.
+ * `SHA256SUMS`), and run `bun run ensure-<id>`.
  */
 import * as fs from 'node:fs'
 import { harnessManifest } from '../src/core/harness/manifests.ts'
@@ -48,7 +45,7 @@ import { installHarness, onInstallProgress } from '../src/core/harness/install/i
 import { isValidInstall, moveToTrash } from '../src/core/harness/install/store-writer.ts'
 import { logger } from '../src/core/services/logger.ts'
 
-const LABELS = { opencode: 'opencode', pi: 'pi', codex: 'Codex' }
+const LABELS = { opencode: 'opencode', pi: 'pi' }
 
 /** `--force` and `--quiet`, nothing else. Throws on anything else. */
 export function parseEnsureArgs(argv) {

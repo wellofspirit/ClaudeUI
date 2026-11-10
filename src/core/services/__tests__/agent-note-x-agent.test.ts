@@ -112,7 +112,7 @@ describe('read back: every engine shows the same row', () => {
     ).toBe('Report from X-Agent impl-e1')
   })
 
-  it('opencode and Codex: the user row of the wrapper becomes the result note', () => {
+  it('opencode: the user row of the wrapper becomes the result note', () => {
     const message: ChatMessage = {
       id: 'u1',
       role: 'user',
@@ -233,7 +233,7 @@ describe('a message from an X-Agent (not its report)', () => {
     ).toBe('Message from X-Agent impl-e1')
   })
 
-  it('opencode and Codex: the wrapper’s user row reads back as the message note', () => {
+  it('opencode: the wrapper’s user row reads back as the message note', () => {
     const message: ChatMessage = {
       id: 'u1',
       role: 'user',

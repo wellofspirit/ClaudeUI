@@ -1,7 +1,14 @@
 import { simpleGit, type SimpleGit } from 'simple-git'
 import * as fs from 'fs'
 import * as path from 'path'
-import type { GitStatusData, GitBranchData, GitFileStatus } from '../../shared/types'
+import type {
+  GitStatusData,
+  GitBranchData,
+  GitBranchDetail,
+  GitAutostash,
+  GitPullConfig,
+  GitFileStatus
+} from '../../shared/types'
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 
@@ -142,6 +149,47 @@ function tooLargeContentMarker(bytes: number): string {
 /** Sentinel returned by getFileContents for a binary working-tree file. */
 function binaryContentMarker(): string {
   return `⟪ Binary file — preview not shown ⟫\n`
+}
+
+/**
+ * Per-ref fields of `getBranches`, `%00`-separated. Order is positional in the parser:
+ * refname, commit time, upstream, upstream:track, worktreepath, HEAD marker.
+ */
+const BRANCH_REF_FORMAT =
+  '%(refname)%00%(committerdate:unix)%00%(upstream:short)%00%(upstream:track)%00%(worktreepath)%00%(HEAD)'
+
+/** `ClaudeUI autostash: <branch> <ISO time>`, behind git's own `On <branch>: ` prefix. */
+const AUTOSTASH_SUBJECT = /(?:^|: )ClaudeUI autostash: (\S+) (\S+)$/
+
+/** `[ahead 1, behind 2]` / `[ahead 1]` / `[behind 2]` / `[gone]` / empty. */
+function parseTrack(track: string): { ahead: number; behind: number; gone: boolean } {
+  return {
+    ahead: Number(/ahead (\d+)/.exec(track)?.[1] ?? 0),
+    behind: Number(/behind (\d+)/.exec(track)?.[1] ?? 0),
+    gone: track.includes('gone')
+  }
+}
+
+/** Both sides come from git, so only trailing slashes and Windows case differ. */
+function samePath(a: string, b: string): boolean {
+  const n = (p: string): string => {
+    const t = p.replace(/\\/g, '/').replace(/\/+$/, '')
+    return process.platform === 'win32' ? t.toLowerCase() : t
+  }
+  return n(a) === n(b)
+}
+
+/**
+ * `git pull` flags for a chosen mode. A rebase keeps the user's own flavour: with
+ * `rebase=merges` configured a plain `--rebase` would flatten their merge commits.
+ */
+export function pullArgs(
+  mode: 'merge' | 'rebase' | undefined,
+  rebaseSetting: string | null
+): string[] {
+  if (mode === 'merge') return ['--no-rebase']
+  if (mode === 'rebase') return [rebaseSetting === 'merges' ? '--rebase=merges' : '--rebase']
+  return []
 }
 
 export class GitService {
@@ -354,34 +402,168 @@ export class GitService {
     }
   }
 
+  /**
+   * Every branch with what the dropdown shows per row, from ONE `for-each-ref`
+   * (`%00` between fields; a ref name holds neither NUL nor newline), plus the
+   * stash stack's ClaudeUI entries and the pull settings git would apply.
+   */
   async getBranches(): Promise<GitBranchData> {
-    const summary = await this.git.branch(['-a', '--no-color'])
+    const [refsOut, autostashes, pullConfig] = await Promise.all([
+      this.git.raw([
+        'for-each-ref',
+        '--sort=-committerdate',
+        `--format=${BRANCH_REF_FORMAT}`,
+        'refs/heads',
+        'refs/remotes'
+      ]),
+      this.listAutostashes(),
+      this.readPullConfig()
+    ])
+
+    const rows = refsOut
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.split('\0'))
+    // Only needed when a branch is checked out somewhere else.
+    const needsMain = rows.some(([, , , , wt, head]) => wt && head !== '*')
+    const mainWorktree = needsMain ? await this.mainWorktreePath() : null
+
+    const details: GitBranchDetail[] = []
     const local: string[] = []
     const remote: string[] = []
     const tracking: Record<string, string> = {}
-
-    for (const [name, info] of Object.entries(summary.branches)) {
-      if (name.startsWith('remotes/')) {
-        // Strip "remotes/" prefix for display
-        const remoteName = name.replace(/^remotes\//, '')
-        // Skip HEAD pointers
-        if (!remoteName.includes('/HEAD')) {
-          remote.push(remoteName)
-        }
-      } else {
-        local.push(name)
+    let current = ''
+    for (const [ref, time, upstream, track, wt, head] of rows) {
+      if (ref.startsWith('refs/remotes/')) {
+        const name = ref.slice('refs/remotes/'.length)
+        if (name.endsWith('/HEAD')) continue // origin/HEAD is a pointer, not a branch
+        remote.push(name)
+        details.push({
+          name,
+          kind: 'remote',
+          commitTime: Number(time) || 0,
+          ahead: 0,
+          behind: 0,
+          gone: false,
+          current: false
+        })
+        continue
       }
-      // Capture tracking info if available
-      if ((info as { tracking?: string }).tracking) {
-        tracking[name] = (info as { tracking?: string }).tracking!
+      const name = ref.slice('refs/heads/'.length)
+      const isCurrent = head === '*'
+      if (isCurrent) current = name
+      local.push(name)
+      if (upstream) tracking[name] = upstream
+      const { ahead, behind, gone } = parseTrack(track)
+      details.push({
+        name,
+        kind: 'local',
+        commitTime: Number(time) || 0,
+        ...(upstream ? { upstream } : {}),
+        ahead,
+        behind,
+        gone,
+        current: isCurrent,
+        ...(wt && !isCurrent
+          ? { worktree: { path: wt, main: mainWorktree !== null && samePath(wt, mainWorktree) } }
+          : {})
+      })
+    }
+    if (!current) {
+      // Detached HEAD has no ref row: report the short sha, as the branch pill does.
+      try {
+        current = (await this.git.raw(['rev-parse', '--short', 'HEAD'])).trim()
+      } catch {
+        /* an unborn branch has no HEAD commit */
       }
     }
 
-    return {
-      current: summary.current,
-      local,
-      remote,
-      tracking
+    // "Not on the remote yet · K commits": only asked of a branch without an upstream.
+    const hasUpstream = details.some((d) => d.current && d.upstream)
+    const unpublished = current && !hasUpstream ? await this.countUnpublished() : 0
+
+    return { current, local, remote, tracking, details, autostashes, pullConfig, unpublished }
+  }
+
+  /** Commits reachable from HEAD that no remote-tracking branch has. */
+  private async countUnpublished(): Promise<number> {
+    try {
+      return (
+        Number(
+          (await this.git.raw(['rev-list', '--count', 'HEAD', '--not', '--remotes'])).trim()
+        ) || 0
+      )
+    } catch {
+      return 0 // unborn branch
+    }
+  }
+
+  /** The first `git worktree list` entry is the main checkout. */
+  private async mainWorktreePath(): Promise<string | null> {
+    try {
+      const out = await this.git.raw(['worktree', 'list', '--porcelain'])
+      const first = out.split('\n').find((l) => l.startsWith('worktree '))
+      return first ? first.slice('worktree '.length).trim() : null
+    } catch {
+      return null
+    }
+  }
+
+  private async configValue(key: string): Promise<string | null> {
+    try {
+      return (await this.git.raw(['config', '--get', key])).trim().toLowerCase() || null
+    } catch {
+      return null // exit 1 = unset
+    }
+  }
+
+  private async currentBranchName(): Promise<string> {
+    try {
+      return (await this.git.raw(['branch', '--show-current'])).trim()
+    } catch {
+      return ''
+    }
+  }
+
+  /** The effective rebase setting, lowercased and unnormalised (`true`, `merges`, `false`, ...). */
+  private async rebaseSetting(): Promise<string | null> {
+    const branch = await this.currentBranchName()
+    const [branchRebase, pullRebase] = await Promise.all([
+      branch ? this.configValue(`branch.${branch}.rebase`) : null,
+      this.configValue('pull.rebase')
+    ])
+    return branchRebase ?? pullRebase
+  }
+
+  private async readPullConfig(): Promise<GitPullConfig> {
+    const [raw, ff] = await Promise.all([this.rebaseSetting(), this.configValue('pull.ff')])
+    const rebase =
+      raw === null ? null : ['false', 'no', 'off', '0'].includes(raw) ? 'merge' : 'rebase'
+    return { rebase, ff: ff === 'only' || ff === 'true' || ff === 'false' ? ff : null }
+  }
+
+  /** ClaudeUI's own entries in the shared stash stack, newest first. */
+  private async listAutostashes(): Promise<GitAutostash[]> {
+    const found: GitAutostash[] = []
+    for (const { sha, subject } of await this.stashEntries()) {
+      const m = AUTOSTASH_SUBJECT.exec(subject)
+      if (m) found.push({ sha, branch: m[1], time: m[2] })
+    }
+    return found
+  }
+
+  private async stashEntries(): Promise<{ sha: string; subject: string }[]> {
+    try {
+      const out = await this.git.raw(['stash', 'list', '--format=%H%x00%gs'])
+      return out
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const [sha, subject] = line.split('\0')
+          return { sha, subject: subject ?? '' }
+        })
+    } catch {
+      return []
     }
   }
 
@@ -389,8 +571,62 @@ export class GitService {
     await this.git.checkout(branch)
   }
 
-  async createBranch(name: string): Promise<void> {
-    await this.git.checkoutLocalBranch(name)
+  /** `base` omitted/null = branch from HEAD, as before. */
+  async createBranch(name: string, base?: string | null): Promise<void> {
+    if (!base) {
+      await this.git.checkoutLocalBranch(name)
+      return
+    }
+    if (base.startsWith('-')) throw new Error(`Invalid base branch: ${base}`)
+    await this.git.checkoutBranch(name, base)
+  }
+
+  /**
+   * Stash the working tree INCLUDING untracked files (never `--all`: that would
+   * stash ignored `node_modules`), labelled so `getBranches` can offer it back.
+   * The stack is shared by every worktree of the repository.
+   */
+  async stashPush(): Promise<void> {
+    const branch = (await this.currentBranchName()) || 'HEAD'
+    await this.git.raw([
+      'stash',
+      'push',
+      '-u',
+      '-m',
+      `ClaudeUI autostash: ${branch} ${new Date().toISOString()}`
+    ])
+  }
+
+  /**
+   * Apply the stash with this sha and drop exactly that entry. Matched by sha,
+   * never by position: other worktrees push to the same stack. A failed apply
+   * (conflicts) throws and leaves the entry in place.
+   */
+  async stashRestore(sha: string): Promise<void> {
+    if (!/^[0-9a-f]{40,64}$/i.test(sha)) throw new Error(`Invalid stash id: ${sha}`)
+    if (!(await this.stashEntries()).some((e) => e.sha === sha)) {
+      throw new Error('That stash no longer exists')
+    }
+    const applied = await this.git.raw(['stash', 'apply', sha])
+    // A content conflict exits 1 with everything on stdout, which simple-git
+    // resolves as success: unmerged paths are the signal.
+    const unmerged = (await this.git.raw(['ls-files', '-u'])).trim()
+    if (unmerged) {
+      throw new Error(
+        'Restoring the stash left conflicts in your working tree. Resolve them; the stash was kept.\n' +
+          applied.trim()
+      )
+    }
+    const index = (await this.stashEntries()).findIndex((e) => e.sha === sha)
+    if (index < 0) return
+    const dropped = await this.git.raw(['stash', 'drop', `stash@{${index}}`])
+    const droppedSha = /\(([0-9a-f]{40,64})\)/i.exec(dropped)?.[1]
+    if (droppedSha && droppedSha !== sha) {
+      throw new Error(
+        `Restored, but the stack moved underneath: git dropped ${droppedSha} instead of ${sha}. ` +
+          `Another stash was removed; recover it with: git stash store -m recovered ${droppedSha}`
+      )
+    }
   }
 
   async getFilePatch(
@@ -576,8 +812,11 @@ export class GitService {
     await this.git.push(['--set-upstream', 'origin', branch])
   }
 
-  async pull(): Promise<{ summary: string }> {
-    const result = await this.git.pull()
+  /** `mode` decides how a diverged branch reconciles; omitted leaves it to git's config. */
+  async pull(mode?: 'merge' | 'rebase'): Promise<{ summary: string }> {
+    const result = await this.git.pull(
+      pullArgs(mode, mode === 'rebase' ? await this.rebaseSetting() : null)
+    )
     const s = result.summary
     return { summary: `${s.changes} changes, ${s.insertions} insertions, ${s.deletions} deletions` }
   }

@@ -1,6 +1,6 @@
 ---
 name: bump-harness
-description: Bump or adopt a new version of an engine ClaudeUI drives — Claude Code (the vendored, patched cli.js / bun-claude), opencode, pi or Codex. Use whenever asked to "bump <engine> to latest", check whether a new harness release is worth adopting, re-pin a harness, fix patches broken by a Claude Code update, or verify a harness version works. Carries the owner's standing bump contract, the gate order, per-engine checklists and the traps past bumps fell into.
+description: Bump or adopt a new version of an engine ClaudeUI drives — Claude Code (the vendored, patched cli.js / bun-claude), opencode or pi. Use whenever asked to "bump <engine> to latest", check whether a new harness release is worth adopting, re-pin a harness, fix patches broken by a Claude Code update, or verify a harness version works. Carries the owner's standing bump contract, the gate order, per-engine checklists and the traps past bumps fell into.
 ---
 
 # Bump a harness
@@ -54,7 +54,6 @@ the PR.
 - Claude Code → `references/claude-code.md`
 - opencode → `references/opencode.md`
 - pi → `references/pi.md`
-- Codex → `references/codex.md`
 
 Each lists the files that must move with the pin and links to the procedure that already exists
 for that engine. Follow the linked procedure; the checklist is what past bumps forgot.

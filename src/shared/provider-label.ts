@@ -3,8 +3,8 @@
  * person calls it (ADR-071 §8).
  *
  * The dashboard's top grouping is the provider, not the vendor and not the
- * engine: one ChatGPT subscription is spent through Codex, opencode and pi
- * under three different vendor ids, and the owner asks one question of it.
+ * engine: one ChatGPT subscription is spent through opencode and pi
+ * under different vendor ids, and the owner asks one question of it.
  * `providerIdForBucket` is that rule and `providerLabel` names its answer.
  *
  * The rule reads the SUBSCRIPTION out of the account key first, because that is
@@ -24,7 +24,7 @@ const OPENAI_PROVIDER = 'openai'
 
 /**
  * Vendor and key prefixes that are the SAME provider under different names —
- * `chatgpt` from an account key, `openai` from opencode and Codex,
+ * `chatgpt` from an account key, `openai` from opencode (and from history rows of the removed Codex engine),
  * `openai-codex` from pi. Canonicalised so a subscription and an API key under
  * one provider land in one group rather than in two identically-labelled ones.
  */

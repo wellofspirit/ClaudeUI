@@ -412,7 +412,7 @@ describe('buildSeriesColorMap', () => {
 })
 
 /**
- * A business workspace member's monthly credit allowance (Codex `individualLimit`).
+ * A business workspace member's monthly credit allowance (ChatGPT `individualLimit`).
  * The backend states what is LEFT; every meter here counts what is USED, so the
  * flip happens in exactly one place and the summary carries both.
  */

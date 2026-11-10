@@ -70,6 +70,16 @@ See `09-initialize.md` for full details. One-shot handshake, sent exactly once p
 
 ---
 
+### `set_has_subscribers` (2.1.319, `@internal`, not sent by ClaudeUI)
+
+`{subtype: "set_has_subscribers", has_subscribers: boolean | null}` (`cli.js@char3180182`): tells the
+CLI whether anybody watches the stream-json output the host passes on (`false` nobody, `true`
+somebody, `null` unknown, counts as `true`). It matters only in a CLI started with
+`CLAUDE_CODE_STREAM_EVENT_HOLD_MS`, which holds most `content_block_delta` and `thinking_tokens` lines to join
+them. ClaudeUI sets none of that, so it never sends it.
+
+---
+
 ### `interrupt`
 
 Abort the current turn. Instant.
@@ -236,7 +246,11 @@ Merge arbitrary settings into the `flagSettings` layer. `null` values delete key
 - Merges `{...prev, ...settings}`, deletes null-valued keys.
 - Persists via `O76(merged)`.
 - `model` key special-cased — updates `l2()`.
-- Notifies `LE.notifyChange('flagSettings')`.
+- Notifies `LE.notifyChange('flagSettings')`. In 2.1.317 (`wI`) the notify is skipped only when all four of these hold:
+  the merge deep-equals the previous flag layer, the entrypoint is `remote_cowork` (`Vm()`), managed-only rules are
+  off, and the fast-mode re-check (`ng`) finds nothing to refresh. So ClaudeUI's empty `apply_flag_settings({})` (entrypoint `claude-desktop`)
+  always notifies. The notify invalidates the whole settings cache (`invalidateAll`) and fans out to the headless
+  subscriber, which rebuilds the permission context from disk. See 02-cli-flags §2.6, "Settings edits while running".
 
 **Timing:** fast (disk write).
 
@@ -1428,3 +1442,5 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 ## 2.1.308 bounded schema audit
 
 The bundle adds internal outbound queries `list_cloud_sessions` (optional `user_initiated`), `get_cloud_session` (`session_id`), and `get_cloud_session_transcript` (`session_id`, optional `cursor`). They read cloud sessions using the CLI's sign-in and have host/entrypoint restrictions. ClaudeUI does not issue them; their runtime availability was not tested. This is a schema audit, not a new host capability.
+
+**2.1.317 re-check:** the three queries are byte-identical (same subtype strings, same field sets and `.describe()` text), still `@internal`, and are still the only ones of their family — no cloud query was added or removed at 2.1.317. Their runtime availability remains untested.

@@ -8,9 +8,11 @@
  */
 
 import type { EngineId } from '../../../../shared/types'
+import { engineLabelOf, isEngineId } from '../../../../shared/engine-label'
 
 interface EngineLogoProps {
-  engineId: EngineId
+  /** A stored value may name an engine that no longer exists: it gets a generic mark. */
+  engineId: string
   /** Tailwind/inline class passthrough for positioning, margin, etc. */
   className?: string
   /** px size of the icon. Default: 12 */
@@ -25,6 +27,23 @@ export function EngineLogo({
   size = 12,
   testid = 'EngineLogo'
 }: EngineLogoProps): React.JSX.Element {
+  if (!isEngineId(engineId)) {
+    return (
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
+        fill="none"
+        className={className}
+        aria-label={engineLabelOf(engineId)}
+        data-testid={testid}
+        data-engine={engineId}
+        style={{ flexShrink: 0 }}
+      >
+        <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="2" />
+      </svg>
+    )
+  }
   const Mark = ENGINE_MARK[engineId]
   return <Mark size={size} className={className} testid={testid} engineId={engineId} />
 }
@@ -148,26 +167,6 @@ function PiMark({
 // compile error until its mark is added (rather than silently rendering Claude).
 type EngineMarkProps = { size: number; className: string; testid: string; engineId: EngineId }
 const ENGINE_MARK = {
-  codex: ({ size, className, testid, engineId }: EngineMarkProps) => (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      className={className}
-      aria-label="Codex"
-      data-testid={testid}
-      data-engine={engineId}
-    >
-      <path
-        d="M5 6l6 6-6 6m9 0h5"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  ),
   claude: ClaudeMark,
   opencode: OpencodeMark,
   pi: PiMark

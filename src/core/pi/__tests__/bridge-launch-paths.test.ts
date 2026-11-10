@@ -19,7 +19,10 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
-vi.mock('../pi-locate', () => ({ locatePiLaunch: () => ({ command: 'pi', args: [] }) }))
+vi.mock('../pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
+  locatePiLaunch: () => ({ command: 'pi', args: [] })
+}))
 vi.mock('../PiBridgeHost', () => ({
   PiBridgeHost: class {
     start = async (): Promise<{ url: string; token: string }> => ({
@@ -51,7 +54,7 @@ describe('every pi launch path that loads the bridge extension sets both credent
     ['pi-child-runner defaultChildEnv', () => defaultChildEnv(BRIDGE)],
     [
       'pi-subagents buildPiSubagentChildEnv',
-      () => buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: true, listing: 'x', skillDirsEnv: {} })
+      () => buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: true, listing: 'x' })
     ],
     ['cross-engine-dispatcher buildPiTargetChildEnv', () => buildPiTargetChildEnv(BRIDGE)],
     [
@@ -80,7 +83,8 @@ describe('every pi launch path that loads the bridge extension sets both credent
       await defaultSpawnPiChild(base as never)
       expect(h.clientOpts).toHaveLength(1)
       const { args, env } = h.clientOpts[0]
-      expect(args.slice(0, 4)).toEqual(['--mode', 'rpc', '-e', '/ext/bridge.mjs'])
+      // `--approve` (pi-locate.ts PI_APPROVE_ARGS): ClaudeUI decides project trust.
+      expect(args.slice(0, 5)).toEqual(['--mode', 'rpc', '--approve', '-e', '/ext/bridge.mjs'])
       expect(env?.CLAUDEUI_PI_BRIDGE_URL).toBe('http://127.0.0.1:4321')
       expect(env?.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('tok-abc')
     })

@@ -80,8 +80,7 @@ describe('AgentTypeTile', () => {
     for (const [engine, type] of [
       ['claude', 'general-purpose'],
       ['pi', 'general-purpose'],
-      ['opencode', 'general'],
-      ['codex', 'default']
+      ['opencode', 'general']
     ] as const) {
       const { unmount } = render(<AgentTypeTile engine={engine} type={type} testId="tile" />)
       expect(hasBot()).toBe(true)
@@ -106,7 +105,7 @@ describe('AgentTypeTile', () => {
   })
 
   it('draws the bot alone for an agent with no type at all', () => {
-    draw('codex', undefined)
+    draw('pi', undefined)
     expect(hasBot()).toBe(true)
     expect(tile().textContent).toBe('')
     expect(tile().getAttribute('data-color')).toBeNull()

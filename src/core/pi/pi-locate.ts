@@ -37,6 +37,20 @@ export function locatePiLaunch(): HarnessLaunch | null {
   return harnessLaunch('pi')
 }
 
+/**
+ * The trust flag EVERY pi spawn ClaudeUI makes carries. `--approve`
+ * (`vendor/pi-src/packages/coding-agent/src/cli/args.ts:241-242` at v1.5.0)
+ * sets `projectTrustOverride`, so pi takes the folder as trusted and skips its
+ * own trust decision — its trust store and the `project_trust` extension event
+ * (`main.ts:754-759`). That is the point: ClaudeUI decides trust (the user
+ * opened the folder in the app), and since pi 1.5.0 a saved "do not trust" in
+ * `~/.pi/agent/trust.json` wins even for a folder with no trust-requiring
+ * resources, silently dropping its AGENTS.md, skills and extensions. The flag
+ * only covers project-local resources, so the `--no-*` ephemeral spawns (model
+ * discovery, a side question) carry it too.
+ */
+export const PI_APPROVE_ARGS: readonly string[] = ['--approve']
+
 /** Cheap "is pi installed?" check. Never spawns a process. */
 export function piBinaryAvailable(): boolean {
   return harnessAvailable('pi')

@@ -1,4 +1,4 @@
-/** Real RPC guard for pi 1.4.0 transcript tool restoration; no provider call. */
+/** Real RPC guard for pi 1.5.0 transcript tool restoration; no provider call. */
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -115,7 +115,7 @@ describe.skipIf(!process.env.PI_INTEGRATION_TESTS || !launch)('pi resumed tool l
           CLAUDEUI_PI_DISPATCH_ENABLED: '',
           CLAUDEUI_PI_AGENT_TOOL: '',
           CLAUDEUI_PI_SEND_MESSAGE: '',
-          CLAUDEUI_PI_SKILL_DIRS: ''
+          CLAUDEUI_PI_SKILLS: ''
         }
       })
       const loadouts: string[][] = []

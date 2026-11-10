@@ -42,13 +42,9 @@ import { voiceController } from '../lib/voice/voice-controller'
 import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice-pack-store'
 import { hasWakingTask } from '../lib/task-types'
 import { isCreatedWorktree } from '../../../shared/linked-worktree'
+import { sessionWorkdir } from '../lib/session-workdir'
 import { approvalActionName } from '../components/chat/tool-registry/approval-action'
-import type {
-  SessionResult,
-  SessionStatus,
-  TaskNotification,
-  SlashCommandInfo
-} from '../../../shared/types'
+import type { SessionResult, SessionStatus, TaskNotification } from '../../../shared/types'
 
 /** Send a system notification if the session is not currently focused */
 function notifyIfNeeded(routingId: string, title: string, body: string, tag?: string): void {
@@ -335,9 +331,9 @@ export function useClaudeEvents(): void {
       // Git status updates from polling
       onSyncEvent('git:status-update', ({ cwd, status }) => {
         const store = useSessionStore.getState()
-        // Find all sessions with this cwd and update them
+        // Find all sessions working in this directory (worktree, else cwd) and update them
         for (const [routingId, session] of Object.entries(store.sessions)) {
-          if (session.cwd === cwd) {
+          if (sessionWorkdir(session) === cwd) {
             store.setGitStatus(routingId, status)
           }
         }
@@ -350,8 +346,8 @@ export function useClaudeEvents(): void {
       onSyncEvent('usage:block-data', (data) => {
         useSessionStore.getState().setBlockUsage(data)
       }),
-      // ADR-068 §2: a bare nudge — a live Codex session pushed new ChatGPT rate
-      // limits, or a panel-driven read finished. The map itself is read back
+      // ADR-068 §2: a bare nudge — new ChatGPT rate limits arrived, or a
+      // panel-driven read finished. The map itself is read back
       // through `usage:chatgpt-limits`, so there is one shape and one owner.
       // `false`: re-read what the host already holds, never provoke a fetch.
       onSyncEvent('usage:chatgpt-limits-changed', () => {
@@ -737,37 +733,6 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
         store.clearTaskStopping(routingId, notification.toolUseId)
         store.clearBashOutput(routingId, notification.toolUseId)
       }
-      return
-    }
-
-    case 'session:slash-commands': {
-      const commands = (args[1] ?? []) as SlashCommandInfo[]
-      // The filesystem list is NOT cleared here: mergeSlashCommands already
-      // gives the engine list precedence by name, so the scan can only fill
-      // gaps (engines that under-report, skills added after spawn). Clearing
-      // it left the fallback empty for the rest of the app's lifetime, since
-      // the only other scan is keyed on cwd changes. Re-scan instead — the
-      // main-process scanner caches per cwd for 30s, so this is cheap.
-      const cwd = store.sessions[routingId]?.cwd
-      if (cwd) {
-        void window.api
-          .scanCustomCommands(cwd)
-          .then((names) =>
-            useSessionStore.getState().setCustomCommands(names.map((name) => ({ name })))
-          )
-          .catch(() => {
-            /* scanner failed — keep existing commands */
-          })
-      }
-      // Best-effort host-cache write. On a remote client it goes over the wire,
-      // so the catch is kept for NETWORK/TRANSPORT failures — a dropped socket
-      // or a mid-flight reconnect. It is no longer a step-up refusal path:
-      // `config:save-slash-commands` is a named benign cache write and costs no
-      // freshness (`BENIGN_CACHE_WRITE_CHANNELS`, ADR-054 2026-08-28 amendment),
-      // precisely because this fires on an ENGINE event rather than a user
-      // gesture. Either way a failed cache write must never surface as an
-      // unhandled rejection.
-      window.api.saveSlashCommands(commands).catch(() => {})
       return
     }
 

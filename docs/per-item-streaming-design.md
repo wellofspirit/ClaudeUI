@@ -4,7 +4,7 @@
 session stream lane was retired the same day (`7837f7e7`); the Claude snapshot fallback
 landed 2026-09-18 (`79345c43`). Verification recorded below.
 Scope: shared protocol and all clients, with Codex root/direct-child adoption first. Roadmap item 2 in
-[the Codex handoff](codex-integration-handoff.md) — now closed. Extends
+the Codex handoff (`docs/codex-integration-handoff.md`, deleted with the engine on 2026-10-28) — now closed. Extends
 [ADR-055](adr/adr-055_volatile-stream-lane.md) and
 [SyncCore contract 3](architecture/sync-core.md#the-four-wire-contracts-closed-set).
 The architecture and ADR-055 now include this extension.

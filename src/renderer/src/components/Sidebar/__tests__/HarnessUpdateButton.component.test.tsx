@@ -238,9 +238,9 @@ function fire(channel: string, ...args: unknown[]): void {
 }
 
 describe('other installs (the upgrade sheet’s, S7b)', () => {
-  const codex = (patch: Record<string, unknown> = {}) => ({
-    id: 'codex',
-    version: '0.156.0',
+  const installing = (patch: Record<string, unknown> = {}) => ({
+    id: 'opencode',
+    version: '1.18.32',
     phase: 'downloading',
     receivedBytes: 18 * 1024 * 1024,
     totalBytes: 210 * 1024 * 1024,
@@ -251,15 +251,15 @@ describe('other installs (the upgrade sheet’s, S7b)', () => {
   it('spins while a harness that is not an update installs, then shows the fading check', async () => {
     await mounted(updates({ available: [] }))
     expect(screen.queryByTestId('HarnessUpdateButton')).toBeNull()
-    fire('harness:install-progress', codex())
+    fire('harness:install-progress', installing())
     expect(button()).toHaveAttribute('data-state', 'running')
     expect(button()).toHaveAttribute(
       'title',
-      'Installing Codex 0.156.0 · Downloading 18.0 MB of 210.0 MB'
+      'Installing opencode 1.18.32 · Downloading 18.0 MB of 210.0 MB'
     )
     fireEvent.click(button())
     const row = installRows()[0]
-    expect(row).toHaveAttribute('data-id', 'codex@0.156.0')
+    expect(row).toHaveAttribute('data-id', 'opencode@1.18.32')
     expect(row).toHaveAttribute('data-state', 'installing')
     expect(within(row).getByTestId('HarnessUpdatePanel.installProgress')).toHaveTextContent(
       'Downloading 18.0 MB of 210.0 MB'
@@ -274,21 +274,21 @@ describe('other installs (the upgrade sheet’s, S7b)', () => {
     // Cancel from the panel reaches the host.
     api.cancelHarnessInstall.mockResolvedValue({
       status: 'cancelled',
-      id: 'codex',
-      version: '0.156.0'
+      id: 'opencode',
+      version: '1.18.32'
     })
     fireEvent.click(within(row).getByTestId('HarnessUpdatePanel.cancel'))
     await act(async () => {})
-    expect(api.cancelHarnessInstall).toHaveBeenCalledWith('codex', '0.156.0')
+    expect(api.cancelHarnessInstall).toHaveBeenCalledWith('opencode', '1.18.32')
   })
 
   it('finishes with the check, which fades, and the panel says it installed', async () => {
     await mounted(updates({ available: [] }))
-    fire('harness:install-progress', codex())
+    fire('harness:install-progress', installing())
     vi.useFakeTimers()
-    fire('harness:install-progress', codex({ phase: 'done' }))
+    fire('harness:install-progress', installing({ phase: 'done' }))
     expect(button()).toHaveAttribute('data-state', 'done')
-    expect(button()).toHaveAttribute('title', 'Codex 0.156.0 installed')
+    expect(button()).toHaveAttribute('title', 'opencode 1.18.32 installed')
     fireEvent.click(button())
     expect(installRows()[0]).toHaveAttribute('data-state', 'installed')
     fireEvent.click(button())
@@ -302,10 +302,10 @@ describe('other installs (the upgrade sheet’s, S7b)', () => {
 
   it('is amber after a failed install, with the reason in the panel, until dismissed', async () => {
     await mounted(updates({ available: [] }))
-    fire('harness:install-progress', codex())
+    fire('harness:install-progress', installing())
     fire(
       'harness:install-progress',
-      codex({
+      installing({
         phase: 'failed',
         reason: "the download's SHA-256 does not match the reviewed digest"
       })

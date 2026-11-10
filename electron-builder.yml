@@ -31,7 +31,7 @@ files:
   # out/web left in an old checkout out of the asar.
   - '!out/web/**'
 extraResources:
-  # Claude Code is the one bundled harness (ADR-082 §8): opencode, pi and Codex
+  # Claude Code is the one bundled harness (ADR-082 §8): opencode and pi
   # are downloaded into ClaudeUI's managed store (~/.claude/ui/harnesses), never
   # packaged. A test (src/core/harness/__tests__/packaging.test.ts) holds this.
   #

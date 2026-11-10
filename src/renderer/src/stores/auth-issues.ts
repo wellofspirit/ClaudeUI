@@ -142,9 +142,8 @@ const DRIVABLE_PROVIDERS: readonly SignInProviderId[] = ['anthropic', 'chatgpt']
 /**
  * Which engines stop working while this credential is refused.
  *
- * `chatgpt` is route-dependent and deliberately so (ADR-030): Codex runs on the
- * vault and nothing else, but pi and opencode only do while their shared-provider
- * route is enabled — with it off those engines are backed by their own auth
+ * `chatgpt` is route-dependent and deliberately so (ADR-030): pi and opencode
+ * only use it while their shared-provider route is enabled — with it off those engines are backed by their own auth
  * stores and a ChatGPT sign-in would not touch them. Claiming otherwise in a
  * tooltip is the kind of confident wrong answer that sends a user to the wrong
  * settings page.
@@ -152,7 +151,7 @@ const DRIVABLE_PROVIDERS: readonly SignInProviderId[] = ['anthropic', 'chatgpt']
 function blockedEngines(providerId: string, routes: Partial<Record<EngineId, boolean>>): string[] {
   if (providerId === 'anthropic') return [engineMeta('claude').label]
   if (providerId === 'chatgpt') {
-    const blocked = [engineMeta('codex').label]
+    const blocked: string[] = []
     for (const engineId of ['pi', 'opencode'] as const)
       if (routes[engineId]) blocked.push(engineMeta(engineId).label)
     return blocked
@@ -180,7 +179,7 @@ interface Draft {
  *    but ONLY for a provider something is routed to (`inUse`). The vault
  *    answers `'unauthenticated'` for an empty store and the ChatGPT row is
  *    always listed, so without that scope a Claude-only install carried a
- *    permanent "Blocks Codex" pill it could never dismiss — and, since `needed`
+ *    permanent "Blocks pi" pill it could never dismiss — and, since `needed`
  *    outranks `resolved`, never saw "Signed in · Retry" either.
  *  - any session with an unresolved `authRequired` → `expired` (red, "has
  *    failed"). NOT scoped: a turn that died on a credential is proof of use.

@@ -66,7 +66,7 @@ describe('seedCanonicalTranscript — content-first for a non-fork Claude resume
     expect(readSessionHistory.mock.calls[0]?.[2]).toBe('anchor-uuid')
   })
 
-  it.each<EngineId>(['codex', 'opencode', 'pi'])('leaves %s on the unchanged read', async (id) => {
+  it.each<EngineId>(['opencode', 'pi'])('leaves %s on the unchanged read', async (id) => {
     await seedCanonicalTranscript(RID, 'sess', '/r/repo', undefined, id)
     expect(readSessionHistory.mock.calls[0]?.slice(0, 4)).toEqual([
       'sess',

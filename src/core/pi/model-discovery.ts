@@ -15,7 +15,7 @@ import type { EngineModelGroup, ModelInfo } from '../../shared/types'
 import { ModelUnavailableError } from '../../shared/model-errors'
 import type { EffortLevel } from '../../shared/model-capabilities'
 import { PiRpcClient } from './PiRpcClient'
-import { locatePiLaunch, piBinaryAvailable } from './pi-locate'
+import { PI_APPROVE_ARGS, locatePiLaunch, piBinaryAvailable } from './pi-locate'
 import type { PiGetAvailableModelsData, PiModel } from './pi-protocol'
 import { logger } from '../services/logger'
 import { loadEngineConfig } from '../services/ui-config'
@@ -245,7 +245,7 @@ function probeCatalog(background = false): Promise<PiModel[]> {
 
     const probe = new PiRpcClient(launch, {
       cwd: homedir(),
-      args: ['--mode', 'rpc', '--no-session']
+      args: ['--mode', 'rpc', ...PI_APPROVE_ARGS, '--no-session']
     })
     client = probe
     try {

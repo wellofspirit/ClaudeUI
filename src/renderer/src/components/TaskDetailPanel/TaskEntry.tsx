@@ -4,7 +4,7 @@ import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import { SubagentOutputBody, dispatchChildEngine } from '../chat/SubagentOutputBody'
-import { HandbackReport, hasHandbackReport } from '../chat/HandbackReport'
+import { HandbackReport, handbackBodyShown, hasHandbackReport } from '../chat/HandbackReport'
 import { TerminalView } from '../chat/TerminalView'
 import { engineToolMap } from '../chat/tool-registry/engine-tool-maps'
 import {
@@ -418,12 +418,17 @@ export function TaskEntry({ toolUseId }: { toolUseId: string }): React.JSX.Eleme
                 {elapsed !== undefined && <span className="font-mono text-[11px]">{elapsed}</span>}
               </div>
             ) : null}
-            {/* The report a SubagentHandback subagent delivered (or didn't). */}
-            <HandbackReport
-              notification={bgNotification}
-              xAgent={isDispatch}
-              className="mt-3 border-t border-border pt-3 shrink-0"
-            />
+            {/* The report a SubagentHandback subagent delivered (or didn't): its
+                body only when the stream above cannot show it, and nothing while a
+                resumed run is going (the notification is the previous run's). */}
+            {!isRunning && !isQueued && (
+              <HandbackReport
+                notification={bgNotification}
+                xAgent={isDispatch}
+                showReport={handbackBodyShown(hasSubagentOutput, subagentPending, isDispatch)}
+                className="mt-3 border-t border-border pt-3 shrink-0"
+              />
+            )}
             {failureSummary && (
               <div
                 data-testid="TaskEntry.failureSummary"

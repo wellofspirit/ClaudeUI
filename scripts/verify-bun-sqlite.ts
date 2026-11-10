@@ -70,8 +70,6 @@ const REQUIRED_TABLES = [
   'remote_config',
   'audit_log',
   'webauthn_credential',
-  'codex_session_overrides',
-  'codex_forks',
   'meta',
   'usage_hub_config',
   'remote_usage_bucket',

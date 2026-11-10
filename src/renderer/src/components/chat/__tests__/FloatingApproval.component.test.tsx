@@ -535,11 +535,11 @@ describe('FloatingApproval rendered component', () => {
     })
   })
 
-  // A Codex guardian override is bound to a tool_use already in the transcript,
-  // so the declined card owns it and the floating layer must stay empty — the
+  // An approval bound to a tool_use already in the transcript is owned by
+  // that card and the floating layer must stay empty — the
   // same rule that keeps any id-matched approval off the floater.
   it('never floats an approval whose tool_use is already on screen', () => {
-    const toolUseId = 'codex:["root","turn","esc"]'
+    const toolUseId = 'toolu_on_screen'
     useSessionStore.getState().createNewSession(ROUTE, '/test')
     useSessionStore.setState({ activeSessionId: ROUTE })
     seed.message(ROUTE, {
@@ -550,7 +550,7 @@ describe('FloatingApproval rendered component', () => {
         {
           type: 'tool_use',
           toolUseId,
-          toolName: 'commandExecution',
+          toolName: 'Bash',
           toolInput: { command: 'rm -rf x' }
         }
       ]
@@ -559,9 +559,8 @@ describe('FloatingApproval rendered component', () => {
       ROUTE,
       makePendingApproval({
         toolUseId,
-        toolName: 'commandExecution',
-        input: { command: 'rm -rf x' },
-        codex: { guardianOverride: true }
+        toolName: 'Bash',
+        input: { command: 'rm -rf x' }
       })
     )
 
@@ -704,9 +703,9 @@ describe('FloatingApproval rendered component', () => {
       expect(header()).toBe('Bash')
     })
 
-    // Codex's map collapses every `mcp__…` name to the kind word "MCP", which on an approval
-    // (no summary line to carry the server and tool) would not say what is being allowed.
-    it.each(['claude', 'codex', 'pi', 'opencode'] as const)(
+    // An approval has no summary line to carry the server and tool, so the header must say
+    // what is being allowed.
+    it.each(['claude', 'pi', 'opencode'] as const)(
       'a third-party MCP tool reads server / tool in a %s session',
       (engine) => {
         setup({ toolName: 'mcp__github__create_issue', input: { title: 'x' } })
@@ -731,7 +730,7 @@ describe('FloatingApproval rendered component', () => {
           ...state.sessions,
           [ROUTE]: {
             ...state.sessions[ROUTE],
-            status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+            status: { ...state.sessions[ROUTE].status, engineId: 'opencode' }
           }
         }
       }))
@@ -739,29 +738,32 @@ describe('FloatingApproval rendered component', () => {
       expect(header()).toBe('srv / do__thing')
     })
 
-    it.each(['dispatch_agent', 'mcp__claude-ui-collab__dispatch_agent'])(
-      'a Codex parent’s own %s ask still reads X-Agent',
-      (toolName) => {
-        setup({ toolName, input: { engine: 'pi' } })
-        useSessionStore.setState((state) => ({
-          sessions: {
-            ...state.sessions,
-            [ROUTE]: {
-              ...state.sessions[ROUTE],
-              status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
-            }
+    // Each engine spells the dispatch tool its own way: pi registers it bare, Claude
+    // goes through the collab MCP server, opencode prefixes it `claudeui_`.
+    it.each([
+      ['pi', 'dispatch_agent'],
+      ['pi', 'mcp__claude-ui-collab__dispatch_agent'],
+      ['opencode', 'claudeui_dispatch_agent']
+    ] as const)('a %s parent’s own %s ask still reads X-Agent', (engine, toolName) => {
+      setup({ toolName, input: { engine: engine === 'pi' ? 'opencode' : 'pi' } })
+      useSessionStore.setState((state) => ({
+        sessions: {
+          ...state.sessions,
+          [ROUTE]: {
+            ...state.sessions[ROUTE],
+            status: { ...state.sessions[ROUTE].status, engineId: engine }
           }
-        }))
-        render(<FloatingApproval />)
-        expect(header()).toBe('X-Agent')
-      }
-    )
+        }
+      }))
+      render(<FloatingApproval />)
+      expect(header()).toBe('X-Agent')
+    })
 
-    it('a Codex X-Agent’s forwarded third-party MCP ask reads server / tool', () => {
+    it('a pi X-Agent’s forwarded third-party MCP ask reads server / tool', () => {
       setup({
         toolName: 'dispatch:mcp__github__create_issue',
         input: {},
-        agent: { agentId: 't1', label: 'x/y', subagentType: 'dispatch:codex' }
+        agent: { agentId: 't1', label: 'x/y', subagentType: 'dispatch:pi' }
       })
       render(<FloatingApproval />)
       expect(header()).toBe('github / create_issue')

@@ -38,12 +38,7 @@ describe('postinstall', () => {
     expect(stages[0].label).toBe('electron install')
     expect(stages[0].keepGoing).toBeUndefined() // a failed Electron download still stops
     expect(stages[1].label).toBe('native deps')
-    expect(memberLabels(stages[2])).toEqual([
-      'ensure-cli',
-      'ensure-opencode',
-      'ensure-pi',
-      'ensure-codex'
-    ])
+    expect(memberLabels(stages[2])).toEqual(['ensure-cli', 'ensure-opencode', 'ensure-pi'])
   })
 
   it('lets the native stage fail without stopping the ensures', () => {
@@ -60,15 +55,10 @@ describe('postinstall', () => {
 })
 
 describe('ensure', () => {
-  it('is the same four-member parallel group postinstall ends with', () => {
+  it('is the same three-member parallel group postinstall ends with', () => {
     const t = build()
     expect(t.ensure).toHaveLength(1)
-    expect(memberLabels(t.ensure[0])).toEqual([
-      'ensure-cli',
-      'ensure-opencode',
-      'ensure-pi',
-      'ensure-codex'
-    ])
+    expect(memberLabels(t.ensure[0])).toEqual(['ensure-cli', 'ensure-opencode', 'ensure-pi'])
     expect(t.ensure[0]).toEqual(t.postinstall[2])
   })
 
@@ -120,12 +110,10 @@ describe('the other targets keep their shape', () => {
         'build:win',
         'ensure',
         'ensure-cli',
-        'ensure-codex',
         'ensure-opencode',
         'ensure-pi',
         'postinstall',
         'update-cli',
-        'update-codex',
         'update-opencode',
         'update-pi'
       ].sort()
@@ -163,7 +151,7 @@ describe('vendorOverrideRefusal', () => {
     'update-cli',
     'postinstall',
     'ensure-pi',
-    'update-codex',
+    'update-pi',
     'builder-thing'
   ])('does not refuse %s', (target) => {
     expect(vendorOverrideRefusal(target, env)).toBeNull()

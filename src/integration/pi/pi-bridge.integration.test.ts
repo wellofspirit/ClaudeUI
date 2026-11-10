@@ -44,7 +44,7 @@ const DENY_TRIGGER = 'CLAUDEUI_DENY_ME'
 const DENY_REASON = 'blocked by integration guard'
 
 /** Read-only check for a real openai-codex credential — never writes to auth.json. */
-function hasCodexCredentials(): boolean {
+function hasChatgptCredentials(): boolean {
   try {
     const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent')
     const raw = readFileSync(join(agentDir, 'auth.json'), 'utf-8')
@@ -58,7 +58,7 @@ function hasCodexCredentials(): boolean {
 // Evaluated once at collection time so every `it`/describe.skipIf below can
 // gate on it — "skip gracefully" even when PI_INTEGRATION_TESTS=1 is set.
 const BINARY_MISSING = !locatePiBinary()
-const CREDENTIALS_MISSING = !hasCodexCredentials()
+const CREDENTIALS_MISSING = !hasChatgptCredentials()
 
 /** POSIX-ify a Windows path for use inside a bash command string — Git Bash + coreutils accept drive-letter paths with forward slashes; backslashes are shell escape characters. */
 function toBashPath(p: string): string {

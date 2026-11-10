@@ -25,24 +25,9 @@ import {
   clearRemotePassword,
   setLastServeRecord,
   clearLastServeRecord,
-  insertUsageEvent,
-  usageEventsForCodexThread,
   MIGRATIONS,
   type Migration,
-  type UsageEventInsert,
   type Db
-} from '../../../core/services/db'
-import {
-  getCodexSessionOverrides,
-  setCodexSessionOverrides,
-  ensureCodexSessionOverrides,
-  hasCodexSessionOverrides,
-  deleteCodexSessionOverrides,
-  registerCodexFork,
-  recordCodexLineage,
-  listCodexForks,
-  listCodexLineage,
-  deleteCodexFork
 } from '../../../core/services/db'
 import { logger } from '../../../core/services/logger'
 
@@ -58,44 +43,6 @@ afterEach(() => {
 function openRawDb(): Db {
   return new BetterSqlite3(':memory:')
 }
-
-describe('Codex session overrides', () => {
-  it('preserves accepted choices independently of projected metadata and validates stored fields', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      expect(getCodexSessionOverrides('native', db)).toBeUndefined()
-      ensureCodexSessionOverrides('native', db)
-      expect(hasCodexSessionOverrides('native', db)).toBe(true)
-      expect(getCodexSessionOverrides('native', db)).toEqual({})
-      setCodexSessionOverrides('native', { model: 'gpt-native', effort: 'ultra' }, db)
-      ensureCodexSessionOverrides('native', db)
-      db.exec(
-        "INSERT INTO session_meta (session_id, engine_id, updated_at) VALUES ('native', 'codex', 0); DELETE FROM session_meta WHERE session_id = 'native'"
-      )
-      expect(getCodexSessionOverrides('native', db)).toEqual({
-        model: 'gpt-native',
-        effort: 'ultra'
-      })
-      // Native policy keys are no longer a storable setting — the session's
-      // shared PermissionMode owns approval/sandbox/reviewer (ADR-066).
-      expect(() =>
-        setCodexSessionOverrides('native', { approvalPolicy: 'never' } as never, db)
-      ).toThrow('Unsupported')
-      // `reset` is no longer a settings verb at all (no channel ever sent one).
-      expect(() => setCodexSessionOverrides('native', { reset: true } as never, db)).toThrow(
-        'Unsupported'
-      )
-      expect(() =>
-        setCodexSessionOverrides('native', { credential: 'synthetic' } as never, db)
-      ).toThrow('Unsupported')
-      deleteCodexSessionOverrides('native', db)
-      expect(hasCodexSessionOverrides('native', db)).toBe(false)
-    } finally {
-      db.close()
-    }
-  })
-})
 
 /** Read user_version off a db. */
 function userVersion(db: Db): number {
@@ -230,7 +177,7 @@ describe('migration framework — user_version guard', () => {
       //      (slice 1a)
       // v31: session_ref / session_link — short session refs and parent/child links
       //      (slice 1b)
-      expect(userVersion(db)).toBe(40)
+      expect(userVersion(db)).toBe(41)
       expect(db.prepare('SELECT * FROM session_inbox').all()).toEqual([])
       expect(db.prepare('SELECT * FROM session_ref').all()).toEqual([])
       expect(db.prepare('SELECT * FROM session_link').all()).toEqual([])
@@ -322,7 +269,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(40)
+      expect(userVersion(db)).toBe(41)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -466,7 +413,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(40)
+      expect(userVersion(db)).toBe(41)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',
@@ -534,105 +481,12 @@ describe('migration framework — user_version guard', () => {
 // Migration framework — transactional application (each up + version bump atomic)
 // ---------------------------------------------------------------------------
 
-describe('Codex lineage cache', () => {
-  it('registers a fork once, unverified, and lists only real branches', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      expect(listCodexForks(db)).toEqual([])
-      registerCodexFork('fork-a', 'source', db)
-      registerCodexFork('fork-b', 'source', db)
-      // A re-registration (a resume of the same branch) must not duplicate the
-      // row or rewrite its lineage.
-      registerCodexFork('fork-a', 'somewhere-else', db)
-      expect(listCodexForks(db)).toEqual([
-        { threadId: 'fork-a', forkedFromId: 'source' },
-        { threadId: 'fork-b', forkedFromId: 'source' }
-      ])
-      // A fork registered at mint time has NOT been read, so the scan still owes
-      // it one metadata read — which is exactly what a null `verifiedAt` says.
-      expect(listCodexLineage(db)).toEqual([
-        { threadId: 'fork-a', forkedFromId: 'source', verifiedAt: null },
-        { threadId: 'fork-b', forkedFromId: 'source', verifiedAt: null }
-      ])
-      deleteCodexFork('fork-a', db)
-      expect(listCodexForks(db)).toEqual([{ threadId: 'fork-b', forkedFromId: 'source' }])
-    } finally {
-      db.close()
-    }
-  })
-
-  /**
-   * THE POINT OF v17: a ROOT earns a row. Under v16 it never did, so every
-   * delete plan re-read every codex `session_meta` id the registry did not name
-   * and the candidate set never shrank.
-   */
-  it('caches a root as a verified row that is not a branch', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      recordCodexLineage('root', null, 1710, db)
-      recordCodexLineage('fork', 'root', 1711, db)
-      // A root is cached — the scan can now tell "asked, it is a root" from
-      // "never asked" — but it is not a branch of anything, so no plan and no
-      // sidebar read may pick it up.
-      expect(listCodexForks(db)).toEqual([{ threadId: 'fork', forkedFromId: 'root' }])
-      // Sorted, because two rows written in the same millisecond fall back to
-      // the thread id for their order and this test is not about that.
-      expect(
-        [...listCodexLineage(db)].sort((a, b) => a.threadId.localeCompare(b.threadId))
-      ).toEqual([
-        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 1711 },
-        { threadId: 'root', forkedFromId: null, verifiedAt: 1710 }
-      ])
-    } finally {
-      db.close()
-    }
-  })
-
-  it('lets a read REPLACE what a mint-time registration guessed, and tombstone it', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      registerCodexFork('fork', 'root', db)
-      // The scan read the thread: same lineage, now verified against the native
-      // `updatedAt`, so the next scan skips it.
-      recordCodexLineage('fork', 'root', 900, db)
-      expect(listCodexLineage(db)).toEqual([
-        { threadId: 'fork', forkedFromId: 'root', verifiedAt: 900 }
-      ])
-      // Twice-refused: the row stays (so the id is never re-read) but it is no
-      // longer a branch — it is not in any plan and not in any sidebar row.
-      recordCodexLineage('fork', null, null, db)
-      expect(listCodexForks(db)).toEqual([])
-      expect(listCodexLineage(db)).toEqual([
-        { threadId: 'fork', forkedFromId: null, verifiedAt: null }
-      ])
-    } finally {
-      db.close()
-    }
-  })
-
-  it('never treats a thread that claims itself as its own branch', () => {
-    const db = openRawDb()
-    try {
-      runMigrations(db)
-      recordCodexLineage('self', 'self', 5, db)
-      expect(listCodexForks(db)).toEqual([])
-      expect(listCodexLineage(db)).toEqual([
-        { threadId: 'self', forkedFromId: 'self', verifiedAt: 5 }
-      ])
-    } finally {
-      db.close()
-    }
-  })
-
+describe('migration v17 — codex_forks lineage cache (shipped history)', () => {
   /**
    * The v16 rows every existing user carries: branches with no `verified_at`,
    * and the one-time adoption MARKER (`thread_id = ''`, generation in
-   * `forked_from_id`) that the cache replaces. The marker must not survive as a
-   * thread id, and a real row must survive as an unverified branch — so the
-   * first scan verifies it exactly once instead of re-adopting anything.
+   * `forked_from_id`) that v17 replaces. The marker must not survive as a
+   * thread id, and a real row must survive as an unverified branch.
    */
   it('migrates v16 rows into the cache and drops the adoption marker', () => {
     const db = openRawDb()
@@ -646,11 +500,13 @@ describe('Codex lineage cache', () => {
       )
       insert.run('fork', 'root', 1)
       insert.run('', 'adopted-v3', 2)
-      runMigrations(db)
-      expect(listCodexLineage(db)).toEqual([
-        { threadId: 'fork', forkedFromId: 'root', verifiedAt: null }
-      ])
-      expect(db.prepare('SELECT COUNT(*) AS n FROM codex_forks').get()).toEqual({ n: 1 })
+      runMigrations(
+        db,
+        MIGRATIONS.filter((migration) => migration.version <= 17)
+      )
+      expect(
+        db.prepare('SELECT thread_id, forked_from_id, verified_at FROM codex_forks').all()
+      ).toEqual([{ thread_id: 'fork', forked_from_id: 'root', verified_at: null }])
     } finally {
       db.close()
     }
@@ -837,36 +693,6 @@ describe('session_meta CRUD', () => {
     expect(() => deleteSessionMeta('never-existed')).not.toThrow()
   })
 
-  // v24 — the two context columns are MERGED, not replaced: only the metering
-  // path writes them, and every other writer (the sidebar's adoption pass, the
-  // renderer's config round-trip) must leave a session's reading alone.
-  it('a model-only write keeps the persisted Codex context reading', () => {
-    setSessionMeta('codex-thread', {
-      engineId: 'codex',
-      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
-      contextUsed: 4000,
-      contextWindow: 272_000
-    })
-    setSessionMeta('codex-thread', {
-      engineId: 'codex',
-      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-sol' }
-    })
-    expect(getSessionMeta('codex-thread')).toEqual({
-      engineId: 'codex',
-      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-sol' },
-      contextUsed: 4000,
-      contextWindow: 272_000
-    })
-  })
-
-  it('a session that never metered carries neither context key', () => {
-    setSessionMeta('plain', { engineId: 'claude' })
-    const meta = getSessionMeta('plain')
-    expect(meta).toEqual({ engineId: 'claude' })
-    expect('contextUsed' in meta!).toBe(false)
-    expect('contextWindow' in meta!).toBe(false)
-  })
-
   it('allSessionMeta returns all entries', () => {
     setSessionMeta('s1', { engineId: 'claude' })
     setSessionMeta('s2', {
@@ -878,72 +704,6 @@ describe('session_meta CRUD', () => {
     expect(all['s1'].engineId).toBe('claude')
     expect(all['s2'].engineId).toBe('opencode')
     expect(all['s2'].model?.modelId).toBe('gpt-4o')
-  })
-})
-
-// ---------------------------------------------------------------------------
-// usageEventsForCodexThread — the cold status line's ledger read (S1e)
-// ---------------------------------------------------------------------------
-
-describe('usageEventsForCodexThread', () => {
-  function codexRow(overrides: Partial<UsageEventInsert>): UsageEventInsert {
-    return {
-      id: 'evt_' + Math.random().toString(36).slice(2),
-      ts: 1,
-      engineId: 'codex',
-      vendorId: 'openai',
-      accountId: null,
-      accountUuid: null,
-      modelId: 'gpt-5.6-luna',
-      inputTokens: 10,
-      outputTokens: 1,
-      cacheWriteTokens: 0,
-      cacheWrite1hTokens: 0,
-      cacheReadTokens: 0,
-      equivCostUsd: null,
-      engineCostUsd: null,
-      sessionId: 'root',
-      messageId: 'msg_' + Math.random().toString(36).slice(2),
-      source: 'live',
-      origin: 'session',
-      ...overrides
-    }
-  }
-
-  it('joins a root to its children by parent_routing_id and excludes strangers', () => {
-    // A child files its row under its OWN thread id, so only the parent link
-    // can find it from the root.
-    insertUsageEvent(codexRow({ ts: 2, messageId: 'own' }))
-    insertUsageEvent(
-      codexRow({
-        ts: 1,
-        messageId: 'child',
-        sessionId: 'kid',
-        origin: 'child',
-        parentRoutingId: 'root'
-      })
-    )
-    // Another root's child, another root's own turn, and a non-Codex row.
-    insertUsageEvent(
-      codexRow({
-        messageId: 'other-child',
-        sessionId: 'kid2',
-        origin: 'child',
-        parentRoutingId: 'other'
-      })
-    )
-    insertUsageEvent(codexRow({ messageId: 'other-own', sessionId: 'other' }))
-    insertUsageEvent(codexRow({ messageId: 'not-codex', engineId: 'opencode' }))
-
-    // Ascending by ts, so a caller walking the rows sees the session's order.
-    expect(usageEventsForCodexThread('root').map((row) => row.messageId)).toEqual(['child', 'own'])
-  })
-
-  it('returns a dispatch row filed under this thread — the caller decides', () => {
-    insertUsageEvent(
-      codexRow({ messageId: 'target', origin: 'dispatch', parentRoutingId: 'some-claude-session' })
-    )
-    expect(usageEventsForCodexThread('root').map((row) => row.origin)).toEqual(['dispatch'])
   })
 })
 
@@ -987,20 +747,6 @@ describe('renameSessionMeta', () => {
     expect(meta?.model?.modelId).toBe('claude-opus-4-8')
   })
 
-  it('carries the context reading across a rekey', () => {
-    setSessionMeta('tmp-codex', {
-      engineId: 'codex',
-      model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5.6-luna' },
-      contextUsed: 1234,
-      contextWindow: 272_000
-    })
-    renameSessionMeta('tmp-codex', 'thread-id')
-    expect(getSessionMeta('thread-id')).toMatchObject({
-      contextUsed: 1234,
-      contextWindow: 272_000
-    })
-  })
-
   it('falls back to default claude entry when oldId has no entry', () => {
     renameSessionMeta('missing-old', 'new-id')
     const meta = getSessionMeta('new-id')
@@ -1038,11 +784,13 @@ describe('importSessionEnginesOnce', () => {
     expect(getSessionMeta('s2')?.model).toBeUndefined()
   })
 
-  it('preserves codex engineId during legacy import', () => {
+  it('skips an entry for the removed codex engine instead of clamping it to claude', () => {
     importSessionEnginesOnce({
-      'legacy-codex': { engineId: 'codex' }
+      'legacy-codex': { engineId: 'codex' },
+      'legacy-claude': { engineId: 'claude' }
     })
-    expect(getSessionMeta('legacy-codex')?.engineId).toBe('codex')
+    expect(getSessionMeta('legacy-codex')).toBeUndefined()
+    expect(getSessionMeta('legacy-claude')?.engineId).toBe('claude')
   })
 
   it('accepts "pi" as a legitimate engineId (not clamped to claude)', () => {

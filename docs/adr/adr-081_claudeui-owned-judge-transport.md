@@ -87,13 +87,15 @@ _Amended 2026-10-23 ([ADR-107](adr-107_judge-outage-and-fallback-judge.md)): the
 
 Both wires stream. There is one SSE accumulator per wire. A stream that ends without a terminal
 event, a mid-stream error event, or an empty text channel is a transport error, so `classify()`
-returns `unavailable` and the human decides. There are no retries, except one on an HTTP 401 from
-the ChatGPT backend, after a forced token refresh.
+returns `unavailable` and the human decides. There are no retries except two, both on the ChatGPT
+backend: one on an HTTP 401, after a forced token refresh, and one at `low` when a workspace refuses
+the `none`/`minimal` reasoning effort (HTTP 403, "reasoning level isn't available"), after which `low`
+is the floor for that route and account until restart (2026-11-06: the second retry added).
 
 **Responses (ChatGPT backend).**
 
 - Headers: `Authorization: Bearer`, `ChatGPT-Account-Id`, `originator: opencode`, `User-Agent`,
-  `session-id`. The vault's token is issued to opencode's OAuth client (`codex-oauth.ts:35`), so
+  `session-id`. The vault's token is issued to opencode's OAuth client (`chatgpt-oauth.ts:35`), so
   the originator matches it. `x-openai-internal-codex-residency` is added when the token's
   `chatgpt_compute_residency` claim is set.
 - Body: `model`, `instructions` (the system prompt, verbatim), one `input` user item,

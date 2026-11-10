@@ -4,10 +4,14 @@ import { useSessionStore } from '../../stores/session-store'
 import type { DirectoryGroup, EngineId, SessionInfo, WorktreeInfo } from '../../../../shared/types'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useIsMobile } from '../../hooks/useIsMobile'
-import type { CodexDeletePlan } from '../../../../shared/codex-types'
 import { SidebarView, type DeleteTarget } from './View'
 import { cwdToProjectKey } from '../../../../shared/project-key'
-import { isCreatedWorktree } from '../../../../shared/linked-worktree'
+import { isCreatedWorktree, worktreeCwdKey } from '../../../../shared/linked-worktree'
+import {
+  foldForView,
+  foldedWorktreeSummary,
+  type ViewDirectoryGroup
+} from '../../../../shared/worktree-fold'
 import { planClaudeProjectDelete } from '../../../../shared/claude-project-delete'
 import {
   beginTranscriptPlaceholder,
@@ -28,17 +32,6 @@ type SidebarSessionData = {
   selectedEngineId: EngineId
 }
 
-function isCodexSession(sessionId: string): boolean {
-  const state = useSessionStore.getState()
-  return (
-    state.sessions[sessionId]?.selectedEngineId === 'codex' ||
-    state.sessionEngines[sessionId]?.engineId === 'codex' ||
-    state.directories.some((group) =>
-      group.sessions.some((info) => info.sessionId === sessionId && info.engineId === 'codex')
-    )
-  )
-}
-
 /**
  * A session that is in memory but not on disk yet (never spawned, or its
  * transcript not listed yet), as a sidebar row. Its harness comes from
@@ -47,7 +40,7 @@ function isCodexSession(sessionId: string): boolean {
  * first spawn failed showed Claude's logo in Recent (ADR-082 S7b).
  *
  * A session another client or the host created has no `sessionEngines` entry until
- * a model-bearing status arrives (Codex sends none before its first prompt); its
+ * a model-bearing status arrives; its
  * birth engine, replicated on `session:created`, stands in until then.
  */
 function inMemorySessionInfo(
@@ -170,8 +163,6 @@ export function Sidebar({
   const [renamingKey, setRenamingKey] = useState<string | null>(null)
   const [showHidden, setShowHidden] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
-  const [deletePlan, setDeletePlan] = useState<CodexDeletePlan | null>(null)
-  const [historyError, setHistoryError] = useState<string | null>(null)
 
   const hiddenSessionSet = useMemo(() => new Set(hiddenSessionIds), [hiddenSessionIds])
   const hiddenProjectSet = useMemo(() => new Set(hiddenProjectKeys), [hiddenProjectKeys])
@@ -197,7 +188,6 @@ export function Sidebar({
   const applyTitle = useCallback(
     (sessionId: string, title: string) => {
       setCustomTitle(sessionId, title)
-      if (isCodexSession(sessionId)) return
       const projectKey = findProjectKey(sessionId)
       if (projectKey && title) {
         window.api.writeCustomTitle(sessionId, projectKey, title)
@@ -209,10 +199,6 @@ export function Sidebar({
   const handleRename = useCallback(
     async (sessionId: string, newTitle: string) => {
       setRenamingKey(null)
-      if (!newTitle.trim() && isCodexSession(sessionId)) {
-        setCustomTitle(sessionId, '')
-        return
-      }
       if (newTitle.trim()) {
         applyTitle(sessionId, newTitle.trim())
         return
@@ -352,7 +338,7 @@ export function Sidebar({
 
     // Navigate first (ADR-102): a placeholder entry renders the loading view while
     // the transcript is read, instead of the sidebar sitting dead for seconds. The
-    // per-engine load (opencode / pi / codex / Claude + subagent files) is shared
+    // per-engine load (opencode / pi / Claude + subagent files) is shared
     // with the post-hydrate reload of the active session.
     const replace = replaceOnClick(inMemory)
     beginTranscriptPlaceholder(info)
@@ -363,7 +349,6 @@ export function Sidebar({
     // entry stays evicted so the next click retries. A failure shows Retry.
     await loadClickedSession(info, {
       isCurrent: () => selectionTarget.current === routingId,
-      onCodexError: setHistoryError,
       replace
     })
   }
@@ -495,13 +480,6 @@ export function Sidebar({
     [hideSession]
   )
 
-  const handleUnhideSession = useCallback(
-    (info: SessionInfo) => {
-      unhideSession(info.sessionId)
-    },
-    [unhideSession]
-  )
-
   const handleDeleteSessionRequest = useCallback((info: SessionInfo) => {
     if (!info.projectKey) return
     setDeleteTarget({
@@ -512,48 +490,6 @@ export function Sidebar({
       engineId: info.engineId
     })
   }, [])
-
-  const handleDeleteProjectRequest = useCallback(
-    (group: DirectoryGroup) => {
-      if (!group.projectKey) return
-      setDeleteTarget({
-        kind: 'project',
-        projectKey: group.projectKey,
-        folderName: group.folderName,
-        sessionCount: group.sessions.length,
-        // From the LISTING (`directories`), not the rendered group: that is what
-        // main plans from when the delete runs, and the in-memory rows merged
-        // into the rendered group have no file to name yet.
-        claudeFiles: planClaudeProjectDelete(directories, group.projectKey)
-      })
-    },
-    [directories]
-  )
-
-  /**
-   * What deleting the pending CODEX target would actually remove.
-   *
-   * Only Codex has a plan: its native delete is refused while a fork still
-   * references the thread's history, so a branched session is a subtree delete
-   * and the confirmation has to say so before the user agrees to it. The answer
-   * is advisory — main recomputes the plan when the delete runs and never
-   * trusts this copy — and a failed query just leaves the plain confirmation
-   * standing rather than blocking the delete.
-   */
-  useEffect(() => {
-    setDeletePlan(null)
-    if (deleteTarget?.kind !== 'session' || deleteTarget.engineId !== 'codex') return
-    let current = true
-    void window.api
-      .codexDeletePlan(deleteTarget.sessionId)
-      .then((plan) => {
-        if (current) setDeletePlan(plan)
-      })
-      .catch(() => {})
-    return () => {
-      current = false
-    }
-  }, [deleteTarget])
 
   const confirmDelete = useCallback(async (): Promise<void> => {
     if (!deleteTarget) return
@@ -574,11 +510,42 @@ export function Sidebar({
     // opencode/pi row here until the next 30 s poll.
   }, [deleteTarget, deleteSessionAction, deleteProjectAction])
 
-  const augmentedDirs = useMemo(() => {
+  // The sidebar's view of the listing: worktree groups folded into their parent project.
+  const foldedDirs = useMemo(() => foldForView(directories), [directories])
+
+  // Sessions of a folded worktree whose own project was hidden before the fold, by that worktree's
+  // project key: they stay hidden (and Unhide on one unhides the worktree's project).
+  const hiddenWorktreeSessions = useMemo(() => {
+    const byId = new Map<string, string>()
+    if (hiddenProjectSet.size === 0) return byId
+    for (const g of directories) {
+      if (g.linkedWorktree?.repoRoot && hiddenProjectSet.has(g.projectKey)) {
+        for (const s of g.sessions) byId.set(s.sessionId, g.projectKey)
+      }
+    }
+    return byId
+  }, [directories, hiddenProjectSet])
+
+  // The groups with the in-memory (not yet listed) sessions merged in: every session the groups
+  // hold, hidden-worktree ones included — what a Delete project covers.
+  const allDirs = useMemo(() => {
     // Build set of session IDs already on disk
     const dirSessionIds = new Set<string>()
     for (const group of directories) {
       for (const s of group.sessions) dirSessionIds.add(s.sessionId)
+    }
+
+    // A not-yet-listed session belongs to the view group whose directory, or a folded worktree's,
+    // it runs in (the same by-directory predicate the delete uses).
+    const groupKeyByCwd = new Map<string, string>()
+    const claim = (cwd: string, groupKey: string): void => {
+      const key = worktreeCwdKey(cwd)
+      if (key && !groupKeyByCwd.has(key)) groupKeyByCwd.set(key, groupKey)
+    }
+    for (const group of foldedDirs) {
+      const groupKey = group.projectKey || cwdToProjectKey(group.cwd)
+      claim(group.cwd, groupKey)
+      for (const w of group.foldedWorktrees ?? []) claim(w.cwd, groupKey)
     }
 
     // Collect in-memory sessions not yet on disk, grouped by canonical projectKey
@@ -587,8 +554,9 @@ export function Sidebar({
       if (dirSessionIds.has(rid) || !data.cwd) continue
       const pk = cwdToProjectKey(data.cwd)
       const info = inMemorySessionInfo(rid, data, sessionEngines[rid]?.engineId, pk)
-      if (!inMemoryByPk[pk]) inMemoryByPk[pk] = []
-      inMemoryByPk[pk].push(info)
+      const target = groupKeyByCwd.get(worktreeCwdKey(data.cwd)) ?? pk
+      if (!inMemoryByPk[target]) inMemoryByPk[target] = []
+      inMemoryByPk[target].push(info)
     }
 
     // Apply custom titles to a session list
@@ -601,7 +569,7 @@ export function Sidebar({
     const mergedPks = new Set<string>()
 
     // Merge in-memory sessions into existing groups (match by projectKey OR exact cwd)
-    const result: DirectoryGroup[] = directories.map((group) => {
+    const result: ViewDirectoryGroup[] = foldedDirs.map((group) => {
       const pk = group.projectKey || cwdToProjectKey(group.cwd)
       const extra = inMemoryByPk[pk]
       if (!extra) {
@@ -634,22 +602,64 @@ export function Sidebar({
       })
     }
     return result
-  }, [directories, sidebarSessions, customTitles, sessionEngines])
+  }, [directories, foldedDirs, sidebarSessions, customTitles, sessionEngines])
+
+  // What the Projects list draws: without the sessions of hidden worktrees, unless "show hidden".
+  const augmentedDirs = useMemo(() => {
+    if (showHidden || hiddenWorktreeSessions.size === 0) return allDirs
+    const result: ViewDirectoryGroup[] = []
+    for (const group of allDirs) {
+      const sessions = group.sessions.filter((s) => !hiddenWorktreeSessions.has(s.sessionId))
+      if (sessions.length === group.sessions.length) result.push(group)
+      else if (sessions.length > 0) result.push({ ...group, sessions })
+    }
+    return result
+  }, [allDirs, showHidden, hiddenWorktreeSessions])
+
+  // Hidden-session marks for the Projects list: the user's own plus the hidden worktrees'.
+  const directoryHiddenSessionSet = useMemo(
+    () =>
+      hiddenWorktreeSessions.size === 0
+        ? hiddenSessionSet
+        : new Set([...hiddenSessionSet, ...hiddenWorktreeSessions.keys()]),
+    [hiddenSessionSet, hiddenWorktreeSessions]
+  )
+
+  // Unhide on a row: the session's own mark, and, when its worktree's project is what hides it, that
+  // project (the dimmed row has no other way back now that the worktree group is folded away).
+  const handleUnhideSession = useCallback(
+    (info: SessionInfo) => {
+      unhideSession(info.sessionId)
+      const worktreeKey = hiddenWorktreeSessions.get(info.sessionId)
+      if (worktreeKey) unhideProject(worktreeKey)
+    },
+    [hiddenWorktreeSessions, unhideSession, unhideProject]
+  )
+
+  const handleDeleteProjectRequest = useCallback(
+    (shown: ViewDirectoryGroup) => {
+      if (!shown.projectKey) return
+      // The group with every session the delete covers, not the drawn one: hidden worktrees'
+      // sessions are deleted too.
+      const group = allDirs.find((g) => g.projectKey === shown.projectKey) ?? shown
+      setDeleteTarget({
+        kind: 'project',
+        projectKey: group.projectKey,
+        folderName: group.folderName,
+        sessionCount: group.sessions.length,
+        // From the LISTING (`directories`), not the rendered group: that is what
+        // main plans from when the delete runs (it folds the same way), and the
+        // in-memory rows merged into the rendered group have no file to name yet.
+        claudeFiles: planClaudeProjectDelete(directories, group.projectKey),
+        synthesized: !!group.synthesized,
+        worktrees: foldedWorktreeSummary(directories, group.projectKey)
+      })
+    },
+    [allDirs, directories]
+  )
 
   return (
     <>
-      {historyError && (
-        <div
-          role="alert"
-          data-testid="Sidebar.nativeHistoryError"
-          className="fixed top-3 right-3 z-50 max-w-sm rounded-lg border border-border bg-bg-secondary p-3 text-sm"
-        >
-          {historyError}
-          <button onClick={() => setHistoryError(null)} className="block mt-2">
-            Dismiss
-          </button>
-        </div>
-      )}
       <SidebarView
         style={style}
         platform={window.api.platform}
@@ -664,6 +674,7 @@ export function Sidebar({
         recentSessions={recentSessions}
         augmentedDirs={augmentedDirs}
         hiddenSessionSet={hiddenSessionSet}
+        directoryHiddenSessionSet={directoryHiddenSessionSet}
         hiddenProjectSet={hiddenProjectSet}
         hasAnyHidden={hasAnyHidden}
         showHidden={showHidden}
@@ -671,7 +682,6 @@ export function Sidebar({
         renamingKey={renamingKey}
         worktreesModalCwd={worktreesModalCwd}
         deleteTarget={deleteTarget}
-        deletePlan={deletePlan}
         cleanupWorktree={cleanupWorktree}
         onToggleCollapse={onToggleCollapse}
         onNewSession={handleNewSession}

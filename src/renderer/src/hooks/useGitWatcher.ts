@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { onSyncAnswered } from '../../../core/shared/sync/client-registry'
 import { useSessionStore, useActiveSession } from '../stores/session-store'
+import { sessionWorkdir } from '../lib/session-workdir'
 
 /**
- * Watches the active session's cwd for git repo status.
+ * Watches the active session's workdir (its worktree, else its cwd) for git repo status.
  *
  * States this client's INTEREST as a replace set (`git:watch {cwds}`, phase 5
  * S2); the union of every connection's set is what the host polls. That is why
@@ -16,11 +17,11 @@ import { useSessionStore, useActiveSession } from '../stores/session-store'
  */
 export function useGitWatcher(): void {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const cwd = useActiveSession((s) => s.cwd)
+  const cwd = useActiveSession(sessionWorkdir)
   const isGitRepo = useActiveSession((s) => s.isGitRepo)
   const setIsGitRepo = useSessionStore((s) => s.setIsGitRepo)
 
-  // Check if cwd is a git repo when session or cwd changes
+  // Check if the workdir is a git repo when session or cwd changes
   useEffect(() => {
     if (!cwd || !activeSessionId) return
 

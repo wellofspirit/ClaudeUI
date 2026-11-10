@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { useActiveSession, useSessionStore } from '../../../stores/session-store'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import type { GitFileStatus } from '../../../../../shared/types'
 import {
   type ContextTarget,
@@ -17,7 +18,7 @@ function contextMenuPosition(e: React.MouseEvent): { x: number; y: number } {
 }
 
 export function GitFileTree(): React.JSX.Element {
-  const cwd = useActiveSession((s) => s.cwd)
+  const cwd = useActiveSession(sessionWorkdir)
   const gitStatus = useActiveSession((s) => s.gitStatus)
   const gitFileFilter = useActiveSession((s) => s.gitFileFilter)
   const gitSelectedFile = useActiveSession((s) => s.gitSelectedFile)

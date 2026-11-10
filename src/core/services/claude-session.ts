@@ -57,15 +57,25 @@ import { classifyApiError } from './api-error'
 import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-permission-decision'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { unwatchAllSubagents } from './subagent-watcher'
-import { saveSlashCommands } from './ui-config'
-import { loadMcpServers, readDisabledMcpServers } from './claude-mcp'
-import { scanSkills } from './skill-scanner'
+import { loadEngineConfig, saveSlashCommands } from './ui-config'
+import { claudeBehaviorSettings } from '../sdk/args'
+import { readDisabledMcpServers } from './claude-mcp'
+import { loadClaudeUiLegacyMcpServers } from './claude-mcp-files'
+import { resolveClaudeSkillCatalog } from './claude-skill-catalog'
+import {
+  claudeSkillEntryToInfo,
+  claudeSkillSlashCommands,
+  mergeSlashCommandLists
+} from './claude-skill-info'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
+import { isSyntheticModel } from './block-usage'
 import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { createCollabServer } from './collab-tool'
+import { currentWorkdir } from './session-workdir'
+import { syncCore } from './sync-host'
 import { ToolUseOwners } from './tool-use-owners'
 import {
   createSessionToolsServer,
@@ -83,14 +93,15 @@ import { accountState, buildClaudeAccountRef, updateClaudeAuthSource } from '../
 import { equivalentCostUsd } from '../../shared/pricing'
 import { withoutToolUses } from '../../shared/content-blocks'
 import { resolveUsageProvider } from './usage-provider'
+import { modelFallbackText, retractedMessageIds, retractionKey } from './claude-model-fallback'
 import {
+  claudeThinkingRequest,
   isClaudeModelAlias,
-  resolveThinkingMode,
-  resolveClaudeCapabilities,
-  type ThinkingMode
+  resolveClaudeCapabilities
 } from '../../shared/model-capabilities'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 
+import { reloadMcpUntil, type McpReloadExpectation } from './claude-mcp-reload'
 import { locateBunClaude } from '../sdk'
 // Straight from the module, not the '../sdk' barrel: several suites replace the
 // barrel with a factory that lists only `query`, and `capabilities` is read on
@@ -108,13 +119,6 @@ export { getCliVersion } from '../sdk'
 export function getCliJsPath(): string {
   return locateBunClaude()
 }
-
-/**
- * cli.js compares retracted_message_uuids against frame uuids truncated to 24
- * chars (its `JWK` constant) so per-block derived uuids resolve to their base
- * frame. Mirror that here. See docs/protocol-cc/04-system-subtypes.md §4.20.
- */
-const RETRACTION_UUID_PREFIX_LEN = 24
 
 /**
  * SDK options for the CLI spawn. They name no executable: `query()` spawns the
@@ -160,7 +164,7 @@ import { isSessionToolName, sessionToolsGuidance } from '../../shared/session-to
  */
 const CROSS_ENGINE_DISPATCH_SECTION = dispatchAgentPromptSection({
   toolName: 'mcp__claude-ui-collab__dispatch_agent',
-  targets: ['opencode', 'pi', 'codex'],
+  targets: ['opencode', 'pi'],
   ownSubagentTool: OWN_SUBAGENT_TOOL.claude
 })
 
@@ -857,16 +861,11 @@ export class ClaudeSession extends BaseSession {
       // initialize; passing config-file servers via mcpServers ensures they're
       // always available even if settingSources parsing differs.
       // The SDK deduplicates by name, so there are no duplicate connections.
-      this._mcpAllServers = {}
+      // Only the ClaudeUI legacy layer rides --mcp-config: cli.js reads
+      // `<cwd>/.mcp.json` itself (walk-up, disabledMcpjsonServers), and injecting
+      // it would bypass both. Same files as the catalog's legacy layer.
+      this._mcpAllServers = loadClaudeUiLegacyMcpServers(this.cwd)
       this._mcpDisabledServers.clear()
-      for (const scope of ['user', 'project', 'local'] as const) {
-        try {
-          const servers = loadMcpServers(scope, this.cwd)
-          Object.assign(this._mcpAllServers, servers)
-        } catch {
-          // Scope may not apply (e.g., project/local without cwd)
-        }
-      }
 
       // Read disabledMcpServers from ~/.claude.json's project entry for logging.
       // The CLI persists disabled state here via the TR() check. The SDK reads
@@ -909,6 +908,11 @@ export class ClaudeSession extends BaseSession {
             engineId: this.engineId,
             getRoutingId: () => this.routingId,
             cwd: this.cwd,
+            getWorkingDirectory: () =>
+              currentWorkdir(
+                this.cwd,
+                syncCore.getCanonicalState().worktreeInfoMap[this.routingId]
+              ),
             getAutonomyMode: () => this.permissionMode,
             getMessages: () => this.getMessages(),
             getQueuedUserTurns: () => this.queuedUserTurns(),
@@ -1058,7 +1062,12 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
               }
             : {}),
           settingSources: ['user', 'project', 'local'],
+          // `--settings` flag settings: the two cli.js behaviour switches the
+          // Claude engine's settings own (read fresh per spawn, so a change
+          // binds the next session start/respawn) beside the paths our own UI
+          // tools write, which stay allowed without a card.
           settings: {
+            ...claudeBehaviorSettings(loadEngineConfig('claude').claudeConfig),
             permissions: {
               allow: [`Edit(${this.cwd}/.claude/ui/**)`, `Write(${this.cwd}/.claude/ui/**)`]
             }
@@ -1082,7 +1091,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
           abortController: this.abortController,
           onInboundFrame: (frame) => this.toolUseOwners.noteFrame(frame),
           includePartialMessages: true,
-          thinking: this.buildThinkingConfig(),
+          // The session's mode coerced for the model, with summarized display (Opus 4.7+ shows no
+          // thinking text without it).
+          thinking: claudeThinkingRequest(this.model, this.thinkingMode),
           effort: this.effort as 'low' | 'medium' | 'high',
           stderr: (chunk) => {
             const text = chunk.toString().trim()
@@ -1502,14 +1513,25 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         // CLI-only commands that produce no output through the SDK
         const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
         const raw = sys.slash_commands || []
-        const slashCommands = raw
+        const cliCommands = raw
           .filter((name) => !CLI_ONLY.has(name))
           .map((name) => ({ name: name.startsWith('/') ? name : '/' + name }))
-        this.send('session:slash-commands', slashCommands)
-        saveSlashCommands(slashCommands)
-
-        const skillNames = sys.skills || []
-        this.send('session:skills', skillNames)
+        // cli.js's list plus the catalog's typed-invocable names it lacks (the catalog is
+        // what the other engines' menus are built from, so every engine offers the same set).
+        let catalogCommands: ReturnType<typeof claudeSkillSlashCommands> = []
+        let catalogNames = new Set<string>()
+        try {
+          const { entries } = resolveClaudeSkillCatalog(this.cwd)
+          catalogCommands = claudeSkillSlashCommands(entries)
+          catalogNames = new Set(entries.map((e) => '/' + e.name))
+        } catch (err) {
+          logger.warn('ClaudeSession', `skill catalog failed: ${err}`)
+        }
+        this.send('session:slash-commands', mergeSlashCommandLists(cliCommands, catalogCommands))
+        // The cache seeds the next session, whatever its folder: keep cli.js's built-ins,
+        // bundled skills and MCP prompts, not this folder's skills (create-session re-adds
+        // the new folder's).
+        saveSlashCommands(cliCommands.filter((c) => !catalogNames.has(c.name)))
 
         const mcpServers = sys.mcp_servers || []
         this._initMcpServers = mcpServers
@@ -1591,7 +1613,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
 
     if (chatMsg) {
       if (!parentToolUseId && typeof msg.uuid === 'string') {
-        this.wireUuidToMessageId.set(msg.uuid.slice(0, RETRACTION_UUID_PREFIX_LEN), chatMsg.id)
+        this.wireUuidToMessageId.set(retractionKey(msg.uuid), chatMsg.id)
       }
       const snapshot = this.itemStreams.handleSnapshot(chatMsg, parentToolUseId)
       if (snapshot !== 'none') {
@@ -1823,11 +1845,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    * Shapes in docs/protocol-cc/04-system-subtypes.md §4.20–4.21.
    */
   private handleModelFallback(msg: SystemMessage): void {
-    const fallbackText =
-      msg.subtype === 'model_refusal_fallback'
-        ? `${msg.original_model || 'The model'} refused this request — switched to ${msg.fallback_model || 'a fallback model'} for the rest of the session.`
-        : `${msg.original_model || 'The model'} is unavailable — using ${msg.fallback_model || 'a fallback model'} for this turn.`
-    const text = msg.content || fallbackText
+    const text = modelFallbackText(msg)
     logger.warn(
       'ClaudeSession',
       `${msg.subtype}: ${msg.original_model} -> ${msg.fallback_model} (trigger=${msg.trigger})`
@@ -1839,14 +1857,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     // Sent even when nothing resolves — the renderer also clears any streamed
     // partial text the retracted message left behind.
     if (msg.subtype === 'model_refusal_fallback') {
-      const retracted = msg.retracted_message_uuids ?? []
-      const messageIds = [
-        ...new Set(
-          retracted
-            .map((u) => this.wireUuidToMessageId.get(u.slice(0, RETRACTION_UUID_PREFIX_LEN)))
-            .filter((id): id is string => !!id)
-        )
-      ]
+      const messageIds = retractedMessageIds(msg, (key) => this.wireUuidToMessageId.get(key))
       if (messageIds.length > 0) {
         this.messageHistory = this.messageHistory.filter((m) => !messageIds.includes(m.id))
       }
@@ -1862,8 +1873,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    * Claude is the one engine whose auto-mode judge we do not run ourselves: the
    * two-stage classifier lives inside cli.js, so this frame is the ONLY way its
    * verdict reaches a card. Without it an auto-mode block showed up as a bare
-   * `is_error` tool_result with no reason and no reviewer — where pi, opencode
-   * and Codex all render a verdict. cli.js emits no frame for an allow.
+   * `is_error` tool_result with no reason and no reviewer — where pi and opencode
+   * both render a verdict. cli.js emits no frame for an allow.
    *
    * Which block a frame becomes — a verdict or a denial — is decided entirely by
    * `permissionDecisionBlock` in `claude-permission-decision.ts`, which owns the
@@ -2643,24 +2654,6 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
   }
 
   /**
-   * Build the SDK `thinking` option from the session's mode and current model.
-   * Always requests `display: 'summarized'` so Opus 4.7+ surfaces reasoning text;
-   * the field is silently ignored on models that don't honour it.
-   *
-   * `adaptive` is auto-coerced to `enabled` when the model lacks adaptive support
-   * (older models would otherwise reject the request).
-   */
-  private buildThinkingConfig():
-    | { type: 'adaptive'; display: 'summarized' }
-    | { type: 'enabled'; display: 'summarized' }
-    | { type: 'disabled' } {
-    const resolved: ThinkingMode = resolveThinkingMode(this.model, this.thinkingMode)
-    if (resolved === 'disabled') return { type: 'disabled' }
-    if (resolved === 'adaptive') return { type: 'adaptive', display: 'summarized' }
-    return { type: 'enabled', display: 'summarized' }
-  }
-
-  /**
    * cli.js's own queue already has native sub-turn timing AND a real per-item
    * take-back, so a claude item is pushed the moment it is queued — core holds
    * nothing (ADR-053). The frame carries the item's id as its `uuid`, which is
@@ -3135,9 +3128,20 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     return result
   }
 
-  /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
-  discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
-    return scanSkills(cwd)
+  /**
+   * Re-read the MCP config after a native `claude mcp add-json` / `remove` wrote it.
+   * A running stream-json cli.js does not watch those files (probed 2.1.317);
+   * `reload_plugins` re-resolves every scope and adds/removes the difference.
+   */
+  async mcpReloadServers(expect?: McpReloadExpectation): Promise<void> {
+    if (!this.activeQuery) throw new Error('No active session')
+    const ok = await reloadMcpUntil(this.activeQuery, expect)
+    if (!ok) logger.warn('ClaudeSession', 'mcpReloadServers: change not visible yet, giving up')
+  }
+
+  /** ISession.discoverSkills: the shared catalog for `cwd`, which is what cli.js loads. */
+  async discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
+    return resolveClaudeSkillCatalog(cwd).entries.map((e) => claudeSkillEntryToInfo(e))
   }
 
   /**
@@ -3146,7 +3150,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
    */
   private accumulateUsage(msg: Record<string, unknown>, isSidechain: boolean): boolean {
     const betaMessage = msg.message as Record<string, unknown> | undefined
-    if (!betaMessage) return false
+    // A synthetic line (cli.js's own, zero usage) would reset the context length to 0.
+    if (!betaMessage || isSyntheticModel(betaMessage.model)) return false
     const usage = betaMessage.usage as Record<string, number> | undefined
     if (!usage) return false
 

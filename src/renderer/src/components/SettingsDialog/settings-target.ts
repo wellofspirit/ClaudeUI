@@ -26,8 +26,7 @@ export const SETTINGS_PAGE_IDS = [
   'harnesses',
   'claude',
   'opencode',
-  'pi',
-  'codex'
+  'pi'
 ] as const
 
 export type SettingsPageId = (typeof SETTINGS_PAGE_IDS)[number]

@@ -249,13 +249,7 @@ describe('SettingsDialog mobile fork', () => {
 
       await tapTab('engines')
 
-      expect(idsOf('SettingsMobileView.page')).toEqual([
-        'harnesses',
-        'claude',
-        'opencode',
-        'pi',
-        'codex'
-      ])
+      expect(idsOf('SettingsMobileView.page')).toEqual(['harnesses', 'claude', 'opencode', 'pi'])
       expect(byId('SettingsMobileView.tab', 'engines')).toHaveAttribute('data-active', 'true')
     })
 
@@ -444,7 +438,7 @@ describe('SettingsDialog mobile fork', () => {
         within(segment)
           .getAllByTestId('SettingsMobileView.engineSegment.option')
           .map((el) => el.dataset.id)
-      ).toEqual(['claude', 'opencode', 'pi', 'codex'])
+      ).toEqual(['claude', 'opencode', 'pi'])
       // No active session, so the group opens on its first engine.
       expect(idsOf('SettingsMobileView.item')).toContain('claudeDispatch')
 
@@ -473,7 +467,7 @@ describe('SettingsDialog mobile fork', () => {
         'claudeDispatchLimits'
       )
       expect(limits.getByTestId('SettingsMobileView.groupNote')).toHaveTextContent(
-        'Governs dispatch_agent calls into Claude from an opencode, pi or Codex session'
+        'Governs dispatch_agent calls into Claude from an opencode or pi session'
       )
 
       await act(async () => {
@@ -487,7 +481,7 @@ describe('SettingsDialog mobile fork', () => {
       )
       // The per-engine note follows too (`noteOf`, phase 3A).
       expect(after.getByTestId('SettingsMobileView.groupNote')).toHaveTextContent(
-        'Governs dispatch_agent calls into opencode from a Claude, pi or Codex session'
+        'Governs dispatch_agent calls into opencode from a Claude or pi session'
       )
     })
 

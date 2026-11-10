@@ -11,8 +11,7 @@ import type { HarnessId, HarnessInstallRecord } from '../../shared/harness-types
 const EXECUTABLES: Record<HarnessId, string> = {
   claude: 'bun-claude',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'codex'
+  pi: 'pi'
 }
 
 export function exeName(base: string): string {
@@ -22,8 +21,6 @@ export function exeName(base: string): string {
 export interface FakePayloadOptions {
   /** pi only: put the executable in a nested `pi/` directory. */
   nested?: boolean
-  /** Codex only: write `codex-code-mode-host` beside `codex` (default true). */
-  codeModeHost?: boolean
   /** Written as `version.json` in the payload root when given. */
   versionJson?: Record<string, unknown>
 }
@@ -41,12 +38,6 @@ export function writeHarnessPayload(
   mkdirSync(binDir, { recursive: true })
   const bin = join(binDir, exeName(EXECUTABLES[id]))
   writeFileSync(bin, '')
-  if (id === 'codex') {
-    if (options.codeModeHost !== false) {
-      writeFileSync(join(binDir, exeName('codex-code-mode-host')), '')
-    }
-    writeFileSync(join(root, 'LICENSE'), '')
-  }
   if (options.versionJson) {
     writeFileSync(join(root, 'version.json'), JSON.stringify(options.versionJson))
   }

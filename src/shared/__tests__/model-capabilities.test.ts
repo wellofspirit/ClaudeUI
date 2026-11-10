@@ -45,25 +45,21 @@ import {
   OPENCODE_ENGINE_CAPABILITIES,
   CLAUDE_ENGINE_CAPABILITIES,
   PI_ENGINE_CAPABILITIES,
-  CODEX_ENGINE_CAPABILITIES,
-  resolveCodexCapabilities,
   piModelCapabilities,
   resolvePiCapabilitiesFromModel
 } from '../model-capabilities'
 
 describe('engine voice capability (ADR-101 §8)', () => {
   it('is on for every engine in the static table — the host narrows it per platform', () => {
-    // opencode, pi and Codex transcribe on-device; Claude uses cli.js's server.
+    // opencode and pi transcribe on-device; Claude uses cli.js's server.
     expect(CLAUDE_ENGINE_CAPABILITIES.voice).toBe(true)
     expect(OPENCODE_ENGINE_CAPABILITIES.voice).toBe(true)
     expect(PI_ENGINE_CAPABILITIES.voice).toBe(true)
-    expect(CODEX_ENGINE_CAPABILITIES.voice).toBe(true)
   })
 
   it('reaches the resolved capabilities of the on-device engines', () => {
     expect(resolveOpencodeCapabilitiesFromModel().voice).toBe(true)
     expect(resolvePiCapabilitiesFromModel().voice).toBe(true)
-    expect(resolveCodexCapabilities().voice).toBe(true)
   })
 })
 
@@ -188,6 +184,10 @@ describe('defaultEffort', () => {
     expect(defaultEffort('claude-opus-5')).toBe('high')
     expect(defaultEffort('claude-sonnet-5')).toBe('high')
     expect(defaultEffort('claude-fable-5')).toBe('high')
+    expect(defaultEffort('claude-fable-5-1')).toBe('high')
+    // cli.js 2.1.321: Fable 5.2 / Mythos 5.2 carry default_effort "medium".
+    expect(defaultEffort('claude-fable-5-2')).toBe('medium')
+    expect(defaultEffort('claude-mythos-5-2')).toBe('medium')
     expect(defaultEffort('claude-opus-4-6')).toBe('high')
     expect(defaultEffort('claude-sonnet-4-5')).toBe('high')
   })
@@ -384,6 +384,14 @@ describe('canonicalizeModelValue', () => {
     // Fable's picker value carries the [1m] context suffix — it must normalise
     // to the bare id used as the modelEffortDefaults key (`claudeEffortKey`).
     expect(canonicalizeModelValue('claude-fable-5[1m]')).toBe('claude-fable-5')
+  })
+  it('maps the `fable` alias to Fable 5.2 (cli.js 2.1.321 baked catalog)', () => {
+    expect(canonicalizeModelValue('fable')).toBe('claude-fable-5-2')
+    expect(canonicalizeModelValue('fable[1m]')).toBe('claude-fable-5-2')
+    // The alias takes its default effort from the model it resolves to.
+    expect(defaultEffort('fable')).toBe('medium')
+    expect(supportsXhighEffort('fable')).toBe(true)
+    expect(maxOutputTokens('fable')).toBe(128_000)
   })
   it('leaves the `default` alias unmapped — its target depends on user config', () => {
     expect(canonicalizeModelValue('default')).toBe('default')
@@ -667,7 +675,9 @@ describe('maxOutputTokens (mirrors cli.js N0e upperLimit)', () => {
   it('128K models: Fable/Mythos 5, Sonnet 5, Opus 4.6/4.7/4.8, Sonnet 4.6', () => {
     for (const m of [
       'claude-fable-5',
+      'claude-fable-5-2',
       'claude-mythos-5',
+      'claude-mythos-5-2',
       'claude-sonnet-5',
       'claude-opus-4-6',
       'claude-opus-4-7',
@@ -769,6 +779,8 @@ describe('resolveContextWindow', () => {
 
   it('resolves implicit-1M full ids by substring (dated / Bedrock)', () => {
     expect(resolveContextWindow('claude-fable-5')).toBe(ONE_M)
+    expect(resolveContextWindow('claude-fable-5-2')).toBe(ONE_M)
+    expect(resolveContextWindow('claude-mythos-5-2')).toBe(ONE_M)
     expect(resolveContextWindow('claude-opus-4-8-20251201')).toBe(ONE_M)
     expect(resolveContextWindow('us.anthropic.claude-opus-4-8-20251201-v1:0')).toBe(ONE_M)
     expect(resolveContextWindow('claude-sonnet-5')).toBe(ONE_M)
@@ -787,11 +799,12 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow(null)).toBe(DEFAULT)
   })
 
-  // The `default` alias names no model family, so it cannot resolve here by
-  // design — which is exactly why claudeModelCapabilities must be handed
-  // `resolvedModel` (next block).
-  it('leaves the opaque `default` alias at 200K — only cli.js knows its target', () => {
-    expect(resolveContextWindow('default')).toBe(DEFAULT)
+  // `default` follows the plan's recommendation (Opus on Max, Sonnet on Pro),
+  // both native-1M. The table is only the fallback before cli.js reports the
+  // real target, which is why claudeModelCapabilities prefers `resolvedModel`.
+  it('sizes the `default` alias at 1M, like the family aliases it points at', () => {
+    expect(resolveContextWindow('default')).toBe(ONE_M)
+    expect(resolveContextWindow('Default')).toBe(ONE_M)
   })
 })
 
@@ -799,15 +812,16 @@ describe('claudeModelCapabilities — sizing from resolvedModel', () => {
   const ONE_M = 1_000_000
   const DEFAULT = 200_000
 
-  it('sizes the opaque `default` alias from its resolvedModel', () => {
+  it('sizes the `default` alias from its resolvedModel over the alias table', () => {
     expect(
-      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-opus-5[1m]' })
+      claudeModelCapabilities({ value: 'default', resolvedModel: 'claude-sonnet-4-6' })
         .contextWindow
-    ).toBe(ONE_M)
+    ).toBe(DEFAULT)
   })
 
   it('falls back to `value` when no resolvedModel is present (non-Claude catalogs)', () => {
-    expect(claudeModelCapabilities({ value: 'default' }).contextWindow).toBe(DEFAULT)
+    expect(claudeModelCapabilities({ value: 'default' }).contextWindow).toBe(ONE_M)
+    expect(claudeModelCapabilities({ value: 'claude-sonnet-4-6' }).contextWindow).toBe(DEFAULT)
   })
 
   it('a resolvedModel that is genuinely 200K stays 200K', () => {
@@ -820,11 +834,11 @@ describe('claudeModelCapabilities — sizing from resolvedModel', () => {
   // maxOutput is routed through resolvedModel too: an account whose `haiku`
   // still runs Haiku 4.5 gets Haiku 4.5's ceiling, not the alias table's 5.5.
   it('resolveClaudeCapabilities sizes a `default` session from the init-reported id', () => {
-    expect(resolveClaudeCapabilities('default', 'claude-opus-5[1m]').contextWindow).toBe(ONE_M)
+    expect(resolveClaudeCapabilities('default', 'claude-sonnet-4-6').contextWindow).toBe(DEFAULT)
   })
 
-  it('resolveClaudeCapabilities is unchanged without the second argument', () => {
-    expect(resolveClaudeCapabilities('default').contextWindow).toBe(DEFAULT)
+  it('resolveClaudeCapabilities falls back to the alias table without the second argument', () => {
+    expect(resolveClaudeCapabilities('default').contextWindow).toBe(ONE_M)
   })
 
   /**
@@ -1117,17 +1131,16 @@ describe('resolveDesiredEffort / resolveSpawnEffort — the one effort ladder', 
       ).toBe(modelDefaultEffort(piRow))
     })
   })
-  it('opencode and Codex remember nothing: neither reads either map', () => {
+  it('opencode remembers nothing: it reads neither map', () => {
     const row = { value: 'x/y', supportsEffort: true }
     const saved: EffortDefaultsSlice = {
-      engineEffortDefaults: { opencode: { 'x/y': 'low' }, codex: { 'x/y': 'low' } }
+      engineEffortDefaults: { opencode: { 'x/y': 'low' } }
     }
-    for (const engineId of ['opencode', 'codex'])
-      expect(
-        resolveDesiredEffort(
-          args({ engineId, modelInfo: row, engineModels: [row], effortDefaults: saved })
-        )
-      ).toBe(modelDefaultEffort(row))
+    expect(
+      resolveDesiredEffort(
+        args({ engineId: 'opencode', modelInfo: row, engineModels: [row], effortDefaults: saved })
+      )
+    ).toBe(modelDefaultEffort(row))
   })
   it('spawn effort clamps a saved value the model does not offer', () => {
     const noMax = { ...OPUS, supportedEffortLevels: ['low', 'medium', 'high'] as const }
@@ -1164,7 +1177,7 @@ describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () 
 
   it('only claude and pi remember', () => {
     expect(['claude', 'pi', undefined].map(engineRemembersEffort)).toEqual([true, true, true])
-    expect(['opencode', 'codex'].map(engineRemembersEffort)).toEqual([false, false])
+    expect(['opencode'].map(engineRemembersEffort)).toEqual([false])
   })
   it('claude writes modelEffortDefaults under claudeEffortKey, moving a legacy key', () => {
     const settings = { modelEffortDefaults: { 'claude-opus-5-5': 'low' } } as const
@@ -1183,9 +1196,8 @@ describe('rememberEffortPatch / savedEffortFor — the one read/write pair', () 
     })
     expect(patch && 'modelEffortDefaults' in patch).toBe(false)
   })
-  it('writes nothing for opencode, codex, or a model not in the catalog', () => {
+  it('writes nothing for opencode, or a model not in the catalog', () => {
     expect(rememberEffortPatch({}, 'opencode', PI, [PI], 'low')).toBeUndefined()
-    expect(rememberEffortPatch({}, 'codex', PI, [PI], 'low')).toBeUndefined()
     expect(rememberEffortPatch({}, 'pi', undefined, [], 'low')).toBeUndefined()
     expect(rememberEffortPatch({}, 'claude', null, [], 'low')).toBeUndefined()
   })

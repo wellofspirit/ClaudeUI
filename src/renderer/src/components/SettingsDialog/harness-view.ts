@@ -21,8 +21,7 @@ import { HARNESS_IDS } from '../../../../shared/harness-types'
 export const HARNESS_LABEL: Record<HarnessId, string> = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
+  pi: 'pi'
 }
 
 /** The row's left segment: Claude Code ships bundled, the rest come from ClaudeUI's store. */
@@ -34,7 +33,7 @@ export function leftLabel(id: HarnessId): string {
   return id === 'claude' ? 'Bundled' : 'ClaudeUI'
 }
 
-/** opencode and pi choose a version; Claude Code's bundled copy and Codex's are locked. */
+/** opencode and pi choose a version; Claude Code's bundled copy is locked. */
 export function hasVersionChoice(id: HarnessId): boolean {
   return id === 'opencode' || id === 'pi'
 }
@@ -125,7 +124,7 @@ export function exactVersions(
 
 /**
  * The selected ClaudeUI version is missing: the row's one actionable state
- * ("1.18.33 is not installed · Install"). opencode, pi and Codex are not
+ * ("1.18.33 is not installed · Install"). opencode and pi are not
  * bundled (ADR-082 §8), so nothing runs in its place; an environment override
  * runs instead and says so, and offers no install.
  */
@@ -225,8 +224,7 @@ export function rowLine(
       title
     }
   }
-  const prefix = id === 'codex' ? 'Exact version this ClaudeUI release speaks' : "ClaudeUI's copy"
-  return { state: 'running', text: withVersion(prefix), tone: 'normal', title }
+  return { state: 'running', text: withVersion("ClaudeUI's copy"), tone: 'normal', title }
 }
 
 /**
@@ -569,7 +567,7 @@ export function notInstalledTitle(id: HarnessId): string {
  * `undefined` when none does.
  */
 export function chatgptDisconnectText(runs: EngineRuns): string | undefined {
-  const users = (['codex', 'pi', 'opencode'] as const).filter((id) => runs(id))
+  const users = (['pi', 'opencode'] as const).filter((id) => runs(id))
   if (users.length === 0) return undefined
   const names = (ids: readonly HarnessId[], last: string): string => {
     const labels = ids.map((id) => HARNESS_LABEL[id])
@@ -577,17 +575,14 @@ export function chatgptDisconnectText(runs: EngineRuns): string | undefined {
       ? (labels[0] ?? '')
       : `${labels.slice(0, -1).join(', ')} ${last} ${labels[labels.length - 1]}`
   }
-  const own = users.filter((id) => id !== 'codex')
   const removed = `ClaudeUI’s ChatGPT sign-in is removed from ${names(users, 'and')}`
   // Owner ruling 2026-10-01 (ADR-082 resolved question 13): with a harness's
   // ChatGPT switched ON, ClaudeUI owns that harness's sign-in; switched OFF,
   // the harness keeps its own, which a disconnect never touches.
-  return own.length > 0
-    ? `${removed}. Where ChatGPT is switched off for ${names(own, 'or')}, a sign-in made there directly stays.`
-    : `${removed}.`
+  return `${removed}. Where ChatGPT is switched off for ${names(users, 'or')}, a sign-in made there directly stays.`
 }
 
-/** How the harness picker marks a harness: one rule for every harness, Codex included. */
+/** How the harness picker marks a harness: one rule for every harness. */
 export function harnessPickerMark(
   readiness: HarnessReadiness
 ): 'none' | 'not-installed' | 'disabled' {
@@ -676,7 +671,7 @@ export function harnessBannerState(
   const need = installNeeded(entry)
   if (need) return { kind: 'offer', request: need.request, version: need.version }
   // The selected version is installed yet does not run (a payload missing a
-  // file, e.g. Codex without its code-mode host): an install would be
+  // file): an install would be
   // "already satisfied" and change nothing, so say why instead of offering it.
   return {
     kind: 'unavailable-here',

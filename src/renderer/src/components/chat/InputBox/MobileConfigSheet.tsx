@@ -37,15 +37,13 @@ import {
   deriveModelGroups,
   groupSignIn,
   unsupportedTooltip,
-  type AccountChoice,
   type ModelDisplay
 } from '../../shared/InlinePickers'
-import { accountDisplayName } from '../../../utils/sign-in-provider'
 
 const ENGINE_LOCKED_TOOLTIP =
   'Harness cannot change after session initialization or for historical sessions'
 
-type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort' | 'account'
+type Page = 'root' | 'mode' | 'engine' | 'model' | 'thinking' | 'variant' | 'effort'
 
 const PAGE_HEADING: Record<Page, string> = {
   root: 'Run configuration',
@@ -54,8 +52,7 @@ const PAGE_HEADING: Record<Page, string> = {
   model: 'Model',
   thinking: 'Thinking mode',
   variant: 'Reasoning variant',
-  effort: 'Effort level',
-  account: 'ChatGPT account'
+  effort: 'Effort level'
 }
 
 export interface MobileConfigSheetProps {
@@ -76,17 +73,7 @@ export interface MobileConfigSheetProps {
   reasoningVariant: string | null
   effort: string
   effortSupported: boolean
-  /** Engine-native effort tiers, in place of the fixed Claude ladder (see EffortPicker). */
-  nativeEffortOptions?: ReadonlyArray<{ value: string; description: string }>
   allowedEffortLevels: readonly EffortLevel[]
-  /** The per-session ChatGPT account row and page (ADR-068 §2). Same gate as desktop. */
-  showAccountPicker: boolean
-  accounts: readonly AccountChoice[]
-  activeAccountId: string | null
-  pinnedAccountId: string | null
-  onSelectAccount: (accountId: string | null) => void
-  onAddAccount: () => void
-  onAccountMenuOpen?: () => void
   onSelectMode: (mode: PermissionMode) => void
   onSelectEngine: (engineId: EngineId) => void
   onSelectModel: (value: string) => void
@@ -475,103 +462,32 @@ function VariantPage({
 function EffortPage({
   effort,
   allowedEffortLevels,
-  nativeOptions,
   onSelect
 }: {
   effort: string
   allowedEffortLevels: readonly EffortLevel[]
-  nativeOptions?: ReadonlyArray<{ value: string; description: string }>
   onSelect: (level: string) => void
 }): React.JSX.Element {
   const allowed = new Set<EffortLevel>(allowedEffortLevels)
-  // Same substitution rule as the desktop EffortPicker: native tiers replace
-  // the Claude ladder, they do not join it.
-  const options: Array<{ value: string; detail?: string; enabled: boolean }> = nativeOptions?.length
-    ? nativeOptions.map((option) => ({
-        value: option.value,
-        detail: option.description,
-        enabled: true
-      }))
-    : EFFORT_LEVELS.map((level) => ({ value: level, enabled: allowed.has(level) }))
+  const options: Array<{ value: string; enabled: boolean }> = EFFORT_LEVELS.map((level) => ({
+    value: level,
+    enabled: allowed.has(level)
+  }))
   return (
     <div>
-      {options.map(({ value, detail, enabled }) => (
+      {options.map(({ value, enabled }) => (
         <OptionButton
           key={value}
           testId="MobileConfigSheet.effortOption"
           dataValue={value}
           active={value === effort}
           disabled={!enabled}
-          title={enabled ? detail : unsupportedTooltip(value as EffortLevel)}
+          title={enabled ? undefined : unsupportedTooltip(value as EffortLevel)}
           onClick={() => enabled && onSelect(value)}
         >
           <span className="text-[13px] capitalize truncate">{value}</span>
         </OptionButton>
       ))}
-    </div>
-  )
-}
-
-/**
- * The same list the desktop `AccountPicker` offers (ADR-068 §2): follow-active
- * first (described by the account it currently resolves to), then every stored
- * account, then the escape hatch into Settings.
- */
-function AccountPage({
-  accounts,
-  activeAccountId,
-  pinnedAccountId,
-  onSelect,
-  onAdd
-}: {
-  accounts: readonly AccountChoice[]
-  activeAccountId: string | null
-  pinnedAccountId: string | null
-  onSelect: (accountId: string | null) => void
-  onAdd: () => void
-}): React.JSX.Element {
-  const active = accounts.find((account) => account.id === activeAccountId)
-  return (
-    <div>
-      <OptionButton
-        testId="MobileConfigSheet.accountOption"
-        dataValue="__active__"
-        active={pinnedAccountId === null}
-        onClick={() => onSelect(null)}
-      >
-        <div className="min-w-0 flex flex-col gap-0.5">
-          <span className="text-[13px] truncate">Follow active account</span>
-          {active && (
-            <span className="text-[11px] text-text-muted truncate">
-              {accountDisplayName(active.email)}
-            </span>
-          )}
-        </div>
-      </OptionButton>
-      {accounts.map((account) => (
-        <OptionButton
-          key={account.id}
-          testId="MobileConfigSheet.accountOption"
-          dataValue={account.id}
-          active={pinnedAccountId === account.id}
-          onClick={() => onSelect(account.id)}
-        >
-          <div className="min-w-0 flex flex-col gap-0.5">
-            <span className="text-[13px] truncate">{accountDisplayName(account.email)}</span>
-            {account.planType && (
-              <span className="text-[11px] text-text-muted truncate">{account.planType}</span>
-            )}
-          </div>
-        </OptionButton>
-      ))}
-      <OptionButton
-        testId="MobileConfigSheet.accountAdd"
-        dataValue="__add__"
-        active={false}
-        onClick={onAdd}
-      >
-        <span className="text-[13px] truncate">Add account…</span>
-      </OptionButton>
     </div>
   )
 }
@@ -600,14 +516,6 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     effort,
     effortSupported,
     allowedEffortLevels,
-    nativeEffortOptions,
-    showAccountPicker,
-    accounts,
-    activeAccountId,
-    pinnedAccountId,
-    onSelectAccount,
-    onAddAccount,
-    onAccountMenuOpen,
     onSelectMode,
     onSelectEngine,
     onSelectModel,
@@ -626,8 +534,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     showModelPicker ||
     showThinkingPicker ||
     showVariantRow ||
-    effortSupported ||
-    showAccountPicker
+    effortSupported
 
   // Reset to root whenever the sheet closes, and fail safe if an external
   // prop change (e.g. a model/engine switch) makes the current submenu
@@ -644,7 +551,6 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     else if (page === 'thinking' && !showThinkingPicker) setPage('root')
     else if (page === 'variant' && !showVariantRow) setPage('root')
     else if (page === 'effort' && !effortSupported) setPage('root')
-    else if (page === 'account' && !showAccountPicker) setPage('root')
   }, [
     open,
     page,
@@ -653,8 +559,7 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
     showModelPicker,
     showThinkingPicker,
     showVariantRow,
-    effortSupported,
-    showAccountPicker
+    effortSupported
   ])
 
   // The OPEN sheet is an Escape layer (use-escape-layer): the key closes the
@@ -836,25 +741,6 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                       onClick={() => setPage('effort')}
                     />
                   )}
-                  {showAccountPicker && (
-                    <RootRow
-                      testId="MobileConfigSheet.account"
-                      label="ChatGPT account"
-                      value={
-                        pinnedAccountId === null
-                          ? `Active · ${accountDisplayName(
-                              accounts.find((account) => account.id === activeAccountId)?.email
-                            )}`
-                          : accountDisplayName(
-                              accounts.find((account) => account.id === pinnedAccountId)?.email
-                            )
-                      }
-                      onClick={() => {
-                        onAccountMenuOpen?.()
-                        setPage('account')
-                      }}
-                    />
-                  )}
                 </div>
               )}
 
@@ -917,25 +803,8 @@ export function MobileConfigSheet(props: MobileConfigSheetProps): React.JSX.Elem
                 <EffortPage
                   effort={effort}
                   allowedEffortLevels={allowedEffortLevels}
-                  nativeOptions={nativeEffortOptions}
                   onSelect={(level) => {
                     onSelectEffort(level)
-                    goRoot()
-                  }}
-                />
-              )}
-
-              {page === 'account' && (
-                <AccountPage
-                  accounts={accounts}
-                  activeAccountId={activeAccountId}
-                  pinnedAccountId={pinnedAccountId}
-                  onSelect={(accountId) => {
-                    onSelectAccount(accountId)
-                    goRoot()
-                  }}
-                  onAdd={() => {
-                    onAddAccount()
                     goRoot()
                   }}
                 />

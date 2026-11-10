@@ -234,7 +234,7 @@ describe('TaskCard — a dispatch call that has not started (L2)', () => {
     const states = (): string[] =>
       screen.getAllByTestId('TaskCard').map((el) => el.getAttribute('data-status') ?? '')
     const bubble = (message: ChatMessage): ReturnType<typeof render> =>
-      render(<MessageBubble message={message} pendingApprovals={[]} isLastAssistant />)
+      render(<MessageBubble message={message} pendingApprovals={[]} />)
 
     it('the second dispatch of one message queues behind the first', () => {
       bubble(assistant(dispatchBlock('toolu_a'), dispatchBlock('toolu_b')))

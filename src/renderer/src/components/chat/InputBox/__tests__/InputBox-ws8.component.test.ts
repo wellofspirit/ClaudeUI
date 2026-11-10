@@ -104,7 +104,6 @@ describe('InputBox FC — WS8 behaviors', () => {
     app.bridge.ipcMain.handle('session:get-engine-models', () => [
       { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }
     ])
-    app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
     app.bridge.ipcMain.handle('file:list-dir', () => [])
 
     useSessionStore.setState({

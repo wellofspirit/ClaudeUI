@@ -34,7 +34,7 @@ import type { UsageHubStatus } from '../../shared/types'
 
 /**
  * The channels declared here. `registerSessionIpc` unbinds them beside its own
- * before re-registering, the way it does for the Codex family — one unbind list,
+ * before re-registering, the way it does for the others — one unbind list,
  * so a second boot in a test cannot leave a stale desktop handler behind.
  */
 export const USAGE_HUB_CHANNELS = [

@@ -11,7 +11,9 @@
  * - `plugins` — the `claudeui-xeng` DIRECTORY plugin (caller identity, the
  *   readiness RPC, the subagent model gate; `resources/opencode/claudeui-xeng/`),
  *   as a `{package, options}` entry whose options carry ClaudeUI's model
- *   allowlist (`options.modelAllowlist`, ADR-111). opencode hands a plugin its
+ *   allowlist (`options.modelAllowlist`, ADR-111) and the hosted `/skills` endpoint
+ *   (`options.skills`, the Claude skill catalog; not part of `configIdentity`: the
+ *   plugin fetches it per location, the endpoint is per server). opencode hands a plugin its
  *   entry's options in `setup`, so the gate is stateless: a location evicted
  *   after an idle hour and set up again reads them again.
  * - `agents.<name>.permissions` — the mode-less agent overlay (ADR-097 §3,
@@ -143,7 +145,14 @@ export function buildOpencodeConfig(
           plugins: [
             {
               package: input.pluginDir,
-              options: { modelAllowlist: canonicalAllowlist(input.modelAllowlist) }
+              options: {
+                modelAllowlist: canonicalAllowlist(input.modelAllowlist),
+                // The shared Claude skill catalog, fetched per location by the plugin.
+                skills: {
+                  url: `http://127.0.0.1:${hosted.port}/skills`,
+                  token: hosted.token
+                }
+              }
             }
           ]
         }
@@ -152,12 +161,21 @@ export function buildOpencodeConfig(
   }
 }
 
-/** `OPENCODE_CONFIG_CONTENT` for one server. Contains secrets — never log it. */
+/**
+ * `OPENCODE_CONFIG_CONTENT` for one server. Contains secrets — never log it.
+ *
+ * opencode runs `{env:VAR}` / `{file:path}` substitution over this TEXT before
+ * parsing it (vendor/opencode-src/packages/core/src/config/variable.ts), so a
+ * value that merely contains one (an argument, a header, a path) would read an
+ * env var or a file. `{` is written as the JSON escape `\u007b`: the same string
+ * after the parse, and no substitution token in the text. Both tokens can only
+ * occur inside JSON strings here.
+ */
 export function buildOpencodeConfigContent(
   input: OpencodeConfigInput,
   hosted: HostedMcpEndpoint
 ): string {
-  return JSON.stringify(buildOpencodeConfig(input, hosted))
+  return JSON.stringify(buildOpencodeConfig(input, hosted)).replace(/\{(env|file):/g, '\\u007b$1:')
 }
 
 /** JSON with object keys sorted at every level, so equal configs digest equally. */

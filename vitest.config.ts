@@ -17,7 +17,7 @@ import { createTestHomeRoot, pruneTestHomes } from './scripts/lib/test-home-root
 const realHome = (process.env.CLAUDEUI_REAL_HOME ??= homedir())
 
 /**
- * ClaudeUI's real managed harness store (ADR-082 §8: opencode, pi and Codex
+ * ClaudeUI's real managed harness store (ADR-082 §8: opencode and pi
  * install there, only Claude Code is vendored). The test home is a throwaway
  * directory, so the store is named here, from the developer's real home. An
  * explicit CLAUDEUI_HARNESS_STORE wins. Kept in the environment like the real home:
@@ -25,6 +25,14 @@ const realHome = (process.env.CLAUDEUI_REAL_HOME ??= homedir())
  */
 const realHarnessStore = (process.env.CLAUDEUI_REAL_HARNESS_STORE ??=
   process.env.CLAUDEUI_HARNESS_STORE ?? resolve(realHome, '.claude', 'ui', 'harnesses'))
+
+/**
+ * An isolated pi agent directory for the pi model-call suites (`docs/protocol-pi/README.md`):
+ * PI_CODING_AGENT_DIR is dropped below like the other home-derived variables, and only the
+ * integration project gets it back. Kept in the environment the same way, for a re-evaluation.
+ */
+const piAgentDir = (process.env.CLAUDEUI_REAL_PI_AGENT_DIR ??=
+  process.env.PI_CODING_AGENT_DIR ?? '')
 
 /**
  * The main process's home, moved BEFORE Vitest starts a single worker. The setup files give every
@@ -56,14 +64,13 @@ process.env.HOME = mainTestHome
 
 /**
  * Variables that move a directory the code would otherwise derive from the home. Left in place,
- * a developer's `CODEX_HOME` (or `XDG_CONFIG_HOME`, ...) sends services and spawned engines to
+ * a developer's `XDG_CONFIG_HOME` (or `OPENCODE_CONFIG_DIR`, ...) sends services and spawned engines to
  * their REAL directories, home redirect or not. Dropped for the whole run: every worker inherits
  * this process's environment, and process-reset.ts snapshots it. A test that wants one sets it
  * itself; the integration project re-adds CLAUDEUI_HARNESS_STORE below. `os.userInfo().homedir`
  * still reports the real home and is not redirected.
  */
 for (const name of [
-  'CODEX_HOME',
   'XDG_CONFIG_HOME',
   'XDG_DATA_HOME',
   'XDG_STATE_HOME',
@@ -352,9 +359,12 @@ export default defineConfig({
           environment: 'node',
           globals: true,
           setupFiles: ['./src/test/setup/node.setup.ts'],
-          // The suites run the opencode, pi and Codex installed in the real
+          // The suites run the opencode and pi installed in the real
           // store, and skip without them.
-          env: { CLAUDEUI_HARNESS_STORE: realHarnessStore },
+          env: {
+            CLAUDEUI_HARNESS_STORE: realHarnessStore,
+            ...(piAgentDir ? { PI_CODING_AGENT_DIR: piAgentDir } : {})
+          },
           include: ['src/integration/**/*.integration.test.ts'],
           testTimeout: 60000
         }

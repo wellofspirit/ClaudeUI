@@ -76,10 +76,22 @@ function storeOn(rig: () => Rig) {
         activate: (id) => c.activateCredential(id),
         relabel: (id, label) => c.updateCredentialLabel(id, label)
       },
+      // The server this test drives is the one ClaudeUI spawned: the harness ran the
+      // first-contact hook on it, so a lease on it is clean (the store refuses `create`
+      // otherwise — 2.2.5 boots a location on create).
+      cleaned: true,
       release: () => {}
     }
   }
-  return new OpencodeCredentialStore({ connect, memory: memorySlotMemory() })
+  // As boot wires it (`core-services.ts`): a recogniser is required for a `create`, because the
+  // proven-copy cleanup cannot be proven done without one (2.2.5 boots a location on create).
+  return new OpencodeCredentialStore({
+    connect,
+    memory: memorySlotMemory(),
+    // A recogniser that knows no token here: the cleanup runs and proves nothing, which is
+    // enough for a create (nothing to delete). The copy cases configure their own.
+    isClaudeuiToken: () => false
+  })
 }
 
 const ours = async (rig: Rig) =>
@@ -175,7 +187,9 @@ describeChatgpt(
     const rig = useRig('s7-chatgpt', {
       sandbox: true,
       config: (_fixture, home) => ({
-        model: 'openai/gpt-5.5',
+        // ChatGPT mode on 2.2.5 keeps only models NEWER than gpt-5.5
+        // (`packages/core/src/plugin/provider/openai.ts`), so this is a 5.6 model.
+        model: 'openai/gpt-5.6-luna',
         providers: { openai: { settings: { transport: 'http' } } },
         plugins: [installPlugin(home, 'contract-chatgpt-redirect', 'chatgpt-redirect-plugin.js')]
       }),
@@ -202,7 +216,7 @@ describeChatgpt(
         await api.ok('session.create', {
           body: {
             location: { directory: rig().cwd },
-            model: { id: 'gpt-5.5', providerID: 'openai' }
+            model: { id: 'gpt-5.6-luna', providerID: 'openai' }
           }
         })
       ).data.id
@@ -282,7 +296,9 @@ describeChatgpt(
     const rig = useRig('s7-copy', {
       sandbox: true,
       config: (_fixture, home) => ({
-        model: 'openai/gpt-5.5',
+        // ChatGPT mode on 2.2.5 keeps only models NEWER than gpt-5.5
+        // (`packages/core/src/plugin/provider/openai.ts`), so this is a 5.6 model.
+        model: 'openai/gpt-5.6-luna',
         providers: { openai: { settings: { transport: 'http' } } },
         plugins: [installPlugin(home, 'contract-chatgpt-redirect', 'chatgpt-redirect-plugin.js')]
       }),
@@ -457,6 +473,13 @@ describeChatgpt(
           value: { type: 'key', key: 'sk-user-s' }
         }
       })
+      // On 2.2.5 this route BOOTS the global-config location
+      // (`packages/server/src/handlers/credential.ts`), whose openai plugin resolves — and here,
+      // with an OAuth connection active from an earlier case, refreshes — the connection: the
+      // proxy sees a CONNECT to auth.openai.com. That is precisely what the store's own create
+      // refuses until the proven-copy cleanup has succeeded (`credential-store.ts`
+      // `createGuard`). Nothing the STORE does from here on reaches the network.
+      const before = rig().proxy.attempts.length
       const signin = await store.prepareSignin('openai')
       expect(signin.previousActive).toBe('cred_user_signin_case')
       // The connect routes need the location's integrations registered (the
@@ -490,7 +513,7 @@ describeChatgpt(
       expect(after.some((row) => row.id === adopted)).toBe(false)
       expect(after.some((row) => row.id === 'cred_user_signin_case')).toBe(true)
       expect(after.find((row) => row.active)?.label).toBe('theirs')
-      expect(rig().proxy.attempts).toEqual([])
+      expect(rig().proxy.attempts.slice(before)).toEqual([])
     })
   }
 )

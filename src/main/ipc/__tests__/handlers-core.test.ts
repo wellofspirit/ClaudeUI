@@ -18,13 +18,22 @@ import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { CommandRegistry, makeRemoteConnection } from '../../../core/ipc/command-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
-vi.mock('../../../core/services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => [])
-}))
-
 vi.mock('../../../core/services/claude-settings', () => ({
   saveCleanupPeriodDays: vi.fn()
 }))
+
+const { resolveCatalog } = vi.hoisted(() => ({
+  resolveCatalog: vi.fn((_cwd: string): { entries: unknown[]; skipped: unknown[] } => ({
+    entries: [],
+    skipped: []
+  }))
+}))
+vi.mock('../../../core/services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: resolveCatalog
+}))
+
+const { setWorkspaceTrust } = vi.hoisted(() => ({ setWorkspaceTrust: vi.fn() }))
+vi.mock('../../../core/services/claude-workspace-trust', () => ({ setWorkspaceTrust }))
 
 vi.mock('../../../core/services/ui-config', () => ({
   saveSessionConfig: vi.fn(),
@@ -40,6 +49,7 @@ const {
   deleteSessionByEngine,
   deleteProjectFiles,
   deleteSessionFiles,
+  removeEmptyProjectDir,
   refreshCanonicalDirectories
 } = vi.hoisted(() => ({
   deleteSessionByEngine: vi.fn(
@@ -47,18 +57,19 @@ const {
   ),
   deleteProjectFiles: vi.fn(async () => {}),
   deleteSessionFiles: vi.fn(async (_id: string, _key: string) => {}),
+  removeEmptyProjectDir: vi.fn(async (_key: string) => {}),
   refreshCanonicalDirectories: vi.fn(async () => {})
 }))
 vi.mock('../../../core/services/session-delete', () => ({ deleteSessionByEngine }))
 vi.mock('../../../core/services/delete-session-files', () => ({
   deleteProjectFiles,
-  deleteSessionFiles
+  deleteSessionFiles,
+  removeEmptyProjectDir
 }))
 vi.mock('../../../core/services/sync-seed', () => ({ refreshCanonicalDirectories }))
 
 // `sendPrompt` can seed canonical's transcript for a session respawning in place
-// (seed-canonical-transcript.ts), which reads through the engine history readers. This
-// file mocks `codex/history` for the delete path only, so the readers are stubbed whole.
+// (seed-canonical-transcript.ts), which reads through the engine history readers. The readers are stubbed whole.
 vi.mock('../../../core/services/engine-history', () => ({
   readSessionHistory: vi.fn(async () => ({ messages: [], taskNotifications: [] }))
 }))
@@ -66,28 +77,6 @@ vi.mock('../../../core/services/engine-history', () => ({
 // R1: a delete must UNWATCH before the file it watches disappears.
 const { unwatchSession } = vi.hoisted(() => ({ unwatchSession: vi.fn() }))
 vi.mock('../../../core/services/session-watcher', () => ({ unwatchSession }))
-
-// Slice G's Codex walk. The plan and the native delete are the subject of
-// `core/codex/__tests__/codex-delete.test.ts`; what these tests pin is that the
-// codex branch reaches the walk at all, with hooks wired to this module's own
-// unwatch/cancel/replicate, and that a refusal still refreshes the listing.
-const { codexDeletePlan, deleteCodexSubtree } = vi.hoisted(() => ({
-  codexDeletePlan: vi.fn((...args: any[]) => ({
-    nodes: [{ threadId: args[0], title: null, live: false, depth: 0 }],
-    order: [args[0]]
-  })),
-  // Returns the threads it deleted, exactly as the real walk does — a project
-  // sweep reads that answer to know what it must not plan again.
-  deleteCodexSubtree: vi.fn(async (...args: any[]) => args[0].order as string[])
-}))
-vi.mock('../../../core/codex/delete', () => ({ codexDeletePlan, deleteCodexSubtree }))
-
-// The lineage scan the walk's one rescan runs. Mocked because the real one
-// spawns an app-server; what these tests pin is that a refusal can reach it.
-const { scanCodexLineage } = vi.hoisted(() => ({
-  scanCodexLineage: vi.fn(async () => ({ read: 0, learned: 0 }))
-}))
-vi.mock('../../../core/codex/history', () => ({ scanCodexLineage }))
 
 // The judge picker's support query (ADR-081 §3) and its resting-route query. The resolver is
 // the subject of `core/automode/__tests__/judge-route.test.ts`; what these tests pin is the
@@ -116,14 +105,16 @@ import {
   listPlaces,
   setPermissionMode,
   setModel,
-  setAccount,
   deleteSession,
   deleteProject,
   clearConversation,
   judgeModelSupport,
   judgeRouteResting,
   sendPrompt,
-  allowPeerMessages
+  loadSkillDetails,
+  allowPeerMessages,
+  setWorkspaceTrustAndNotify,
+  TRUST_REFRESH_DELAY_MS
 } from '../../../core/ipc/handlers-core'
 import { syncCore, addSyncSubscriber } from '../../../core/services/sync-host'
 import { crossEngineDispatcher } from '../../../core/services/cross-engine-dispatcher'
@@ -253,12 +244,12 @@ describe('handlers-core', () => {
   })
 
   it("a client's saveSessions does not drop a session it does not know from canonical sessionEngines", () => {
-    // The host created `host-codex` (birth identity); the saving client's snapshot
+    // The host created `host-opencode` (birth identity); the saving client's snapshot
     // predates it. The DB write only upserts, so the echo must too — or every
     // replica loses the entry while its row stays.
     syncCore.resetCanonicalForTests()
     saveSessions({
-      sessionEngines: { 'host-codex': { engineId: 'codex' } }
+      sessionEngines: { 'host-opencode': { engineId: 'opencode' } }
     } as any)
 
     saveSessions({
@@ -266,7 +257,7 @@ describe('handlers-core', () => {
     } as any)
 
     expect(syncCore.getCanonicalState().sessionEngines).toEqual({
-      'host-codex': { engineId: 'codex' },
+      'host-opencode': { engineId: 'opencode' },
       'client-pi': { engineId: 'pi' }
     })
     // Every other key of the payload is echoed as the client sent it.
@@ -284,8 +275,21 @@ describe('handlers-core', () => {
     saveSessions({ sessionEngines: {} } as any)
     expect(Object.keys(syncCore.getCanonicalState().sessionEngines).sort()).toEqual([
       'client-pi',
-      'host-codex'
+      'host-opencode'
     ])
+  })
+
+  it("a client's saveSessions does not replicate an engine this build does not ship", () => {
+    // A stale client still naming `codex`: saveSessionConfig refuses to store it, so the echo
+    // must not put it into every replica's map either.
+    syncCore.resetCanonicalForTests()
+    saveSessions({
+      sessionEngines: { 'stale-codex': { engineId: 'codex' }, 'client-pi': { engineId: 'pi' } }
+    } as any)
+
+    expect(syncCore.getCanonicalState().sessionEngines).toEqual({
+      'client-pi': { engineId: 'pi' }
+    })
   })
 
   it('listDirEntries returns the default empty shape for a nonexistent path', async () => {
@@ -363,59 +367,6 @@ describe('handlers-core', () => {
       await setPermissionMode(manager, 'rid-1', 'bogus')
 
       expect(sessionStub.setPermissionMode).not.toHaveBeenCalled()
-    })
-  })
-
-  // -------------------------------------------------------------------------
-  // ADR-068 §2 — the per-session account pin is CAPABILITY-gated at the handler
-  // -------------------------------------------------------------------------
-
-  describe('setAccount', () => {
-    it('delegates to the session when the engine declares perSessionAccount', async () => {
-      const sessionStub = makeSessionStub({
-        engineId: 'codex',
-        capabilities: {
-          ...resolveClaudeCapabilities('default'),
-          auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: true }
-        },
-        setAccount: vi.fn(async () => {})
-      })
-      const manager = makeManager(sessionStub)
-
-      await setAccount(manager, 'rid-1', 'acct-b')
-      await setAccount(manager, 'rid-1', null)
-
-      expect(sessionStub.setAccount).toHaveBeenNthCalledWith(1, 'acct-b')
-      expect(sessionStub.setAccount).toHaveBeenNthCalledWith(2, null)
-    })
-
-    it('REFUSES on an engine without the capability rather than resolving into nothing', async () => {
-      // Claude's `auth.perSessionAccount` is false. A silent no-op here would
-      // leave the picker showing a pin the session never took.
-      const sessionStub = makeSessionStub({ setAccount: vi.fn(async () => {}) })
-      const manager = makeManager(sessionStub)
-
-      await expect(setAccount(manager, 'rid-1', 'acct-b')).rejects.toThrow(
-        'This engine does not support per-session accounts'
-      )
-      expect(sessionStub.setAccount).not.toHaveBeenCalled()
-    })
-
-    it('refuses a missing session and a malformed id', async () => {
-      await expect(setAccount(makeManager(undefined), 'ghost', 'acct-b')).rejects.toThrow(
-        'No active session'
-      )
-      const sessionStub = makeSessionStub({
-        capabilities: {
-          ...resolveClaudeCapabilities('default'),
-          auth: { canDriveLogin: true, multiAccount: false, perSessionAccount: true }
-        },
-        setAccount: vi.fn(async () => {})
-      })
-      const manager = makeManager(sessionStub)
-      for (const bad of ['', 'x'.repeat(257), 42 as unknown as string])
-        await expect(setAccount(manager, 'rid-1', bad)).rejects.toThrow('Invalid account id')
-      expect(sessionStub.setAccount).not.toHaveBeenCalled()
     })
   })
 
@@ -757,188 +708,342 @@ describe('handlers-core', () => {
       expect(deleteProjectFiles).toHaveBeenCalledWith('-repo')
     })
 
-    // -----------------------------------------------------------------------
-    // Codex (ADR-066 slice G) — a delete is a leaf-first SUBTREE walk
-    // -----------------------------------------------------------------------
-    //
-    // This branch used to `throw new Error('Codex deletion is unsupported …')`,
-    // so the sidebar's delete was a dead end for the one engine whose sessions
-    // cannot be removed by unlinking a file.
-
-    it('walks the Codex subtree instead of refusing, with this module’s own hooks', async () => {
-      const order: string[] = []
-      unwatchSession.mockImplementation((id: string) => order.push(`unwatch:${id}`))
-      const manager = {
-        cancel: vi.fn((id: string) => order.push(`cancel:${id}`)),
-        get: vi.fn(),
-        has: vi.fn((id: string) => id === 'cx-live'),
-        forEach: vi.fn()
-      } as any
-      syncCore.emit('session:created', ['cx-root', { cwd: '/repo' }])
-
-      await deleteSession(manager, 'cx-root', '-repo', 'codex')
-
-      expect(deleteCodexSubtree).toHaveBeenCalledTimes(1)
-      const [plan, hooks] = deleteCodexSubtree.mock.calls[0] as any
-      expect(plan.order).toEqual(['cx-root'])
-      // The hooks are the same three steps every other engine's delete takes.
-      hooks.unwatch('cx-root')
-      hooks.stop('cx-root')
-      hooks.removeSession('cx-root')
-      expect(order).toEqual(['unwatch:cx-root', 'cancel:cx-root'])
-      expect(syncCore.getCanonicalState().sessions['cx-root']).toBeUndefined()
-      // `liveness` is answered by the session manager, not by the engine.
-      const facts = codexDeletePlan.mock.calls[0][1] as (id: string) => { live: boolean }
-      expect(typeof facts).toBe('function')
-      expect(facts('cx-live').live).toBe(true)
-      expect(facts('cx-root').live).toBe(false)
-      // The file-unlinking dispatcher is NOT part of this path.
-      expect(deleteSessionByEngine).not.toHaveBeenCalled()
-      expect(refreshCanonicalDirectories).toHaveBeenCalled()
-    })
-
     /**
-     * The walk's one second chance (db v17). A `-32600` may mean "a branch this
-     * app has never heard of still references that thread", and the lineage
-     * cache is the only thing that can learn one — but only `handlers-core`
-     * knows the root id and the liveness lookup a rebuilt plan needs, so the
-     * closure is wired here.
+     * The sidebar folds linked-worktree groups into their parent, and the delete covers what it
+     * shows: the server derives the set from the canonical listing (the request names only the
+     * project key). Worktree folders on disk are never touched; only their emptied Claude project
+     * dirs may go, and only with a plain rmdir (`removeEmptyProjectDir`).
      */
-    it('hands the Codex walk a replan that rescans lineage and rebuilds', async () => {
-      const manager = {
-        cancel: vi.fn(),
-        get: vi.fn(),
-        has: vi.fn(() => false),
-        forEach: vi.fn()
-      } as any
-      await deleteSession(manager, 'cx-root', '-repo', 'codex')
-      const options = deleteCodexSubtree.mock.calls[0][2] as {
-        replan?: () => Promise<{ order: string[] }>
-      }
-      expect(typeof options?.replan).toBe('function')
-      codexDeletePlan.mockClear()
-      const rebuilt = await options.replan!()
-      // `all`: `verified_at` is ignored, because the cache has just been proven
-      // incomplete by the refusal.
-      expect(scanCodexLineage).toHaveBeenCalledWith(undefined, undefined, 'all')
-      // ...and the plan is rebuilt AFTER the scan, or it would read the same
-      // cache that was wrong a moment ago.
-      expect(scanCodexLineage.mock.invocationCallOrder[0]).toBeLessThan(
-        codexDeletePlan.mock.invocationCallOrder[0]
-      )
-      expect(rebuilt.order).toEqual(['cx-root'])
-    })
-
-    it('refreshes the listing even when the Codex walk is refused', async () => {
-      const manager = {
-        cancel: vi.fn(),
-        get: vi.fn(),
-        has: vi.fn(() => false),
-        forEach: vi.fn()
-      } as any
-      deleteCodexSubtree.mockRejectedValueOnce(new Error('Codex refused to delete "b" (…)'))
-      await expect(deleteSession(manager, 'cx-root', '-repo', 'codex')).rejects.toThrow(
-        /Codex refused to delete/
-      )
-      // Without this the deleted-but-refused rows stay missing on every client:
-      // the walk already replicated their removal before asking the binary.
-      expect(refreshCanonicalDirectories).toHaveBeenCalled()
-    })
-
-    it('sweeps a project’s Codex sessions through the same walk, before the Claude unlink', async () => {
-      const manager = {
-        cancel: vi.fn(),
-        get: vi.fn(),
-        has: vi.fn(() => false),
-        forEach: vi.fn()
-      } as any
-      const order: string[] = []
-      deleteCodexSubtree.mockImplementation(async (plan: any) => {
-        order.push(`codex:${plan.order.join(',')}`)
-        return plan.order as string[]
+    describe('folded worktrees', () => {
+      const WT = '/repo/.claude/worktrees/wt'
+      const WT_KEY = '-repo--claude-worktrees-wt'
+      const OC_WT = '/data/opencode/worktree/abc123/feat'
+      const OC_KEY = '-data-opencode-worktree-abc123-feat'
+      const linked = (worktreePath: string, name: string): any => ({
+        worktreePath,
+        repoRoot: '/repo',
+        name,
+        branch: 'b'
       })
-      deleteProjectFiles.mockImplementation(async () => {
-        order.push('unlink-claude')
+      const sess = (
+        sessionId: string,
+        cwd: string,
+        projectKey: string,
+        engineId?: string
+      ): any => ({
+        sessionId,
+        cwd,
+        projectKey,
+        ...(engineId ? { engineId } : {})
       })
-      syncCore.setDirectories([
+      const listing = (withParent: boolean): any[] => [
+        ...(withParent
+          ? [
+              {
+                cwd: '/repo',
+                projectKey: '-repo',
+                folderName: 'repo',
+                sessions: [sess('home-1', '/repo', '-repo', 'claude')]
+              }
+            ]
+          : []),
         {
-          cwd: '/repo',
-          projectKey: '-repo',
-          folderName: 'repo',
+          cwd: WT,
+          projectKey: WT_KEY,
+          folderName: 'wt',
+          linkedWorktree: linked(WT, 'wt'),
+          sessions: [sess('wt-claude', WT, WT_KEY, 'claude'), sess('wt-pi', WT, WT_KEY, 'pi')]
+        },
+        {
+          cwd: OC_WT,
+          projectKey: OC_KEY,
+          folderName: 'feat',
+          linkedWorktree: linked(OC_WT, 'feat'),
+          sessions: [sess('oc-1', OC_WT, OC_KEY, 'opencode')]
+        },
+        // A similar key, an unrelated repo: nothing of it is taken along.
+        {
+          cwd: '/repo2',
+          projectKey: '-repo2',
+          folderName: 'repo2',
+          sessions: [sess('r2-claude', '/repo2', '-repo2', 'claude')]
+        },
+        {
+          cwd: '/repo2/.claude/worktrees/x',
+          projectKey: '-repo2--claude-worktrees-x',
+          folderName: 'x',
+          linkedWorktree: { ...linked('/repo2/.claude/worktrees/x', 'x'), repoRoot: '/repo2' },
           sessions: [
-            { sessionId: 'cl-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' },
-            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' }
+            sess('r2-wt', '/repo2/.claude/worktrees/x', '-repo2--claude-worktrees-x', 'claude')
           ]
         }
-      ] as never)
+      ]
+      const manager = (): any => ({ cancel: vi.fn(), get: vi.fn(), forEach: vi.fn() })
 
-      await deleteProject(manager, '-repo')
+      it('an existing parent: foreign worktree sessions go by id, Claude ones by their own key, the parent dir wholesale', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        const m = manager()
 
-      expect(order).toEqual(['codex:cx-1', 'unlink-claude'])
-      // Codex never goes through the engine-neutral single-thread delete here —
-      // the walk already removed it, and a second ask is refused as "no such
-      // thread", which is indistinguishable from a real refusal.
-      expect(deleteSessionByEngine).not.toHaveBeenCalled()
-    })
+        await deleteProject(m, '-repo')
 
-    /**
-     * A walk can delete MORE than the plan it was handed: its one rescan finds
-     * branches the lineage cache never knew. Those ids are gone, so planning a
-     * second delete for one of them would be refused as "no such thread" — a
-     * refusal indistinguishable from a real one, which would abort the whole
-     * project delete.
-     */
-    it('does not re-plan a thread the previous walk’s rescan already removed', async () => {
-      const manager = {
-        cancel: vi.fn(),
-        get: vi.fn(),
-        has: vi.fn(() => false),
-        forEach: vi.fn()
-      } as any
-      // The plan for `cx-1` named only itself; the walk also removed `cx-2`.
-      deleteCodexSubtree.mockImplementationOnce(async () => ['cx-1', 'cx-2'])
-      syncCore.setDirectories([
-        {
-          cwd: '/repo',
-          projectKey: '-repo',
-          folderName: 'repo',
-          sessions: [
-            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' },
-            { sessionId: 'cx-2', cwd: '/repo', projectKey: '-repo', engineId: 'codex' }
-          ]
-        }
-      ] as never)
+        expect(deleteSessionByEngine.mock.calls.map((c) => [c[0], c[1], c[2]]).sort()).toEqual([
+          ['oc-1', OC_KEY, 'opencode'],
+          ['wt-pi', WT_KEY, 'pi']
+        ])
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['wt-claude', WT_KEY]
+        ])
+        expect(deleteProjectFiles.mock.calls).toEqual([['-repo']])
+        expect(removeEmptyProjectDir.mock.calls.map((c) => c[0]).sort()).toEqual([OC_KEY, WT_KEY])
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0]).sort()).toEqual([
+          'home-1',
+          'oc-1',
+          'wt-claude',
+          'wt-pi'
+        ])
+      })
 
-      await deleteProject(manager, '-repo')
+      it('a synthesised parent deletes the listed files and NEVER the parent folder', async () => {
+        syncCore.setDirectories(listing(false) as never)
 
-      expect(deleteCodexSubtree).toHaveBeenCalledTimes(1)
-      expect(codexDeletePlan.mock.calls.map((call: unknown[]) => call[0])).toEqual(['cx-1'])
-      expect(deleteProjectFiles).toHaveBeenCalledWith('-repo')
-    })
+        await deleteProject(manager(), '-repo')
 
-    it('a refused Codex walk aborts the project delete before anything irreversible', async () => {
-      const manager = {
-        cancel: vi.fn(),
-        get: vi.fn(),
-        has: vi.fn(() => false),
-        forEach: vi.fn()
-      } as any
-      deleteCodexSubtree.mockRejectedValueOnce(new Error('Codex refused to delete "cx-1" (…)'))
-      syncCore.setDirectories([
-        {
-          cwd: '/repo',
-          projectKey: '-repo',
-          folderName: 'repo',
-          sessions: [
-            { sessionId: 'cl-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' },
-            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' }
-          ]
-        }
-      ] as never)
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['wt-claude', WT_KEY]
+        ])
+        // Claude's per-repo memory lives in `projects/-repo/`: no wholesale delete, of it or anything.
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(removeEmptyProjectDir.mock.calls.map((c) => c[0])).not.toContain('-repo')
+      })
 
-      await expect(deleteProject(manager, '-repo')).rejects.toThrow(/Codex refused to delete/)
-      // A session that still exists must not be left behind a deleted project.
-      expect(deleteProjectFiles).not.toHaveBeenCalled()
+      it('sweeps a live worktree session the listing does not hold, and nothing of another repo', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        syncCore.emit('session:created', ['live-wt', { cwd: WT }])
+        syncCore.emit('session:created', ['live-other', { cwd: '/repo2/.claude/worktrees/x' }])
+        const m = manager()
+
+        await deleteProject(m, '-repo')
+
+        const cancelled = m.cancel.mock.calls.map((c: unknown[]) => c[0])
+        expect(cancelled).toContain('live-wt')
+        expect(cancelled).not.toContain('live-other')
+        expect(cancelled).not.toContain('r2-claude')
+        expect(cancelled).not.toContain('r2-wt')
+        expect(deleteSessionByEngine.mock.calls.map((c) => c[0])).not.toContain('r2-wt')
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => c[0])).not.toContain('r2-wt')
+      })
+
+      it('a request for the worktree’s own key deletes just that group, file by file, never wholesale', async () => {
+        syncCore.setDirectories(listing(true) as never)
+
+        await deleteProject(manager(), WT_KEY)
+
+        expect(deleteSessionByEngine.mock.calls.map((c) => c[0])).toEqual(['wt-pi'])
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['wt-claude', WT_KEY]
+        ])
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(removeEmptyProjectDir.mock.calls).toEqual([[WT_KEY]])
+      })
+
+      it('a group of live, not-yet-listed sessions only: cancelled, storage deleted, no folder wholesale', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        syncCore.emit('session:created', ['new-claude', { cwd: '/fresh/dir' }])
+        syncCore.emit('session:created', ['new-pi', { cwd: '/fresh/dir', engineId: 'pi' }])
+        syncCore.emit('session:created', ['elsewhere', { cwd: '/fresh/other' }])
+        const m = manager()
+
+        await deleteProject(m, '-fresh-dir')
+
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0]).sort()).toEqual([
+          'new-claude',
+          'new-pi'
+        ])
+        expect(deleteSessionFiles.mock.calls).toEqual([['new-claude', '-fresh-dir']])
+        expect(deleteSessionByEngine).toHaveBeenCalledWith('new-pi', '-fresh-dir', 'pi')
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(syncCore.getCanonicalState().sessions['elsewhere']).toBeDefined()
+      })
+
+      it('...but never a session a listed group claims by directory or already holds', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: 'D:\\Work\\x',
+            projectKey: 'D--Work-x',
+            folderName: 'x',
+            sessions: [sess('held', 'D:\\Work\\x', 'D--Work-x', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['claimed', { cwd: 'd:/work/x' }])
+        syncCore.emit('session:created', ['held', { cwd: 'd:/work/x' }])
+        const m = manager()
+
+        await deleteProject(m, 'd--work-x')
+
+        expect(m.cancel).not.toHaveBeenCalled()
+        expect(deleteSessionFiles).not.toHaveBeenCalled()
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+      })
+
+      it('a live session another listed group holds is cancelled with its project but its files are not named by cwd', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/repo',
+            projectKey: '-repo',
+            folderName: 'repo',
+            sessions: [sess('p1', '/repo', '-repo', 'claude')]
+          },
+          {
+            cwd: '/elsewhere',
+            projectKey: '-elsewhere',
+            folderName: 'elsewhere',
+            sessions: [sess('moved', '/elsewhere', '-elsewhere', 'claude')]
+          }
+        ] as never)
+        // Live in the repo's directory, but a different group lists it.
+        syncCore.emit('session:created', ['moved', { cwd: '/repo' }])
+        const m = manager()
+
+        await deleteProject(m, '-repo')
+
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0])).toContain('moved')
+        expect(
+          deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])
+        ).not.toContainEqual(['moved', '-repo'])
+      })
+
+      it('a key the listing has no group for deletes no folder and no listed session', async () => {
+        syncCore.setDirectories(listing(false) as never)
+
+        await deleteProject(manager(), '-gone')
+
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(deleteSessionFiles).not.toHaveBeenCalled()
+        expect(deleteSessionByEngine).not.toHaveBeenCalled()
+      })
+
+      it('the live sweep is by directory: "/a-b" is not swept by deleting a repo whose worktree is "/a/b"', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/repo',
+            projectKey: '-repo',
+            folderName: 'repo',
+            sessions: [sess('p1', '/repo', '-repo', 'claude')]
+          },
+          {
+            cwd: '/a/b',
+            projectKey: '-a-b',
+            folderName: 'b',
+            linkedWorktree: { worktreePath: '/a/b', repoRoot: '/repo', name: 'b', branch: 'b' },
+            sessions: [sess('w1', '/a/b', '-a-b', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['live-lossy', { cwd: '/a-b' }])
+        syncCore.emit('session:created', ['live-wt', { cwd: '/a/b' }])
+        const m = manager()
+
+        await deleteProject(m, '-repo')
+
+        const cancelled = m.cancel.mock.calls.map((c: unknown[]) => c[0])
+        expect(cancelled).toContain('live-wt')
+        expect(cancelled).not.toContain('live-lossy')
+        expect(syncCore.getCanonicalState().sessions['live-lossy']).toBeDefined()
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => c[0])).not.toContain(
+          'live-lossy'
+        )
+      })
+
+      it('the live sweep ignores a drive-letter case or separator difference', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: 'D:\\Work\\repo',
+            projectKey: 'D--Work-repo',
+            folderName: 'repo',
+            sessions: [sess('p1', 'D:\\Work\\repo', 'D--Work-repo', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['live-1', { cwd: 'd:/work/repo' }])
+        const m = manager()
+
+        await deleteProject(m, 'D--Work-repo')
+
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0])).toContain('live-1')
+      })
+
+      it('a live session the listing does not hold also loses its persisted history, by its own cwd key', async () => {
+        syncCore.setDirectories(listing(true) as never)
+        syncCore.emit('session:created', ['live-claude', { cwd: WT }])
+        syncCore.emit('session:created', ['live-pi', { cwd: WT, engineId: 'pi' }])
+        syncCore.emit('session:created', ['live-oc', { cwd: '/repo', engineId: 'opencode' }])
+
+        await deleteProject(manager(), '-repo')
+
+        // Claude: the file under the key of the session's own cwd.
+        expect(deleteSessionFiles).toHaveBeenCalledWith('live-claude', WT_KEY)
+        // opencode and pi: by engine session id, like the listed ones.
+        expect(deleteSessionByEngine).toHaveBeenCalledWith('live-pi', WT_KEY, 'pi')
+        expect(deleteSessionByEngine).toHaveBeenCalledWith('live-oc', '-repo', 'opencode')
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => c[0])).not.toContain('live-pi')
+      })
+
+      it('a synthesised parent’s live session loses its history too, and the parent folder stays', async () => {
+        syncCore.setDirectories(listing(false) as never)
+        syncCore.emit('session:created', ['live-root', { cwd: '/repo' }])
+
+        await deleteProject(manager(), '-repo')
+
+        expect(deleteSessionFiles).toHaveBeenCalledWith('live-root', '-repo')
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+      })
+
+      it('repo "/a/b" with no root group and its worktree "/a-b": only that worktree’s sessions, no folder wholesale', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/a-b',
+            projectKey: '-a-b',
+            folderName: 'a-b',
+            linkedWorktree: { worktreePath: '/a-b', repoRoot: '/a/b', name: 'a-b', branch: 'b' },
+            sessions: [sess('w1', '/a-b', '-a-b', 'claude'), sess('w2', '/a-b', '-a-b', 'pi')]
+          }
+        ] as never)
+
+        await deleteProject(manager(), '-a-b')
+
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['w1', '-a-b']
+        ])
+        expect(deleteSessionByEngine.mock.calls.map((c) => c[0])).toEqual(['w2'])
+      })
+
+      it('"/a-b" a worktree of "/other", "/wt" a worktree of "/a/b": deleting "-a-b" takes only "/wt"', async () => {
+        syncCore.setDirectories([
+          {
+            cwd: '/a-b',
+            projectKey: '-a-b',
+            folderName: 'a-b',
+            linkedWorktree: { worktreePath: '/a-b', repoRoot: '/other', name: 'a-b', branch: 'b' },
+            sessions: [sess('other-wt', '/a-b', '-a-b', 'claude')]
+          },
+          {
+            cwd: '/wt',
+            projectKey: '-wt',
+            folderName: 'wt',
+            linkedWorktree: { worktreePath: '/wt', repoRoot: '/a/b', name: 'wt', branch: 'b' },
+            sessions: [sess('mine', '/wt', '-wt', 'claude')]
+          }
+        ] as never)
+        syncCore.emit('session:created', ['live-other', { cwd: '/a-b' }])
+        const m = manager()
+
+        await deleteProject(m, '-a-b')
+
+        expect(deleteProjectFiles).not.toHaveBeenCalled()
+        expect(deleteSessionFiles.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+          ['mine', '-wt']
+        ])
+        expect(m.cancel.mock.calls.map((c: unknown[]) => c[0])).toEqual(['mine'])
+      })
     })
 
     it('one engine failing does not abandon the rest of the delete', async () => {
@@ -1064,16 +1169,6 @@ describe('handlers-core', () => {
       expect(endParent.mock.calls.map((c) => c[0])).toEqual(['cl-fine'])
     })
 
-    it('Codex: each thread ends as the binary deletes it (the walk’s `deleted` hook), a refused one never', async () => {
-      await deleteSession(manager(), 'cx-root', '-repo', 'codex')
-      const hooks = deleteCodexSubtree.mock.calls[0][1] as any
-      // Replicating the removal is announced before the binary is asked: it ends nothing.
-      hooks.removeSession('cx-root')
-      expect(endParent).not.toHaveBeenCalled()
-      hooks.deleted('cx-root')
-      expect(endParent).toHaveBeenCalledWith('cx-root')
-    })
-
     it('deleteProject: every session the engines deleted ends; a survivor keeps its X-Agents', async () => {
       deleteSessionByEngine.mockImplementation(async (id: string) => {
         if (id === 'oc-live') throw new Error('opencode server down')
@@ -1092,23 +1187,6 @@ describe('handlers-core', () => {
       ] as never)
       await deleteProject(manager(), '-repo')
       expect(endParent.mock.calls.map((c) => c[0]).sort()).toEqual(['cl-gone', 'pi-gone'])
-    })
-
-    it('deleteProject: a refused Codex walk ends nothing after it', async () => {
-      deleteCodexSubtree.mockRejectedValueOnce(new Error('Codex refused to delete "b" (…)'))
-      syncCore.setDirectories([
-        {
-          cwd: '/repo',
-          projectKey: '-repo',
-          folderName: 'repo',
-          sessions: [
-            { sessionId: 'cx-1', cwd: '/repo', projectKey: '-repo', engineId: 'codex' },
-            { sessionId: 'cl-1', cwd: '/repo', projectKey: '-repo', engineId: 'claude' }
-          ]
-        }
-      ] as never)
-      await expect(deleteProject(manager(), '-repo')).rejects.toThrow(/Codex refused/)
-      expect(endParent).not.toHaveBeenCalled()
     })
   })
 
@@ -1713,7 +1791,7 @@ describe('sendPrompt — a resumed session waits for its own totals seed', () =>
     expect(session.calls).toEqual(['run:hello'])
   })
 
-  it('an engine without the hook (opencode, pi, codex) is unaffected', () => {
+  it('an engine without the hook (opencode, pi) is unaffected', () => {
     for (const engineId of ['opencode', 'pi']) {
       const { rid, session } = resumed(() => new Promise<void>(() => {}), engineId)
       delete session.resumeSeedReady
@@ -1759,5 +1837,106 @@ describe('allowPeerMessages — the session:allow-peer-messages body', () => {
       makeRemoteConnection('password', null)
     )
     expect(viaDispatcher).toEqual(await allowPeerMessages(manager, 'rid-1'))
+  })
+})
+
+describe('setWorkspaceTrustAndNotify — the claude:set-workspace-trust body', () => {
+  const STATE = { root: '/tmp/repo-a', trusted: true, worktree: false }
+  const refresh = () => vi.fn(async () => {})
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    setWorkspaceTrust.mockReset()
+    setWorkspaceTrust.mockResolvedValue(STATE)
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('refreshes only Claude sessions on the same project, once, after the delay', async () => {
+    const same = makeSessionStub({ cwd: '/tmp/repo-a', notifySettingsChanged: refresh() })
+    const other = makeSessionStub({ cwd: '/tmp/repo-b', notifySettingsChanged: refresh() })
+    const oc = makeSessionStub({
+      engineId: 'opencode',
+      cwd: '/tmp/repo-a',
+      notifySettingsChanged: refresh()
+    })
+    const noSeam = makeSessionStub({ cwd: '/tmp/repo-a' }) // a session without the seam must not throw
+    // A session whose key cannot be derived must not abort the refresh (or throw in the main process).
+    const broken = makeSessionStub({ cwd: undefined as any, notifySettingsChanged: refresh() })
+    const all = [broken, same, other, oc, noSeam]
+    const manager = { forEach: (cb: (s: any) => void) => all.forEach(cb) } as any
+
+    await expect(setWorkspaceTrustAndNotify(manager, '/tmp/repo-a', true)).resolves.toEqual(STATE)
+    expect(setWorkspaceTrust).toHaveBeenCalledWith('/tmp/repo-a', true)
+    expect(same.notifySettingsChanged).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(TRUST_REFRESH_DELAY_MS - 1)
+    expect(same.notifySettingsChanged).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    vi.advanceTimersByTime(60_000)
+    expect(same.notifySettingsChanged).toHaveBeenCalledTimes(1)
+    expect(other.notifySettingsChanged).not.toHaveBeenCalled()
+    expect(oc.notifySettingsChanged).not.toHaveBeenCalled()
+  })
+
+  it('schedules nothing when the write fails', async () => {
+    setWorkspaceTrust.mockRejectedValueOnce(new Error('locked'))
+    const s = makeSessionStub({ cwd: '/tmp/repo-a', notifySettingsChanged: refresh() })
+    await expect(setWorkspaceTrustAndNotify(makeManager(s), '/tmp/repo-a', true)).rejects.toThrow(
+      'locked'
+    )
+    vi.advanceTimersByTime(TRUST_REFRESH_DELAY_MS * 2)
+    expect(s.notifySettingsChanged).not.toHaveBeenCalled()
+  })
+})
+
+describe('loadSkillDetails', () => {
+  const SKILL = { name: 'mine', description: 'd', source: 'user', path: '/p', content: 'c' }
+
+  beforeEach(() => resolveCatalog.mockClear())
+
+  it('asks the addressed session, with that session cwd', async () => {
+    const discoverSkills = vi.fn(async () => [SKILL])
+    const manager = makeManager(makeSessionStub({ cwd: '/sess/cwd', discoverSkills }))
+
+    await expect(loadSkillDetails(manager, 'route-1', '/other')).resolves.toEqual([SKILL])
+
+    expect(manager.get).toHaveBeenCalledWith('route-1')
+    expect(discoverSkills).toHaveBeenCalledWith('/sess/cwd')
+    expect(resolveCatalog).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the catalog for the cwd when no live session answers', async () => {
+    resolveCatalog.mockReturnValue({
+      entries: [
+        {
+          name: 'proj',
+          description: 'p',
+          source: 'project',
+          file: '/repo/.claude/skills/proj/SKILL.md',
+          body: 'body',
+          kind: 'skill',
+          userInvocable: true,
+          modelInvocable: true,
+          claudeOnly: ['context']
+        }
+      ],
+      skipped: []
+    })
+    const manager = { get: vi.fn(() => undefined) } as any
+
+    const result = await loadSkillDetails(manager, 'gone', '/repo')
+
+    expect(resolveCatalog).toHaveBeenCalledWith('/repo')
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ name: 'proj', source: 'project', content: 'body' })
+    // The fallback is Claude's own view: nothing to flag as unapplied.
+    expect(result[0].claudeOnly).toBeUndefined()
+  })
+
+  it('uses the catalog when no routing id is given', async () => {
+    const manager = { get: vi.fn() } as any
+    await loadSkillDetails(manager, null, '/repo')
+    expect(manager.get).not.toHaveBeenCalled()
+    expect(resolveCatalog).toHaveBeenCalledWith('/repo')
   })
 })

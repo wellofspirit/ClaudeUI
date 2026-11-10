@@ -159,7 +159,7 @@ interface Scaffold {
 
 function scaffold(opts?: {
   sessionIdFor?: (routingId: string) => string | null
-  engineId?: 'claude' | 'opencode' | 'pi' | 'codex'
+  engineId?: 'claude' | 'opencode' | 'pi'
 }): Scaffold {
   const bridge = new TestIpcBridge()
   setIpcBridge(bridge)
@@ -577,50 +577,14 @@ describe('PluginManager', () => {
       delete (global as any).__deltas
     })
 
-    it('preserves message observers across the Codex item lane without ringing prefixes', async () => {
-      s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'codex' })
-      writePlugin({
-        id: 'item-listener',
-        entryJs: `module.exports = { activate(ctx) {
-        global.__itemMessages = []
-        global.__codexLegacyStreams = []
-        ctx.on('session:message', evt => global.__itemMessages.push(evt))
-        ctx.on('session:stream', evt => global.__codexLegacyStreams.push(evt))
-      } }`
-      })
-      await s.manager.loadAll()
-      syncCore.seedSession('R-codex-item', { selectedEngineId: 'codex' })
-      const target = { messageId: 'item', blockIndex: 0, kind: 'text' }
-      const message = {
-        id: 'item',
-        role: 'assistant',
-        timestamp: 1,
-        content: [{ type: 'text', text: '' }]
-      }
-      emitEvent('session:item-open', ['R-codex-item', { target, message }])
-      const seq = syncCore.currentSeq()
-      emitEvent('session:item-delta', ['R-codex-item', { target, chunk: 'one' }])
-      emitEvent('session:item-delta', ['R-codex-item', { target, chunk: ' two' }])
-      expect(syncCore.currentSeq()).toBe(seq)
-      emitEvent('session:item-seal', [
-        'R-codex-item',
-        { message: { ...message, content: [{ type: 'text', text: 'final' }] } }
-      ])
-      expect((global as any).__itemMessages.map((m: any) => m.content[0].text)).toEqual([
-        'one',
-        'one two',
-        'final'
-      ])
-      expect((global as any).__codexLegacyStreams).toEqual([])
-      delete (global as any).__itemMessages
-      delete (global as any).__codexLegacyStreams
-    })
-
     it.each(['claude', 'opencode', 'pi'] as const)(
       'preserves legacy root stream observers for %s item appends',
       async (engineId) => {
         // The canonical engine is authoritative even if the legacy manager view is stale.
-        s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'codex' })
+        s = scaffold({
+          sessionIdFor: () => 'SID-1',
+          engineId: engineId === 'pi' ? 'claude' : 'pi'
+        })
         writePlugin({
           id: 'pi-stream-listener',
           entryJs: `module.exports = { activate(ctx) {
@@ -650,35 +614,6 @@ describe('PluginManager', () => {
         delete (global as any).__piStreams
       }
     )
-
-    it('does not expose Codex item appends through a lone legacy stream listener', async () => {
-      s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'codex' })
-      writePlugin({
-        id: 'codex-stream-listener',
-        entryJs: `module.exports = { activate(ctx) {
-          global.__codexOnlyStreams = []
-          ctx.on('session:stream', evt => global.__codexOnlyStreams.push(evt))
-        } }`
-      })
-      await s.manager.loadAll()
-      syncCore.seedSession('R-codex-stream', { selectedEngineId: 'codex' })
-      const target = { messageId: 'codex-stream-item', blockIndex: 0, kind: 'text' }
-      emitEvent('session:item-open', [
-        'R-codex-stream',
-        {
-          target,
-          message: {
-            id: 'codex-stream-item',
-            role: 'assistant',
-            timestamp: 1,
-            content: [{ type: 'text', text: '' }]
-          }
-        }
-      ])
-      emitEvent('session:item-delta', ['R-codex-stream', { target, chunk: 'private prefix' }])
-      expect((global as any).__codexOnlyStreams).toEqual([])
-      delete (global as any).__codexOnlyStreams
-    })
 
     it('resolves targeted multi-block seals from canonical state without regressing siblings', async () => {
       s = scaffold({ sessionIdFor: () => 'SID-1', engineId: 'opencode' })
@@ -750,7 +685,7 @@ describe('PluginManager', () => {
       delete (global as any).__explicitSeals
     })
 
-    it.each(['claude', 'opencode', 'pi', 'codex'] as const)(
+    it.each(['claude', 'opencode', 'pi'] as const)(
       'keeps %s child item compatibility owner-scoped and engine-independent',
       async (engineId) => {
         s = scaffold({ sessionIdFor: () => 'SID-1', engineId })

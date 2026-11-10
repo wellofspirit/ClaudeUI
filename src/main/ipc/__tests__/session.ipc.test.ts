@@ -16,21 +16,9 @@ import * as os from 'os'
 import { EventEmitter } from 'events'
 import * as path from 'path'
 
-vi.mock('../../../core/codex/codex-locate', () => ({ codexBinaryAvailable: () => false }))
-vi.mock('../../../core/codex/model-discovery', () => ({
-  discoverCodexModels: vi.fn(async () => [])
-}))
-vi.mock('../../../core/codex/history', () => ({
-  listCodexSessions: vi.fn(async () => []),
-  loadCodexHistory: vi.fn()
-}))
-vi.mock('../../../core/auth/CodexAuthProvider', () => ({
-  codexAuthProvider: {
-    status: vi.fn(async () => ({ available: false, authenticated: false, authKind: null })),
-    loginStart: vi.fn(),
-    loginStatus: vi.fn(() => ({ status: 'idle' })),
-    loginCancel: vi.fn()
-  }
+vi.mock('../../../core/pi/model-discovery', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../core/pi/model-discovery')>()),
+  discoverPiModels: vi.fn(async () => [])
 }))
 
 // ---------------------------------------------------------------------------
@@ -60,6 +48,8 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     push: vi.fn(async () => {}),
     pushWithUpstream: vi.fn(async () => {}),
     pull: vi.fn(async () => ({ ok: true })),
+    stashPush: vi.fn(async () => {}),
+    stashRestore: vi.fn(async () => {}),
     fetch: vi.fn(async () => {}),
     startPolling: vi.fn(),
     stopPolling: vi.fn()
@@ -92,6 +82,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     mcpToggleServer: vi.fn(async () => {}),
     mcpReconnectServer: vi.fn(async () => {}),
     mcpSetServers: vi.fn(async () => ({})),
+    mcpReloadServers: vi.fn(async () => {}),
     notifySettingsChanged: vi.fn(async () => {}),
     getPlanContent: vi.fn(() => null),
     getSessionLogPath: vi.fn(() => null),
@@ -197,20 +188,23 @@ vi.mock('../../../core/services/claude-settings', () => ({
   saveClaudePermissions: vi.fn()
 }))
 
+const mcpCli = vi.hoisted(() => ({
+  addMcpServerNative: vi.fn(async () => ({})),
+  removeMcpServerNative: vi.fn(async () => ({ error: 'No MCP server named "x" in user config' }))
+}))
+vi.mock('../../../core/services/claude-mcp-cli', () => mcpCli)
+
 vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
+  listMcpCatalog: vi.fn(() => ({
+    servers: [{ name: 'u', source: 'user', config: { command: 'x' } }],
+    skipped: []
+  })),
   saveMcpServers: vi.fn(),
   removeMcpServer: vi.fn(),
+  removeClaudeUiLegacyMcpServer: vi.fn(),
   readDisabledMcpServers: vi.fn(() => []),
   writeDisabledMcpServers: vi.fn()
-}))
-
-vi.mock('../../../core/services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => [])
-}))
-
-vi.mock('../../../core/services/custom-command-scanner', () => ({
-  scanCustomCommands: vi.fn(async () => [])
 }))
 
 vi.mock('../../../core/services/delete-session-files', () => ({
@@ -446,6 +440,33 @@ describe('session.ipc', () => {
       expect(res).toEqual({ ok: true, data: { path: '/tmp/wt', branch: 'feat' } })
     })
 
+    it('worktree:create declares withProgress and keeps the reporter off the wire args', async () => {
+      expect(commandRegistry.declaration('worktree:create')).toMatchObject({
+        capability: 'git',
+        kind: 'command',
+        withProgress: true
+      })
+      const { createWorktree } = await import('../../../core/services/worktree')
+      const reporter = vi.fn()
+      await dispatchDesktop(
+        'worktree:create',
+        ['/tmp/repo', 'feature', { base: 'default' }],
+        reporter
+      )
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', { base: 'default' })
+      // The heartbeat reports at once, so the web client's invoke window starts sliding.
+      expect(reporter).toHaveBeenCalledWith(expect.objectContaining({ phase: 'creating' }))
+    })
+
+    it('worktree:create forwards the base option and reads a null one as absent', async () => {
+      const { createWorktree } = await import('../../../core/services/worktree')
+      await harness.call<any>('worktree:create', '/tmp/repo', 'feature', { base: 'default' })
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', { base: 'default' })
+      // A remote client turns an omitted argument into null.
+      await harness.call<any>('worktree:create', '/tmp/repo', 'feature', null)
+      expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', undefined)
+    })
+
     it('returns { ok: true, data } on success for git:status', async () => {
       const res = await harness.call<any>('git:status', '/tmp/repo')
       expect(res.ok).toBe(true)
@@ -670,12 +691,12 @@ describe('session.ipc', () => {
       const dismissals: unknown[][] = []
       harness.onEvent('session:approval-dismiss', (...args) => dismissals.push(args))
       sessionStub.resolveApproval.mockImplementationOnce(() => {
-        throw new Error('Stale or unknown Codex approval')
+        throw new Error('Stale or unknown approval')
       })
       await expect(
-        harness.call('session:approval-response', 'codex-rid', 'req-x', 'allow')
-      ).rejects.toThrow('Stale or unknown Codex approval')
-      expect(dismissals).toEqual([['codex-rid', { requestId: 'req-x' }]])
+        harness.call('session:approval-response', 'pi-rid-2', 'req-x', 'allow')
+      ).rejects.toThrow('Stale or unknown approval')
+      expect(dismissals).toEqual([['pi-rid-2', { requestId: 'req-x' }]])
     })
 
     it('falls through to the session when the dispatcher declines to consume', async () => {
@@ -800,7 +821,9 @@ describe('session.ipc', () => {
       ['git:stage-file', ['/tmp/r', 'a.ts']],
       ['git:commit', ['/tmp/r', 'msg']],
       ['git:push', ['/tmp/r']],
-      ['git:pull', ['/tmp/r']]
+      ['git:pull', ['/tmp/r']],
+      ['git:stash-push', ['/tmp/r']],
+      ['git:stash-restore', ['/tmp/r', 'a'.repeat(40)]]
     ])('%s is registered', async (channel, args) => {
       const res = await harness.call<any>(channel, ...args)
       expect(res).toHaveProperty('ok', true)
@@ -931,6 +954,42 @@ describe('session.ipc', () => {
       expect(res).toEqual([])
     })
 
+    it('mcp:load-catalog answers the catalog without an ok key', async () => {
+      const res = await harness.call<any>('mcp:load-catalog', '/repo')
+      expect(res).toEqual({
+        servers: [{ name: 'u', source: 'user', config: { command: 'x' } }],
+        skipped: []
+      })
+      expect('ok' in res).toBe(false)
+    })
+
+    it('mcp:cli-add / mcp:cli-remove hand cli.js its scope, name and the session cwd; the error text comes back as data', async () => {
+      const added = await harness.call<any>(
+        'mcp:cli-add',
+        'project',
+        'srv',
+        { command: 'x' },
+        '/repo'
+      )
+      expect(mcpCli.addMcpServerNative).toHaveBeenCalledWith(
+        'project',
+        'srv',
+        { command: 'x' },
+        '/repo'
+      )
+      expect(added).toEqual({})
+
+      const removed = await harness.call<any>('mcp:cli-remove', 'user', 'x', '/repo')
+      expect(mcpCli.removeMcpServerNative).toHaveBeenCalledWith('user', 'x', '/repo')
+      expect(removed).toEqual({ error: 'No MCP server named "x" in user config' })
+    })
+
+    it('mcp:reload asks the live session to re-read its config (safeHandler-wrapped)', async () => {
+      const res = await harness.call<any>('mcp:reload', 'rid-1')
+      expect(res.ok).toBe(true)
+      expect(sessionStub.mcpReloadServers).toHaveBeenCalled()
+    })
+
     it('mcp:toggle is registered (safeHandler-wrapped)', async () => {
       const res = await harness.call<any>('mcp:toggle', 'rid-1', 'srv', true)
       expect(res.ok).toBe(true)
@@ -1027,7 +1086,7 @@ describe('session.ipc', () => {
       forgetEntriesQuiet(['/tmp/wt-quiet'])
 
       expect(refreshCanonicalDirectories).not.toHaveBeenCalled()
-      // ...while the in-session hook does (a Codex app-server must not start after the teardown).
+      // ...while the in-session hook does (an engine server must not start after the teardown).
       forgetEntriesAndEmit(['/tmp/wt-quiet'])
       expect(refreshCanonicalDirectories).toHaveBeenCalledTimes(1)
     })
@@ -1138,7 +1197,7 @@ describe('session.ipc', () => {
       }
     })
 
-    it('worktree:remove-many does NOT restrict to created worktrees (the manager removes Codex/opencode/orphan ones too)', async () => {
+    it('worktree:remove-many does NOT restrict to created worktrees (the manager removes opencode/orphan ones too)', async () => {
       await harness.call('worktree:remove-many', '/tmp/r', ['a'])
       const opts = vi.mocked(removeWorktrees).mock.lastCall![3] as Record<string, unknown>
       expect(opts.createdOnly).toBeUndefined()
@@ -1313,17 +1372,17 @@ describe('session.ipc', () => {
     })
 
     // The composer asks per engine (engine-models.ts); the id must reach the
-    // handler through the desktop transport, or every request answers all four.
-    it('session:get-engine-models carries its engine id: codex probes only codex', async () => {
-      const { discoverCodexModels } = await import('../../../core/codex/model-discovery')
+    // handler through the desktop transport, or every request answers all three.
+    it('session:get-engine-models carries its engine id: pi probes only pi', async () => {
+      const { discoverPiModels } = await import('../../../core/pi/model-discovery')
       const native = {
-        engineId: 'codex' as const,
-        vendorId: 'openai',
-        vendorName: 'OpenAI',
-        models: [{ value: 'gpt', displayName: 'GPT', description: '', engineId: 'codex' as const }]
+        engineId: 'pi' as const,
+        vendorId: 'openai-codex',
+        vendorName: 'ChatGPT',
+        models: [{ value: 'gpt', displayName: 'GPT', description: '', engineId: 'pi' as const }]
       }
-      vi.mocked(discoverCodexModels).mockResolvedValueOnce([native])
-      await expect(harness.call('session:get-engine-models', 'codex')).resolves.toEqual([native])
+      vi.mocked(discoverPiModels).mockResolvedValueOnce([native])
+      await expect(harness.call('session:get-engine-models', 'pi')).resolves.toEqual([native])
       // Claude's probe never ran.
       expect(vi.mocked(query)).not.toHaveBeenCalled()
       await expect(harness.call('session:get-engine-models', 'gemini')).rejects.toThrow(
@@ -1459,7 +1518,7 @@ describe('session.ipc', () => {
       sharedProviderSpies.setApiKey.mockClear()
       await harness.callSafe('shared-provider:set-key', 'local', 'secret', ['pi'])
       expect(sharedProviderSpies.setApiKey).toHaveBeenCalledWith('local', 'secret', ['pi'])
-      for (const bad of [true, 'pi', ['pi', 'codex']]) {
+      for (const bad of [true, 'pi', ['pi', 'gemini']]) {
         await expect(
           harness.callSafe('shared-provider:set-key', 'local', 'secret', bad)
         ).rejects.toThrow(/replaceOwn/)

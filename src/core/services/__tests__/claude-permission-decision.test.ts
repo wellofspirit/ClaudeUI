@@ -4,7 +4,7 @@
  *
  * These cases are the wire facts the feature rests on, not a restatement of the
  * implementation: a classifier verdict must become the SAME block pi and
- * opencode produce (so all four engines render one card), a rule denial must
+ * opencode produce (so every engine renders one card), a rule denial must
  * NOT (it judged nothing), and a frame we cannot bind must be dropped rather
  * than guessed at.
  */

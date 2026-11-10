@@ -20,7 +20,12 @@
 import fs from 'fs'
 import { chatgptAccountKey, nativeAccountKey, type AccountIdentity } from '../../shared/account-key'
 import { apiKeyAccountKey } from '../services/account-key-hash'
-import { extractAccountId, extractEmail, extractPlanType, extractUserId } from './vault/codex-oauth'
+import {
+  extractAccountId,
+  extractEmail,
+  extractPlanType,
+  extractUserId
+} from './vault/chatgpt-oauth'
 
 /** One vendor's entry as either engine's auth.json stores it. Untyped JSON, read defensively. */
 interface AuthEntryShape {
@@ -36,8 +41,8 @@ interface AuthEntryShape {
  * Resolve one vendor's account identity from its auth.json entry.
  *
  * - a ChatGPT oauth entry → `chatgpt:<subscription>:<user>`, the same key the
- *   Codex engine derives for the same subscription, so usage through any of
- *   the three engines lands on one account. The subscription id is the stored
+ *   opencode derives for the same subscription, so usage through any of
+ *   the engines lands on one account. The subscription id is the stored
  *   `accountId` when the engine persists one (opencode does) and the token's
  *   own `chatgpt_account_id` claim when it does not (pi);
  * - any entry carrying a key → the API-key digest;
@@ -106,10 +111,10 @@ export function accountIdentityFromAuthEntry(params: {
 const CHATGPT_VENDOR_ID = 'openai'
 
 /**
- * Codex signed in on its own, with no vault account behind the session
+ * ChatGPT signed in on its own, with no vault account behind the session
  * (ADR-071 §3's "credentials an engine holds and we cannot identify").
  */
-export function codexNativeIdentity(): AccountIdentity {
+export function chatgptNativeIdentity(): AccountIdentity {
   return {
     accountKey: nativeAccountKey('codex', CHATGPT_VENDOR_ID),
     accountLabel: CHATGPT_VENDOR_ID

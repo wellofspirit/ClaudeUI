@@ -138,7 +138,7 @@ function touch(p: string): void {
 beforeEach(() => {
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-system-')))
   setHostPaths({ getAppPath: () => path.join(tmp, 'app') })
-  for (const id of ['claude', 'opencode', 'pi', 'codex'] as const) {
+  for (const id of ['claude', 'opencode', 'pi'] as const) {
     savedEnv[id] = process.env[harnessEnvVar(id)]
     delete process.env[harnessEnvVar(id)]
   }
@@ -244,7 +244,7 @@ describe('a usable System install', () => {
   })
 })
 
-// Only Claude Code falls back (to its bundled copy); opencode, pi and Codex are
+// Only Claude Code falls back (to its bundled copy); opencode and pi are
 // not bundled (ADR-082 §8), so an unusable System choice resolves to nothing,
 // even with ClaudeUI's own copy installed.
 describe('an unusable System install', () => {

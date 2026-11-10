@@ -39,8 +39,7 @@ export interface JudgeUsageInput {
 /**
  * The ledger event for one judge call, or null when the sample moved nothing.
  *
- * The token split is the disjoint one a price and a row want, as
- * `codexDisjointTokens` builds it: both wires report the cached part INSIDE the
+ * The token split is the disjoint one a price and a row want: both wires report the cached part INSIDE the
  * input count, so it comes out of `input` and becomes `cacheRead`; reasoning is
  * inside `output` on both wires and stays there. Neither wire reports a cache
  * write.

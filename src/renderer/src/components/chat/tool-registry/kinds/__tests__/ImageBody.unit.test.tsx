@@ -1,5 +1,5 @@
 /**
- * Layer 1 (unit) for `ImageBody` — Codex `imageGeneration`.
+ * Layer 1 (unit) for `ImageBody` — an engine's image-generation call.
  *
  * The picture itself is NOT this body's job: `ToolCard` places the shared
  * `ToolResultImages` strip for every standard kind. What is pinned here is the
@@ -36,10 +36,10 @@ describe('ImageBody', () => {
     renderBody({
       kind: 'image',
       prompt: 'An isometric illustration of a dark desktop application window',
-      savedPath: '~/.codex/images/img_01.png'
+      savedPath: '~/images/img_01.png'
     })
     expect(screen.getByTestId('ImageBody.prompt').textContent).toContain('isometric illustration')
-    expect(screen.getByTestId('ImageBody.savedPath').textContent).toBe('~/.codex/images/img_01.png')
+    expect(screen.getByTestId('ImageBody.savedPath').textContent).toBe('~/images/img_01.png')
   })
 
   it('renders nothing when the wire carried neither', () => {

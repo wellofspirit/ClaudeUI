@@ -32,7 +32,6 @@ vi.mock('os', async () => {
 vi.mock('../../../core/services/claude-session', () => ({ ClaudeSession: class {} }))
 vi.mock('../../../core/opencode/OpencodeSession', () => ({ OpencodeSession: class {} }))
 vi.mock('../../../core/pi/PiSession', () => ({ PiSession: class {} }))
-vi.mock('../../../core/codex/CodexSession', () => ({ CodexSession: class {} }))
 vi.mock('../../../core/providers/claude-spawn-prep', () => ({
   claudeSpawnPrep: vi.fn(async (model?: string) => ({ resolvedModel: model }))
 }))
@@ -42,7 +41,6 @@ vi.mock('../../../core/opencode/opencode-spawn-prep', () => ({
 vi.mock('../../../core/pi/pi-spawn-prep', () => ({
   piSpawnPrep: vi.fn(async (model?: string) => ({ resolvedModel: model }))
 }))
-vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/claude-settings', () => ({ saveCleanupPeriodDays: vi.fn() }))
 vi.mock('../../../core/services/ui-config', () => ({
   loadEngineConfig: () => ({}),

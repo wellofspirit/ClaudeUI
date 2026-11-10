@@ -64,7 +64,7 @@ async function measure(
         className="mx-auto pt-5 pb-6 flex flex-col gap-3 px-8"
       >
         <div data-testid="wrapper">
-          <MessageBubble message={message} pendingApprovals={[]} isLastAssistant={false} />
+          <MessageBubble message={message} pendingApprovals={[]} />
         </div>
       </div>
     </div>

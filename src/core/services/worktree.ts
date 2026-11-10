@@ -1,7 +1,9 @@
 import { simpleGit, type SimpleGit } from 'simple-git'
+import { execFile } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { promisify } from 'util'
 import type {
   WorktreeInfo,
   WorktreeStatus,
@@ -14,6 +16,7 @@ import type {
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { listTreeFiles, measureTree, removeTreeLinkSafe, type TreeFailure } from './worktree-fs'
+import { setupWorktree } from './worktree-setup'
 import {
   collectHolders,
   createHolderMatcher,
@@ -37,6 +40,7 @@ import {
 } from './worktree-root'
 
 const LOG = 'worktree'
+const execFileAsync = promisify(execFile)
 const WORKTREES_DIR = '.claude/worktrees'
 const UNCOMMITTED_SAMPLE_MAX = 20
 const COMMIT_SAMPLE_MAX = 10
@@ -52,8 +56,17 @@ const WORKTREE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const WORKTREE_NAME_MAX = 100
 
 /** Absolute path of the managed worktrees directory for a given git root. */
-function getManagedWorktreesRoot(gitRoot: string): string {
+export function getManagedWorktreesRoot(gitRoot: string): string {
   return path.join(gitRoot, WORKTREES_DIR)
+}
+
+/**
+ * The repository root a managed worktree path (`<repo>/.claude/worktrees/<name>`) belongs to, or
+ * null when `dir` is not shaped like one. Lexical only: the directory may already be gone.
+ */
+export function managedWorktreeRepo(dir: string): string | null {
+  const repo = path.dirname(path.dirname(path.dirname(path.resolve(dir))))
+  return samePath(path.dirname(path.resolve(dir)), getManagedWorktreesRoot(repo)) ? repo : null
 }
 
 /** Throw unless `name` is a safe worktree name (main-side enforcement of R2). */
@@ -96,7 +109,48 @@ function requireRepoRoot(cwd: string): string {
   return root
 }
 
-export async function createWorktree(cwd: string, name: string): Promise<WorktreeInfo> {
+/** How long `git fetch origin` may run before `base: 'default'` gives up and branches from HEAD. */
+const FETCH_TIMEOUT_MS = 15_000
+
+/**
+ * The start point of a `base: 'default'` worktree: a fresh `origin/<default>`, or null (with a log)
+ * when there is no remote, the fetch fails or times out, or `origin/HEAD` is not set. Never
+ * prompts for credentials.
+ */
+async function resolveDefaultBase(gitRoot: string): Promise<string | null> {
+  try {
+    // Not through simple-git: a custom `env` is refused there whenever the user's own
+    // environment sets GIT_EDITOR, GIT_ASKPASS and the like.
+    await execFileAsync('git', ['fetch', 'origin'], {
+      cwd: gitRoot,
+      timeout: FETCH_TIMEOUT_MS,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }
+    })
+    const git = simpleGit(gitRoot)
+    const branch = await getRemoteDefaultBranch(git)
+    if (!branch) {
+      logger.info(LOG, 'No origin/HEAD; creating the worktree from HEAD')
+      return null
+    }
+    // origin/HEAD can dangle (the remote branch was deleted or renamed): fall back, don't fail.
+    await git.raw(['rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`])
+    return `origin/${branch}`
+  } catch (err) {
+    logger.warn(LOG, 'Could not fetch origin; creating the worktree from HEAD', err)
+    return null
+  }
+}
+
+/**
+ * `base: 'head'` (the default) branches from the repo root's HEAD; `'default'` from the remote's
+ * default branch (`origin/<branch>`, fetched first), falling back to HEAD when there is none.
+ */
+export async function createWorktree(
+  cwd: string,
+  name: string,
+  opts?: { base?: 'head' | 'default' | null }
+): Promise<WorktreeInfo> {
   validateWorktreeName(name)
 
   // From a worktree's cwd this is still the MAIN root, so worktrees never nest.
@@ -114,11 +168,22 @@ export async function createWorktree(cwd: string, name: string): Promise<Worktre
   }
   const branchName = `worktree-${name}`
 
-  // Get current HEAD commit before creating worktree
-  const headCommit = (await git.revparse(['HEAD'])).trim()
+  const remoteBase = opts?.base === 'default' ? await resolveDefaultBase(gitRoot) : null
+  const startPoint = remoteBase ?? 'HEAD'
+  // The commit the worktree starts from, read before it is created
+  const headCommit = (await git.revparse([startPoint])).trim()
 
-  // Create the worktree with a new branch from HEAD
-  await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD'])
+  // Create the worktree with a new branch from the start point. A remote-tracking start point
+  // would make the branch track it (a plain push would then target the default branch).
+  await git.raw([
+    'worktree',
+    'add',
+    '-b',
+    branchName,
+    ...(remoteBase ? ['--no-track'] : []),
+    worktreePath,
+    startPoint
+  ])
   // A "not a worktree" answer cached for this path (the 30 s negative cache) must not hide the
   // marker of the worktree that now exists.
   forgetLinkedWorktrees([worktreePath])
@@ -135,19 +200,7 @@ export async function createWorktree(cwd: string, name: string): Promise<Worktre
     logger.warn(LOG, 'Failed to copy settings.local.json', err)
   }
 
-  // Configure core.hooksPath if .husky or .git/hooks exist
-  try {
-    const huskyDir = path.join(gitRoot, '.husky')
-    const gitHooksDir = path.join(gitRoot, '.git', 'hooks')
-    const wtGit = simpleGit(worktreePath)
-    if (fs.existsSync(huskyDir)) {
-      await wtGit.addConfig('core.hooksPath', huskyDir)
-    } else if (fs.existsSync(gitHooksDir)) {
-      await wtGit.addConfig('core.hooksPath', gitHooksDir)
-    }
-  } catch (err) {
-    logger.warn(LOG, 'Failed to configure hooksPath', err)
-  }
+  await setupWorktree(gitRoot, worktreePath)
 
   const info: WorktreeInfo = {
     worktreePath,
@@ -720,7 +773,7 @@ export type WorktreeRemoveOptions = (
    * C-S11: when given, only an entry for which this returns true may be removed; any other is
    * refused (`invalid: not a worktree ClaudeUI created`) before anything is touched. The legacy
    * entry point and the quit removal pass it; the manager's `remove-many` does not (it removes
-   * what the inventory lists: Codex, opencode and orphan shells too).
+   * what the inventory lists: opencode and orphan shells too).
    */
   createdOnly?: (worktreePath: string) => boolean
 }
@@ -879,16 +932,6 @@ async function applyBranchRule(
     const reason = err instanceof Error ? err.message.split('\n')[0] : String(err)
     logger.warn(LOG, `Failed to delete branch ${plan.name}`, err)
     return { name: plan.name, action: 'kept', uniqueCommits, reason }
-  }
-}
-
-async function removeEmptyCodexBucket(entryPath: string): Promise<void> {
-  const bucket = path.dirname(entryPath)
-  try {
-    if (!isRealDirectory(bucket)) return
-    await fs.promises.rmdir(bucket) // not recursive: a bucket that still holds anything stays
-  } catch {
-    // not empty, or already gone
   }
 }
 
@@ -1053,7 +1096,6 @@ async function removeOne(
     }
   }
   const branch = await applyBranchRule(git, plan)
-  if (entry.location === 'codex') await removeEmptyCodexBucket(entry.path)
   return {
     result: { id, outcome: 'removed', ...(branch ? { branch } : {}) },
     touchedPath: entry.path

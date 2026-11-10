@@ -55,7 +55,7 @@ vi.mock('../../../core/auth/vault/CredentialSync', () => ({
     cancelLogin: mockCancelLogin,
     beginDeviceCodeLogin: mockBeginDeviceCodeLogin
   },
-  PI_CODEX_VENDOR_ID: 'openai-codex'
+  PI_CHATGPT_VENDOR_ID: 'openai-codex'
 }))
 
 import { PiAuthProvider } from '../../../core/auth/PiAuthProvider'

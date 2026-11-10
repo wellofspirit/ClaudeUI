@@ -816,8 +816,8 @@ describe('sessionStart', () => {
     const p = born('start-over', { mode: 'acceptEdits', model: 'sonnet', effort: 'high' })
     await sessionStart(p.caller, start({ permission_mode: 'plan', effort: 'low' }))
     expect(created[0]).toMatchObject({ permissionMode: 'plan', effort: 'low', model: 'sonnet' })
-    await sessionStart(p.caller, start({ engine: 'codex' }))
-    expect(created[1].engineId).toBe('codex')
+    await sessionStart(p.caller, start({ engine: 'opencode' }))
+    expect(created[1].engineId).toBe('opencode')
     expect(created[1].model).toBeUndefined()
     expect(created[1].effort).toBeUndefined()
     expect(created[1].permissionMode).toBe('acceptEdits')
@@ -1384,7 +1384,7 @@ describe('X-Agents and session_message (ADR-105 §4)', () => {
     p: Born,
     over: {
       name?: string | null
-      engine?: 'claude' | 'pi' | 'codex'
+      engine?: 'claude' | 'pi'
       mode?: string
       state?: 'running' | 'idle' | 'stopped'
     } = {}
@@ -1402,7 +1402,6 @@ describe('X-Agents and session_message (ADR-105 §4)', () => {
       model: 'm-x',
       launchMode: 'default',
       accountKey: null,
-      codexAccountId: null,
       callerRestriction: null,
       name: over.name === undefined ? 'worker' : over.name,
       description: 'review the diff'

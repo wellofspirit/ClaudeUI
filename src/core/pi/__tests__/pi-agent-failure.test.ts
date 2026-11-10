@@ -10,7 +10,7 @@ import { isPiAuthStatus, piErrorStatusCode } from '../pi-error-status'
 const turn = (message: string): PiAgentFailureInput => ({ kind: 'turn-error', message })
 const classify = (message: string) => classifyPiAgentFailure(turn(message))
 
-describe('pi 1.4.0 failure compatibility', () => {
+describe('pi 1.5.0 failure compatibility', () => {
   it.each([
     'upstream request failed',
     'upstream_stream_read_error',
@@ -19,6 +19,7 @@ describe('pi 1.4.0 failure compatibility', () => {
     'http2 stream failed',
     'request to https://oauth2.googleapis.com/token failed, reason:',
     'stream disconnected before completion: stream closed before response.completed',
+    "Claude Code's stream from Anthropic was cut short after the reply had begun",
     'subscription_sharing_workplace_individual_usage_limit_exceeded',
     'subscription_sharing_workplace_individual_usage_limit_exceeded: Contact your workspace admin to raise your limit',
     'status (503)',
@@ -151,6 +152,22 @@ describe('classifyPiAgentFailure (ADR-089 S1b) — one case per rule, first matc
     ]) {
       expect(classify(m), m).toBe('transient')
     }
+  })
+
+  it('follows the patterns pi 1.5.0 added (LiteLLM pre-call overflow, z.ai error code 1308)', () => {
+    // LiteLLM's pre-call ContextWindowExceededError is an overflow even when the
+    // gateway also names a retryable status (429 would otherwise read transient).
+    expect(
+      classify('429 litellm.ContextWindowExceededError: Context Window exceeded for given call.')
+    ).toBe('permanent')
+    for (const m of [
+      '429 {"code":"1308","message":"Usage limit reached for this plan"}',
+      '{"code":1308,"message":"The plan usage limit has been reached"}'
+    ]) {
+      expect(classify(m), m).toBe('transient')
+    }
+    // The code must not match a longer number.
+    expect(classify('{"code":"13080","message":"tool failed"}')).toBe('permanent')
   })
 
   it('5. a crashed child process is transient', () => {

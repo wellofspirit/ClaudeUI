@@ -159,7 +159,7 @@ describe('suggestionRuleToClaudeString + suggestionDestinationToScope', () => {
 })
 
 // ---------------------------------------------------------------------------
-// persistAllowSuggestions — the ONE copy behind Codex/pi/opencode sessions.
+// persistAllowSuggestions — the ONE copy behind pi/opencode sessions.
 // ---------------------------------------------------------------------------
 
 describe('persistAllowSuggestions', () => {
@@ -204,7 +204,7 @@ describe('persistAllowSuggestions', () => {
 
   it('skips destinations with no on-disk scope, and reports nothing written', () => {
     // `session`/`cliArg` are the engines' own in-memory grants (opencode's
-    // `always` reply, Codex's sessionAllows) — there is no file to touch.
+    // `always` reply, pi's sessionAllows) — there is no file to touch.
     expect(persistAllowSuggestions([rule('session', 'ls'), rule('cliArg', 'ls')], '/work')).toBe(
       false
     )

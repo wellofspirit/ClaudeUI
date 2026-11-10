@@ -3,7 +3,7 @@
  * ones that must never come back.
  *
  * ADR-068 §3 left SIX surfaces able to report one rejected credential, and a
- * single Codex token-refresh failure lit four of them at once. Two remain in the
+ * single ChatGPT token-refresh failure lit four of them at once. Two remain in the
  * chat, and neither carries a flow:
  *
  *  · `AuthPill`           — app-wide, in the top bar's left group. One indicator
@@ -75,7 +75,7 @@ function patch(fields: Record<string, unknown>): void {
 const CHATGPT_REJECTED = {
   providerId: 'chatgpt',
   accountId: 'v2',
-  message: 'ChatGPT rejected the credential Codex runs under.',
+  message: 'ChatGPT rejected the credential pi runs under.',
   retryPrompt: 'do the thing'
 }
 
@@ -98,7 +98,7 @@ const AUTH_MESSAGE: ChatMessage = {
 function renderRow(): ReturnType<typeof render> {
   return render(
     <TranscriptSessionProvider value={ROUTING_ID}>
-      <MessageBubble message={AUTH_MESSAGE} pendingApprovals={[]} isLastAssistant={false} />
+      <MessageBubble message={AUTH_MESSAGE} pendingApprovals={[]} />
     </TranscriptSessionProvider>
   )
 }
@@ -109,7 +109,7 @@ function renderBoth(): ReturnType<typeof render> {
     <SidebarContext.Provider value={{ collapsed: false, toggle: () => {}, isMobile: false }}>
       <AuthPill />
       <TranscriptSessionProvider value={ROUTING_ID}>
-        <MessageBubble message={AUTH_MESSAGE} pendingApprovals={[]} isLastAssistant={false} />
+        <MessageBubble message={AUTH_MESSAGE} pendingApprovals={[]} />
       </TranscriptSessionProvider>
     </SidebarContext.Provider>
   )
@@ -262,8 +262,8 @@ describe('host parity — no surface grows a second home for the flow', () => {
       useSessionStore.setState({
         authState: { status: 'authorizing', account: null, error: null, manualUrl: MANUAL_URL },
         vendorOAuth: {
-          engineId: 'codex',
-          vendorId: 'openai',
+          engineId: 'pi',
+          vendorId: 'openai-codex',
           stage: 'paste',
           instructions: 'That page fails to load — expected. Copy its address.',
           url: VENDOR_URL,

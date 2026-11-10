@@ -119,8 +119,8 @@ export class SessionQueue {
 
   /**
    * Consume the FIRST pending item whose text matches — the correlation ADR-053
-   * pins for opencode and pi, whose posts carry no id we chose (claude and
-   * Codex correlate by id, {@link consumeById}). Duplicate texts are
+   * pins for opencode and pi, whose posts carry no id we chose (claude
+   * correlates by id, {@link consumeById}). Duplicate texts are
    * interchangeable, so taking the oldest is both deterministic and harmless.
    * Returns undefined (a no-op) for a prompt that was never queued, which is
    * what makes it safe to call from every engine's post-send ack path.
@@ -133,8 +133,8 @@ export class SessionQueue {
 
   /**
    * Consume ONE named item — the correlation for an engine that carries a
-   * client-chosen id end to end (Codex's `clientUserMessageId`, ADR-066;
-   * Claude's user-frame `uuid`, whose `command_lifecycle` frames name it back).
+   * client-chosen id end to end (Claude's user-frame `uuid`,
+   * whose `command_lifecycle` frames name it back).
    * Text never enters into it, so duplicate texts stay individually
    * addressable. Returns undefined for an id that is unknown or already
    * terminal, so it is as safe to fire unconditionally as {@link consumeByText}.

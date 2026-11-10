@@ -4,12 +4,12 @@
  * pi's driven sign-in must never bind port 1455 on an unwired host (F2,
  * `a1c54df2`).
  *
- * `docs/codex-integration-handoff.md` once claimed pi had a PKCE fallback of its
+ * An old integration note once claimed pi had a PKCE fallback of its
  * own that bound the fixed loopback port on a headless server. It does not: pi's
  * ONLY driven login is `openai-codex`, and it goes
  *
  *   PiAuthProvider.oauthAuthorize → credentialSync.beginLogin
- *     → AuthVault.loginFlowFactory → new CodexLoginFlow({ loopback: hostOAuthLoopback() })
+ *     → AuthVault.loginFlowFactory → new ChatgptLoginFlow({ loopback: hostOAuthLoopback() })
  *
  * — the one `createServer` in `src/core/auth`. `hostOAuthLoopback()` defaults to
  * FALSE and only `bootCore()` (the desktop) publishes `true`, so an unwired host
@@ -21,28 +21,28 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createServer, type Server } from 'node:net'
-import type { CodexLoginFlowOptions } from '../../../../core/auth/vault/codex-oauth'
-import { DEFAULT_OAUTH_PORT } from '../../../../core/auth/vault/codex-oauth'
+import type { ChatgptLoginFlowOptions } from '../../../../core/auth/vault/chatgpt-oauth'
+import { DEFAULT_OAUTH_PORT } from '../../../../core/auth/vault/chatgpt-oauth'
 
-const constructed = vi.hoisted(() => ({ options: [] as CodexLoginFlowOptions[] }))
+const constructed = vi.hoisted(() => ({ options: [] as ChatgptLoginFlowOptions[] }))
 
 /**
  * The REAL flow, only recorded. A stub would prove nothing here — the whole
  * question is what the real class is asked to do, and whether it binds.
  */
-vi.mock('../../../../core/auth/vault/codex-oauth', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../../../core/auth/vault/codex-oauth')>()
-  class RecordingCodexLoginFlow extends actual.CodexLoginFlow {
-    constructor(options: CodexLoginFlowOptions = {}) {
+vi.mock('../../../../core/auth/vault/chatgpt-oauth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../core/auth/vault/chatgpt-oauth')>()
+  class RecordingChatgptLoginFlow extends actual.ChatgptLoginFlow {
+    constructor(options: ChatgptLoginFlowOptions = {}) {
       constructed.options.push(options)
       super(options)
     }
   }
-  return { ...actual, CodexLoginFlow: RecordingCodexLoginFlow }
+  return { ...actual, ChatgptLoginFlow: RecordingChatgptLoginFlow }
 })
 
 import { piAuthProvider } from '../../../../core/auth/PiAuthProvider'
-import { PI_CODEX_VENDOR_ID } from '../../../../core/auth/vault/CredentialSync'
+import { PI_CHATGPT_VENDOR_ID } from '../../../../core/auth/vault/CredentialSync'
 import { setHostOAuthLoopback } from '../../../../core/host'
 
 /**
@@ -84,7 +84,7 @@ describe('pi sign-in on an unwired host — port 1455 is never bound', () => {
     try {
       // pi's OWN entry point, not the vault's — that is the path the handoff
       // doc doubted.
-      const result = await piAuthProvider.oauthAuthorize(PI_CODEX_VENDOR_ID, 0)
+      const result = await piAuthProvider.oauthAuthorize(PI_CHATGPT_VENDOR_ID, 0)
 
       // A loopback-binding flow would have thrown EADDRINUSE out of start().
       expect(result.method).toBe('auto')
@@ -105,7 +105,7 @@ describe('pi sign-in on an unwired host — port 1455 is never bound', () => {
    * port instead of fighting over the fixed one.
    */
   it('constructs the login flow with loopback DISABLED', async () => {
-    await piAuthProvider.oauthAuthorize(PI_CODEX_VENDOR_ID, 0)
+    await piAuthProvider.oauthAuthorize(PI_CHATGPT_VENDOR_ID, 0)
 
     expect(constructed.options).toHaveLength(1)
     expect(constructed.options[0].loopback).toBe(false)

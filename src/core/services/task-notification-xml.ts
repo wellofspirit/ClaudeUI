@@ -17,6 +17,11 @@
  *   <usage><subagent_tokens>22020</subagent_tokens><tool_uses>0</tool_uses><duration_ms>1191</duration_ms></usage>
  *   </task-notification>
  *
+ * 2.1.321 keeps the envelope byte-for-byte but clips a background command's
+ * description inside `<summary>` over 1,000 characters to its first 500 and last
+ * 300 around `\n\n... [N characters truncated] ...\n\n`; the title is the summary's
+ * first line, so live and history titles still agree.
+ *
  * Older binaries wrote `<usage>` as `total_tokens: N` lines; both parse.
  */
 import type { TaskHandback, TaskNotification, TaskTerminalStatus } from '../../shared/types'
@@ -276,14 +281,30 @@ const HANDBACK_POINTER =
 const HANDBACK_WITHHELD_SENTENCE =
   /^The subagent ended without delivering a report through SubagentHandback, so no report was delivered\. Its unsent text is not shown\.(?: Send the agent a message \(SendMessage\) to ask it to deliver its report\.)?$/
 /**
+ * cli.js's carried-content notice pairs: the artifact pair
+ * (`<artifact-content-authored-by-others/>`, entity-escaped in real transcripts, and its
+ * sentence) and, since 2.1.319, the Remote Control pair (`<remote-control-device-report/>`
+ * and "This agent read text marked as coming from a Remote Control session ...").
+ */
+const CARRIED_NOTICE_LINE =
+  /^(?:(?:&lt;|<)(?:artifact-content-authored-by-others|remote-control-device-report)\/(?:&gt;|>)|This agent read Artifact content written by people other than you|This agent read text marked as coming from a Remote Control session)/
+/**
  * The harness's own lines that cli.js puts BEFORE its hand-back sentence in `<result>`
- * (`k6n`: the artifact note - in real transcripts an entity-escaped
- * `<artifact-content-authored-by-others/>` line and its sentence - the max-turns note, and
+ * (`k6n` / 2.1.319 `rbn`: the carried-content notice pairs, the max-turns note, and
  * `\u26a0 <notice>`; the sentence is pushed after them and, with no report to follow,
  * last). Any other line is model text.
  */
-const HANDBACK_NOTICE_LINE =
-  /^(?:\u26a0 |.*-turn limit before finishing\.|(?:&lt;|<)artifact-content-authored-by-others\/(?:&gt;|>)|This agent read Artifact content written by people other than you)/
+const isHandbackNoticeLine = (line: string): boolean =>
+  /^(?:\u26a0 |.*-turn limit before finishing\.)/.test(line) || CARRIED_NOTICE_LINE.test(line)
+/**
+ * cli.js 2.1.319's line after a delivered pointer when the agent called SubagentHandback
+ * again and was refused (`WAr`, plus ` If it has not messaged you since, send it a message
+ * (SendMessage) to ask for it.` (`GAr`) when the caller can continue agents and the result
+ * is neither interim nor flagged: `uVi(xe&&!M&&!Ue)`). The only thing that may follow the
+ * pointer.
+ */
+const HANDBACK_LATER_REFUSED =
+  /^This agent called SubagentHandback again after that report and was refused \(one report per result\), so anything new in that call has not reached you through it\.(?: If it has not messaged you since, send it a message \(SendMessage\) to ask for it\.)?$/
 
 /** The fields of a `withheld` hand-back, as live ({@link handbackNotificationFields}). */
 export const HANDBACK_WITHHELD_FIELDS: Pick<TaskNotification, 'summary' | 'handback'> = {
@@ -305,14 +326,25 @@ export function handbackFromNotificationResult(
   // lines. Where cli.js writes the result itself (the hand-back contract) that is exactly
   // its shape; a result that is a model's own text (no contract) can quote a sentence
   // anywhere in it, and a quoted one must not turn an ordinary result into a hand-back.
-  const lines = result.split('\n')
+  const lines = result.trimEnd().split('\n')
+  // 2.1.319: a refused later report adds one block after the pointer; the pointer is then
+  // the last line before it (only a delivered hand-back can carry it). cli.js joins the
+  // result's text blocks with "\n" and each block ends in "\n", so a blank line separates
+  // them.
+  const refused = HANDBACK_LATER_REFUSED.test(lines[lines.length - 1].trim())
+  if (refused) {
+    lines.pop()
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop()
+    if (lines.length === 0) return undefined
+  }
   const last = lines[lines.length - 1].trim()
   const before = lines.slice(0, -1)
-  if (!before.every((line) => line.trim() === '' || HANDBACK_NOTICE_LINE.test(line.trim()))) {
+  if (!before.every((line) => line.trim() === '' || isHandbackNoticeLine(line.trim()))) {
     return undefined
   }
   const pointer = HANDBACK_POINTER.exec(last)
   if (pointer) return pointer[1] ? 'flagged' : 'send'
+  if (refused) return undefined
   return HANDBACK_WITHHELD_SENTENCE.test(last) ? 'withheld' : undefined
 }
 
@@ -373,7 +405,15 @@ export function parseNativeHandbackFrame(
   const before = lines.slice(0, header)
   const after = lines.slice(header + 1)
   if (!before.every(indented) || !after.every(indented)) return null
-  const warning = before.map((line) => line.slice(2)).join('\n')
+  // 2.1.319 puts the carried-content notice pairs above the warning (`[UX(…), warning]`
+  // joined and indented); they are not part of it. Drop the leading ones, as cli.js's own
+  // display does (`$zi`).
+  const above = before.map((line) => line.slice(2))
+  let firstWarningLine = 0
+  while (firstWarningLine < above.length && CARRIED_NOTICE_LINE.test(above[firstWarningLine])) {
+    firstWarningLine++
+  }
+  const warning = above.slice(firstWarningLine).join('\n')
   const report = after
     .map((line) => line.slice(2))
     .join('\n')

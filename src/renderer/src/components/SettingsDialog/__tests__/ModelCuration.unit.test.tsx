@@ -428,8 +428,7 @@ describe('ModelCuration — an open block follows a model reload', () => {
         harnesses: {
           claude: of('claude'),
           opencode: of('opencode'),
-          pi: of('pi'),
-          codex: of('codex')
+          pi: of('pi')
         },
         detection: { running: false },
         installs: [],

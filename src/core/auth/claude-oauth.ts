@@ -36,7 +36,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
-import { base64UrlEncode } from './vault/codex-oauth'
+import { base64UrlEncode } from './vault/chatgpt-oauth'
 import { CLI_OAUTH } from '../services/claude-usage-api'
 import { readJsonFileForWrite, writeJsonAtomicAsync } from '../services/write-json-atomic'
 import { logger } from '../services/logger'

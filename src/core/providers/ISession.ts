@@ -48,6 +48,12 @@ export interface NonUserItem {
  */
 export type NonUserOutcome = 'started' | 'queued' | 'unavailable'
 
+/** What a worktree tool answers: the text the model reads, an error when it was refused or failed. */
+export interface WorktreeToolResult {
+  text: string
+  isError?: boolean
+}
+
 /**
  * Engine-neutral session interface. All methods here are implemented by
  * every backend (Claude, opencode, etc.). Engine-specific capabilities
@@ -55,10 +61,6 @@ export type NonUserOutcome = 'started' | 'queued' | 'unavailable'
  * are gated behind `capabilities` flags.
  */
 export interface ISession {
-  resolveCodexApproval?(
-    requestId: string,
-    decision: import('../../shared/codex-types').CodexApprovalDecision
-  ): void
   readonly engineId: EngineId
   readonly routingId: string
   readonly cwd: string
@@ -108,6 +110,20 @@ export interface ISession {
    * optional so a minimal test double need not carry it.
    */
   readonly blockedCalls?: BlockedCallLedger
+
+  /**
+   * The directory the engine runs this session in now, when it can differ from `cwd` (opencode:
+   * the worktree it moved into). Optional: absent means `cwd`. Read at the moment of use.
+   */
+  readonly workingDirectory?: string
+
+  /**
+   * The hosted `claudeui_enter_worktree` / `claudeui_exit_worktree` tools (opencode, worktree
+   * parity D7): move this session into a ClaudeUI worktree and back. Optional: only the opencode
+   * session implements them.
+   */
+  enterWorktree?(input: { name?: string; path?: string }): Promise<WorktreeToolResult>
+  exitWorktree?(): Promise<WorktreeToolResult>
 
   /**
    * Approve one auto-mode block after the fact (ADR-091 part 6): grant, route
@@ -227,20 +243,11 @@ export interface ISession {
    * `services/voice-relay.ts`, which starts the server through this.
    *
    * `startFields` ride on `voice_start` beside the language: the on-device server
-   * (opencode, pi, Codex — ADR-101) needs its per-spawn `token` there; cli.js's
+   * (opencode, pi — ADR-101) needs its per-spawn `token` there; cli.js's
    * own server (Claude) takes none.
    */
   voiceStartServer?(): Promise<{ port: number; startFields?: Record<string, unknown> }>
   voiceStopServer?(): Promise<void>
-
-  /**
-   * Pin this session to one stored vendor account, or `null` to follow the
-   * globally active one (ADR-068 §2). Gated by
-   * `capabilities.auth.perSessionAccount` — Codex only today; the channel
-   * refuses on every other engine rather than relying on the optional call, so
-   * a client gets a reason instead of silence.
-   */
-  setAccount?(accountId: string | null): Promise<void>
 
   /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
   setEffort?(effort: string): void | Promise<void>
@@ -258,15 +265,17 @@ export interface ISession {
   mcpToggleServer?(serverName: string, enabled: boolean): Promise<void>
   mcpReconnectServer?(serverName: string): Promise<void>
   mcpSetServers?(servers: Record<string, unknown>): Promise<unknown>
+  /** Re-read the MCP config from disk (after a native `claude mcp add/remove`). */
+  mcpReloadServers?(expect?: { name: string; present: boolean }): Promise<void>
 
   /** Hot-reload settings from disk. Claude-only; no capability flag. */
   notifySettingsChanged?(): Promise<void>
   /** Live token-usage snapshot. Claude-only; no capability flag. */
   getUsage?(): Promise<Record<string, unknown> | null>
 
-  /** Discover skills for a cwd. Implemented by ALL engines (Claude → scanSkills,
-   *  opencode → discoverOpencodeSkills). Optional so callers use optional-call +
-   *  scanSkills fallback for the no-active-session case. */
+  /** The skills this session offers for a cwd: the shared Claude skill catalog (with
+   *  `claudeOnly` on non-Claude engines) plus the engine's own as `source: 'engine'`.
+   *  Optional: `loadSkillDetails` falls back to the catalog alone. */
   discoverSkills?(cwd: string): Promise<SkillInfo[]>
 
   /** Update the inactivity timeout. Pass 0 to disable. */
@@ -309,18 +318,6 @@ export interface ISession {
    * launching call carried.
    */
   getAutonomyMode?(): string
-
-  /**
-   * The provider-wide ACTIVE account changed to `activeAccountId` (null = none).
-   *
-   * Optional: only an engine whose sessions share ONE process per account has
-   * anything to do here. Codex implements it (ADR-069 §4) — a session that
-   * follows the active account leaves the host it was on and continues on the
-   * new account's at its next prompt, while a pinned session is untouched.
-   * opencode recycles its servers through its own auth provider instead
-   * (ADR-047), and Claude and pi carry their credential per process.
-   */
-  followActiveAccount?(activeAccountId: string | null): Promise<void>
 
   /**
    * Ask a one-off question outside the main conversation history (the `/btw`

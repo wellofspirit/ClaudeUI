@@ -69,7 +69,7 @@ describe('PermissionsDialog — mobile view', () => {
         saveCalls.push({ scope, perms })
       }
     )
-    app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => true)
+    app.bridge.ipcMain.handle('claude:workspace-trust' as never, async () => null)
     app.bridge.ipcMain.handle('file:list-dir' as never, async (_e, path: string) => ({
       path,
       entries: [

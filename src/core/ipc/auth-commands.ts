@@ -28,9 +28,9 @@
  *  - `vendor-auth:oauth-authorize`: for opencode's `auto` method the loopback
  *    lives inside the host's opencode server, unreachable from a remote browser,
  *    so a remote caller is refused with an actionable message (use the `code`
- *    method, or the desktop). pi's Codex `auto` is NOT refused — it completes
+ *    method, or the desktop). pi's ChatGPT `auto` is NOT refused — it completes
  *    remotely via the paste-back path (`vendor-auth:oauth-callback` carries the
- *    pasted URL as its `code` arg; see `codex-oauth.ts`).
+ *    pasted URL as its `code` arg; see `chatgpt-oauth.ts`).
  *
  * **Token material NEVER crosses the wire.** `probe` / `list-keys` return
  * booleans / credential-kind / labels only; the mutations return void/void-ish.
@@ -278,7 +278,7 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
           // opencode's `auto` method drives a loopback INSIDE the host's opencode
           // server process — a remote browser can never reach it (ADR-057). Tear
           // the just-started flow down and refuse with an actionable message.
-          // pi's Codex `auto` is deliberately NOT refused: it completes remotely
+          // pi's ChatGPT `auto` is deliberately NOT refused: it completes remotely
           // via the paste-back path on `vendor-auth:oauth-callback`.
           if (isRemote(connection) && engineId === 'opencode' && result.method === 'auto') {
             await provider.cancelVendorOauth?.()
@@ -351,7 +351,7 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
             throw new Error(`Engine "${engineId}" does not support oauthCallback`)
           }
           // `code` may be a bare code OR a whole pasted callback URL — the
-          // provider (pi Codex / opencode) decides how to consume it (ADR-057).
+          // provider (pi ChatGPT / opencode) decides how to consume it (ADR-057).
           //
           // Through `opt` because the CODELESS call is a real one: the `auto`
           // method awaits the host-side loopback with no code at all, and over
@@ -433,11 +433,10 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       capability: 'config',
       kind: 'query',
       handler: safeHandler(async (providerId: string): Promise<SharedProviderAccountList> => {
-        const definition = accountProvider(providerId)
+        accountProvider(providerId)
         const status = await credentialSync.getStatus()
         return {
           activeId: status.activeId,
-          perSession: definition.accounts?.perSession === true,
           // Field-picked rather than passed through: the status is the vault's
           // shape, and only these fields are ever allowed across a wire.
           accounts: status.accounts.map(
@@ -469,15 +468,6 @@ export function authCommands(deps: AuthCommandDeps): Array<Omit<CommandRegistrat
       handler: safeHandler(async (providerId: string, id: string): Promise<void> => {
         accountProvider(providerId)
         await credentialSync.removeAccount(id)
-      })
-    },
-    {
-      channel: 'provider-account:set-per-session',
-      capability: 'config',
-      kind: 'command',
-      handler: safeHandler(async (providerId: string, enabled: boolean): Promise<void> => {
-        accountProvider(providerId)
-        await sharedProviderService.setAccountsPerSession(providerId, enabled)
       })
     },
     {

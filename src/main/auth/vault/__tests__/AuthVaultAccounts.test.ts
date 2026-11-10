@@ -24,7 +24,8 @@ vi.mock('node:os', async () => {
 })
 
 import { AuthVault, vaultPath, CHATGPT_PROVIDER_ID } from '../../../../core/auth/vault/AuthVault'
-import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
+import { fakeChatgptJwt } from './fixtures/fake-jwt'
 
 let testHome: string
 beforeEach(() => {
@@ -319,6 +320,40 @@ describe('AuthVault.setActiveAccount / saveAccountCredential', () => {
     })
     expect(accounts.find((x) => x.id === a.id)?.credential.access).toBe('fake-access')
     await expect(vault.getActiveAccountId(CHATGPT_PROVIDER_ID)).resolves.toBe(a.id)
+  })
+})
+
+describe('AuthVault.saveAccountCredential workspace invariant', () => {
+  it("refuses another workspace's token, writes nothing, and names only the vault id", async () => {
+    const vault = new AuthVault()
+    const a = await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
+    const before = readFileSync(vaultPath())
+
+    const foreign = cred({ ws: 'ws-a', access: fakeChatgptJwt({ ws: 'ws-b' }), refresh: 'fake-rx' })
+    const refused = vault.saveAccountCredential(CHATGPT_PROVIDER_ID, a.id, foreign)
+    await expect(refused).rejects.toThrow(
+      `Refusing to store another ChatGPT workspace's credential on vault account ${a.id}`
+    )
+    await expect(refused).rejects.not.toThrow(/ws-/)
+    expect(readFileSync(vaultPath()).equals(before)).toBe(true)
+  })
+
+  it('writes a token of the same workspace, or one whose workspace is unknown', async () => {
+    const vault = new AuthVault()
+    const a = await vault.upsertAccount(CHATGPT_PROVIDER_ID, cred({ ws: 'ws-a' }))
+
+    await vault.saveAccountCredential(
+      CHATGPT_PROVIDER_ID,
+      a.id,
+      cred({ ws: 'ws-a', access: fakeChatgptJwt({ ws: 'ws-a' }), refresh: 'fake-r2' })
+    )
+    await vault.saveAccountCredential(
+      CHATGPT_PROVIDER_ID,
+      a.id,
+      cred({ ws: 'ws-a', access: 'fake-claimless', refresh: 'fake-r3' })
+    )
+    const stored = (await vault.listAccounts(CHATGPT_PROVIDER_ID))[0]
+    expect(stored.credential.refresh).toBe('fake-r3')
   })
 })
 

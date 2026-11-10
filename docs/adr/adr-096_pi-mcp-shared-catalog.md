@@ -2,6 +2,10 @@
 
 **Status:** Accepted (2026-10-06, owner decision). Built on branch `pi-mcp` (based on
 `harness-pins`: pi pinned and floored at 1.0.4).
+2026-11-08: the catalog is what a Claude session in the cwd loads (cli.js's scopes in `~/.claude.json` and
+`.mcp.json`, its approval veto, disabled list and policy, plus enabled plugins' servers), not McpDialog's own files,
+which stay as a top layer; McpDialog writes through cli.js's `mcp add-json` / `mcp remove`
+([mcp-catalog.md](../architecture/mcp-catalog.md)).
 **Amends:** [ADR-035](adr-035_pi-engine-backend.md) ("pi has no MCP client" — pi 1.0 has one, and
 ClaudeUI now feeds it), [ADR-089](adr-089_pi-subagents-host-run.md) (children register the parent's
 catalog; MCP entries in an agent's tool lists are spelled the way pi names MCP tools).
@@ -15,12 +19,10 @@ Claude-only).
 
 ## Context
 
-ClaudeUI has one MCP catalog: the Claude-scoped servers McpDialog manages — user
-(`~/.claude/.mcp.json` + `settings.json`), project (`<cwd>/.mcp.json` + `.claude/settings.json`),
-local (`.claude/settings.local.json`) — minus the cwd's `disabledMcpServers`. Claude reads it
-natively; opencode (`opencode/claude-mcp-bridge.ts`, runtime-only through
-`OPENCODE_CONFIG_CONTENT`) and Codex (`codex/codex-mcp-bridge.ts`, a per-thread `config` override)
-inherit it. pi sessions got none of it.
+ClaudeUI has one MCP catalog: the servers a Claude session in the cwd loads, resolved host-side the
+way cli.js resolves them ([mcp-catalog.md](../architecture/mcp-catalog.md)). opencode
+(`opencode/claude-mcp-bridge.ts`, runtime-only through `OPENCODE_CONFIG_CONTENT`) inherits it. pi
+sessions got none of it.
 
 pi 1.0 ships an MCP client as a built-in extension (`vendor/pi-src/packages/coding-agent/src/extensions/mcp/`,
 v1.0.4) that reads pi's own `~/.pi/agent/mcp.json` and the trusted project's `.pi/mcp.json`, and
@@ -52,9 +54,9 @@ through ClaudeUI's normal permission engine (the existing fail-closed bridge `to
 
 ### 1. One read, one translator
 
-`readEnabledClaudeMcpServers(cwd)` (`services/claude-mcp.ts`) is the merge-minus-disabled read the
-opencode, Codex and pi bridges now share. `src/core/pi/pi-mcp-bridge.ts`
-translates each entry into pi's shape — stdio `{type, command, args, env, cwd?}`, streamable HTTP
+`resolveClaudeMcpCatalog(cwd)` (`services/claude-mcp-catalog.ts`) is the read the opencode and pi
+bridges share; its own skips join pi's. `src/core/pi/pi-mcp-bridge.ts`
+translates each entry into pi's shape — stdio `{type, command, args, env}`, streamable HTTP
 `{type, url, headers}`, always `exposure: "direct"` — and SKIPS, with a reason, what pi would
 refuse: SSE, `sdk`/other transports, invalid names, bad URLs, no command or url, ClaudeUI's reserved
 names (`claudeui`, `claude-ui`, `claude-ui-mockup`, `claude-ui-collab`, compared by pi namespace),

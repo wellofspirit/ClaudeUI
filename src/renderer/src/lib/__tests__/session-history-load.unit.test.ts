@@ -169,18 +169,6 @@ describe('sidebar actions that need a transcript (auto-rename, watch toggle)', (
 })
 
 describe('a declined load that a newer click superseded', () => {
-  it('Codex: skipped, so the click does not navigate back to the old row', async () => {
-    evictedEntry(['tail-1'])
-    loadSessionHistory.mockRejectedValue(new Error('app-server down'))
-
-    const result = await loadSessionIntoStore(
-      { ...INFO, engineId: 'codex' },
-      { isCurrent: () => false, replace: true }
-    )
-
-    expect(result).toBe('skipped')
-  })
-
   it('Claude: skipped, not declined, once superseded', async () => {
     evictedEntry(['tail-1'])
     loadSessionHistory.mockRejectedValue(new Error('disk gone'))
@@ -188,58 +176,6 @@ describe('a declined load that a newer click superseded', () => {
     const result = await loadSessionIntoStore(INFO, { isCurrent: () => false, replace: true })
 
     expect(result).toBe('skipped')
-  })
-})
-
-describe('a Codex reopen', () => {
-  const CODEX: SessionInfo = { ...INFO, engineId: 'codex' }
-  const codexHistory = (lastEffort?: string | null): unknown => ({
-    ...(history('m1') as object),
-    ...(lastEffort === undefined ? {} : { lastEffort })
-  })
-
-  it('shows the tier the thread last ran at, not the model default', async () => {
-    loadSessionHistory.mockResolvedValue(codexHistory('low'))
-
-    expect(await loadSessionIntoStore(CODEX, { isCurrent: () => true })).toBe('loaded')
-
-    expect(store().sessions['sess'].effort).toBe('low')
-  })
-
-  it('leaves a thread that names no tier on the model default', async () => {
-    loadSessionHistory.mockResolvedValue(codexHistory(null))
-    await loadSessionIntoStore(CODEX, { isCurrent: () => true })
-    expect(store().sessions['sess'].effort).toBeNull()
-
-    loadSessionHistory.mockResolvedValue(codexHistory())
-    await loadSessionIntoStore(CODEX, { isCurrent: () => true, replace: true })
-    expect(store().sessions['sess'].effort).toBeNull()
-  })
-
-  it('keeps a tier the user picked in this run over the one the thread last ran at', async () => {
-    evictedEntry([], { effort: 'high' })
-    loadSessionHistory.mockResolvedValue(codexHistory('low'))
-
-    await loadSessionIntoStore(CODEX, { isCurrent: () => true, replace: true })
-
-    expect(store().sessions['sess'].effort).toBe('high')
-  })
-
-  it('does not rewrite the tier of a session that went live while the read was out', async () => {
-    patchLocalSession('sess', { cwd: '/p', sdkActive: true, effort: null }, { create: true })
-    loadSessionHistory.mockResolvedValue(codexHistory('low'))
-
-    await loadSessionIntoStore(CODEX, { isCurrent: () => true })
-
-    expect(store().sessions['sess'].effort).toBeNull()
-  })
-
-  it('does not touch a session whose read was superseded', async () => {
-    loadSessionHistory.mockResolvedValue(codexHistory('low'))
-
-    expect(await loadSessionIntoStore(CODEX, { isCurrent: () => false })).toBe('skipped')
-
-    expect(store().sessions['sess']).toBeUndefined()
   })
 })
 
@@ -286,8 +222,7 @@ describe('a replace that lands after the session went live', () => {
       'opencode',
       'loadOpencodeHistory',
       { messages: [message('h1')], statusLine: null, lastModel: null }
-    ],
-    ['codex', 'loadSessionHistory', history('h1')]
+    ]
   ] as const)('guards the %s commit site too', async (engineId, api, read) => {
     evictedEntry(['tail-1'])
     let release!: (value: unknown) => void
@@ -338,22 +273,6 @@ describe('a click whose read cannot replace a held transcript', () => {
     })
 
     expect(result).toBe('declined')
-    expect(ids('sess')).toEqual(['tail-1'])
-    expect(store().sessions['sess'].evicted).toBe(true)
-  })
-
-  it('a failed Codex read over a held transcript is declined, not a dead click', async () => {
-    evictedEntry(['tail-1'])
-    loadSessionHistory.mockRejectedValue(new Error('app-server down'))
-    const onCodexError = vi.fn()
-
-    const result = await loadSessionIntoStore(
-      { ...INFO, engineId: 'codex' },
-      { isCurrent: () => true, replace: true, onCodexError }
-    )
-
-    expect(result).toBe('declined')
-    expect(onCodexError).toHaveBeenLastCalledWith(expect.stringContaining('Codex history'))
     expect(ids('sess')).toEqual(['tail-1'])
     expect(store().sessions['sess'].evicted).toBe(true)
   })
@@ -578,15 +497,6 @@ describe('a sidebar click on a parent whose X-Agent still runs (ADR-105 §5)', (
     })
     expect(await click(INFO)).toBe('loaded')
     expect(store().sessions['sess'].isHistorical).toBe(true)
-    expect(store().sessions['sess'].activeTasks).toEqual({ toolu_1: record })
-  })
-
-  it('Codex: the same', async () => {
-    loadSessionHistory.mockResolvedValue({
-      ...(history('h1') as object),
-      activeTasks: { toolu_1: record }
-    })
-    expect(await click({ ...INFO, engineId: 'codex' })).toBe('loaded')
     expect(store().sessions['sess'].activeTasks).toEqual({ toolu_1: record })
   })
 

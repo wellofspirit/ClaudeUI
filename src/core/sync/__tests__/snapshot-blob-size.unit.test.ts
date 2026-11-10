@@ -24,7 +24,6 @@ import { syncCore, emitEvent } from '../../services/sync-host'
 import { sendPrompt, getBlob } from '../../ipc/handlers-core'
 import type { SessionManager } from '../../services/session-manager'
 
-vi.mock('../../services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../services/claude-settings', () => ({ saveCleanupPeriodDays: vi.fn() }))
 vi.mock('../../services/ui-config', () => ({
   saveSessionConfig: vi.fn(),

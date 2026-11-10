@@ -41,14 +41,12 @@ export const DEFAULT_DISPATCH_TILE_COLOR: AgentColorId = 'orange'
  * telling apart.
  *
  * Claude Code: `general-purpose`. pi: ClaudeUI's own `general-purpose`
- * (`core/pi/pi-agent-registry.ts`). opencode: `general`. Codex: the role
- * `default` (`DEFAULT_ROLE_NAME`, codex-rs/core/src/agent/role.rs).
+ * (`core/pi/pi-agent-registry.ts`). opencode: `general`.
  */
 export const DEFAULT_SUBAGENT_TYPE: Record<EngineId, string> = {
   claude: 'general-purpose',
   opencode: 'general',
-  pi: 'general-purpose',
-  codex: 'default'
+  pi: 'general-purpose'
 }
 
 /**

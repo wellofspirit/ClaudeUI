@@ -17,9 +17,7 @@
  * `arrivals.ts` does the same, and the scheduler drops a `stale` request a
  * resolution makes while its own run is still in flight.
  *
- * Codex is not here: its discovery memo is keyed by the resolved binary's
- * identity on every call (`codex/model-discovery.ts`), so a new binary is
- * already a cache miss. Claude Code's models do not come from a harness probe.
+ * Claude Code's models do not come from a harness probe.
  *
  * The invalidators are injected (boot passes the two discovery modules'), so
  * the harness layer never imports an engine module.

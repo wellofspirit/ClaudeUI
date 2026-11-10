@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import type { ClaudePermissions, PermissionScope } from '../../../../shared/types'
+import type { ClaudePermissions, PermissionScope, WorkspaceTrust } from '../../../../shared/types'
 import { useIsMobile } from '../../hooks/useIsMobile'
 import { PermissionsDialogView } from './View'
 import { PermissionsMobileView } from './MobileView'
 import type { RuleCategory } from './shared'
+import { ipcErrorMessage } from '../../utils/ipc-error'
 
 interface PermissionsDialogProps {
   open: boolean
@@ -41,7 +42,11 @@ export function PermissionsDialog({
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   /** null until probed / when there is no cwd to probe. */
-  const [workspaceTrusted, setWorkspaceTrusted] = useState<boolean | null>(null)
+  const [trust, setTrust] = useState<WorkspaceTrust | null>(null)
+  const [trustSaving, setTrustSaving] = useState(false)
+  const [trustError, setTrustError] = useState<string | null>(null)
+  /** Bumped on every probe (open/cwd change): a save that lands after it belongs to a stale cwd. */
+  const trustGeneration = useRef(0)
 
   const loaded = useRef(false)
 
@@ -92,25 +97,53 @@ export function PermissionsDialog({
 
   // Workspace trust gates whether cli.js honors project/local ALLOW rules at
   // all, so it's only meaningful once there's a cwd. A probe failure leaves it
-  // null → no banner, rather than crying wolf on an unknown state.
+  // null → no row, rather than crying wolf on an unknown state.
   useEffect(() => {
+    trustGeneration.current++
+    setTrustSaving(false)
+    setTrustError(null)
     if (!open || !cwd) {
-      setWorkspaceTrusted(null)
+      setTrust(null)
       return
     }
     let cancelled = false
     window.api
-      .isWorkspaceTrusted(cwd)
-      .then((trusted) => {
-        if (!cancelled) setWorkspaceTrusted(trusted)
+      .getWorkspaceTrust(cwd)
+      .then((t) => {
+        if (!cancelled) setTrust(t)
       })
       .catch(() => {
-        if (!cancelled) setWorkspaceTrusted(null)
+        if (!cancelled) setTrust(null)
       })
     return () => {
       cancelled = true
     }
   }, [open, cwd])
+
+  // Saved immediately and independently of the dialog's Save/dirty state: it
+  // writes ~/.claude.json, not a settings file. Optimistic; reverts on failure.
+  const toggleTrust = useCallback(async (): Promise<void> => {
+    if (!cwd || !trust || trustSaving) return
+    const previous = trust
+    const next = !previous.trusted
+    const generation = trustGeneration.current
+    setTrustSaving(true)
+    setTrustError(null)
+    setTrust({ ...previous, trusted: next })
+    try {
+      const saved = await window.api.setWorkspaceTrust(cwd, next)
+      if (generation === trustGeneration.current) setTrust(saved)
+    } catch (e) {
+      if (generation !== trustGeneration.current) return
+      setTrustError(ipcErrorMessage(e))
+      // A remote call can fail after the host already wrote (dropped connection,
+      // timeout): show what is on disk, not a guess. Fall back to the old state.
+      const actual = await window.api.getWorkspaceTrust(cwd).catch(() => null)
+      if (generation === trustGeneration.current) setTrust(actual ?? previous)
+    } finally {
+      if (generation === trustGeneration.current) setTrustSaving(false)
+    }
+  }, [cwd, trust, trustSaving])
 
   const saveScope = useCallback(
     async (scope: PermissionScope): Promise<void> => {
@@ -204,7 +237,11 @@ export function PermissionsDialog({
       perms={perms}
       dirty={dirty}
       hasDirty={hasDirty}
-      workspaceTrusted={workspaceTrusted}
+      cwd={cwd}
+      trust={trust}
+      trustSaving={trustSaving}
+      trustError={trustError}
+      onToggleTrust={toggleTrust}
       onListDir={window.api.listDir}
       onChangeTab={handleChangeTab}
       onUpdateRule={(category, i, v) =>

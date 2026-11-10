@@ -21,7 +21,7 @@ Enable **six** of the eight capabilities for opencode, each mapping opencode's n
 ### Slash commands + skills (8a)
 
 - **Commands** are server-driven: `GET /command` lists them; **`POST /session/{id}/command {command, arguments}`** runs a full turn with server-side template expansion. opencode does **not** interpret a leading `/` in a normal prompt, so `OpencodeSession.run` routes a `/known-command` prompt to the command route (else `promptAsync`), with a BadRequest→promptAsync fallback.
-- **Skills** are list-only + model-invoked (no user-invoke API, no skill SSE event). `GET /skill` feeds the read-only SkillsDialog (engine-dispatched in the skill-details IPC); opencode reads the same `~/.claude/skills` dirs.
+- **Skills** are model-invoked and listed by `GET /skill`, which feeds the SkillsDialog. 2026-11-09 ([ADR-115](adr-115_claude-skills-in-pi-and-opencode.md)): opencode no longer reads `.claude/skills` itself; ClaudeUI's plugin adds the shared Claude skill catalog under Claude's names, and a typed `/name` is expanded host-side.
 - **Eager connect:** `run(null)` connects opencode at session creation (parity with Claude's spawn-only init) to discover commands/skills before the first prompt and emit `session:slash-commands`/`session:skills`. The acquire is **memoized** (`ensureConnected`) so a prompt racing the eager connect cannot double-acquire the shared per-cwd server (a ref-leak); the per-run cancel guard resets so a session reconnects after an idle timeout; the eager path arms the inactivity timer.
 
 ### Side-questions: `/btw` + native `question.asked` (8b) — two distinct features

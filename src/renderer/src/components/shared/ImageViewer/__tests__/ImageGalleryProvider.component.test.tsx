@@ -44,7 +44,7 @@ function userMessage(id: string, content: ContentBlock[]): ChatMessage {
 
 function renderChat(messages: ChatMessage[], wrap = true): ReturnType<typeof render> {
   const bubbles = messages.map((m) => (
-    <MessageBubble key={m.id} message={m} pendingApprovals={[]} isLastAssistant={false} />
+    <MessageBubble key={m.id} message={m} pendingApprovals={[]} />
   ))
   return render(
     wrap ? (

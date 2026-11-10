@@ -24,10 +24,7 @@ import { McpBody } from './McpBody'
 import { ImageBody } from './ImageBody'
 
 /** Passive kinds the registry can render. Lifted kinds are routed elsewhere. */
-export type PassiveToolKind = Exclude<
-  ToolKind,
-  'plan' | 'question' | 'todo' | 'task' | 'sleep' | 'note'
->
+export type PassiveToolKind = Exclude<ToolKind, 'plan' | 'question' | 'todo' | 'task' | 'note'>
 
 export const TOOL_RENDERERS: Record<PassiveToolKind, KindRenderer> = {
   command: { layout: 'standard', Body: CommandBody },

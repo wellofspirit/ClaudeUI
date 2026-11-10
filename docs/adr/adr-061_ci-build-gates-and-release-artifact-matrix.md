@@ -11,6 +11,7 @@ last amendment, which supersedes both matrices. **Amended by [ADR-099](adr-099_o
 **Relates to:** ADR-006 (the rebundled bun-claude binary — the mechanism whose linux gap
 this ADR takes a position on), ADR-058 (the `claudeui-server` artifacts this ADR ships),
 ADR-056 (the headless admission model those artifacts serve).
+**Amended 2026-10-28:** the Codex engine was removed; the release matrix, caches and notes no longer carry Codex or its bwrap requirement, and every Codex row below is historical.
 
 ## Context
 

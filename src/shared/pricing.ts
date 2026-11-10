@@ -51,6 +51,31 @@ export interface TokenCostInput {
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_PRICING: PricingEntry[] = [
+  // Fable 5.2 / Mythos 5.2 — cli.js 2.1.321 `tier_8_40_cache_read_0_20`: $8/$40,
+  // cache write 5m $10 / 1h $16, cache read $0.20/MTok. Must precede the generic
+  // 'fable'/'mythos' entries (first substring match wins).
+  {
+    vendorId: 'anthropic',
+    match: 'fable-5-2',
+    pricing: {
+      inputPerMTok: 8,
+      outputPerMTok: 40,
+      cacheWritePerMTok: 10,
+      cacheWrite1hPerMTok: 16,
+      cacheReadPerMTok: 0.2
+    }
+  },
+  {
+    vendorId: 'anthropic',
+    match: 'mythos-5-2',
+    pricing: {
+      inputPerMTok: 8,
+      outputPerMTok: 40,
+      cacheWritePerMTok: 10,
+      cacheWrite1hPerMTok: 16,
+      cacheReadPerMTok: 0.2
+    }
+  },
   // Fable 5.1 / Mythos 5.1 — cli.js 2.1.261 `tier_10_50_cache_read_0_25`:
   // same $10/$50 as 5.0 but cache reads at $0.25/MTok (vs $1). Must precede
   // the generic 'fable'/'mythos' entries (first substring match wins).
@@ -296,7 +321,7 @@ export const ANTHROPIC_MODEL_PRICING: ReadonlyArray<{ match: string; pricing: Mo
 // ---------------------------------------------------------------------------
 
 const OPENAI_PRICING: PricingEntry[] = [
-  // ── The models Codex's own catalog offers (ADR-066) ─────────────────────────
+  // ── The OpenAI models ChatGPT subscriptions offer (ADR-066) ─────────────────────────
   //
   // Sources, both fetched 2026-09-13 and in agreement to the cent:
   //   1. developers.openai.com/api/docs/pricing — the standard-tier rows
@@ -312,7 +337,7 @@ const OPENAI_PRICING: PricingEntry[] = [
   //
   // The >200k-context tier (2× input, and 1.5× output on the 5.6/6 line) and the
   // priority/batch tiers are NOT modelled: nothing on the wire says which tier a
-  // turn billed at, and guessing one would be worse than the base rate. Codex's
+  // turn billed at, and guessing one would be worse than the base rate. The
   // hidden models (`gpt-daybreak-*`, `codex-auto-review`) have no public price
   // and are deliberately absent, so the lookup returns null for them instead of
   // a fabricated number.
@@ -448,7 +473,7 @@ const OPENAI_PRICING: PricingEntry[] = [
       cacheReadPerMTok: 0.175
     }
   },
-  // gpt-5.2 — still listed by Codex's catalog, and priced by both sources above
+  // gpt-5.2 — still listed by the ChatGPT catalog, and priced by both sources above
   // ($1.75 / $0.175 cached / $14.00); no cache-write rate is published for it.
   {
     vendorId: 'openai',

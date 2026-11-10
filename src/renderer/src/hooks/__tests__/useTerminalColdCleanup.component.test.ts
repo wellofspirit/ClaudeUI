@@ -131,6 +131,47 @@ describe('useTerminalColdCleanup', () => {
     unmount()
   })
 
+  // Terminal groups are keyed by the session's workdir, so the worktree's group is
+  // not an orphan just because no session has it as its spawn cwd.
+  // ...and the terminals it opened in its spawn cwd before it entered the worktree stay too.
+  it('does NOT reap the worktree group, nor the spawn-cwd group, of a session in a worktree', async () => {
+    const { unmount } = renderHook(() => useTerminalColdCleanup())
+    const worktree = '/repo/.claude/worktrees/wt'
+
+    act(() => {
+      useSessionStore.getState().createNewSession('session-1', '/repo')
+      useSessionStore.setState((s) => ({
+        sessions: {
+          ...s.sessions,
+          'session-1': {
+            ...s.sessions['session-1'],
+            worktreeInfo: {
+              worktreePath: worktree,
+              worktreeBranch: 'wt',
+              worktreeName: 'wt',
+              originalCwd: '/repo',
+              gitRoot: '/repo',
+              originalHeadCommit: '',
+              createdAt: 0
+            }
+          }
+        }
+      }))
+      setTerminalGroup('/repo', [makeTab('tab-0', '/repo')])
+      setTerminalGroup(worktree, [makeTab('tab-1', worktree)])
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(TEN_MIN_PLUS)
+    })
+
+    expect(killTerminalsByCwd).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().terminalGroups[worktree]).toBeDefined()
+    expect(useSessionStore.getState().terminalGroups['/repo']).toBeDefined()
+
+    unmount()
+  })
+
   it('does NOT fire when a session with that cwd exists (terminal is in use)', async () => {
     const { unmount } = renderHook(() => useTerminalColdCleanup())
 

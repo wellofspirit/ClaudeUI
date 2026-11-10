@@ -117,18 +117,6 @@ describe('harnessCandidates', () => {
     expect(candidates('pi', deps)).toContainEqual({ id: 'pi', kind: 'pi-managed', path: root })
   })
 
-  it("finds Codex's standalone install through current/", () => {
-    const standalone = path.join(home, '.codex', 'packages', 'standalone')
-    const release = path.join(standalone, 'releases', '0.156.0-x')
-    writeNative(path.join(release, 'bin', `codex${EXE}`))
-    linkDir(release, path.join(standalone, 'current'))
-    expect(candidates('codex', deps)).toContainEqual({
-      id: 'codex',
-      kind: 'file',
-      path: path.join(standalone, 'current', 'bin', `codex${EXE}`)
-    })
-  })
-
   it("finds opencode 2.x's opencode2 on PATH beside (or instead of) opencode", () => {
     const v1Dir = path.join(tmp, 'v1')
     const v2Dir = path.join(tmp, 'v2')

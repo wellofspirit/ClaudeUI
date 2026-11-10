@@ -11,8 +11,8 @@ Reference documentation for the complete wire protocol between ClaudeUI's SDK ha
 ## Verified against
 
 ```
-cli.js version: 2.1.268
-upstream SDK:   @anthropic-ai/claude-code 2.1.268 (Bun 1.4.1 standalone binary, chunked ESM graph)
+cli.js version: 2.1.321
+upstream SDK:   @anthropic-ai/claude-code 2.1.321 (Bun 1.4.x standalone binary, chunked ESM graph)
 ```
 
 > Bundle-format note: since 2.1.261 the vendored `vendor/claude-cli/cli.js` is a
@@ -30,6 +30,60 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 **2.1.290 bounded verification (2026-10-06):** bundled build and the compatibility floor (floor = tested = 2.1.290, owner ruling). Compared pristine darwin-arm64 concats and native `--help` against 2.1.289. Public-contract drift: 0 long flags added or removed (71 → 71; `attach`/`logs` also take a session name); zod `subtype` literals +1, `system/file_attachments_missing` (`@internal`, bridge-worker only, answers the `@internal` `file_attachments` ClaudeUI never sends); one optional `@internal` user-frame field `refused_message_id`; one print-mode control handler `set_proactivity_level {level, offer_bypass}` with no public schema; capability id `register_repo_root_v1` appears only in the cloud-hosted unavailable set, not in `system/init`. No removals; production OAuth constants and the model-id set are unchanged. 0 consumed-wire breaks. All three registry patches apply unchanged (2,252 chunks), `test:patch` passes 3/3 (subagent-streaming 9/9, voice-server-anchors 4/4, bash-output-streaming 9/9, Haiku 4.5), the voice start/connect/idempotent-start/native-fallback/stop probe passes, and the localhost SSE ordering fixtures pass. Hidden/provider/plugin surfaces were not manually re-verified, so the banner stays at 2.1.268.
 
 **2.1.293 bounded verification (2026-10-08):** bundled build and the compatibility floor (floor = tested = 2.1.293, ADR-082 §3). Compared pristine darwin-arm64 concats and native `--help` against 2.1.290. Public-contract drift: 0 long flags added or removed (71 → 71, `--help` byte-identical; `plugin install` gained `--marketplace <source>`, unused). Zod `subtype` literals +2: `system/permission_check_status` (`@internal`, on the wire in print mode when an auto-mode permission check runs past ~4 s; 04 §4.32; not consumed) and host→CLI `ui_prompt_autocomplete` (`@internal`, never sent). Additive public fields: `run_id` on every `task_*` frame and `background_tasks_changed` entry, `parent_task_id` on `task_started` and those entries, `subagent_type` on the entries (04 §4.5 note); `agent_id` on forwarded subagent `assistant`/`user` frames, which still carry `parent_tool_use_id`, so ClaudeUI's placement and turn-start checks are unaffected (03 §3.3). Additive `@internal`: `stream_event.abandoned_blocks` on cli.js's synthesized `message_stop` (05 §5.8), `result.safety_stops`, `api_error` value `usage_limit_reached`, `request_marker_lists_v1` in `system/init.capabilities`; `@internal` `result.system_prompt_detail` removed. No print-mode handler removed; production OAuth constants and the host-token contract anchors are unchanged. 0 consumed-wire breaks. Model catalog: new `claude-haiku-5-5`, and the first-party `haiku` alias moved to it (13 header note). All three registry patches apply unchanged (2,290 chunks), `test:patch` passes 3/3 (subagent-streaming 9/9, voice-server-anchors 4/4, bash-output-streaming 9/9, Haiku 4.5), the voice start/connect/idempotent-start/native-fallback/stop probe passes, and the localhost SSE ordering fixtures pass (5 tests). Hidden/provider/plugin surfaces were not manually re-verified, so the banner stays at 2.1.268.
+
+**2.1.321 bounded verification (2026-11-10, facts slice):** compared pristine darwin-arm64 concats
+and native `--help` against 2.1.319. `--help` is byte-identical (83 flag lines). The baked model
+catalog gains `claude-fable-5-2` and `claude-mythos-5-2` and the `fable` alias moves to Fable 5.2,
+mirrored in `src/shared/` (13). Zod `subtype` literals +2: `system/ui_notify` and `ui_notify_cancel`
+(plugin `$.ui` surface, emitted only when `CLAUDE_CODE_NOTIFICATIONS_HOST` is set; ClaudeUI sets
+none, like the already-present `ui_toast` / `ui_status`; not consumed). The
+`<task-notification>` envelope builder is byte-identical; a background command's description inside
+`<summary>` is now clipped to its first 500 and last 300 characters when over 1,000 (`src/core/services/task-notification-xml.ts`
+header). Hand-back sentences, OAuth constants, the OAuth login/refresh bodies (the exchange and
+refresh requests now run behind an abortable 30 s wrapper; bodies and headers unchanged), the
+host-token contract anchors, `DANGEROUS_*` lists, worktree result strings and the auto-mode
+stage-2 prompt and default rules (14) are unchanged. Patches: three anchors moved by one token
+each (subagent-streaming Patch C: the converter head's second argument is now a call,
+`FN(e,s())`; bash-output-streaming Part A: a late-callback guard opens `onProgress`; Part B:
+`startPolling(id,flag)` takes a second argument), re-anchored as described in each patch README.
+Boot probe ok; all three patches apply to the win32-x64, darwin-arm64 and linux-x64 bundles; live
+suites 3/3 on haiku (bash-output-streaming 9/9, subagent-streaming 9/9, voice-server anchors);
+`sdk-contract` 11/11.
+
+**2.1.319 bounded verification (2026-11-09):** bundled build and the compatibility floor are
+2.1.319; the banner names it. Compared pristine darwin-arm64 concats against 2.1.317. `--help`
+and the model catalog are byte-identical (13); the SDK converter, the system arms and the control
+subtypes ClaudeUI sends or answers are unchanged; OAuth and host-token anchors unchanged. Additive
+only: `result.credential_expires_at` / `stopped_by_permission_check` / `process_turn_threads` (03
+§3.7), `system/status.resume_held_for_plan` (04 §4.3) and notification key `config-two-files` (04
+§4.14), control `set_has_subscribers` (07 §7.3), four `permission_denied.decision_reason_code`
+values (04 §4.25), `tool_progress.inner_call` (03 §3.8), and two new `<result>` lines of a
+hand-back (04 §4.4). `subagent-streaming` Patch C re-anchored on the `case"progress":` dispatch
+head because the chain gained a new first arm (its README). All three registry patches apply to
+win32-x64, darwin-arm64 and linux-x64; the darwin boot probe passes; the sdk-contract suite passes
+(9/9); `test:patch` passes 3/3 (subagent-streaming 9/9, voice-server-anchors 4/4,
+bash-output-streaming 9/9, Haiku 5.5). Linux and Windows bundles were applied and syntax-checked, not
+executed.
+
+**2.1.317 bounded verification (2026-11-04):** bundled build and the compatibility floor are
+2.1.317; the banner above now names it. All three registry patches apply to win32-x64,
+darwin-arm64 and linux-x64 (Linux ELF rebundling remains unsupported), and the darwin boot probe
+passes (warn-only gate on macOS). `subagent-streaming` Patch C needed a re-anchor: 2.1.317 deleted
+the remote/container-only `bash_progress` arm from the SDK converter's `case"progress":` chain (now
+`else if(e.data.type==="tool_heartbeat")`) and moved the `agent_progress` predicate into an
+**imported** binding in another chunk (its README). The bundle's own layout also changed: Bun now
+writes `bytecode.len` as "start of this module's bytecode → start of the contents region" and
+`module_info` as `[0,0]`, so `rebundle-cli` reads those dropped fields as lengths only (01 §1.12).
+Model catalog: 22 models, same ids, aliases, context windows, pricing, output limits, default and
+per-effort cost indexes; only capability flags moved — `tool_loaded_text` added to 18 models and
+`total_tokens_reminder` dropped from `claude-opus-5-5` and `claude-sonnet-5-5` (neither flag is
+mirrored). `DANGEROUS_DIRECTORIES`/`DANGEROUS_FILES` (agent-control paths), the `EnterWorktree`
+result strings and the three internal cloud-session queries are unchanged. Auto-mode stage-2 prompt
+is byte-identical to 2.1.308; the default rule lists changed by exactly one entry (the
+`Scheduled-Task Fires` allow rule is gone: 21 environment / 1 hard-deny / 72 soft-deny / 16 allow).
+Offline SDK contracts pass 6/6. Native macOS/Linux execution, the live patch suites
+(`test:patch`), voice transcription and the full hidden/provider/plugin surface were not verified;
+the banners in the per-version notes below are historical.
 
 **2.1.308 bounded verification (2026-10-22):** bundled build and compatibility floor
 are 2.1.308. Against pristine 2.1.306, the complete baked model catalog (19,901

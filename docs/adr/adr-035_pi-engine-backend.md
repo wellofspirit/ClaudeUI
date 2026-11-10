@@ -76,9 +76,9 @@ Two facts drove the design, both **probed against the real binary before any pro
   sanctioned `~/.pi` write — a byte-preserving api_key merge). OAuth `/login` is TUI-interactive and
   **not** driven from ClaudeUI (`canDriveLogin:false`); the Settings › pi › Providers section shows
   a "run /login in a terminal" hint with the copyable vendored binary path plus in-app API-key CRUD.
-- **Shared skills:** the bridge extension's `resources_discover` hook returns the existing
-  `~/.claude/skills` + `<cwd>/.claude/skills` dirs (computed main-side, passed via env), so pi
-  surfaces Claude skills through the same `session:skills` wiring.
+- **Shared skills:** 2026-11-09 ([ADR-115](adr-115_claude-skills-in-pi-and-opencode.md)): the bridge (v27)
+  fetches the shared Claude skill catalog from the host's `/skills` and appends it to pi's system-prompt skill
+  list at `before_agent_start`, replacing the `resources_discover` folders; a typed `/name` is expanded host-side.
 - **Hosted tools (ADR-007/019 parity):** `render_mermaid`/`create_mockup`/`show_mockup` registered
   via `pi.registerTool()` over a second `PiBridgeHost` route (`/hosted-tool`), delegating to the
   SAME `mermaid-tool.ts`/`mockup-tool.ts` handlers Claude and opencode reuse. Auto-allowed by the

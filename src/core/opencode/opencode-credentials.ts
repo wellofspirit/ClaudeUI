@@ -20,8 +20,9 @@ import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 
 async function connectPooled(): Promise<CredentialLease> {
   // Lingers idle after the last read: a burst of credential reads reuses one server.
-  // Credential routes only: served even by a server whose first-contact
-  // cleanup has not succeeded yet (they never activate a location).
+  // Credential routes only: served even by a server whose first-contact cleanup
+  // has not succeeded yet — except `create`, which boots a location (2.2.5), so the
+  // lease carries the manager's verdict and the store refuses a create on an unclean one.
   const conn = await opencodeServerManager.acquire(PERSISTED_SESSIONS_DIR, {
     waitForHostedTools: false,
     lingerMs: READ_LINGER_MS,
@@ -29,11 +30,15 @@ async function connectPooled(): Promise<CredentialLease> {
   })
   return {
     api: credentialApi(new OpencodeClient(conn)),
+    cleaned: conn.cleaned,
     release: () => opencodeServerManager.releaseIfCurrent(PERSISTED_SESSIONS_DIR, conn)
   }
 }
 
-/** The credential routes only: they never activate a location (2.0.24, probed). */
+/**
+ * The credential routes. `create` boots the global-config location on 2.2.5 (and can refresh the
+ * active OAuth connection); list/remove/activate/relabel never activate one (probed).
+ */
 function credentialApi(client: OpencodeClient): CredentialApi {
   return {
     list: () => client.listCredentials(),
@@ -53,10 +58,13 @@ export const opencodeCredentialStore = new OpencodeCredentialStore({
  * First contact with every new server (ADR-097 §5, owner decision 2026-10-07):
  * proven copies of ClaudeUI's own sign-in are deleted through the credential
  * routes BEFORE the server serves anything that can activate a location.
- * opencode resolves (and so may refresh) the active OAuth credential only when
- * a location activates its plugins — never at boot and never on a credential
- * route. Without the store's recogniser (not wired yet) the hook FAILS, so the
- * manager keeps the server uncleaned and retries — it never counts as clean.
+ * opencode resolves (and so may refresh) the active OAuth credential when a
+ * location activates its plugins — never at boot, never on `credential.list`,
+ * `remove`, `activate` or relabel; `credential.create` is the one credential
+ * route that boots the global-config location (2.2.5), so the store fails that
+ * one closed until this hook has succeeded. Without the store's recogniser (not
+ * wired yet) the hook FAILS, so the manager keeps the server uncleaned and
+ * retries — it never counts as clean.
  */
 export function installCopyCleanupHook(
   manager: Pick<OpencodeServerManager, 'setServerStartedHook'>,

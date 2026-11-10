@@ -54,25 +54,17 @@ describe('SharedProviderRepository', () => {
     expect(repo.get('bad')).toBeNull()
     expect(repo.get('invalid')).toBeNull()
   })
-  it('persists the ChatGPT per-session accounts flag (ADR-068 §2)', () => {
+  it('loads a ChatGPT record an older build wrote with a per-session accounts block, and no longer carries it', () => {
     const repo = new SharedProviderRepository()
     const chatgpt = repo.get('chatgpt')!
-    // Absent means off — the flag only exists once someone turns it on.
-    expect(chatgpt.accounts).toBeUndefined()
-    repo.save({ ...chatgpt, accounts: { perSession: true } })
-    expect(new SharedProviderRepository().get('chatgpt')?.accounts).toEqual({ perSession: true })
-    repo.save({ ...chatgpt, accounts: { perSession: false } })
-    expect(new SharedProviderRepository().get('chatgpt')?.accounts).toEqual({ perSession: false })
-  })
-  it('rejects a malformed accounts block rather than storing it', () => {
-    const repo = new SharedProviderRepository()
-    const chatgpt = repo.get('chatgpt')!
-    expect(() =>
-      repo.save({
-        ...chatgpt,
-        accounts: { perSession: 'yes' } as unknown as { perSession: boolean }
-      })
-    ).toThrow(/accounts/i)
+    repo.save(chatgpt) // creates the providers dir
+    writeFileSync(
+      sharedProviderPath('chatgpt'),
+      JSON.stringify({ ...chatgpt, accounts: { perSession: true } })
+    )
+    const loaded = new SharedProviderRepository().get('chatgpt')
+    expect(loaded).not.toBeNull()
+    expect(loaded).not.toHaveProperty('accounts')
   })
   it('rejects traversal ids', () => {
     expect(() => new SharedProviderRepository().get('../x')).toThrow(/Invalid/)

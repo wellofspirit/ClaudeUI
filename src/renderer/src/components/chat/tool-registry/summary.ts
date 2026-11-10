@@ -104,8 +104,7 @@ export function summarizeTool(kind: ToolKind, view: ToolView, toolName?: string)
       return view.kind === 'note' ? view.text : ''
 
     case 'mcp':
-      // `server / tool` when the engine's name was splittable (Codex's
-      // `mcp__<server>__<tool>`, F20). Engines whose MCP names carry neither —
+      // `server / tool` when the engine's name was splittable (`mcp__<server>__<tool>`, F20). Engines whose MCP names carry neither —
       // opencode's underscore-joined `server_tool`, and any caller that
       // normalized without a tool name — keep today's JSON dump.
       // A session tool (first-party) is named by the card's own header ("Session · message"), so the

@@ -14,6 +14,51 @@ names change, offsets shift, string landmarks survive. **(I)** marks a claim rea
 off the code but not traced end to end; **(unverified)** marks text carried over
 from the 2.1.220 revision that was not re-checked.
 
+**2.1.321 bounded drift check (2026-11-10):** the re-extracted stage-2 prompt is byte-identical to
+2.1.319's (45,473 bytes from the extractor); its one runtime slot is now named `mLt` instead of `KAt`
+(the voice-call rule text, compared with interpolation names masked, is the same 868 characters). The
+default rule lists (`claude auto-mode defaults`, 82,359 bytes) are byte-identical: 21 environment, 1
+hard-deny, 72 soft-deny and 16 allow. The prompt template now sits at characters
+13,557,533-13,601,592 of the **darwin-arm64** concat, and the role-gating anchors below moved by
+about +309,000 characters (`tengu_smooth_chipmunk` @9,654,682); the flags, the kill switch and the
+`CLAUDE_CODE_AUTO_MODE_SERVER` gate are all still there. `DANGEROUS_DIRECTORIES` / `DANGEROUS_FILES`
+(19 and 37 entries) are unchanged from 2.1.319. Not re-traced: how the 2.1.321 batching of
+background-subagent reports in headless auto mode reaches the classifier.
+
+**2.1.319 bounded drift check (2026-11-09):** the re-extracted stage-2 prompt differs from 2.1.317's
+only by one new interpolation slot, `${KAt}`, appended after the gated `${r}` slot inside
+`<cc_automode_session_rules>` (45,473 bytes from the extractor against 45,462: the extractor writes an
+unresolved slot as a visible `«${KAt}»` placeholder, which accounts for the difference; every other line
+is byte-identical). `KAt` is a runtime-gated rule text, defined in the same chunk (`cli.js@char10365526`): text
+under the voice-call marker line, or from a non-user source of kind `voice-call`, is a record of speech
+that never establishes user intent, meets a consent bar or lifts a boundary, and a tool call justified only
+by it is evaluated as fully autonomous (**I**: the gate that appends it was not traced). The default rule lists
+render the same: 21 environment, 1 hard-deny, 72 soft-deny and 16 allow. The prompt template sits at
+characters 13,241,485-13,285,544 of the **darwin-arm64** concat. Four new `permission_denied`
+`decision_reason_code` values name auto-mode stops (04 §4.25). This checks shipped text, not server-side
+rollout or classifier decisions.
+
+**Server-classifier role gating (2.1.319, `Ybr` at `cli.js@char9359414`).** Which classifier runs is a role
+(`off` / `arbiter` / `arbiterWithLocalFallback`), not a setting of its own. First party: `arbiter` (the server
+reviews) unless the user switch `CLAUDE_CODE_AUTO_MODE_SERVER` is false (`user_switch_off`), the feature flag
+`tengu_smooth_chipmunk` (the server-classifier rollout, default true) is false (`rollout_flag_off`), the kill
+switch `tengu_iridescent_crystal` is on, the refused latch is set, or batch file tools apply (each makes the
+role `off`). Third party: `arbiterWithLocalFallback` unless its own switch, the refused latch, batch file
+tools or the kill switch turn it `off`. New in 2.1.319 (`u7e` at `cli.js@char9346633`): when the served
+value can't be read because telemetry or feature flags are off (`DISABLE_TELEMETRY`, `DO_NOT_TRACK`,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` or `DISABLE_GROWTHBOOK`),
+the server check is forced to `"all"` with no local fallback, unless `CLAUDE_CODE_AUTO_MODE_SERVER=0`
+(2.1.317 used the local classifier there). ClaudeUI sets none of these on a session.
+
+**2.1.317 bounded drift check (2026-11-04):** the re-extracted stage-2 prompt is **byte-identical**
+to 2.1.308's (45,462 bytes from the extractor), and the environment / hard-deny / soft-deny lists
+render the same 21 / 1 / 72 entries. The allow list lost exactly one entry — the rule that opens
+`Scheduled-Task Fires: a user turn opening with [SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED
+PROMPT] …` — so rendered rules are 21 environment, 1 hard-deny, 72 soft-deny and 16 allow (2.1.308:
+17 allow). The prompt template sits at characters 12,824,398–12,868,449 of the **darwin-arm64**
+concat (2.1.308: 12,245,433–12,289,484 there; the win32 offsets quoted in the 2.1.308 note below are
+that platform's). This checks shipped text, not server-side rollout or classifier decisions.
+
 **2.1.308 bounded drift check (2026-10-22):** re-extracted stage-2 prompt and native `auto-mode defaults` rules are identical to 2.1.306. The new concat prompt spans characters 12,314,470–12,358,522; rendered rules contain 21 environment, 1 hard-deny, 72 soft-deny and 17 allow entries. This checks shipped text, not server-side rollout or classifier decisions; the architectural offsets below remain historical.
 
 Regenerate the verbatim stage-2 prompt, and render the shipped rules, with

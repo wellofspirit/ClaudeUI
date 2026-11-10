@@ -36,7 +36,7 @@ describe('withLaunch', () => {
     const siteEnv = { PATH: '/bin', X: '1' }
     const composed = withLaunch(nativeLaunch('/bin/pi'), ['--mode', 'rpc'], siteEnv)
     expect(composed).toEqual({ command: '/bin/pi', args: ['--mode', 'rpc'], env: siteEnv })
-    // The same object: a site with replacement semantics (Codex) sees no copy.
+    // The same object: a site with replacement semantics sees no copy.
     expect(composed.env).toBe(siteEnv)
   })
 

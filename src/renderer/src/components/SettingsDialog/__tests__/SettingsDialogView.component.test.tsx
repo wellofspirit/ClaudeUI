@@ -117,8 +117,7 @@ describe('the rail', () => {
       ['harnesses', 'Installed'],
       ['claude', 'Claude Code'],
       ['opencode', 'opencode'],
-      ['pi', 'pi'],
-      ['codex', 'Codex']
+      ['pi', 'pi']
     ])
     expect(screen.getByTestId('SettingsDialog.pageTitle')).toHaveTextContent('Installed')
     // The page's own actions sit in the header, beside the title.
@@ -586,10 +585,11 @@ describe('the page pane', () => {
   })
 
   it('hides a capability-gated group when the page engine lacks it', () => {
-    // Claude has both flags, so both gated groups show — after the two
-    // ungated endpoint groups (ADR-074 §9).
+    // Claude has both flags, so both gated groups show — after the ungated
+    // session and endpoint groups (ADR-074 §9).
     renderView({ activePage: 'claude' })
     expect(screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)).toEqual([
+      'session',
       'endpoint',
       'model-mapping',
       'sandbox',
@@ -610,12 +610,11 @@ describe('engine segments', () => {
     expect(segment).toBeInTheDocument()
     expect(
       screen.getAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
-    ).toEqual(['opencode', 'pi', 'codex'])
+    ).toEqual(['opencode', 'pi'])
 
     const keys = screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)
     expect(keys).toContain('opencodeAutoMode')
     expect(keys).not.toContain('piAutoMode')
-    expect(keys).not.toContain('codexAutoMode')
   })
 
   it('switching the segment swaps which items render', () => {
@@ -639,11 +638,11 @@ describe('engine segments', () => {
     expect(tags).toContain('engines/pi.json')
   })
 
-  it('offers all four engines on the dispatch page (pi, then Codex, joined as targets)', () => {
+  it('offers every engine on the dispatch page, joined as targets', () => {
     renderView({ activePage: 'dispatch', engineByGroup: { 'dispatch/into': 'pi' as EngineId } })
     expect(
       screen.getAllByTestId('SettingsGroup.engineSegment.option').map((el) => el.dataset.id)
-    ).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    ).toEqual(['claude', 'opencode', 'pi'])
     // The app-level Concurrency row leads the page: its cap bounds every
     // direction, so it is read before any per-target rule (ADR-033, 2026-09-18).
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toEqual([
@@ -672,7 +671,7 @@ describe('engine segments', () => {
     expect(limits.queryByTestId('SettingsGroup.storage')).not.toBeInTheDocument()
     expect(limits.queryByTestId('SettingsGroup.note.badge')).not.toBeInTheDocument()
     expect(limits.getByTestId('SettingsGroup.note')).toHaveTextContent(
-      'Governs dispatch_agent calls into opencode from a Claude, pi or Codex session'
+      'Governs dispatch_agent calls into opencode from a Claude or pi session'
     )
     expect(
       within(byId('SettingsGroup', 'into')).getByTestId('SettingsGroup.storage')
@@ -908,13 +907,10 @@ describe('a harness that does not run (ADR-082 §8)', () => {
   afterEach(() => harnessStore.resetForTests())
 
   it('greys its rail item: aria-disabled, out of the tab order, titled, and a click does nothing', async () => {
-    harnesses(['pi', 'codex'])
+    harnesses(['pi'])
     const { props } = renderView({ activePage: 'claude' })
     await settle()
-    for (const [id, label] of [
-      ['pi', 'pi'],
-      ['codex', 'Codex']
-    ]) {
+    for (const [id, label] of [['pi', 'pi']]) {
       const item = railItem(id)
       expect(item).toHaveAttribute('aria-disabled', 'true')
       expect(item).toHaveAttribute('tabindex', '-1')
@@ -990,7 +986,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     harnesses(null)
     renderView({ activePage: 'claude' })
     await settle()
-    for (const id of ['opencode', 'pi', 'codex']) {
+    for (const id of ['opencode', 'pi']) {
       expect(railItem(id)).not.toHaveAttribute('aria-disabled')
     }
   })
@@ -1010,7 +1006,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
   })
 
   it('Default models: no segment or row for it; back when it runs', async () => {
-    harnesses(['pi', 'codex'])
+    harnesses(['pi'])
     renderView({
       activePage: 'models',
       engineByGroup: { 'models/defaults': 'pi' as EngineId }
@@ -1024,7 +1020,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
 
     cleanup()
     harnessStore.resetForTests()
-    harnesses(['opencode', 'pi', 'codex'])
+    harnesses(['opencode', 'pi'])
     renderView({
       activePage: 'models',
       engineByGroup: { 'models/defaults': 'pi' as EngineId }
@@ -1047,14 +1043,15 @@ describe('a harness that does not run (ADR-082 §8)', () => {
       within(byId('SettingsGroup', 'defaults'))
         .getAllByTestId('SettingsGroup.engineSegment.option')
         .map((el) => el.dataset.id)
-    ).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    ).toEqual(['claude', 'opencode', 'pi'])
   })
 
-  it('Sessions: the judge segments and Trust & protection follow opencode, pi and Codex', async () => {
+  it('Sessions: the judge and Trust & protection follow opencode and pi', async () => {
     harnesses(['pi'])
     renderView({ activePage: 'sessions', engineByGroup: { 'sessions/judge': 'pi' as EngineId } })
     await settle()
-    expect(segment()).toEqual(['opencode', 'codex'])
+    // One option is no choice: no segment, only opencode's judge row.
+    expect(segment()).toEqual([])
     expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toContain(
       'opencodeAutoMode'
     )
@@ -1067,29 +1064,9 @@ describe('a harness that does not run (ADR-082 §8)', () => {
     harnesses(['opencode', 'pi'])
     renderView({ activePage: 'sessions' })
     await settle()
-    // Only Codex's guardian is left in the judge — one option, so no segment —
-    // and the opencode/pi-only parts go.
-    expect(segment()).toEqual([])
-    expect(screen.getAllByTestId('SettingsItem').map((el) => el.dataset.id)).toContain(
-      'codexAutoMode'
-    )
-    expect(groupIds()).not.toContain('trust')
-    expect(screen.queryByTestId('OtherEnginePermissionsRow')).toBeNull()
+    // Neither judge runs: the judge and Trust & protection go.
     expect(groupIds()).toEqual([
-      'autonomy',
-      'permissions',
-      'judge',
-      'session-tools',
-      'context-pressure',
-      'retention'
-    ])
-
-    cleanup()
-    harnessStore.resetForTests()
-    harnesses(['opencode', 'pi', 'codex'])
-    renderView({ activePage: 'sessions' })
-    await settle()
-    expect(groupIds()).toEqual([
+      'worktrees',
       'autonomy',
       'permissions',
       'session-tools',
@@ -1105,7 +1082,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
       engineByGroup: { 'dispatch/into': 'pi' as EngineId }
     })
     await settle()
-    expect(segment()).toEqual(['claude', 'opencode', 'pi', 'codex'])
+    expect(segment()).toEqual(['claude', 'opencode', 'pi'])
     const pi = byId('SettingsGroup.engineSegment.option', 'pi')
     expect(pi).toHaveAttribute('aria-disabled', 'true')
     expect(pi).toHaveAttribute('tabindex', '-1')
@@ -1128,7 +1105,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
   })
 
   it('Dispatch: Claude is greyed while no caller runs; with no target at all, both cards go', async () => {
-    harnesses(['opencode', 'codex'])
+    harnesses(['opencode'])
     renderView({ activePage: 'dispatch' })
     await settle()
     // pi can still call Claude.
@@ -1138,7 +1115,7 @@ describe('a harness that does not run (ADR-082 §8)', () => {
 
     cleanup()
     harnessStore.resetForTests()
-    harnesses(['opencode', 'pi', 'codex'])
+    harnesses(['opencode', 'pi'])
     renderView({ activePage: 'dispatch' })
     await settle()
     // No caller for Claude, no other target: nothing to configure but the slots

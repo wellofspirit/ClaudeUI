@@ -497,7 +497,6 @@ These events fire for every active Claude session. All handlers receive a single
 | `session:background-output`    | `{ toolUseId, tail, totalSize, done }`                                                                                     | Background task output chunk                                                                                                                                                                                    |
 | `session:permission-mode`      | `string`                                                                                                                   | Permission mode changed                                                                                                                                                                                         |
 | `session:slash-commands`       | `SlashCommandInfo[]`                                                                                                       | Available slash commands updated                                                                                                                                                                                |
-| `session:skills`               | `string[]`                                                                                                                 | Available skill names updated                                                                                                                                                                                   |
 | `session:mcp-servers`          | `McpServerInfo[]`                                                                                                          | MCP server status updated                                                                                                                                                                                       |
 | `session:status-line`          | `StatusLineData`                                                                                                           | Status line metrics updated                                                                                                                                                                                     |
 | `session:teammate-detected`    | `TeammateInfo`                                                                                                             | New teammate/subagent detected                                                                                                                                                                                  |
@@ -520,9 +519,6 @@ synthesized from the same append frames:
 - `session:stream` fires for a ROOT text or thinking append; `session:subagent-stream`
   for a child's. Both carry only the new chunk, as they always did.
 - A `plan` item synthesizes neither: the legacy channels never carried plans.
-- On a **Codex** session a root append synthesizes `session:message` with the growing
-  message instead of `session:stream`, which is what that engine emitted before the
-  migration.
 - `session:message` / `session:subagent-message` fire at every `session:item-seal`,
   carrying the message read back from canonical state (with any still-active sibling
   block overlaid), not the seal payload.

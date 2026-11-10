@@ -184,7 +184,7 @@ describe.skipIf(!LAUNCH)('pi + the session tools (credential-free, slice 2)', ()
         CLAUDEUI_PI_PLAN_TOOLS: '',
         CLAUDEUI_PI_AGENT_TOOL: '',
         CLAUDEUI_PI_SEND_MESSAGE: '',
-        CLAUDEUI_PI_SKILL_DIRS: ''
+        CLAUDEUI_PI_SKILLS: ''
       }
     })
     client.onEvent((ev) => events.push(ev as unknown as Record<string, unknown>))

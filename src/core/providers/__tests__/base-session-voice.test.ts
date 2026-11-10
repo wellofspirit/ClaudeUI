@@ -2,7 +2,7 @@
  * @vitest-environment node
  *
  * `BaseSession.voiceStartServer` (ADR-101): every engine that does not bring its
- * own transcription server — opencode, pi, Codex — starts voice input on the
+ * own transcription server — opencode, pi — starts voice input on the
  * host's on-device worker. The session adds nothing of its own; what must hold is
  * that it is the worker's endpoint, token included, that reaches the relay, and
  * that a missing speech pack surfaces as the error the relay turns into the

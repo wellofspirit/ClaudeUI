@@ -18,9 +18,12 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { request as httpRequest } from 'node:http'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { PERSISTED_SESSIONS_DIR } from '../../services/persisted-sessions-dir'
+import type { ClaudeSkillCatalog, ClaudeSkillEntry } from '../../services/claude-skill-catalog'
 import { startMcpHttpHost } from '../mcp-http-host'
 import type { McpHttpHost } from '../mcp-http-host'
 import { createOpencodeHostedToolsServer } from '../opencode-hosted-tools'
@@ -246,6 +249,8 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'create_mockup',
       'dispatch_agent',
+      'enter_worktree',
+      'exit_worktree',
       'render_mermaid',
       'show_mockup'
     ])
@@ -372,5 +377,146 @@ describe('startMcpHttpHost — full MCP round-trip (SDK client)', () => {
     // A real client still connects afterwards.
     const client = await connectClient(host)
     expect(client).toBeTruthy()
+  })
+})
+
+describe('GET /skills (the Claude skill catalog for the claudeui-xeng plugin)', () => {
+  const entry = (name: string, extra: Partial<ClaudeSkillEntry> = {}): ClaudeSkillEntry => ({
+    name,
+    kind: 'skill',
+    source: 'project',
+    file: `/proj/.claude/skills/${name}/SKILL.md`,
+    description: `desc ${name}`,
+    argumentNames: [],
+    body: `body ${name}`,
+    userInvocable: true,
+    modelInvocable: true,
+    claudeOnly: [],
+    ...extra
+  })
+  const catalog: ClaudeSkillCatalog = {
+    entries: [
+      entry('a'),
+      entry('p:Fancy', { displayName: 'Fancy', modelInvocable: false }),
+      entry('typed-only', { userInvocable: true, modelInvocable: false }),
+      entry('hidden', { userInvocable: false, modelInvocable: false })
+    ],
+    skipped: []
+  }
+
+  async function get(host: McpHttpHost, directory: string, token: string | null = host.token) {
+    const response = await fetch(
+      `http://127.0.0.1:${host.port}/skills?directory=${encodeURIComponent(directory)}`,
+      { headers: token ? { authorization: `Bearer ${token}` } : {} }
+    )
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> }
+  }
+
+  it('needs the same bearer as the MCP route', async () => {
+    const host = await startMcpHttpHost(makeBlankServer, { skillCatalog: () => catalog })
+    hosts.push(host)
+    expect((await get(host, '/proj', null)).status).toBe(401)
+    expect((await get(host, '/proj', 'wrong-token')).status).toBe(401)
+  })
+
+  it('serves the directory catalog as Skill.Info entries: user- or model-invocable only', async () => {
+    const asked: string[] = []
+    const host = await startMcpHttpHost(makeBlankServer, {
+      skillCatalog: (directory) => (asked.push(directory), catalog)
+    })
+    hosts.push(host)
+    const { status, body } = await get(host, '/proj')
+    expect(status).toBe(200)
+    expect(asked).toEqual(['/proj'])
+    expect(body.skills).toEqual([
+      {
+        id: 'a',
+        name: 'a',
+        description: 'desc a',
+        autoinvoke: true,
+        path: '/proj/.claude/skills/a/SKILL.md',
+        content: 'body a'
+      },
+      {
+        id: 'p:Fancy',
+        name: 'Fancy',
+        description: 'desc p:Fancy',
+        autoinvoke: false,
+        path: '/proj/.claude/skills/p:Fancy/SKILL.md',
+        content: 'body p:Fancy'
+      },
+      {
+        id: 'typed-only',
+        name: 'typed-only',
+        description: 'desc typed-only',
+        autoinvoke: false,
+        path: '/proj/.claude/skills/typed-only/SKILL.md',
+        content: 'body typed-only'
+      }
+    ])
+  })
+
+  it("ClaudeUI's housekeeping directory gets none, and the resolver is not asked", async () => {
+    const asked: string[] = []
+    const host = await startMcpHttpHost(makeBlankServer, {
+      skillCatalog: (directory) => (asked.push(directory), catalog)
+    })
+    hosts.push(host)
+    const { status, body } = await get(host, PERSISTED_SESSIONS_DIR)
+    expect(status).toBe(200)
+    expect(body).toEqual({ skills: [] })
+    expect(asked).toEqual([])
+  })
+
+  it('fills ${CLAUDE_SKILL_DIR} and ${CLAUDE_PROJECT_DIR} in the content, leaving the session id', async () => {
+    const host = await startMcpHttpHost(makeBlankServer, {
+      skillCatalog: () => ({
+        entries: [
+          entry('v', {
+            baseDir: '/proj/.claude/skills/v',
+            body: 'run ${CLAUDE_SKILL_DIR}/x in ${CLAUDE_PROJECT_DIR} for ${CLAUDE_SESSION_ID}'
+          })
+        ],
+        skipped: []
+      })
+    })
+    hosts.push(host)
+    const { body } = await get(host, '/work')
+    expect((body.skills as { content: string }[])[0].content).toBe(
+      'run /proj/.claude/skills/v/x in /work for ${CLAUDE_SESSION_ID}'
+    )
+  })
+
+  it('a malformed request URL is a 400, not an uncaught throw', async () => {
+    const host = await startMcpHttpHost(makeBlankServer, { skillCatalog: () => catalog })
+    hosts.push(host)
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port: host.port,
+          path: '//',
+          headers: { authorization: `Bearer ${host.token}` }
+        },
+        (res) => {
+          res.resume()
+          resolve(res.statusCode ?? 0)
+        }
+      )
+      req.on('error', reject)
+      req.end()
+    })
+    expect(status).toBe(400)
+  })
+
+  it('a missing or relative directory is a 400; a throwing resolver a 500', async () => {
+    const host = await startMcpHttpHost(makeBlankServer, {
+      skillCatalog: () => {
+        throw new Error('boom')
+      }
+    })
+    hosts.push(host)
+    expect((await get(host, 'relative/dir')).status).toBe(400)
+    expect((await get(host, '/proj')).status).toBe(500)
   })
 })

@@ -203,7 +203,7 @@ it('streams individual items over WebSocket, catches up after 5500 chunks and se
     timestamp: 1,
     content: [{ type: 'text' as const, text }]
   })
-  emitEvent('session:created', [id, { cwd: CWD, engineId: 'codex' }])
+  emitEvent('session:created', [id, { cwd: CWD, engineId: 'pi' }])
   const first = await connect()
   try {
     await first.client.send({ type: 'sync', lastSeq: 0 })

@@ -334,14 +334,23 @@ function readBlobAtSection(buf, sectionOff, sectionSize) {
     const side = blob.readUInt8(e + 51)
     const readBytes = ({ off, len }) =>
       len > 0 ? Buffer.from(blob.subarray(off, off + len)) : Buffer.alloc(0)
+    // The three fields the writer drops are read as LENGTHS only, never copied.
+    // Claude Code 2.1.317's embedded Bun changed what `bytecode`'s len holds:
+    // it now spans from that module's bytecode start to the start of the
+    // contents region (up to 105 MB per module; 2.1.308's largest was 14 MB),
+    // and `module_info` reads [0,0] where 2.1.308 had [off,0]. Copying them
+    // would allocate ~259 GB across 2,942 modules and the process dies to
+    // SIGKILL before writing anything. Their bytes are never used —
+    // writeBlob() emits `{off:0,len:0}` for all three — so do not trust, and
+    // do not read, what they point at.
     modules.push({
       index: i,
       name: readBytes(name),
       contents: readBytes(contents),
       sourcemap: readBytes(sourcemap),
-      bytecode: readBytes(bytecode),
-      module_info: readBytes(module_info),
-      bytecode_origin_path: readBytes(bytecode_origin_path),
+      bytecode: { length: bytecode.len },
+      module_info: { length: module_info.len },
+      bytecode_origin_path: { length: bytecode_origin_path.len },
       encoding,
       loader,
       module_format,
@@ -445,10 +454,11 @@ function writeBlob({ modules, argv, entry_point_id, flags }) {
   // HAS_BUILTIN_BYTECODE (6), HAS_BYTECODE_STRING_TABLE (7),
   // HAS_STARTUP_MODULE_COUNT (8), HAS_MODULE_INFO_STRING_TABLE (9),
   // CROSS_COMPILED_BYTECODE (10). We emit none of them, so those bits MUST be
-  // cleared — copying the upstream flags verbatim (0x3ff on 2.1.261) makes the
-  // loader read whatever follows the table as record data and segfault before
-  // main. Bits 0-3 (DISABLE_DEFAULT_ENV_FILES / DISABLE_AUTOLOAD_BUNFIG /
-  // _TSCONFIG / _PACKAGE_JSON) are behavioural and must be preserved.
+  // cleared — copying the upstream flags verbatim (0x3ff on 2.1.261, 0x1fff on
+  // 2.1.308, 0x3fff on 2.1.317) makes the loader read whatever follows the
+  // table as record data and segfault before main. Bits 0-3
+  // (DISABLE_DEFAULT_ENV_FILES / DISABLE_AUTOLOAD_BUNFIG / _TSCONFIG /
+  // _PACKAGE_JSON) are behavioural and must be preserved.
   const outFlags = flags & 0xf
 
   // Offsets struct sits at byte_count (= current pos), trailer follows.

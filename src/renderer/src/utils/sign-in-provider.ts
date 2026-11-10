@@ -102,9 +102,6 @@ export function chatgptAuthFromRegistry(
  * `null` = no ClaudeUI-drivable sign-in owns this pair, so no entry point.
  *
  * - **claude / anthropic** — the Claude subscription.
- * - **codex / openai** — Codex runs on the ChatGPT vault and nothing else
- *   (ADR-068 §1). Deliberately NOT gated on `chatgptRoutes`: those describe the
- *   shared provider's pi/opencode routes, which Codex is not one of.
  * - **pi / opencode** — ChatGPT only for the vendor that IS the ChatGPT route
  *   ({@link CHATGPT_ROUTE_PROVIDER_IDS}) and only while that route is enabled.
  * - everything else (API keys, free gateways, custom endpoints) — `null`.
@@ -124,7 +121,6 @@ export function signInProviderFor(
     return vendor === 'anthropic'
       ? { providerId: 'anthropic', state: providerAuth.anthropic }
       : null
-  if (engineId === 'codex') return vendor === 'openai' ? chatgpt : null
   if (engineId === 'pi' || engineId === 'opencode')
     return vendor === CHATGPT_ROUTE_PROVIDER_IDS[engineId] && providerAuth.chatgptRoutes[engineId]
       ? chatgpt

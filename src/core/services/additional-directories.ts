@@ -1,8 +1,8 @@
 /**
  * The user's `permissions.additionalDirectories` as a list of directories a session may treat as
  * its workspace: how an entry is spelled, resolved, de-duplicated and, for the ones an ENGINE is
- * told about, checked on disk. A LEAF module (node built-ins and the logger only) so CodexSession,
- * the dispatcher and the dispatch-workdir check can all use it without an import cycle.
+ * told about, checked on disk. A LEAF module (node built-ins and the logger only) so the
+ * dispatcher and the dispatch-workdir check can all use it without an import cycle.
  */
 import * as fs from 'node:fs'
 import * as os from 'node:os'
@@ -36,8 +36,8 @@ export function resolveAdditionalDirectories(
 
 /**
  * `dirs` narrowed to the ones that are an absolute path and an existing directory right now
- * (`statSync`, no realpath). For the directories an ENGINE is sent (Codex `writableRoots`, Claude
- * `--add-dir`): a relative path fails Codex's whole `turn/start` (`AbsolutePathBuf`), and a
+ * (`statSync`, no realpath). For the directories an ENGINE is sent (Claude
+ * `--add-dir`): a relative path means nothing to the engine's own process, and a
  * missing one is dropped by the engine at best. ClaudeUI's own scope checks keep the unfiltered
  * list. A dropped entry is logged at debug. Symlinks are NOT filtered (a symlinked root is a hard
  * error under macOS seatbelt: noted, not handled).

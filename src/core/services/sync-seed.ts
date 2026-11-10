@@ -32,7 +32,7 @@
  * degrades to exactly that.
  */
 
-import { loadSettings, loadSessionConfig, loadSlashCommands } from './ui-config'
+import { loadSettings, loadSessionConfig } from './ui-config'
 import { pruneOrphanClaudeSessionMeta } from './session-meta-prune'
 import { seedLinkState } from './session-links'
 import { interruptStaleDispatchTargets } from './dispatch-target-ledger'
@@ -40,7 +40,6 @@ import { sweepOrphanDispatchTargets } from './dispatch-target-end'
 import { loadClaudePermissions } from './claude-settings'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
-import { mergeEngineIntoDirectories } from '../../shared/directory-merge'
 import { mergeOpencodeIntoDirectories, mergePiIntoDirectories } from '../../shared/directory-merge'
 import { emitEvent } from './sync-host'
 import { syncCore } from './sync-host'
@@ -81,20 +80,12 @@ export async function listAllDirectories(): Promise<DirectoryGroup[]> {
   } catch (err) {
     logger.debug(LOG_SOURCE, `pi session list unavailable: ${String(err)}`)
   }
-  try {
-    const codexInfos = await historyFor('codex').list()
-    // Guarded like opencode and pi above: the merge PRUNES session-less groups,
-    // so running it with an empty listing deletes them instead of doing nothing.
-    if (codexInfos.length > 0) merged = mergeEngineIntoDirectories(merged, codexInfos, 'codex')
-  } catch {
-    logger.debug(LOG_SOURCE, 'Native Codex session list unavailable')
-  }
   return markLinkedWorktrees(merged)
 }
 
 /**
  * Mark every group whose cwd IS a linked git worktree (any engine, any layout: the managed
- * `.claude/worktrees`, opencode's data dir, `~/.codex/worktrees`). Filesystem facts only, no git
+ * `.claude/worktrees`, opencode's data dir). Filesystem facts only, no git
  * spawn, positive hits cached by `linkedWorktreeOf`. The marker rides the replicated listing, so
  * every client draws the same worktree rows without a second map; a removal's directories refresh
  * (after `forgetLinkedWorktrees`) clears it.
@@ -276,10 +267,8 @@ export function resetDirectoryRefreshStateForTests(): void {
  * Seed the app-level snapshot fields from disk, once at boot.
  *
  * Mirrors `hydrateConfigFromDisk` in the renderer store, field for field, minus
- * everything that is per-client view state. `sdkSkillNames` is deliberately NOT
- * seeded: the renderer does not populate it at boot either (it only ever arrives
- * on `session:skills`, at engine spawn), so seeding it would make canonical
- * DISAGREE with the replica it is about to become the source for.
+ * everything that is per-client view state. The slash menu is per session now and
+ * arrives on that session's `session:slash-commands`, so nothing about it is seeded.
  */
 export async function seedCanonicalAppState(): Promise<void> {
   try {
@@ -338,14 +327,6 @@ export async function seedCanonicalAppState(): Promise<void> {
     })
   } catch (err) {
     logger.warn(LOG_SOURCE, 'auto-mode gate seed failed', err)
-  }
-
-  try {
-    // The cached command list the renderer loads with `loadSlashCommands()`.
-    // A live engine replaces it wholesale on `session:slash-commands` at spawn.
-    syncCore.setAppState({ slashCommands: loadSlashCommands() })
-  } catch (err) {
-    logger.warn(LOG_SOURCE, 'slash-command seed failed', err)
   }
 
   await refreshCanonicalDirectories()

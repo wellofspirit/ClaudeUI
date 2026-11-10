@@ -40,8 +40,7 @@ import { classifyVersion, versionReason } from './version-gate'
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
+  pi: 'pi'
 }
 
 /** The launcher environment a cached pi launch may carry, besides Electron's. */

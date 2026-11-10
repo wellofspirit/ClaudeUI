@@ -3,17 +3,11 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
-import { scanSkills } from '../services/skill-scanner'
+import { resolveClaudeSkillCatalog } from '../services/claude-skill-catalog'
+import { claudeSkillEntryToInfo } from '../services/claude-skill-info'
 import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
-import { syncCodexRulesFile } from '../codex/rules-sync'
-import {
-  codexDeletePlan,
-  deleteCodexSubtree,
-  type CodexDeleteHooks,
-  type CodexNodeFacts
-} from '../codex/delete'
-import { scanCodexLineage } from '../codex/history'
-import type { CodexDeletePlan } from '../../shared/codex-types'
+import { setWorkspaceTrust } from '../services/claude-workspace-trust'
+import { claudeProjectKey } from '../services/claude-config-paths'
 import type {
   AttachmentUpload,
   ClaudePermissions,
@@ -21,8 +15,10 @@ import type {
   JudgeModelSupport,
   ListPlacesResult,
   PermissionScope,
-  PromptOrigin
+  PromptOrigin,
+  WorkspaceTrust
 } from '../../shared/types'
+import { isEngineId } from '../../shared/engine-label'
 import {
   saveSessionConfig,
   saveSettings,
@@ -38,14 +34,20 @@ import { emitEvent, syncCore } from '../services/sync-host'
 import { blobStore, internAttachments } from '../services/blob-store'
 import { deleteSessionByEngine } from '../services/session-delete'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
-import { deleteProjectFiles, deleteSessionFiles } from '../services/delete-session-files'
+import {
+  deleteProjectFiles,
+  deleteSessionFiles,
+  removeEmptyProjectDir
+} from '../services/delete-session-files'
 import { refreshCanonicalDirectories } from '../services/sync-seed'
 import { seedCanonicalTranscript } from './seed-canonical-transcript'
 import { unwatchSession } from '../services/session-watcher'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { planClaudeProjectDelete } from '../../shared/claude-project-delete'
+import { liveProjectMembers, projectScope } from '../../shared/worktree-fold'
 import { applyProxyEnv, applyEndpointEnv, applyModelEnv } from '../providers/claude-spawn-prep'
 import type { ISession } from '../providers/ISession'
+import type { SkillInfo } from '../../shared/types'
 import { PERMISSION_MODE_CYCLE } from '../../shared/permission-modes'
 import { normalizeContextPressure } from '../../shared/context-pressure'
 import { deleteSessionMeta, getSessionMeta } from '../services/db'
@@ -179,13 +181,11 @@ export interface SendPromptOptions {
  *
  * Applies when canonical holds nothing for the session, did not drop it as an empty
  * one (`seeded` false), and the engine has a session to resume. Not when the prompt
- * will only queue behind a running turn, and not for Codex: its `cancel()` closes the
- * object for good (`run` refuses), so a Codex respawn always goes through
- * `createSession`, which seeds. Registered with core exactly as `create-session.ts`
+ * will only queue behind a running turn. Registered with core exactly as `create-session.ts`
  * does, so the send waits on the read.
  */
 function reseedAfterExit(session: ISession, routingId: string): Promise<void> | undefined {
-  if (session.willQueue || session.engineId === 'codex') return undefined
+  if (session.willQueue) return undefined
   const held = syncCore.getCanonicalState().sessions[routingId]
   if (!held || held.seeded || held.messages.length > 0) return undefined
   const resumeId = session.getSessionId()
@@ -251,7 +251,7 @@ function sendNow(
   session.originLedger?.userPrompt({ hostInstruction, agentBrief: options.agentBrief })
   if (!hostInstruction && !options.agentBrief) noteClientPrompt(routingId)
   const id = `msg-${crypto.randomUUID()}`
-  if (session.engineId !== 'codex') session.run(prompt, attachments)
+  session.run(prompt, attachments)
   emitEvent('session:user-message', [
     routingId,
     // `msg-` prefix + randomUUID mirrors what the renderer minted, so nothing
@@ -264,7 +264,6 @@ function sendNow(
       ...(hostInstruction ? { origin: 'host-instruction' as const } : {})
     }
   ])
-  if (session.engineId === 'codex') return session.run(prompt, attachments, id)
 }
 
 /**
@@ -396,82 +395,6 @@ function unwatchForDelete(sessionId: string): void {
 }
 
 /**
- * What a Codex delete plan needs to know about each thread it lists: the title
- * the user would recognise it by, and whether a process still holds it.
- *
- * The title comes from the canonical directory listing rather than from the
- * engine, because a fork the user has never opened has no live session and no
- * `session_meta` title — the sidebar row is the only place its name exists.
- */
-function codexNodeFacts(manager: SessionManager): (threadId: string) => CodexNodeFacts {
-  const listed = syncCore.getCanonicalState().directories.flatMap((group) => group.sessions)
-  return (threadId) => ({
-    title: listed.find((session) => session.sessionId === threadId)?.title ?? null,
-    live: manager.has(threadId)
-  })
-}
-
-/** The three side effects above, handed to the Codex walk per node. */
-function codexDeleteHooks(manager: SessionManager): CodexDeleteHooks {
-  return {
-    unwatch: unwatchForDelete,
-    stop: (threadId) => manager.cancel(threadId),
-    removeSession: (threadId) => syncCore.removeSession(threadId),
-    // Only once the binary has deleted the thread: its X-Agents end with it (ADR-105 §5).
-    deleted: (threadId) => crossEngineDispatcher.endParent(threadId)
-  }
-}
-
-/**
- * What deleting `threadId` would remove: the thread and every branch cut from
- * it, leaf-first.
- *
- * A read-only query, so the confirmation can say what it is about to do. The
- * walk below recomputes its own plan and never trusts the answer a client was
- * shown — by the time the user clicks, a branch may have appeared or gone.
- */
-export async function codexDeletePlanFor(
-  manager: SessionManager,
-  threadId: string
-): Promise<CodexDeletePlan> {
-  if (typeof threadId !== 'string' || !threadId || threadId.length > 512)
-    throw new Error('Invalid Codex thread ID')
-  return codexDeletePlan(threadId, codexNodeFacts(manager))
-}
-
-/**
- * Delete one persisted Codex session AND every branch cut from it.
- *
- * Not a choice: the binary refuses to delete a thread whose history a fork
- * still references, so the subtree goes leaf-first or nothing goes at all (see
- * `core/codex/delete.ts`). The walk stops at the first refusal and throws
- * naming it; the listing refresh runs either way, which is what puts the
- * surviving rows back on every client after a partial delete.
- *
- * `replan` is the walk's one second chance, and it belongs here because the
- * plan's inputs do: a refusal may mean "a branch this app has never heard of
- * still references that thread", and the full lineage rescan is the only thing
- * that can learn one. Facts are recomputed with it — by then a node the walk
- * stopped is no longer live.
- */
-async function deleteCodexSession(manager: SessionManager, sessionId: string): Promise<void> {
-  try {
-    await deleteCodexSubtree(
-      codexDeletePlan(sessionId, codexNodeFacts(manager)),
-      codexDeleteHooks(manager),
-      {
-        replan: async () => {
-          await scanCodexLineage(undefined, undefined, 'all')
-          return codexDeletePlan(sessionId, codexNodeFacts(manager))
-        }
-      }
-    )
-  } finally {
-    void refreshCanonicalDirectories()
-  }
-}
-
-/**
  * Delete one persisted session, everywhere.
  *
  * `sessionId` is also the routingId of a live session for it, when there is one
@@ -486,9 +409,7 @@ export async function deleteSession(
   const actualEngine = manager.get(sessionId)?.engineId ?? getSessionMeta(sessionId)?.engineId
   if (engineId && actualEngine && engineId !== actualEngine)
     throw new Error('Session deletion engine does not match persisted identity')
-  if (engineId === 'codex' || actualEngine === 'codex')
-    return deleteCodexSession(manager, sessionId)
-  if (engineId && !['claude', 'opencode', 'pi'].includes(engineId))
+  if ((engineId && !isEngineId(engineId)) || (actualEngine && !isEngineId(actualEngine)))
     throw new Error('Unsupported deletion engine')
   unwatchForDelete(sessionId)
   manager.cancel(sessionId)
@@ -530,65 +451,40 @@ export async function deleteSession(
  */
 export async function deleteProject(manager: SessionManager, projectKey: string): Promise<void> {
   const state = syncCore.getCanonicalState()
-  const group = state.directories.find((g) => g.projectKey === projectKey)
-  const ids = new Set<string>(group?.sessions.map((s) => s.sessionId) ?? [])
-  for (const [routingId, session] of Object.entries(state.sessions)) {
-    if (cwdToProjectKey(session.cwd) === projectKey) ids.add(routingId)
-  }
-
-  // Codex FIRST, and by subtree.
-  //
-  // Each root is walked leaf-first through the same path a single delete takes,
-  // before anything irreversible happens to the other engines: a native refusal
-  // (a thread some other process still holds) aborts the whole project delete
-  // rather than leaving Claude's directory unlinked behind a session that
-  // survived. A branch whose root is elsewhere is just a node — which also
-  // means a root here can take a fork that lives in ANOTHER project with it,
-  // because the binary will not delete the source while the fork references it.
-  const codexIds = new Set(
-    [...ids].filter(
-      (id) =>
-        state.sessions[id]?.status.engineId === 'codex' ||
-        group?.sessions.find((s) => s.sessionId === id)?.engineId === 'codex' ||
-        getSessionMeta(id)?.engineId === 'codex'
-    )
+  // What the sidebar showed for this key: the parent's group (none for a synthesised parent or an
+  // unknown key) plus the linked-worktree groups folded into it. Resolved here from the canonical
+  // listing through the same fold, never from the client's request.
+  const scope = projectScope(state.directories, projectKey)
+  const memberGroups = [...(scope.group ? [scope.group] : []), ...scope.children]
+  const memberSessions = memberGroups.flatMap((g) =>
+    g.sessions.map((s) => ({ s, key: g.projectKey }))
   )
-  const swept = new Set<string>()
-  let walkedCodex = false
-  try {
-    for (const id of codexIds) {
-      if (swept.has(id)) continue
-      // A fork of this root that an earlier walk already removed is not deleted
-      // twice: the second delete would be refused as "no such thread", which is
-      // indistinguishable from a real refusal. The same filter is applied to a
-      // rescan's plan, for the same reason.
-      const unswept = (plan: CodexDeletePlan): CodexDeletePlan => ({
-        nodes: plan.nodes.filter((node) => !swept.has(node.threadId)),
-        order: plan.order.filter((threadId) => !swept.has(threadId))
+  const ids = new Set<string>(memberSessions.map(({ s }) => s.sessionId))
+  // Live sessions of the project (see `liveProjectMembers`). The ones no listing group holds also
+  // lose their persisted history, under the key of their OWN cwd (nothing else names it).
+  const live = liveProjectMembers(
+    state.directories,
+    scope,
+    projectKey,
+    Object.entries(state.sessions)
+  )
+  const liveUnlisted: Array<{ id: string; key: string; engineId: EngineId | undefined }> = []
+  for (const routingId of live.ids) {
+    const session = state.sessions[routingId]
+    if (live.unlisted.includes(routingId) && !ids.has(routingId)) {
+      liveUnlisted.push({
+        id: routingId,
+        key: cwdToProjectKey(session.cwd),
+        engineId:
+          manager.get(routingId)?.engineId ??
+          getSessionMeta(routingId)?.engineId ??
+          session.selectedEngineId
       })
-      const plan = unswept(codexDeletePlan(id, codexNodeFacts(manager)))
-      walkedCodex = true
-      const walked = await deleteCodexSubtree(plan, codexDeleteHooks(manager), {
-        replan: async () => {
-          await scanCodexLineage(undefined, undefined, 'all')
-          return unswept(codexDeletePlan(id, codexNodeFacts(manager)))
-        }
-      })
-      // The WALK's own answer, not the plan's: a rescan can extend it with
-      // branches this plan never named, and a second delete of one of those
-      // would be refused as "no such thread" and abort the whole project.
-      for (const threadId of walked) swept.add(threadId)
-      for (const node of plan.nodes) swept.add(node.threadId)
     }
-  } finally {
-    // Also on the way out of a REFUSAL: the walk replicates each removal before
-    // it asks the binary, so an aborted sweep leaves clients missing rows for
-    // sessions that still exist until the listing is re-read.
-    if (walkedCodex) void refreshCanonicalDirectories()
+    ids.add(routingId)
   }
 
   for (const id of ids) {
-    if (swept.has(id)) continue
     unwatchForDelete(id)
     manager.cancel(id)
     syncCore.removeSession(id)
@@ -597,29 +493,31 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   // Engine-owned storage first (see above). `allSettled`: one engine being down
   // must not abandon the rest of the delete — the Claude unlink below is the
   // irreversible step and it still has to run.
-  // Codex is excluded: its threads went through the subtree walk above, and
-  // asking the binary to delete one again would be refused as "no such thread".
-  const foreign = (group?.sessions ?? []).filter(
-    (s) => s.engineId && s.engineId !== 'claude' && !swept.has(s.sessionId)
-  )
+  const foreign = [
+    ...memberSessions,
+    ...liveUnlisted.map(({ id, key, engineId }) => ({
+      s: { sessionId: id, engineId },
+      key
+    }))
+  ].filter(({ s }) => isEngineId(s.engineId) && s.engineId !== 'claude')
   const results = await Promise.allSettled(
-    foreign.map((s) => deleteSessionByEngine(s.sessionId, projectKey, s.engineId))
+    foreign.map(({ s, key }) => deleteSessionByEngine(s.sessionId, key, s.engineId))
   )
   const survivors = new Set<string>()
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
-      survivors.add(foreign[i].sessionId)
+      survivors.add(foreign[i].s.sessionId)
       logger.warn(
         'IPC',
-        `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`,
+        `session:delete-project: ${foreign[i].s.engineId} session ${foreign[i].s.sessionId} survived the delete`,
         result.reason
       )
     } else if (result.value === false) {
       // opencode and pi swallow their own failures and say so this way.
-      survivors.add(foreign[i].sessionId)
+      survivors.add(foreign[i].s.sessionId)
       logger.warn(
         'IPC',
-        `session:delete-project: ${foreign[i].engineId} session ${foreign[i].sessionId} survived the delete`
+        `session:delete-project: ${foreign[i].s.engineId} session ${foreign[i].s.sessionId} survived the delete`
       )
     }
   })
@@ -633,7 +531,14 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   // kept. The rule is `planClaudeProjectDelete`'s (shared), so the confirmation
   // dialog describes exactly what runs here. `allSettled` for the same reason as
   // the engine sweep above — one stuck file must not abandon the rest.
-  const { removeDir, sessionFiles } = planClaudeProjectDelete(state.directories, projectKey)
+  const plan = planClaudeProjectDelete(state.directories, projectKey)
+  const { removeDir } = plan
+  const sessionFiles = [
+    ...plan.sessionFiles,
+    ...liveUnlisted
+      .filter(({ engineId }) => !engineId || engineId === 'claude')
+      .map(({ id, key }) => ({ sessionId: id, projectKey: key }))
+  ]
   const fileResults = await Promise.allSettled(
     sessionFiles.map((s) => deleteSessionFiles(s.sessionId, s.projectKey))
   )
@@ -648,9 +553,14 @@ export async function deleteProject(manager: SessionManager, projectKey: string)
   })
 
   if (removeDir) await deleteProjectFiles(projectKey)
+  // A worktree group's own project dir (folded in, or asked for by its own key), once its sessions
+  // are gone: only if it is empty (a plain rmdir, never recursive). Nothing under the worktree
+  // folders themselves is touched.
+  await Promise.allSettled(
+    memberGroups.filter((g) => g.linkedWorktree).map((g) => removeEmptyProjectDir(g.projectKey))
+  )
   // Every session the engines accepted the delete of: its X-Agents end with it (ADR-105 §5).
-  // A survivor, or a Claude transcript that could not be removed, keeps them. (The Codex
-  // threads ended one by one as the walk deleted them.)
+  // A survivor, or a Claude transcript that could not be removed, keeps them.
   const stuck = new Set(survivors)
   fileResults.forEach((result, i) => {
     if (result.status === 'rejected') stuck.add(sessionFiles[i].sessionId)
@@ -934,41 +844,9 @@ export async function setEffort(
   effort: string
 ): Promise<void> {
   const s = manager.get(routingId)
-  // Either reasoning axis counts: Claude/opencode report `effort` levels, Codex
-  // reports `nativeEffort` options from its own model catalog.
-  if (s && s.capabilities.reasoning.effort == null && s.capabilities.reasoning.nativeEffort == null)
-    return
+  if (s && s.capabilities.reasoning.effort == null) return
   await s?.setEffort?.(effort)
   emitConfigChanged(s, routingId, { effort })
-}
-
-/**
- * Pin a session to one stored vendor account (ADR-068 §2).
- *
- * Engine-neutral by channel and capability-gated by
- * `capabilities.auth.perSessionAccount`, so it REFUSES loudly on an engine that
- * has no such thing rather than resolving into nothing — a silent no-op here
- * would leave the picker showing a pin the session never took. Validation of the
- * id itself belongs to the session (only it can ask the vault), and its error
- * text reaches the caller unchanged.
- *
- * No `session:config-changed` echo: the pin is not one of that event's four
- * fields, and the session re-emits `session:status` (carrying
- * `codex.pinnedAccountId`) as part of applying it, which is what every replica
- * folds.
- */
-export async function setAccount(
-  manager: SessionManager,
-  routingId: string,
-  accountId: string | null
-): Promise<void> {
-  if (accountId !== null && (typeof accountId !== 'string' || !accountId || accountId.length > 256))
-    throw new Error('Invalid account id')
-  const session = manager.get(routingId)
-  if (!session) throw new Error('No active session')
-  if (!session.capabilities.auth.perSessionAccount || !session.setAccount)
-    throw new Error('This engine does not support per-session accounts')
-  await session.setAccount(accountId)
 }
 
 export function setThinkingMode(manager: SessionManager, routingId: string, mode: string): void {
@@ -1027,15 +905,43 @@ export function savePermissionsAndNotify(
   cwd?: string
 ): void {
   saveClaudePermissions(scope, permissions, cwd)
-  // Codex reads user permission rules only through the generated execpolicy file
-  // (see `codex/rules-sync.ts`), which compiles USER scope alone — a project or
-  // local write cannot change its content, so only a user write regenerates it.
-  if (scope === 'user') syncCodexRulesFile()
   manager.forEach((session) => {
     if (!cwd || session.cwd === cwd || scope === 'user') {
       session.notifySettingsChanged?.().catch(() => {})
     }
   })
+}
+
+/** cli.js polls the global config every 1 s; refresh after it has surely picked the change up. */
+export const TRUST_REFRESH_DELAY_MS = 2000
+
+/**
+ * Trust or untrust the workspace and, once, TRUST_REFRESH_DELAY_MS later, make
+ * every running Claude session on the same project key rebuild its permission
+ * rules (`apply_flag_settings({})`). Resolves with the new state without
+ * waiting for the refresh; a failed refresh only costs immediacy.
+ */
+export async function setWorkspaceTrustAndNotify(
+  manager: SessionManager,
+  cwd: string,
+  trusted: boolean
+): Promise<WorkspaceTrust> {
+  const state = await setWorkspaceTrust(cwd, trusted)
+  const key = claudeProjectKey(cwd)
+  // A timer callback that throws is an uncaught exception in the main process: guard each session.
+  const timer = setTimeout(() => {
+    manager.forEach((session) => {
+      try {
+        if (session.engineId === 'claude' && claudeProjectKey(session.cwd) === key) {
+          session.notifySettingsChanged?.().catch(() => {})
+        }
+      } catch (err) {
+        logger.warn('WorkspaceTrust', 'Trust refresh skipped a session', err)
+      }
+    })
+  }, TRUST_REFRESH_DELAY_MS)
+  timer.unref?.()
+  return state
 }
 
 // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
@@ -1047,18 +953,20 @@ export function setCleanupPeriod(manager: SessionManager, days: number): void {
   })
 }
 
-export function loadSkillDetails(manager: SessionManager, cwd: string) {
-  // Delegate skill discovery to an active session for this cwd via the neutral
-  // ISession.discoverSkills seam. Preserve historical precedence: an opencode
-  // session on this cwd wins over Claude. With no active session (or only a
-  // Claude one) fall back to the Claude scanner — identical to
-  // ClaudeSession.discoverSkills, so behavior is unchanged.
-  let delegate: ISession | undefined
-  manager.forEach((session) => {
-    if (session.cwd !== cwd) return
-    if (!delegate || session.engineId === 'opencode') delegate = session
-  })
-  return delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)
+/**
+ * The Skills dialog's list for one session: that session's own `discoverSkills` (its
+ * engine's skills plus the shared catalog, `claudeOnly` filled in for non-Claude
+ * engines). With no live session under `routingId` (the dialog opened on a folder or
+ * a cold session) it is the catalog for `cwd`, which is what a Claude session there loads.
+ */
+export async function loadSkillDetails(
+  manager: SessionManager,
+  routingId: string | null | undefined,
+  cwd: string
+): Promise<SkillInfo[]> {
+  const session = routingId ? manager.get(routingId) : undefined
+  if (session?.discoverSkills) return session.discoverSkills(session.cwd || cwd)
+  return resolveClaudeSkillCatalog(cwd).entries.map((e) => claudeSkillEntryToInfo(e))
 }
 
 /**
@@ -1077,10 +985,17 @@ export function loadSkillDetails(manager: SessionManager, cwd: string) {
  */
 export function saveSessions(config: UISessionConfig): void {
   saveSessionConfig(config)
+  // An engine this build does not ship (a stale client still naming `codex`) is not stored
+  // (`saveSessionConfig`), so it is not echoed into every replica's map either.
   const echo = config.sessionEngines
     ? {
         ...config,
-        sessionEngines: { ...syncCore.getCanonicalState().sessionEngines, ...config.sessionEngines }
+        sessionEngines: {
+          ...syncCore.getCanonicalState().sessionEngines,
+          ...Object.fromEntries(
+            Object.entries(config.sessionEngines).filter(([, meta]) => isEngineId(meta?.engineId))
+          )
+        }
       }
     : config
   emitEvent('config:sessions-changed', [echo])

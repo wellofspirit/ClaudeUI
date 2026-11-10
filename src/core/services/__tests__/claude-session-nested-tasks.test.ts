@@ -54,7 +54,6 @@ vi.mock('../session-history', () => ({
   computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
   fallbackBlockText: vi.fn(() => '')
 }))
-vi.mock('../skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))
 vi.mock('../usage-fetcher', () => ({ usageFetcher: { fetch: vi.fn(async () => null) } }))

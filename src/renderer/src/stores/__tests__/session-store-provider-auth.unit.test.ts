@@ -80,7 +80,7 @@ describe('refreshProviderAuth', () => {
     stubWindowApi(async () =>
       snapshot(
         chatgptEntry({
-          accounts: { activeId: 'a1', perSession: false, list: [{ id: 'a1', needsReauth: true }] }
+          accounts: { activeId: 'a1', list: [{ id: 'a1', needsReauth: true }] }
         })
       )
     )

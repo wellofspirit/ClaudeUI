@@ -92,6 +92,22 @@ async function prompt(r: Rig, sessionID: string, text: string) {
   return from
 }
 
+/**
+ * Waits (bounded) until the session has no running execution. Keeps pumping the mapper, so a
+ * reinterrupt the feed raises meanwhile is sent — the woken child is stopped on the way.
+ */
+async function untilIdle(m: ReturnType<typeof driven>, sessionID: string, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    m.pump()
+    const active = await m.active()
+    if (!active.includes(sessionID)) return active
+    if (Date.now() > deadline)
+      throw new Error(`${sessionID} still has a running execution; active: ${active.join(', ')}`)
+    await sleep(200)
+  }
+}
+
 describeV2('opencode 2.x contract: a per-subagent Stop', () => {
   // Slow children stream for 30 × 150 ms: a window to stop them. Depth 2 for the nested case.
   const rig = useRig('subagent-stop', {
@@ -269,9 +285,10 @@ describeV2('opencode 2.x contract: a per-subagent Stop', () => {
           [grand.data.toolUseId, 'stopped']
         ].sort()
       )
-      // Nothing of the subtree is running.
-      expect(await m.active()).not.toContain(child.data.taskId)
-      expect(await m.active()).not.toContain(grand.data.taskId)
+      // Nothing of the subtree is running — bounded, not one sample: on 2.2.5 the child is woken
+      // by its cancelled grandchild's completion and starts a fresh execution, which the latch
+      // interrupts again; the engine releases the claim when that run ends, a beat later.
+      for (const id of [child.data.taskId, grand.data.taskId]) await untilIdle(m, id)
 
       // Every execution the child started after the Stop was asked to stop again, and was
       // ended by that, not by finishing its (slow) turn.

@@ -386,10 +386,10 @@ describe('the click load is THE load in flight for its session (R2)', () => {
 describe('beginTranscriptPlaceholder — engine identity before the read (R1)', () => {
   /**
    * PRE-FIX (placeholder built before `sessionEngines` knows the engine): a pi /
-   * opencode / Codex click showed a Claude entry (engine, capabilities) until the
+   * opencode click showed a Claude entry (engine, capabilities) until the
    * read landed, and a prompt typed meanwhile would have spawned Claude.
    */
-  it.each(['opencode', 'pi', 'codex'] as const)('a %s click seeds its engine first', (engineId) => {
+  it.each(['opencode', 'pi'] as const)('a %s click seeds its engine first', (engineId) => {
     beginTranscriptPlaceholder({ ...INFO, engineId })
     expect(store().sessionEngines['sess']?.engineId).toBe(engineId)
     const entry = store().sessions['sess']

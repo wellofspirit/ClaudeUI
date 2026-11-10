@@ -13,8 +13,6 @@ import { claudeModel, opencodeModel, piModel } from './types'
 import type { EngineCapabilities, ResolvedCapabilities } from './model-capabilities'
 import {
   CLAUDE_ENGINE_CAPABILITIES,
-  CODEX_ENGINE_CAPABILITIES,
-  resolveCodexCapabilities,
   OPENCODE_ENGINE_CAPABILITIES,
   PI_ENGINE_CAPABILITIES,
   resolveClaudeCapabilities,
@@ -32,7 +30,7 @@ export const OPENCODE_DEFAULT_MODEL = 'opencode/mimo-v2.5-free'
 
 /**
  * The hard-coded pi fallback model VALUE. `openai-codex` is pi's provider id
- * for the ChatGPT-subscription flow (shares opencode's Codex OAuth client —
+ * for the ChatGPT-subscription flow (shares opencode's ChatGPT OAuth client —
  * see docs/protocol-pi/README.md "Auth"). A per-engine configurable default
  * (mirroring opencode's opencodeConfig.model) shipped in M3 — Settings'
  * PiDefaultModelSection + session-store's `piDefaultModel` — and takes
@@ -144,20 +142,6 @@ const PI_META: EngineMeta = {
  * new EngineId a compile error until its meta is added.
  */
 export const ENGINE_META = {
-  codex: {
-    id: 'codex',
-    label: 'Codex',
-    capabilities: CODEX_ENGINE_CAPABILITIES,
-    defaultVendorId: 'openai',
-    defaultModelValue: (configured?: string) => configured ?? '',
-    encodeModelValue: (ref: ModelRef) => ref.modelId,
-    decodeModelValue: (value: string): ModelRef => ({
-      engineId: 'codex',
-      vendorId: 'openai',
-      modelId: value
-    }),
-    seedCapabilities: (_value: string, modelInfo?: ModelInfo) => resolveCodexCapabilities(modelInfo)
-  },
   claude: CLAUDE_META,
   opencode: OPENCODE_META,
   pi: PI_META

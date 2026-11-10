@@ -84,3 +84,18 @@ describe('EngineLogo', () => {
     expect(container.querySelector('svg')!.getAttribute('viewBox')).toBe('0 0 800 800')
   })
 })
+
+describe('EngineLogo — an engine this build no longer has', () => {
+  it('renders a generic mark labelled "Codex (removed)" for a stored engineId="codex"', () => {
+    const { container } = render(<EngineLogo engineId="codex" size={12} className="" />)
+    const svg = container.querySelector('svg')
+    expect(svg).not.toBeNull()
+    expect(svg!.getAttribute('aria-label')).toBe('Codex (removed)')
+    expect(svg!.getAttribute('data-engine')).toBe('codex')
+  })
+
+  it('does not throw for an empty id', () => {
+    const { container } = render(<EngineLogo engineId="" size={12} className="" />)
+    expect(container.querySelector('svg')!.getAttribute('aria-label')).toBe('Unknown engine')
+  })
+})

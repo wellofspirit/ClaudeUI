@@ -148,7 +148,6 @@ export interface SharedProviderAccountStatus extends SharedProviderAccountSummar
 /** What `provider-account:list` answers: the stored accounts and the policy over them. */
 export interface SharedProviderAccountList {
   activeId: string | null
-  perSession: boolean
   accounts: SharedProviderAccountStatus[]
 }
 
@@ -174,13 +173,6 @@ export interface SharedProviderDefinition {
   baseUrl?: string
   models: SharedProviderModel[]
   routes: Record<ConfigurableHarnessId, SharedProviderRoute>
-  /**
-   * Account policy for a `kind: 'subscription'` provider (ADR-068 §2).
-   * `perSession` off (the default, and the meaning of an absent value) means one
-   * ACTIVE account for everything; on, a session may pin one of the stored
-   * accounts. Meaningless on a custom provider, which holds one API key.
-   */
-  accounts?: { perSession: boolean }
   /**
    * One model list for every engine, or one per engine (ADR-074 §3). Absent:
    * derived from the engines' own lists by `effectiveCuration` — linked iff

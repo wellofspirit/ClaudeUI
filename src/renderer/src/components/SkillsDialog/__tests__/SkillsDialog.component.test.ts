@@ -37,7 +37,7 @@ function makeSkill(overrides: Partial<SkillInfo> = {}): SkillInfo {
 describe('SkillsDialog FC', () => {
   let app: TestApp
   let onClose: ReturnType<typeof vi.fn>
-  let loadCalls: string[]
+  let loadCalls: Array<[string | null, string]>
 
   beforeEach(async () => {
     app = await bootTestApp()
@@ -45,20 +45,33 @@ describe('SkillsDialog FC', () => {
     loadCalls = []
     viewProps = null
 
-    app.bridge.ipcMain.handle('config:load-skill-details', async (_e, cwd: string) => {
-      loadCalls.push(cwd)
-      return [makeSkill()]
-    })
+    app.bridge.ipcMain.handle(
+      'config:load-skill-details',
+      async (_e, routingId: string | null, cwd: string) => {
+        loadCalls.push([routingId, cwd])
+        return [makeSkill()]
+      }
+    )
   })
 
   afterEach(() => {
     app.teardown()
   })
 
-  async function renderFC(props: { open: boolean; cwd: string | null }): Promise<void> {
+  async function renderFC(props: {
+    open: boolean
+    cwd: string | null
+    routingId?: string | null
+  }): Promise<void> {
     const { SkillsDialog } = await import('../SkillsDialog')
     await act(async () => {
-      render(React.createElement(SkillsDialog, { ...props, onClose: onClose as () => void }))
+      render(
+        React.createElement(SkillsDialog, {
+          routingId: null,
+          ...props,
+          onClose: onClose as () => void
+        })
+      )
     })
   }
 
@@ -73,9 +86,18 @@ describe('SkillsDialog FC', () => {
       await new Promise((r) => setTimeout(r, 0))
     })
 
-    expect(loadCalls).toEqual(['/d/repo'])
+    expect(loadCalls).toEqual([[null, '/d/repo']])
     expect(viewProps?.skills).toHaveLength(1)
     expect(viewProps?.loading).toBe(false)
+  })
+
+  it('asks for the skills of the session it is opened on', async () => {
+    await renderFC({ open: true, cwd: '/d/repo', routingId: 'route-7' })
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(loadCalls).toEqual([['route-7', '/d/repo']])
   })
 
   it('Escape key closes the dialog', async () => {
@@ -96,12 +118,15 @@ describe('SkillsDialog FC', () => {
 
   it('clears stale skills before loading a new cwd on reopen', async () => {
     // Setup: different skill lists per cwd so we can detect leakage
-    app.bridge.ipcMain.handle('config:load-skill-details', async (_e, cwd: string) => {
-      loadCalls.push(cwd)
-      if (cwd === '/a') return [makeSkill({ name: 'skill-a', displayName: 'A' })]
-      if (cwd === '/b') return [makeSkill({ name: 'skill-b', displayName: 'B' })]
-      return []
-    })
+    app.bridge.ipcMain.handle(
+      'config:load-skill-details',
+      async (_e, routingId: string | null, cwd: string) => {
+        loadCalls.push([routingId, cwd])
+        if (cwd === '/a') return [makeSkill({ name: 'skill-a', displayName: 'A' })]
+        if (cwd === '/b') return [makeSkill({ name: 'skill-b', displayName: 'B' })]
+        return []
+      }
+    )
 
     const { SkillsDialog } = await import('../SkillsDialog')
     const onClose = vi.fn()
@@ -109,7 +134,12 @@ describe('SkillsDialog FC', () => {
     // Open with /a — View sees skill-a
     const { rerender, unmount } = await act(async () =>
       render(
-        React.createElement(SkillsDialog, { open: true, cwd: '/a', onClose: onClose as () => void })
+        React.createElement(SkillsDialog, {
+          open: true,
+          cwd: '/a',
+          routingId: null,
+          onClose: onClose as () => void
+        })
       )
     )
     await act(async () => {
@@ -123,6 +153,7 @@ describe('SkillsDialog FC', () => {
         React.createElement(SkillsDialog, {
           open: false,
           cwd: '/a',
+          routingId: null,
           onClose: onClose as () => void
         })
       )
@@ -137,7 +168,12 @@ describe('SkillsDialog FC', () => {
 
     await act(async () =>
       rerender(
-        React.createElement(SkillsDialog, { open: true, cwd: '/b', onClose: onClose as () => void })
+        React.createElement(SkillsDialog, {
+          open: true,
+          cwd: '/b',
+          routingId: null,
+          onClose: onClose as () => void
+        })
       )
     )
 

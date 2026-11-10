@@ -213,7 +213,7 @@ describe('a queued dispatch call in the task panel and the agent roster (L2, C1)
       setSession(pair())
       const r = renderHook(() => useAgentRoster()).result.current
       render(<TaskEntry toolUseId="toolu_b" />)
-      render(<MessageBubble message={pair()[0]} pendingApprovals={[]} isLastAssistant />)
+      render(<MessageBubble message={pair()[0]} pendingApprovals={[]} />)
       await act(async () => {
         render(
           React.createElement(AgentRosterList, {
@@ -249,7 +249,7 @@ describe('a queued dispatch call in the task panel and the agent roster (L2, C1)
     it('a Stop from the panel is seen by the card and the roster row too', async () => {
       setSession(pair())
       const r = renderHook(() => useAgentRoster()).result.current
-      render(<MessageBubble message={pair()[0]} pendingApprovals={[]} isLastAssistant />)
+      render(<MessageBubble message={pair()[0]} pendingApprovals={[]} />)
       render(<TaskEntry toolUseId="toolu_b" />)
       await act(async () => {
         render(

@@ -35,7 +35,7 @@
 import { useMemo, useState } from 'react'
 import type { CostTotals, DashboardMachine, UsageDashboardData } from '../../../../shared/types'
 import type { DashboardGroupBy } from './UsageView'
-import { ENGINE_META } from '../../../../shared/engine-meta'
+import { engineLabelOf } from '../../../../shared/engine-label'
 import {
   PROVIDER_OVERFLOW_COLOR,
   buildSeriesColorMap,
@@ -148,14 +148,6 @@ function toMachineLeaves(data: UsageDashboardData): Leaf[] {
 /** How long a machine may go without pushing before its row says so (ADR-072 §7). */
 const BEHIND_MS = 24 * 60 * 60 * 1000
 
-function engineLabel(engineId: string): string {
-  // Engine ids in the ledger are free strings (a bucket written by a build that
-  // knew an engine this one does not), so the registry is read defensively
-  // rather than through `engineMeta`, which throws on an unknown id.
-  const meta = (ENGINE_META as Record<string, { label: string } | undefined>)[engineId]
-  return meta?.label ?? engineId
-}
-
 // ---------------------------------------------------------------------------
 // Summing
 // ---------------------------------------------------------------------------
@@ -208,7 +200,7 @@ interface Level {
 const LEVEL: Record<DashboardGroupBy, Level> = {
   provider: { name: 'provider', key: (l) => l.providerId, label: (l) => l.providerLabel },
   account: { name: 'account', key: (l) => l.accountKey, label: (l) => l.accountLabel },
-  engine: { name: 'engine', key: (l) => l.engineId, label: (l) => engineLabel(l.engineId) },
+  engine: { name: 'engine', key: (l) => l.engineId, label: (l) => engineLabelOf(l.engineId) },
   model: { name: 'model', key: (l) => l.modelId, label: (l) => shortModelName(l.modelId) },
   machine: {
     name: 'machine',

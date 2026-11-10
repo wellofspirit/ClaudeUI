@@ -17,8 +17,6 @@ import {
   deleteOpencodeSession
 } from './opencode-session-list'
 import { deleteSessionFiles } from './delete-session-files'
-import { listCodexSessions, loadCodexHistory, resolveCodexForkAnchor } from '../codex/history'
-import { deleteCodexThread } from '../codex/delete'
 import type { ForkAnchorResult } from '../../shared/types'
 
 interface EngineHistory {
@@ -51,7 +49,7 @@ interface EngineHistory {
 const bare = (load: {
   messages: SessionHistoryResult['messages']
   statusLine?: StatusLineData | null
-  /** pi's host-run subagent transcripts (ADR-089), passed through inline like Codex's. */
+  /** pi's host-run subagent transcripts (ADR-089), passed through inline. */
   subagentMessages?: SessionHistoryResult['subagentMessages']
   /** pi's host-run subagents' terminal events (ADR-089 S3). */
   taskNotifications?: SessionHistoryResult['taskNotifications']
@@ -84,23 +82,6 @@ const readers: Record<EngineId, EngineHistory> = {
     forkAnchor: async () => {
       throw new Error('opencode fork is not implemented')
     }
-  },
-  codex: {
-    // The anchor is a native TURN id, never a Claude JSONL line uuid — the codex
-    // `forkAnchor` below is the only thing that mints one — so it is forwarded
-    // as the cut, which is what seeds a branch's canonical transcript.
-    read: (id, _projectKey, anchor) =>
-      anchor ? loadCodexHistory(id, undefined, anchor) : loadCodexHistory(id),
-    list: listCodexSessions,
-    // ONE thread, which is all this engine-neutral seam can express. The
-    // binary refuses to delete a thread a fork still references, so a branched
-    // session is deleted through `handlers-core.deleteSession`'s leaf-first
-    // subtree walk instead — this entry is the leaf case and the walk's own
-    // per-node call shares its implementation (`core/codex/delete.ts`).
-    delete: (id) => deleteCodexThread(id),
-    // Turn-granular and native: no JSONL line uuid and no `messageIndex`, since
-    // the Codex message id already carries the turn that owns the row.
-    forkAnchor: (id, cwd, message) => resolveCodexForkAnchor(id, message, { cwd })
   }
 }
 

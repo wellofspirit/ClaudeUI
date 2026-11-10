@@ -44,10 +44,7 @@ const chatgpt: ProviderEntry = {
   credential: 'connected',
   engines: {
     pi: { enabled: true, modelCount: 4, native: true },
-    opencode: { enabled: true, modelCount: 6, native: true },
-    // The registry projects Codex onto the ChatGPT row since F14: it is fed by
-    // vault injection and follows the ACTIVE account.
-    codex: { enabled: true }
+    opencode: { enabled: true, modelCount: 6, native: true }
   },
   detail: 'ChatGPT subscription · shared with pi and opencode'
 }
@@ -158,7 +155,6 @@ describe('the rows', () => {
               ...e,
               accounts: {
                 activeId: 'acc-1',
-                perSession: false,
                 list: [{ id: 'acc-1', email: 'a@example.com' }, { id: 'acc-2' }]
               }
             }
@@ -172,42 +168,14 @@ describe('the rows', () => {
     expect(badge).toHaveAttribute('data-id', 'connected')
   })
 
-  it('chips the engines the provider is configured for, claude → opencode → pi → codex', async () => {
-    // Codex is fed by vault injection, not by a shared route (ADR-068 §1), so
-    // the chip has to be LAST in the order and present on the ChatGPT row —
-    // without it the row reads as "this subscription is not available to Codex".
+  it('chips the engines the provider is configured for, claude → opencode → pi', async () => {
     await renderList()
     const chips = (id: string): string[] =>
       within(row(id))
         .getAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id!)
-    expect(chips('chatgpt')).toEqual(['opencode', 'pi', 'codex'])
+    expect(chips('chatgpt')).toEqual(['opencode', 'pi'])
     expect(chips('pi:ollama')).toEqual(['pi'])
-  })
-
-  it('dims the Codex chip when no ChatGPT account is active (F14)', async () => {
-    snapshot = {
-      entries: [
-        {
-          ...chatgpt,
-          engines: {
-            opencode: { enabled: true },
-            pi: { enabled: true },
-            codex: { enabled: false }
-          }
-        }
-      ],
-      opencodeInstalled: true
-    }
-    await renderList()
-    const codex = within(row('chatgpt'))
-      .getAllByTestId('ProviderList.engine')
-      .find((el) => el.dataset.id === 'codex')!
-    expect(codex).toHaveTextContent('Codex')
-    // The Subscriptions Engines row's pill (ADR-074 §7): dim, and it says "off".
-    expect(codex).toHaveAttribute('data-on', 'false')
-    expect(codex).toHaveTextContent('off')
-    expect(codex.className).toContain('opacity-60')
   })
 
   it('dims the chip of an engine the provider does not currently reach', async () => {
@@ -254,7 +222,7 @@ describe('the rows', () => {
   })
 
   it('hides the chips of a harness that does not run, says nothing, and brings them back', async () => {
-    // ADR-082 §8: readiness, for opencode, pi and Codex alike — not the
+    // ADR-082 §8: readiness, for opencode and pi alike — not the
     // registry's `opencodeInstalled`, which stays true here.
     app.bridge.ipcMain.handle('harness:state', async () => harnessSnapshot(['opencode', 'pi']))
     const chips = (id: string): (string | undefined)[] =>
@@ -262,7 +230,7 @@ describe('the rows', () => {
         .queryAllByTestId('ProviderList.engine')
         .map((el) => el.dataset.id)
     await renderList()
-    await waitFor(() => expect(chips('chatgpt')).toEqual(['codex']))
+    await waitFor(() => expect(chips('chatgpt')).toEqual([]))
     // The providers stay listed: their credentials exist.
     expect(chips('opencode:openrouter')).toEqual([])
     expect(chips('pi:ollama')).toEqual([])
@@ -274,7 +242,7 @@ describe('the rows', () => {
     await act(async () => {
       await harnessStore.refresh()
     })
-    expect(chips('chatgpt')).toEqual(['opencode', 'pi', 'codex'])
+    expect(chips('chatgpt')).toEqual(['opencode', 'pi'])
     expect(chips('pi:ollama')).toEqual(['pi'])
   })
 
@@ -348,11 +316,7 @@ describe('the store’s provider-auth view', () => {
     expect(useSessionStore.getState().providerAuth.chatgpt).toBe('authenticated')
     expect(useSessionStore.getState().providerAuth.chatgptRoutes).toEqual({
       pi: true,
-      opencode: true,
-      // Not a route at all — but it is in `engines`, and the view projects
-      // whatever the registry put there. Only pi/opencode are read back
-      // (`signInProviderFor`), so the extra key gates nothing.
-      codex: true
+      opencode: true
     })
   })
 

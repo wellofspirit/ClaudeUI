@@ -8,6 +8,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
+import type { ClaudeEngineConfig } from '../../shared/types'
 import { getProxyEnv } from './proxy'
 import { getEndpointEnv } from './endpoint-env'
 import { getModelEnv } from './model-env'
@@ -218,6 +219,39 @@ export function buildArgs(options: QueryOptions): string[] {
   return args
 }
 
+/** cli.js's built-in email-address privacy plugin, under the id `enabledPlugins` names it by. */
+export const PRIVACY_PLUGIN_ID = 'cc-plugin-privacy@builtin'
+
+/**
+ * cli.js behaviour ClaudeUI owns a switch for, as `--settings` flag settings.
+ *
+ * Both keys ride the `settings` object a spawn already carries (args.ts below
+ * emits it as `--settings <json>`), which is cli.js's `flagSettings` source:
+ * it outranks the user's `~/.claude/settings.json`, so ClaudeUI's answer is
+ * authoritative for a ClaudeUI session and the terminal `claude` keeps its own.
+ *
+ *  - `idleCompaction` — cli.js summarises a 200K+ token conversation left idle
+ *    on the `claude-desktop` / VS Code entrypoints (`isSleepCompactionHost`;
+ *    `oAt()` reads it with a default of true). ClaudeUI's default is OFF.
+ *  - `enabledPlugins[PRIVACY_PLUGIN_ID]` — the built-in privacy plugin that
+ *    asks before a Web/Bash/Monitor/PowerShell call carrying the account email
+ *    address. It is `defaultEnabled:!0` and
+ *    `enabledFromTrustedSettingsOnly:!0`, so only user/flag/policy settings can
+ *    turn it off; ClaudeUI's default is ON, stated explicitly so the toggle is
+ *    ClaudeUI's rather than whatever the user's settings file says.
+ *
+ * Read fresh at every spawn, so a change binds the next session start.
+ */
+export function claudeBehaviorSettings(config: ClaudeEngineConfig | undefined): {
+  idleCompaction: boolean
+  enabledPlugins: Record<string, boolean>
+} {
+  return {
+    idleCompaction: config?.idleCompaction === true,
+    enabledPlugins: { [PRIVACY_PLUGIN_ID]: config?.privacyEmailCheck !== false }
+  }
+}
+
 /**
  * Port of the SDK's QV() helper. Folds `sandbox` into `settings`, then
  * returns a flat flag-bag ready for --<flag> <value> emission.
@@ -368,7 +402,7 @@ export function buildSpawnEnv(base: NodeJS.ProcessEnv = process.env): SpawnEnv {
   // No in-app endpoint configured: do NOT delete inherited ANTHROPIC_BASE_URL/
   // ANTHROPIC_AUTH_TOKEN. A user routing through a gateway/LiteLLM via their own
   // env relies on them and the stock CLI supports them (M-CL4). These inherited
-  // values are the user's own shell env — the Codex/vault path never writes
+  // values are the user's own shell env — the vault path never writes
   // ANTHROPIC_* to process.env, so this cannot leak vault tokens into Claude.
   // The exception is a multi-account host-token spawn, below: it runs on the
   // account's own OAuth token, which never goes to an inherited gateway.

@@ -9,7 +9,6 @@
 import { describe, it, expect } from 'vitest'
 import { engineToolMap } from '../engine-tool-maps'
 import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
-import { CodexEngineToolMap } from '../CodexEngineToolMap'
 import { OpencodeEngineToolMap } from '../OpencodeEngineToolMap'
 import { PiEngineToolMap } from '../PiEngineToolMap'
 import type { EngineId } from '../../../../../../shared/types'
@@ -39,7 +38,6 @@ describe('engineToolMap', () => {
 // on an explicit `run_in_background: true`.
 describe.each([
   ['Claude', ClaudeEngineToolMap],
-  ['Codex', CodexEngineToolMap],
   ['Opencode', OpencodeEngineToolMap],
   ['Pi', PiEngineToolMap]
 ] as const)('%sEngineToolMap — dispatch run_in_background', (_name, map) => {

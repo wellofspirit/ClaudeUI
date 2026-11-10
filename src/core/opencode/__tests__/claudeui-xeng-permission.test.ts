@@ -96,6 +96,7 @@ async function setup(opts: {
         return {}
       }
     },
+    skill: { transform: async () => ({}), reload: async () => {} },
     mcp: {
       transform: async (cb: Fake['mcpTransform']) => {
         mcpTransform = cb
@@ -350,7 +351,8 @@ describe('the `guard` RPC (ClaudeUI refuses a server without the hooks)', () => 
       mcpDirect: true,
       modelGate: true,
       // `setup` ran with no options here
-      allowlistLoaded: false
+      allowlistLoaded: false,
+      skillsLoaded: false
     })
   })
 })

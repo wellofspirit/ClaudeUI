@@ -71,7 +71,7 @@ export const GENERATOR_VERSION = 2
  * names that commit, so bumping `tested` without re-reviewing `PIN_COMMIT`
  * fails both generate and check.
  */
-const PIN_COMMIT = 'a517687fde98a7329ada3ae644a01a9fc6c4e99e'
+const PIN_COMMIT = 'dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06'
 const manifest = JSON.parse(
   readFileSync(new URL('../src/shared/harness-manifests/opencode.json', import.meta.url), 'utf8')
 )
@@ -154,7 +154,8 @@ const ANNOTATION_KEYWORDS = new Set([
   'readOnly',
   'writeOnly',
   'contentMediaType',
-  'contentEncoding'
+  'contentEncoding',
+  'contentSchema'
 ])
 const STRUCTURAL_KEYWORDS = new Set([
   '$ref',
@@ -208,6 +209,12 @@ function topLevelUnion(text) {
   return false
 }
 const unionOf = (parts) => (parts.includes('unknown') ? 'unknown' : [...new Set(parts)].join(' | '))
+/** `{}`: a JSON Schema that constrains nothing, which only a `not` makes meaningful. */
+const isPlainEmpty = (node) =>
+  node !== null &&
+  typeof node === 'object' &&
+  !Array.isArray(node) &&
+  Object.keys(node).length === 0
 const intersectionOf = (parts) =>
   parts.map((part) => (topLevelUnion(part) ? `(${part})` : part)).join(' & ')
 
@@ -233,11 +240,15 @@ export function schemaToTs(node, at = '#', indent = '') {
     return typeName(node.$ref.slice(prefix.length))
   }
   if (node.not !== undefined) {
-    // The only negation opencode 2.1 serves: a payload that may be anything but
-    // null (`Session.Inbox.CompactionPayload`). TypeScript cannot express a
-    // general `not`, so fail closed on any other shape.
+    // Two negations are served. `not:{}` is a value that cannot exist
+    // (`Schema.Never`, e.g. the `absent` variant fields of
+    // `Schedule.ConditionInput`: an optional key that must be missing).
+    // `not:{type:'null'}` is a payload that may be anything but null
+    // (`Session.Inbox.CompactionPayload`). TypeScript cannot express a general
+    // `not`, so fail closed on any other shape.
     if (Object.keys(node).some((key) => STRUCTURAL_KEYWORDS.has(key) && key !== 'not'))
       throw new Error(`not with sibling structure at ${at}`)
+    if (isPlainEmpty(node.not)) return 'never'
     if (node.not?.type === 'null') return 'NonNullable<unknown>'
     throw new Error(`Unsupported not-schema at ${at}: ${JSON.stringify(node.not)}`)
   }

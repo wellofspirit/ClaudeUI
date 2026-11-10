@@ -10,9 +10,8 @@
  * the hub client queues the newest per account and pushes it with the limits.
  *
  * `observedAt` is the instant the credits were READ, which the caller states:
- * for ChatGPT the last full `account/rateLimits/read`, never the instant a live
- * turn's push arrived, because a push carries the allowance Codex copied forward
- * from that read (`ChatgptRateLimitStore.creditsReadAt`). The hub keeps the
+ * for ChatGPT the instant of the last backend read
+ * (`ChatgptRateLimitStore.creditsReadAt`). The hub keeps the
  * newest per account, so a reading dated later than it was taken would
  * overwrite another machine's genuinely newer one.
  *

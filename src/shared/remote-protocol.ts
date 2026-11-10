@@ -1126,7 +1126,6 @@ export interface PerSessionSnapshot {
    */
   metering?: MeteringSnapshot
   slashCommands: SlashCommandInfo[]
-  sdkSkillNames: string[]
   /** Whether cli.js/the engine is live for this session. A remote client MUST
    *  carry this so its first send steers the running session instead of
    *  respawning it (as Claude) — see H15 / InputBox.doSend. */
@@ -1136,7 +1135,6 @@ export interface PerSessionSnapshot {
   selectedEngineId?: EngineId
   /** Model picker value within the selected engine. */
   selectedModel?: string
-  codexModelExplicit?: boolean
   /**
    * The sign-in this session owes — see {@link AuthRequiredState}. Optional for
    * the same older-server-compat reason as {@link PerSessionSnapshot.queue}: a

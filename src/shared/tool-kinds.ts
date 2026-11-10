@@ -19,8 +19,7 @@ export type ToolKind =
   | 'fileRead' //  read a file    — Claude Read · opencode read
   | 'search' //    glob/grep/list — Claude Glob/Grep · opencode glob/grep/list
   | 'web' //       fetch/search   — Claude WebFetch/WebSearch · opencode webfetch
-  | 'image' //     picture made   — Codex imageGeneration
-  | 'sleep' //     timed wait     — Codex sleep  (lifted — routes to SleepRow)
+  | 'image' //     picture made   — no engine produces it today
   | 'todo' //      checklist      — Claude TodoWrite  (lifted — routes to TodoToolBlock)
   | 'task' //      subagent       — Claude Task/Agent · opencode task
   | 'plan' //      plan approval  — Claude ExitPlanMode (lifted — routes to ExitPlanModeCard)
@@ -61,7 +60,7 @@ export type ToolView =
   // polish (§9) but unused by the current generic renderer.
   | { kind: 'search'; query: string }
   // `action` and `results` are present only when the engine's wire carries them
-  // (Codex `webSearch.action`/`results`, Claude's `Links:` trailer). The body
+  // (Claude's `Links:` trailer). The body
   // falls back to the result text when they are absent, so an engine that
   // reports neither renders exactly as it did before.
   | {
@@ -76,7 +75,7 @@ export type ToolView =
       prompt: string
       /**
        * What to CALL this agent in a list: the name the spawning call gave it
-       * (Claude's `name`, pi's `agent`, Codex's agent path leaf), falling back
+       * (Claude's `name`, pi's `agent`), falling back
        * to its type. Distinct from `subagent`, which is the card's badge and
        * carries dispatch's "<engine> · <model>" instead. Without it a fan-out
        * reads "Explore, Explore, Explore" and nothing can tie a
@@ -86,8 +85,7 @@ export type ToolView =
       /**
        * The agent TYPE the spawning call named: Claude's `subagent_type`,
        * opencode's, pi's, never a model and never a path. Absent on a
-       * cross-engine dispatch (see `dispatch`) and on a Codex spawn, whose wire
-       * carries no role (ADR-094): a Codex model is not a type.
+       * cross-engine dispatch (see `dispatch`).
        */
       subagent?: string
       model?: string
@@ -144,7 +142,6 @@ export type ToolView =
    * a header, a chevron and an empty body would be chrome around nothing.
    */
   | { kind: 'note'; icon?: string; text: string }
-  | { kind: 'sleep'; durationMs: number }
   | { kind: 'unknown'; input: unknown }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +162,7 @@ export type ToolView =
 export interface EngineToolMap {
   kindOf(toolName: string): ToolKind
   /**
-   * `toolName` is OPTIONAL and every engine but Codex ignores it: the MCP body
+   * `toolName` is OPTIONAL: the MCP body
    * needs the server and tool, and `mcp__<server>__<tool>` is the only place
    * they exist. Callers that do not have the name (a synthetic view) may omit
    * it and get today's answer.
@@ -185,8 +182,8 @@ export interface EngineToolMap {
 // ---------------------------------------------------------------------------
 
 /**
- * A cross-engine dispatch (ADR-033) as a 'task' view. All four engine tool maps
- * build it the same way from `dispatch_agent`'s `{ engine, prompt, model?, name?,
+ * A cross-engine dispatch (ADR-033) as a 'task' view. Every engine tool map
+ * builds it the same way from `dispatch_agent`'s `{ engine, prompt, model?, name?,
  * description? }` input, so the structured `dispatch` field (what the type tile and
  * the roster read, ADR-094) is set in one place.
  *

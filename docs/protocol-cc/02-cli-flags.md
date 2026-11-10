@@ -88,7 +88,7 @@ Pre-parse argv scan at char `12940601` (`Bt1`) intercepts `--handle-uri`, `-p`, 
 - **Effect (2.1.280 source):**
   1. Foreground Agent: the progress callback forwards every content block of the subagent's messages. Without the flag it skips all but tool_use/tool_result (`if(!Kt&&J.type!=="tool_use"&&J.type!=="tool_result")continue;`). The blocks arrive as complete `assistant`/`user` messages with `parent_tool_use_id` set to the Agent call's id, with no `stream_event` deltas (those still need patch/subagent-streaming).
   2. The same callback forwards nested progress (`agent_progress`/`skill_progress` from the subagent's own Agent or Skill calls) instead of dropping it. Forked skills (`context: fork`) get the same two changes in their own loop, and background subagents write nested progress to their relay (their own messages are relayed without the flag).
-  3. Without the flag, a non-interactive session forces subagent thinking to `display:"omitted"` unless `--thinking-display` was explicit. ClaudeUI always passes `--thinking-display summarized`, so this changes nothing for us.
+  3. Without the flag, a non-interactive session forces subagent thinking to `display:"omitted"` unless `--thinking-display` was explicit. ClaudeUI passes `--thinking-display summarized` on a session and a dispatch target (`claudeThinkingRequest`) and on an automation run (its own config), so this changes nothing for us.
 - **On the patched binary:** subagent-streaming Patch A deletes the `continue` in (1), so the flag adds nothing there and nothing arrives twice; only the nested and forked-skill messages of (2) are new. Live check 2026-09-25 (2.1.280, Haiku 4.5, one foreground Agent turn whose subagent runs one Bash call): official with the flag, 4 subagent `assistant` frames (2 thinking, 1 text, 1 tool_use) and 0 subagent `stream_event`s; patched without it, 5 frames (the model wrote one more text block) and 112 `stream_event`s; patched with it, 4 frames and 101 `stream_event`s. In both patched runs each subagent API message produced as many forwarded blocks as streamed `content_block_start`s, with no repeated uuid or content.
 
 ### `--session-mirror` (hidden)
@@ -375,6 +375,7 @@ Pre-parse argv scan at char `12940601` (`Bt1`) intercepts `--handle-uri`, `-p`, 
 - **Type:** enum: `summarized` | `omitted`
 - **Default:** config-resolved
 - **Effect:** How thinking blocks appear in response. `omitted` hides them.
+- **ClaudeUI:** `summarized` on a session and a dispatch target (`claudeThinkingRequest` in `src/shared/model-capabilities.ts`) and on an automation run (`automation-manager.ts`). Without it, Opus 4.7+ thinking arrives as a signature with empty text (seen 2026-11-06 on a 2.1.317 dispatch target running Opus 4.8: 8,084 thinking tokens, no text).
 - **Anchor:** parseOpt `12947940`.
 
 ### `--max-thinking-tokens <tokens>` (hidden, DEPRECATED)
@@ -448,12 +449,53 @@ Pre-parse argv scan at char `12940601` (`Bt1`) intercepts `--handle-uri`, `-p`, 
 - **Effect:** Additional settings. Inline JSON is persisted to a content-hashed temp file via `MNH("claude-settings", ".json", {contentHash: $})`; file path is resolved against `k8()` and read. Lazily parsed during `preAction`.
 - **Anchors:** parseOpt `12950310`, handler `ut1` `12938600`.
 
+ClaudeUI passes this **flag settings** source (never the user's `~/.claude/settings.json`, which the terminal `claude` shares) two keys of its own, from `engines/claude.json#claudeConfig` (`claudeBehaviorSettings`, `src/core/sdk/args.ts`): `idleCompaction` — cli.js reads it with a default of true and summarises a 200K+ token conversation left idle on the `claude-desktop` entrypoint; ClaudeUI's default is **false** — and `enabledPlugins["cc-plugin-privacy@builtin"]` — the bundled email-address privacy plugin (`defaultEnabled:!0`, `enabledFromTrustedSettingsOnly:!0`, so only user/flag/policy settings can turn it off); ClaudeUI's default is **true**. Every session spawn carries them beside its `permissions` rules (`claude-session.ts`), as does the `--settings` JSON built for a cross-engine dispatch target (`cross-engine-dispatcher.ts`).
+
 ### `--setting-sources <sources>`
 
 - **Type:** string (comma list of `user`, `project`, `local`)
 - **Default:** all sources
 - **Effect:** Restricts setting scopes loaded.
 - **Anchors:** parseOpt `12954012`, handler `xt1` `12938670`.
+
+#### Workspace trust and the project/local scopes (2.1.317)
+
+- **What's gated:** while a workspace is untrusted, the permission-rule builder (`x()`, near `A("permissions.allow"`)
+  drops `allow` rules and `additionalDirectories` from `projectSettings`. It drops them from `localSettings` only when
+  `.claude/settings.local.json` (or `.claude/`) is tracked by git. Headless (`-p`) cli.js sets session trust (`QH(!0)`)
+  before it builds the permission context, so `gateLocal` falls through to the git-tracked check. Deny and ask rules,
+  and user-scope allows, always apply.
+- **The flag it reads:** `<globalConfig>#projects[K].hasTrustDialogAccepted === true`. This is one key, with no parent
+  walk for this gate (`ph()` → `oYe(hut(cwd))`).
+- **The key K:**
+  - It's `h4(kt(ur(cwd)) ?? NFC(resolve(cwd)))`. The starting cwd is `NFC(realpathSync(process.cwd()))`, the physical
+    path. Bun's `realpathSync` case-corrects like Node's `realpathSync.native` (probed on macOS).
+  - `ur` returns the first ancestor holding a `.git` file or directory.
+  - `kt` maps a linked worktree to its main checkout, after checks on its `gitdir`, `commondir` and back-pointer.
+  - `h4` rewrites `\` to `/` on Windows.
+  - It is the same key `projects[...]` uses for MCP state. ClaudeUI derives it in `claude-config-paths.ts`.
+- **How the dialog records trust:** `UTe(cwd)` gives home only session trust (`H(cwd)` compares the cwd, not the root,
+  with home). Anywhere else, `$hs` writes `projects[K].hasTrustDialogAccepted: true` under the global-config lock: a
+  proper-lockfile `mkdir` of `<config>.lock`, stale after 10 s. ClaudeUI writes it the same way
+  (`claude-workspace-trust.ts`, ADR-009).
+- **Live effect:** running cli.js polls the global config about every 1 s. `apply_flag_settings({})` rebuilds the rules
+  from the refreshed copy, so trusting and untrusting both take effect without a restart. One exception: added
+  directories are added live only on cli.js's own trust-flip path.
+  - Probed live on 2026-11-09 (`list_permission_rules`). Trusting from outside made the Project allows live. It did
+    not add the Project `additionalDirectories` already listed, and a second nudge 3 s later didn't add them either.
+    Untrusting removed both. The cause is the directory diff (`Gko`): it adds only directories missing from the
+    _previous_ raw settings unless `trustFlip` is set.
+- **Settings edits while running (2.1.317, probed live 2026-11-09):** an edit to allow/ask/deny or
+  `additionalDirectories` in the user or local file, added or removed, is in the session's live `toolPermissionContext`
+  on the next `list_permission_rules` after `apply_flag_settings({})`. Without that nudge, cli.js's own watcher picks
+  it up within about 3 s. The subscriber (`Settings changed from ${source}, updating app state`) re-reads every
+  enabled source (`Mx()`), replaces each source's rules (`Myn`) and diffs the added directories (`Gko`).
+  `permissions.defaultMode` is the one key it never re-derives.
+- **Where Local lives (2.1.317):** when the session cwd differs from its canonical git root (a subdirectory or a
+  linked worktree), `localSettings` is stored at the root (`mLn` → `Xj`, after a POSIX ownership check; Windows
+  keeps cwd). `<cwd>/.claude/settings.local.json` is still read as a "legacy" file merged into `localSettings`
+  (`yye`, `onLegacyLocalSettingsRead`). Edits to that cwd file apply live by watcher and by nudge, as probed for both
+  layouts. ClaudeUI's Local tab writes the cwd file.
 
 ### `--plugin-dir <path>`
 

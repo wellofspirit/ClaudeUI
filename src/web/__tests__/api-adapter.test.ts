@@ -157,6 +157,24 @@ describe('web api-adapter — worktree manager (ADR-112)', () => {
     expect(connection.invoke).toHaveBeenLastCalledWith('worktree:inspect', '/repo', 'id-1')
   })
 
+  it('createWorktree always rides invokeWithProgress (the channel is withProgress, so the 30 s timeout slides), forwards the base, and unwraps the envelope', async () => {
+    connection.invokeWithProgress.mockResolvedValueOnce({ ok: true, data: { worktreePath: '/wt' } })
+    await expect(
+      api.createWorktree('/repo/app', 'feature-x', { base: 'default' })
+    ).resolves.toEqual({
+      worktreePath: '/wt'
+    })
+    expect(connection.invoke).not.toHaveBeenCalled()
+    expect(connection.invokeWithProgress).toHaveBeenLastCalledWith(
+      'worktree:create',
+      ['/repo/app', 'feature-x', { base: 'default' }],
+      expect.any(Function)
+    )
+
+    connection.invokeWithProgress.mockResolvedValueOnce({ ok: false, error: 'permission denied' })
+    await expect(api.createWorktree('/repo/app', 'x')).rejects.toThrow('permission denied')
+  })
+
   it('the legacy removeWorktree always rides invokeWithProgress (the channel is withProgress) with a no-op callback, and unwraps the envelope', async () => {
     connection.invokeWithProgress.mockResolvedValueOnce({
       ok: true,
@@ -530,20 +548,6 @@ function callMethod(name: string, args: readonly unknown[]): unknown {
  * nowhere. A stub cannot be spotted at the call site; this table can.
  */
 const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unknown[] }> = [
-  {
-    method: 'codexApproval',
-    channel: 'session:codex-approval',
-    args: ['native-root', 'opaque-request', 'acceptForSession']
-  },
-  { method: 'codexAuthStatus', channel: 'codex:auth-status', args: [] },
-  { method: 'readCodexConfig', channel: 'codex-config:read', args: [] },
-  {
-    method: 'writeCodexConfig',
-    channel: 'codex-config:write',
-    args: [[{ keyPath: 'model_verbosity', value: 'high' }], 'v1']
-  },
-  { method: 'recompileCodexRules', channel: 'codex:recompile-rules', args: [] },
-  { method: 'codexDeletePlan', channel: 'session:codex-delete-plan', args: ['thread-1'] },
   // Engine / vendor config (plain handlers — preload uses a bare invoke here).
   { method: 'loadEngineConfig', channel: 'config:load-engine-config', args: ['opencode'] },
   {
@@ -662,14 +666,13 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
 
   // Worktrees — `capability: 'git'`, the same one the `git:*` mutations ride.
   // These threw "Worktrees not available in remote mode".
-  { method: 'createWorktree', channel: 'worktree:create', args: ['/repo/app', 'feature-x'] },
   {
     method: 'getWorktreeStatus',
     channel: 'worktree:status',
     args: ['/repo/app-feature-x', 'abc1234']
   },
-  // `removeWorktree` rides the progress path (`withProgress` server-side): see the worktree
-  // manager describe, it does not reach `connection.invoke`.
+  // `createWorktree` and `removeWorktree` ride the progress path (`withProgress` server-side): see
+  // the worktree manager describe, they do not reach `connection.invoke`.
 
   // Automations — one frozen declaration shared by both transports
   // (`core/ipc/automation-commands.ts`, `config`). Plain handlers, so preload
@@ -720,6 +723,20 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     method: 'mcpToggleDisabled',
     channel: 'mcp:toggle-disabled',
     args: ['/repo/app', 'lsphub', true]
+  },
+  // McpDialog's native writes and catalog-backed list: the browser client drives the same
+  // channels as the desktop. The reload verb is safeHandler-wrapped (unwrapped); the rest are plain.
+  { method: 'loadMcpCatalog', channel: 'mcp:load-catalog', args: ['/repo/app'] },
+  {
+    method: 'mcpCliAdd',
+    channel: 'mcp:cli-add',
+    args: ['user', 'lsphub', { command: 'lsphub' }, '/repo/app']
+  },
+  { method: 'mcpCliRemove', channel: 'mcp:cli-remove', args: ['project', 'lsphub', '/repo/app'] },
+  {
+    method: 'mcpReloadServers',
+    channel: 'mcp:reload',
+    args: ['sess-1', { name: 'lsphub', present: true }]
   },
 
   // The unified provider list (ADR-065 phase 6) — a READ, declared in the same
@@ -788,9 +805,9 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     args: ['local', 'pi', 'local-1']
   },
 
-  // The three singletons. `saveSlashCommands` is the cache write
-  // `useClaudeEvents` makes when cli.js announces the command list (plain
-  // handler, bare invoke). The other two are safeHandler-wrapped and both act on
+  // The singletons. `saveSlashCommands` is the slash-menu cache write (plain
+  // handler, bare invoke); `loadSkillDetails` addresses a session by routing id.
+  // The other two are safeHandler-wrapped and both act on
   // the HOST rather than this browser — `proxy:test-connection` dials through the
   // host's proxy settings, `usage:refresh-prices` refreshes the host's price
   // cache — which is exactly why running them there is the right answer for a
@@ -799,6 +816,11 @@ const WIRED: ReadonlyArray<{ method: string; channel: string; args: readonly unk
     method: 'saveSlashCommands',
     channel: 'config:save-slash-commands',
     args: [[{ name: 'review', description: 'Review the diff' }]]
+  },
+  {
+    method: 'loadSkillDetails',
+    channel: 'config:load-skill-details',
+    args: ['route-1', '/repo']
   },
   {
     method: 'testProxyConnection',
@@ -844,12 +866,11 @@ describe('web api-adapter — wired methods reach the channel they claim', () =>
         'deleteOpencodeAgent',
         'setOpencodeAgentDisabled',
         'generateOpencodeAgent',
-        'createWorktree',
         'mcpToggleServer',
         'saveSharedProvider'
       ].includes(method)
     )
-    expect(mutations).toHaveLength(9)
+    expect(mutations).toHaveLength(8)
     for (const { method, args } of mutations) {
       connection.invoke.mockResolvedValueOnce({ ok: false, error: 'permission denied' })
       await expect(callMethod(method, args)).rejects.toThrow('permission denied')

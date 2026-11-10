@@ -37,8 +37,9 @@ user config got swept into that channel by convenience, even though it is neithe
   (Claude store is the single source, compiled per-engine — ADR-022, applied via `PATCH /session` for
   opencode) and the hosted-MCP `mcp.claudeui` block (dynamic port/token, `OPENCODE_CONFIG_CONTENT`).
   Standalone visibility is intentionally sacrificed — the config is not the engine's to own.
-- **Skills** need no bridge: opencode natively scans `.claude/skills/**/SKILL.md`, so both engines read
-  the same on-disk source.
+- **Skills** are bridged like MCP servers. 2026-11-09 ([ADR-115](adr-115_claude-skills-in-pi-and-opencode.md)):
+  opencode's own `.claude/skills` reader is off on ClaudeUI's servers and the plugin serves the shared Claude skill
+  catalog; opencode's own skill folders and its `skills` config key are untouched.
 
 **Concrete opencode mechanics** (`src/core/opencode/opencode-config.ts`, mirroring `claude-settings.ts`):
 

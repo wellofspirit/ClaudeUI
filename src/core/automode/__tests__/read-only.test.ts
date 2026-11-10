@@ -876,7 +876,7 @@ describe('sensitive components', () => {
 
   it('only real history files are sensitive, not history-named sources', () => {
     expectBypass('cat src/components/AutomationRunHistory/index.ts')
-    expectBypass('cat src/core/codex/history.ts')
+    expectBypass('cat src/core/opencode/history.ts')
     expectRefuse('cat .zsh_history', {}, 'path:sensitive .zsh_history')
     expectRefuse('cat fish_history', {}, 'path:sensitive fish_history')
   })

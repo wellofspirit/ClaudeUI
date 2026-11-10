@@ -6,10 +6,10 @@ Live Bash command output never reaches the stream-json consumer until the comman
 
 `vendor/claude-cli/cli.js` — the vendored Claude Code bundle (`bun-claude`).
 
-| Component            | Version                                                  |
-| -------------------- | -------------------------------------------------------- |
-| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105 |
-| Last verified anchor | **2.1.261** (chunked bundle — see "Bundle shape" below)  |
+| Component            | Version                                                                      |
+| -------------------- | ---------------------------------------------------------------------------- |
+| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105                     |
+| Last verified anchor | **2.1.321** (chunked bundle — see "Bundle shape" below; re-anchored 2.1.321) |
 
 ### Bundle shape (changed in 2.1.261)
 
@@ -173,6 +173,19 @@ Regex in `apply.mjs`:
   `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)\\}`
 ```
 
+**Optional late-callback guard (2.1.321).** 2.1.321 opens the body with a guard that drops the first
+stray call after the command is killed/completed:
+
+```js
+// 2.1.321, darwin, char 15727659
+onProgress(Si,pa,qa,kl,dl){if(!so&&!Pn&&(Nr.status==="killed"||Nr.status==="completed")){Pn=!0;return}No=Si,co=pa,Ho=qa,yo=dl?kl:0;let ed=Rr;if(ed)Rr=null,ed()}
+```
+
+`apply.mjs` accepts it as an optional group (`lateGuard`, keyed on the `"killed"` / `"completed"`
+literals) between the `{` and the four assignments, and Part A is injected **after** the guard, so a
+call the CLI drops never reaches the SDK stream either. Without the guard (<= 2.1.319) the injection
+point is the opening brace as before.
+
 **Why it is unique.** 2.1.261 has exactly four `onProgress(` occurrences in the whole concat:
 
 | Offset      | Chunk               | Shape                                                                    |
@@ -248,7 +261,25 @@ Two-step capture, in this order:
    ```js
    new RegExp(`(${V})\\.startPolling\\((${V})\\.taskOutput\\.taskId\\)`, 'g')
    // 2.1.261 → aI.startPolling(tn.taskOutput.taskId)
+   // 2.1.321 → c5.startPolling(Nr.taskOutput.taskId,so)   (optional 2nd arg, see below)
    ```
+
+   2.1.321 added a second parameter, `static startPolling(e,n=!0)`, stored as the "read the output
+   file" flag (`false` makes `pollProgress` call `onProgress("","",0,0,!1)` without reading). The regex takes the second arg as `(?:,(V))?`.
+   The CLI computes it right before its own call: `so=!(n&&Mji()),c5.startPolling(id,so)`. `n` is
+   `progressTextUnread`, always true on the SDK path ClaudeUI uses; `Mji()` is a server-side
+   GrowthBook gate (`tengu_lazy_pumpkin`, off today). When the gate turns on, `so` becomes `false`,
+   `pollProgress` stops reading the output file and calls `onProgress("","",0,0,!1)`, and Part A would
+   forward empty `bash_output` frames: live output goes blank after ~2 s. **Part B therefore pins the
+   flag**: it rewrites `so=!(n&&Mji())` to `/*PATCHED:bash-poll-flag*/so=!0` (the 2.1.319 behaviour),
+   keeping the variable so the late-callback guard and other readers stay consistent.
+
+   The rewrite is anchored on the CLI's own call: `(V)=!\((V)&&V\(\)\),<class>.startPolling(<cmd>.taskOutput.taskId,\1)`
+   (the assignment target must be the call's 2nd argument; class and command names are the ones bound
+   in step 1; the gate function is not named). Exactly one match in the window or the patch aborts;
+   a one-arg call (<= 2.1.319) logs and skips. The whole of Part B is guarded by the early-poll marker,
+   so it is idempotent. The one-arg early call we inject (default `!0`) matches the pinned value. The
+   search window is 6000 chars from the Part A anchor.
 
    Taking the class name from a call site _inside the target chunk_ is what guarantees the
    identifier we inject is in scope there (post-split it might be an imported alias).
@@ -547,6 +578,15 @@ through Node pipes — a much larger behavioral change (it also changes what end
   the class binding and the variable off the `startPolling` call first, then constrains the
   `.result` regex to that exact variable. This is both stricter and chunk-safe.
 - Window widened 3,000 → 4,000 and clamped to the chunk edge.
+
+### 2.1.321 re-anchor
+
+- Part A: `ERROR: Cannot locate the bash onProgress callback.` — the body gained the late-callback
+  guard above in front of the four assignments. Optional `lateGuard` group in the anchor, injection
+  moved to after it.
+- Part B: `ERROR: expected exactly 1 <TaskOutput>.startPolling(...) call ... found 0` — the CLI's call
+  is now `startPolling(id,so)`. Optional second argument in the regex; the injected call stays
+  one-arg.
 
 ## Key Functions Reference
 

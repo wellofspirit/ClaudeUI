@@ -52,7 +52,6 @@ const KINDS: ReadonlySet<string> = new Set<HarnessInstallKind>([
   'homebrew',
   'scoop',
   'winget',
-  'standalone',
   'pi-managed',
   'path'
 ])

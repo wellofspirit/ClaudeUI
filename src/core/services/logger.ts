@@ -9,8 +9,8 @@ const LOG_DIR = process.env.CLAUDE_UI_LOG_DIR || join(homedir(), '.claude', 'ui'
 
 /**
  * The directory the daily log files live in, for the rare caller that needs to
- * write a sidecar file beside them (today: `CodexAppServerClient`'s opt-in
- * stderr capture). Resolved at module load like `LOG_DIR` itself, so a later
+ * write a sidecar file beside them (today: the judge capture's `judge/`
+ * directory). Resolved at module load like `LOG_DIR` itself, so a later
  * change to `CLAUDE_UI_LOG_DIR` does not split a process's output across two
  * directories.
  */

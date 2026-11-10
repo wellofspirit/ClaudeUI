@@ -21,9 +21,9 @@
  * with a summary of every failed stage (quiet and -v alike).
  *
  * Targets mirror the package.json scripts: build, build:mac, build:win,
- * build:linux, build:unpack, ensure (the CLI and the three harnesses together),
+ * build:linux, build:unpack, ensure (the CLI and the two harnesses together),
  * postinstall, ensure-cli, update-cli, ensure-opencode, update-opencode,
- * ensure-pi, update-pi, ensure-codex, update-codex. The stage lists live in
+ * ensure-pi, update-pi. The stage lists live in
  * `scripts/lib/build-targets.mjs`; `-h` prints them.
  */
 

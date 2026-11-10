@@ -51,7 +51,6 @@ const snapshot = (...entries: ProviderEntry[]): ProviderRegistrySnapshot => ({
 describe('signInProviderFor', () => {
   it.each([
     ['claude', 'anthropic', 'anthropic'],
-    ['codex', 'openai', 'chatgpt'],
     ['pi', 'openai-codex', 'chatgpt'],
     ['opencode', 'openai', 'chatgpt']
   ] as const)('%s / %s resolves to %s', (engineId, vendorId, providerId) => {
@@ -65,16 +64,6 @@ describe('signInProviderFor', () => {
     const routesOff = auth({ chatgpt: 'unauthenticated', chatgptRoutes: {} })
     expect(signInProviderFor('pi', 'openai-codex', routesOff)).toBeNull()
     expect(signInProviderFor('opencode', 'openai', routesOff)).toBeNull()
-  })
-
-  it('does NOT gate Codex on the shared routes — it has none', () => {
-    // ChatGPT's `engines` facts describe its pi/opencode routes; Codex reads the
-    // vault directly (ADR-068 §1), so an empty `chatgptRoutes` must not silence
-    // the one engine that cannot run without a ChatGPT sign-in.
-    expect(signInProviderFor('codex', 'openai', auth({ chatgpt: 'unauthenticated' }))).toEqual({
-      providerId: 'chatgpt',
-      state: 'unauthenticated'
-    })
   })
 
   it.each([
@@ -128,7 +117,7 @@ describe('chatgptAuthFromRegistry', () => {
       chatgptAuthFromRegistry(
         snapshot(
           chatgptEntry({
-            accounts: { activeId: 'a1', perSession: false, list: [{ id: 'a1', email: 'x@y.z' }] }
+            accounts: { activeId: 'a1', list: [{ id: 'a1', email: 'x@y.z' }] }
           })
         )
       )
@@ -151,7 +140,6 @@ describe('chatgptAuthFromRegistry', () => {
           chatgptEntry({
             accounts: {
               activeId: 'dead',
-              perSession: false,
               list: [{ id: 'fine' }, { id: 'dead', needsReauth: true }]
             }
           })
@@ -167,7 +155,6 @@ describe('chatgptAuthFromRegistry', () => {
           chatgptEntry({
             accounts: {
               activeId: 'fine',
-              perSession: false,
               list: [{ id: 'fine' }, { id: 'dead', needsReauth: true }]
             }
           })

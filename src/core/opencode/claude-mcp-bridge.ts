@@ -2,8 +2,8 @@
  * Bridge Claude MCP servers into opencode's runtime config.
  *
  * opencode reads MCP servers only from its own `mcp` config key — it does NOT
- * scan ~/.claude or project .mcp.json files. This module translates the user's
- * Claude-scoped MCP servers (user/project/local) into opencode 2.x's native
+ * scan ~/.claude or project .mcp.json files. This module translates the shared
+ * Claude MCP catalog (`resolveClaudeMcpCatalog`) into opencode 2.x's native
  * `mcp.servers.<name>` shape (`Mcp.LocalConfig` / `Mcp.RemoteConfig`,
  * vendor/opencode-src/packages/schema/src/mcp.ts) and returns them for
  * injection into OPENCODE_CONFIG_CONTENT at spawn (ADR-097 §4).
@@ -21,13 +21,26 @@
  *   marks it failed when it does not.
  * - The reserved name `claudeui` is filtered out (it's the hosted-tools block in
  *   buildOpencodeConfigContent — a user server must not shadow it).
- * - Respects Claude's per-cwd `disabledMcpServers` list.
+ * - A literal `{env:` / `{file:` in a value must not become an opencode substitution:
+ *   `buildOpencodeConfigContent` escapes them in the serialized text.
  */
 
 import type { McpServerConfig } from '../../shared/types'
 import type { Mcp_LocalConfigEncoded, Mcp_RemoteConfigEncoded } from './protocol-v2/openapi'
-import { readEnabledClaudeMcpServers } from '../services/claude-mcp'
+import { resolveClaudeMcpCatalog } from '../services/claude-mcp-catalog'
+import { expandClaudeEnvRefs } from '../services/claude-env-refs'
 import { logger } from '../services/logger'
+import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
+import * as path from 'node:path'
+
+/** ClaudeUI's own housekeeping directory: it gets no bridged MCP servers and no skill catalog. */
+export function isHousekeepingDir(cwd: string): boolean {
+  const norm = (p: string): string => {
+    const r = path.resolve(p)
+    return process.platform === 'win32' ? r.toLowerCase() : r
+  }
+  return norm(cwd) === norm(PERSISTED_SESSIONS_DIR)
+}
 
 // ---------------------------------------------------------------------------
 // Types — opencode 2.x `Mcp.LocalConfig` / `Mcp.RemoteConfig`
@@ -49,31 +62,43 @@ export const HOSTED_MCP_SERVER = 'claudeui'
 // ---------------------------------------------------------------------------
 
 /**
- * Translate a single Claude McpServerConfig into an OpencodeMcpEntry.
+ * Translate a single catalog entry into an OpencodeMcpEntry, expanding Claude's
+ * `${VAR}` / `${VAR:-default}` against `env` (the environment opencode is
+ * spawned with) in command, args, env, url and headers.
  *
- * Returns null if the config has neither a command nor a url (unresolvable —
- * skip silently rather than injecting a broken entry).
+ * Expanded here, not rewritten to opencode's `{env:VAR}`: opencode substitutes
+ * `{env:}` in the raw config TEXT before parsing it
+ * (vendor/opencode-src/packages/core/src/config/variable.ts `substitute`), and
+ * only JSON-escapes the value when the raw text no longer parses — a value
+ * holding `", "x": "` still parses and would alter the config's structure. An
+ * unset variable would also silently become "" there, with no default.
+ *
+ * Returns null if the config has neither a command nor a url (the catalog
+ * already refuses typeless url-less entries; this guards a direct call).
  */
-export function translateClaudeMcpServer(cfg: McpServerConfig): OpencodeMcpEntry | null {
-  const isStdio =
-    cfg.type === 'stdio' || (cfg.type === undefined && cfg.command !== undefined && !cfg.url)
-  const isRemote =
-    cfg.type === 'sse' || cfg.type === 'http' || (cfg.type === undefined && cfg.url !== undefined)
+export function translateClaudeMcpServer(
+  cfg: McpServerConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  missing: Set<string> = new Set()
+): OpencodeMcpEntry | null {
+  const x = (v: string): string => expandClaudeEnvRefs(v, env, missing)
+  const xs = (m: Record<string, string>): Record<string, string> =>
+    Object.fromEntries(Object.entries(m).map(([k, v]) => [k, x(v)]))
 
-  if (isStdio && cfg.command) {
+  if ((cfg.type === undefined || cfg.type === 'stdio') && cfg.command) {
     return {
       type: 'local',
-      command: [cfg.command, ...(cfg.args ?? [])],
-      ...(cfg.env && Object.keys(cfg.env).length > 0 ? { environment: cfg.env } : {}),
+      command: [x(cfg.command), ...(cfg.args ?? []).map(x)],
+      ...(cfg.env && Object.keys(cfg.env).length > 0 ? { environment: xs(cfg.env) } : {}),
       codemode: false
     }
   }
 
-  if (isRemote && cfg.url) {
+  if ((cfg.type === 'sse' || cfg.type === 'http') && cfg.url) {
     return {
       type: 'remote',
-      url: cfg.url,
-      ...(cfg.headers && Object.keys(cfg.headers).length > 0 ? { headers: cfg.headers } : {}),
+      url: x(cfg.url),
+      ...(cfg.headers && Object.keys(cfg.headers).length > 0 ? { headers: xs(cfg.headers) } : {}),
       codemode: false
     }
   }
@@ -83,26 +108,37 @@ export function translateClaudeMcpServer(cfg: McpServerConfig): OpencodeMcpEntry
 }
 
 // ---------------------------------------------------------------------------
-// I/O: collect from all Claude scopes
+// I/O: collect from the shared catalog
 // ---------------------------------------------------------------------------
 
 /**
- * Collect and translate all Claude MCP servers for a given cwd, merging
- * user/project/local scopes (local wins on collision, then project, then user).
+ * The servers a Claude session in `cwd` would load (`resolveClaudeMcpCatalog`:
+ * every scope, plugins, the disabled list), translated for opencode.
  *
- * - Excludes names in the cwd's `disabledMcpServers` list.
  * - Drops the reserved name `claudeui` (would shadow the hosted-tools block).
+ * - Logs the catalog's own skips and unset `${VAR}` NAMES (never values).
  * - Wraps in try/catch — returns {} on any failure so a transient config-read
  *   error never blocks a spawn.
+ * - Nothing for ClaudeUI's own housekeeping directory (`PERSISTED_SESSIONS_DIR`:
+ *   session lists, credentials, model discovery, usage). opencode connects
+ *   every configured MCP server for each directory a request touches, so a
+ *   bridged catalog there would start the user's servers at app boot with no
+ *   session open.
  */
-export function collectClaudeMcpForOpencode(cwd: string): Record<string, OpencodeMcpEntry> {
+export function collectClaudeMcpForOpencode(
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env
+): Record<string, OpencodeMcpEntry> {
+  if (isHousekeepingDir(cwd)) return {}
   try {
-    // Merge: user first (lowest priority), then project, then local (highest
-    // priority), minus the cwd's disabled list — the read every bridge shares.
-    const enabled: Record<string, McpServerConfig> = readEnabledClaudeMcpServers(cwd)
+    const catalog = resolveClaudeMcpCatalog(cwd)
+    for (const { name, reason } of catalog.skipped) {
+      logger.debug('ClaudeMcpBridge', `MCP server "${name}" not bridged to opencode: ${reason}`)
+    }
 
     const result: Record<string, OpencodeMcpEntry> = {}
-    for (const [name, cfg] of Object.entries(enabled)) {
+    for (const [name, { config, disabled }] of Object.entries(catalog.servers)) {
+      if (disabled) continue
       if (name === HOSTED_MCP_SERVER) {
         logger.warn(
           'ClaudeMcpBridge',
@@ -111,10 +147,16 @@ export function collectClaudeMcpForOpencode(cwd: string): Record<string, Opencod
         continue
       }
 
-      const entry = translateClaudeMcpServer(cfg)
-      if (entry !== null) {
-        result[name] = entry
+      const missing = new Set<string>()
+      const entry = translateClaudeMcpServer(config, env, missing)
+      if (entry === null) continue
+      if (missing.size > 0) {
+        logger.warn(
+          'ClaudeMcpBridge',
+          `MCP server "${name}": unset environment variable(s) ${[...missing].join(', ')} left as written`
+        )
       }
+      result[name] = entry
     }
 
     return result

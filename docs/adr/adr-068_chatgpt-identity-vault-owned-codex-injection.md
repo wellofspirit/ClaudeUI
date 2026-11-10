@@ -6,6 +6,7 @@
 **Amended by:** [ADR-070](adr-070_one-auth-surface.md) — §3's one dialog held, but §4's "one event, one card" did not: every engine emitted the event AND a companion `session:error`, which is why one credential failure produced four simultaneous prompts. ADR-070 moves the verbatim text onto the event, adds `provider:auth-resolved` so a sign-in clears what it fixed, and replaces the banner/row/composer-hint with one top-bar pill.
 **Relates to:** ADR-015 (Claude multi-account, the model this mirrors), ADR-021 (`EngineAuthProvider`), ADR-030 (capability honesty), ADR-045 (opencode disconnect), ADR-047 (opencode server recycle on auth change), ADR-059 (no silent model fallback — the same rule applied to a removed account)
 **Amended by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — where opencode credentials live. As built: ADR-097 §5 "As built (S7)" (access-token-only ChatGPT rows with padded expiry, rotate-by-replace, the pre-turn gate, quit restores the user's row).
+**Amended 2026-10-28:** the Codex engine was removed, retiring §1's token injection into Codex, §5 and §6; the ChatGPT vault identity (§§2-4: accounts, the one sign-in dialog, one auth-required event) remains in use by pi, opencode and the judge.
 
 ## Context
 

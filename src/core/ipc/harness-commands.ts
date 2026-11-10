@@ -125,8 +125,7 @@ export const HARNESS_CHANNELS = [
 const LABELS: Record<HarnessId, string> = {
   claude: 'Claude Code',
   opencode: 'opencode',
-  pi: 'pi',
-  codex: 'Codex'
+  pi: 'pi'
 }
 
 // ── State snapshot ────────────────────────────────────────────────────────────
@@ -244,9 +243,6 @@ function versionArg(payload: unknown): string {
 function managedVersionProblem(id: HarnessId, version: unknown): string | null {
   const label = LABELS[id]
   if (typeof version !== 'string') return `Invalid ${label} version`
-  if (id === 'codex' && version !== 'tested') {
-    return `ClaudeUI's Codex is locked to ${harnessManifest('codex').tested}`
-  }
   if (version === 'tested' || version === 'latest') return null
   if (HARNESS_VERSION_RE.test(version) && versionAccepted(id, version)) return null
   const { floor, ceiling } = harnessManifest(id)
@@ -257,9 +253,9 @@ function managedVersionProblem(id: HarnessId, version: unknown): string | null {
  * A selection `id` can take, normalised, or a throw that says why not:
  *
  * - Claude Code offers `bundled | system` and no version choice;
- * - opencode, pi and Codex offer `managed | system`. Their `version` is the
+ * - opencode and pi offer `managed | system`. Their `version` is the
  *   ClaudeUI choice: `tested`, `latest` or an exact version in [floor,
- *   ceiling), and Codex's copy is locked to its pin (`tested` only). It is kept
+ *   ceiling). It is kept
  *   while System is selected, so switching back restores it (ADR-082 §2): a
  *   selection that names no version keeps `previous`'s when that one is still
  *   valid, and a `managed` one with neither is `tested`.

@@ -251,14 +251,8 @@ export function SessionView(): React.JSX.Element {
       // desktop sidebar this is already true and the call is a no-op.
       setSidebarCollapsed(true)
     }
-    // Same hand-off as the desktop host: a link out of settings closes it.
-    const leave = (): void => setMobileSettings(null)
     window.addEventListener('open-settings', handler)
-    window.addEventListener('open-mcp-servers', leave)
-    return () => {
-      window.removeEventListener('open-settings', handler)
-      window.removeEventListener('open-mcp-servers', leave)
-    }
+    return () => window.removeEventListener('open-settings', handler)
   }, [ownsSettings])
 
   // Global Shift+Tab to cycle permission mode

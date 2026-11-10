@@ -52,7 +52,7 @@ function status(sessionId: string): SessionStatus {
     model: null,
     cwd: null,
     totalCostUsd: 0,
-    engineId: 'codex',
+    engineId: 'pi',
     account: null
   } as SessionStatus
 }
@@ -87,15 +87,15 @@ describe('engine row follows a rekey (host-side, no client save)', { timeout: 30
     const { db, manager, emitEvent } = await fresh()
     try {
       db.setSessionMeta('temp-1', {
-        engineId: 'codex',
-        model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-5' }
+        engineId: 'pi',
+        model: { engineId: 'pi', vendorId: 'openai', modelId: 'gpt-5' }
       })
       emitEvent('session:created', ['temp-1', { cwd: '/x' }])
 
       emitEvent('session:status', ['temp-1', status('thread-9')])
 
       expect(db.getSessionMeta('temp-1')).toBeUndefined()
-      expect(db.getSessionMeta('thread-9')?.engineId).toBe('codex')
+      expect(db.getSessionMeta('thread-9')?.engineId).toBe('pi')
       expect(db.getSessionMeta('thread-9')?.model?.modelId).toBe('gpt-5')
     } finally {
       manager.disposeRekeyObserver()
@@ -106,10 +106,10 @@ describe('engine row follows a rekey (host-side, no client save)', { timeout: 30
   it('keeps the row the engine already wrote under its stable id', async () => {
     const { db, manager, emitEvent } = await fresh()
     try {
-      db.setSessionMeta('temp-1', { engineId: 'codex' })
+      db.setSessionMeta('temp-1', { engineId: 'pi' })
       db.setSessionMeta('thread-9', {
-        engineId: 'codex',
-        model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-real' }
+        engineId: 'pi',
+        model: { engineId: 'pi', vendorId: 'openai', modelId: 'gpt-real' }
       })
       emitEvent('session:created', ['temp-1', { cwd: '/x' }])
 

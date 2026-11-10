@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { useSessionStore, normalizeCwd } from '../stores/session-store'
+import { sessionWorkdir } from '../lib/session-workdir'
 
 const COLD_TIMEOUT_MS = 10 * 60 * 1000 // 10 minutes
 
@@ -13,9 +14,13 @@ const coldTimers = new Map<string, ReturnType<typeof setTimeout>>()
 export function useTerminalColdCleanup(): void {
   useEffect(() => {
     const unsub = useSessionStore.subscribe((state) => {
-      // Compute active cwds from all sessions
+      // Every directory a session holds: its workdir (terminal groups are keyed by it, so a
+      // session in a worktree keeps that group alive) AND its spawn cwd, whose terminals opened
+      // before the session entered the worktree must not be reaped behind the user's back.
       const activeCwds = new Set<string>()
       for (const session of Object.values(state.sessions)) {
+        const workdir = sessionWorkdir(session)
+        if (workdir) activeCwds.add(normalizeCwd(workdir))
         if (session.cwd) activeCwds.add(normalizeCwd(session.cwd))
       }
 

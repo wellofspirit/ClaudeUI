@@ -37,7 +37,7 @@ describe('collectHolders', () => {
         { id: 'abcdef123456', engine: 'claude', live: true, cwds: ['/a', '/b', ''] },
         { id: 's2', engine: 'pi', title: '  Fix the thing ', live: false, cwds: ['/c'] }
       ],
-      xAgents: () => [{ id: 'x1', engine: 'codex', label: 'reviewer', cwd: '/d', live: false }],
+      xAgents: () => [{ id: 'x1', engine: 'pi', label: 'reviewer', cwd: '/d', live: false }],
       terminals: () => [{ id: 't1', cwd: '/e' }]
     })
 
@@ -59,7 +59,7 @@ describe('collectHolders', () => {
         cwd: '/b'
       },
       { kind: 'session', id: 's2', label: 'Fix the thing', live: false, engine: 'pi', cwd: '/c' },
-      { kind: 'x-agent', id: 'x1', label: 'reviewer', live: false, engine: 'codex', cwd: '/d' },
+      { kind: 'x-agent', id: 'x1', label: 'reviewer', live: false, engine: 'pi', cwd: '/d' },
       { kind: 'terminal', id: 't1', label: 'terminal', live: true, cwd: '/e' }
     ])
   })

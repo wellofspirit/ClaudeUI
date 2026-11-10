@@ -113,9 +113,9 @@ describe('locateGit / resolveRepoRoot (C-S4)', () => {
     expect(resolveRepoRoot(path.join(repo, '.claude', 'worktrees', 'gone', 'sub'))).toBe(repo)
   })
 
-  it('a worktree outside the repo (Codex layout) still resolves to the main root', () => {
+  it('a worktree outside the repo still resolves to the main root', () => {
     const repo = makeRepo(path.join(base, 'repo'))
-    const wt = path.join(base, '.codex', 'worktrees', 'ab12', 'repo')
+    const wt = path.join(base, 'elsewhere', 'worktrees', 'ab12', 'repo')
     addWorktree(repo, wt, 'repo')
 
     expect(resolveRepoRoot(wt)).toBe(repo)
@@ -193,14 +193,15 @@ describe('linkedWorktreeOf (3c)', () => {
     expect(linkedWorktreeOf(wt)?.branch).toBe('')
   })
 
-  it('names a Codex-layout worktree <4hex>/<repo> and an opencode one by its slug', () => {
+  it('names an opencode worktree by its slug, and any other out-of-tree one by its last segment', () => {
     const repo = makeRepo(path.join(base, 'repo'))
-    const codex = path.join(base, '.codex', 'worktrees', 'ab12', 'repo')
+    const other = path.join(base, '.codex', 'worktrees', 'ab12', 'repo')
     const opencode = path.join(base, 'data', 'worktree', 'abcdef', 'brave-fox')
-    addWorktree(repo, codex, 'codex')
+    addWorktree(repo, other, 'other')
     addWorktree(repo, opencode, 'opencode')
 
-    expect(linkedWorktreeOf(codex)?.name).toBe('ab12/repo')
+    // Codex's layout (a build that no longer ships Codex) is just another out-of-tree directory.
+    expect(linkedWorktreeOf(other)?.name).toBe('repo')
     expect(linkedWorktreeOf(opencode)?.name).toBe('brave-fox')
   })
 
@@ -236,7 +237,7 @@ describe('classifyWorktreeLocation', () => {
         path.join(os.tmpdir(), '.codex', 'worktrees', 'AB12', 'repo'),
         managedRoot
       )
-    ).toEqual({ location: 'codex', name: 'AB12/repo' })
+    ).toEqual({ location: 'other', name: 'repo' })
     expect(
       classifyWorktreeLocation(
         path.join(os.tmpdir(), 'share', 'worktree', 'a1b2c3', 'slug'),
@@ -272,13 +273,6 @@ describe('classifyWorktreeLocation', () => {
     expect(classifyWorktreeLocation(path.join(managed, 'lnk', 'not-yet'), managed).location).toBe(
       'other'
     )
-  })
-
-  it('a bucket that is not 4 hex digits is not a Codex layout', () => {
-    expect(
-      classifyWorktreeLocation(path.join(os.tmpdir(), 'worktrees', 'zzzz', 'repo'), managedRoot)
-        .location
-    ).toBe('other')
   })
 })
 

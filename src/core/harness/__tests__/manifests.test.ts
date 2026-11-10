@@ -2,9 +2,6 @@
  * @vitest-environment node
  *
  * The release manifests (ADR-082 §5) are the source of truth for "Tested".
- * Codex's own parity checks (host set vs `CODEX_SUPPORTED_HOSTS`, `tested` vs
- * the generated protocol's provenance) live beside the Codex tooling tests in
- * `src/core/codex/__tests__/codex-tooling.test.ts`.
  */
 import { describe, it, expect } from 'vitest'
 import { HARNESS_IDS } from '../../../shared/harness-types'
@@ -26,10 +23,10 @@ describe('harness manifests', () => {
     expect(typeof manifest.platforms).toBe('object')
   })
 
-  it('floors Claude Code at 2.1.308, the bundled build (floor = tested, ADR-082 §3)', () => {
+  it('floors Claude Code at 2.1.321, the bundled build (floor = tested, ADR-082 §3)', () => {
     // The bundled build is the baseline: floor = tested. A deliberate floor
     // decision, so a bump that moves it has to touch this test too.
-    expect(harnessManifest('claude').floor).toBe('2.1.308')
+    expect(harnessManifest('claude').floor).toBe('2.1.321')
   })
 
   it('keeps Claude Code on the bundled build that package.json pins', () => {

@@ -7,8 +7,14 @@
  * 'Backquote'. Matching on `key` would silently drop the binding on exactly the
  * platform it was added for.
  */
-import { describe, it, expect } from 'vitest'
-import { isTerminalToggleShortcut } from '../toggle-terminal'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import {
+  EMPTY_SESSION_STATE,
+  selectActiveTerminalId,
+  selectVisibleTerminalTabs,
+  useSessionStore
+} from '../../../stores/session-store'
+import { isTerminalToggleShortcut, toggleTerminalPanel } from '../toggle-terminal'
 
 /** Minimal KeyboardEvent-shaped stub — the predicate reads five fields. */
 function key(init: {
@@ -80,5 +86,54 @@ describe('isTerminalToggleShortcut', () => {
     expect(
       isTerminalToggleShortcut(key({ key: 'Dead', code: 'Backquote', metaKey: true, altKey: true }))
     ).toBe(false)
+  })
+})
+
+// A session that entered a worktree keeps its spawn cwd, but its shell and its
+// tab group belong to the worktree (the git panel and VS Code point there too).
+describe('toggleTerminalPanel in a worktree session', () => {
+  const WORKTREE = '/repo/.claude/worktrees/wt'
+  let createTerminal: ReturnType<typeof vi.fn>
+  let initial: ReturnType<typeof useSessionStore.getState>
+
+  beforeEach(() => {
+    initial = useSessionStore.getState()
+    createTerminal = vi.fn().mockResolvedValue('term-1')
+    ;(globalThis as any).window.api = { createTerminal }
+    useSessionStore.setState({
+      activeSessionId: 's-1',
+      terminalPanelOpen: false,
+      terminalGroups: {},
+      sessions: {
+        's-1': {
+          ...EMPTY_SESSION_STATE,
+          cwd: '/repo',
+          worktreeInfo: {
+            worktreePath: WORKTREE,
+            worktreeBranch: 'wt',
+            worktreeName: 'wt',
+            originalCwd: '/repo',
+            gitRoot: '/repo',
+            originalHeadCommit: '',
+            createdAt: 0
+          }
+        }
+      }
+    })
+  })
+
+  afterEach(() => {
+    useSessionStore.setState(initial, true)
+  })
+
+  it('opens the shell in the worktree and keys the tab group by it', async () => {
+    toggleTerminalPanel()
+    await Promise.resolve()
+
+    expect(createTerminal).toHaveBeenCalledWith(WORKTREE, 0)
+    const state = useSessionStore.getState()
+    expect(selectVisibleTerminalTabs(state).map((t) => t.cwd)).toEqual([WORKTREE])
+    expect(selectActiveTerminalId(state)).toBe('term-1')
+    expect(Object.keys(state.terminalGroups)).toEqual([WORKTREE])
   })
 })

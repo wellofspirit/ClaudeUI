@@ -142,7 +142,7 @@ describe('AuthPill — tones and labels', () => {
 
   it('a failed vendor flow is not a running one', () => {
     useSessionStore.setState({
-      vendorOAuth: { engineId: 'codex', vendorId: 'openai', stage: 'error', instructions: '' }
+      vendorOAuth: { engineId: 'pi', vendorId: 'openai-codex', stage: 'error', instructions: '' }
     })
     expect(renderPill().container.firstChild).toBeNull()
   })
@@ -174,7 +174,7 @@ describe('AuthPill — app-wide, not per-session', () => {
     renderPill()
     const title = screen.getByTestId('AuthPill').getAttribute('title') ?? ''
     expect(title).toContain('ChatGPT — sign-in expired')
-    expect(title).toContain('Blocks Codex, pi')
+    expect(title).toContain('Blocks pi')
     expect(title).toContain('2 prompts stopped')
     expect(title).toContain('Click to sign in')
   })

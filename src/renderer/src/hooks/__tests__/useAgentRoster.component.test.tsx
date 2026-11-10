@@ -144,30 +144,6 @@ describe('useAgentRoster', () => {
     expect(seen?.runningShellCount).toBe(1)
   })
 
-  it('names a Codex v1 spawn after its model, and gives it no type (ADR-094)', async () => {
-    setSession({
-      ...withEngine('codex'),
-      messages: [
-        assistantWithTool('m1', 'tu-c', 'collab:spawnAgent', {
-          prompt: 'survey the tests',
-          model: 'gpt-5.6-luna',
-          receiverThreadIds: ['child-1']
-        }),
-        assistantWithTool('m2', 'tu-p', 'collab:spawnAgent', {
-          agentPath: '/root/probe',
-          receiverThreadIds: ['child-2']
-        }),
-        assistantWithTool('m3', 'tu-n', 'collab:spawnAgent', { receiverThreadIds: ['child-3'] })
-      ]
-    })
-    await renderProbe()
-
-    // The model names it (as before the type tile); a path leaf wins over it; with
-    // neither it is the bare tool name.
-    expect(seen?.agents.map((r) => r.name)).toEqual(['gpt-5.6-luna', 'probe', 'Agent'])
-    expect(seen?.agents.map((r) => r.type)).toEqual([undefined, undefined, undefined])
-  })
-
   it('marks a cross-engine dispatch with the structured field, not a type (ADR-094)', async () => {
     setSession({
       messages: [
@@ -474,23 +450,23 @@ describe('useAgentRoster', () => {
     })
 
     it("reads a dispatch child's bucket with the child engine's tool map, and what nests in it", () => {
-      // A Codex X-Agent under a Claude session: its `collab:spawnAgent` is no Claude call.
+      // An opencode X-Agent under a Claude session: its `task` is no Claude call.
       const root = [
         assistantWithTool('d-1', 'tu-d', 'mcp__claude-ui-collab__dispatch_agent', {
-          engine: 'codex',
+          engine: 'opencode',
           prompt: 'go'
         })
       ]
       const buckets = {
-        'tu-d': [assistantWithTool('d-2', 'tu-sp', 'collab:spawnAgent', { prompt: 'inner' })],
-        'tu-sp': [assistantWithTool('d-3', 'tu-sp2', 'collab:spawnAgent', { prompt: 'deeper' })]
+        'tu-d': [assistantWithTool('d-2', 'tu-sp', 'task', { subagent_type: 'general' })],
+        'tu-sp': [assistantWithTool('d-3', 'tu-sp2', 'task', { subagent_type: 'explore' })]
       }
       expect(scanAgentTree(root, buckets, 'claude').map((r) => [r.toolUseId, r.depth])).toEqual([
         ['tu-d', 0],
         ['tu-sp', 1],
         ['tu-sp2', 2]
       ])
-      // The same buckets under a native Codex-less reading would list nothing below the dispatch.
+      // Without the child's buckets nothing is listed below the dispatch.
       expect(scanAgentTree(root, {}, 'claude').map((r) => r.toolUseId)).toEqual(['tu-d'])
     })
 
@@ -509,8 +485,7 @@ describe('useAgentRoster', () => {
   })
 
   // ADR-073 §7: a nested row that no lifecycle event describes cannot outlive
-  // its parent. Without this, a refused Codex v2 grandchild (a `started` card
-  // that never gets a result) or a pi/opencode child aborted mid-call reads
+  // its parent. Without this, a pi/opencode child aborted mid-call reads
   // "running" forever.
   describe('a nested row with no lifecycle record', () => {
     const doneNotification = (toolUseId: string) => ({
@@ -521,24 +496,14 @@ describe('useAgentRoster', () => {
       summary: ''
     })
 
-    it('settles as loaded, not running, under a finished parent (Codex v2 refused spawn)', async () => {
+    it('settles as loaded, not running, under a finished parent', async () => {
       setSession({
-        ...withEngine('codex'),
-        messages: [
-          assistantWithTool('m1', 'tu-child', 'collab:spawnAgent', {
-            agentPath: '/root/child',
-            receiverThreadIds: ['thr-child'],
-            agentsStates: {}
-          })
-        ],
+        ...withEngine('opencode'),
+        messages: [assistantWithTool('m1', 'tu-child', 'task', { subagent_type: 'child' })],
         subagentMessages: {
-          // The grandchild's `subAgentActivity started` card: no result, ever.
+          // The grandchild's call: no result, ever.
           'tu-child': [
-            assistantWithTool('c1', 'tu-grandchild', 'collab:spawnAgent', {
-              agentPath: '/root/child/grandchild',
-              receiverThreadIds: ['thr-grandchild'],
-              agentsStates: {}
-            })
+            assistantWithTool('c1', 'tu-grandchild', 'task', { subagent_type: 'grandchild' })
           ]
         },
         taskNotifications: [doneNotification('tu-child')]
@@ -837,30 +802,6 @@ describe('useAgentRoster', () => {
       expect(labels()).toEqual([['opus', false, 'audit the reducer']])
     })
 
-    it('Codex v1: a spawn that names only its model is labelled by the model', async () => {
-      await spawnOn('codex', 'collab:spawnAgent', {
-        prompt: 'survey the tests',
-        model: 'gpt-5.6-luna',
-        receiverThreadIds: ['child-1']
-      })
-      // The normalizer's description is the placeholder "Agent": never the label.
-      expect(seen?.agents[0].description).toBe('Agent')
-      expect(labels()).toEqual([['gpt-5.6-luna', true, 'gpt-5.6-luna']])
-    })
-
-    it('Codex v2: the agent path leaf is the name', async () => {
-      await spawnOn('codex', 'collab:spawnAgent', {
-        agentPath: '/root/probe',
-        receiverThreadIds: ['child-2']
-      })
-      expect(labels()).toEqual([['probe', true, 'probe']])
-    })
-
-    it('Codex: a spawn with neither model nor path falls back to the placeholder', async () => {
-      await spawnOn('codex', 'collab:spawnAgent', { receiverThreadIds: ['child-3'] })
-      expect(labels()).toEqual([['Agent', false, 'Agent']])
-    })
-
     it('opencode: the agent is only a type, so the description labels the row', async () => {
       await spawnOn('opencode', 'task', { subagent_type: 'general', description: 'edit things' })
       expect(labels()).toEqual([['general', false, 'edit things']])
@@ -1110,7 +1051,7 @@ describe('useAgentRoster', () => {
   })
 
   // The model an agent runs on (`resolveAgentModel`): what its own messages report,
-  // else what the spawn asked for, else (Codex) the parent's.
+  // else what the spawn asked for.
   describe('the model a row runs on', () => {
     const assistant = (id: string, model?: string): ChatMessage =>
       ({
@@ -1183,28 +1124,7 @@ describe('useAgentRoster', () => {
       expect(seen?.agents.map((r) => r.model)).toEqual(['claude-opus-5-5', 'claude-haiku-4-5'])
     })
 
-    it('is the parent session’s model for Codex, below the requested one', async () => {
-      setSession({
-        ...withEngine('codex'),
-        messages: [
-          assistantWithTool('m1', 'tu-a', 'collab:spawnAgent', { receiverThreadIds: ['t1'] }),
-          assistantWithTool('m2', 'tu-b', 'collab:spawnAgent', {
-            model: 'gpt-6-luna',
-            receiverThreadIds: ['t2']
-          })
-        ]
-      })
-      setSession({
-        status: {
-          ...useSessionStore.getState().sessions[ROUTE].status,
-          model: { engineId: 'codex', vendorId: 'openai', modelId: 'gpt-6-sol' }
-        }
-      })
-      await renderProbe()
-      expect(seen?.agents.map((r) => r.model)).toEqual(['gpt-6-sol', 'gpt-6-luna'])
-    })
-
-    it('does not borrow the parent’s model on any other engine', async () => {
+    it('does not borrow the parent’s model', async () => {
       setSession({
         messages: [assistantWithTool('m1', 'tu-a', 'Agent', { name: 'scout' })],
         status: {

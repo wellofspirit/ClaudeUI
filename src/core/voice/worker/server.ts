@@ -4,7 +4,7 @@
  *
  * Speaking cli.js's protocol is the whole point: `VoiceStreamClient`, the relay,
  * both capture owners, the pre-`ready` drain, the timeouts and the outcome
- * messages then serve opencode, pi and Codex sessions unchanged.
+ * messages then serve opencode and pi sessions unchanged.
  *
  *   client → server   {"type":"voice_start","language":"en","token":"<hex>","preview":true}
  *                     {"type":"audio","data":"<base64 i16le 16 kHz mono>"}

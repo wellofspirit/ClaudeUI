@@ -5,7 +5,7 @@
  * session's `worktreeInfoMap` entry (slice 3a/3b), driven through the real funnel: canonical
  * state, the reducer and `emitEvent`, with only the config file mocked.
  *
- * What it pins end to end: a curly-quoted cli.js 2.1.308 result records the entry, the entry
+ * What it pins end to end: a curly-quoted cli.js 2.1.317 result records the entry, the entry
  * SURVIVES the next `session:status` (whose cwd is the spawn cwd, equal to `originalCwd`), a
  * second EnterWorktree into another worktree overwrites it, and a successful ExitWorktree clears
  * it. An error result changes nothing.

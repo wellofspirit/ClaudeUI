@@ -9,11 +9,17 @@ import { GitBranchDropdown } from './GitBranchDropdown'
  * the pill is hidden and `TopBar`'s ⋯ menu carries the row that opens the same
  * dropdown — a second derivation there could offer fetch/pull/push for a
  * session the pill itself would have said nothing about.
+ *
+ * A detached worktree (opencode, Codex) has no branch to name, so the pill
+ * names the worktree instead.
  */
 export function useBranchPillName(): string | null {
   const isGitRepo = useActiveSession((s) => s.isGitRepo)
   const gitStatus = useActiveSession((s) => s.gitStatus)
-  return isGitRepo && gitStatus ? gitStatus.branch || 'HEAD' : null
+  const worktreeInfo = useActiveSession((s) => s.worktreeInfo)
+  if (!isGitRepo || !gitStatus) return null
+  const branch = gitStatus.branch || 'HEAD'
+  return branch === 'HEAD' && worktreeInfo ? worktreeInfo.worktreeName : branch
 }
 
 /** The branch mark, shared with the ⋯ row that replaces this pill below tier 1
@@ -27,10 +33,32 @@ export const BRANCH_MARK = (
   </>
 )
 
+/** The worktree mark, shared with the ⋯ row that replaces this pill below tier
+ *  1 — one drawing, whatever `<svg>` box each surface puts it in. */
+export const WORKTREE_MARK = (
+  <>
+    <circle cx="12" cy="18" r="3" />
+    <circle cx="6" cy="6" r="3" />
+    <circle cx="18" cy="6" r="3" />
+    <path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9" />
+    <path d="M12 12v3" />
+  </>
+)
+
+/**
+ * Whether this session runs in a linked worktree - the one pill carries both
+ * facts, so the worktree mark replaces the branch mark (tinted purple by the
+ * pill) rather than a second pill sitting beside it.
+ */
+export function useIsWorktreeSession(): boolean {
+  return useActiveSession((s) => !!s.worktreeInfo)
+}
+
 export function GitBranchPill(): React.JSX.Element | null {
   const gitStatus = useActiveSession((s) => s.gitStatus)
   const syncOp = useActiveSession((s) => s.gitSyncOperation)
   const branchName = useBranchPillName()
+  const isWorktree = useIsWorktreeSession()
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
 
@@ -41,7 +69,7 @@ export function GitBranchPill(): React.JSX.Element | null {
   const isSyncing = syncOp !== 'idle'
 
   // Build detailed tooltip
-  const tooltipParts = [`Branch: ${branchName}`]
+  const tooltipParts = [`${isWorktree ? 'Worktree branch' : 'Branch'}: ${branchName}`]
   if (trackingBranch) {
     if (ahead > 0) tooltipParts.push(`${ahead} ahead`)
     if (behind > 0) tooltipParts.push(`${behind} behind`)
@@ -57,11 +85,15 @@ export function GitBranchPill(): React.JSX.Element | null {
         ref={buttonRef}
         data-testid="GitBranchPill.toggle"
         onClick={() => setDropdownOpen(!dropdownOpen)}
-        className="flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
+        className={`flex items-baseline gap-1.5 px-2 py-1 rounded-md text-[12px] hover:bg-bg-hover transition-colors cursor-default ${
+          isWorktree ? 'text-mode-edit' : 'text-text-muted hover:text-text-primary'
+        }`}
         title={tooltipParts.join(' \u00b7 ')}
       >
-        {/* Git branch icon */}
+        {/* Git branch icon, or the worktree mark in a worktree session */}
         <svg
+          data-testid="GitBranchPill.mark"
+          data-mark={isWorktree ? 'worktree' : 'branch'}
           width="11"
           height="11"
           viewBox="0 0 24 24"
@@ -72,7 +104,7 @@ export function GitBranchPill(): React.JSX.Element | null {
           strokeLinejoin="round"
           className="shrink-0 relative top-[1.5px]"
         >
-          {BRANCH_MARK}
+          {isWorktree ? WORKTREE_MARK : BRANCH_MARK}
         </svg>
         <span className="truncate max-w-[100px] font-mono">{displayName}</span>
 

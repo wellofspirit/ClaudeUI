@@ -121,13 +121,13 @@ describe('AgentRow', () => {
     expect(screen.getByTestId('AgentRow.name').previousElementSibling).toBe(slot)
   })
 
-  it('draws an agent with no type at all (a Codex spawn) as the muted bot alone', async () => {
+  it('draws an agent with no type at all (an opencode spawn) as the muted bot alone', async () => {
     useSessionStore.setState((state) => ({
       sessions: {
         ...state.sessions,
         [ROUTE]: {
           ...state.sessions[ROUTE],
-          status: { ...state.sessions[ROUTE].status, engineId: 'codex' }
+          status: { ...state.sessions[ROUTE].status, engineId: 'opencode' }
         }
       }
     }))

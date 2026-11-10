@@ -35,7 +35,7 @@ Codex credential, feeding both engines' native stores.
   `safeStorage` is resolved **lazily** off a namespace import so merely importing the module (which
   `session.ipc.ts` does transitively) never requires the Electron `safeStorage` API to exist — a
   partial `electron` test mock can't break unrelated suites.
-- **Codex OAuth flow (M6a, `codex-oauth.ts`):** the PKCE-S256 authorize → loopback-callback →
+- **Codex OAuth flow (M6a, `chatgpt-oauth.ts`):** the PKCE-S256 authorize → loopback-callback →
   token-exchange → refresh flow, ported from the vendored opencode source. The loopback callback
   server binds **127.0.0.1** only (matching PiBridgeHost), validates the CSRF `state`, HTML-escapes
   reflected error params, and self-closes after one attempt. The redirect URI stays the registered
@@ -74,7 +74,7 @@ port is the pragmatic choice. This is the one place ClaudeUI implements OAuth it
 
 ## Consequences
 
-- New `src/main/auth/vault/` (AuthVault, codex-oauth, CredentialSync) + `openai-codex` OAuth
+- New `src/main/auth/vault/` (AuthVault, chatgpt-oauth, CredentialSync) + `openai-codex` OAuth
   delegation on `PiAuthProvider`; `OpencodeAuthProvider` gains a direct-file feed/read for its store.
   `credentialSync.start()/stop()` run non-blocking at boot / before-quit.
 - **v1 scope: `openai-codex` only.** The vault key + flow are provider-specific; other providers

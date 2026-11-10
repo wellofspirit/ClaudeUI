@@ -44,9 +44,7 @@ function thirdPartyMcpName(wire: string): string | null {
 /**
  * The ask's action as a person reads it ("X-Agent", "Session · message", "Bash"). A first-party
  * tool takes its friendly label; a third-party MCP tool reads `server / tool` on every engine,
- * because an approval must say which tool it allows, and Codex's map collapses every `mcp__…`
- * name to the kind word "MCP" (its tool card spells the server and tool on a summary line that
- * the approval card does not have).
+ * because an approval must say which tool it allows.
  */
 export function approvalActionName(
   approval: { toolName: string; agent?: { subagentType?: string } },

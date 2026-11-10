@@ -30,8 +30,7 @@ export interface ModelEntry {
  * cli.js up to 2.1.280, write "Name · detail". cli.js 2.1.285 moved the name
  * into `displayName` ("Haiku 4.5") and left only the tagline in `description`,
  * except on `default`, whose `displayName` is "Default (recommended)" and whose
- * description keeps the "Name · detail" form. Codex's native catalog puts a
- * marketing sentence in `description`, so its name is `displayName`.
+ * description keeps the "Name · detail" form.
  */
 export function modelLabel(m: {
   value: string
@@ -43,7 +42,6 @@ export function modelLabel(m: {
   const description = m.description?.trim()
   if (!description) return { shortName: name }
   const [head, detail] = description.split('·').map((part) => part.trim())
-  if (m.engineId === 'codex') return { shortName: name, detail: detail || undefined }
   if (detail === undefined) {
     return m.displayName ? { shortName: m.displayName, detail: head } : { shortName: head }
   }

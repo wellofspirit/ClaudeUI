@@ -3,7 +3,7 @@
  *
  * What ships (ADR-082 §8, amending ADR-061): Claude Code is the one bundled
  * harness — its Bun binary and version metadata, and since ADR-098 no loose
- * native addons (voice captures in the renderer). opencode, pi and Codex are
+ * native addons (voice captures in the renderer). opencode and pi are
  * downloaded into ClaudeUI's managed store, so no package, release zip or
  * server tarball may carry their `vendor/<id>-cli` directories, and
  * `postinstall` installs them into the store for development.
@@ -16,7 +16,7 @@ import pkg from '../../../../package.json'
 
 const ROOT = join(__dirname, '..', '..', '..', '..')
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')
-const UNBUNDLED = /\b(?:opencode|pi|codex)-cli\b/
+const UNBUNDLED = /\b(?:opencode|pi)-cli\b/
 
 interface ExtraResource {
   from: string
@@ -75,18 +75,18 @@ describe('release workflows', () => {
     '.github/workflows/ci.yml',
     '.github/workflows/pre-release.yml',
     '.github/workflows/release.yml'
-  ])('%s copies or caches no vendored opencode, pi or Codex', (file) => {
-    expect(read(file)).not.toMatch(/vendor\/(?:opencode|pi|codex)-cli/)
+  ])('%s copies or caches no vendored opencode or pi', (file) => {
+    expect(read(file)).not.toMatch(/vendor\/(?:opencode|pi)-cli/)
   })
 })
 
 describe('postinstall', () => {
-  it('runs the postinstall build target, which installs opencode, pi and Codex into the managed store', async () => {
+  it('runs the postinstall build target, which installs opencode and pi into the managed store', async () => {
     expect(pkg.scripts.postinstall).toBe('node scripts/build.mjs postinstall')
     const { targets }: any = await import('../../../../scripts/lib/build-targets.mjs')
     const stages = targets({ quiet: true, childEnv: {} }).postinstall
     const group = stages.find((s: any) => s.parallel)
-    for (const id of ['opencode', 'pi', 'codex']) {
+    for (const id of ['opencode', 'pi']) {
       const member = group.parallel.find((m: any) => m.label === `ensure-${id}`)
       expect(member.steps[0][1][0]).toBe(`scripts/ensure-${id}.mjs`)
       expect(pkg.scripts[`ensure-${id}` as keyof typeof pkg.scripts]).toBe(

@@ -16,7 +16,6 @@ import {
   makeChatMessage,
   makeToolUseBlock,
   makeSessionStatus,
-  makePendingApproval,
   resetFactoryCounter
 } from '@test/factories/messages'
 
@@ -74,9 +73,8 @@ describe('E2E: auto-mode verdict on the card it judged', () => {
         type: 'tool_review',
         toolUseId: 'tool-1',
         reviewId: 'rv-1',
-        reviewer: 'codex-auto-review',
+        reviewer: 'auto-mode',
         decision: 'approved',
-        riskLevel: 'medium',
         rationale: 'Writes only to dist/.'
       }
     })
@@ -91,59 +89,12 @@ describe('E2E: auto-mode verdict on the card it judged', () => {
         type: 'tool_review',
         toolUseId: 'tool-1',
         reviewId: 'rv-1',
-        reviewer: 'codex-auto-review',
+        reviewer: 'auto-mode',
         decision: 'approved',
-        riskLevel: 'medium',
         rationale: 'Writes only to dist/.'
       }
     ])
     expect(useSessionStore.getState().sessions[routingId].pendingApprovals).toHaveLength(0)
-  })
-
-  /**
-   * The Codex denial shape end to end: the verdict lands on the card, the
-   * declined result lands under it, and the override offer SURVIVES — a
-   * `tool_result` clears a pending approval, so the producer raises the offer
-   * after it, and nothing about F18 may change that ordering.
-   */
-  it('a denial keeps its verdict and its override offer side by side', () => {
-    const routingId = 'r1'
-    seedToolUse(routingId, 'tool-2')
-
-    app.emit('session:tool-review', routingId, {
-      toolUseId: 'tool-2',
-      review: {
-        type: 'tool_review',
-        toolUseId: 'tool-2',
-        reviewId: 'rv-2',
-        reviewer: 'codex-auto-review',
-        decision: 'denied',
-        riskLevel: 'high',
-        rationale: 'Recursive deletion the task did not ask for.'
-      }
-    })
-    app.emit('session:tool-result', routingId, {
-      toolUseId: 'tool-2',
-      result: 'This action was rejected due to unacceptable risk.',
-      isError: true
-    })
-    app.emit(
-      'session:approval-request',
-      routingId,
-      makePendingApproval({
-        requestId: 'codex-guardian:1',
-        toolName: 'commandExecution',
-        input: { command: 'rm -rf x' },
-        toolUseId: 'tool-2',
-        decisionReason: 'Codex auto-review denied this action.',
-        codex: { guardianOverride: true }
-      })
-    )
-
-    expect(reviewsOn(routingId, 'tool-2').map((b) => b.decision)).toEqual(['denied'])
-    expect(
-      useSessionStore.getState().sessions[routingId].pendingApprovals.map((a) => a.requestId)
-    ).toEqual(['codex-guardian:1'])
   })
 
   it('a verdict for a tool_use nobody holds is dropped, not parked', () => {

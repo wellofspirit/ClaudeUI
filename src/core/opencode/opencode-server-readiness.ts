@@ -170,6 +170,11 @@ export type PermissionGuard =
        * to check closed); the manager logs a warning.
        */
       allowlistLoaded?: boolean
+      /**
+       * The plugin fetched the shared Claude skill catalog for the directory. False
+       * (no endpoint option, or the fetch failed) never refuses a session either.
+       */
+      skillsLoaded?: boolean
     }
   /** No plugin, or it never confirmed both hooks: ClaudeUI must not run sessions here. */
   | { state: 'missing'; reason: string; elapsedMs: number }
@@ -177,7 +182,7 @@ export type PermissionGuard =
 /**
  * "Is ClaudeUI's permission hook active for this directory?" — the plugin's
  * `guard` RPC (`POST /api/rpc/claudeui-xeng/guard`) must answer
- * `{permissionHook: true, mcpDirect: true, modelGate: true}` (plus `allowlistLoaded`,
+ * `{permissionHook: true, mcpDirect: true, modelGate: true}` (plus `allowlistLoaded` and `skillsLoaded`,
  * reported, never required). Unlike {@link waitForHostedTools}
  * there is no heuristic fallback: the MCP status says nothing about hooks, and
  * without the hook the user's saved "always" rows answer ClaudeUI's asks. A
@@ -211,7 +216,12 @@ export async function waitForPermissionGuard(
       output?.mcpDirect === true &&
       output?.modelGate === true
     )
-      return { state: 'active', elapsedMs, allowlistLoaded: output.allowlistLoaded === true }
+      return {
+        state: 'active',
+        elapsedMs,
+        allowlistLoaded: output.allowlistLoaded === true,
+        skillsLoaded: output.skillsLoaded === true
+      }
     last = response
       ? `guard RPC ${response.status} ${JSON.stringify(output ?? response.body).slice(0, 200)}`
       : 'guard RPC unreachable'

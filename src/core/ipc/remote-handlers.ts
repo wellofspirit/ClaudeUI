@@ -1,6 +1,5 @@
 import * as fs from 'fs'
 import { engineInstalled } from '../harness/resolve'
-import { codexCommands } from './codex-commands'
 import { readSessionHistory as loadSessionHistory, historyFor } from '../services/engine-history'
 import type { ProgressReporter } from '../../shared/remote-protocol'
 import * as os from 'os'
@@ -52,15 +51,11 @@ import type {
 } from '../../shared/types'
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
-import {
-  loadClaudePermissions,
-  loadCleanupPeriodDays,
-  isWorkspaceTrusted
-} from '../services/claude-settings'
-import { loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
-import { scanCustomCommands } from '../services/custom-command-scanner'
+import { loadClaudePermissions, loadCleanupPeriodDays } from '../services/claude-settings'
+import { getWorkspaceTrust } from '../services/claude-workspace-trust'
+import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../services/claude-mcp'
 import { usageFetcher } from '../services/usage-fetcher'
-import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { chatgptRateLimits } from '../shared-providers/chatgpt-rate-limits'
 import { readAccountLimits } from '../services/usage-provider'
 import { sanitizeUsageWindowQuery, usageWindowSummary } from '../services/usage-window-ledger'
 import {
@@ -80,7 +75,6 @@ import type {
 import { getSdkExecutableOpts } from '../services/claude-session'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import { answerApproval } from './approval-response'
-import { getSessionMeta } from '../services/db'
 import { emitEvent } from '../services/sync-host'
 import { getCliVersion } from '../sdk/harness'
 import { listAllDirectories } from '../services/sync-seed'
@@ -150,7 +144,6 @@ import {
   askSideQuestion,
   setPermissionMode,
   setEffort,
-  setAccount,
   setThinkingMode,
   setModel,
   setReasoningVariant,
@@ -160,6 +153,7 @@ import {
   mcpStatus,
   setCleanupPeriod,
   savePermissionsAndNotify,
+  setWorkspaceTrustAndNotify,
   loadSkillDetails,
   saveSessions,
   saveUiSettings,
@@ -167,7 +161,6 @@ import {
   listPlaces,
   deleteSession,
   deleteProject,
-  codexDeletePlanFor,
   clearConversation,
   judgeModelSupport,
   judgeRouteResting,
@@ -625,18 +618,6 @@ export function registerRemoteHandlers(
     handler: async (routingId: string, effort: string) => setEffort(manager, routingId, effort)
   })
 
-  // ADR-068 §2 — the per-session vendor account pin. `session-config` like the
-  // two above: choosing which stored subscription a session bills is session
-  // configuration, and the phone manages the same accounts the desktop does.
-  handleRemote({
-    channel: 'session:set-account',
-    capability: 'session-config',
-    kind: 'command',
-    sessionIdArg: 0,
-    handler: async (routingId: string, accountId: string | null) =>
-      setAccount(manager, routingId, accountId)
-  })
-
   handleRemote({
     channel: 'session:set-thinking-mode',
     capability: 'session-config',
@@ -665,7 +646,7 @@ export function registerRemoteHandlers(
     handler: async () => claudeSupportedModels()
   })
 
-  // Cross-engine model catalog (Claude + opencode + pi + Codex, or one engine's
+  // Cross-engine model catalog (Claude + opencode + pi, or one engine's
   // share of it) for the model picker: the same `listEngineModels` as
   // session.ipc.ts's, minus the desktop-only auth-source reporting side effects
   // of its Claude read. It validates the client's engine id.
@@ -840,8 +821,6 @@ export function registerRemoteHandlers(
     capability: 'config',
     kind: 'command',
     handler: async (sessionId: string, projectKey: string, title: string) => {
-      if (getSessionMeta(sessionId)?.engineId === 'codex')
-        throw new Error('Codex titles must not be written to Claude transcript files')
       // LOW-RW3: reachable by any token-holding remote client. Without this,
       // projectKey='../..' + a crafted sessionId appends attacker-controlled
       // JSON to an arbitrary *.jsonl on the host. Mirrors the desktop handler
@@ -1009,15 +988,6 @@ export function registerRemoteHandlers(
     }
   })
 
-  // The desktop twin in session.ipc.ts carries the reasoning; the two must
-  // agree on capability and kind or the registry throws.
-  handleRemote({
-    channel: 'session:codex-delete-plan',
-    capability: 'chat',
-    kind: 'query',
-    handler: async (threadId: string) => codexDeletePlanFor(manager, threadId)
-  })
-
   // -------------------------------------------------------------------------
   // Config (read-write, synced bidirectionally)
   // -------------------------------------------------------------------------
@@ -1071,16 +1041,11 @@ export function registerRemoteHandlers(
     handler: async (id: string) => sharedProviderService.listProviderModels(id)
   })
   handleRemote({
-    channel: 'config:scan-custom-commands',
-    capability: 'config',
-    kind: 'query',
-    handler: async (cwd: string) => scanCustomCommands(cwd)
-  })
-  handleRemote({
     channel: 'config:load-skill-details',
     capability: 'config',
     kind: 'query',
-    handler: async (cwd: string) => loadSkillDetails(manager, cwd)
+    handler: async (routingId: string | null, cwd: string) =>
+      loadSkillDetails(manager, routingId, cwd)
   })
 
   // Claude permissions — full parity with the desktop handler (same
@@ -1104,7 +1069,14 @@ export function registerRemoteHandlers(
     channel: 'claude:workspace-trust',
     capability: 'config',
     kind: 'query',
-    handler: async (cwd: string) => isWorkspaceTrusted(cwd)
+    handler: async (cwd: string) => getWorkspaceTrust(cwd)
+  })
+  handleRemote({
+    channel: 'claude:set-workspace-trust',
+    capability: 'config',
+    kind: 'command',
+    handler: async (cwd: string, trusted: boolean) =>
+      setWorkspaceTrustAndNotify(manager, cwd, trusted)
   })
 
   // Transcript retention window (~/.claude/settings.json#cleanupPeriodDays)
@@ -1128,6 +1100,12 @@ export function registerRemoteHandlers(
     kind: 'query',
     handler: async (scope: string, cwd?: string | null) =>
       loadMcpServers(scope as 'user' | 'project' | 'local', opt(cwd))
+  })
+  handleRemote({
+    channel: 'mcp:load-catalog',
+    capability: 'config',
+    kind: 'query',
+    handler: async (cwd?: string | null) => listMcpCatalog(cwd)
   })
   handleRemote({
     channel: 'mcp:read-disabled',
@@ -1303,7 +1281,8 @@ export function registerRemoteHandlers(
     channel: 'git:create-branch',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string, name: string) => withGit(cwd, (s) => s.createBranch(name))
+    handler: async (cwd: string, name: string, base?: string | null) =>
+      withGit(cwd, (s) => s.createBranch(name, base))
   })
   handleRemote({
     channel: 'git:file-patch',
@@ -1371,7 +1350,19 @@ export function registerRemoteHandlers(
     channel: 'git:pull',
     capability: 'git',
     kind: 'command',
-    handler: async (cwd: string) => withGit(cwd, (s) => s.pull())
+    handler: async (cwd: string, mode?: 'merge' | 'rebase') => withGit(cwd, (s) => s.pull(mode))
+  })
+  handleRemote({
+    channel: 'git:stash-push',
+    capability: 'git',
+    kind: 'command',
+    handler: async (cwd: string) => withGit(cwd, (s) => s.stashPush())
+  })
+  handleRemote({
+    channel: 'git:stash-restore',
+    capability: 'git',
+    kind: 'command',
+    handler: async (cwd: string, sha: string) => withGit(cwd, (s) => s.stashRestore(sha))
   })
   handleRemote({
     channel: 'git:fetch',
@@ -1938,7 +1929,6 @@ export function registerRemoteHandlers(
   for (const cmd of authCommands(resolvedAuthDeps)) {
     handleRemote(cmd)
   }
-  for (const command of codexCommands(manager)) handleRemote(command)
 
   logger.info('remote-handlers', `Registered ${dispatcher.channels().length} remote handlers`)
 }

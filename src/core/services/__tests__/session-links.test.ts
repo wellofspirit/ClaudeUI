@@ -128,13 +128,13 @@ describe('refs', () => {
 })
 
 describe('the engine a ref records', () => {
-  it('is the birth engine for a session that has not reported a status yet (Codex starts lazily)', () => {
-    const codex = born(id('codex'), 'codex')
-    expect(canonical().sessions[codex].status.engineId).toBe('claude') // canonical's default
-    const resolved = resolveRef(codex)
-    expect(resolved).toMatchObject({ ok: true, engine: 'codex' })
+  it('is the birth engine for a session that has not reported a status yet', () => {
+    const pi = born(id('pi'), 'pi')
+    expect(canonical().sessions[pi].status.engineId).toBe('claude') // canonical's default
+    const resolved = resolveRef(pi)
+    expect(resolved).toMatchObject({ ok: true, engine: 'pi' })
     if (!resolved.ok) throw new Error('unreachable')
-    expect(getSessionRef(resolved.ref)?.engine).toBe('codex')
+    expect(getSessionRef(resolved.ref)?.engine).toBe('pi')
   })
 
   it('records a parent’s birth engine when a child is linked under a session that never reported', () => {
@@ -245,11 +245,11 @@ describe('resolveRef', () => {
 describe('linkChild', () => {
   it('records the refs and a starting link, replicates them, and puts the card in the parent', () => {
     const parent = born(id('parent'))
-    const child = born(id('child'), 'codex')
+    const child = born(id('child'), 'pi')
     const { parentRef, childRef } = linkChild({
       parent,
       childRoutingId: child,
-      engine: 'codex',
+      engine: 'pi',
       kind: 'handoff',
       createdBy: 'agent',
       grouped: true,
@@ -283,7 +283,7 @@ describe('linkChild', () => {
           childRef,
           kind: 'handoff',
           title: 'Fix the flaky test',
-          engineId: 'codex'
+          engineId: 'pi'
         }
       ]
     })

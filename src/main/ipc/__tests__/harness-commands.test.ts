@@ -88,7 +88,6 @@ const OC_NEXT_MINOR = OPENCODE.tested.replace(
   /^(\d+)\.(\d+)\..*$/,
   (_m, major, minor) => `${major}.${Number(minor) + 9}.0`
 )
-const CODEX = harnessManifest('codex')
 const CLAUDE = harnessManifest('claude')
 
 let tmp: string
@@ -101,7 +100,7 @@ beforeEach(() => {
   setHostPaths({ getAppPath: () => path.join(tmp, 'app') })
   savedEnv.store = process.env[HARNESS_STORE_ENV]
   process.env[HARNESS_STORE_ENV] = store
-  for (const id of ['claude', 'opencode', 'pi', 'codex'] as const) {
+  for (const id of ['claude', 'opencode', 'pi'] as const) {
     savedEnv[id] = process.env[harnessEnvVar(id)]
     delete process.env[harnessEnvVar(id)]
   }
@@ -118,7 +117,7 @@ afterEach(() => {
   setHostPaths(null)
   if (savedEnv.store === undefined) delete process.env[HARNESS_STORE_ENV]
   else process.env[HARNESS_STORE_ENV] = savedEnv.store
-  for (const id of ['claude', 'opencode', 'pi', 'codex'] as const) {
+  for (const id of ['claude', 'opencode', 'pi'] as const) {
     if (savedEnv[id] === undefined) delete process.env[harnessEnvVar(id)]
     else process.env[harnessEnvVar(id)] = savedEnv[id]
   }
@@ -357,7 +356,7 @@ describe('harness:state', () => {
       path: expect.stringContaining('node'),
       version: '24.1.0'
     })
-    expect(snapshot.harnesses.codex.system).toEqual({
+    expect(snapshot.harnesses.claude.system).toEqual({
       detectedAt: null,
       installs: [],
       choice: { kind: 'fallback', reason: 'System detection has not run yet' }
@@ -447,8 +446,6 @@ describe('harness:set-selection', () => {
     ['claude', { source: 'managed' }, /Claude Code runs from bundled or system/],
     ['claude', { source: 'system', version: 'tested' }, /no version choice/],
     ['opencode', { source: 'bundled' }, /opencode runs from managed or system/],
-    ['codex', { source: 'managed', version: 'latest' }, /locked to/],
-    ['codex', { source: 'managed', version: '0.157.0' }, /locked to/],
     ['opencode', { source: 'managed', version: '1.0.0' }, /not supported/],
     ['opencode', { source: 'managed', version: OPENCODE.ceiling }, /not supported/],
     ['pi', { source: 'managed', version: '../../etc' }, /not supported/],
@@ -506,12 +503,8 @@ describe('harness:set-selection', () => {
     expect(loadHarnessesConfig().selections?.pi).toEqual({ source: 'managed', version: 'latest' })
   })
 
-  it('a managed selection without a version is tested; Codex accepts only that', () => {
+  it('a managed selection without a version is tested', () => {
     expect(validateHarnessSelection('opencode', { source: 'managed' })).toEqual({
-      source: 'managed',
-      version: 'tested'
-    })
-    expect(validateHarnessSelection('codex', { source: 'managed', version: 'tested' })).toEqual({
       source: 'managed',
       version: 'tested'
     })
@@ -524,7 +517,6 @@ describe('harness:set-selection', () => {
         { source: 'managed', version: '0.1.0' }
       )
     ).toEqual({ source: 'system' })
-    expect(CODEX.tested).toMatch(/^\d/)
   })
 })
 
@@ -603,10 +595,10 @@ describe('harness:detect and harness:versions', () => {
     const requestDetection = vi.fn(async () => {})
     const registry = registryOf(commands({ requestDetection }))
     const answer = (await call(registry, 'harness:detect', {
-      ids: ['pi', 'pi', 'codex']
+      ids: ['pi', 'pi', 'opencode']
     })) as HarnessStateSnapshot
-    expect(requestDetection).toHaveBeenCalledWith(['pi', 'codex'], 'user')
-    expect(Object.keys(answer.harnesses).sort()).toEqual(['claude', 'codex', 'opencode', 'pi'])
+    expect(requestDetection).toHaveBeenCalledWith(['pi', 'opencode'], 'user')
+    expect(Object.keys(answer.harnesses).sort()).toEqual(['claude', 'opencode', 'pi'])
 
     await call(registry, 'harness:detect', {})
     expect(requestDetection).toHaveBeenLastCalledWith(undefined, 'user')
@@ -760,8 +752,6 @@ describe('updates', () => {
 })
 
 describe('the upgrade prompt (ADR-082 §8)', () => {
-  const PI = harnessManifest('pi')
-
   async function prompt(
     deps: HarnessCommandDeps = {}
   ): Promise<HarnessStateSnapshot['upgradePrompt']> {
@@ -784,10 +774,9 @@ describe('the upgrade prompt (ADR-082 §8)', () => {
   })
 
   it('offers each used, missing, managed harness; not Claude, an installed one or a System choice', async () => {
-    // pi is installed, so it runs; Codex is on System; Claude is bundled.
-    fakeHarnessInstall(store, 'pi', PI.tested)
-    writeSelections({ codex: { source: 'system' } })
-    sessionCountsByEngine.mockReturnValue({ claude: 50, opencode: 14, pi: 3, codex: 2 })
+    // pi is on System, so ClaudeUI installs nothing for it; Claude is bundled.
+    writeSelections({ pi: { source: 'system' } })
+    sessionCountsByEngine.mockReturnValue({ claude: 50, opencode: 14, pi: 3 })
     const emit = vi.fn()
     const stop = startHarnessEvents(emit)
     try {
@@ -838,9 +827,7 @@ describe('the upgrade prompt (ADR-082 §8)', () => {
       selections: { pi: { source: 'system' } },
       upgradePrompt: 'answered'
     })
-    expect(emit.mock.calls).toEqual(
-      ['opencode', 'pi', 'codex'].map((id) => ['harness:changed', [{ id }]])
-    )
+    expect(emit.mock.calls).toEqual(['opencode', 'pi'].map((id) => ['harness:changed', [{ id }]]))
     // Answered stays answered: a harness used later is not offered by the sheet.
     sessionCountsByEngine.mockReturnValue({ opencode: 1 })
     expect(await prompt()).toEqual({ pending: false, candidates: [] })
@@ -870,7 +857,7 @@ describe('the upgrade prompt (ADR-082 §8)', () => {
   it('harness:answer-upgrade-prompt records the answer beside unknown keys, for an admin connection', async () => {
     fs.mkdirSync(path.dirname(harnessesConfigPath()), { recursive: true })
     fs.writeFileSync(harnessesConfigPath(), JSON.stringify({ future: 1, selections: {} }))
-    sessionCountsByEngine.mockReturnValue({ codex: 4 })
+    sessionCountsByEngine.mockReturnValue({ pi: 4 })
     evaluateUpgradePrompt()
     expect((await prompt()).pending).toBe(true)
 
@@ -896,7 +883,7 @@ describe('events (startHarnessEvents)', () => {
     emit.mockClear()
     invalidateHarness()
     expect(emit.mock.calls).toEqual(
-      ['claude', 'opencode', 'pi', 'codex'].map((id) => ['harness:changed', [{ id }]])
+      ['claude', 'opencode', 'pi'].map((id) => ['harness:changed', [{ id }]])
     )
     stop()
     emit.mockClear()
@@ -934,8 +921,7 @@ describe('events (startHarnessEvents)', () => {
     }
     expect(emit.mock.calls).toEqual([
       ['harness:changed', [{ id: 'opencode' }]],
-      ['harness:changed', [{ id: 'pi' }]],
-      ['harness:changed', [{ id: 'codex' }]]
+      ['harness:changed', [{ id: 'pi' }]]
     ])
   })
 
@@ -958,8 +944,8 @@ describe('events (startHarnessEvents)', () => {
       throw new Error('no subscriber')
     })
     try {
-      expect(() => invalidateHarness('codex')).not.toThrow()
-      expect(resolveHarness('codex').id).toBe('codex')
+      expect(() => invalidateHarness('pi')).not.toThrow()
+      expect(resolveHarness('pi').id).toBe('pi')
     } finally {
       stop()
     }

@@ -9,13 +9,13 @@ vi.mock('node:os', async () => {
   return { ...actual, homedir: () => home.value, default: { ...actual, homedir: () => home.value } }
 })
 import { AuthVault, vaultPath } from '../../../../core/auth/vault/AuthVault'
-import { CredentialSync, type CodexFeedTarget } from '../../../../core/auth/vault/CredentialSync'
+import { CredentialSync, type ChatgptFeedTarget } from '../../../../core/auth/vault/CredentialSync'
 import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
-import type { VaultCredential } from '../../../../core/auth/vault/codex-oauth'
+import type { VaultCredential } from '../../../../core/auth/vault/chatgpt-oauth'
 import {
-  CodexDeviceCodeFlow,
+  ChatgptDeviceCodeFlow,
   DeviceCodeCancelledError
-} from '../../../../core/auth/vault/codex-device-code'
+} from '../../../../core/auth/vault/chatgpt-device-code'
 import { setHostOAuthLoopback } from '../../../../core/host'
 import { createServer } from 'node:http'
 let testHome: string
@@ -56,7 +56,7 @@ describe('AuthVault', () => {
     await vault.save(credential)
     await expect(vault.load()).resolves.toEqual(credential)
   })
-  it('migrates plaintext v1 Codex data on the next write', async () => {
+  it('migrates plaintext v1 ChatGPT data on the next write', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
     writeFileSync(
       vaultPath(),
@@ -94,7 +94,7 @@ describe('AuthVault', () => {
     writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'opaque' }))
     const native = (
       snapshot: { access: string; refresh: string; expires: number } | null
-    ): CodexFeedTarget => ({
+    ): ChatgptFeedTarget => ({
       authFilePath: () => join(testHome, 'native-auth.json'),
       feedOauthCredential: vi.fn(async () => {}),
       readOauthEntry: vi.fn(async () => snapshot),
@@ -122,7 +122,7 @@ describe('AuthVault', () => {
     await vault.saveCredential('custom', { type: 'api_key', key: 'keep' })
     await vault.save({ type: 'oauth', access: 'a', refresh: 'r', expires: 1 })
     // Both engines hold the copy ClaudeUI vended (S7e: only that one goes).
-    const native = (): CodexFeedTarget => ({
+    const native = (): ChatgptFeedTarget => ({
       authFilePath: () => join(testHome, 'native-auth.json'),
       feedOauthCredential: vi.fn(async () => {}),
       readOauthEntry: vi.fn(async () => ({ access: 'a', refresh: 'r', expires: 1 })),
@@ -141,7 +141,7 @@ describe('AuthVault', () => {
   it('clears an unreadable encrypted v1 with no native recovery source so future boots do not retry it', async () => {
     mkdirSync(dirname(vaultPath()), { recursive: true })
     writeFileSync(vaultPath(), JSON.stringify({ v: 1, encrypted: true, data: 'opaque' }))
-    const target = (): CodexFeedTarget => ({
+    const target = (): ChatgptFeedTarget => ({
       authFilePath: () => join(testHome, 'native-auth.json'),
       feedOauthCredential: vi.fn(async () => {}),
       readOauthEntry: vi.fn(async () => null),
@@ -184,7 +184,7 @@ describe('AuthVault validation', () => {
 
 describe('AuthVault lifecycle compatibility', () => {
   function flow(
-    overrides: Partial<import('../../../../core/auth/vault/codex-oauth').LoginFlow> = {}
+    overrides: Partial<import('../../../../core/auth/vault/chatgpt-oauth').LoginFlow> = {}
   ) {
     return {
       start: vi.fn(async () => ({ authorizeUrl: 'https://example.test/auth', state: 's' })),
@@ -291,7 +291,7 @@ describe('AuthVault lifecycle compatibility', () => {
   // ── Device code (ADR-068 §3, Slice 7) ─────────────────────────────────────
   function deviceFlow(
     overrides: Partial<
-      import('../../../../core/auth/vault/codex-device-code').DeviceCodeFlowLike
+      import('../../../../core/auth/vault/chatgpt-device-code').DeviceCodeFlowLike
     > = {}
   ) {
     return {
@@ -352,7 +352,7 @@ describe('AuthVault lifecycle compatibility', () => {
     // A device flow holds the slot for fifteen minutes; refusing here is how a
     // page reload or a second tab strands the user for a quarter of an hour
     // (ADR-068 §3, Slice 7 design point 6).
-    const first = new CodexDeviceCodeFlow({
+    const first = new ChatgptDeviceCodeFlow({
       deps: {
         issuer: 'https://issuer.test',
         fetch: (async (url: string) =>

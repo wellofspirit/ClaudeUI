@@ -78,7 +78,6 @@ vi.mock('../../../core/services/session-history', () => ({
   computeTokenMetrics: vi.fn(() => ({})),
   fallbackBlockText: vi.fn(() => '')
 }))
-vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)

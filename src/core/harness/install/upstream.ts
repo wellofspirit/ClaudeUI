@@ -8,8 +8,6 @@
  *   pi        GitHub's release list for `earendil-works/pi` (the newest 100),
  *             not drafts or prereleases, and only releases that carry this
  *             host's asset and `SHA256SUMS`
- *   Codex     the manifest's tested version, always (ClaudeUI's Codex is
- *             locked to the pin, ADR-082 §2); no network
  *   Claude    nothing (Claude Code has no ClaudeUI-managed copy)
  *
  * Only stable versions (`x.y.z`) at or above the floor and below the ceiling
@@ -133,7 +131,6 @@ export function createUpstream(deps: UpstreamDeps = {}): Upstream {
   async function load(id: HarnessId): Promise<string[] | null> {
     const manifest = manifestOf(id)
     try {
-      if (id === 'codex') return [manifest.tested]
       if (id === 'opencode') return newestFirst(manifest, await opencodeVersions(manifest))
       if (id === 'pi') return newestFirst(manifest, await piVersions(manifest))
       return []

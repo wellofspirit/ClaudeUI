@@ -150,9 +150,10 @@ export function isImageMediaType(mediaType: unknown): mediaType is ImageMediaTyp
  * A permission JUDGE's verdict on the tool call it judged, carried on the card
  * of that call rather than as prose beside it (ADR-067, F18).
  *
- * Two reviewers produce one: Codex's native auto-review (`codex-auto-review`,
- * whose `riskLevel` is the reviewer's own) and the Auto-mode classifier
- * (`auto-mode`, whose `rule` names the rule it matched). `auto-mode` covers two
+ * Two reviewers produce one: the Auto-mode classifier (`auto-mode`, whose
+ * `rule` names the rule it matched) and, in transcripts stored before the Codex
+ * engine was removed, Codex's native auto-review (`codex-auto-review`, whose
+ * `riskLevel` is the reviewer's own; nothing writes it any more). `auto-mode` covers two
  * judges that answer the same question: ClaudeUI's own classifier on opencode
  * and pi, and cli.js's native one on Claude, whose verdict reaches us as
  * `system/permission_denied` — blocks only, since cli.js emits no frame for an
@@ -172,7 +173,7 @@ export type ToolReviewBlock = {
   reviewId: string
   reviewer: 'codex-auto-review' | 'auto-mode'
   decision: 'approved' | 'denied' | 'timedOut' | 'aborted' | 'inProgress'
-  /** Codex's auto-review only — ClaudeUI's judge scores no risk level. */
+  /** `codex-auto-review` blocks only (stored transcripts) — ClaudeUI's judge scores no risk level. */
   riskLevel?: 'low' | 'medium' | 'high' | 'critical'
   /** ClaudeUI's judge only — the corpus rule name behind a block. */
   rule?: string
@@ -182,7 +183,7 @@ export type ToolReviewBlock = {
    * its held card, or Approve on the blocked review afterwards. The host
    * re-sends the review with this set (a new `reviewId`, so the reducer's
    * last-one-wins shows it and it replicates like any review); the card then
-   * reads "approved by you" and offers no Approve. Never set by Codex.
+   * reads "approved by you" and offers no Approve.
    */
   overriddenByUser?: true
   /**
@@ -295,12 +296,18 @@ export type ContentBlock =
   | { type: 'compact_separator'; text?: string }
   /**
    * Context an engine injected into the model's prompt that the USER never
-   * typed — Codex's `hookPrompt` fragments today, pi's `custom_message`
-   * entries, and (later) Claude's `attachment` family. Collapsed to a count by
+   * typed — pi's `custom_message` entries, and (later) Claude's `attachment` family. Collapsed to a count by
    * default; every fragment is UNTRUSTED third-party text and is rendered
    * verbatim, never through the markdown pipeline.
    */
   | { type: 'context_note'; title: string; fragments: { text: string; label?: string }[] }
+  /**
+   * What a dispatched agent's engine reported about the run that no message of the agent
+   * carries, shown in its card's transcript — today a Claude target's model switch
+   * (`model_refusal_fallback` / `model_fallback`, which a root session shows as a warning).
+   * The engine's own text, rendered verbatim, never through the markdown pipeline.
+   */
+  | { type: 'notice'; text: string }
   /**
    * Claude Code holding (or having held) a message another Claude session sent
    * this one over its own socket — `system/peer_message_hold`. One row per
@@ -355,14 +362,6 @@ export type ContentBlock =
       /** The started session's ref, once it has started. */
       startedRef?: string
     }
-  /**
-   * The rendered output of a code review the engine ran (Codex's
-   * `exitedReviewMode`). The one untrusted-text block that DOES go through
-   * markdown, by decision (F20): it is the model's own structured review — a
-   * numbered list with file:line citations — and reading it as a wall of plain
-   * text loses the structure that makes it usable.
-   */
-  | { type: 'review_result'; text: string }
   /** A user-attached image. The bytes live in the host's blob store (see {@link BlobRef}). */
   | { type: 'image'; mediaType: ImageMediaType; blobId: string; bytes: number; fileName?: string }
   /** A user-attached PDF. The bytes live in the host's blob store (see {@link BlobRef}). */
@@ -384,8 +383,6 @@ export interface FileAttachment {
 }
 
 export interface ChatMessage {
-  /** Native acknowledgement replaces a host-minted pending user row by identity. */
-  replacesMessageId?: string
   id: string
   role: 'user' | 'assistant' | 'system'
   content: ContentBlock[]
@@ -421,7 +418,9 @@ export interface ChatMessage {
   thinkingDurationMs?: number
 }
 
-export type EngineId = 'claude' | 'opencode' | 'pi' | 'codex'
+export const ENGINE_IDS = ['claude', 'opencode', 'pi'] as const
+
+export type EngineId = (typeof ENGINE_IDS)[number]
 
 /**
  * Who a prompt handed to `sendPrompt` speaks for. `user` (the default) is text
@@ -465,8 +464,7 @@ export function piModel(vendorId: VendorId, modelId: string): ModelRef {
 export type BillingType = 'subscription' | 'apiKey' | 'free' | 'unknown'
 
 /**
- * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent or
- * a Codex child thread; 'dispatch' is a cross-engine dispatch (ADR-033), which
+ * Where a metered turn came from (ADR-071 §1). 'child' is a native subagent; 'dispatch' is a cross-engine dispatch (ADR-033), which
  * counts in dashboard totals but not in the dispatching session's headline.
  * 'judge' is an auto-mode judge call ClaudeUI made itself for the session named
  * by `parentRoutingId` (ADR-081 §5).
@@ -507,7 +505,7 @@ export interface VendorAuthOption {
 }
 
 /**
- * Read-only snapshot of the M6a/M6b auth vault's Codex (ChatGPT) credential —
+ * Read-only snapshot of the M6a/M6b auth vault's ChatGPT credential —
  * CredentialSync.getStatus(). Drives PiVendors.tsx's (M6c) "Connect ChatGPT"
  * UI. NEVER carries token material (access/refresh).
  */
@@ -534,8 +532,6 @@ export interface AccountRef {
 }
 
 export interface SessionStatus {
-  /** Native Codex policy is authoritative; shared PermissionMode does not apply. */
-  codex?: import('./codex-types').CodexSessionState
   state: 'idle' | 'running' | 'error' | 'disconnected'
   sessionId: string | null
   /** Vendor-qualified model identity. Null until the engine reports a model. */
@@ -564,7 +560,6 @@ export interface PermissionSuggestion {
 }
 
 export interface PendingApproval {
-  codex?: import('./codex-types').CodexApprovalPayload
   requestId: string
   /**
    * Set by the dispatcher when it puts back a card a parent's disconnect cleared (ADR-105
@@ -617,8 +612,7 @@ export interface PendingApproval {
    * Set when the card holds an auto-mode judge BLOCK for the user (ADR-091 §3;
    * pi, opencode and their dispatch targets): the card offers Keep blocked /
    * Approve anyway, never a standing rule. `expiresAt` (epoch ms) is when the
-   * host resolves it as Keep blocked and withdraws the card. Engine-neutral,
-   * unlike Codex's after-the-fact `codex.guardianOverride`.
+   * host resolves it as Keep blocked and withdraws the card. Engine-neutral.
    */
   autoModeBlock?: { expiresAt: number }
   suggestions?: PermissionSuggestion[]
@@ -1082,8 +1076,6 @@ export interface EngineConfig {
   dispatch?: DispatchConfig
   /** pi engine-configurable settings (M3). Lives in engines/pi.json. */
   piConfig?: PiConfig
-  /** Codex engine-configurable settings (ADR-068 §6). Lives in engines/codex.json. */
-  codexConfig?: CodexEngineConfig
   /** Claude session defaults (ADR-074 §8). Lives in engines/claude.json. */
   claudeConfig?: ClaudeEngineConfig
   /**
@@ -1108,28 +1100,24 @@ export interface EngineConfig {
 export interface ClaudeEngineConfig {
   /** A Claude picker value from `supportedModels()`: an alias (`opus`, `sonnet[1m]`, …; ADR-100). */
   defaultModel?: string
-}
-
-/**
- * ClaudeUI's OWN per-engine defaults for Codex — NOT `config.toml`.
- *
- * Codex's native file already carries a `model`, and the Engines › Codex page
- * edits it through the app-server. This block is the ClaudeUI-side answer to a
- * different question: what a session STARTED FROM CLAUDEUI runs on, which is
- * carried on `turn/start` and therefore overrides whatever the working
- * directory's layers resolve to. Blank means "say nothing", which is what makes
- * the native value win — today's behaviour, and the reason neither key has a
- * fallback constant the way `piConfig.defaultModel` has `PI_DEFAULT_MODEL`.
- *
- * A value here IS an explicit choice (ADR-059): a session seeded from it carries
- * `codexModelExplicit`, so a model the catalog no longer lists banners rather
- * than silently resolving to something else.
- */
-export interface CodexEngineConfig {
-  /** Native Codex model id (`gpt-5.6-codex`), from `model/list`. */
-  defaultModel?: string
-  /** Native reasoning tier, from the selected model's `supportedReasoningEfforts`. */
-  defaultEffort?: string
+  /**
+   * Whether cli.js may summarise a long (200K+ token) conversation left idle —
+   * its `idleCompaction` setting (read as `ri("idleCompaction",!0)`,
+   * `vendor/claude-cli/cli.js` 2.1.317). ClaudeUI's default is OFF: absent
+   * means false, and the value is passed per spawn as `--settings` flag
+   * settings, so the user's own `~/.claude/settings.json` (which the terminal
+   * `claude` shares) is never touched.
+   */
+  idleCompaction?: boolean
+  /**
+   * Whether cli.js's built-in `cc-plugin-privacy@builtin` plugin asks before a
+   * Web/Bash/Monitor/PowerShell call whose input holds the account email
+   * address. ClaudeUI's default is ON: absent means true. cli.js reads the
+   * plugin's switch (`enabledPlugins`, `defaultEnabled:!0`,
+   * `enabledFromTrustedSettingsOnly:!0`) only from user, flag or policy
+   * settings, so it is passed per spawn as `--settings` flag settings.
+   */
+  privacyEmailCheck?: boolean
 }
 
 /**
@@ -1178,7 +1166,7 @@ export interface DispatchConfig {
   maxCostUsd?: number
   /**
    * Absolute cap on ONE dispatched turn, in MILLISECONDS — the user's own
-   * limit, applied in EVERY dispatch direction (Claude, opencode, pi, Codex).
+   * limit, applied in EVERY dispatch direction (Claude, opencode, pi).
    *
    * THERE IS NO BUILT-IN DEFAULT (ADR-033's 2026-09-18 amendment): undefined
    * and `0` both mean NO LIMIT. A dispatched agent then runs until it finishes,
@@ -1368,6 +1356,18 @@ export interface ClaudePermissions {
 }
 
 export type PermissionScope = 'user' | 'project' | 'local'
+
+/**
+ * Claude Code's workspace trust for a cwd (`~/.claude.json#projects[root].hasTrustDialogAccepted`).
+ * Untrusted, cli.js drops every allow rule and added directory from the project and local scopes.
+ */
+export interface WorkspaceTrust {
+  /** The directory cli.js records trust on: the canonical git root (the main checkout for a linked worktree), else the cwd. */
+  root: string
+  trusted: boolean
+  /** The cwd is a linked git worktree; trust is recorded on its main checkout. */
+  worktree: boolean
+}
 
 // AskUserQuestion tool types
 export interface AskUserQuestionOption {
@@ -1688,8 +1688,6 @@ export interface WatchUpdate {
 }
 
 export interface ModelInfo {
-  nativeEffortOptions?: Array<{ value: string; description: string }>
-  nativeDefaultEffort?: string
   value: string
   /** Concrete model id an alias resolves to, straight off cli.js's
    *  `supportedModels()` (e.g. `default` → `claude-opus-5[1m]`). Present on
@@ -1775,7 +1773,7 @@ export interface DirectoryGroup {
   sessions: SessionInfo[]
   /**
    * Set (main side, filesystem facts only) when `cwd` is a linked git worktree, wherever it
-   * lives (`<repo>/.claude/worktrees`, opencode's data dir, `~/.codex/worktrees`). Every session
+   * lives (`<repo>/.claude/worktrees`, opencode's data dir). Every session
    * row in this group is a worktree session; the sidebar and the pill read it by normalised cwd.
    */
   linkedWorktree?: LinkedWorktree
@@ -1920,16 +1918,10 @@ interface SessionAPI {
     warnings: string[]
     /**
      * Subagent transcripts the reader already resolved, by PARENT tool_use id.
-     * Codex's native children are threads on the same connection, so its reader
-     * returns them inline; Claude's live in per-agent JSONL files and are
-     * fetched separately through {@link loadSubagentHistory}.
+     * opencode's and pi's readers return them inline; Claude's live in per-agent
+     * JSONL files and are fetched separately through {@link loadSubagentHistory}.
      */
     subagentMessages?: Record<string, ChatMessage[]>
-    /**
-     * Codex only: the native reasoning tier the thread last ran at, which a
-     * cold reopen shows and resumes with. `null` when the rollout names none.
-     */
-    lastEffort?: string | null
     /**
      * The X-Agents of this session that are running now (ADR-105 §5): their task
      * records, which no transcript holds. Keyed by the launching tool_use id.
@@ -2074,12 +2066,6 @@ interface SessionAPI {
   setPermissionMode(routingId: string, mode: string): Promise<void>
   setModel(routingId: string, model: string): Promise<void>
   setEffort(routingId: string, effort: string): Promise<void>
-  /**
-   * Pin a session to one stored vendor account, or `null` to follow the active
-   * one (ADR-068 §2). Only Codex answers it today
-   * (`capabilities.auth.perSessionAccount`); every other engine rejects.
-   */
-  setSessionAccount(routingId: string, accountId: string | null): Promise<void>
   setThinkingMode(routingId: string, mode: string): Promise<void>
   setReasoningVariant(routingId: string, variant: string | null): Promise<void>
   getModels(): Promise<ModelInfo[]>
@@ -2177,8 +2163,8 @@ interface SessionAPI {
   deleteProject(projectKey: string): Promise<void>
   loadSlashCommands(): Promise<SlashCommandInfo[]>
   saveSlashCommands(commands: SlashCommandInfo[]): Promise<void>
-  scanCustomCommands(cwd: string): Promise<string[]>
-  loadSkillDetails(cwd: string): Promise<SkillInfo[]>
+  /** The session's own skills (its engine's plus the shared catalog); catalog for `cwd` with no live session. */
+  loadSkillDetails(routingId: string | null, cwd: string): Promise<SkillInfo[]>
   onBeforeQuit(cb: () => void): () => void
   /**
    * Confirm the quit. `removeWorktreePaths`: worktree directories to delete AFTER the
@@ -2282,8 +2268,6 @@ interface SharedProviderAPI {
   switchProviderAccount(providerId: string, accountId: string): Promise<void>
   /** Forget one stored account. Removing the active one promotes the newest remaining. */
   removeProviderAccount(providerId: string, accountId: string): Promise<void>
-  /** Turn per-session account pinning on or off for a subscription provider. */
-  setProviderAccountsPerSession(providerId: string, enabled: boolean): Promise<void>
   listSharedProviders(): Promise<SharedProviderDefinition[]>
   getSharedProviderStatuses(): Promise<SharedProviderStatus[]>
   listSharedProviderModels(id: string): Promise<SharedProviderModel[]>
@@ -2350,7 +2334,8 @@ interface GitAPI {
   gitGetStatus(cwd: string): Promise<GitStatusData>
   gitGetBranches(cwd: string): Promise<GitBranchData>
   gitCheckout(cwd: string, branch: string): Promise<void>
-  gitCreateBranch(cwd: string, name: string): Promise<void>
+  /** `base` = the commit-ish to branch from (`checkout -b name base`); omitted = the current HEAD. */
+  gitCreateBranch(cwd: string, name: string, base?: string | null): Promise<void>
   gitGetFilePatch(
     cwd: string,
     filePath: string,
@@ -2370,7 +2355,12 @@ interface GitAPI {
   gitCommit(cwd: string, message: string): Promise<string>
   gitPush(cwd: string): Promise<void>
   gitPushWithUpstream(cwd: string, branch: string): Promise<void>
-  gitPull(cwd: string): Promise<{ summary: string }>
+  /** `mode` picks how a diverged pull reconciles (`--rebase` / `--no-rebase`); omitted = git's own config. */
+  gitPull(cwd: string, mode?: 'merge' | 'rebase'): Promise<{ summary: string }>
+  /** `git stash push -u` labelled `ClaudeUI autostash: <branch> <ISO time>`. */
+  gitStashPush(cwd: string): Promise<void>
+  /** Apply the stash with this commit sha, then drop exactly that entry. A conflict leaves it in place. */
+  gitStashRestore(cwd: string, sha: string): Promise<void>
   gitFetch(cwd: string): Promise<void>
   /**
    * Replace this connection's set of git-watched cwds (phase 5 S2).
@@ -2400,6 +2390,26 @@ interface McpAPI {
     cwd?: string
   ): Promise<void>
   removeMcpServer(scope: McpServerScope, serverName: string, cwd?: string): Promise<void>
+  /** `cwd` omitted: the home directory (user-scope view, no project). */
+  loadMcpCatalog(cwd?: string): Promise<McpCatalogResult>
+  /** Add through `claude mcp add-json -s <scope>` (cwd = the session cwd). */
+  mcpCliAdd(
+    scope: 'user' | 'project' | 'local',
+    name: string,
+    config: McpServerConfig,
+    cwd?: string
+  ): Promise<McpCliResult>
+  mcpCliRemove(
+    scope: 'user' | 'project' | 'local',
+    name: string,
+    cwd?: string
+  ): Promise<McpCliResult>
+  /** Make a live Claude session re-read its MCP config (after a native write). */
+  mcpReloadServers(
+    routingId: string,
+    /** Retry (bounded) until this server is / is no longer listed live. */
+    expect?: { name: string; present: boolean }
+  ): Promise<void>
   mcpReadDisabled(cwd: string): Promise<string[]>
   mcpToggleDisabled(cwd: string, serverName: string, enabled: boolean): Promise<void>
   loadClaudePermissions(scope: PermissionScope, cwd?: string): Promise<ClaudePermissions>
@@ -2408,10 +2418,13 @@ interface McpAPI {
     permissions: ClaudePermissions,
     cwd?: string
   ): Promise<void>
-  /** Whether Claude Code honors this workspace's project/local ALLOW rules
-   *  (~/.claude.json#projects[cwd].hasTrustDialogAccepted). Untrusted → cli.js
-   *  silently drops them; deny/ask and user-scope allows still apply. */
-  isWorkspaceTrusted(cwd: string): Promise<boolean>
+  /** Whether Claude Code honors this workspace's project/local ALLOW rules, and the
+   *  directory that trust is recorded on. Untrusted → cli.js silently drops them;
+   *  deny/ask and user-scope allows still apply. null when there is no cwd. */
+  getWorkspaceTrust(cwd: string): Promise<WorkspaceTrust | null>
+  /** Trust or untrust the workspace (writes ~/.claude.json the way cli.js's own trust
+   *  dialog does) and refresh running Claude sessions on it. Resolves to the new state. */
+  setWorkspaceTrust(cwd: string, trusted: boolean): Promise<WorkspaceTrust>
   /** Transcript retention window (cleanupPeriodDays). undefined = not set (CLI default of 30). */
   getCleanupPeriodDays(): Promise<number | undefined>
   setCleanupPeriodDays(days: number): Promise<void>
@@ -2618,7 +2631,15 @@ interface FileAPI {
     sessionKey: string,
     filePath: string
   ): Promise<{ src: string } | { error: string }>
-  createWorktree(cwd: string, name: string): Promise<WorktreeInfo>
+  /**
+   * `opts.base`: `'head'` (default) branches from HEAD; `'default'` from the remote's default
+   * branch (HEAD when there is none).
+   */
+  createWorktree(
+    cwd: string,
+    name: string,
+    opts?: { base?: 'head' | 'default' }
+  ): Promise<WorktreeInfo>
   getWorktreeStatus(worktreePath: string, originalHead: string): Promise<WorktreeStatus>
   /**
    * Legacy single-path removal (session-delete cleanup modal). Same mechanics as
@@ -2656,7 +2677,7 @@ interface FileAPI {
  * here is display material: the page to open, the code to type, and when the
  * host stops polling. The `device_auth_id` the host polls with never crosses the
  * wire. Structurally mirrored by `DeviceCodeStart` in
- * `core/auth/vault/codex-device-code.ts`, which owns the flow.
+ * `core/auth/vault/chatgpt-device-code.ts`, which owns the flow.
  */
 export interface VendorDeviceCodeStart {
   verificationUrl: string
@@ -2737,7 +2758,7 @@ interface AccountAPI {
   fetchAccountUsage(): Promise<AccountUsage>
   /**
    * Per-account ChatGPT rate limits (ADR-068 §2). `refresh` asks the host to
-   * read them from Codex first; without it the last known map comes back.
+   * read them from the ChatGPT backend first; without it the last known map comes back.
    */
   fetchChatgptLimits(refresh?: boolean): Promise<ChatgptRateLimits>
   fetchBlockUsage(): Promise<BlockUsageData>
@@ -3672,30 +3693,6 @@ export interface ClaudeAPI
     VoiceAPI,
     SharedProviderAPI,
     PluginAPI {
-  codexApproval(
-    routingId: string,
-    requestId: string,
-    decision: import('./codex-types').CodexApprovalDecision
-  ): Promise<void>
-  codexAuthStatus(): Promise<import('./codex-types').CodexAuthStatus>
-  /**
-   * Codex's own `config.toml` plus the compiled Bash-rule status (ADR-068 §6).
-   * Read through the app-server — ClaudeUI never parses TOML.
-   */
-  readCodexConfig(): Promise<import('./codex-types').CodexConfigRead>
-  /**
-   * Apply edits to `config.toml` in ONE `config/batchWrite`. `value: null`
-   * REMOVES a key (that is what a row's Reset does). `expectedVersion` is the
-   * version the caller last read; a mismatch is reported, never clobbered.
-   */
-  writeCodexConfig(
-    edits: import('./codex-types').CodexConfigEdit[],
-    expectedVersion: string
-  ): Promise<import('./codex-types').CodexConfigWriteResult>
-  /** Recompile `$CODEX_HOME/rules/claudeui.rules` and answer its fresh status. */
-  recompileCodexRules(): Promise<import('./codex-types').CodexRulesStatus>
-  /** What deleting this Codex thread would remove: the thread and every branch cut from it. */
-  codexDeletePlan(threadId: string): Promise<import('./codex-types').CodexDeletePlan>
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */
@@ -3706,7 +3703,7 @@ export interface ClaudeAPI
    *  executable, or a System pi's shim rather than its `cli.js`; null if not
    *  found. Settings › pi's subscription hint block (`pi /login`). */
   getPiBinaryPath(): Promise<string | null>
-  /** Read-only Codex (ChatGPT) auth-vault connection status (M6c). Drives
+  /** Read-only ChatGPT auth-vault connection status (M6c). Drives
    *  PiVendors.tsx's "Connect ChatGPT" UI — never returns token material. */
   getPiAuthStatus(): Promise<PiAuthStatus>
 }
@@ -3721,8 +3718,7 @@ export interface RateWindow {
   /**
    * How long the window lasts, when the vendor says (ADR-071 §6, S3c).
    *
-   * ChatGPT states it (`limit_window_seconds` → Codex's `window_minutes` →
-   * `windowDurationMins`) and it is what the window's KIND is derived from, so
+   * ChatGPT states it (`limit_window_seconds`, converted to minutes) and it is what the window's KIND is derived from, so
    * a plan with only a weekly limit is no longer filed as a five-hour one.
    * Claude never states it: its windows are named by the API itself
    * (`five_hour`, `seven_day`), so the name carries the length and this stays
@@ -3734,10 +3730,9 @@ export interface RateWindow {
 /**
  * ChatGPT subscription usage for ONE stored vault account (ADR-068 §2).
  *
- * Codex's `RateLimitSnapshot` maps onto {@link RateWindow} one to one —
- * `usedPercent` is already 0-100 and `resetsAt` is a unix timestamp in SECONDS
- * (`protocol/src/protocol.rs`: "Unix timestamp (seconds since epoch) when the
- * window resets"), converted to ISO 8601 on the way in so the panel's existing
+ * The backend's rate-limit windows map onto {@link RateWindow} one to one —
+ * `used_percent` is already 0-100 and `reset_at` is a unix timestamp in SECONDS,
+ * converted to ISO 8601 on the way in so the panel's existing
  * `formatResetTime` works unchanged.
  *
  * `primary` and `secondary` are SLOTS, not lengths (corrected 2026-09-21, S3c):
@@ -3754,8 +3749,7 @@ export interface ChatgptAccountLimits {
   secondary: RateWindow | null
   /**
    * A CREDITS-based plan (a business workspace, seen live 2026-09-14) reports no
-   * windows at all — both are null in `rateLimits` and in
-   * `rateLimitsByLimitId.codex` — and answers with a credit balance instead.
+   * windows at all — both are null — and answers with a credit balance instead.
    * Percentage bars are not the shape that plan has, so the balance is what the
    * panel shows for it. Absent when the backend says the account has no credits.
    */
@@ -3770,16 +3764,16 @@ export interface ChatgptAccountLimits {
 
 /**
  * A business workspace member's credit allowance: the backend's
- * `spend_control.individual_limit`, which Codex forwards as `individualLimit`
- * and its own `/status` renders as "Monthly credit limit — N of M credits used".
+ * `spend_control.individual_limit`, which the Codex CLI's `/status`
+ * renders as "Monthly credit limit — N of M credits used".
  *
  * It is what makes a credits plan's usage legible. `credits` only says the
  * workspace HAS credits (its balance is usually withheld from members), while
  * this says how much of the member's share is spent.
  *
  * The wire carries the amounts as decimal STRINGS; they are parsed once on the
- * way in, and an allowance whose amounts do not parse is dropped whole, as
- * Codex's own display drops it. `resetsAt` is ISO 8601 like every
+ * way in, and an allowance whose amounts do not parse is dropped whole.
+ * `resetsAt` is ISO 8601 like every
  * {@link RateWindow}. It is a month away, not a rolling window, so it is never a
  * window kind and is not sampled (ADR-071 §6 samples rolling windows only).
  */
@@ -4435,7 +4429,7 @@ export interface StatusLineData {
   /** What actually left a wallet, by the same rule: `0` under a subscription or
    *  a free vendor, the engine's figure under an API key, null when unknown.
    *  Optional because only the engines that follow ADR-071 §2 report it — a
-   *  Claude or Codex status line leaves it (and `unknownCostMessages`) unset,
+   *  Claude status line leaves it (and `unknownCostMessages`) unset,
    *  and the tooltip shows the extra rows only when they are present. */
   billedCostUsd?: number | null
   /** How many of this session's messages had no known cost. Omitted when none:
@@ -4752,7 +4746,7 @@ export interface WorktreeStatus {
 export interface LinkedWorktree {
   worktreePath: string
   repoRoot: string
-  /** Last path segment; `<4hex>/<repo>` for the Codex layout. */
+  /** Last path segment. */
   name: string
   /** Branch from the worktree's HEAD; '' when detached. */
   branch: string
@@ -4770,11 +4764,11 @@ export interface WorktreeHolder {
 export interface WorktreeInventoryEntry {
   /** Stable wire key: the normalised absolute path (names collide across roots). */
   id: string
-  /** Display name: last path segment (Codex layout: `<4hex>/<repo>`). */
+  /** Display name: last path segment. */
   name: string
   path: string
   /** By layout, display only: never a permission input. */
-  location: 'managed' | 'opencode' | 'codex' | 'other'
+  location: 'managed' | 'opencode' | 'other'
   /**
    * worktree: registered in `git worktree list` and the directory is present.
    * orphan: a directory directly under the managed root that git does not list.
@@ -4874,7 +4868,12 @@ export interface SlashCommandInfo {
 // Skill types (skills management dialog)
 // ---------------------------------------------------------------------------
 
-export type SkillSource = 'project' | 'user' | 'plugin' | 'bundled'
+/**
+ * `managed`/`user`/`project`/`plugin` = the shared Claude skill catalog's sources;
+ * `engine` = a skill the session's own engine loads itself (opencode's `.opencode` / `.agents`
+ * folders, pi's `~/.pi` / `.pi` / `.agents` folders, built-ins).
+ */
+export type SkillSource = 'managed' | 'project' | 'user' | 'plugin' | 'bundled' | 'engine'
 
 export interface SkillInfo {
   name: string
@@ -4884,13 +4883,45 @@ export interface SkillInfo {
   pluginName?: string
   path: string // filesystem path to SKILL.md (empty for bundled)
   content: string // markdown body (no frontmatter)
+  /** `command` = a legacy `.claude/commands` entry; absent = skill. */
+  kind?: 'skill' | 'command'
+  /** False: the user cannot type `/name` (frontmatter `user-invocable: false`). */
+  userInvocable?: boolean
+  /** False: hidden from the model (`disable-model-invocation`, `skillOverrides`). */
+  modelInvocable?: boolean
+  /** Claude-only behaviour this session's engine does not apply (non-Claude sessions only). */
+  claudeOnly?: string[]
 }
 
 // ---------------------------------------------------------------------------
 // MCP Server types (MCP server management dialog)
 // ---------------------------------------------------------------------------
 
-export type McpServerScope = 'user' | 'project' | 'local' | 'claudeai' | 'managed'
+export type McpServerScope =
+  'user' | 'project' | 'local' | 'claudeai' | 'managed' | 'plugin' | 'claudeui'
+
+/** Where the catalog found an entry; `claudeui` is McpDialog's legacy files (cli.js ignores them). */
+export type McpCatalogSource = 'plugin' | 'user' | 'project' | 'local' | 'managed' | 'claudeui'
+
+export interface McpCatalogServer {
+  /** The name Claude Code knows it by (`plugin:p:s` for a plugin server). */
+  name: string
+  config: McpServerConfig
+  source: McpCatalogSource
+  /** Named in `disabledMcpServers`: listed so it can be re-enabled, but not loaded. */
+  disabled?: boolean
+}
+
+/** `mcp:load-catalog`. No `ok` key: preload `unwrap` treats `{ok}` envelopes specially. */
+export interface McpCatalogResult {
+  servers: McpCatalogServer[]
+  skipped: { name: string; reason: string }[]
+}
+
+/** `mcp:cli-add` / `mcp:cli-remove`: cli.js's own message when it refused. */
+export interface McpCliResult {
+  error?: string
+}
 export type McpServerConnectionStatus =
   'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_started'
 export type McpServerTransport = 'stdio' | 'sse' | 'http'
@@ -4968,13 +4999,8 @@ export interface PlanComment {
 
 export interface PlanReviewData {
   planContent: string
-  /**
-   * The approval this review answers, or NULL when the plan came from an engine
-   * that has no approval gate on its plan item (Codex's native plan mode, F20).
-   * A null id means the comments are SENT AS A PROMPT instead of denied with
-   * feedback — there is nothing to deny.
-   */
-  approvalRequestId: string | null
+  /** The approval this review answers. */
+  approvalRequestId: string
   comments: PlanComment[]
 }
 
@@ -5024,11 +5050,58 @@ export interface GitStatusData {
   filesTruncated?: boolean
 }
 
+/** One branch row of the branch dropdown, from a single `git for-each-ref`. */
+export interface GitBranchDetail {
+  /** `feat/x` for a local branch, `origin/feat/x` for a remote-tracking one. */
+  name: string
+  kind: 'local' | 'remote'
+  /** Last commit time, unix seconds. */
+  commitTime: number
+  /** Short upstream name (`origin/feat/x`); local branches only. */
+  upstream?: string
+  /** Commits ahead of / behind the upstream (0 without one, and when `gone`). */
+  ahead: number
+  behind: number
+  /** The upstream branch was deleted on the remote. */
+  gone: boolean
+  /** The branch ClaudeUI's checkout is on. */
+  current: boolean
+  /**
+   * Checked out in ANOTHER worktree (git refuses to check it out twice): where, and whether
+   * that is the repository's main checkout rather than a linked worktree.
+   */
+  worktree?: { path: string; main: boolean }
+}
+
+/** A stash made by the dropdown's "Stash and switch" (`ClaudeUI autostash: <branch> <ISO time>`). */
+export interface GitAutostash {
+  sha: string
+  /** The branch the changes were stashed from. */
+  branch: string
+  /** ISO time from the stash label. */
+  time: string
+}
+
+/** The pull settings git would apply, read with `git config --get` (any scope). */
+export interface GitPullConfig {
+  /** `pull.rebase` / `branch.<current>.rebase`: `rebase` (true/merges/interactive), `merge` (false), or unset. */
+  rebase: 'rebase' | 'merge' | null
+  /** `pull.ff`, lowercased; null when unset. */
+  ff: 'only' | 'true' | 'false' | null
+}
+
 export interface GitBranchData {
   current: string
   local: string[]
   remote: string[]
   tracking: Record<string, string>
+  /** Every local and remote-tracking branch, newest commit first. */
+  details: GitBranchDetail[]
+  /** ClaudeUI autostashes in the (repository-wide) stash stack, newest first. */
+  autostashes: GitAutostash[]
+  pullConfig: GitPullConfig
+  /** Commits of the current branch that no remote has yet; counted only while it has no upstream. */
+  unpublished: number
 }
 
 // ---------------------------------------------------------------------------

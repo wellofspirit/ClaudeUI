@@ -65,14 +65,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     // The jsdom harness is not the real-app harness: nothing here reads
     // `window.__claudeuiVerifier`, and tests reach the store directly.
     verifierHooks: false,
-    codexApproval: (id, requestId, decision) =>
-      unwrap('session:codex-approval', id, requestId, decision),
-    codexAuthStatus: () => unwrap('codex:auth-status'),
-    readCodexConfig: () => unwrap('codex-config:read'),
-    writeCodexConfig: (edits, expectedVersion) =>
-      unwrap('codex-config:write', edits, expectedVersion),
-    recompileCodexRules: () => unwrap('codex:recompile-rules'),
-    codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
     createSession: (
       routingId,
@@ -190,8 +182,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
     setModel: (routingId, model) => ipcRenderer.invoke('session:set-model', routingId, model),
     setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
-    setSessionAccount: (routingId, accountId) =>
-      ipcRenderer.invoke('session:set-account', routingId, accountId),
     setThinkingMode: (routingId, mode) =>
       ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
     setReasoningVariant: (routingId, variant) =>
@@ -260,7 +250,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     onTerminalDetached: () => () => {},
 
     // Worktree
-    createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
+    createWorktree: (cwd, name, opts) => unwrap('worktree:create', cwd, name, opts),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
     removeWorktree: (worktreePath, branch, gitRoot) =>
@@ -282,7 +272,7 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitGetStatus: (cwd) => unwrap('git:status', cwd),
     gitGetBranches: (cwd) => unwrap('git:branches', cwd),
     gitCheckout: (cwd, branch) => unwrap('git:checkout', cwd, branch),
-    gitCreateBranch: (cwd, name) => unwrap('git:create-branch', cwd, name),
+    gitCreateBranch: (cwd, name, base) => unwrap('git:create-branch', cwd, name, base),
     gitGetFilePatch: (cwd, filePath, staged, ignoreWhitespace) =>
       unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
     gitGetFileContents: (cwd, filePath, staged) =>
@@ -295,7 +285,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     gitCommit: (cwd, message) => unwrap('git:commit', cwd, message),
     gitPush: (cwd) => unwrap('git:push', cwd),
     gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
-    gitPull: (cwd) => unwrap('git:pull', cwd),
+    gitPull: (cwd, mode) => unwrap('git:pull', cwd, mode),
+    gitStashPush: (cwd) => unwrap('git:stash-push', cwd),
+    gitStashRestore: (cwd, sha) => unwrap('git:stash-restore', cwd, sha),
     gitFetch: (cwd) => unwrap('git:fetch', cwd),
     watchGit: (cwds) => unwrap('git:watch', { cwds }),
 
@@ -312,8 +304,8 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
     loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
     saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
-    scanCustomCommands: (cwd) => ipcRenderer.invoke('config:scan-custom-commands', cwd),
-    loadSkillDetails: (cwd) => ipcRenderer.invoke('config:load-skill-details', cwd),
+    loadSkillDetails: (routingId, cwd) =>
+      ipcRenderer.invoke('config:load-skill-details', routingId, cwd),
 
     fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
     fetchChatgptLimits: (refresh) => ipcRenderer.invoke('usage:chatgpt-limits', refresh ?? false),
@@ -347,7 +339,9 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('claude:load-permissions', scope, cwd),
     saveClaudePermissions: (scope, permissions, cwd?) =>
       ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
-    isWorkspaceTrusted: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
+    getWorkspaceTrust: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
+    setWorkspaceTrust: (cwd, trusted) =>
+      ipcRenderer.invoke('claude:set-workspace-trust', cwd, trusted),
 
     mcpServerStatus: (routingId) => ipcRenderer.invoke('mcp:status', routingId),
     mcpToggleServer: (routingId, serverName, enabled) =>
@@ -359,6 +353,11 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
     removeMcpServer: (scope, serverName, cwd?) =>
       ipcRenderer.invoke('mcp:remove-server', scope, serverName, cwd),
+    loadMcpCatalog: (cwd) => ipcRenderer.invoke('mcp:load-catalog', cwd),
+    mcpCliAdd: (scope, name, config, cwd?) =>
+      ipcRenderer.invoke('mcp:cli-add', scope, name, config, cwd),
+    mcpCliRemove: (scope, name, cwd?) => ipcRenderer.invoke('mcp:cli-remove', scope, name, cwd),
+    mcpReloadServers: (routingId, expect) => unwrap('mcp:reload', routingId, expect),
     mcpReadDisabled: (cwd) => ipcRenderer.invoke('mcp:read-disabled', cwd),
     mcpToggleDisabled: (cwd, serverName, enabled) =>
       ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
@@ -486,8 +485,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
       unwrap('provider-account:switch', providerId, accountId),
     removeProviderAccount: (providerId, accountId) =>
       unwrap('provider-account:remove', providerId, accountId),
-    setProviderAccountsPerSession: (providerId, enabled) =>
-      unwrap('provider-account:set-per-session', providerId, enabled),
     listSharedProviders: () => unwrap('shared-provider:list'),
     getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
     listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
@@ -608,7 +605,6 @@ export async function bootTestApp(): Promise<TestApp> {
     'config:load-sessions',
     'config:save-slash-commands',
     'config:load-slash-commands',
-    'config:scan-custom-commands',
     'config:load-engine-config',
     'config:save-engine-config',
     'config:load-vendor-config',

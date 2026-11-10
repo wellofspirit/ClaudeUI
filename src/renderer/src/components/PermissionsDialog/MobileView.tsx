@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PermissionsDialogViewProps } from './View'
 import {
+  APPLY_NOTE,
   RULE_TEMPLATES,
   SCOPE_DESCRIPTIONS,
   SCOPE_LABELS,
   useDirSuggestions,
   type RuleCategory
 } from './shared'
+import { TrustRow } from './TrustRow'
 
 /**
  * Mobile (viewport ≤768px) permissions UI.
@@ -154,7 +156,11 @@ export function PermissionsMobileView({
   perms,
   dirty,
   hasDirty,
-  workspaceTrusted,
+  cwd,
+  trust,
+  trustSaving,
+  trustError,
+  onToggleTrust,
   onListDir,
   onChangeTab,
   onUpdateRule,
@@ -169,8 +175,6 @@ export function PermissionsMobileView({
   const [sheet, setSheet] = useState<SheetState | null>(null)
   const [sheetValue, setSheetValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
-
-  const showTrustWarning = workspaceTrusted === false && activeTab !== 'user'
 
   const openSheet = useCallback((state: SheetState, initialValue: string) => {
     setSheet(state)
@@ -296,35 +300,16 @@ export function PermissionsMobileView({
         </span>
       </div>
 
-      {/* Untrusted-workspace warning */}
-      {showTrustWarning && (
-        <div
-          data-testid="PermissionsDialog.trustWarning"
-          className="shrink-0 flex items-start gap-2 px-3 py-2.5 border-b border-warning/30 bg-warning/10 text-[11px] leading-relaxed text-warning"
-        >
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="shrink-0 mt-[1px]"
-          >
-            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <path d="M12 9v4" />
-            <path d="M12 17h.01" />
-          </svg>
-          <span>
-            This workspace is not trusted, so Claude Code ignores every{' '}
-            <strong className="font-semibold">Allow</strong> rule from the Local and Project scopes.
-            Deny and Ask rules still apply, as do Global allows. To trust it, run{' '}
-            <code className="font-mono">claude</code> in this directory once and accept the trust
-            prompt.
-          </span>
-        </div>
+      {/* Workspace trust toggle */}
+      {trust && activeTab !== 'user' && (
+        <TrustRow
+          trust={trust}
+          saving={trustSaving}
+          error={trustError}
+          cwd={cwd}
+          onToggle={onToggleTrust}
+          padX="px-3"
+        />
       )}
 
       {/* Content */}
@@ -351,8 +336,11 @@ export function PermissionsMobileView({
         className="shrink-0 flex items-center gap-2 px-3 py-2.5 border-t border-border bg-bg-secondary/30"
         style={{ paddingBottom: 'calc(0.625rem + env(safe-area-inset-bottom))' }}
       >
-        <span className="flex-1 min-w-0 text-[10px] leading-tight text-text-muted">
-          Changes take effect on next session start
+        <span
+          data-testid="PermissionsDialog.applyNote"
+          className="flex-1 min-w-0 text-[10px] leading-tight text-text-muted"
+        >
+          {APPLY_NOTE}
         </span>
         {hasDirty && (
           <button

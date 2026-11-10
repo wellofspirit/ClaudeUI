@@ -2,7 +2,7 @@
  * The speech pack's pins — ADR-101 §5. One manifest, no logic beyond the host
  * lookup, so a sherpa-onnx or model bump is an edit here and nowhere else.
  *
- * The pack is what makes voice work for opencode, pi and Codex sessions: the
+ * The pack is what makes voice work for opencode and pi sessions: the
  * `sherpa-onnx-node` addon (plus its per-platform native package) and the four
  * Parakeet TDT 0.6B v2 int8 model files. Nothing here is bundled with the app;
  * the installer downloads it into `~/.claude/ui/voice/` and verifies every byte

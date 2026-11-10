@@ -5,6 +5,12 @@ import { useContextMenu } from '../../hooks/useContextMenu'
 import { useSessionStore } from '../../stores/session-store'
 import { groupHeadIdOf, groupSessions } from '../../lib/session-links'
 import {
+  effectiveStartInWorktree,
+  isManagedWorktreePath,
+  withProjectChoice,
+  type WorktreeProjectChoice
+} from '../../../../shared/worktree-start'
+import {
   expandParents,
   toggleParentCollapsed,
   useCollapsedParents
@@ -68,6 +74,25 @@ export const DirectoryItem = memo(function DirectoryItem({
   onDeleteSession?: (info: SessionInfo) => void
 }): React.JSX.Element {
   const menu = useContextMenu()
+  // "New sessions in worktree": the project's own choice over the global default.
+  const projectKey = group.projectKey
+  const worktreeChoice = useSessionStore((s) => s.settings.worktreeByProject?.[projectKey] ?? null)
+  const worktreeDefaultOn = useSessionStore((s) => s.settings.startInWorktree === true)
+  // New sessions inside a managed worktree start with the toggle off, so neither mark nor menu applies.
+  const worktreeApplies = !isManagedWorktreePath(group.cwd)
+  const worktreeOn = useSessionStore(
+    (s) => worktreeApplies && effectiveStartInWorktree(s.settings, projectKey)
+  )
+  const updateSettings = useSessionStore((s) => s.updateSettings)
+  const chooseWorktree = (choice: WorktreeProjectChoice | null): void => {
+    const next = withProjectChoice(
+      useSessionStore.getState().settings.worktreeByProject,
+      projectKey,
+      choice
+    )
+    updateSettings({ worktreeByProject: next })
+    menu.close()
+  }
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Groups (slices 1b and 5): sessions grouped with the one they were started or
@@ -160,6 +185,16 @@ export const DirectoryItem = memo(function DirectoryItem({
         <span className="truncate flex-1" title={group.cwd || group.folderName}>
           {group.folderName}
         </span>
+        {worktreeOn && (
+          <span
+            data-testid="DirectoryItem.worktreeMark"
+            className="shrink-0 text-[11px] text-text-muted"
+            title="New sessions start in a worktree"
+            aria-label="New sessions start in a worktree"
+          >
+            ⑂
+          </span>
+        )}
         <span className="text-[10px] text-text-muted">{group.sessions.length}</span>
         {/* The right-click menu for touch screens, where iOS never fires a context-menu.
             Not rendered on pointer devices: right-click covers them and the button would
@@ -291,6 +326,42 @@ export const DirectoryItem = memo(function DirectoryItem({
             </svg>
             New session here
           </button>
+          {projectKey && worktreeApplies && (
+            <div
+              role="group"
+              aria-label="New sessions in worktree"
+              data-testid="DirectoryItem.worktreeMenu"
+            >
+              <div role="separator" className="h-px bg-border my-1" />
+              <div className="px-3 pt-1 pb-0.5 text-[11px] text-text-muted">
+                New sessions in worktree
+              </div>
+              {(
+                [
+                  [null, `Use default (${worktreeDefaultOn ? 'On' : 'Off'})`],
+                  ['always', 'Always'],
+                  ['never', 'Never']
+                ] as const
+              ).map(([choice, label]) => (
+                <button
+                  key={choice ?? 'default'}
+                  role="menuitemradio"
+                  aria-checked={worktreeChoice === choice}
+                  data-testid={`DirectoryItem.worktree.${choice ?? 'default'}`}
+                  onClick={() => chooseWorktree(choice)}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors text-left cursor-default"
+                >
+                  <span className="w-3 shrink-0 text-accent">
+                    {worktreeChoice === choice ? '✓' : ''}
+                  </span>
+                  {label}
+                </button>
+              ))}
+              <div className="px-3 pt-0.5 pb-1 text-[11px] text-text-muted">
+                Default: Settings › Sessions &amp; autonomy › Worktrees
+              </div>
+            </div>
+          )}
           {(onHide || onUnhide || onDelete) && (
             <div role="separator" className="h-px bg-border my-1" />
           )}

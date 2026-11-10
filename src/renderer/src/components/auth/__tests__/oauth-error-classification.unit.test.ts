@@ -22,8 +22,8 @@ const read = (...parts: string[]): string => readFileSync(join(process.cwd(), ..
 describe('the CSRF/state rejection', () => {
   const CSRF_MESSAGE = 'Invalid state - potential CSRF attack'
 
-  it('is still what codex-oauth.ts throws on both completion paths', () => {
-    const source = read('src', 'core', 'auth', 'vault', 'codex-oauth.ts')
+  it('is still what chatgpt-oauth.ts throws on both completion paths', () => {
+    const source = read('src', 'core', 'auth', 'vault', 'chatgpt-oauth.ts')
     // The loopback handler and the paste-back path each raise it independently.
     const occurrences = source.split(CSRF_MESSAGE).length - 1
     expect(occurrences).toBeGreaterThanOrEqual(2)

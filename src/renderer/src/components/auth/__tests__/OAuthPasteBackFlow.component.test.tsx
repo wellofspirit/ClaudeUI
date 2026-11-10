@@ -2,7 +2,7 @@
  * The shared remote sign-in flow (ADR-057 / S4-UI) — mockup states 2, 3 and 4.
  *
  * What matters here and is easy to break silently:
- *  - the two VARIANTS say different things (Codex/opencode paste a dead URL;
+ *  - the two VARIANTS say different things (ChatGPT/opencode paste a dead URL;
  *    claude.ai shows a code on its page);
  *  - step 2 posts the pasted string VERBATIM apart from trimming, exactly once.
  *    Any client-side parsing would fork the backend's shape-dependent CSRF rule

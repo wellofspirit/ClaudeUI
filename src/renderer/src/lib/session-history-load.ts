@@ -46,11 +46,6 @@ export interface HistoryLoadOptions {
    */
   isCurrent: () => boolean
   /**
-   * Codex's reader failing is user-visible (its transcript is native, and a
-   * silent empty one would hide that), so the caller owns the banner.
-   */
-  onCodexError?: (message: string | null) => void
-  /**
    * Replace the transcript the store already holds instead of filling an empty
    * one. The active session after a resync still shows its last-known
    * conversation, and `seedColdSession` refuses to clobber a held transcript, so
@@ -98,17 +93,6 @@ function seedHistoricalEngine(
   window.api.saveSessionConfig({ sessionEngines })
 }
 
-/** Record that `routingId` is a Codex session, so its identity block reads the right engine. */
-function seedCodexEngine(routingId: string): void {
-  const state = useSessionStore.getState()
-  useSessionStore.setState({
-    sessionEngines: {
-      ...state.sessionEngines,
-      [routingId]: { ...state.sessionEngines[routingId], engineId: 'codex' as const }
-    }
-  })
-}
-
 /**
  * The sidebar click on a session that is not resident (ADR-102): put an evicted
  * placeholder in the store BEFORE the disk read, so the click can navigate at once
@@ -117,13 +101,11 @@ function seedCodexEngine(routingId: string): void {
  * The placeholder gets the identity the finished load will give it (R1), and for
  * that the engine has to be in `sessionEngines` first — opencode / pi seeded
  * idempotently here (the read's own call later adds the model it last answered
- * on), Codex as its branch does. Claude needs nothing: it is the default.
+ * on). Claude needs nothing: it is the default.
  */
 export function beginTranscriptPlaceholder(info: SessionInfo): void {
   if (info.engineId === 'opencode' || info.engineId === 'pi') {
     seedHistoricalEngine(info.sessionId, info.engineId, null)
-  } else if (info.engineId === 'codex') {
-    seedCodexEngine(info.sessionId)
   }
   useSessionStore.getState().beginTranscriptLoad(info)
 }
@@ -170,7 +152,7 @@ export async function loadSessionIntoStore(
   info: SessionInfo,
   options: HistoryLoadOptions
 ): Promise<HistoryLoadResult> {
-  const { isCurrent, onCodexError, replace = false, onProgress } = options
+  const { isCurrent, replace = false, onProgress } = options
   const routingId = info.sessionId
   const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()
   const tracker = onProgress
@@ -213,7 +195,7 @@ export async function loadSessionIntoStore(
       lastModel: null
     }
     // Host-run pi subagent transcripts (ADR-089) come back inline, keyed by the
-    // parent `agent` call id — the Codex precedent below. opencode returns none.
+    // parent `agent` call id. opencode returns none.
     const subagentMessages =
       loaded && 'subagentMessages' in loaded ? loaded.subagentMessages : undefined
     // pi's agent notifications (ADR-089 S3): finished background runs, plus an
@@ -237,47 +219,6 @@ export async function loadSessionIntoStore(
       loaded && 'activeTasks' in loaded ? loaded.activeTasks : undefined
     )
     if (info.title && info.title !== 'Untitled') store().setCustomTitle(routingId, info.title)
-    return 'loaded'
-  }
-
-  if (info.engineId === 'codex') {
-    seedCodexEngine(routingId)
-    onCodexError?.(null)
-    const history = await window.api
-      .loadSessionHistory(info.sessionId, info.projectKey)
-      .catch(() => {
-        if (isCurrent())
-          onCodexError?.(
-            'Codex history could not be loaded. Check the native installation/account and retry; no transcript was replaced.'
-          )
-        return null
-      })
-    if (!history)
-      return replace && isCurrent() && holdsTranscript(routingId) ? 'declined' : 'skipped'
-    if (!isCurrent()) return 'skipped'
-    if (replace && isLive(routingId)) return 'declined'
-    if (replace && !stripForReplace(routingId, history.messages)) return 'declined'
-    store().loadHistoricalSession(
-      routingId,
-      history.messages,
-      info.cwd,
-      history.taskNotifications,
-      // Codex's reader returns the child threads' transcripts inline (they
-      // are native THREADS on the same connection, not JSONL sidecars), so
-      // there is no second fetch to make here as there is for Claude.
-      history.subagentMessages,
-      history.statusLine,
-      history.warnings,
-      undefined,
-      history.activeTasks
-    )
-    // The tier the thread last ran at is the session's own until the user picks
-    // another (a pick made earlier in this run wins). It has to be the session's
-    // own and not just a label: a resume that names a model makes Codex ignore the
-    // thread's remembered tier, so only an effort carried on the spawn keeps it.
-    if (history.lastEffort && !isLive(routingId) && !store().sessions[routingId]?.effort)
-      store().setEffort(history.lastEffort, routingId)
-    if (info.title) store().setCustomTitle(routingId, info.title)
     return 'loaded'
   }
 
@@ -525,7 +466,7 @@ export function reloadActiveTranscript(routingId: string): Promise<void> {
  */
 export function loadClickedSession(
   info: SessionInfo,
-  options: Pick<HistoryLoadOptions, 'isCurrent' | 'onCodexError' | 'replace'>
+  options: Pick<HistoryLoadOptions, 'isCurrent' | 'replace'>
 ): Promise<void> {
   const routingId = info.sessionId
   return trackTranscriptLoad(routingId, async () => {
@@ -564,10 +505,7 @@ async function runReload(routingId: string): Promise<void> {
           )
         },
         replace: true,
-        onProgress: (p) => setTranscriptLoadProgress(routingId, p),
-        onCodexError: (message) => {
-          if (message) warn(`${message} (session ${routingId})`)
-        }
+        onProgress: (p) => setTranscriptLoadProgress(routingId, p)
       })
     }
   } catch (err) {

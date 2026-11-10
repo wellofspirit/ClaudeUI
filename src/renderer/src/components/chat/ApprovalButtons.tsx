@@ -14,7 +14,6 @@
  */
 
 import { useState, useEffect } from 'react'
-import { CodexApprovalCard } from './CodexApprovalCard'
 import type {
   PendingApproval,
   PermissionSuggestion,
@@ -82,9 +81,6 @@ export function ApprovalButtons({
   }, [approval.suggestions])
 
   const hasSuggestions = showSuggestions && (approval.suggestions?.length ?? 0) > 0
-  // Only a native QUESTION still needs the engine-specific card; commands and
-  // file changes come through the shared gate and render here (ADR-066).
-  if (approval.codex?.questions) return <CodexApprovalCard approval={approval} />
   const hasReason = showSuggestions && !!approval.decisionReason
 
   const handleDecision = async (decision: 'allow' | 'deny'): Promise<void> => {
@@ -95,34 +91,30 @@ export function ApprovalButtons({
     await onApproval(decision, selected?.length ? selected : undefined)
   }
 
-  // An auto-mode judge's block the user may override — one branch, two
-  // triggers. Codex's guardian denial was already answered (ADR-067): nothing
-  // waits on this click, so the exits are "leave it denied" and "tell Codex to
-  // allow that one action". ClaudeUI's own judge HOLDS its block (ADR-091 §3)
-  // until the user answers or `expiresAt` passes, when the host keeps it
-  // blocked. Neither offers a standing rule: each is an override of one call,
-  // and under `auto` a ClaudeUI allow rule is never consulted.
+  // An auto-mode judge's block the user may override. ClaudeUI's own judge
+  // HOLDS its block (ADR-091 §3) until the user answers or `expiresAt` passes,
+  // when the host keeps it blocked. It offers no standing rule: it is an
+  // override of one call, and under `auto` a ClaudeUI allow rule is never
+  // consulted.
   const heldBlock = approval.autoModeBlock
-  if (approval.codex?.guardianOverride || heldBlock)
+  if (heldBlock)
     return (
       <>
-        {(approval.decisionReason || heldBlock) && (
-          <div className="border-t border-warning/20 px-3 py-2 flex items-start gap-2">
-            {approval.decisionReason && (
-              <p className="flex-1 text-[11px] text-text-muted/70 leading-relaxed">
-                {approval.decisionReason}
-              </p>
-            )}
-            {heldBlock && <HoldCountdown expiresAt={heldBlock.expiresAt} />}
-          </div>
-        )}
+        <div className="border-t border-warning/20 px-3 py-2 flex items-start gap-2">
+          {approval.decisionReason && (
+            <p className="flex-1 text-[11px] text-text-muted/70 leading-relaxed">
+              {approval.decisionReason}
+            </p>
+          )}
+          <HoldCountdown expiresAt={heldBlock.expiresAt} />
+        </div>
         <div data-testid={testid ?? 'ApprovalButtons'} className="flex border-t border-warning/20">
           <button
-            data-testid={heldBlock ? 'ApprovalButtons.keepBlocked' : 'ApprovalButtons.dismiss'}
+            data-testid="ApprovalButtons.keepBlocked"
             onClick={() => handleDecision('deny')}
             className="flex-1 h-8 text-[12px] font-medium text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer"
           >
-            {heldBlock ? 'Keep blocked' : 'Dismiss'}
+            Keep blocked
           </button>
           <div className="w-px bg-warning/20" />
           <button

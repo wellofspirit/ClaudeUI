@@ -71,6 +71,7 @@ import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
 import type { ChatMessage, EngineId, EngineModelGroup } from '../../shared/types'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 import type { CallerRestriction } from './caller-restriction'
+import type { WorktreeToolResult } from '../providers/ISession'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
 // ERASED at compile time, so this does NOT create a runtime import cycle
 // even though cross-engine-dispatcher.ts (at runtime) imports
@@ -87,7 +88,13 @@ import type {
  * cycle note below.
  */
 export interface CallerSessionHandle {
+  /** The caller's identity (spawn) directory. */
   cwd: string
+  /**
+   * The directory the caller works in NOW (the worktree it moved into), read at each dispatch.
+   * A dispatched target runs there; absent means `cwd`.
+   */
+  readonly workingDirectory?: string
   /** The caller's Claude-style permission mode, read LIVE at every dispatch
    *  decision (ADR-088) — not a snapshot taken when the handle was built. */
   getAutonomyMode: () => string
@@ -103,7 +110,33 @@ export interface CallerSessionHandle {
   /** ISession.addDispatchedCost — folds a dispatched turn's spend into the
    *  caller session's own cost breakdown (ADR-033 Slice C). */
   addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void
+  /**
+   * `claudeui_enter_worktree` / `claudeui_exit_worktree` (worktree parity D7): the live session
+   * moves itself; the logic needs its lease, location and permission chain. Optional so a test
+   * handle (or a host that did not wire them) answers the tools with a refusal.
+   */
+  enterWorktree?: (input: { name?: string; path?: string }) => Promise<WorktreeToolResult>
+  exitWorktree?: () => Promise<WorktreeToolResult>
 }
+
+export type { WorktreeToolResult }
+
+/** Mirrors Claude Code's EnterWorktree: only on an explicit instruction. */
+export const ENTER_WORKTREE_DESCRIPTION =
+  'Use this tool ONLY when explicitly instructed to work in a worktree — by the user or by ' +
+  'project instructions (CLAUDE.md / AGENTS.md). Creates `<repo>/.claude/worktrees/<name>` on ' +
+  'branch `worktree-<name>` and moves this session there, or, with `path`, moves it into an ' +
+  'existing worktree of this repository under `<repo>/.claude/worktrees/`. The move takes ' +
+  'effect after this step: tool calls later in this same response still run in the old ' +
+  'directory. Pass at most one of `name` and `path`; with neither, a name is generated. ' +
+  'Not available while already in a worktree (with `name`), in plan mode, or to a subagent.'
+
+/** Mirrors Claude Code's ExitWorktree (keep only). */
+export const EXIT_WORKTREE_DESCRIPTION =
+  'Only for a worktree this session entered with claudeui_enter_worktree; do not call it ' +
+  'proactively — only when the user asks. Moves the session back to the directory it entered ' +
+  'from. Keeps the worktree and its branch on disk (nothing is removed). A no-op error when ' +
+  'this session did not enter a worktree.'
 
 /**
  * Resolves the live OpencodeSession for a caller session id (routingId,
@@ -249,11 +282,10 @@ export type CallerCwdResolver = (callerSessionId: string | undefined) => Promise
  */
 function buildDispatchAgentInputSchema(
   modelHintShort: string,
-  piModelHintShort: string,
-  codexModelHintShort: string
+  piModelHintShort: string
 ): Record<string, z.ZodTypeAny> {
   return {
-    engine: z.enum(['claude', 'pi', 'codex']).describe('Target engine to dispatch to'),
+    engine: z.enum(['claude', 'pi']).describe('Target engine to dispatch to'),
     prompt: z.string().describe('Task for the dispatched agent'),
     model: z
       .string()
@@ -261,7 +293,7 @@ function buildDispatchAgentInputSchema(
       .describe(
         'Target model id (format depends on the target engine — must be user-allowed). Omit for ' +
           `that engine's configured default. For claude: a Claude alias (e.g. "haiku", "sonnet") — ` +
-          `${modelHintShort} For pi: ${piModelHintShort} For codex: ${codexModelHintShort}`
+          `${modelHintShort} For pi: ${piModelHintShort}`
       ),
     name: z.string().optional().describe(DISPATCH_NAME_PARAM),
     description: z.string().describe(DISPATCH_DESCRIPTION_PARAM),
@@ -431,14 +463,6 @@ export function createOpencodeHostedToolsServer(
     allowedModels: piDispatchCfg?.allowedModels,
     defaultModel: piDispatchCfg?.defaultModel
   })
-  // codex (ADR-033 slice H) — a THIRD independent snapshot alongside the two
-  // above, same snapshot-at-spawn caveat.
-  const codexDispatchCfg = loadEngineConfig('codex').dispatch
-  const codexModelHint = describeDispatchModels({
-    targetEngine: 'codex',
-    allowedModels: codexDispatchCfg?.allowedModels,
-    defaultModel: codexDispatchCfg?.defaultModel
-  })
 
   if (deps.listModels) {
     const listModels = deps.listModels
@@ -475,20 +499,17 @@ export function createOpencodeHostedToolsServer(
     'dispatch_agent',
     {
       description: dispatchAgentDescription({
-        targets: ['claude', 'pi', 'codex'],
+        targets: ['claude', 'pi'],
         ownSubagentTool: OWN_SUBAGENT_TOOL.opencode,
         hints: joinDispatchHints([
           { targetEngine: 'claude', long: modelHint.long },
-          { targetEngine: 'pi', long: piModelHint.long },
-          { targetEngine: 'codex', long: codexModelHint.long }
+          { targetEngine: 'pi', long: piModelHint.long }
         ])
       }),
       // Loose: the removed `session_id` is not declared (the model must not see it) but a call
       // that still sends one must reach the handler for its guiding error; a plain raw shape
       // would strip it. `tools/list` shows only the declared keys either way.
-      inputSchema: z.looseObject(
-        buildDispatchAgentInputSchema(modelHint.short, piModelHint.short, codexModelHint.short)
-      )
+      inputSchema: z.looseObject(buildDispatchAgentInputSchema(modelHint.short, piModelHint.short))
     },
     async (
       args: Record<string, unknown>,
@@ -505,7 +526,7 @@ export function createOpencodeHostedToolsServer(
         __xeng_caller_session,
         __xeng_call_id
       } = args as {
-        engine: 'claude' | 'pi' | 'codex'
+        engine: 'claude' | 'pi'
         prompt: string
         model?: string
         name?: string
@@ -595,6 +616,7 @@ export function createOpencodeHostedToolsServer(
 
       const workdirArg = dispatchWorkdirArg(workdir)
       const background = runsInBackground(run_in_background, callerIsRoot, identity.callId)
+      const workingDirectory = caller.workingDirectory || caller.cwd
       const result = await deps.dispatch(
         {
           engine,
@@ -610,7 +632,8 @@ export function createOpencodeHostedToolsServer(
         {
           fromEngine: 'opencode',
           fromRoutingId: routingId,
-          cwd: caller.cwd,
+          cwd: workingDirectory,
+          ...(workingDirectory !== caller.cwd ? { originCwd: caller.cwd } : {}),
           getAutonomyMode: caller.getAutonomyMode,
           getMessages: caller.getMessages,
           ...(caller.getQueuedUserTurns ? { getQueuedUserTurns: caller.getQueuedUserTurns } : {}),
@@ -637,6 +660,7 @@ export function createOpencodeHostedToolsServer(
 
   if (deps.handBack) registerHandBack(server, deps.handBack)
   if (deps.sessionTools) registerSessionTools(server, deps)
+  registerWorktreeTools(server, deps)
 
   return server
 }
@@ -766,4 +790,83 @@ function registerSessionTools(
       }
     )
   }
+}
+
+/**
+ * `claudeui_enter_worktree` / `claudeui_exit_worktree`: move the calling chat into a ClaudeUI
+ * worktree and back. Root agent only: the rulesets hide them from plan mode, a subagent child and
+ * a dispatch target; a call that reaches here anyway from anything but a ClaudeUI chat is refused
+ * (the caller is the session opencode's `_meta` names, never the model's say-so).
+ */
+function registerWorktreeTools(
+  server: McpServer,
+  deps: { lookupCallerSession?: CallerSessionLookup; resolveCallerRoot?: CallerRootResolver }
+): void {
+  const refuse = (text: string): { content: { type: 'text'; text: string }[]; isError: true } => ({
+    content: [{ type: 'text' as const, text: `Refused: ${text}` }],
+    isError: true
+  })
+  const run = async (
+    tool: string,
+    extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
+    act: (handle: CallerSessionHandle) => Promise<WorktreeToolResult> | undefined
+  ) => {
+    const callerId = resolveCallerIdentity(
+      extra?._meta as Record<string, unknown> | undefined,
+      {}
+    ).sessionId
+    if (!callerId)
+      return refuse(`${tool} could not identify the calling session, so it is not run.`)
+    const handle = deps.lookupCallerSession?.(callerId)
+    if (!handle) {
+      // A subagent child resolves to its chat; it is refused all the same.
+      const root = await deps.resolveCallerRoot?.(callerId).catch(() => undefined)
+      return refuse(
+        root && !('refused' in root)
+          ? `${tool} is for the main agent of the session; a subagent cannot move the session.`
+          : `${tool} is for the main agent of a ClaudeUI session; the calling session (${callerId}) is not one.`
+      )
+    }
+    const pending = act(handle)
+    if (!pending) return refuse(`${tool} is not available for this session.`)
+    const result = await pending
+    return {
+      content: [{ type: 'text' as const, text: result.text }],
+      ...(result.isError ? { isError: true as const } : {})
+    }
+  }
+  server.registerTool(
+    'enter_worktree',
+    {
+      description: ENTER_WORKTREE_DESCRIPTION,
+      inputSchema: {
+        name: z
+          .string()
+          .optional()
+          .describe('Name for the new worktree (becomes the directory and `worktree-<name>`).'),
+        path: z
+          .string()
+          .optional()
+          .describe('An existing worktree of this repository under `<repo>/.claude/worktrees/`.')
+      }
+    },
+    async (
+      args: { name?: string; path?: string },
+      extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+    ) =>
+      run('enter_worktree', extra, (handle) =>
+        handle.enterWorktree?.({
+          ...(args.name !== undefined ? { name: args.name } : {}),
+          ...(args.path !== undefined ? { path: args.path } : {})
+        })
+      )
+  )
+  server.registerTool(
+    'exit_worktree',
+    { description: EXIT_WORKTREE_DESCRIPTION, inputSchema: {} },
+    async (
+      _args: Record<string, never>,
+      extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+    ) => run('exit_worktree', extra, (handle) => handle.exitWorktree?.())
+  )
 }

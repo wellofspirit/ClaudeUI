@@ -43,11 +43,6 @@ const CATALOGS: Record<EngineId, AgentTypeInfo[]> = {
   pi: [
     { type: 'general-purpose', source: 'builtin' },
     { type: 'Plan', source: 'project' }
-  ],
-  codex: [
-    { type: 'default', source: 'builtin' },
-    { type: 'explorer', source: 'builtin' },
-    { type: 'worker', source: 'builtin' }
   ]
 }
 
@@ -90,7 +85,7 @@ describe('Agent colours settings', () => {
     app.teardown()
   })
 
-  it.each(['claude', 'opencode', 'pi', 'codex'] as const)(
+  it.each(['claude', 'opencode', 'pi'] as const)(
     'lists the %s agent types, with a tile each and the default type greyed',
     async (engine) => {
       render(<Section engine={engine} />)
@@ -103,7 +98,7 @@ describe('Agent colours settings', () => {
         const row = rowOf(info.type)
         expect(row).toBeTruthy()
         expect(row.textContent).toContain(info.type)
-        const isDefault = ['general-purpose', 'general', 'default'].includes(info.type)
+        const isDefault = ['general-purpose', 'general'].includes(info.type)
         if (isDefault) {
           // Greyed: dimmed, the muted bot alone, and nothing to pick.
           expect(row.textContent).toContain('Default type, a plain bot with no colour.')
@@ -313,7 +308,7 @@ describe('Agent colours settings', () => {
   })
 
   it('is reachable on every engine page, and the dispatch colour on the dispatch page', () => {
-    for (const engine of ['claude', 'opencode', 'pi', 'codex'] as const) {
+    for (const engine of ['claude', 'opencode', 'pi'] as const) {
       const group = pageOf(engine).groups.find((g) => g.id === 'agent-colours')
       expect(group?.label, engine).toBe('Agent colours')
       expect(group?.items?.map((i) => i.key)).toEqual([`${engine}AgentColours`])

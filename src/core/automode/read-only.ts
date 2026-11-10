@@ -39,7 +39,7 @@
  * 3. per-segment checks: command name, the pipe-consumer rule, the command's
  *    typed tables; before them, the user's Bash deny/ask rules over the whole
  *    command (ADR-085's matcher, `../permissions/shell-rules.ts`, the same one
- *    the pi and Codex ladders use, so the bypass and the ladder cannot
+ *    the pi ladder uses, so the bypass and the ladder cannot
  *    disagree);
  * 4. path rules (scope, realpath, sensitive names, Read deny rules) — also
  *    offered per operand to ADR-085's auto-mode allow-rule skip

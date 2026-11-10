@@ -14,12 +14,11 @@
  *
  * Consequences, all guarded below:
  *  - `resolvedModelId` stayed null, so a `default` session sized its context
- *    window with `getContextWindowSize('default')` → 200K. `default` really
- *    resolves to `claude-opus-5[1m]` (1M), so a 600K-token transcript rendered
- *    as 300% instead of 60%.
- *  - `slash_commands` and `skills` were never emitted. (Slash commands are
- *    masked by `saveSlashCommands` persistence; `session:skills` has no other
- *    Claude emitter, so the skills list was simply empty.)
+ *    window from the alias table instead of the model cli.js actually runs.
+ *    (The table now sizes `default` at 1M; an account whose `default` runs a
+ *    200K model is the case the alias alone gets wrong.)
+ *  - `slash_commands` was never emitted. (Masked by `saveSlashCommands`
+ *    persistence.)
  *
  * And the second case pins the other half of the fix: cli.js re-emits
  * `system/init` at the head of every turn with the model actually in force, so
@@ -34,7 +33,14 @@ import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-win
 import { clearSyncSubscribersForTests } from '../../../core/services/sync-host'
 import type { StatusLineData } from '../../../shared/types'
 
-const { mockQuery } = vi.hoisted(() => ({ mockQuery: vi.fn() }))
+const { mockQuery, mockCatalog, mockSaveSlash } = vi.hoisted(() => ({
+  mockQuery: vi.fn(),
+  mockSaveSlash: vi.fn(),
+  mockCatalog: vi.fn((): { entries: unknown[]; skipped: unknown[] } => ({
+    entries: [],
+    skipped: []
+  }))
+}))
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 
@@ -62,8 +68,11 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 vi.mock('../../../core/services/ui-config', () => ({
-  saveSlashCommands: vi.fn(),
+  saveSlashCommands: mockSaveSlash,
   loadEngineConfig: vi.fn(() => ({}))
+}))
+vi.mock('../../../core/services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: mockCatalog
 }))
 vi.mock('../../../core/services/claude-mcp', () => ({
   loadMcpServers: vi.fn(() => ({})),
@@ -73,7 +82,6 @@ vi.mock('../../../core/services/session-history', () => ({
   computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
   fallbackBlockText: vi.fn(() => '')
 }))
-vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 // NOTE: `context-window` is deliberately NOT mocked (the queue test stubs it to
 // a flat 200000). The whole point here is the real alias → window resolution.
@@ -250,7 +258,8 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
       type: 'system',
       subtype: 'init',
       session_id: 's-init-1',
-      model: 'claude-opus-5[1m]',
+      // A 200K model: the alias table alone says `default` is 1M.
+      model: 'claude-sonnet-4-6',
       slash_commands: ['review', 'context', 'compact'],
       skills: ['unslop', 'dataviz'],
       mcp_servers: [],
@@ -259,18 +268,16 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
     })
     handle.emit(ASSISTANT_600K)
 
-    // 600_000 / 1_000_000 — NOT 300, which is what the 200K `default` fallback
-    // produced while the init branch sat behind the sessionId latch.
-    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(60))
+    // 600_000 / 200_000 — NOT 60, which is what the alias table's 1M
+    // `default` produces while the init branch sits behind the sessionId latch.
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(300))
 
-    // Both halves of the field, not just the percentage derived from them.
-    // `contextWindowSize` used to carry the CONSUMPTION under a name that says
-    // window — here, 600_000 under the spelling that promised 1_000_000. The
-    // pair is now stated explicitly, in the one place the ambiguity was most
-    // dangerous: an alias whose real window is five times the fallback.
+    // Both halves of the field, not just the percentage derived from them:
+    // `contextWindowSize` once carried the CONSUMPTION under a name that says
+    // window, so the pair is stated explicitly.
     expect(statusLines(sent).at(-1)!.contextWindow).toEqual({
       used: 600_000,
-      size: 1_000_000
+      size: 200_000
     })
 
     // The rest of the init payload reached the renderer too.
@@ -278,10 +285,46 @@ describe('ClaudeSession system/init capture (behind command_lifecycle)', () => {
     expect(slash).toBeDefined()
     // `context` is CLI-only and filtered out; the others gain their leading '/'.
     expect(slash![2]).toEqual([{ name: '/review' }, { name: '/compact' }])
+  })
 
-    const skills = sent.find(([c]) => c === 'session:skills')
-    expect(skills).toBeDefined()
-    expect(skills![2]).toEqual(['unslop', 'dataviz'])
+  it('adds the catalog user-invocable names cli.js lacks to the slash list', async () => {
+    const entry = (name: string, userInvocable: boolean, description = ''): unknown => ({
+      name,
+      description,
+      userInvocable
+    })
+    mockCatalog.mockReturnValue({
+      entries: [
+        entry('review', true, 'dup of a cli.js name'),
+        entry('deploy', true, 'Ship it'),
+        entry('hidden', false)
+      ],
+      skipped: []
+    })
+    const { sent, handle } = await startSession('r-init-catalog')
+
+    handle.emit({
+      type: 'system',
+      subtype: 'init',
+      session_id: 's-init-3',
+      model: 'claude-opus-5[1m]',
+      slash_commands: ['review', 'compact'],
+      skills: [],
+      mcp_servers: [],
+      uuid: 'u3'
+    })
+
+    await vi.waitFor(() => expect(sent.some(([c]) => c === 'session:slash-commands')).toBe(true))
+    const slash = sent.find(([c]) => c === 'session:slash-commands')!
+    // cli.js's own entries first and winning the clash; only invocable catalog names are added.
+    expect(slash[2]).toEqual([
+      { name: '/review' },
+      { name: '/compact' },
+      { name: '/deploy', description: 'Ship it' }
+    ])
+    // The cache keeps cli.js's own list minus this folder's skill names, so it seeds any folder.
+    expect(mockSaveSlash).toHaveBeenLastCalledWith([{ name: '/compact' }])
+    mockCatalog.mockReturnValue({ entries: [], skipped: [] })
   })
 
   it('re-captures the resolved model on a LATER init, resizing the window', async () => {
@@ -382,5 +425,42 @@ describe('ClaudeSession follows system/init for every alias (ADR-100)', () => {
     // Haiku 4.5's 200K must not size the `sonnet` session it switched to.
     await session.setModel('sonnet')
     expect(lastUsedPercentage(sent)).toBe(60)
+  })
+})
+
+/**
+ * cli.js streams a synthetic assistant line of its own ("No response
+ * requested." after a resume or interrupt): `<synthetic>` model, all-zero
+ * usage. It is no API call, so it must not reset the context length to 0.
+ */
+describe('ClaudeSession ignores synthetic assistant lines for usage', () => {
+  it('keeps the context length of the last real turn', async () => {
+    const { sent, handle } = await startSession('r-synthetic', 'opus')
+
+    emitInit(handle, 's-synth-1', 'claude-opus-5-5')
+    handle.emit(ASSISTANT_600K)
+    await vi.waitFor(() => expect(lastUsedPercentage(sent)).toBe(60))
+
+    handle.emit({
+      type: 'assistant',
+      message: {
+        id: 'msg_synth',
+        model: '<synthetic>',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0
+        },
+        content: [{ type: 'text', text: 'No response requested.' }]
+      }
+    })
+    // A changed init model re-emits the status line from the accumulators
+    // (another 1M model, so only `used` can move).
+    const before = statusLines(sent).length
+    emitInit(handle, 's-synth-1', 'claude-opus-5')
+    await vi.waitFor(() => expect(statusLines(sent).length).toBeGreaterThan(before))
+
+    expect(statusLines(sent).at(-1)!.contextWindow).toEqual({ used: 600_000, size: 1_000_000 })
   })
 })

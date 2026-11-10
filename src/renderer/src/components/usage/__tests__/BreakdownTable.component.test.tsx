@@ -196,7 +196,7 @@ describe('BreakdownTable — the hierarchy', () => {
     // claude ran $6 + $4 + $5, codex ran $8.
     expect(rowsAtLevel(0)).toEqual([
       ['Claude', expect.stringContaining('$15.00')],
-      ['Codex', expect.stringContaining('$8.00')]
+      ['Codex (removed)', expect.stringContaining('$8.00')]
     ])
     // One model rung under the engine, with Opus summed across both accounts.
     expect(rowsAtLevel(1)).toEqual([

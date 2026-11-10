@@ -124,7 +124,8 @@ beforeEach(() => {
         btwQuestion: null,
         btwResponse: null,
         btwLoading: false,
-        authRequired: null
+        authRequired: null,
+        slashCommands: []
       }
     },
     settings: {
@@ -152,13 +153,7 @@ function makeMessage(toolName: string, toolInput?: Record<string, unknown>): Cha
 }
 
 function renderMsg(toolName: string, toolInput?: Record<string, unknown>): void {
-  render(
-    <MessageBubble
-      message={makeMessage(toolName, toolInput)}
-      pendingApprovals={[]}
-      isLastAssistant={true}
-    />
-  )
+  render(<MessageBubble message={makeMessage(toolName, toolInput)} pendingApprovals={[]} />)
 }
 
 describe('renderToolBlock dispatch (via MessageBubble)', () => {

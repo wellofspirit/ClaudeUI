@@ -431,7 +431,7 @@ function RemoteApp(): React.JSX.Element {
     // `provider-registry:list`, and the desktop gets it from
     // `hydrateConfigFromDisk`, which only `renderer/src/main.tsx` runs. Without
     // this the web client sat on `'unknown'` for the whole session, so a headless
-    // user with no ChatGPT account saw Codex's models undimmed, no "Sign in to
+    // user with no ChatGPT account saw ChatGPT's models undimmed, no "Sign in to
     // ChatGPT" item and no composer hint — the exact "never advertise what does
     // not work" failure ADR-030 forbids.
     //

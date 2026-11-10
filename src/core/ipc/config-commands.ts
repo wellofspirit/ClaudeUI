@@ -82,10 +82,16 @@ import {
 import type { SlashCommandCache } from '../services/ui-config'
 import {
   saveMcpServers,
+  removeClaudeUiLegacyMcpServer,
   removeMcpServer,
   readDisabledMcpServers,
   writeDisabledMcpServers
 } from '../services/claude-mcp'
+import {
+  addMcpServerNative,
+  removeMcpServerNative,
+  type NativeMcpScope
+} from '../services/claude-mcp-cli'
 import {
   createWorktree,
   getWorktreeStatus,
@@ -146,7 +152,8 @@ import type {
   SharedAutoModeConfig,
   OpencodeConfigSettings,
   ProxySettings,
-  RawConfigPatch
+  RawConfigPatch,
+  McpServerConfig
 } from '../../shared/types'
 
 // ---------------------------------------------------------------------------
@@ -418,6 +425,8 @@ function assertSharedAutoModeConfig(value: unknown): asserts value is SharedAuto
 
 /** One call removes at most this many worktrees (a crafted array cannot queue unbounded git work). */
 const MAX_REMOVE_IDS = 500
+/** How often `worktree:create` reports progress, so the web client's invoke timeout keeps sliding. */
+const WORKTREE_CREATE_HEARTBEAT_MS = 5_000
 
 /** The directory a manager call works from: a non-empty absolute path (a relative one would resolve against the host's cwd). */
 function assertAbsoluteCwd(cwd: unknown, channel: string): asserts cwd is string {
@@ -444,7 +453,7 @@ function worktreeHolderSources(manager: SessionManager): HolderSources {
 /**
  * Drop the recorded worktree entries of removed directories, server-side, and tell every client.
  * Nothing else: the quit-time removal uses exactly this, because re-listing the directories
- * would reach for a Codex app-server after the teardown.
+ * would reach for an engine process after the teardown.
  */
 export function forgetEntriesQuiet(worktreePaths: string[]): void {
   forgetWorktreeEntries(worktreePaths, (channel, args) => emitEvent(channel, args))
@@ -486,9 +495,26 @@ export function configCommands(
       channel: 'worktree:create',
       capability: 'git',
       kind: 'command',
-      handler: safeHandler(async (cwd: string, name: string) => {
-        return await createWorktree(cwd, name)
-      })
+      // A fetch, a checkout and the include copy can outlast the web client's 30 s invoke
+      // timeout: `withProgress` slides it, and the heartbeat keeps frames coming between phases.
+      withProgress: true,
+      handler: safeHandler(
+        async (
+          progress: ProgressReporter,
+          cwd: string,
+          name: string,
+          opts?: { base?: 'head' | 'default' } | null
+        ) => {
+          const beat = (): void => progress({ done: 0, total: null, phase: 'creating' })
+          beat()
+          const timer = setInterval(beat, WORKTREE_CREATE_HEARTBEAT_MS)
+          try {
+            return await createWorktree(cwd, name, opts ?? undefined)
+          } finally {
+            clearInterval(timer)
+          }
+        }
+      )
     },
     {
       channel: 'worktree:status',
@@ -940,8 +966,44 @@ export function configCommands(
       channel: 'mcp:remove-server',
       capability: 'config',
       kind: 'command',
-      handler: (scope: string, serverName: string, cwd?: string) =>
-        removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd)
+      // Legacy layer only (McpDialog's own files): cli.js's scopes go through `mcp:cli-remove`.
+      // `claudeui` = every legacy scope; a native scope name keeps the old per-scope meaning.
+      handler: (scope: string, serverName: string, cwd?: string) => {
+        if (scope === 'claudeui') return removeClaudeUiLegacyMcpServer(serverName, cwd)
+        removeMcpServer(scope as 'user' | 'project' | 'local', serverName, cwd, {
+          legacyLayer: true
+        })
+      }
+    },
+    // Native writes: cli.js's own `mcp add-json` / `mcp remove` (claude-mcp-cli.ts)
+    {
+      channel: 'mcp:cli-add',
+      capability: 'config',
+      kind: 'command',
+      handler: (scope: string, name: string, config: McpServerConfig, cwd?: string) =>
+        addMcpServerNative(scope as NativeMcpScope, name, config, cwd)
+    },
+    {
+      channel: 'mcp:cli-remove',
+      capability: 'config',
+      kind: 'command',
+      handler: (scope: string, name: string, cwd?: string) =>
+        removeMcpServerNative(scope as NativeMcpScope, name, cwd)
+    },
+    {
+      channel: 'mcp:reload',
+      capability: 'config',
+      kind: 'command',
+      sessionIdArg: 0,
+      handler: safeHandler(
+        async (routingId: string, expect?: { name: string; present: boolean }) => {
+          const session = manager.get(routingId)
+          if (!session) throw new Error('No active session')
+          if (!session.capabilities.hostedMcp || !session.mcpReloadServers)
+            throw new Error('Provider does not support hosted MCP')
+          await session.mcpReloadServers(expect)
+        }
+      )
     },
     // MCP disabled state (direct ~/.claude.json access, no session needed)
     {

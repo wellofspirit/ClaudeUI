@@ -11,7 +11,8 @@ import type {
   ApprovalDecision,
   ClaudeAPI,
   PermissionSuggestion,
-  TerminalAvailability
+  TerminalAvailability,
+  WorkspaceTrust
 } from '../shared/types'
 import type { IdeAvailability, IdeEntry, InvokeProgress } from '../shared/remote-protocol'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
@@ -66,14 +67,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
   }
 
   const api: ClaudeAPI = {
-    codexApproval: (id, requestId, decision) =>
-      unwrap('session:codex-approval', id, requestId, decision),
-    codexAuthStatus: () => unwrap('codex:auth-status'),
-    readCodexConfig: () => unwrap('codex-config:read'),
-    writeCodexConfig: (edits, expectedVersion) =>
-      unwrap('codex-config:write', edits, expectedVersion),
-    recompileCodexRules: () => unwrap('codex:recompile-rules'),
-    codexDeletePlan: (threadId) => unwrap('session:codex-delete-plan', threadId),
     platform: 'web',
     // Never on the web client. The verifier hooks are a LOCAL harness affordance
     // (`scripts/app-shot.mjs` driving the real Electron app); a browser reaching
@@ -329,8 +322,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('session:set-model', routingId, model) as Promise<void>,
     setEffort: (routingId, effort) =>
       connection.invoke('session:set-effort', routingId, effort) as Promise<void>,
-    setSessionAccount: (routingId, accountId) =>
-      connection.invoke('session:set-account', routingId, accountId) as Promise<void>,
     setThinkingMode: (routingId, mode) =>
       connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
     setReasoningVariant: (routingId, variant) =>
@@ -425,8 +416,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       unwrap('provider-account:switch', providerId, accountId),
     removeProviderAccount: (providerId, accountId) =>
       unwrap('provider-account:remove', providerId, accountId),
-    setProviderAccountsPerSession: (providerId, enabled) =>
-      unwrap('provider-account:set-per-session', providerId, enabled),
     listSharedProviders: () =>
       connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
     getSharedProviderStatuses: () =>
@@ -625,7 +614,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // safeHandler-wrapped, so `unwrap` carries the real reason back (an empty
     // answer would read as "this repo has no worktrees" rather than "this client
     // cannot ask").
-    createWorktree: (cwd, name) => unwrap('worktree:create', cwd, name),
+    createWorktree: (cwd, name, opts) =>
+      unwrapWithProgress('worktree:create', [cwd, name, opts], () => {}),
     getWorktreeStatus: (worktreePath, originalHead) =>
       unwrap('worktree:status', worktreePath, originalHead),
     // `withProgress` on the server: the progress path slides the invoke timeout; no caller
@@ -653,7 +643,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     gitGetStatus: (cwd) => unwrap('git:status', cwd),
     gitGetBranches: (cwd) => unwrap('git:branches', cwd),
     gitCheckout: (cwd, branch) => unwrap('git:checkout', cwd, branch),
-    gitCreateBranch: (cwd, name) => unwrap('git:create-branch', cwd, name),
+    gitCreateBranch: (cwd, name, base) => unwrap('git:create-branch', cwd, name, base),
     gitGetFilePatch: (cwd, filePath, staged, ignoreWhitespace) =>
       unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
     gitGetFileContents: (cwd, filePath, staged) =>
@@ -666,7 +656,9 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     gitCommit: (cwd, message) => unwrap('git:commit', cwd, message),
     gitPush: (cwd) => unwrap('git:push', cwd),
     gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
-    gitPull: (cwd) => unwrap('git:pull', cwd),
+    gitPull: (cwd, mode) => unwrap('git:pull', cwd, mode),
+    gitStashPush: (cwd) => unwrap('git:stash-push', cwd),
+    gitStashRestore: (cwd, sha) => unwrap('git:stash-restore', cwd, sha),
     gitFetch: (cwd) => unwrap('git:fetch', cwd),
     // Live watching is real over remote: the server shares one poller per cwd
     // with the desktop (gitWatchRegistry) and pushes git:status-update over the
@@ -725,12 +717,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // last cached.
     saveSlashCommands: (commands) =>
       connection.invoke('config:save-slash-commands', commands) as Promise<void>,
-    scanCustomCommands: (cwd) =>
-      connection.invoke('config:scan-custom-commands', cwd) as ReturnType<
-        ClaudeAPI['scanCustomCommands']
-      >,
-    loadSkillDetails: (cwd) =>
-      connection.invoke('config:load-skill-details', cwd) as ReturnType<
+    loadSkillDetails: (routingId, cwd) =>
+      connection.invoke('config:load-skill-details', routingId, cwd) as ReturnType<
         ClaudeAPI['loadSkillDetails']
       >,
 
@@ -815,8 +803,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >,
     saveClaudePermissions: (scope, permissions, cwd?) =>
       connection.invoke('claude:save-permissions', scope, permissions, cwd) as Promise<void>,
-    isWorkspaceTrusted: (cwd) =>
-      connection.invoke('claude:workspace-trust', cwd) as Promise<boolean>,
+    getWorkspaceTrust: (cwd) =>
+      connection.invoke('claude:workspace-trust', cwd) as Promise<WorkspaceTrust | null>,
+    setWorkspaceTrust: (cwd, trusted) =>
+      connection.invoke('claude:set-workspace-trust', cwd, trusted) as Promise<WorkspaceTrust>,
 
     // Transcript retention window (cleanupPeriodDays)
     getCleanupPeriodDays: () =>
@@ -849,6 +839,17 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('mcp:save-servers', scope, servers, cwd) as Promise<void>,
     removeMcpServer: (scope, serverName, cwd?) =>
       connection.invoke('mcp:remove-server', scope, serverName, cwd) as Promise<void>,
+    loadMcpCatalog: (cwd) =>
+      connection.invoke('mcp:load-catalog', cwd) as ReturnType<ClaudeAPI['loadMcpCatalog']>,
+    mcpCliAdd: (scope, name, config, cwd?) =>
+      connection.invoke('mcp:cli-add', scope, name, config, cwd) as ReturnType<
+        ClaudeAPI['mcpCliAdd']
+      >,
+    mcpCliRemove: (scope, name, cwd?) =>
+      connection.invoke('mcp:cli-remove', scope, name, cwd) as ReturnType<
+        ClaudeAPI['mcpCliRemove']
+      >,
+    mcpReloadServers: (routingId, expect) => unwrap('mcp:reload', routingId, expect),
     mcpReadDisabled: (cwd) =>
       connection.invoke('mcp:read-disabled', cwd) as ReturnType<ClaudeAPI['mcpReadDisabled']>,
     mcpToggleDisabled: (cwd, serverName, enabled) =>

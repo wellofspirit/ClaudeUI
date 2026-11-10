@@ -137,6 +137,28 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     expect(cost).toBeCloseTo(10.0)
   })
 
+  it('fable-5-2 / mythos-5-2: $8/$40, cache write $10 / $16, cache read $0.20 (tier_8_40_cache_read_0_20, cli.js 2.1.321)', () => {
+    for (const model of [
+      'claude-fable-5-2',
+      'us.anthropic.claude-fable-5-2',
+      'claude-mythos-5-2'
+    ]) {
+      const tokens = (k: keyof TokenCostInput) => oneMTok({ [k]: 1_000_000 })
+      expect(equivalentCostUsd('anthropic', model, tokens('inputTokens'))).toBeCloseTo(8)
+      expect(equivalentCostUsd('anthropic', model, tokens('outputTokens'))).toBeCloseTo(40)
+      expect(equivalentCostUsd('anthropic', model, tokens('cacheWriteTokens'))).toBeCloseTo(10)
+      // 1h tokens are a subset of the cache-write total.
+      expect(
+        equivalentCostUsd(
+          'anthropic',
+          model,
+          oneMTok({ cacheWriteTokens: 1_000_000, cacheWrite1hTokens: 1_000_000 })
+        )
+      ).toBeCloseTo(16)
+      expect(equivalentCostUsd('anthropic', model, tokens('cacheReadTokens'))).toBeCloseTo(0.2)
+    }
+  })
+
   it('fable-5-1: cache reads at $0.25/MTok (tier_10_50_cache_read_0_25, cli.js 2.1.261)', () => {
     const cost = equivalentCostUsd(
       'anthropic',
@@ -378,12 +400,12 @@ describe('equivalentCostUsd — openai pricing', () => {
 })
 
 // ---------------------------------------------------------------------------
-// The models Codex's own catalog offers (ADR-066). Both sources are quoted in
+// The OpenAI models ChatGPT subscriptions offer (ADR-066). Both sources are quoted in
 // OPENAI_PRICING; these pin every published column so a bad edit shows up as a
 // wrong cost rather than as a plausible one.
 // ---------------------------------------------------------------------------
 
-describe('equivalentCostUsd — the Codex catalog models', () => {
+describe('equivalentCostUsd — the ChatGPT catalog models', () => {
   const rates: Array<[string, number, number, number, number]> = [
     // model, input, cached input, cache write, output — all per MTok
     ['gpt-6-astra', 10, 1, 12.5, 50],
@@ -408,7 +430,7 @@ describe('equivalentCostUsd — the Codex catalog models', () => {
       )
     })
 
-  // Codex's hidden models have no published price. A guess would be worse than
+  // The hidden models have no published price. A guess would be worse than
   // "unknown", so the lookup must stay null for them.
   for (const model of ['gpt-daybreak-blue-latest', 'gpt-daybreak-red-latest', 'codex-auto-review'])
     it(`${model}: unpriced → null`, () => {
@@ -829,6 +851,8 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
   it('preserves declared order — first substring match wins', () => {
     const order = ANTHROPIC_MODEL_PRICING.map((e) => e.match)
     expect(order).toEqual([
+      'fable-5-2',
+      'mythos-5-2',
       'fable-5-1',
       'mythos-5-1',
       'fable',
@@ -851,6 +875,8 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
     // The ordering constraint that actually matters: point-release entries must
     // precede their family catch-alls, and the cheap 4.5+ entries must precede
     // the catch-all 'opus-4' (4.0/4.1 pricing) and 'opus'.
+    expect(order.indexOf('fable-5-2')).toBeLessThan(order.indexOf('fable'))
+    expect(order.indexOf('mythos-5-2')).toBeLessThan(order.indexOf('mythos'))
     expect(order.indexOf('fable-5-1')).toBeLessThan(order.indexOf('fable'))
     expect(order.indexOf('mythos-5-1')).toBeLessThan(order.indexOf('mythos'))
     expect(order.indexOf('opus-4-5')).toBeLessThan(order.indexOf('opus-4'))

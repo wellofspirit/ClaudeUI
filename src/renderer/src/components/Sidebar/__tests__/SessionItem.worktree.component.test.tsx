@@ -10,7 +10,7 @@ import { EMPTY_SESSION_STATE, useSessionStore } from '../../../stores/session-st
 import type { DirectoryGroup, SessionInfo, WorktreeInfo } from '../../../../../shared/types'
 import { SessionItem } from '../SessionItem'
 
-const WT = 'C:/Users/me/.codex/worktrees/ab12/repo'
+const WT = 'C:/Users/me/.local/share/opencode/worktree/ab12/repo'
 
 const info = (cwd: string, sessionId = 's-1'): SessionInfo => ({
   sessionId,
@@ -70,7 +70,7 @@ describe('SessionItem worktree tint', () => {
 
   it('a cwd the listing marks as a linked worktree tints the row, matched across separators and case', () => {
     useSessionStore.setState({ directories: [marked(WT)] })
-    renderRow('c:\\users\\ME\\.codex\\worktrees\\ab12\\repo\\')
+    renderRow('c:\\users\\ME\\.local\\share\\opencode\\worktree\\ab12\\repo\\')
     expect(screen.getByTestId('SessionItem.worktreeTint')).toBeInTheDocument()
     expect(screen.getByTitle('Worktree session')).toBeInTheDocument()
   })

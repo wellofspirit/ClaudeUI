@@ -22,6 +22,7 @@ import {
   SIGNIN_PENDING_TTL_MS,
   type SlotMemory
 } from '../credential-store'
+import { OpencodeCredentialCleanupError } from '../OpencodeServerManager'
 import { fakeChatgptJwt, fakeCredentialTable } from './fixtures/fake-credential-table'
 
 const NOW = 1_800_000_000_000
@@ -32,6 +33,8 @@ function setup(
     available?: () => boolean
     memory?: SlotMemory
     isClaudeuiToken?: (refresh: string) => boolean
+    /** `false`: no recogniser at all (nothing can be proven clean — creates are refused). */
+    recogniser?: false
     claimedBySharedRoute?: (integrationID: string) => boolean | Promise<boolean>
   } = {}
 ) {
@@ -42,7 +45,10 @@ function setup(
     available: options.available,
     memory,
     now: () => NOW,
-    isClaudeuiToken: options.isClaudeuiToken,
+    // Wired by default the way the app wires it (`core-services.ts`): a recogniser that
+    // knows only real vault tokens, so the proven-copy cleanup runs and succeeds.
+    isClaudeuiToken:
+      options.recogniser === false ? undefined : (options.isClaudeuiToken ?? (() => false)),
     claimedBySharedRoute: options.claimedBySharedRoute
   })
   const changes = vi.fn()
@@ -539,7 +545,12 @@ describe('L2: a corrupt record file never blocks a vend', () => {
       table.seed({ ...userKey('cred_claudeui_openrouter_v1', 'openrouter', 'sk-x'), label: 'x' })
       writeFileSync(file, '{ not json')
       const memory = fileSlotMemory(file)
-      const store = new OpencodeCredentialStore({ connect: table.connect, memory, now: () => NOW })
+      const store = new OpencodeCredentialStore({
+        connect: table.connect,
+        memory,
+        now: () => NOW,
+        isClaudeuiToken: () => false
+      })
       await store.vendChatgpt({ access: fakeChatgptJwt('acct-1', EXP), expires: NOW })
       expect(readdirSync(dir).some((name) => name.includes('.corrupt-'))).toBe(true)
       const records = JSON.parse(readFileSync(file, 'utf8')).slots
@@ -567,7 +578,8 @@ describe('L2b: a rebuilt record skips a row that fills no slot', () => {
       const store = new OpencodeCredentialStore({
         connect: table.connect,
         memory: fileSlotMemory(file),
-        now: () => NOW
+        now: () => NOW,
+        isClaudeuiToken: () => false
       })
       await store.vendKey('openrouter', 'sk-or-secret')
       expect(Object.keys(JSON.parse(readFileSync(file, 'utf8')).slots)).toEqual(['openrouter:key'])
@@ -752,7 +764,7 @@ describe('a sign-in started from ClaudeUI is ClaudeUI’s', () => {
 // ── S7 review (s7b) ───────────────────────────────────────────────────────────
 
 describe('s7b-1: a FAILED process-first cleanup is not recorded as done', () => {
-  it('retries on the next operation and deletes the copy then', async () => {
+  it('refuses the create, retries on the next operation and deletes the copy then', async () => {
     const { table, store } = setup({ isClaudeuiToken: (r) => r === 'rt-vault' })
     table.seed(userOauth('cred_copy', 'rt-vault', false))
     const list = table.api.list
@@ -764,10 +776,76 @@ describe('s7b-1: a FAILED process-first cleanup is not recorded as done', () => 
       }
       return list()
     }
-    await store.vendKey('openrouter', 'k1')
+    // RULING 2 (2.2.5): the create would boot the global-config location — and so let
+    // opencode refresh the copy — while the cleanup has not succeeded. Fail closed.
+    await expect(store.vendKey('openrouter', 'k1')).rejects.toThrow(OpencodeCredentialCleanupError)
+    expect(table.calls.some((call) => call.startsWith('create '))).toBe(false)
     expect(table.rows().map((row) => row.id)).toContain('cred_copy')
-    await store.vendKey('openrouter', 'k2')
+    // The cleanup is retried on the next operation and deletes the copy; that vend goes through.
+    expect(await store.vendKey('openrouter', 'k2')).toBe(true)
     expect(table.rows().map((row) => row.id)).not.toContain('cred_copy')
+  })
+})
+
+describe('s7c: a credential create boots a location on 2.2.5, so it needs a proven cleanup', () => {
+  it('cleanup succeeds → the create runs', async () => {
+    const { table, store } = setup({ isClaudeuiToken: (r) => r === 'rt-vault' })
+    table.seed(userOauth('cred_copy', 'rt-vault', false))
+    expect(await store.vendKey('openrouter', 'sk-1')).toBe(true)
+    expect(table.calls).toContain('create cred_claudeui_openrouter_v1')
+    expect(table.rows().map((row) => row.id)).not.toContain('cred_copy')
+  })
+
+  it('no recogniser (nothing can be proven clean) → the create is refused', async () => {
+    const { table, store } = setup({ recogniser: false })
+    table.seed(userOauth('cred_user', 'rt-user', false))
+    await expect(store.vendKey('openrouter', 'sk-1')).rejects.toThrow(
+      OpencodeCredentialCleanupError
+    )
+    expect(table.calls.some((call) => call.startsWith('create '))).toBe(false)
+  })
+
+  it('an unclean server lease is cleaned by the store’s own run on it, so the create goes through', async () => {
+    const { table, store } = setup({ isClaudeuiToken: (r) => r === 'rt-vault' })
+    // The manager’s first-contact run never finished on this server (slow past its bound,
+    // or failed once), so it cannot vouch for it — and a credential-route lease never
+    // re-runs it. The store runs the same idempotent cleanup on this lease instead, and
+    // that success is what lets the create through: no `setCleaned(true)` is needed.
+    table.setCleaned(false)
+    table.seed(userOauth('cred_copy', 'rt-vault', false))
+    expect(await store.vendKey('openrouter', 'sk-1')).toBe(true)
+    expect(table.calls).toContain('create cred_claudeui_openrouter_v1')
+    expect(table.rows().map((row) => row.id)).not.toContain('cred_copy')
+    expect(table.rows().map((row) => row.id)).toContain('cred_claudeui_openrouter_v1')
+  })
+
+  it('an unclean lease whose store-side cleanup FAILS still refuses the create', async () => {
+    const { table, store } = setup({ isClaudeuiToken: () => false })
+    // A clean process run first: {@link copiesCleaned} is true, so only the lease’s own
+    // verdict can refuse the next create.
+    expect(await store.vendKey('openrouter', 'sk-1')).toBe(true)
+    table.setCleaned(false)
+    // The store’s run on this lease cannot prove anything (the table read fails).
+    table.failNext('list')
+    await expect(
+      store.vendChatgpt({ access: fakeChatgptJwt('acct-a', EXP), expires: EXP * 1000 })
+    ).rejects.toThrow(OpencodeCredentialCleanupError)
+    expect(table.active('openai')).toBeUndefined()
+    expect(table.calls.filter((call) => call.startsWith('create '))).toEqual([
+      'create cred_claudeui_openrouter_v1'
+    ])
+    // The next operation retries on its own lease: a run that succeeds lets it through.
+    table.setCleaned(true)
+    expect(
+      await store.vendChatgpt({ access: fakeChatgptJwt('acct-a', EXP), expires: EXP * 1000 })
+    ).toBe(true)
+  })
+
+  it('the refusal is a cleanup error, not a plain failure (callers recognise it)', async () => {
+    const { store } = setup({ recogniser: false })
+    const caught = store.vendKey('openrouter', 'sk-1').catch((err: unknown) => err)
+    expect(await caught).toBeInstanceOf(OpencodeCredentialCleanupError)
+    expect(((await caught) as Error).message).toContain('will not save a credential yet')
   })
 })
 
@@ -788,7 +866,8 @@ describe('s7b-3: a sign-in that completes after its hold is adopted later', () =
     const store = new OpencodeCredentialStore({
       connect: table.connect,
       memory: memorySlotMemory(),
-      now: () => now
+      now: () => now,
+      isClaudeuiToken: () => false
     })
     const late = await store.prepareSignin('github-copilot')
     const stale = await store.prepareSignin('anthropic')
@@ -814,7 +893,12 @@ describe('s7b-4: sign-in ownership survives a quarantined slot file — only fro
     try {
       const table = fakeCredentialTable()
       const memory = fileSlotMemory(file)
-      const store = new OpencodeCredentialStore({ connect: table.connect, memory, now: () => NOW })
+      const store = new OpencodeCredentialStore({
+        connect: table.connect,
+        memory,
+        now: () => NOW,
+        isClaudeuiToken: () => false
+      })
       const signin = await store.prepareSignin('github-copilot')
       table.seed({ ...userKey('ghc_ours', 'github-copilot', 'tok'), label: signin.label })
       await store.adoptSignin('github-copilot', signin.label)
@@ -827,7 +911,8 @@ describe('s7b-4: sign-in ownership survives a quarantined slot file — only fro
       const fresh = new OpencodeCredentialStore({
         connect: table.connect,
         memory: fileSlotMemory(file),
-        now: () => NOW
+        now: () => NOW,
+        isClaudeuiToken: () => false
       })
       await fresh.vendKey('openrouter', 'k')
       expect(recorded(fresh).has('github-copilot')).toBe(true)
@@ -843,7 +928,8 @@ describe('s7b-4: sign-in ownership survives a quarantined slot file — only fro
     const table = fakeCredentialTable()
     const store = new OpencodeCredentialStore({
       connect: table.connect,
-      memory: memorySlotMemory()
+      memory: memorySlotMemory(),
+      isClaudeuiToken: () => false
     })
     table.seed({ ...userKey('ghc_x', 'github-copilot', 'tok'), label: adoptedSigninLabel('aaaa') })
     await store.vendKey('openrouter', 'k')
@@ -904,7 +990,8 @@ describe('removeIntegration: an explicit user Remove deletes EVERY row of the in
         }
       },
       memory: memorySlotMemory(),
-      now: () => NOW
+      now: () => NOW,
+      isClaudeuiToken: () => false
     })
     table.seed(userKey('cred_user_a', 'openrouter', 'sk-a'))
     await store.vendKey('openrouter', 'sk-ours') // active; the user's row is inactive now

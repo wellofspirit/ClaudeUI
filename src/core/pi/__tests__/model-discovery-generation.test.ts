@@ -49,6 +49,7 @@ const { probes, control, MockPiRpcClient, mockPiBinaryAvailable } = vi.hoisted((
 
 vi.mock('../PiRpcClient', () => ({ PiRpcClient: MockPiRpcClient }))
 vi.mock('../pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
   locatePiLaunch: () => ({ command: '/fake/pi', args: [] }),
   piBinaryAvailable: mockPiBinaryAvailable
 }))

@@ -481,7 +481,7 @@ describe('allowRuleSkip — shell, write targets: scope roots, secret and agent-
     ['sed -i s/a/b/ .claude/settings.json', ['Bash(sed:*)'], {}, 'write:path:agent-control'],
     ['cp CLAUDE.md x', ['Bash(cp:*)'], {}, 'write:path:agent-control'],
     ['rm sub/AGENTS.md', RM, {}, 'write:path:agent-control'],
-    // (d) …the cli.js 2.1.308 additions, and the multi-component `.config/git`.
+    // (d) …the cli.js 2.1.317 additions, and the multi-component `.config/git`.
     ['tee .ripgreprc', ['Bash(tee:*)'], {}, 'write:path:agent-control'],
     ['cp x bunfig.toml', ['Bash(cp:*)'], {}, 'write:path:agent-control'],
     ['cp x .idea/workspace.xml', ['Bash(cp:*)'], {}, 'write:path:agent-control'],

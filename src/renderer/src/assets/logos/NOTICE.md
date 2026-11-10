@@ -1,12 +1,12 @@
 # Provider logos
 
-`claude-color.svg` and `codex-color.svg` are taken unmodified from
+`claude-color.svg` is taken unmodified from
 [`@lobehub/icons-static-svg`](https://www.npmjs.com/package/@lobehub/icons-static-svg) 1.95.1
-(`icons/claude-color.svg`, `icons/codex-color.svg`), published under the MIT licence
+(`icons/claude-color.svg`), published under the MIT licence
 (LobeHub, https://github.com/lobehub/lobe-icons).
 
-The marks themselves are trademarks of Anthropic (Claude) and OpenAI (Codex). They are used only to
-identify those providers' subscriptions in Settings › Models & providers (ADR-074 §7).
+The mark itself is a trademark of Anthropic (Claude). It is used only to
+identify that provider's subscription in Settings › Models & providers (ADR-074 §7).
 
 ## Licence
 

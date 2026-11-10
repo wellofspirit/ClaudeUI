@@ -19,14 +19,56 @@
  */
 import { createServer } from 'node:http'
 import type { Server } from 'node:http'
+import { isAbsolute } from 'node:path'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import {
+  resolveClaudeSkillCatalog,
+  skillListingDescription
+} from '../services/claude-skill-catalog'
+import type { ClaudeSkillCatalog } from '../services/claude-skill-catalog'
+import { fillVariables } from '../services/claude-skill-invoke'
+import { isHousekeepingDir } from './claude-mcp-bridge'
 
 export interface McpHttpHost {
   port: number
   token: string
   close(): Promise<void>
+}
+
+/** One entry of `GET /skills`: opencode's `Skill.Info` (`packages/schema/src/skill.ts`). */
+export interface HostedSkill {
+  id: string
+  name: string
+  description: string
+  autoinvoke: boolean
+  path: string
+  content: string
+}
+
+export interface McpHttpHostOptions {
+  /** The Claude skill catalog for a directory (`GET /skills`). Default: the real resolver. */
+  skillCatalog?: (directory: string) => ClaudeSkillCatalog
+}
+
+/** The catalog as the plugin's skill transform adds it; nothing for the housekeeping directory. */
+function hostedSkills(
+  directory: string,
+  resolve: (directory: string) => ClaudeSkillCatalog
+): HostedSkill[] {
+  if (isHousekeepingDir(directory)) return []
+  return resolve(directory)
+    .entries.filter((e) => e.userInvocable || e.modelInvocable)
+    .map((e) => ({
+      id: e.name,
+      name: e.displayName ?? e.name,
+      description: skillListingDescription(e),
+      autoinvoke: e.modelInvocable,
+      path: e.file,
+      // As cli.js fills a skill the model loads; no session here, so `${CLAUDE_SESSION_ID}` stays.
+      content: fillVariables(e.body, e, { cwd: directory })
+    }))
 }
 
 interface Session {
@@ -41,7 +83,11 @@ interface Session {
  * @param createServer_ - Builds a fresh, unconnected McpServer for each MCP
  *   session (connect() is called here).
  */
-export async function startMcpHttpHost(createServer_: () => McpServer): Promise<McpHttpHost> {
+export async function startMcpHttpHost(
+  createServer_: () => McpServer,
+  options: McpHttpHostOptions = {}
+): Promise<McpHttpHost> {
+  const skillCatalog = options.skillCatalog ?? ((directory) => resolveClaudeSkillCatalog(directory))
   const token = randomBytes(24).toString('base64url')
   const sessions = new Map<string, Session>()
   let closed = false
@@ -75,6 +121,33 @@ export async function startMcpHttpHost(createServer_: () => McpServer): Promise<
     if (provided.length !== expectedAuth.length || !timingSafeEqual(provided, expectedAuth)) {
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+    // `GET /skills?directory=<abs path>`: the Claude skill catalog for the claudeui-xeng
+    // plugin (not MCP). Same bearer check as above; a resolver failure is a 500.
+    let url: URL
+    try {
+      url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'malformed URL' }))
+      return
+    }
+    if (req.method === 'GET' && url.pathname === '/skills') {
+      const directory = url.searchParams.get('directory')
+      if (!directory || !isAbsolute(directory)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'directory must be an absolute path' }))
+        return
+      }
+      try {
+        const body = JSON.stringify({ skills: hostedSkills(directory, skillCatalog) })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(body)
+      } catch {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'skill catalog failed' }))
+      }
       return
     }
     const header = req.headers['mcp-session-id']

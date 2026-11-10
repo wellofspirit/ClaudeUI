@@ -1,6 +1,6 @@
 /**
  * Harness sources and resolution (ADR-082). A harness is the program ClaudeUI
- * runs for an engine: Claude Code, opencode, pi or Codex.
+ * runs for an engine: Claude Code, opencode, pi.
  *
  * Main owns the selection file (`~/.claude/ui/harnesses.json`,
  * `src/core/harness/selection-store.ts`) and the resolver
@@ -8,7 +8,7 @@
  * renderer.
  */
 
-export const HARNESS_IDS = ['claude', 'opencode', 'pi', 'codex'] as const
+export const HARNESS_IDS = ['claude', 'opencode', 'pi'] as const
 
 export type HarnessId = (typeof HARNESS_IDS)[number]
 
@@ -18,7 +18,7 @@ export function isHarnessId(value: unknown): value is HarnessId {
 
 /**
  * Where the user wants a harness to come from. Claude Code offers
- * `bundled | system`; opencode, pi and Codex offer `managed | system`.
+ * `bundled | system`; opencode and pi offer `managed | system`.
  */
 export type HarnessSourceChoice = 'bundled' | 'managed' | 'system'
 
@@ -75,11 +75,11 @@ export interface HarnessLaunch {
 
 export interface ResolvedHarness {
   id: HarnessId
-  /** The executable (claude: bun-claude; codex: codex), or null when none was found. */
+  /** The executable (claude: bun-claude), or null when none was found. */
   path: string | null
   /** How to spawn it; null exactly when `path` is null. */
   launch: HarnessLaunch | null
-  /** The executable's directory: the payload root (Codex's host and pi's assets live here). */
+  /** The executable's directory: the payload root (pi's assets live here). */
   dir: string | null
   source: HarnessResolvedSource
   /** The version when a `version.json` / `install.json` states it, else null. */
@@ -136,7 +136,6 @@ export type HarnessInstallKind =
   | 'homebrew'
   | 'scoop'
   | 'winget'
-  | 'standalone'
   | 'pi-managed'
   | 'path'
 
@@ -144,7 +143,7 @@ export type HarnessInstallKind =
  * A detected install's label. The first four are `classifyVersion`'s
  * (`src/core/harness/version-gate.ts`); `unsupported` means ClaudeUI cannot
  * run it at all (a script launcher, a version-manager shim, pi without a
- * suitable Node, Codex without its code-mode host); `failed` means its
+ * suitable Node); `failed` means its
  * `--version` probe errored, timed out or printed something unrecognisable.
  */
 export type DetectedVerdict =
@@ -281,7 +280,7 @@ export interface HarnessResolvedView {
   displayPath?: string
   /** Why `path` is null, or why a fallback was taken. */
   reason?: string
-  /** `harnessAvailable`: can a session start on it (Codex also needs its host). */
+  /** `harnessAvailable`: can a session start on it. */
   available: boolean
   /**
    * `harnessRevision`: changes exactly when the binary does — what main
@@ -302,7 +301,7 @@ export interface HarnessStateEntry {
   managed: HarnessManagedVersionView[]
   /**
    * ClaudeUI can install its own copy on this host: the manifest has a release
-   * for it (opencode, pi) or the host has reviewed digests (Codex). Claude
+   * for it (opencode, pi). Claude
    * Code: false (it is bundled, never downloaded).
    */
   installable: boolean

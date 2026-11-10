@@ -20,6 +20,7 @@ edge; a message to an idle X-Agent starts a paid run, §3, §4).
 [ADR-085](adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md),
 [ADR-087](adr-087_transcript-blobs-off-the-ring-and-host-eviction.md), [ADR-089](adr-089_pi-subagents-host-run.md) (the
 model this generalises).
+**Amended 2026-10-28:** the Codex engine was removed; dispatch targets are claude, opencode and pi, so the Codex X-Agent paths below (including the dynamic-tool review) are retired.
 
 ## Context
 

@@ -19,13 +19,9 @@ vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 vi.mock('../../../core/pi/pi-locate', () => ({
+  PI_APPROVE_ARGS: ['--approve'],
   locatePiLaunch: vi.fn(() => null),
   piBinaryAvailable: vi.fn(() => true)
-}))
-vi.mock('../../../core/codex/codex-locate', () => ({
-  codexBinaryAvailable: vi.fn(() => false),
-  locateCodexBinary: vi.fn(() => null),
-  locateCodexCodeModeHost: vi.fn(() => null)
 }))
 vi.mock('../../../core/harness/resolve', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../core/harness/resolve')>()),
@@ -510,7 +506,8 @@ function connFor(
     authHeader: 'Basic x',
     directory,
     startedAt: 0,
-    hostedTools: { state: 'skipped' }
+    hostedTools: { state: 'skipped' },
+    cleaned: true
   }
 }
 
@@ -745,17 +742,29 @@ describe('opencode target — lifecycle', () => {
       { action: 'shell', resource: '*', effect: 'ask' },
       { action: 'edit', resource: '*', effect: 'ask' },
       { action: 'webfetch', resource: '*', effect: 'ask' },
+      // A paid model call, gated like webfetch (2.2.2+ offers it by default).
+      { action: 'experimental_image_generate', resource: '*', effect: 'ask' },
       { action: 'external_directory', resource: '*', effect: 'ask' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'ask' },
       { action: 'claudeui_session_*', resource: '*', effect: 'ask' },
       { action: 'execute', resource: '*', effect: 'deny' },
+      // The direct tools of 2.2.0+ (Code Mode's, offered directly while `execute` is hidden).
+      { action: 'opencode_session_*', resource: '*', effect: 'deny' },
+      { action: 'opencode_worktree_*', resource: '*', effect: 'deny' },
+      { action: 'opencode_artifact_*', resource: '*', effect: 'deny' },
+      { action: 'opencode_schedule_*', resource: '*', effect: 'deny' },
       // Without `requireHandBack` (the dispatcher's own suites) a target is an ordinary session of the server.
       { action: 'claudeui_hand_back', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
+      // The worktree tools move the chat's own session: hidden from a dispatch target.
+      { action: 'claudeui_enter_worktree', resource: '*', effect: 'deny' },
+      { action: 'claudeui_exit_worktree', resource: '*', effect: 'deny' },
       // The session tools are the root agent's: hidden from a dispatch target (slice 2).
       { action: 'claudeui_session_*', resource: '*', effect: 'deny' },
       { action: 'question', resource: '*', effect: 'deny' }
     ])
+    expect(v2ToolHidden(rules, 'claudeui_enter_worktree', 'linux')).toBe(true)
+    expect(v2ToolHidden(rules, 'claudeui_exit_worktree', 'linux')).toBe(true)
     // The session tools are hidden and denied for the target, the other hosted tools are not.
     expect(v2ToolHidden(rules, 'claudeui_session_start', 'linux')).toBe(true)
     expect(evaluateV2Call(rules, 'claudeui_session_message', ['*'], 'linux')).toBe('deny')
@@ -1860,19 +1869,6 @@ describe('opencode target — shared machinery', () => {
     expect([r1, r2].filter((r) => r.isError).map((r) => r.text)).toEqual([
       expect.stringContaining('concurrent dispatches')
     ])
-  })
-
-  it('a codex-sourced dispatch into opencode runs', async () => {
-    const { dispatcher } = makeHarness()
-    const result = await dispatcher.dispatch(
-      { engine: 'opencode', prompt: 'x' },
-      makeCtx({ fromEngine: 'codex', fromRoutingId: 'routing-codex' })
-    )
-    expect(result).toEqual({
-      text: 'target answer',
-      sessionId: 'oc-sess-1',
-      agentRef: expect.stringMatching(/^s-/)
-    })
   })
 
   it('sends progress heartbeats through extra while the turn is in flight', async () => {
@@ -3743,6 +3739,96 @@ describe('opencode target — workdir', () => {
       const rules = createdRules(client)
       expect(rules).toContainEqual({ action: 'shell', resource: 'rm *', effect: 'deny' })
       expect(rules).toContainEqual({ action: 'shell', resource: 'npm publish*', effect: 'ask' })
+    })
+
+    // The caller works in a worktree it entered (`cwd`); `originCwd` is where it was started.
+    describe('a caller that works in a worktree', () => {
+      it('the target starts in the worktree, not the identity directory', async () => {
+        const { parent, wt } = tree()
+        const { dispatcher, serverManager } = makeHarness()
+        await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x' },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(serverManager.acquire).toHaveBeenCalledWith(wt)
+      })
+
+      it('a deny rule only the identity directory has still binds the target', async () => {
+        const { parent, wt } = tree()
+        const { dispatcher, client } = makeHarness({
+          loadUserRules: (cwd) =>
+            cwd === parent ? userRules({ deny: [PARENT_DENY] }) : userRules()
+        })
+        await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x' },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(createdRules(client)).toContainEqual({
+          action: 'shell',
+          resource: 'rm *',
+          effect: 'deny'
+        })
+      })
+
+      it('a message to a finished X-Agent rebuilds the context with the parent’s identity directory', async () => {
+        const { parent, wt } = tree()
+        const { dispatcher, client, ledger } = makeHarness({
+          loadUserRules: (cwd) =>
+            cwd === parent ? userRules({ deny: [PARENT_DENY] }) : userRules(),
+          parents: {
+            session: () => ({ getAutonomyMode: () => 'default', getMessages: () => [] }),
+            emit: () => {},
+            // canonical state: the parent was started in `parent`
+            identityCwd: () => parent
+          }
+        })
+        // The launch ran from the worktree; the ledger row holds only that.
+        await dispatcher.dispatch({ engine: 'opencode', prompt: 'x' }, makeCtx({ cwd: wt }))
+        expect(createdRules(client)).not.toContainEqual({
+          action: 'shell',
+          resource: 'rm *',
+          effect: 'deny'
+        })
+        const id = ledger.rowFor('opencode', 'oc-sess-1')!.id
+        const from = { routingId: 'routing-1', engine: 'claude' as const, title: 'Boss' }
+        const sent = await dispatcher.messageXAgent({ ledgerId: id, text: 'more', from })
+        expect(sent.kind).not.toBe('refused')
+        await tick(6)
+        expect(client.setSessionPermissions.mock.calls.at(-1)![1]).toContainEqual({
+          action: 'shell',
+          resource: 'rm *',
+          effect: 'deny'
+        })
+      })
+
+      it('a workdir in the identity directory but outside the worktree is refused', async () => {
+        const { parent, wt } = tree()
+        mkdirSync(join(parent, 'other'))
+        const { dispatcher, serverManager } = makeHarness()
+        const result = await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x', workdir: join(parent, 'other') },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(result.isError).toBe(true)
+        expect(result.text).toContain('is not inside your working directory')
+        expect(serverManager.acquire).not.toHaveBeenCalled()
+      })
+
+      it('unless the user listed it as an additional directory', async () => {
+        const { parent, wt } = tree()
+        const other = join(parent, 'other')
+        mkdirSync(other)
+        const { dispatcher, serverManager } = makeHarness({
+          loadUserRules: (cwd) =>
+            cwd === wt ? userRules({ additionalDirectories: [other] }) : userRules()
+        })
+        const result = await dispatcher.dispatch(
+          { engine: 'opencode', prompt: 'x', workdir: other },
+          makeCtx({ cwd: wt, originCwd: parent })
+        )
+        expect(result.isError).toBeUndefined()
+        expect(serverManager.acquire).toHaveBeenCalledWith(uiPath(realpathSync.native(other)))
+      })
     })
 
     it('B3/B7: the additional directories become external_directory allows; the user’s allow tier still adds nothing', async () => {

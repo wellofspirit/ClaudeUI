@@ -120,7 +120,6 @@ describe('a session_message card, through the real tool map', () => {
   it.each([
     ['pi', 'session_message'],
     ['opencode', 'claudeui_session_message'],
-    ['codex', 'session_message'],
     ['claude', 'mcp__claude-ui-sessions__session_message']
   ] as const)('%s X-Agent: first-party header, no raw server / tool summary', (engine, name) => {
     setUpSession('claude')

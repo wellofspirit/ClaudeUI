@@ -142,8 +142,8 @@ describe('the row line (one line, the active side only)', () => {
     })
   })
 
-  it('never mentions a bundled copy for opencode, pi or Codex', () => {
-    for (const id of ['opencode', 'pi', 'codex'] as const) {
+  it('never mentions a bundled copy for opencode or pi', () => {
+    for (const id of ['opencode', 'pi'] as const) {
       const entry = pi({
         id,
         managed: [],
@@ -176,35 +176,6 @@ describe('the row line (one line, the active side only)', () => {
     expect(rowLine(entry)).toMatchObject({
       state: 'running',
       text: 'Environment override · 9.9.9'
-    })
-  })
-
-  it("Codex reads design 1's uiNote when installed, else the not-installed state", () => {
-    const codexEntry = (managed: HarnessStateEntry['managed']): HarnessStateEntry =>
-      pi({
-        id: 'codex',
-        manifest: { tested: '0.156.0', floor: '0.156.0', ceiling: '1.0.0' },
-        managed,
-        resolved:
-          managed.length > 0
-            ? {
-                source: 'managed',
-                version: '0.156.0',
-                path: '/opt/store/codex/0.156.0/codex',
-                available: true
-              }
-            : nothing('managed', 'Codex 0.156.0 is not installed')
-      })
-    expect(
-      rowLine(
-        codexEntry([
-          { version: '0.156.0', verified: 'reviewed', installedAt: '2026-09-29T00:00:00.000Z' }
-        ])
-      ).text
-    ).toBe('Exact version this ClaudeUI release speaks · 0.156.0')
-    expect(rowLine(codexEntry([]))).toMatchObject({
-      state: 'not-installed',
-      text: '0.156.0 is not installed'
     })
   })
 
@@ -380,7 +351,11 @@ describe('updateButtonState', () => {
       'running'
     )
     // Since S7b an install that is not an update (the upgrade sheet's) spins too.
-    const other: HarnessInstallProgress = { id: 'codex', version: '0.156.0', phase: 'downloading' }
+    const other: HarnessInstallProgress = {
+      id: 'opencode',
+      version: '1.18.32',
+      phase: 'downloading'
+    }
     expect(
       updateButtonState({ ...idle, updates: updates({ available: [] }), installs: [other] })
     ).toBe('running')
@@ -388,8 +363,8 @@ describe('updateButtonState', () => {
 
   it('is amber for a failed install outside the update flow, not for an update’s own', () => {
     const failed: HarnessInstallProgress = {
-      id: 'codex',
-      version: '0.156.0',
+      id: 'opencode',
+      version: '1.18.32',
       phase: 'failed',
       reason: 'digest mismatch'
     }
@@ -495,19 +470,19 @@ describe('installPanelRows (S7b)', () => {
     const rowsOf = installPanelRows(
       view,
       [
-        { id: 'codex', version: '0.156.0', phase: 'downloading', receivedBytes: 5 },
-        { id: 'pi', version: '0.87.4', phase: 'downloading' },
-        { id: 'opencode', version: '1.18.32', phase: 'failed', reason: 'no network' }
+        { id: 'opencode', version: '1.18.32', phase: 'failed', reason: 'no network' },
+        { id: 'opencode', version: '1.18.31', phase: 'downloading', receivedBytes: 5 },
+        { id: 'pi', version: '0.87.4', phase: 'downloading' }
       ],
       [
         { id: 'claude', version: '9.9.9' },
-        { id: 'codex', version: '0.156.0' }
+        { id: 'opencode', version: '1.18.31' }
       ]
     )
     expect(rowsOf.map((r) => [r.id, r.version, r.state])).toEqual([
       ['claude', '9.9.9', 'installed'],
       ['opencode', '1.18.32', 'failed'],
-      ['codex', '0.156.0', 'installing']
+      ['opencode', '1.18.31', 'installing']
     ])
     expect(rowsOf[1].reason).toBe('no network')
     // pi 0.87.4 is an available update: it is an update row, not an install row.
@@ -522,18 +497,16 @@ describe('chatgptDisconnectText (ADR-082 §8, S7e)', () => {
       ids.includes(engine)
 
   it('names every harness that runs, and the ones whose own sign-in stays', () => {
-    expect(chatgptDisconnectText(running('codex', 'pi', 'opencode'))).toBe(
-      'ClaudeUI’s ChatGPT sign-in is removed from Codex, pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
+    expect(chatgptDisconnectText(running('pi', 'opencode'))).toBe(
+      'ClaudeUI’s ChatGPT sign-in is removed from pi and opencode. Where ChatGPT is switched off for pi or opencode, a sign-in made there directly stays.'
     )
     expect(chatgptDisconnectText(running('opencode'))).toBe(
       'ClaudeUI’s ChatGPT sign-in is removed from opencode. Where ChatGPT is switched off for opencode, a sign-in made there directly stays.'
     )
   })
 
-  it('Codex alone keeps nothing to mention; none running says nothing', () => {
-    expect(chatgptDisconnectText(running('codex'))).toBe(
-      'ClaudeUI’s ChatGPT sign-in is removed from Codex.'
-    )
+  it('a harness that does not use ChatGPT sign-in is not named; none running says nothing', () => {
+    expect(chatgptDisconnectText(running('claude'))).toBeUndefined()
     expect(chatgptDisconnectText(running())).toBeUndefined()
   })
 })

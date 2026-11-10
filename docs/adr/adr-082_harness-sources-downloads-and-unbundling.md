@@ -34,6 +34,7 @@ user's shared opencode database and imported `auth.json`.
 **Relates to:** [ADR-052](adr-052_remote-auth-passkeys-capabilities.md) (the capability that gates
 installs from a remote device), [ADR-035](adr-035_pi-engine-backend.md), [ADR-019](adr-019_opencode-engine-backend.md).
 **Amended by:** [ADR-097](adr-097_opencode-v2-only.md) (accepted 2026-10-06; lands with the opencode 2.x arc at S10) — manifest coordinates and ceiling. As built: ADR-097 §1 (S1: `@opencode/cli-<plat>` 2.0.24, floor = tested, ceiling 3.0.0).
+**Amended 2026-10-28:** the Codex engine was removed; the managed store, the Installed page and the installer now cover opencode and pi (and Claude Code as before), and every mention of Codex below is historical.
 
 ## Context
 

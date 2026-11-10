@@ -9,6 +9,7 @@ import { render, fireEvent, act } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { GitChangesPill } from '../GitChangesPill'
+import { sessionWorkdir } from '../../../lib/session-workdir'
 import type { GitStatusData } from '../../../../../shared/types'
 
 const ROUTE = 'route-gcp'
@@ -97,7 +98,7 @@ describe('GitChangesPill — populated by git:status-update', () => {
     app.onSync('git:status-update', ({ cwd: eventCwd, status }) => {
       const s = useSessionStore.getState()
       for (const [routingId, session] of Object.entries(s.sessions)) {
-        if (session.cwd === eventCwd) s.setGitStatus(routingId, status)
+        if (sessionWorkdir(session) === eventCwd) s.setGitStatus(routingId, status)
       }
     })
   })

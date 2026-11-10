@@ -1,7 +1,7 @@
 /**
  * @vitest-environment node
  *
- * The session service as the opencode, pi and Codex adapters call it (slice 2):
+ * The session service as the opencode and pi adapters call it (slice 2):
  * a caller with each engine's id and a `callOwner` that reflects the engine's
  * root-only facts. The adapters' own suites cover how they BUILD that caller;
  * this one pins what the shared service does with it — root acts, anything else is
@@ -96,7 +96,7 @@ const callerOf = (s: ReturnType<typeof born>, owner: Owner): SessionToolCaller =
 const auditFor = (ref: string): ReturnType<typeof listAuditLog> =>
   listAuditLog({ limit: 500 }).filter((r) => r.connectionId === `session:${ref}`)
 
-const ENGINES = ['opencode', 'pi', 'codex'] as const
+const ENGINES = ['opencode', 'pi'] as const
 const ACTING_INPUTS = {
   session_message: (target: string) => ({ session: target, message: 'hi' }),
   session_stop: (target: string) => ({ session: target }),

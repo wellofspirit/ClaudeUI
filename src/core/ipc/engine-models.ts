@@ -7,13 +7,13 @@
  * Asked for ONE engine, only that engine's lookup runs and only its groups come
  * back. That is how the composer reads: one request per engine, so each
  * engine's models land as soon as its own probe answers. Each lookup is an
- * independent process probe (cli.js init, an opencode server, `pi --mode rpc`,
- * the Codex app-server) with timeouts up to 15s, and a single reply for all four
+ * independent process probe (cli.js init, an opencode server, `pi --mode rpc`)
+ * with timeouts up to 15s, and a single reply for all three
  * held every engine's models back until the slowest probe — a pi probe running
  * to its timeout hid Claude's models with it.
  *
- * Asked for no engine, all four run CONCURRENTLY into one reply (claude,
- * opencode, pi, codex), which waits for the slowest. Kept for callers that want
+ * Asked for no engine, all three run CONCURRENTLY into one reply (claude,
+ * opencode, pi), which waits for the slowest. Kept for callers that want
  * every engine at once and can afford that wait (Settings' curation blocks).
  *
  * Each engine degrades to [] on its own: every engine but Claude is optional,
@@ -21,7 +21,6 @@
  */
 import { HARNESS_IDS, isHarnessId } from '../../shared/harness-types'
 import type { EngineId, EngineModelGroup, ModelInfo } from '../../shared/types'
-import { discoverCodexModels } from '../codex/model-discovery'
 import { discoverOpencodeModels } from '../opencode/model-discovery'
 import { discoverPiModels } from '../pi/model-discovery'
 
@@ -63,8 +62,6 @@ function engineGroups(
       return discoverOpencodeModels().catch(none)
     case 'pi':
       return discoverPiModels().catch(none)
-    case 'codex':
-      return discoverCodexModels().catch(none)
   }
 }
 

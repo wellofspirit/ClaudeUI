@@ -8,8 +8,7 @@ import type { HarnessId, HarnessStateEntry, HarnessStateSnapshot } from '../../s
 export const TEST_TESTED: Record<HarnessId, string> = {
   claude: '2.1.280',
   opencode: '1.18.32',
-  pi: '0.87.4',
-  codex: '0.156.0'
+  pi: '0.87.4'
 }
 
 export function harnessEntry(id: HarnessId, running = true): HarnessStateEntry {
@@ -39,7 +38,7 @@ export function harnessSnapshot(
 ): HarnessStateSnapshot {
   const of = (id: HarnessId): HarnessStateEntry => harnessEntry(id, !missing.includes(id))
   return {
-    harnesses: { claude: of('claude'), opencode: of('opencode'), pi: of('pi'), codex: of('codex') },
+    harnesses: { claude: of('claude'), opencode: of('opencode'), pi: of('pi') },
     detection: { running: false },
     installs: [],
     updates: { mode: 'ask', available: [], status: { running: false, results: [] } },

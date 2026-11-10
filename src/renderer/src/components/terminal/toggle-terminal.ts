@@ -1,4 +1,5 @@
 import { useSessionStore, normalizeCwd } from '../../stores/session-store'
+import { sessionWorkdir } from '../../lib/session-workdir'
 import { nextFreeSlot } from './pool-slot'
 
 /**
@@ -24,7 +25,7 @@ export function isTerminalToggleShortcut(e: KeyboardEvent): boolean {
 
 /**
  * Flip the bottom terminal panel open/closed, auto-creating the first tab for
- * the active session's cwd when opening into an empty group.
+ * the active session's workdir (its worktree, else its cwd) when opening into an empty group.
  *
  * Single source of truth for the affordance: SessionView's keydown handler (via
  * {@link isTerminalToggleShortcut}) and the TopBar button both call this, so the
@@ -47,7 +48,8 @@ export function toggleTerminalPanel(): void {
   // shell. Opening the panel alone is right there: it renders its own
   // "Press + to open a terminal" empty state.
   if (willOpen) {
-    const cwd = state.activeSessionId ? state.sessions[state.activeSessionId]?.cwd : undefined
+    const active = state.activeSessionId ? state.sessions[state.activeSessionId] : undefined
+    const cwd = active ? sessionWorkdir(active) : undefined
     if (!cwd) return
     const key = normalizeCwd(cwd)
     const group = state.terminalGroups[key]

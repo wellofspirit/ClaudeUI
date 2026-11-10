@@ -2,7 +2,7 @@
  * Where each managed harness comes from and how its download is verified
  * (ADR-082 §4). These put the payload into a staging directory in the layout
  * the resolver reads (`store.ts`). They replaced the vendoring pipelines of the
- * old `scripts/ensure-{opencode,pi,codex}.mjs`, which are now thin wrappers
+ * old `scripts/ensure-{opencode,pi}.mjs`, which are now thin wrappers
  * over the installer (ADR-082 §8).
  *
  *   opencode  npm registry: `@opencode/cli-<os>-<arch>@<version>` metadata
@@ -15,26 +15,18 @@
  *             and the SHA256SUMS entry must match. Otherwise SHA256SUMS only
  *             (`publisher`). The whole archive is kept (pi resolves its
  *             assets relative to itself).
- *   Codex     tested only: `codex` and `codex-code-mode-host` from
- *             `openai/codex` `rust-v<version>`, each `.tar.gz` holding exactly
- *             one member, checked against the reviewed `archiveSha256` and
- *             `binarySha256`, plus the LICENSE at the pinned commit
- *             (`licenseSha256`).
  *
  * Every check fails closed with the reason; there is no override.
  */
-import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { HarnessId, HarnessManifest } from '../../../shared/harness-types'
 import { ArchiveError, extractTarGz, extractZip, type ExtractedFile } from './archive'
 import {
   DownloadError,
-  GITHUB_RAW,
   GITHUB_RELEASES,
   NPM_REGISTRY,
   downloadToFile,
-  fetchBytes,
   fetchJson,
   fetchText,
   type DownloadedFile,
@@ -79,7 +71,6 @@ export interface Acquired {
 
 const METADATA_MAX_BYTES = 1024 * 1024
 const SUMS_MAX_BYTES = 64 * 1024
-const LICENSE_MAX_BYTES = 64 * 1024
 
 /** Own-property lookup: platform keys come from host strings. */
 function platformEntry(manifest: HarnessManifest, key: string): Record<string, unknown> | null {
@@ -88,13 +79,6 @@ function platformEntry(manifest: HarnessManifest, key: string): Record<string, u
 
 function isHex64(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
-}
-
-/** A plain file name: no separators, no leading dot. */
-function plainName(value: unknown): value is string {
-  return (
-    typeof value === 'string' && value !== '' && !/[/\\:]/.test(value) && !value.startsWith('.')
-  )
 }
 
 /** Download one file of the install into `downloadsDir`, within the install's budget. */
@@ -312,116 +296,11 @@ async function acquirePi(ctx: AcquireContext): Promise<Acquired> {
   return { executable, verified: ctx.tested ? 'reviewed' : 'publisher' }
 }
 
-// ── Codex ─────────────────────────────────────────────────────────────────────
-
-interface CodexBinary {
-  name: string
-  member: string
-  archiveSha256: string
-  binarySha256: string
-}
-
-function codexBinaries(ctx: AcquireContext): CodexBinary[] {
-  const key = `${ctx.platform}-${ctx.arch}`
-  const host = platformEntry(ctx.manifest, key)
-  const binaries = host?.binaries
-  if (!binaries || typeof binaries !== 'object') {
-    throw new VerifyError(`Codex has no reviewed release for ${key}`)
-  }
-  const list: CodexBinary[] = []
-  for (const [name, raw] of Object.entries(binaries as Record<string, unknown>)) {
-    const e = raw as Record<string, unknown> | null
-    if (
-      !plainName(name) ||
-      !plainName(e?.member) ||
-      !isHex64(e?.archiveSha256) ||
-      !isHex64(e?.binarySha256)
-    ) {
-      throw new VerifyError(`the Codex manifest has an invalid record for ${key}`)
-    }
-    list.push({
-      name,
-      member: e.member as string,
-      archiveSha256: e.archiveSha256 as string,
-      binarySha256: e.binarySha256 as string
-    })
-  }
-  const exe = ctx.platform === 'win32' ? 'codex.exe' : 'codex'
-  if (!list.some((b) => b.name === exe)) {
-    throw new VerifyError(`the Codex manifest for ${key} has no ${exe}`)
-  }
-  return list
-}
-
-async function acquireCodex(ctx: AcquireContext): Promise<Acquired> {
-  ctx.phase('resolving')
-  if (!ctx.tested) {
-    throw new VerifyError(
-      `ClaudeUI's Codex is locked to ${ctx.manifest.tested}; ${ctx.version} cannot be installed`
-    )
-  }
-  const binaries = codexBinaries(ctx)
-  const licenseUrl = (ctx.manifest as { license?: unknown }).license
-  const licenseSha = (ctx.manifest as { licenseSha256?: unknown }).licenseSha256
-  if (typeof licenseUrl !== 'string' || !isHex64(licenseSha)) {
-    throw new VerifyError('the Codex manifest has no reviewed LICENSE')
-  }
-
-  for (const binary of binaries) {
-    const archive = await download(
-      ctx,
-      `https://github.com/openai/codex/releases/download/rust-v${ctx.version}/${binary.member}.tar.gz`,
-      `${binary.member}.tar.gz`,
-      GITHUB_RELEASES
-    )
-    ctx.phase('verifying')
-    if (archive.sha256 !== binary.archiveSha256) {
-      throw new VerifyError(
-        `${binary.member}.tar.gz SHA-256 ${archive.sha256} does not match the reviewed ${binary.archiveSha256}`
-      )
-    }
-    // Exactly one regular member, named as reviewed.
-    const files = await extract(ctx, archive.file, 'tar.gz', (p) =>
-      p === binary.member ? binary.name : null
-    )
-    if (files.length !== 1 || files[0].entryPath !== binary.member || files[0].dest === null) {
-      throw new VerifyError(`${binary.member}.tar.gz does not hold exactly ${binary.member}`)
-    }
-    ctx.phase('verifying')
-    if (files[0].sha256 !== binary.binarySha256) {
-      throw new VerifyError(
-        `${binary.name} SHA-256 ${files[0].sha256} does not match the reviewed ${binary.binarySha256}`
-      )
-    }
-    if (ctx.platform !== 'win32') fs.chmodSync(files[0].dest, 0o755)
-  }
-
-  ctx.phase('downloading')
-  const licenseBytes = await fetchBytes(licenseUrl, {
-    fetch: ctx.fetch,
-    policy: GITHUB_RAW,
-    signal: ctx.signal,
-    maxBytes: LICENSE_MAX_BYTES
-  })
-  ctx.phase('verifying')
-  const actual = createHash('sha256').update(licenseBytes).digest('hex')
-  if (actual !== licenseSha) {
-    throw new VerifyError(
-      `Codex LICENSE SHA-256 ${actual} does not match the reviewed ${licenseSha}`
-    )
-  }
-  fs.writeFileSync(path.join(ctx.payloadDir, 'LICENSE'), licenseBytes, { flag: 'wx' })
-
-  const exe = ctx.platform === 'win32' ? 'codex.exe' : 'codex'
-  return { executable: path.join(ctx.payloadDir, exe), verified: 'reviewed' }
-}
-
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 const ACQUIRERS: Partial<Record<HarnessId, (ctx: AcquireContext) => Promise<Acquired>>> = {
   opencode: acquireOpencode,
-  pi: acquirePi,
-  codex: acquireCodex
+  pi: acquirePi
 }
 
 /** Download, verify and unpack `ctx.id` into `ctx.payloadDir`. */

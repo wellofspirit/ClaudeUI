@@ -6,7 +6,7 @@
  * The decision itself is `session.capabilities.voice` and nothing else. This
  * only picks the words: for Claude that flag is false exactly when the spawned
  * binary lacks our voice-server patch (`ClaudeSession.capabilities`; static
- * Claude capabilities always have voice), and for opencode, pi and Codex exactly
+ * Claude capabilities always have voice), and for opencode and pi exactly
  * when the host has no speech runtime — "Provider does not support voice" would
  * misdescribe both.
  */
@@ -24,7 +24,7 @@ export const VOICE_NEEDS_PATCHED_HARNESS =
   'Voice input needs the patched Claude Code binary; the one this session runs lacks the voice-server patch'
 
 /** The engines whose voice is the host's on-device worker (ADR-101). */
-const ON_DEVICE_ENGINES: ReadonlySet<EngineId> = new Set<EngineId>(['opencode', 'pi', 'codex'])
+const ON_DEVICE_ENGINES: ReadonlySet<EngineId> = new Set<EngineId>(['opencode', 'pi'])
 
 /**
  * The refusal message for `session`, or null when it can take voice input.

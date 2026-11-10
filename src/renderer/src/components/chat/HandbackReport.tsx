@@ -8,6 +8,12 @@
  *  - `flagged`  — the same, under auto mode's security warning (when it gave one);
  *  - `withheld` — the subagent ended without delivering a report.
  *
+ * The report itself is also the "Hand back" tool call in the agent's own stream,
+ * so a caller showing that stream passes `showReport={false}`: only the lines
+ * the stream cannot show remain (the warning, the no-review note, withheld).
+ * Callers draw it only once the task has settled — a resumed agent's previous
+ * report is not news while its next run streams above it.
+ *
  * Nothing renders for a notification without a hand-back. The warning is auto
  * mode's classifier text and the report is the subagent's own words, both
  * UNTRUSTED: the warning is plain text; the report goes through the same
@@ -28,13 +34,32 @@ export function hasHandbackReport(notification: TaskNotification | undefined): b
   return notification.handback === 'withheld' || notification.summary !== ''
 }
 
+/**
+ * Whether a settled task's card draws the report body (`showReport`). Not while
+ * its transcript is still loading (it would flash, then vanish once the stream
+ * lands), and not under a loaded stream: native Claude's `SubagentHandback`
+ * call renders the report there. An X-Agent's `hand_back` call does not yet
+ * (it is a generic JSON row), so a dispatch keeps the body.
+ */
+export function handbackBodyShown(
+  hasSubagentOutput: boolean,
+  subagentPending: boolean,
+  isDispatch: boolean
+): boolean {
+  if (isDispatch) return true
+  return !hasSubagentOutput && !subagentPending
+}
+
 export function HandbackReport({
   notification,
   className = '',
-  xAgent = false
+  xAgent = false,
+  showReport = true
 }: {
   notification: TaskNotification | undefined
   className?: string
+  /** Draw the report body. False when the agent's stream is on screen and already holds it. */
+  showReport?: boolean
   /** The task is a cross-engine dispatch: its withheld line says "X-Agent", not "subagent". */
   xAgent?: boolean
 }): React.JSX.Element | null {
@@ -55,33 +80,39 @@ export function HandbackReport({
     )
   }
 
+  const hasNote = handback === 'send' && !!notification.warning
+  if (!showReport && handback !== 'flagged' && !hasNote) return null
+  const gap = showReport ? 'mb-2 ' : ''
+
   return (
     <div data-testid="HandbackReport" data-handback={handback} className={className}>
       {handback === 'flagged' && (
         <div
           data-testid="HandbackReport.warning"
           role="alert"
-          className="mb-2 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[12px] text-warning whitespace-pre-wrap break-words"
+          className={`${gap}rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-[12px] text-warning whitespace-pre-wrap break-words`}
         >
           {notification.warning || HANDBACK_FLAGGED_GENERIC_WARNING}
         </div>
       )}
-      {handback === 'send' && notification.warning && (
+      {hasNote && (
         // A report no review ran for (ADR-105 §3, B-3c): a note, not a security warning.
         <div
           data-testid="HandbackReport.note"
-          className="mb-2 text-[12px] text-text-muted italic whitespace-pre-wrap break-words"
+          className={`${gap}text-[12px] text-text-muted italic whitespace-pre-wrap break-words`}
         >
           {notification.warning}
         </div>
       )}
-      <div
-        {...TOOL_OUTPUT_SCOPE}
-        data-testid="HandbackReport.text"
-        className="text-[12px] text-text-primary/80 leading-[1.5]"
-      >
-        <MarkdownRenderer content={notification.summary} />
-      </div>
+      {showReport && (
+        <div
+          {...TOOL_OUTPUT_SCOPE}
+          data-testid="HandbackReport.text"
+          className="text-[12px] text-text-primary/80 leading-[1.5]"
+        >
+          <MarkdownRenderer content={notification.summary} />
+        </div>
+      )}
     </div>
   )
 }

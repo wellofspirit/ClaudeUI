@@ -32,8 +32,8 @@
  * close instead, which lost to the app's own scrolling: clicking a trigger that
  * is only half visible scrolls it into view AFTER the menu opens (the browser
  * does this for the focus the click gives the button), and that scroll killed
- * the menu the click had just opened — reproduced in Settings › Engines ›
- * Codex, where such a trigger could not be opened at all. Trackpad inertia
+ * the menu the click had just opened — reproduced on an engine's
+ * Settings page, where such a trigger could not be opened at all. Trackpad inertia
  * after a deliberate scroll does the same. The menu now closes only once the
  * anchor's rect is entirely outside the viewport, which is the one case where a
  * fixed menu really would be stranded beside nothing. Scrolling the menu's own

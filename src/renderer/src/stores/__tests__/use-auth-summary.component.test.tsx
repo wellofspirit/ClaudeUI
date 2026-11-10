@@ -18,7 +18,7 @@ import type { ChatMessage } from '../../../../shared/types'
 vi.mock('electron', async () => await import('../../../../test/stubs/electron-shim'))
 
 const CLAUDE = 'r-summary-claude'
-const CODEX = 'r-summary-codex'
+const PI_SESSION = 'r-summary-pi'
 
 function installApi(): void {
   ;(globalThis as unknown as { window: Record<string, unknown> }).window.api = {
@@ -74,20 +74,9 @@ describe('useAuthSummary — `inUse` comes from the sessions that exist', () => 
     expect(seen.at(-1)?.issues).toEqual([])
   })
 
-  it('a Codex session is what puts the ChatGPT credential in scope', () => {
-    useSessionStore.getState().createNewSession(CODEX, '/tmp/b')
-    patch(CODEX, { selectedEngineId: 'codex', selectedModel: 'gpt-5.6-sol' })
-    useSessionStore.setState({
-      providerAuth: { anthropic: 'authenticated', chatgpt: 'unauthenticated', chatgptRoutes: {} }
-    })
-    const seen = observe()
-    expect(seen.at(-1)?.tone).toBe('needed')
-    expect(seen.at(-1)?.issues.map((issue) => issue.providerId)).toEqual(['chatgpt'])
-  })
-
   it("honours the engine's route gate — pi on a disabled ChatGPT route is not in use", () => {
-    useSessionStore.getState().createNewSession(CODEX, '/tmp/b')
-    patch(CODEX, { selectedEngineId: 'pi', selectedModel: 'openai-codex/gpt-5.6-luna' })
+    useSessionStore.getState().createNewSession(PI_SESSION, '/tmp/b')
+    patch(PI_SESSION, { selectedEngineId: 'pi', selectedModel: 'openai-codex/gpt-5.6-luna' })
     useSessionStore.setState({
       providerAuth: {
         anthropic: 'authenticated',

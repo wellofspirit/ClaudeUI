@@ -9,6 +9,8 @@
  * Markers (last user text):
  *   [tool]      shell tool call; after the tool result, echo the result
  *   [toolwrite] shell tool call that WRITES `judged.txt` (not read-only: auto mode judges it)
+ *   [worktreeremove] `opencode_worktree_remove` call on an absolute path with `force`
+ *               (a path that need not exist: ClaudeUI's plugin refuses the call first)
  *   [mcp]       call the first tool named `*_echo`; then echo the result
  *   [dispatch]  call ClaudeUI's hosted `claudeui_dispatch_agent`; then echo the result
  *   [subdispatch] `subagent` tool call whose child prompt is `[dispatch]`
@@ -16,6 +18,9 @@
  *   [handback]  call ClaudeUI's hosted `claudeui_hand_back` (a dispatch target's report); then echo the result
  *   [sessiontool]  call ClaudeUI's hosted `claudeui_session_list`; then echo the result
  *   [subsession]   `subagent` tool call whose child prompt is `[sessiontool]`
+ *   [enterwt:<name>]  ClaudeUI's hosted `claudeui_enter_worktree` with `{ name }`; then echo the result
+ *   [enterwtpath:<abs>]  the same with `{ path }` (an existing managed worktree; no `]` in the path)
+ *   [exitwt]    ClaudeUI's hosted `claudeui_exit_worktree`; then echo the result
  *   [websearch] `websearch` tool call (query `contract query`)
  *   [skill]     `skill` tool call loading `SKILL_ID` (a test creates it under `.opencode/skills/`)
  *   [question]  `question` tool call (one single-choice question)
@@ -109,6 +114,8 @@ export const SKILL_ID = 'contract-demo'
 export const COMPACTION_SUMMARY = '## Objective\nContract compaction summary.'
 /** The file the file-tool markers work on (a test creates it with `alpha`). */
 export const NOTES_FILE = 'notes.txt'
+/** `[worktreeremove]`'s target: never a real worktree — the call is refused before it resolves. */
+export const WORKTREE_REMOVE_DIR = '/claudeui-contract/no-such-worktree'
 
 const USAGE = { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 }
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -278,6 +285,12 @@ export async function startFixtureProvider(
           tools.find((tool) => tool === 'shell'),
           { command: WRITE_COMMAND, description: 'contract write' }
         )
+      if (text.includes('[worktreeremove]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'opencode_worktree_remove'),
+          { directory: WORKTREE_REMOVE_DIR, force: true }
+        )
       if (text.includes('[subdispatch]'))
         return streamToolCall(
           res,
@@ -303,6 +316,26 @@ export async function startFixtureProvider(
           res,
           tools.find((tool) => tool === 'claudeui_session_list'),
           { scope: 'linked' }
+        )
+      const enterWt = /\[enterwt:([A-Za-z0-9_-]+)\]/.exec(text)
+      if (enterWt)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_enter_worktree'),
+          { name: enterWt[1] }
+        )
+      const enterWtPath = /\[enterwtpath:([^\]]+)\]/.exec(text)
+      if (enterWtPath)
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_enter_worktree'),
+          { path: enterWtPath[1] }
+        )
+      if (text.includes('[exitwt]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'claudeui_exit_worktree'),
+          {}
         )
       if (text.includes('[mcp]'))
         return streamToolCall(

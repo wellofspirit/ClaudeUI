@@ -1,5 +1,5 @@
 /**
- * Layer 1 (unit) for `ContextNoteBlock` — Codex `hookPrompt` fragments and pi
+ * Layer 1 (unit) for `ContextNoteBlock` — hook fragments and pi
  * `custom_message` entries.
  *
  * The rule it carries: a fragment is THIRD-PARTY text (an arbitrary hook

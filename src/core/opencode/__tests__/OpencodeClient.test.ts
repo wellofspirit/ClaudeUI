@@ -204,6 +204,20 @@ describe('request building', () => {
     ])
   })
 
+  it('moveSession posts the destination (and delivery only when given) to the move route', async () => {
+    const { api, sent } = client(() => empty())
+    await api.moveSession('ses_1', '/work/wt')
+    await api.moveSession('ses_1', '/work/wt', 'steer')
+    expect(sent.map((s) => `${s.method} ${s.url.slice(BASE.length)}`)).toEqual([
+      'POST /api/session/ses_1/move',
+      'POST /api/session/ses_1/move'
+    ])
+    expect(sent.map((s) => s.body)).toEqual([
+      { directory: '/work/wt' },
+      { directory: '/work/wt', delivery: 'steer' }
+    ])
+  })
+
   it('credential CRUD + activate and location reload hit the v2 routes', async () => {
     const entry = {
       id: 'cred_claudeui_x_v1',

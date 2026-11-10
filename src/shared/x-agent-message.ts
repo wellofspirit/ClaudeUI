@@ -1,8 +1,8 @@
 /**
- * The words of messaging between a session and its X-Agents (ADR-105 §4), once, for the four
+ * The words of messaging between a session and its X-Agents (ADR-105 §4), once, for the
  * engines' registrations and the dispatcher: the X-Agent's `session_message` description, how a
- * message reads to the X-Agent it reaches, what the X-Agent's card shows of it, and the two
- * refusals of the Codex review. Pure strings, no imports.
+ * message reads to the X-Agent it reaches, what the X-Agent's card shows of it, and the
+ * refusals. Pure strings, no imports.
  */
 
 /** The name of the one session tool an X-Agent has; it is the same tool a root session has. */
@@ -76,19 +76,6 @@ export function messageNotTakenText(name: string, reason: string): string {
     `could not take it up again: ${why} Send it again when that is resolved.`
   )
 }
-
-/** The refusal of an X-Agent's message that auto mode's review blocked (a Codex target). */
-export function messageBlockedText(reason: string): string {
-  const why = reason.replace(/\s+/g, ' ').trim().slice(0, 500) || 'flagged as potentially unsafe'
-  return (
-    `Refused: auto mode blocked this message and it was not sent. Reason: ${why}. ` +
-    'Rephrase it, or put what matters in your hand_back report.'
-  )
-}
-
-/** The refusal of an X-Agent's message that could not be reviewed (a Codex target; fail closed). */
-export const MESSAGE_UNREVIEWED_TEXT =
-  'Refused: this message could not be reviewed; include it in your hand_back report instead.'
 
 /** The refusal of a message from an X-Agent whose run is over (its report was taken, it was stopped). */
 export const MESSAGE_RUN_ENDED_TEXT =

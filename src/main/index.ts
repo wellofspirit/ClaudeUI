@@ -10,7 +10,6 @@ import {
   dialog,
   powerMonitor
 } from 'electron'
-import { codexHostRegistry } from '../core/codex/CodexHost'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
@@ -764,16 +763,6 @@ app.whenReady().then(() => {
       currentPluginManager?.stopAll()
       core?.automationManager.stopAll()
       credentialSync.stop()
-      // Every Codex app-server (ADR-069 §6): stdin EOF first, so the binary
-      // closes its sqlite state files itself, and the process tree is killed
-      // only if it outlives the grace. Bounded — nothing here waits on a child,
-      // and a parent that exits first closes the pipe, which is the same EOF.
-      //
-      // This is the WHOLE Codex teardown since H2: a session is a thread on one
-      // of these hosts, so closing them ends every Codex turn and every Codex
-      // child thread this app started. Each attached session is told (ADR-069
-      // §5) and settles its own cards on the way out.
-      codexHostRegistry.shutdown()
       void core?.remoteServer.stop()
       // The usage hub's timers (ADR-072 §7). Nothing waits on the client: a
       // push in flight is idempotent on the hub, so the worst a killed one

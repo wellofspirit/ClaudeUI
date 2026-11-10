@@ -1,6 +1,6 @@
 /**
  * The session tools' schemas, once (slice 2): the zod shapes Claude and opencode
- * register and the JSON specs pi's bridge and Codex's `dynamicTools` take must
+ * register and the JSON specs pi's bridge takes must
  * describe the same nine tools.
  */
 import { describe, expect, it } from 'vitest'
@@ -69,7 +69,7 @@ describe('sessionToolJsonSchema', () => {
       Record<string, unknown>
     >
     expect(start.mode).toMatchObject({ type: 'string', enum: ['start', 'propose'] })
-    expect(start.engine).toMatchObject({ enum: ['claude', 'opencode', 'pi', 'codex'] })
+    expect(start.engine).toMatchObject({ enum: ['claude', 'opencode', 'pi'] })
     expect(start.permission_mode).toMatchObject({
       enum: ['plan', 'default', 'acceptEdits', 'auto', 'bypassPermissions']
     })

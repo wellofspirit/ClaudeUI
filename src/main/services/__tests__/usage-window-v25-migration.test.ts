@@ -34,10 +34,10 @@ const CLAUDE = 'anthropic:org-a:acct-a'
 const CHATGPT = 'chatgpt:w-a:user-a'
 /**
  * The OTHER ChatGPT key shape: a vault credential with no workspace id resolves
- * through `codexNativeIdentity()`, so its readings are mis-kinded exactly like
+ * through `chatgptNativeIdentity()`, so its readings are mis-kinded exactly like
  * the `chatgpt:` ones and a `LIKE 'chatgpt:%'` sweep would leave them forever.
  */
-const CODEX_NATIVE = 'codex:openai:native'
+const CHATGPT_NATIVE = 'codex:openai:native'
 
 function openRawDb(): Db {
   return new BetterSqlite3(':memory:')
@@ -73,7 +73,7 @@ function seedV24(db: Db): void {
   sample.run('s-chatgpt-5h', END - 1_000, CHATGPT, 63, END, CHATGPT, '5h')
   sample.run('s-chatgpt-7d', END - 1_000, CHATGPT, 12, END + SEVEN_DAYS, CHATGPT, '7d')
   // The same mis-kinding under the native key.
-  sample.run('s-native-5h', END - 1_000, CODEX_NATIVE, 20, END, CODEX_NATIVE, '5h')
+  sample.run('s-native-5h', END - 1_000, CHATGPT_NATIVE, 20, END, CHATGPT_NATIVE, '5h')
   // A pre-v21 row in the shared bucket, which belongs to neither vendor.
   sample.run('s-unknown', END - 1_000, 'uuid-b', 99, END, 'unknown', '5h')
 
@@ -84,7 +84,7 @@ function seedV24(db: Db): void {
   )
   window.run(CLAUDE, '5h', END, END - FIVE_HOURS, 41.25, 3)
   window.run(CHATGPT, '5h', END, END - FIVE_HOURS, 63, 7)
-  window.run(CODEX_NATIVE, '5h', END, END - FIVE_HOURS, 20, 2)
+  window.run(CHATGPT_NATIVE, '5h', END, END - FIVE_HOURS, 20, 2)
 
   db.prepare(
     `INSERT INTO usage_event

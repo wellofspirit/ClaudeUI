@@ -119,7 +119,10 @@ describeChatgpt('opencode 2.x contract: ChatGPT access-token vending (hermetic)'
   const rig = useRig('chatgpt', {
     sandbox: true,
     config: (_fixture, home) => ({
-      model: 'openai/gpt-5.5',
+      // ChatGPT mode on 2.2.5 keeps only models NEWER than gpt-5.5
+      // (`packages/core/src/plugin/provider/openai.ts`: `major > 5 || (major === 5 && minor > 5)`)
+      // and only the codex fallback set (`plugin/provider/chatgpt.ts`). gpt-5.5 is disabled now.
+      model: 'openai/gpt-5.6-luna',
       providers: { openai: { settings: { transport: 'http' } } },
       plugins: [installPlugin(home, 'contract-chatgpt-redirect', 'chatgpt-redirect-plugin.js')]
     }),
@@ -141,7 +144,7 @@ describeChatgpt('opencode 2.x contract: ChatGPT access-token vending (hermetic)'
     const created = await api.ok('session.create', {
       body: {
         location: { directory: rig().cwd },
-        model: { id: 'gpt-5.5', providerID: 'openai' }
+        model: { id: 'gpt-5.6-luna', providerID: 'openai' }
       }
     })
     const sessionID = created.data.id

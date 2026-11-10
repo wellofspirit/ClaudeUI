@@ -3,7 +3,7 @@
  *
  * A target spun off a parent in auto mode inherits auto mode (ruling 3) and is
  * JUDGED (ruling 1): pi and opencode targets by ClaudeUI's own judge (ruling 2
- * — Claude targets keep cli.js's, Codex targets Codex's `auto_review`). The
+ * — Claude targets keep cli.js's). The
  * steps are the shared {@link runJudgePipeline} (ruling 4: no third copy); this
  * class only supplies a target's hooks and holds what is per TARGET — the
  * denial caps, the tool-outcome map, the memoized session-start git facts and
@@ -22,7 +22,6 @@
  */
 import { v4 as uuid } from 'uuid'
 import { HAND_BACK_TOOL } from '../../shared/dispatch-agent-description'
-import { X_AGENT_MESSAGE_TOOL } from '../../shared/x-agent-message'
 import type { ReportReview } from '../../shared/handback-review'
 import type {
   AutoModeConfig,
@@ -86,20 +85,8 @@ import { loadSharedAutoModeConfig } from './ui-config'
 export { recordTrajectoryMessage, TARGET_TRAJECTORY_MAX } from '../automode/trajectory'
 
 export interface DispatchTargetJudgeOptions {
-  /** The TARGET engine — which is also the judge engine (except for a Codex target's report review, below). */
+  /** The TARGET engine — which is also the judge engine. */
   engine: 'opencode' | 'pi'
-  /**
-   * Whose `autoMode` block applies, when that is not the judge engine's: a Codex target has no
-   * judge of its own, so its REPORT is reviewed through pi's route (`engine: 'pi'`, the ChatGPT
-   * subscription) under the Codex engine's switches (ADR-105 §3, slice B-3c).
-   */
-  configEngine?: string
-  /**
-   * The judge model for every call, whatever `autoMode.judgeModel` says: a Codex target's own
-   * model (no judge picker exists for Codex, and a model id of another engine's namespace would
-   * not route). Read per call.
-   */
-  fixedModel?: () => string
   /** The target's working directory (a `workdir` launch: not its dispatcher's). */
   cwd: string
   /**
@@ -228,7 +215,7 @@ export class DispatchTargetJudge {
     // (a mid-dispatch config edit is not hot-reloaded).
     let autoMode: AutoModeConfig
     try {
-      autoMode = opts.loadEngineConfig(opts.configEngine ?? opts.engine).autoMode ?? {}
+      autoMode = opts.loadEngineConfig(opts.engine).autoMode ?? {}
     } catch {
       autoMode = {}
     }
@@ -292,31 +279,11 @@ export class DispatchTargetJudge {
     )
   }
 
-  /**
-   * Review a message an X-Agent sends the agent that spawned it (`session_message`, ADR-105 §4) before
-   * it is delivered: the hand-back review applied to a message (the pipeline, framing, throwaway
-   * tracker and cut are the same, the label and rule 15's wording are a message's). For a target
-   * whose own gate cannot see the call (Codex's dynamic tools); a pi or opencode target is gated by
-   * {@link judge} like any other action.
-   */
-  async reviewAgentMessage(message: string, call: HandBackReviewCall): Promise<ReportReview> {
-    return this.reviewText(
-      {
-        toolName: X_AGENT_MESSAGE_TOOL,
-        input: (shown) => ({ message: shown }),
-        agentMessage: true
-      },
-      message,
-      call
-    )
-  }
-
   private async reviewText(
     kind: {
       toolName: string
       input: (shown: string) => Record<string, unknown>
       handBack?: boolean
-      agentMessage?: boolean
     },
     report: string,
     call: HandBackReviewCall
@@ -333,8 +300,7 @@ export class DispatchTargetJudge {
           toolUseId: '',
           toolName: kind.toolName,
           input: kind.input(shown),
-          ...(kind.handBack ? { handBack: true } : {}),
-          ...(kind.agentMessage ? { agentMessage: true } : {})
+          ...(kind.handBack ? { handBack: true } : {})
         },
         this.hooks(
           {
@@ -451,7 +417,7 @@ export class DispatchTargetJudge {
    * configured but missing → the human decides, with ONE banner per target.
    */
   judgeAvailable(): boolean {
-    const configured = this.opts.fixedModel ? undefined : this.autoMode.judgeModel
+    const configured = this.autoMode.judgeModel
     if (!configured) return true
     const all = (this.opts.peekModels() ?? []).flatMap((g) => g.models)
     if (all.length === 0) return true
@@ -469,12 +435,9 @@ export class DispatchTargetJudge {
   /**
    * The fallback judge model in effect (`autoMode.fallbackJudgeModel` of the TARGET engine), or
    * undefined: none set, the same as the primary, no longer in the engine's catalog (one log
-   * line; never a crash — the human decides), or a {@link DispatchTargetJudgeOptions.fixedModel}
-   * judge (a Codex target's report review: the fallback picker has no Codex namespace to name
-   * a model in). The same cache-only peek as {@link judgeAvailable}.
+   * line; never a crash — the human decides). The same cache-only peek as {@link judgeAvailable}.
    */
   private fallbackJudgeModel(): string | undefined {
-    if (this.opts.fixedModel) return undefined
     const model = fallbackJudgeModelFor(
       this.autoMode.fallbackJudgeModel,
       this.autoMode.judgeModel ?? this.opts.model(),
@@ -547,7 +510,7 @@ export class DispatchTargetJudge {
     const make = this.opts.makeTransport ?? makeSessionJudgeTransport
     return make({
       engine: this.opts.engine,
-      modelValue: () => this.opts.fixedModel?.() ?? this.autoMode.judgeModel ?? this.opts.model(),
+      modelValue: () => this.autoMode.judgeModel ?? this.opts.model(),
       sessionId: this.opts.sessionId,
       routingId:
         typeof this.opts.routingId === 'function' ? this.opts.routingId() : this.opts.routingId,

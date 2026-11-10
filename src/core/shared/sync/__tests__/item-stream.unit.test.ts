@@ -35,7 +35,7 @@ const target = (id: string, ownerToolUseId?: string): ItemStreamTarget => ({
 })
 function fixture() {
   const core = new SyncCore({ capacity: 10 })
-  core.emit('session:created', ['s', { cwd: '/fixture', engineId: 'codex' }])
+  core.emit('session:created', ['s', { cwd: '/fixture', engineId: 'pi' }])
   const frames: ItemStreamFrame[] = []
   core.setStreamDelivery((f) => {
     if (f.type === 'item-stream') frames.push(f)
@@ -205,23 +205,6 @@ describe('per-item volatile streams', () => {
       'tool_use',
       'text',
       'tool_result'
-    ])
-  })
-  it('keeps the native id when a Codex acknowledgement replaces an optimistic user row', () => {
-    const f = fixture()
-    f.core.emit('session:user-message', ['s', { id: 'optimistic', prompt: 'hello', timestamp: 1 }])
-    f.core.emit('session:message', [
-      's',
-      {
-        id: 'native',
-        replacesMessageId: 'optimistic',
-        role: 'user',
-        timestamp: 2,
-        content: [{ type: 'text', text: 'hello' }]
-      }
-    ])
-    expect(f.core.getCanonicalState().sessions.s.messages).toEqual([
-      expect.objectContaining({ id: 'native', replacesMessageId: 'optimistic' })
     ])
   })
   it('keeps interleaved items and child owners separate, with constant ring growth', () => {
@@ -756,7 +739,7 @@ describe('item replay after backpressure', () => {
   it('retries the current accumulation without another token and cancels on unwatch', () => {
     vi.useFakeTimers()
     const id = 'backpressure-items'
-    emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'codex' }])
+    emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'pi' }])
     const t = target('a')
     emitEvent('session:item-open', [id, { target: t, message: message('a') }])
     let congested = true
@@ -786,7 +769,7 @@ describe('item replay after backpressure', () => {
   it('backs off repeated recovery attempts and resets after delivery', () => {
     vi.useFakeTimers()
     const id = 'backpressure-backoff'
-    emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'codex' }])
+    emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'pi' }])
     const t = target('a')
     emitEvent('session:item-open', [id, { target: t, message: message('a') }])
     let congested = true
@@ -819,7 +802,7 @@ describe('item replay after backpressure', () => {
   it('caps recovery backoff at two seconds and cancels it on disconnect', () => {
     vi.useFakeTimers()
     const id = 'backpressure-cap'
-    emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'codex' }])
+    emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'pi' }])
     const t = target('a')
     emitEvent('session:item-open', [id, { target: t, message: message('a') }])
     let attempts = 0
@@ -844,7 +827,7 @@ describe('item replay after backpressure', () => {
     vi.useFakeTimers()
     const ids = ['multi-a', 'multi-b']
     for (const id of ids) {
-      emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'codex' }])
+      emitEvent('session:created', [id, { cwd: '/fixture', engineId: 'pi' }])
       emitEvent('session:item-open', [id, { target: target('item'), message: message('item') }])
     }
     let congested = true

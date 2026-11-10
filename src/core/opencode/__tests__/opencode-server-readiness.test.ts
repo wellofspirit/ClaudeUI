@@ -224,6 +224,32 @@ describe('waitForPermissionGuard (ADR-097 §3, S6: no heuristic fallback)', () =
     }
   })
 
+  it('reports skillsLoaded without requiring it (a missing catalog is a warning, not a refusal)', async () => {
+    for (const [reported, expected] of [
+      [true, true],
+      [false, false],
+      [undefined, false]
+    ] as const) {
+      const { deps } = guardDeps([
+        {
+          status: 200,
+          body: {
+            output: {
+              permissionHook: true,
+              mcpDirect: true,
+              modelGate: true,
+              skillsLoaded: reported
+            }
+          }
+        }
+      ])
+      await expect(waitForPermissionGuard({ pluginExpected: true }, deps)).resolves.toMatchObject({
+        state: 'active',
+        skillsLoaded: expected
+      })
+    }
+  })
+
   it('missing at once when no plugin was injected (never asks the MCP status)', async () => {
     const { deps, paths } = guardDeps([{ status: 200, body: {} }])
     const guard = await waitForPermissionGuard({ pluginExpected: false }, deps)

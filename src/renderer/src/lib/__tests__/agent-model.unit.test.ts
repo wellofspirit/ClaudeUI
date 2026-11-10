@@ -15,7 +15,7 @@ describe('latestMessageModel', () => {
     expect(latestMessageModel(messages)).toBe('claude-opus-5-5')
   })
 
-  it('is not cleared by a newer message with no model (an error row, a Codex message)', () => {
+  it('is not cleared by a newer message with no model (an error row)', () => {
     const messages = [
       msg({ id: 'a', model: 'claude-opus-5-5' }),
       msg({ id: 'b' }),
@@ -58,16 +58,6 @@ describe('resolveAgentModel', () => {
     expect(resolveAgentModel({ engine: 'claude' })).toBeUndefined()
   })
 
-  it('uses the parent’s model for Codex only, and last', () => {
-    expect(resolveAgentModel({ engine: 'codex', parentModel: 'gpt-6-sol' })).toBe('gpt-6-sol')
-    expect(
-      resolveAgentModel({ engine: 'codex', requested: 'gpt-6-luna', parentModel: 'gpt-6-sol' })
-    ).toBe('gpt-6-luna')
-    for (const engine of ['claude', 'opencode', 'pi'] as const) {
-      expect(resolveAgentModel({ engine, parentModel: 'gpt-6-sol' })).toBeUndefined()
-    }
-  })
-
   it('names a dispatch by the model it ran on, else the one it asked for', () => {
     const dispatch = { engine: 'opencode', model: 'openai/gpt-6-luna' }
     expect(resolveAgentModel({ dispatch, latestModel: 'openai/gpt-6-sol' })).toBe(
@@ -77,13 +67,12 @@ describe('resolveAgentModel', () => {
     expect(resolveAgentModel({ dispatch: { engine: 'pi' } })).toBeUndefined()
   })
 
-  it('never lets a dispatch fall back to the spawn view or the parent', () => {
+  it('never lets a dispatch fall back to the spawn view', () => {
     expect(
       resolveAgentModel({
         dispatch: { engine: 'opencode' },
         requested: 'sonnet',
-        engine: 'codex',
-        parentModel: 'gpt-6-sol'
+        engine: 'claude'
       })
     ).toBeUndefined()
   })

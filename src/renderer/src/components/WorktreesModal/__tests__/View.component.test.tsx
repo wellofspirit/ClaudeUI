@@ -162,11 +162,10 @@ describe('WorktreesModalView', () => {
     expect(within(rows[3]).queryByTestId('WorktreesModal.branch')).toBeNull()
   })
 
-  it('kind and location badges', () => {
+  it('kind badges', () => {
     view({
       rows: [
         row(entry('o', { kind: 'orphan', branch: null })),
-        row(entry('codex/ab12', { location: 'codex', branch: null })),
         row(entry('l', { locked: true, lockReason: 'usb' }), {
           disabledReason: 'locked: usb'
         }),
@@ -181,9 +180,8 @@ describe('WorktreesModalView', () => {
         .queryAllByTestId('WorktreesModal.kindBadge')
         .map((b) => b.getAttribute('data-kind')!)
     expect(kinds(rows[0])).toEqual(['orphan'])
-    expect(kinds(rows[1])).toEqual(['codex'])
-    expect(kinds(rows[2])).toEqual(['locked'])
-    expect(kinds(rows[3])).toEqual(['invalid'])
+    expect(kinds(rows[1])).toEqual(['locked'])
+    expect(kinds(rows[2])).toEqual(['invalid'])
   })
 
   it('a live-held row: checkbox disabled, live chip in the warning colour, reason shown; a cold chip is muted', () => {

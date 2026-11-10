@@ -14,8 +14,7 @@ const { FIXED } = vi.hoisted(() => ({
   FIXED: {
     claude: { tested: '2.1.280', floor: '2.1.275', ceiling: '3.0.0' },
     opencode: { tested: '2.0.24', floor: '2.0.20', ceiling: '3.0.0' },
-    pi: { tested: '0.87.1', floor: '0.87.1', ceiling: '1.0.0' },
-    codex: { tested: '0.156.0', floor: '0.156.0', ceiling: '1.0.0' }
+    pi: { tested: '0.87.1', floor: '0.87.1', ceiling: '1.0.0' }
   } as Record<string, { tested: string; floor: string; ceiling: string }>
 }))
 let useReal = false
@@ -66,15 +65,6 @@ describe('classifyVersion', () => {
     ['3.0.0', 'incompatible']
   ] as const)('opencode %j is %s', (version, expected) => {
     expect(classifyVersion('opencode', version)).toBe(expected)
-  })
-
-  it.each([
-    ['0.156.0', 'tested'],
-    ['0.159.2', 'untested'],
-    ['0.155.9', 'too-old'],
-    ['1.0.0', 'incompatible']
-  ] as const)('codex %j is %s', (version, expected) => {
-    expect(classifyVersion('codex', version)).toBe(expected)
   })
 
   it('explains a version below the floor, naming the major line when it is a whole one behind', () => {

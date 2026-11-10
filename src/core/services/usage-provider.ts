@@ -52,7 +52,7 @@ import {
   type RemoteCreditRow,
   type RemoteLimitRow
 } from './db'
-import { chatgptRateLimits } from '../codex/chatgpt-rate-limits'
+import { chatgptRateLimits } from '../shared-providers/chatgpt-rate-limits'
 import { credentialSync } from '../auth/vault/CredentialSync'
 import { buildClaudeAccountRef, hostAccountsDir } from '../host'
 import { getSecurestorageEnv } from '../sdk/securestorage-env'
@@ -138,7 +138,7 @@ async function credentialsMtime(path: string): Promise<number | null> {
  *
  * "No account signed in" and "an account whose limits we could not read" are
  * different answers, and only the second one is a card. A machine that only
- * uses Codex would otherwise show an `unknown` / unavailable Claude row forever.
+ * uses opencode or pi would otherwise show an `unknown` / unavailable Claude row forever.
  */
 async function activeClaudeLimits(refresh: boolean): Promise<AccountLimits | null> {
   // Never a second fetch: `fetch()` is the poller's own path (it pushes to the
