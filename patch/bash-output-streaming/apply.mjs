@@ -43,6 +43,7 @@ console.log(`Read ${cliPath} (${(src.length / 1024 / 1024).toFixed(1)} MB)`)
 
 const PATCH_MARKER = '/*PATCHED:bash-output-streaming*/'
 const EARLY_POLL_MARKER = '/*PATCHED:bash-early-poll*/'
+const POLL_FLAG_MARKER = '/*PATCHED:bash-poll-flag*/'
 
 if (src.includes(PATCH_MARKER) && src.includes(EARLY_POLL_MARKER)) {
   console.log('Already applied (both parts). Skipping.')
@@ -213,19 +214,20 @@ if (src.includes(EARLY_POLL_MARKER)) {
   console.log('\n--- Part B: early TaskOutput.startPolling after the runner returns ---')
 
   // Search window after the Part A anchor, clamped to the end of the enclosing
-  // chunk so nothing can match across a `// @bun-chunk` delimiter. 4000 (was
-  // 3000) because Part A has already injected ~450 chars into this window.
-  let windowEnd = Math.min(src.length, anchorMatch.index + 4000)
+  // chunk so nothing can match across a `// @bun-chunk` delimiter. 6000 (was
+  // 3000, then 4000) because Part A has already injected ~450 chars into this
+  // window and 2.1.321 put the CLI's own call ~3000 chars after the anchor.
+  let windowEnd = Math.min(src.length, anchorMatch.index + 6000)
   const chunkEdge = src.indexOf('\n// @bun-chunk ', anchorMatch.index)
   if (chunkEdge !== -1 && chunkEdge < windowEnd) windowEnd = chunkEdge
   const searchArea = src.slice(anchorMatch.index, windowEnd)
 
   // 1. TaskOutput class binding + shell-command var, from the CLI's own call.
   // 2.1.321 passes a second arg, `startPolling(id,so)`: `startPolling(e,n=!0)` stores it as the
-  // "read the output file" flag, and `so` is still `!0` when our early call runs, so the
-  // one-arg default we inject is equivalent until the CLI's own call sets it.
+  // "read the output file" flag. `so` is computed just before as `so=!(n&&Mji())`, where Mji is
+  // a server-side gate; see the pin below.
   const pollRe = new RegExp(
-    `(${V})\\.startPolling\\((${V})\\.taskOutput\\.taskId(?:,${V})?\\)`,
+    `(${V})\\.startPolling\\((${V})\\.taskOutput\\.taskId(?:,(${V}))?\\)`,
     'g'
   )
   const pollMatches = [...searchArea.matchAll(pollRe)]
@@ -257,9 +259,51 @@ if (src.includes(EARLY_POLL_MARKER)) {
   const resultAbsIdx = anchorMatch.index + resultMatch.index + resultMatch[0].length
   console.log(`  Found .result assignment: ${resultMatch[0]} (resultVar=${resultMatch[1]})`)
 
+  // 3. Pin the CLI's read-the-file flag (2.1.321+). `so=!(n&&GATE())` turns false when a
+  //    server-side gate flips on; startPolling then stores false, pollProgress stops reading the
+  //    output file and calls onProgress("","",0,0,!1), so Part A would forward empty
+  //    bash_output frames. Rewrite it to `so=!0` (2.1.319 behaviour). Keep the variable: the
+  //    late-callback guard and the rest of the generator read it. Anchored on the CLI's own
+  //    call: the assignment's target must be that call's 2nd argument (backreference).
+  //    One-arg call (<= 2.1.319): nothing to pin.
+  let flagPatch = null
+  if (pollMatches[0][3] !== undefined) {
+    const flagRe = new RegExp(
+      `(${V})=!\\((${V})&&${V}\\(\\)\\),` +
+        `${reEsc(taskOutputClass)}\\.startPolling\\(${reEsc(shellCmdVar)}\\.taskOutput\\.taskId,\\1\\)`,
+      'g'
+    )
+    const flagMatches = [...searchArea.matchAll(flagRe)]
+    if (flagMatches.length !== 1) {
+      console.error(
+        `ERROR: expected exactly 1 \`<flag>=!(<n>&&<gate>()),${taskOutputClass}.startPolling(...,<flag>)\` ` +
+          `site after onProgress, found ${flagMatches.length}.`
+      )
+      process.exit(1)
+    }
+    const fm = flagMatches[0]
+    const assignEnd = fm[0].indexOf(',' + taskOutputClass + '.startPolling')
+    flagPatch = {
+      start: anchorMatch.index + fm.index,
+      end: anchorMatch.index + fm.index + assignEnd,
+      text: `${POLL_FLAG_MARKER}${fm[1]}=!0`
+    }
+    console.log(`  Pinning poll flag: ${fm[0].slice(0, assignEnd)} -> ${fm[1]}=!0`)
+  } else {
+    console.log('  One-arg startPolling (<= 2.1.319): no poll flag to pin.')
+  }
+
   const initInjection =
     EARLY_POLL_MARKER + `${taskOutputClass}.startPolling(${shellCmdVar}.taskOutput.taskId);`
 
+  // The flag site is after the .result assignment: apply it first so offsets hold.
+  if (flagPatch) {
+    if (flagPatch.start < resultAbsIdx) {
+      console.error('ERROR: poll flag site precedes the .result assignment; unexpected shape.')
+      process.exit(1)
+    }
+    src = src.slice(0, flagPatch.start) + flagPatch.text + src.slice(flagPatch.end)
+  }
   src = src.slice(0, resultAbsIdx) + initInjection + src.slice(resultAbsIdx)
 
   if (!src.includes(EARLY_POLL_MARKER)) {

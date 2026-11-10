@@ -35,7 +35,7 @@ export const PATCH_REGISTRY = Object.freeze(
     // subagent-A … subagent-G, plus subagent-F2.
     { name: 'subagent-streaming', marker: markerRe('subagent-[A-G]\\d?') },
     { name: 'voice-server', marker: markerRe('voice-server') },
-    { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll') }
+    { name: 'bash-output-streaming', marker: markerRe('bash-output-streaming|bash-early-poll|bash-poll-flag') }
     // Retired at Claude Code 2.1.280: usage-relay (the native get_usage handler
     // answers first), request-usage (stream_event message_start/message_delta
     // carry the same usage), and mcp-tool-refresh, taskstop-notification,
