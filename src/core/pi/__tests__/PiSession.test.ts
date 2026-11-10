@@ -1059,7 +1059,7 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     expect(resultPayload.totalCostUsd).toBeCloseTo(0.003)
   })
 
-  it('records an idle-time cache-warm usage entry once, without touching session state', async () => {
+  it('records an idle-time cache warm once and counts it in the headline, not the context meter', async () => {
     const win = new MockWindow()
     const session = new PiSession('rid-warm', win as never, '/cwd', {})
     await session.run('hi')
@@ -1069,7 +1069,7 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     mockRecordUsageEvent.mockClear()
     const sentBefore = win.webContents.send.mock.calls.length
     const messagesBefore = session.getMessages().length
-    const processingBefore = session.status
+    const statusBefore = session.status
 
     handler({
       type: 'entry_appended',
@@ -1102,9 +1102,23 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
         tokens: expect.objectContaining({ input: 1, cacheRead: 900 })
       })
     )
-    expect(win.webContents.send.mock.calls.length).toBe(sentBefore)
+    // No transcript row, no processing flip.
     expect(session.getMessages().length).toBe(messagesBefore)
-    expect(session.status).toEqual(processingBefore)
+    expect(session.status.state).toBe(statusBefore.state)
+    // The headline moves: a fresh status line and status, each carrying the warm.
+    const sent = win.webContents.send.mock.calls.slice(sentBefore)
+    expect(sent.map((c) => c[0])).toEqual(['session:status-line', 'session:status'])
+    // send(channel, routingId, payload)
+    const line = sent[0][2] as {
+      totalCostUsd: number | null
+      cachedTokens: number
+      contextWindow: { used: number }
+    }
+    expect(line.totalCostUsd ?? 0).toBeGreaterThan(statusBefore.totalCostUsd ?? 0)
+    expect(line.cachedTokens).toBe(900)
+    // ...but a warm is not a conversation step: the context meter stays put.
+    expect(line.contextWindow.used).toBe(0)
+    expect((sent[1][2] as { totalCostUsd: number | null }).totalCostUsd).toBe(line.totalCostUsd)
   })
 
   it('stamps durationMs on the addressed thinking block', async () => {

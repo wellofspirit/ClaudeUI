@@ -47,17 +47,18 @@ and emitted as
 
 ClaudeUI records each such entry in the usage ledger (`event-mapper.ts` `mapUsageEntry` → a `usage`
 output flagged `cacheWarm`, ledger key `pi-warm:<pi session id>:<entry id>`, since pi entry ids are
-unique only within a session) for the session, or host-run subagent, whose process emitted it. A
-warm moves no session state: no transcript row, live headline cost, token sums or turn
-accounting. Other `entry_appended` types stay ignored.
+unique only within a session) for the session, or host-run subagent, whose process emitted it.
 
-Known gaps:
+A session's own warm also counts toward its headline cost and token sums (owner, 2026-11-10: it is
+billed spend), and `PiSession` sends a fresh status line and status, because between runs no
+`result` follows. That is also what a reopened session shows: on resume `PiSession` seeds those
+totals from `get_session_stats`, which in 1.5.1 counts usage entries. A warm is not a conversation
+step: it does not move the context meter, add a transcript row, or start or end a turn. A host-run
+subagent's warm is ledger-only, as a parent's resumed headline does not include child sessions
+either. Other `entry_appended` types stay ignored.
 
-- **Resumed headline includes warms.** On resume, `PiSession` seeds the headline cost and token
-  sums from `get_session_stats`, which in 1.5.1 counts usage entries. So a reopened session's
-  headline includes the warm spend that the live session left out.
-- **Dispatch targets** don't record warms, and an error or timeout turn's reconciled cost absorbs
-  them ([#213](https://github.com/wellofspirit/ClaudeUI/issues/213)).
+Known gap: **dispatch targets** don't record warms, and an error or timeout turn's reconciled cost
+absorbs them ([#213](https://github.com/wellofspirit/ClaudeUI/issues/213)).
 
 ## 1.4.0 → 1.5.0 compatibility assessment (2026-11-04)
 
