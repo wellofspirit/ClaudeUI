@@ -19,6 +19,7 @@ describe('pi 1.5.0 failure compatibility', () => {
     'http2 stream failed',
     'request to https://oauth2.googleapis.com/token failed, reason:',
     'stream disconnected before completion: stream closed before response.completed',
+    "Claude Code's stream from Anthropic was cut short after the reply had begun",
     'subscription_sharing_workplace_individual_usage_limit_exceeded',
     'subscription_sharing_workplace_individual_usage_limit_exceeded: Contact your workspace admin to raise your limit',
     'status (503)',

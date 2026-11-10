@@ -1,6 +1,37 @@
 # pi wire protocol — verified integration notes
 
-Current tested release: **1.5.0** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.5.0)); floor = tested = **1.5.0**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.5.0, 2.0.0) other than 1.5.0 runs as _untested_; only **1.5.0** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.5.0. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+Current tested release: **1.5.1** ([stable release](https://github.com/earendil-works/pi/releases/tag/v1.5.1)); floor = tested = **1.5.1**, ceiling **2.0.0** (ADR-082's next-major rule; owner, 2026-10-06). A version in [1.5.1, 2.0.0) other than 1.5.1 runs as _untested_; only **1.5.1** was measured. The dated 0.84.3 findings below are historical probes, not fresh verification of every behavior on 1.5.1. The prior Windows 0.87.1 run passed all 13 gated tests, including live approval, hosted tools, subagents, dispatch, fork and clone. It used an isolated `PI_CODING_AGENT_DIR`, an explicit `openai-codex/gpt-5.6-luna` model entry, and a credential command that supplied the active vault access token over a pipe without copying tokens to disk or refreshing them. The credential gates honor `PI_CODING_AGENT_DIR`. Pi 0.87.1 persists system messages; fork/clone tests compare the complete expected transcript rather than assuming only user/assistant messages contribute to `messageCount`.
+
+## 1.5.0 → 1.5.1 compatibility assessment (2026-11-10)
+
+`git diff v1.5.0..v1.5.1`. No RPC command, event or field was added or removed; `docs/rpc.md`
+changed only in its Shutdown section.
+
+- **Shutdown** (`modes/rpc/rpc-mode.ts`): pi now waits for pending work (an MCP or provider token
+  refresh) before exiting. Once a shutdown has started, a stdin EOF or a single SIGTERM/SIGHUP no
+  longer interrupts it; a second signal exits at once. `ctx.shutdown()` while idle now exits right
+  away. ClaudeUI's dispose (stdin EOF, tree-kill after `PI_DISPOSE_GRACE_MS` = 2 s) is unchanged:
+  the `openai-codex` token is refreshed by ClaudeUI's CredentialSync, not by pi (owner, 2026-11-10).
+  A refresh pi runs itself (vendors logged in with `pi /login`, pi's own MCP OAuth) that is still in
+  flight 2 s after dispose can still be cut off.
+- **Cache warming** default `"streaming"` → `"idle"` (see §Cache warming).
+- **Retry patterns** (`packages/ai/src/utils/retry.ts`): one new retryable phrase, `cut short after
+the reply had begun`; ported into `src/core/pi/pi-agent-failure.ts`.
+- **MCP**: the server-name rule moved, unchanged, from `core/mcp-servers.ts` to
+  `packages/mcp/src/config.ts`.
+- Unchanged upstream files ClaudeUI ports: `core/tools/path-utils.ts`, `utils/paths.ts`; the edit
+  tool's `details` shape (`{diff, patch, firstChangedLine?}`) is unchanged.
+- The `anthropic` provider's default model is now `claude-opus-5-5`; ClaudeUI always passes a model.
+- **Gated suite:** 25 of 25, no skip, on the darwin-arm64 1.5.1 managed-store binary, model calls on
+  `openai-codex/gpt-5.6-luna`. **Credential recipe, corrected:** the isolated agent directory needs
+  the `!command` in **both** files. The `models.json` `providers.openai-codex.apiKey` is what makes
+  the provider count as configured (without it: `Model not found`), and an `auth.json`
+  `openai-codex` `api_key` record is what the request uses (`auth.json` wins over `models.json` at
+  request time; a placeholder there gives `Failed to extract accountId from token`). Same on 1.5.0
+  and 1.5.1 (`model-registry.ts` unchanged). The command is `!/usr/bin/env
+PI_CODING_AGENT_DIR=<real agent dir> <store>/pi/<version>/pi/pi auth check --provider
+openai-codex --no-refresh --credentials`. The store's `<version>/pi` is a directory; the binary is
+  `pi/pi` inside it. The real `auth.json`'s sha256 and mtime were unchanged after the run.
 
 ## 1.4.0 → 1.5.0 compatibility assessment (2026-11-04)
 
@@ -37,6 +68,16 @@ case-insensitive on Windows, `fork` writes through one file handle).
   while a subscription still reads the list price. Absent or `false` (every session recorded
   before 1.5.0) keeps the old rule: pi's total is the equivalent. `get_session_stats` reports one
   cumulative `cost` with no such flag, so a resumed session's seeded base keeps the old rule.
+- **Cache warming (1.5.1):** `cacheWarming` now defaults to `"idle"` (was `"streaming"`): pi sends
+  billed prompt-cache refresh requests during runs and for up to 30 minutes between runs, when it
+  estimates the refresh pays for itself. ClaudeUI keeps pi processes alive between turns, so these
+  fire with no prompt in flight. Each successful warm is persisted as a session entry and emitted as
+  `{"type":"entry_appended","entry":{"type":"usage","kind":"cache_warm","provider","model","usage":{…,"cost"},"note"?,"id",…}}`
+  (`cache-warmer.ts` `onWarmed`, `agent-session.ts`). ClaudeUI records every such entry in the usage
+  ledger (`event-mapper.ts` `mapUsageEntry` → a `usage` output flagged `cacheWarm`, `messageId` = the
+  entry id) for the session, or host-run subagent, whose process emitted it; it moves no session
+  state (no transcript row, headline, token sums or turn accounting). Other `entry_appended` types
+  stay ignored.
 - **Failure classification:** `packages/ai/src/utils/retry.ts` added Zhipu/Z.ai error code 1308
   (`'"code"\s*:\s*"?1308(?![0-9])'`) to the non-retryable provider-limits pattern, and
   `packages/ai/src/utils/overflow.ts` added the LiteLLM pre-call overflow text
