@@ -21,6 +21,7 @@
 
 import { logger } from '../services/logger'
 import type { IpcResult } from '../../shared/types'
+import type { Transport } from './command-registry'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
@@ -35,4 +36,16 @@ export function safeHandler<T>(handler: (...args: any[]) => Promise<T>) {
       return { ok: false, error }
     }
   }
+}
+
+/**
+ * The envelope a shared declaration applies to the channels that are `{ ok, data }`-enveloped
+ * on the desktop and answered bare on the WebSocket (the web client calls those raw). One
+ * factory builds `const env = envelopeFor(transport)` and wraps exactly those handlers in it;
+ * wrapping both transports would change the web client's contract.
+ */
+export function envelopeFor(transport: Transport) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type Handler<T> = (...args: any[]) => Promise<T>
+  return transport === 'desktop' ? safeHandler : <T>(handler: Handler<T>): Handler<T> => handler
 }

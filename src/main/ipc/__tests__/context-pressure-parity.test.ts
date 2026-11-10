@@ -23,15 +23,27 @@ function registrationOf(source: string): string {
 }
 
 describe('session:context-pressure:respond has the same shape everywhere', () => {
-  it.each([
-    ['desktop', 'src/core/ipc/session.ipc.ts'],
-    ['remote', 'src/core/ipc/remote-handlers.ts']
-  ])('%s registers a chat command on the session that calls the service', (_, file) => {
-    const block = registrationOf(read(file))
+  it('is declared once, as a chat command on the session that calls the service', () => {
+    const block = registrationOf(read('src/core/ipc/session-commands.ts'))
     expect(block).toContain("capability: 'chat'")
     expect(block).toContain("kind: 'command'")
     expect(block).toContain('sessionIdArg: 0')
     expect(block).toContain('respondContextPressure(routingId, answer)')
+  })
+
+  it.each([
+    [
+      'desktop',
+      'src/core/ipc/session.ipc.ts',
+      /sessionCommands\(manager, 'desktop'\)[^]*?handleIpc\(/
+    ],
+    [
+      'remote',
+      'src/core/ipc/remote-handlers.ts',
+      /sessionCommands\(manager, 'remote'\)[^]*?handleRemote\(/
+    ]
+  ])('the %s registrar spreads that declaration', (_, file, spread) => {
+    expect(read(file)).toMatch(spread)
   })
 
   it('the desktop channel list unbinds it on re-registration', () => {

@@ -182,7 +182,20 @@ const SHARED_DECLARATION_SOURCES = [
   // ADR-101 §6 — the speech pack (status `chat`, install/cancel/remove `admin`),
   // one declaration spread by both transports. The web client invokes them since
   // S4; the three `admin` ones are in UNGRANTED_AT_CONNECT_REMOTE_CHANNELS.
-  'src/core/ipc/voice-pack-commands.ts'
+  'src/core/ipc/voice-pack-commands.ts',
+  // The `git:*` working-tree surface — one declaration, spread by both transports.
+  'src/core/ipc/git-commands.ts',
+  // The mockup preview (read + confined watch) — one declaration, both transports.
+  'src/core/ipc/mockup-commands.ts',
+  // The `usage:*` metering channels — one declaration, both transports.
+  'src/core/ipc/usage-metering-commands.ts',
+  // The app-state reads / settings writes — one declaration, both transports.
+  'src/core/ipc/app-state-commands.ts',
+  // The model catalog, opencode providers and title / commit-message generation.
+  'src/core/ipc/model-commands.ts',
+  // The live-session channels and the session listing / history reads.
+  'src/core/ipc/session-commands.ts',
+  'src/core/ipc/session-history-commands.ts'
 ]
 
 /**
