@@ -1933,6 +1933,9 @@ export class PiSession extends BaseSession {
             parentRoutingId: null
           })
         )
+        // A cache warm lands between runs: ledger only. No headline, token sums
+        // or context length move (it is not part of the conversation).
+        if (output.cacheWarm) break
         // ADR-071 §2: the headline follows the cost rule, so what this message
         // adds is its DISPLAY cost — pi's own figure only when the rule says
         // that is what the user was charged. The ledger row above keeps pi's

@@ -1059,6 +1059,54 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
     expect(resultPayload.totalCostUsd).toBeCloseTo(0.003)
   })
 
+  it('records an idle-time cache-warm usage entry once, without touching session state', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-warm', win as never, '/cwd', {})
+    await session.run('hi')
+    const handler = lastEventHandler()
+    handler({ type: 'agent_end', messages: [], willRetry: false })
+    handler({ type: 'agent_settled' })
+    mockRecordUsageEvent.mockClear()
+    const sentBefore = win.webContents.send.mock.calls.length
+    const messagesBefore = session.getMessages().length
+    const processingBefore = session.status
+
+    handler({
+      type: 'entry_appended',
+      entry: {
+        type: 'usage',
+        kind: 'cache_warm',
+        id: 'warm-1',
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-6',
+        usage: {
+          input: 1,
+          output: 0,
+          cacheRead: 900,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0.0003, cacheWrite: 0, total: 0.0003 }
+        }
+      }
+    })
+
+    expect(mockRecordUsageEvent).toHaveBeenCalledTimes(1)
+    expect(mockRecordUsageEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        engineId: 'pi',
+        vendorId: 'anthropic',
+        modelId: 'claude-sonnet-4-6',
+        messageId: 'warm-1',
+        origin: 'session',
+        parentRoutingId: null,
+        engineCostUsd: 0.0003,
+        tokens: expect.objectContaining({ input: 1, cacheRead: 900 })
+      })
+    )
+    expect(win.webContents.send.mock.calls.length).toBe(sentBefore)
+    expect(session.getMessages().length).toBe(messagesBefore)
+    expect(session.status).toEqual(processingBefore)
+  })
+
   it('stamps durationMs on the addressed thinking block', async () => {
     vi.useFakeTimers()
     try {

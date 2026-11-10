@@ -981,6 +981,8 @@ export class PiSubagentManager {
               parentRoutingId: this.host.routingId
             })
           )
+          // A cache warm is spend only, not turn progress.
+          if (out.cacheWarm) return
           const r = entry.runner
           if (!r) return
           this.host.send('session:task-progress', {
