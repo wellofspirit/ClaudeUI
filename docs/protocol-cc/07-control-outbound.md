@@ -246,7 +246,11 @@ Merge arbitrary settings into the `flagSettings` layer. `null` values delete key
 - Merges `{...prev, ...settings}`, deletes null-valued keys.
 - Persists via `O76(merged)`.
 - `model` key special-cased — updates `l2()`.
-- Notifies `LE.notifyChange('flagSettings')`.
+- Notifies `LE.notifyChange('flagSettings')`. In 2.1.317 (`wI`) the notify is skipped only when all four of these hold:
+  the merge deep-equals the previous flag layer, the entrypoint is `remote_cowork` (`Vm()`), managed-only rules are
+  off, and the fast-mode re-check (`ng`) finds nothing to refresh. So ClaudeUI's empty `apply_flag_settings({})` (entrypoint `claude-desktop`)
+  always notifies. The notify invalidates the whole settings cache (`invalidateAll`) and fans out to the headless
+  subscriber, which rebuilds the permission context from disk. See 02-cli-flags §2.6, "Settings edits while running".
 
 **Timing:** fast (disk write).
 

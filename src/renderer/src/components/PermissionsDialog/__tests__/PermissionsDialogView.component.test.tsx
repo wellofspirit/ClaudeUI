@@ -1,6 +1,7 @@
 /**
- * Layer 2: Component tests for the workspace-trust row in PermissionsDialogView
- * and PermissionsMobileView (same props, same testids).
+ * Layer 2: Component tests for the workspace-trust row and the footer apply
+ * note in PermissionsDialogView and PermissionsMobileView (same props, same
+ * testids).
  *
  * cli.js drops every project/local ALLOW rule while a workspace is untrusted
  * and suppresses its own warning in non-interactive mode, so this row is the
@@ -32,36 +33,40 @@ const EMPTY_PERMS: ClaudePermissions = {
 const UNTRUSTED: WorkspaceTrust = { root: '/d/repo', trusted: false, worktree: false }
 const TRUSTED: WorkspaceTrust = { root: '/d/repo', trusted: true, worktree: false }
 
+function baseProps(over: Partial<PermissionsDialogViewProps> = {}): PermissionsDialogViewProps {
+  return {
+    loading: false,
+    saving: false,
+    activeTab: 'local' as PermissionScope,
+    tabs: ['local', 'project', 'user'],
+    perms: EMPTY_PERMS,
+    dirty: { local: false, project: false, user: false },
+    hasDirty: false,
+    cwd: '/d/repo',
+    trust: UNTRUSTED,
+    trustSaving: false,
+    trustError: null,
+    onToggleTrust: vi.fn(),
+    onListDir: vi.fn(async () => ({ entries: [], isRoot: false })),
+    onChangeTab: vi.fn(async () => {}),
+    onUpdateRule: vi.fn(),
+    onDeleteRule: vi.fn(),
+    onAddRule: vi.fn(),
+    onUpdateDir: vi.fn(),
+    onDeleteDir: vi.fn(),
+    onAddDir: vi.fn(),
+    onSaveAll: vi.fn(async () => {}),
+    onClose: vi.fn(),
+    ...over
+  }
+}
+
 describe.each([
   ['desktop', PermissionsDialogView],
   ['mobile', PermissionsMobileView]
 ])('%s view — workspace trust row', (_name, View) => {
   function renderView(over: Partial<PermissionsDialogViewProps> = {}): PermissionsDialogViewProps {
-    const props: PermissionsDialogViewProps = {
-      loading: false,
-      saving: false,
-      activeTab: 'local' as PermissionScope,
-      tabs: ['local', 'project', 'user'],
-      perms: EMPTY_PERMS,
-      dirty: { local: false, project: false, user: false },
-      hasDirty: false,
-      cwd: '/d/repo',
-      trust: UNTRUSTED,
-      trustSaving: false,
-      trustError: null,
-      onToggleTrust: vi.fn(),
-      onListDir: vi.fn(async () => ({ entries: [], isRoot: false })),
-      onChangeTab: vi.fn(async () => {}),
-      onUpdateRule: vi.fn(),
-      onDeleteRule: vi.fn(),
-      onAddRule: vi.fn(),
-      onUpdateDir: vi.fn(),
-      onDeleteDir: vi.fn(),
-      onAddDir: vi.fn(),
-      onSaveAll: vi.fn(async () => {}),
-      onClose: vi.fn(),
-      ...over
-    }
+    const props = baseProps(over)
     render(<View {...props} />)
     return props
   }
@@ -169,4 +174,28 @@ describe.each([
     expect(row()!.textContent).not.toContain('Not trusted, so')
     expect(toggle()).toHaveAttribute('aria-checked', 'false')
   })
+})
+
+// Saving hot-reloads every running session the scope reaches (Claude via
+// apply_flag_settings({}) + its file watcher, opencode via a ruleset re-patch,
+// pi on its next gate call), so the footer must not tell people to restart.
+describe.each([
+  ['desktop', PermissionsDialogView],
+  ['mobile', PermissionsMobileView]
+])('%s view — footer apply note', (_name, View) => {
+  it.each([
+    ['local tab, clean', {}],
+    [
+      'global tab with unsaved edits, no cwd',
+      { activeTab: 'user', tabs: ['user'], cwd: null, trust: null, hasDirty: true }
+    ]
+  ] as [string, Partial<PermissionsDialogViewProps>][])(
+    'says saved changes apply live (%s)',
+    (_case, over) => {
+      render(<View {...baseProps(over)} />)
+      const note = screen.getByTestId('PermissionsDialog.applyNote')
+      expect(note).toHaveTextContent('Saved changes apply to running sessions right away')
+      expect(note.textContent).not.toMatch(/next session/i)
+    }
+  )
 })

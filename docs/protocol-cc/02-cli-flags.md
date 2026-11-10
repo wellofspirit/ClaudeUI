@@ -481,6 +481,21 @@ ClaudeUI passes this **flag settings** source (never the user's `~/.claude/setti
 - **Live effect:** running cli.js polls the global config about every 1 s. `apply_flag_settings({})` rebuilds the rules
   from the refreshed copy, so trusting and untrusting both take effect without a restart. One exception: added
   directories are added live only on cli.js's own trust-flip path.
+  - Probed live on 2026-11-09 (`list_permission_rules`). Trusting from outside made the Project allows live. It did
+    not add the Project `additionalDirectories` already listed, and a second nudge 3 s later didn't add them either.
+    Untrusting removed both. The cause is the directory diff (`Gko`): it adds only directories missing from the
+    _previous_ raw settings unless `trustFlip` is set.
+- **Settings edits while running (2.1.317, probed live 2026-11-09):** an edit to allow/ask/deny or
+  `additionalDirectories` in the user or local file, added or removed, is in the session's live `toolPermissionContext`
+  on the next `list_permission_rules` after `apply_flag_settings({})`. Without that nudge, cli.js's own watcher picks
+  it up within about 3 s. The subscriber (`Settings changed from ${source}, updating app state`) re-reads every
+  enabled source (`Mx()`), replaces each source's rules (`Myn`) and diffs the added directories (`Gko`).
+  `permissions.defaultMode` is the one key it never re-derives.
+- **Where Local lives (2.1.317):** when the session cwd differs from its canonical git root (a subdirectory or a
+  linked worktree), `localSettings` is stored at the root (`mLn` → `Xj`, after a POSIX ownership check; Windows
+  keeps cwd). `<cwd>/.claude/settings.local.json` is still read as a "legacy" file merged into `localSettings`
+  (`yye`, `onLegacyLocalSettingsRead`). Edits to that cwd file apply live by watcher and by nudge, as probed for both
+  layouts. ClaudeUI's Local tab writes the cwd file.
 
 ### `--plugin-dir <path>`
 

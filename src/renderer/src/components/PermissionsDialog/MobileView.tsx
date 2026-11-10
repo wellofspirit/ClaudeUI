@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PermissionsDialogViewProps } from './View'
 import {
+  APPLY_NOTE,
   RULE_TEMPLATES,
   SCOPE_DESCRIPTIONS,
   SCOPE_LABELS,
@@ -335,8 +336,11 @@ export function PermissionsMobileView({
         className="shrink-0 flex items-center gap-2 px-3 py-2.5 border-t border-border bg-bg-secondary/30"
         style={{ paddingBottom: 'calc(0.625rem + env(safe-area-inset-bottom))' }}
       >
-        <span className="flex-1 min-w-0 text-[10px] leading-tight text-text-muted">
-          Changes take effect on next session start
+        <span
+          data-testid="PermissionsDialog.applyNote"
+          className="flex-1 min-w-0 text-[10px] leading-tight text-text-muted"
+        >
+          {APPLY_NOTE}
         </span>
         {hasDirty && (
           <button
