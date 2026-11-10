@@ -1,22 +1,25 @@
 /**
  * WebSocket-backed implementation of ClaudeAPI.
  *
- * This is a mechanical translation of src/preload/index.ts — every
- * ipcRenderer.invoke becomes connection.invoke, every ipcRenderer.on
- * becomes an event listener registration. The remote server dispatches
- * to the same handler functions that IPC uses.
+ * The pass-through members (every `ipcRenderer.invoke` of the preload and every host-local
+ * `ipcRenderer.on`) are built from the shared tables in `shared/api-invoke-table.ts` over this
+ * connection; what is written out below is only what this client does differently: desktop-only
+ * members that are stubs or refusals here, members that ride another wire mechanism (terminal
+ * frames, voice frames) and members computed locally. The remote server dispatches to the same
+ * handler functions that IPC uses.
  */
 
-import type {
-  ApprovalDecision,
-  ClaudeAPI,
-  PermissionSuggestion,
-  TerminalAvailability,
-  WorkspaceTrust
-} from '../shared/types'
-import type { IdeAvailability, IdeEntry, InvokeProgress } from '../shared/remote-protocol'
+import type { ClaudeAPI, TerminalAvailability } from '../shared/types'
 import { buildMockupHttpUrl } from '../shared/mockup-url'
 import { buildSentFileUrl } from '../shared/sent-file-url'
+import {
+  API_EVENTS,
+  API_INVOKES,
+  buildEventApi,
+  buildInvokeApi,
+  unwrapEnvelope,
+  type InvokeTransport
+} from '../shared/api-invoke-table'
 import { derivePasswordProof } from './password-proof'
 import type { RemoteConnection } from './connection'
 
@@ -33,40 +36,27 @@ declare global {
   }
 }
 
+/** The members that are not a pass-through of the shared tables: this client's own. */
+type WebOwnApi = Omit<ClaudeAPI, keyof typeof API_INVOKES | keyof typeof API_EVENTS>
+
 export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
   // Listener registration mirrors preload's onEvent(). The registry itself
   // lives in the connection's SyncClient — it has to be the thing that knows an
   // event was dispatched, or the cursor advances past events nobody applied
   // (SyncCore phase 0 ack discipline).
-  const on = (channel: string): ReturnType<RemoteConnection['on']> => connection.on(channel)
-
-  // Mirrors preload's unwrap() for safeHandler envelopes: `{ ok: false, error }` throws.
-  function unwrapEnvelope<T>(channel: string, result: unknown): T {
-    if (result && typeof result === 'object' && 'ok' in result) {
-      const envelope = result as { ok: boolean; data?: unknown; error?: string }
-      if (!envelope.ok) throw new Error(envelope.error ?? `Remote ${channel} failed`)
-      return envelope.data as T
-    }
-    return result as T
+  const transport: InvokeTransport = {
+    failurePrefix: 'Remote',
+    invoke: (channel, args) => connection.invoke(channel, ...args),
+    invokeWithProgress: (channel, args, onProgress) =>
+      connection.invokeWithProgress(channel, [...args], onProgress),
+    on: (channel) => connection.on(channel)
   }
 
-  async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
-    return unwrapEnvelope<T>(channel, await connection.invoke(channel, ...args))
-  }
+  // The one hand-written member that still unwraps (see `resolveForkAnchor`).
+  const unwrap = async <T>(channel: string, ...args: unknown[]): Promise<T> =>
+    unwrapEnvelope<T>('Remote', channel, await connection.invoke(channel, ...args))
 
-  // The progress twin of `unwrap` (ADR-102): same envelope, reported through `onProgress`.
-  async function unwrapWithProgress<T>(
-    channel: string,
-    args: unknown[],
-    onProgress: (progress: InvokeProgress) => void
-  ): Promise<T> {
-    return unwrapEnvelope<T>(
-      channel,
-      await connection.invokeWithProgress(channel, args, onProgress)
-    )
-  }
-
-  const api: ClaudeAPI = {
+  const own: WebOwnApi = {
     platform: 'web',
     // Never on the web client. The verifier hooks are a LOCAL harness affordance
     // (`scripts/app-shot.mjs` driving the real Electron app); a browser reaching
@@ -81,149 +71,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       return null
     },
 
-    createSession: (
-      routingId,
-      cwd,
-      effort?,
-      resumeSessionId?,
-      permissionMode?,
-      model?,
-      thinkingMode?,
-      resumeSessionAt?,
-      forkSession?,
-      engineId?,
-      announce?
-    ) =>
-      connection.invoke(
-        'session:create',
-        routingId,
-        cwd,
-        effort,
-        resumeSessionId,
-        permissionMode,
-        model,
-        thinkingMode,
-        resumeSessionAt,
-        forkSession,
-        engineId,
-        announce
-      ) as Promise<void>,
-
+    // Envelope differs from the desktop's (it answers the plain result): kept as is.
     resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
       unwrap('session:resolve-fork-anchor', sessionId, cwd, messageId, engineId, messageIndex),
-
-    sendPrompt: (routingId, prompt, attachments?) =>
-      connection.invoke('session:send', routingId, prompt, attachments) as Promise<void>,
-
-    cancelSession: (routingId) => connection.invoke('session:cancel', routingId) as Promise<void>,
-    clearConversation: (routingId, permissionMode) =>
-      connection.invoke('session:clear-conversation', routingId, permissionMode) as Promise<void>,
-
-    interruptSession: (routingId) =>
-      connection.invoke('session:interrupt', routingId) as Promise<void>,
-
-    respondApproval: (
-      routingId: string,
-      requestId: string,
-      decision: ApprovalDecision,
-      answers?: Record<string, string>,
-      updatedPermissions?: PermissionSuggestion[]
-    ) =>
-      connection.invoke(
-        'session:approval-response',
-        routingId,
-        requestId,
-        decision,
-        answers,
-        updatedPermissions
-      ) as Promise<void>,
-
-    approveBlocked: (routingId: string, toolUseId: string) =>
-      connection.invoke('session:approve-blocked', routingId, toolUseId) as Promise<void>,
 
     // Window controls — no-op on web
     minimizeWindow: async () => {},
     maximizeWindow: async () => {},
     closeWindow: async () => {},
-
-    listDirectories: () =>
-      connection.invoke('session:list-directories') as ReturnType<ClaudeAPI['listDirectories']>,
-    listOpencodeSessionsGlobal: () =>
-      connection.invoke('session:list-opencode') as ReturnType<
-        ClaudeAPI['listOpencodeSessionsGlobal']
-      >,
-    loadOpencodeHistory: (sessionId: string) =>
-      connection.invoke('session:load-opencode-history', sessionId) as ReturnType<
-        ClaudeAPI['loadOpencodeHistory']
-      >,
-    // Not yet registered on RemoteDispatcher (remote/web session listing is
-    // out of M1 scope) — mirrors the opencode pair above, same pre-existing gap.
-    listPiSessionsGlobal: () =>
-      connection.invoke('session:list-pi') as ReturnType<ClaudeAPI['listPiSessionsGlobal']>,
-    loadPiHistory: (sessionId: string) =>
-      connection.invoke('session:load-pi-history', sessionId) as ReturnType<
-        ClaudeAPI['loadPiHistory']
-      >,
-
-    // The progress path only when a callback is given (ADR-102); otherwise the
-    // plain invoke, so every other caller is unchanged. The options ride as a
-    // 4th wire arg only when given: no options is the exact 3-arg call.
-    loadSessionHistory: (sessionId, projectKey, resumeSessionAt, onProgress, options) => {
-      const wireArgs = options
-        ? [sessionId, projectKey, resumeSessionAt, options]
-        : [sessionId, projectKey, resumeSessionAt]
-      return (
-        onProgress
-          ? connection.invokeWithProgress('session:load-history', wireArgs, onProgress)
-          : connection.invoke('session:load-history', ...wireArgs)
-      ) as ReturnType<ClaudeAPI['loadSessionHistory']>
-    },
-
-    loadSessionStatusLine: (sessionId, projectKey, onProgress) =>
-      (onProgress
-        ? connection.invokeWithProgress(
-            'session:load-status-line',
-            [sessionId, projectKey],
-            onProgress
-          )
-        : connection.invoke('session:load-status-line', sessionId, projectKey)) as ReturnType<
-        ClaudeAPI['loadSessionStatusLine']
-      >,
-
-    loadSubagentHistory: (sessionId, projectKey, agentId) =>
-      connection.invoke(
-        'session:load-subagent-history',
-        sessionId,
-        projectKey,
-        agentId
-      ) as ReturnType<ClaudeAPI['loadSubagentHistory']>,
-
-    getBlob: (blobId) => connection.invoke('blob:get', blobId) as ReturnType<ClaudeAPI['getBlob']>,
-
-    buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
-      connection.invoke(
-        'session:build-subagent-file-map',
-        sessionId,
-        projectKey,
-        taskPrompts
-      ) as ReturnType<ClaudeAPI['buildSubagentFileMap']>,
-
-    loadBackgroundOutput: (projectKey, taskId, outputFile?) =>
-      connection.invoke(
-        'session:load-background-output',
-        projectKey,
-        taskId,
-        outputFile
-      ) as ReturnType<ClaudeAPI['loadBackgroundOutput']>,
-
-    askSideQuestion: (routingId, question) =>
-      connection.invoke('session:ask-side-question', routingId, question) as ReturnType<
-        ClaudeAPI['askSideQuestion']
-      >,
-
-    deleteSession: (sessionId, projectKey, engineId?) =>
-      unwrap('session:delete-session', sessionId, projectKey, engineId),
-    deleteProject: (projectKey) => unwrap('session:delete-project', projectKey),
 
     // Every replicated / volatile subscription is GONE from this adapter
     // (SyncCore phase 4c). It was the hand-maintained mirror of the preload's
@@ -240,7 +95,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // Host-local channels. A remote client mostly has no such surface, so these
     // are either dead subscriptions kept for signature parity or genuinely
     // per-transport implementations (terminal bytes ride the volatile WS lane).
-    onMaximizeChange: on('window:maximized-change') as ClaudeAPI['onMaximizeChange'],
+    //
     // Terminal output is the VOLATILE lane (SyncCore phase 2): `term-data` /
     // `term-exit` frames targeted at attached sockets, never event-log channels
     // — PTY bytes must not be replayable from a ring buffer.
@@ -252,170 +107,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.onTerminalResized(cb)) as ClaudeAPI['onTerminalResized'],
     onTerminalExit: ((cb: Parameters<ClaudeAPI['onTerminalExit']>[0]) =>
       connection.onTerminalExit(cb)) as ClaudeAPI['onTerminalExit'],
-    onBeforeQuit: on('app:before-quit') as ClaudeAPI['onBeforeQuit'],
 
-    // Background task control
-    watchBackground: (routingId, toolUseId) =>
-      connection.invoke('session:watch-background', routingId, toolUseId) as Promise<void>,
-    unwatchBackground: (routingId, toolUseId) =>
-      connection.invoke('session:unwatch-background', routingId, toolUseId) as Promise<void>,
-    readBackgroundRange: (routingId, toolUseId, offset, length) =>
-      connection.invoke(
-        'session:read-background-range',
-        routingId,
-        toolUseId,
-        offset,
-        length
-      ) as Promise<string>,
-
-    // Task control
-    stopTask: (routingId, toolUseId, isDispatch) =>
-      connection.invoke('session:stop-task', routingId, toolUseId, isDispatch) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    backgroundTask: (routingId, toolUseId) =>
-      connection.invoke('session:background-task', routingId, toolUseId) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    dequeueMessage: (routingId, value) =>
-      connection.invoke('session:dequeue-message', routingId, value) as Promise<{
-        removed: number
-      }>,
-    allowPeerMessages: (routingId) =>
-      connection.invoke('session:allow-peer-messages', routingId) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    setSessionGrouped: (routingId, grouped) =>
-      connection.invoke('session:link:set-grouped', routingId, grouped) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    startSessionProposal: (proposalId, grouped) =>
-      connection.invoke('session:proposal:start', proposalId, grouped) as Promise<{
-        success: boolean
-        error?: string
-        startedRef?: string
-      }>,
-    dismissSessionProposal: (proposalId) =>
-      connection.invoke('session:proposal:dismiss', proposalId) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    respondContextPressure: (routingId, answer) =>
-      connection.invoke('session:context-pressure:respond', routingId, answer) as Promise<{
-        success: boolean
-        error?: string
-      }>,
-    recallQueued: (routingId) =>
-      connection.invoke('session:recall-queued', routingId) as Promise<{
-        recalled: string[]
-        notRecalled: number
-      }>,
-
-    // Session settings
-    setPermissionMode: (routingId, mode) =>
-      connection.invoke('session:set-permission-mode', routingId, mode) as Promise<void>,
-    setModel: (routingId, model) =>
-      connection.invoke('session:set-model', routingId, model) as Promise<void>,
-    setEffort: (routingId, effort) =>
-      connection.invoke('session:set-effort', routingId, effort) as Promise<void>,
-    setThinkingMode: (routingId, mode) =>
-      connection.invoke('session:set-thinking-mode', routingId, mode) as Promise<void>,
-    setReasoningVariant: (routingId, variant) =>
-      connection.invoke('session:set-reasoning-variant', routingId, variant) as Promise<void>,
-    getModels: () => connection.invoke('session:get-models') as ReturnType<ClaudeAPI['getModels']>,
-    getEngineModels: (engineId) =>
-      connection.invoke('session:get-engine-models', engineId) as ReturnType<
-        ClaudeAPI['getEngineModels']
-      >,
-    judgeModelSupport: (engineId, values) =>
-      connection.invoke('automode:judge-model-support', engineId, values) as ReturnType<
-        ClaudeAPI['judgeModelSupport']
-      >,
-    judgeRouteResting: (engineId, model, accountId) =>
-      connection.invoke('automode:judge-route-resting', engineId, model, accountId) as ReturnType<
-        ClaudeAPI['judgeRouteResting']
-      >,
-    getOpencodeProviders: () =>
-      connection.invoke('session:get-opencode-providers') as ReturnType<
-        ClaudeAPI['getOpencodeProviders']
-      >,
-    setOpencodeProviderDisabled: (providerId, disabled) =>
-      connection.invoke(
-        'session:set-opencode-provider-disabled',
-        providerId,
-        disabled
-      ) as ReturnType<ClaudeAPI['setOpencodeProviderDisabled']>,
-    removeOpencodeProvider: (providerId, kind) =>
-      connection.invoke('session:remove-opencode-provider', providerId, kind) as ReturnType<
-        ClaudeAPI['removeOpencodeProvider']
-      >,
-    getOpencodeProviderModels: (providerId) =>
-      connection.invoke('session:get-opencode-provider-models', providerId) as ReturnType<
-        ClaudeAPI['getOpencodeProviderModels']
-      >,
-    getPiModelCatalogGroups: () =>
-      connection.invoke('session:get-pi-model-catalog') as ReturnType<
-        ClaudeAPI['getPiModelCatalogGroups']
-      >,
-    engineIsInstalled: (engineId) =>
-      connection.invoke('engine:is-installed', engineId) as ReturnType<
-        ClaudeAPI['engineIsInstalled']
-      >,
-    // The harness manager (ADR-082 arc 2). Plain results (no safeHandler
-    // envelope), so `connection.invoke` like the reads beside them. The writes
-    // declare `admin`: a base connection is refused them by the registry.
-    harnessState: () => connection.invoke('harness:state') as ReturnType<ClaudeAPI['harnessState']>,
-    harnessVersions: (id) =>
-      connection.invoke('harness:versions', { id }) as ReturnType<ClaudeAPI['harnessVersions']>,
-    setHarnessSelection: (id, selection) =>
-      connection.invoke('harness:set-selection', { id, selection }) as ReturnType<
-        ClaudeAPI['setHarnessSelection']
-      >,
-    installHarness: (id, version) =>
-      connection.invoke('harness:install', { id, version }) as ReturnType<
-        ClaudeAPI['installHarness']
-      >,
-    cancelHarnessInstall: (id, version) =>
-      connection.invoke('harness:install-cancel', { id, version }) as ReturnType<
-        ClaudeAPI['cancelHarnessInstall']
-      >,
-    detectHarnesses: (ids) =>
-      connection.invoke('harness:detect', ids ? { ids } : {}) as ReturnType<
-        ClaudeAPI['detectHarnesses']
-      >,
-    setHarnessUpdateMode: (mode) =>
-      connection.invoke('harness:set-update-mode', { mode }) as ReturnType<
-        ClaudeAPI['setHarnessUpdateMode']
-      >,
-    // Resolves when the run ends; the 30 s invoke timeout may come first, which
-    // the harness store treats as still running (the events carry on).
-    updateHarnesses: () =>
-      connection.invoke('harness:update-all') as ReturnType<ClaudeAPI['updateHarnesses']>,
-    checkHarnessUpdates: () =>
-      connection.invoke('harness:check-updates') as ReturnType<ClaudeAPI['checkHarnessUpdates']>,
-    answerHarnessUpgradePrompt: () =>
-      connection.invoke('harness:answer-upgrade-prompt') as ReturnType<
-        ClaudeAPI['answerHarnessUpgradePrompt']
-      >,
-    getPiBinaryPath: () =>
-      connection.invoke('pi:binary-path') as ReturnType<ClaudeAPI['getPiBinaryPath']>,
-    getPiAuthStatus: () =>
-      connection.invoke('pi:auth-status') as ReturnType<ClaudeAPI['getPiAuthStatus']>,
-    // The unified provider list — safeHandler-wrapped host-side (declared once
-    // in `core/ipc/auth-commands.ts`), so it unwraps like the writes below and
-    // unlike the three older reads under it.
-    listProviderRegistry: () => unwrap('provider-registry:list'),
-    // The subscription accounts (ADR-068 §2) — safeHandler-wrapped host-side in
-    // the same shared module, so they unwrap like the registry above.
-    listProviderAccounts: (providerId) => unwrap('provider-account:list', providerId),
-    switchProviderAccount: (providerId, accountId) =>
-      unwrap('provider-account:switch', providerId, accountId),
-    removeProviderAccount: (providerId, accountId) =>
-      unwrap('provider-account:remove', providerId, accountId),
+    // Shared-provider reads: the web client answers the plain result.
     listSharedProviders: () =>
       connection.invoke('shared-provider:list') as ReturnType<ClaudeAPI['listSharedProviders']>,
     getSharedProviderStatuses: () =>
@@ -426,70 +119,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('shared-provider:models', id) as ReturnType<
         ClaudeAPI['listSharedProviderModels']
       >,
-    // Shared-provider WRITES — mirrors preload 1:1. All seven are registered for
-    // both transports in core/ipc/auth-commands.ts under `capability: 'config'`
-    // (ADR-056 reclassified the family admin→config), alongside the three reads
-    // above that were already wired. They used to answer one shared rejecting
-    // helper, which refused honestly but refused a write the server was already
-    // prepared to accept. Every handler is safeHandler-wrapped, so `unwrap`
-    // carries a real refusal back. `set-key` sends the key host-side and returns
-    // nothing — the same direction `vendor-auth:set-key` already travels.
-    saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
-    probeSharedEndpoint: (input) => unwrap('shared-provider:probe', input),
-    removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
-    setSharedProviderRoute: (id, harness, enabled) =>
-      unwrap('shared-provider:set-route', id, harness, enabled),
-    // `replaceOwn` (the harnesses the user agreed to overwrite) goes on the
-    // wire only when it names one (S7f).
-    setSharedProviderApiKey: (id, key, replaceOwn) =>
-      unwrap('shared-provider:set-key', id, key, ...(replaceOwn?.length ? [replaceOwn] : [])),
-    adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
-    setSharedProviderCuration: (id, curation) =>
-      unwrap('shared-provider:set-curation', id, curation),
-    setSharedProviderDisabled: (id, disabled, replaceOwn) =>
-      unwrap(
-        'shared-provider:set-disabled',
-        id,
-        disabled,
-        ...(replaceOwn?.length ? [replaceOwn] : [])
-      ),
-    syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
-    useSharedProviderStoredKey: (id, harness) =>
-      unwrap('shared-provider:use-stored-key', id, harness),
-    getSharedProviderOwnKeyHolders: (id) => unwrap('shared-provider:own-key-holders', id),
-    disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
-    setSharedProviderDefaultModel: (id, harness, modelId) =>
-      unwrap('shared-provider:set-default', id, harness, modelId),
-
-    // Generation
-    generateTitle: (conversationText) =>
-      connection.invoke('session:generate-title', conversationText) as Promise<string | null>,
-    generateCommitMessage: (diff) =>
-      connection.invoke('session:generate-commit-message', diff) as Promise<string | null>,
-
-    writeCustomTitle: (sessionId, projectKey, title) =>
-      connection.invoke(
-        'session:write-custom-title',
-        sessionId,
-        projectKey,
-        title
-      ) as Promise<void>,
-    getPlanContent: (routingId) =>
-      connection.invoke('session:get-plan-content', routingId) as Promise<string | null>,
-    getSessionLogPath: (routingId) =>
-      connection.invoke('session:get-session-log-path', routingId) as Promise<string | null>,
-
-    // Watch
-    watchSession: (routingId, sessionId, projectKey, cwd) =>
-      connection.invoke(
-        'session:watch-session',
-        routingId,
-        sessionId,
-        projectKey,
-        cwd
-      ) as Promise<void>,
-    unwatchSession: (routingId) =>
-      connection.invoke('session:unwatch-session', routingId) as Promise<void>,
 
     // Terminal (SyncCore phase 2 — ADR-052). Reachable over remote behind three
     // server-side gates: the desktop opt-in toggle, a stepped-up `shell` grant,
@@ -499,8 +128,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // already has a shell open in attaches to THAT pty (tmux-style) instead of
     // spawning a second one. A host that predates the pool ignores the extra
     // argument and answers exactly as before.
-    createTerminal: (cwd, index) =>
-      connection.invoke('terminal:create', cwd, index) as Promise<string>,
+    //
     // Keystrokes ride the `term-input` FRAME rather than an invoke: one
     // request/response round trip per keypress is pure overhead, and the frame
     // is what refreshes the grant's idle deadline.
@@ -510,7 +138,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     resizeTerminal: async (id, cols, rows) => {
       connection.sendTerminalResize(id, cols, rows)
     },
-    killTerminal: (id) => connection.invoke('terminal:kill', id) as Promise<void>,
     // Desktop-only lifecycle sweep (cold-session cleanup); not on the remote
     // surface, so a web client never mass-kills the operator's shells.
     killTerminalsByCwd: async () => [],
@@ -524,18 +151,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       )) as TerminalAvailability
       return { ...availability, passkey: connection.passkeyAvailable() }
     },
-    // Which slots of this cwd already hold a live shell. Refused (like every
-    // `shell` channel) until the three gates hold — the caller treats a refusal
-    // as "nothing known", never as "nothing running".
-    terminalPool: (cwd) => connection.invoke('terminal:pool', cwd) as Promise<number[]>,
-    // Remote IDE (ADR-064). Both go straight over the wire — unlike
-    // `terminalAvailability` there is nothing for the client to merge in, because
-    // every axis of the answer (toggle, grant, ORIGIN, CLI probe, child state) is
-    // a host fact. The entry URL comes back RELATIVE and the caller navigates its
-    // own origin with it, which is why no host or scheme is ever guessed here.
-    ideAvailability: () => connection.invoke('ide:availability') as Promise<IdeAvailability>,
-    ideMintEntry: (folder, themeKind) =>
-      connection.invoke('ide:mint-entry', { folder, themeKind }) as Promise<IdeEntry>,
+    // The volatile lane's subscription verb; the desktop's answer is passed through, here the
+    // result is dropped.
     watchStreams: async (sessionIds, automationIds) => {
       await connection.invoke('stream:watch', { sessionIds, automationRuns: automationIds })
     },
@@ -597,78 +214,14 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
         settingsSessionExpiresAt: response.settingsSessionExpiresAt
       }
     },
-    // The reply shape is `TerminalAttachResult` from this build's host and a
-    // bare boolean from an older one (ADR-060 version skew) — passed through
-    // verbatim either way; the caller narrows.
-    attachTerminal: (id) =>
-      connection.invoke('terminal:attach', id) as ReturnType<ClaudeAPI['attachTerminal']>,
-    detachTerminal: (id) => connection.invoke('terminal:detach', id) as Promise<void>,
     onTerminalDetached: ((cb: Parameters<ClaudeAPI['onTerminalDetached']>[0]) =>
       connection.onTerminalDetached(cb)) as ClaudeAPI['onTerminalDetached'],
-
-    // Worktree — mirrors preload 1:1. All four are registered for both transports
-    // in core/ipc/config-commands.ts under `capability: 'git'`, the same
-    // capability the `git:*` mutations below already ride, and the gate is
-    // SERVER-side. Creating or removing a worktree is git work on the host's
-    // repos: no dialog, no window, nothing host-physical. Every handler is
-    // safeHandler-wrapped, so `unwrap` carries the real reason back (an empty
-    // answer would read as "this repo has no worktrees" rather than "this client
-    // cannot ask").
-    createWorktree: (cwd, name, opts) =>
-      unwrapWithProgress('worktree:create', [cwd, name, opts], () => {}),
-    getWorktreeStatus: (worktreePath, originalHead) =>
-      unwrap('worktree:status', worktreePath, originalHead),
-    // `withProgress` on the server: the progress path slides the invoke timeout; no caller
-    // listens, so the callback is a no-op.
-    removeWorktree: (worktreePath, branch, gitRoot) =>
-      unwrapWithProgress('worktree:remove', [worktreePath, branch, gitRoot], () => {}),
-    inventoryWorktrees: (cwd) => unwrap('worktree:inventory', cwd),
-    inspectWorktree: (cwd, id) => unwrap('worktree:inspect', cwd, id),
-    measureWorktree: (cwd, id, onProgress) =>
-      onProgress
-        ? unwrapWithProgress('worktree:measure', [cwd, id], onProgress)
-        : unwrap('worktree:measure', cwd, id),
-    removeWorktrees: (cwd, ids, onProgress) =>
-      onProgress
-        ? unwrapWithProgress('worktree:remove-many', [cwd, ids], onProgress)
-        : unwrap('worktree:remove-many', cwd, ids),
 
     // App lifecycle — quit is desktop-only; no-ops that resolve on web.
     confirmQuit: async () => {}, // No-op on web
     cancelQuit: async () => {}, // No-op on web
     ackQuitPrompt: async () => {}, // No-op on web
 
-    // Git — route through remote server
-    gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),
-    gitGetStatus: (cwd) => unwrap('git:status', cwd),
-    gitGetBranches: (cwd) => unwrap('git:branches', cwd),
-    gitCheckout: (cwd, branch) => unwrap('git:checkout', cwd, branch),
-    gitCreateBranch: (cwd, name, base) => unwrap('git:create-branch', cwd, name, base),
-    gitGetFilePatch: (cwd, filePath, staged, ignoreWhitespace) =>
-      unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
-    gitGetFileContents: (cwd, filePath, staged) =>
-      unwrap('git:file-contents', cwd, filePath, staged),
-    gitStageFile: (cwd, filePath) => unwrap('git:stage-file', cwd, filePath),
-    gitUnstageFile: (cwd, filePath) => unwrap('git:unstage-file', cwd, filePath),
-    gitDiscardFile: (cwd, filePath) => unwrap('git:discard-file', cwd, filePath),
-    gitStageAll: (cwd) => unwrap('git:stage-all', cwd),
-    gitUnstageAll: (cwd) => unwrap('git:unstage-all', cwd),
-    gitCommit: (cwd, message) => unwrap('git:commit', cwd, message),
-    gitPush: (cwd) => unwrap('git:push', cwd),
-    gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
-    gitPull: (cwd, mode) => unwrap('git:pull', cwd, mode),
-    gitStashPush: (cwd) => unwrap('git:stash-push', cwd),
-    gitStashRestore: (cwd, sha) => unwrap('git:stash-restore', cwd, sha),
-    gitFetch: (cwd) => unwrap('git:fetch', cwd),
-    // Live watching is real over remote: the server shares one poller per cwd
-    // with the desktop (gitWatchRegistry) and pushes git:status-update over the
-    // bridge. Without these the pill never rendered — gitStatus stayed null.
-    watchGit: (cwds) => unwrap('git:watch', { cwds }),
-
-    // File ops
-    listDir: (dirPath) =>
-      connection.invoke('file:list-dir', dirPath) as ReturnType<ClaudeAPI['listDir']>,
-    listPlaces: () => connection.invoke('file:list-places') as ReturnType<ClaudeAPI['listPlaces']>,
     openInVSCode: async () => {}, // No-op on web
 
     // Sent-file preview: no RPC — the src IS an authenticated same-origin URL
@@ -686,208 +239,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     },
 
     // Mockup preview — HTML is read from the server's filesystem and rendered client-side
-    readMockupHtml: (cwd, directory) => unwrap('mockup:read-html', cwd, directory),
-    watchMockup: (cwd, directory) =>
-      connection.invoke('mockup:watch', cwd, directory) as Promise<void>,
-    unwatchMockup: (cwd, directory) =>
-      connection.invoke('mockup:unwatch', cwd, directory) as Promise<void>,
     getMockupPreviewUrl: (cwd, directory, opts) =>
       buildMockupHttpUrl(window.location.origin, cwd, directory, {
         token: window.__MOCKUP_TOKEN__ ?? '',
         dark: opts?.dark,
         parentOrigin: window.location.origin
       }),
-
-    // Config
-    loadSettings: () =>
-      connection.invoke('config:load-settings') as ReturnType<ClaudeAPI['loadSettings']>,
-    saveSettings: (settings) =>
-      connection.invoke('config:save-settings', settings) as Promise<void>,
-    loadSessionConfig: () =>
-      connection.invoke('config:load-sessions') as ReturnType<ClaudeAPI['loadSessionConfig']>,
-    saveSessionConfig: (config) =>
-      connection.invoke('config:save-sessions', config) as Promise<void>,
-    loadSlashCommands: () =>
-      connection.invoke('config:load-slash-commands') as ReturnType<ClaudeAPI['loadSlashCommands']>,
-    // `config:save-slash-commands` is registered for both transports
-    // (config-commands.ts, `config`) with a PLAIN handler, so this is a bare
-    // invoke exactly like preload's. It is not a user edit but the cache write
-    // useClaudeEvents makes when cli.js announces the command list — stubbing it
-    // meant a remote client's slash menu was rebuilt from whatever the desktop
-    // last cached.
-    saveSlashCommands: (commands) =>
-      connection.invoke('config:save-slash-commands', commands) as Promise<void>,
-    loadSkillDetails: (routingId, cwd) =>
-      connection.invoke('config:load-skill-details', routingId, cwd) as ReturnType<
-        ClaudeAPI['loadSkillDetails']
-      >,
-
-    // Usage
-    fetchAccountUsage: () =>
-      connection.invoke('usage:fetch') as ReturnType<ClaudeAPI['fetchAccountUsage']>,
-    fetchChatgptLimits: (refresh) =>
-      connection.invoke('usage:chatgpt-limits', refresh ?? false) as ReturnType<
-        ClaudeAPI['fetchChatgptLimits']
-      >,
-    fetchBlockUsage: () =>
-      connection.invoke('usage:fetch-block') as ReturnType<ClaudeAPI['fetchBlockUsage']>,
-    setUsageAccountFilter: (account) =>
-      connection.invoke('usage:set-account-filter', account) as ReturnType<
-        ClaudeAPI['setUsageAccountFilter']
-      >,
-    fetchAccountLimits: (refresh) =>
-      connection.invoke('usage:limits', refresh ?? false) as ReturnType<
-        ClaudeAPI['fetchAccountLimits']
-      >,
-    fetchUsageWindows: (query) =>
-      connection.invoke('usage:windows', query ?? {}) as ReturnType<ClaudeAPI['fetchUsageWindows']>,
-    fetchUsageDashboard: (range, scope) =>
-      connection.invoke('usage:dashboard', { range, scope }) as ReturnType<
-        ClaudeAPI['fetchUsageDashboard']
-      >,
-    usageHubStatus: () =>
-      connection.invoke('usage-hub:status') as ReturnType<ClaudeAPI['usageHubStatus']>,
-    configureUsageHub: (input) =>
-      connection.invoke('usage-hub:configure', input) as ReturnType<ClaudeAPI['configureUsageHub']>,
-    setUsageHubSecret: (secret) =>
-      connection.invoke('usage-hub:set-secret', secret) as ReturnType<
-        ClaudeAPI['setUsageHubSecret']
-      >,
-    syncUsageHubNow: () =>
-      connection.invoke('usage-hub:sync-now') as ReturnType<ClaudeAPI['syncUsageHubNow']>,
-    resyncUsageHub: () =>
-      connection.invoke('usage-hub:resync') as ReturnType<ClaudeAPI['resyncUsageHub']>,
-    forgetUsageHub: () =>
-      connection.invoke('usage-hub:forget') as ReturnType<ClaudeAPI['forgetUsageHub']>,
-    // The OpenRouter tab — `config` queries, safeHandler envelopes (hence `unwrap`).
-    openrouterStatus: () => unwrap('openrouter:status'),
-    openrouterOverview: () => unwrap('openrouter:overview'),
-    openrouterModels: (scope) => unwrap('openrouter:models', scope),
-    openrouterModelEndpoints: (modelId) => unwrap('openrouter:model-endpoints', modelId),
-
-    // Native OAuth (ADR-014) — remote since ADR-057/S4. The host does NOT open
-    // its own browser for these calls: it returns `manualUrl` on the state and
-    // the client drives the two-step paste-back flow itself (S4-UI). The token
-    // EXCHANGE still happens host-side; no token material crosses the wire.
-    signIn: () => connection.invoke('auth:sign-in') as ReturnType<ClaudeAPI['signIn']>,
-    submitOAuthCode: (code) =>
-      connection.invoke('auth:submit-code', code) as ReturnType<ClaudeAPI['submitOAuthCode']>,
-    cancelSignIn: () => connection.invoke('auth:cancel') as Promise<void>,
-    // Still host-local by classification (sync-channels.md) — a remote client
-    // learns its own flow's outcome from the invoke returns above, not from here.
-    onAuthState: on('auth:state') as ClaudeAPI['onAuthState'],
-
-    // Multi-account (ADR-015) — the mutations are `config`-capability commands
-    // registered on both transports since S4 (core/ipc/auth-commands.ts).
-    getAccounts: () => connection.invoke('account:get') as ReturnType<ClaudeAPI['getAccounts']>,
-    setMultiAccountEnabled: (enabled) =>
-      connection.invoke('account:set-enabled', enabled) as ReturnType<
-        ClaudeAPI['setMultiAccountEnabled']
-      >,
-    // Carries `pendingSignIn` back for a remote caller — see AccountsState.
-    addAccount: () => connection.invoke('account:add') as ReturnType<ClaudeAPI['addAccount']>,
-    switchAccount: (id) =>
-      connection.invoke('account:switch', id) as ReturnType<ClaudeAPI['switchAccount']>,
-    deleteAccount: (id) =>
-      connection.invoke('account:delete', id) as ReturnType<ClaudeAPI['deleteAccount']>,
-    onAccountsChanged: on('account:changed') as ClaudeAPI['onAccountsChanged'],
-    onAccountRespawnSessions: on(
-      'account:respawn-sessions'
-    ) as ClaudeAPI['onAccountRespawnSessions'],
-
-    // Claude permissions — full parity: the remote handler runs the same
-    // save + hot-reload fan-out as the desktop IPC.
-    loadClaudePermissions: (scope, cwd?) =>
-      connection.invoke('claude:load-permissions', scope, cwd) as ReturnType<
-        ClaudeAPI['loadClaudePermissions']
-      >,
-    saveClaudePermissions: (scope, permissions, cwd?) =>
-      connection.invoke('claude:save-permissions', scope, permissions, cwd) as Promise<void>,
-    getWorkspaceTrust: (cwd) =>
-      connection.invoke('claude:workspace-trust', cwd) as Promise<WorkspaceTrust | null>,
-    setWorkspaceTrust: (cwd, trusted) =>
-      connection.invoke('claude:set-workspace-trust', cwd, trusted) as Promise<WorkspaceTrust>,
-
-    // Transcript retention window (cleanupPeriodDays)
-    getCleanupPeriodDays: () =>
-      connection.invoke('claude:get-cleanup-period') as ReturnType<
-        ClaudeAPI['getCleanupPeriodDays']
-      >,
-    setCleanupPeriodDays: (days) =>
-      connection.invoke('claude:set-cleanup-period', days) as Promise<void>,
-
-    // MCP — the WRITE half now mirrors preload 1:1. Every channel here is
-    // registered for both transports in core/ipc/config-commands.ts under
-    // `capability: 'config'`; the read half (`status`, `load-servers`,
-    // `read-disabled`) was already wired, and splitting read from write across
-    // transports was the accident that comment in config-commands.ts names.
-    //
-    // `unwrap` appears exactly where preload uses it: the three LIVE verbs that
-    // address a running session are safeHandler-wrapped, the three FILE verbs are
-    // plain handlers whose throw is already a rejection over the wire.
-    // `mcpSetServers` was the worst of the old stubs — it resolved an empty
-    // SUCCESS result, so a remote caller could not tell the write from a no-op.
-    mcpServerStatus: (routingId) =>
-      connection.invoke('mcp:status', routingId) as ReturnType<ClaudeAPI['mcpServerStatus']>,
-    mcpToggleServer: (routingId, serverName, enabled) =>
-      unwrap('mcp:toggle', routingId, serverName, enabled),
-    mcpReconnectServer: (routingId, serverName) => unwrap('mcp:reconnect', routingId, serverName),
-    mcpSetServers: (routingId, servers) => unwrap('mcp:set-servers', routingId, servers),
-    loadMcpServers: (scope, cwd?) =>
-      connection.invoke('mcp:load-servers', scope, cwd) as ReturnType<ClaudeAPI['loadMcpServers']>,
-    saveMcpServers: (scope, servers, cwd?) =>
-      connection.invoke('mcp:save-servers', scope, servers, cwd) as Promise<void>,
-    removeMcpServer: (scope, serverName, cwd?) =>
-      connection.invoke('mcp:remove-server', scope, serverName, cwd) as Promise<void>,
-    loadMcpCatalog: (cwd) =>
-      connection.invoke('mcp:load-catalog', cwd) as ReturnType<ClaudeAPI['loadMcpCatalog']>,
-    mcpCliAdd: (scope, name, config, cwd?) =>
-      connection.invoke('mcp:cli-add', scope, name, config, cwd) as ReturnType<
-        ClaudeAPI['mcpCliAdd']
-      >,
-    mcpCliRemove: (scope, name, cwd?) =>
-      connection.invoke('mcp:cli-remove', scope, name, cwd) as ReturnType<
-        ClaudeAPI['mcpCliRemove']
-      >,
-    mcpReloadServers: (routingId, expect) => unwrap('mcp:reload', routingId, expect),
-    mcpReadDisabled: (cwd) =>
-      connection.invoke('mcp:read-disabled', cwd) as ReturnType<ClaudeAPI['mcpReadDisabled']>,
-    mcpToggleDisabled: (cwd, serverName, enabled) =>
-      connection.invoke('mcp:toggle-disabled', cwd, serverName, enabled) as Promise<void>,
-
-    // Automation — mirrors preload 1:1. All ten channels are one frozen
-    // declaration shared by both transports (core/ipc/automation-commands.ts)
-    // under `capability: 'config'`, and the gate is SERVER-side: an automation is
-    // host-side configuration (a stored prompt plus a cron expression under
-    // ~/.claude/ui/automation/), which is why that file rules `config` rather
-    // than `admin`. None of these is safeHandler-wrapped, so they are bare
-    // invokes like preload's — a throw is already a rejection over the wire.
-    //
-    // The run LANE was always remote (`stream:watch` carries automationRuns), so
-    // the stubs left the remote UI able to watch a run it could not start: the
-    // list came back empty, and every mutation resolved into nothing.
-    listAutomations: () =>
-      connection.invoke('automation:list') as ReturnType<ClaudeAPI['listAutomations']>,
-    saveAutomation: (automation) =>
-      connection.invoke('automation:save', automation) as Promise<void>,
-    deleteAutomation: (id) => connection.invoke('automation:delete', id) as Promise<void>,
-    runAutomationNow: (id) => connection.invoke('automation:run-now', id) as Promise<void>,
-    toggleAutomation: (id, enabled) =>
-      connection.invoke('automation:toggle', id, enabled) as Promise<void>,
-    listAutomationRuns: (automationId) =>
-      connection.invoke('automation:list-runs', automationId) as ReturnType<
-        ClaudeAPI['listAutomationRuns']
-      >,
-    loadAutomationRunHistory: (automationId, runId) =>
-      connection.invoke('automation:load-run-history', automationId, runId) as ReturnType<
-        ClaudeAPI['loadAutomationRunHistory']
-      >,
-    cancelAutomationRun: (automationId) =>
-      connection.invoke('automation:cancel', automationId) as Promise<void>,
-    dismissAutomationRun: (automationId, runId) =>
-      connection.invoke('automation:dismiss-run', automationId, runId) as Promise<void>,
-    sendAutomationMessage: (automationId, prompt) =>
-      connection.invoke('automation:send-message', automationId, prompt) as Promise<void>,
 
     // Remote access (not needed on the web client itself)
     getNetworkInterfaces: async () => [],
@@ -910,18 +267,16 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       lastError: null,
       authMethods: []
     }),
-    onRemoteStatus: () => () => {},
-    // The REDACTED status is real over remote (owner ruling, 2026-08-28):
-    // `remote:status-view`, a `config` QUERY declared for both transports in
-    // `core/ipc/remote-view-commands.ts`, carrying running state, port, the
-    // connected-client list, tunnel state, auth methods, the last listen error
-    // and a redacted `tls` — and neither `lanUrl`/`tunnelUrl` nor anything
-    // derived from them, which is why the two stubs above stay stubs.
+    // The REDACTED status (`getRemoteStatusView`, a table member) is real over remote (owner
+    // ruling, 2026-08-28): `remote:status-view`, a `config` QUERY declared for both transports in
+    // `core/ipc/remote-view-commands.ts`, carrying running state, port, the connected-client
+    // list, tunnel state, auth methods, the last listen error and a redacted `tls` — and neither
+    // `lanUrl`/`tunnelUrl` nor anything derived from them, which is why the two stubs here stay
+    // stubs.
     //
     // No event twin: `remote:status` is host-local by classification, so the web
-    // settings view polls this while it is on screen.
-    getRemoteStatusView: () =>
-      connection.invoke('remote:status-view') as ReturnType<ClaudeAPI['getRemoteStatusView']>,
+    // settings view polls the view while it is on screen.
+    onRemoteStatus: () => () => {},
     // The READ is real over remote as of ADR-054 decision 6: `authcfg:get`, an
     // `admin`-gated QUERY answering the same sanitized object the desktop's
     // `remote:get-config` does. Making the routine settings web-reachable is
@@ -932,7 +287,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       connection.invoke('authcfg:get') as ReturnType<ClaudeAPI['getRemoteConfig']>,
     // The WRITE stays host-anchor only: `remote:set-config` is the one writer
     // that can reach the `off` master switch, and it has no remote registration
-    // at all. The routine subset is `authcfg:*` below.
+    // at all. The routine subset is `authcfg:*` (table members).
     setRemoteConfig: async () => {
       throw new Error(
         'Transport and authentication-disabling settings can only be changed on the host — ' +
@@ -947,14 +302,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     clearRemotePassword: async () => {
       throw new Error('Not available in remote mode')
     },
-    // ADR-054 §6 — the routine remote-access settings, behind `admin` AND a live
-    // settings-editing session. A locked editor answers the typed
-    // `needs-settings-session`, which the connection's step-up gate deliberately
-    // does NOT intercept: unlocking is the operator pressing Edit, not an
-    // ambient retry, so this rejection reaches the pane and re-locks it.
-    authcfgApply: (patch) =>
-      connection.invoke('authcfg:apply', patch) as ReturnType<ClaudeAPI['authcfgApply']>,
-    authcfgEnd: () => connection.invoke('authcfg:end') as ReturnType<ClaudeAPI['authcfgEnd']>,
     // Success and disconnection are the SAME event here when the caller is
     // password-authenticated: the server drops every socket holding the old
     // password — the actor included — before the invoke response goes out. So
@@ -982,13 +329,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       >
       return Promise.race([answered, rotatedAndDisconnected])
     },
-    // ADR-056 item C. Both are session-gated like `authcfg:apply` — `lan-link` is
-    // a `query` and would otherwise be free, but it hands out the channel key.
-    authcfgLanLink: () =>
-      connection.invoke('authcfg:lan-link') as ReturnType<ClaudeAPI['authcfgLanLink']>,
-    authcfgRotateLanKey: () =>
-      connection.invoke('authcfg:rotate-lan-key') as ReturnType<ClaudeAPI['authcfgRotateLanKey']>,
-
     detectTailscale: async () => {
       throw new Error('Not available in remote mode')
     },
@@ -1004,18 +344,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // served from an origin with an RP ID. Reachability is the server's call —
     // `enroll` / `admin` are outside the base remote grant set, so a plain token
     // connection gets "permission denied" from the registry, which is the point.
-    webauthnCredentials: () =>
-      connection.invoke('webauthn:credentials') as ReturnType<ClaudeAPI['webauthnCredentials']>,
-    webauthnRename: (credId, nickname) =>
-      connection.invoke('webauthn:rename', credId, nickname) as ReturnType<
-        ClaudeAPI['webauthnRename']
-      >,
-    webauthnRevoke: (credId) =>
-      connection.invoke('webauthn:revoke', credId) as ReturnType<ClaudeAPI['webauthnRevoke']>,
-    webauthnMintEnrollToken: () =>
-      connection.invoke('webauthn:mint-enroll-token') as ReturnType<
-        ClaudeAPI['webauthnMintEnrollToken']
-      >,
     webauthnRegisterOptions: () =>
       connection.invoke('webauthn:register-options') as ReturnType<
         ClaudeAPI['webauthnRegisterOptions']
@@ -1030,7 +358,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // these: `voice:start` binds this connection's audio to the session, the
     // audio rides the `voice-audio` lane frame, and the transcripts come back as
     // lane frames targeted at this socket — landing in `on('voice:transcript')`
-    // below, the same listener the desktop's host-local send feeds.
+    // (`onVoiceTranscript`, a table member), the same listener the desktop's
+    // host-local send feeds.
     //
     // `opts` rides only when given: the verb's third argument is the client's
     // `{ preview: false }`, and a base call stays the two-argument frame it
@@ -1045,23 +374,6 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     voiceStop: async () => {
       await connection.invoke('voice:stop')
     },
-    onVoiceTranscript: on('voice:transcript') as ClaudeAPI['onVoiceTranscript'],
-    onVoiceState: on('voice:state') as ClaudeAPI['onVoiceState'],
-    // The on-device speech pack (ADR-101 §6). Status is a `chat` query; the three
-    // writes are `admin`, so a base connection is refused them by the registry
-    // (and they sit in UNGRANTED_AT_CONNECT_REMOTE_CHANNELS). Install resolves
-    // only when the install does, so this client's invoke can time out while the
-    // host keeps installing — the callers treat that as running, not failed.
-    voicePackStatus: () =>
-      connection.invoke('voice:pack-status') as ReturnType<ClaudeAPI['voicePackStatus']>,
-    voicePackInstall: () =>
-      connection.invoke('voice:pack-install') as ReturnType<ClaudeAPI['voicePackInstall']>,
-    voicePackInstallCancel: () =>
-      connection.invoke('voice:pack-install-cancel') as ReturnType<
-        ClaudeAPI['voicePackInstallCancel']
-      >,
-    voicePackRemove: () =>
-      connection.invoke('voice:pack-remove') as ReturnType<ClaudeAPI['voicePackRemove']>,
 
     // Error logging — send to server
     logError: (source, message) => {
@@ -1072,104 +384,10 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
       console.log(`[${source}] ${level}: ${message}`)
     },
 
-    // Version info — reflects the remote server's build
-    getVersionInfo: () =>
-      connection.invoke('app:version-info') as ReturnType<ClaudeAPI['getVersionInfo']>,
-
     // Desktop-only by ABSENCE of a channel: `log-viewer:open` is a raw
     // `ipcMain.handle` registration (main/services/log-viewer.ts) with no remote
     // twin, and a browser has no native window to open anyway.
     openLogViewer: async () => {},
-    // Mirrors preload 1:1 (`proxy:test-connection`, both transports,
-    // `capability: 'config'`, safeHandler-wrapped). It probes the HOST's egress
-    // rather than this browser's — which is the CORRECT semantic for a remote
-    // client, because the proxy settings being tested are the host's and it is
-    // the host that will dial through them. A local probe would answer a question
-    // nobody asked. The stub reported a hard failure next to fields the same pane
-    // can now save, so the button contradicted its own form.
-    testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
-
-    // Engine / vendor / engine-native config. Every channel below is registered
-    // for BOTH transports in core/ipc/config-commands.ts under `capability:
-    // 'config'`, so these mirror preload 1:1 instead of stubbing. Wiring them
-    // widens nothing: the capability gate is SERVER-side, in the channel
-    // registry, and it already applied to these channels whether or not this
-    // client could reach them. What the stubs broke was honest callers — every
-    // remote settings pane (auto mode, dispatch, the pi ClaudeUI half, vendor
-    // endpoints, the opencode Configuration panes) rendered and then resolved a
-    // save that went nowhere.
-    //
-    // `unwrap` appears exactly where preload uses it. The four engine/vendor
-    // channels are plain handlers, so a throw is already a rejection over the
-    // wire; the rest are safeHandler-wrapped and answer an { ok, data } envelope.
-    loadEngineConfig: (engineId) =>
-      connection.invoke('config:load-engine-config', engineId) as ReturnType<
-        ClaudeAPI['loadEngineConfig']
-      >,
-    saveEngineConfig: (engineId, config) =>
-      connection.invoke('config:save-engine-config', engineId, config) as Promise<void>,
-    loadVendorConfig: (vendorId) =>
-      connection.invoke('config:load-vendor-config', vendorId) as ReturnType<
-        ClaudeAPI['loadVendorConfig']
-      >,
-    saveVendorConfig: (vendorId, config) =>
-      connection.invoke('config:save-vendor-config', vendorId, config) as Promise<void>,
-    loadSharedAutoMode: () =>
-      connection.invoke('config:load-shared-automode') as ReturnType<
-        ClaudeAPI['loadSharedAutoMode']
-      >,
-    saveSharedAutoMode: (config) =>
-      connection.invoke('config:save-shared-automode', config) as Promise<void>,
-    loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
-    saveOpencodeSettings: (settings, base) =>
-      unwrap('config:save-opencode-settings', settings, base),
-    readOpencodeNativeRaw: () => unwrap('config:read-opencode-native-raw'),
-    patchOpencodeNative: (patches) => unwrap('config:patch-opencode-native', patches),
-    setOpencodeToolDisabled: (action, disabled) =>
-      unwrap('config:set-opencode-tool-disabled', action, disabled),
-    readPiNativeRaw: () => unwrap('config:read-pi-native-raw'),
-    patchPiNative: (patches) => unwrap('config:patch-pi-native', patches),
-    writePiNativeText: (text) => unwrap('config:write-pi-native-text', text),
-    readPiModelsRaw: () => unwrap('config:read-pi-models-raw'),
-    patchPiModels: (patches) => unwrap('config:patch-pi-models', patches),
-    setProviderModelAllowlist: (engine, providerId, models) =>
-      unwrap('models:set-provider-allowlist', engine, providerId, models),
-
-    // opencode agent CRUD — the same family, split across two capabilities:
-    // `config` for the five file verbs, `chat` for `generate` because it spends
-    // model tokens. Both are in the base grant set, so an authenticated remote
-    // connection reaches all six.
-    listOpencodeAgents: (cwd) => unwrap('opencode-agents:list', cwd),
-    listAgentTypes: (engine, cwd) => unwrap('config:list-agent-types', engine, cwd),
-    readOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:read', name, scope, cwd),
-    saveOpencodeAgent: (input, cwd) => unwrap('opencode-agents:save', input, cwd),
-    deleteOpencodeAgent: (name, scope, cwd) => unwrap('opencode-agents:delete', name, scope, cwd),
-    setOpencodeAgentDisabled: (name, scope, cwd, disabled) =>
-      unwrap('opencode-agents:set-disabled', name, scope, cwd, disabled),
-    generateOpencodeAgent: (description, cwd) =>
-      unwrap('opencode-agents:generate', description, cwd),
-
-    // Engine-routed per-vendor auth — registered on both transports since S4
-    // (core/ipc/auth-commands.ts), so this mirrors preload 1:1 through `unwrap`
-    // (every one of these handlers is safeHandler-wrapped). They used to be
-    // stubbed as desktop-only; the stubs for the MUTATIONS were the worse half —
-    // `vendorAuthSetKey` resolved silently, so a remote user could "save" an API
-    // key that went nowhere. `oauth-authorize` refuses opencode's `auto` method
-    // for a remote caller; `oauth-callback` accepts the pasted URL/code (ADR-057).
-    vendorAuthProbe: (engineId) => unwrap('vendor-auth:probe', engineId),
-    vendorAuthListOptions: (engineId) => unwrap('vendor-auth:list-options', engineId),
-    vendorAuthListKeys: (engineId) => unwrap('vendor-auth:list-keys', engineId),
-    vendorAuthSetKey: (engineId, vendorId, key) =>
-      unwrap('vendor-auth:set-key', engineId, vendorId, key),
-    vendorAuthOauthAuthorize: (engineId, vendorId, method, inputs) =>
-      unwrap('vendor-auth:oauth-authorize', engineId, vendorId, method, inputs),
-    vendorAuthDeviceCodeStart: (engineId, vendorId) =>
-      unwrap('vendor-auth:device-code-start', engineId, vendorId),
-    vendorAuthDeviceCodeStatus: (engineId) => unwrap('vendor-auth:device-code-status', engineId),
-    vendorAuthOauthCallback: (engineId, vendorId, method, code) =>
-      unwrap('vendor-auth:oauth-callback', engineId, vendorId, method, code),
-    vendorAuthRemove: (engineId, vendorId) => unwrap('vendor-auth:remove', engineId, vendorId),
-    vendorAuthOauthCancel: (engineId) => unwrap('vendor-auth:oauth-cancel', engineId),
 
     // Plugin system — desktop-only by ABSENCE of a channel, like the log viewer:
     // the four `plugin:*` handlers are raw `ipcMain.handle` registrations in
@@ -1179,16 +397,12 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     reloadPlugin: async () => {},
     getPluginViews: async () => [],
     getPluginPreloadPath: async () => '',
-    onPluginViewsChanged: () => () => {},
-
-    // Mirrors preload 1:1 (`usage:refresh-prices`, both transports,
-    // `capability: 'config'`, safeHandler-wrapped). It spawns a LOCAL opencode
-    // server to read its price table — host-side work, not host-PHYSICAL, which
-    // is exactly the line the everything-remote ruling draws. The stub was the
-    // quietest of the lot: `{ count: 0 }` renders as "Updated 0 model prices",
-    // a success message for a refresh that never happened.
-    refreshPrices: () => unwrap('usage:refresh-prices')
+    onPluginViewsChanged: () => () => {}
   }
 
-  return api
+  return {
+    ...buildInvokeApi(API_INVOKES, transport),
+    ...buildEventApi(API_EVENTS, transport),
+    ...own
+  }
 }

@@ -30,20 +30,35 @@ import { finishHydrate } from '../../renderer/src/lib/session-history-load'
 import type { SyncEventMap } from '../../core/shared/sync/events'
 import type { FullStateSnapshot } from '../../shared/remote-protocol'
 import type { ClaudeAPI } from '../../shared/types'
+import {
+  API_EVENTS,
+  API_INVOKES,
+  DESKTOP_EVENTS,
+  DESKTOP_INVOKES,
+  buildEventApi,
+  buildInvokeApi,
+  type InvokeTransport
+} from '../../shared/api-invoke-table'
 
 // Build a ClaudeAPI object backed by the bridge.
-// This mirrors src/preload/index.ts but uses bridge.ipcRenderer instead of Electron's.
+// The pass-through members come from the same tables as src/preload/index.ts
+// (`shared/api-invoke-table.ts`), over bridge.ipcRenderer instead of Electron's.
 function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
   const { ipcRenderer } = bridge
 
-  /**
-   * HOST-LOCAL channels only — mirrors `src/preload/index.ts` since SyncCore
-   * phase 4c. Replicated / volatile events reach the renderer through the
-   * harness's `SyncClient` instead (see {@link TestApp.emit}).
-   */
-  function onEvent<T extends (...args: never[]) => void>(channel: string): (cb: T) => () => void {
-    return (cb: T) => {
-      const handler = (_: unknown, ...args: unknown[]): void => (cb as Function)(...args)
+  const transport: InvokeTransport = {
+    failurePrefix: 'IPC',
+    invoke: (channel, args) => ipcRenderer.invoke(channel, ...args),
+    // The harness bridge has no progress channel: the callback is simply never called.
+    invokeWithProgress: (channel, args) => ipcRenderer.invoke(channel, ...args),
+    /**
+     * HOST-LOCAL channels only — mirrors `src/preload/index.ts` since SyncCore
+     * phase 4c. Replicated / volatile events reach the renderer through the
+     * harness's `SyncClient` instead (see {@link TestApp.emit}).
+     */
+    on: (channel) => (cb: (...args: never[]) => void) => {
+      const handler = (_: unknown, ...args: unknown[]): void =>
+        (cb as unknown as (...a: unknown[]) => void)(...args)
       ipcRenderer.on(channel, handler)
       return () => {
         ipcRenderer.removeListener(channel, handler)
@@ -51,334 +66,54 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     }
   }
 
-  async function unwrap<T>(channel: string, ...args: unknown[]): Promise<T> {
-    const result = await ipcRenderer.invoke(channel, ...args)
-    if (result && typeof result === 'object' && 'ok' in result) {
-      if (!(result as any).ok) throw new Error((result as any).error ?? `IPC ${channel} failed`)
-      return (result as any).data as T
-    }
-    return result as T
-  }
-
-  return {
+  // Members that are not a table pass-through (same split as the preload).
+  const own: Omit<
+    ClaudeAPI,
+    | keyof typeof API_INVOKES
+    | keyof typeof API_EVENTS
+    | keyof typeof DESKTOP_INVOKES
+    | keyof typeof DESKTOP_EVENTS
+  > = {
     platform: process.platform,
     // The jsdom harness is not the real-app harness: nothing here reads
     // `window.__claudeuiVerifier`, and tests reach the store directly.
     verifierHooks: false,
-    pickFolder: () => ipcRenderer.invoke('session:pick-folder'),
-    createSession: (
-      routingId,
-      cwd,
-      effort?,
-      resumeSessionId?,
-      permissionMode?,
-      model?,
-      thinkingMode?,
-      resumeSessionAt?,
-      forkSession?,
-      engineId?,
-      announce?
-    ) =>
-      ipcRenderer.invoke(
-        'session:create',
-        routingId,
-        cwd,
-        effort,
-        resumeSessionId,
-        permissionMode,
-        model,
-        thinkingMode,
-        resumeSessionAt,
-        forkSession,
-        engineId,
-        announce
-      ),
-    resolveForkAnchor: (sessionId, cwd, messageId, engineId, messageIndex) =>
-      ipcRenderer.invoke(
-        'session:resolve-fork-anchor',
-        sessionId,
-        cwd,
-        messageId,
-        engineId,
-        messageIndex
-      ),
-    loadOpencodeHistory: (sessionId) =>
-      ipcRenderer.invoke('session:load-opencode-history', sessionId),
-    listPiSessionsGlobal: () => ipcRenderer.invoke('session:list-pi'),
-    loadPiHistory: (sessionId) => ipcRenderer.invoke('session:load-pi-history', sessionId),
-    sendPrompt: (routingId, prompt, attachments?) =>
-      ipcRenderer.invoke('session:send', routingId, prompt, attachments),
-    cancelSession: (routingId) => ipcRenderer.invoke('session:cancel', routingId),
-    clearConversation: (routingId, permissionMode) =>
-      ipcRenderer.invoke('session:clear-conversation', routingId, permissionMode),
-    interruptSession: (routingId) => ipcRenderer.invoke('session:interrupt', routingId),
-    respondApproval: (routingId, requestId, decision, answers?, updatedPermissions?) =>
-      ipcRenderer.invoke(
-        'session:approval-response',
-        routingId,
-        requestId,
-        decision,
-        answers,
-        updatedPermissions
-      ),
-    approveBlocked: (routingId, toolUseId) =>
-      ipcRenderer.invoke('session:approve-blocked', routingId, toolUseId),
-    minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
-    maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
-    closeWindow: () => ipcRenderer.invoke('window:close'),
-    listDirectories: () => ipcRenderer.invoke('session:list-directories'),
-    listOpencodeSessionsGlobal: () => ipcRenderer.invoke('session:list-opencode'),
-    loadSessionHistory: (sessionId, projectKey, resumeSessionAt) =>
-      ipcRenderer.invoke('session:load-history', sessionId, projectKey, resumeSessionAt),
-    loadSessionStatusLine: (sessionId, projectKey) =>
-      ipcRenderer.invoke('session:load-status-line', sessionId, projectKey),
-    loadSubagentHistory: (sessionId, projectKey, agentId) =>
-      ipcRenderer.invoke('session:load-subagent-history', sessionId, projectKey, agentId),
-    getBlob: (blobId) => ipcRenderer.invoke('blob:get', blobId),
-    buildSubagentFileMap: (sessionId, projectKey, taskPrompts) =>
-      ipcRenderer.invoke('session:build-subagent-file-map', sessionId, projectKey, taskPrompts),
-    loadBackgroundOutput: (projectKey, taskId, outputFile?) =>
-      ipcRenderer.invoke('session:load-background-output', projectKey, taskId, outputFile),
 
     // The sync transport is installed by bootTestApp itself, so there is no port
     // to acquire (mirrors the web adapter).
     acquireSyncPort: () => {},
 
-    // Host-local events only — see the `onEvent` note.
-    onMaximizeChange: onEvent('window:maximized-change'),
-    onAuthState: onEvent('auth:state'),
-    onAccountsChanged: onEvent('account:changed'),
-    onAccountRespawnSessions: onEvent('account:respawn-sessions'),
-    onTerminalData: onEvent('terminal:data'),
-    onTerminalResized: onEvent('terminal:resized'),
-    onTerminalExit: onEvent('terminal:exit'),
-    onBeforeQuit: onEvent('app:before-quit'),
-
-    watchBackground: (routingId, toolUseId) =>
-      ipcRenderer.invoke('session:watch-background', routingId, toolUseId),
-    unwatchBackground: (routingId, toolUseId) =>
-      ipcRenderer.invoke('session:unwatch-background', routingId, toolUseId),
-    readBackgroundRange: (routingId, toolUseId, offset, length) =>
-      ipcRenderer.invoke('session:read-background-range', routingId, toolUseId, offset, length),
-    stopTask: (routingId, toolUseId, isDispatch) =>
-      ipcRenderer.invoke('session:stop-task', routingId, toolUseId, isDispatch),
-    backgroundTask: (routingId, toolUseId) =>
-      ipcRenderer.invoke('session:background-task', routingId, toolUseId),
-    dequeueMessage: (routingId, value) =>
-      ipcRenderer.invoke('session:dequeue-message', routingId, value),
-    allowPeerMessages: (routingId) => ipcRenderer.invoke('session:allow-peer-messages', routingId),
-    setSessionGrouped: (routingId, grouped) =>
-      ipcRenderer.invoke('session:link:set-grouped', routingId, grouped),
-    startSessionProposal: (proposalId, grouped) =>
-      ipcRenderer.invoke('session:proposal:start', proposalId, grouped),
-    dismissSessionProposal: (proposalId) =>
-      ipcRenderer.invoke('session:proposal:dismiss', proposalId),
-    respondContextPressure: (routingId, answer) =>
-      ipcRenderer.invoke('session:context-pressure:respond', routingId, answer),
-    recallQueued: (routingId) => ipcRenderer.invoke('session:recall-queued', routingId),
-    askSideQuestion: (routingId, question) =>
-      ipcRenderer.invoke('session:ask-side-question', routingId, question),
-    setPermissionMode: (routingId, mode) =>
-      ipcRenderer.invoke('session:set-permission-mode', routingId, mode),
-    setModel: (routingId, model) => ipcRenderer.invoke('session:set-model', routingId, model),
-    setEffort: (routingId, effort) => ipcRenderer.invoke('session:set-effort', routingId, effort),
-    setThinkingMode: (routingId, mode) =>
-      ipcRenderer.invoke('session:set-thinking-mode', routingId, mode),
-    setReasoningVariant: (routingId, variant) =>
-      ipcRenderer.invoke('session:set-reasoning-variant', routingId, variant),
-    getModels: () => ipcRenderer.invoke('session:get-models'),
-    getEngineModels: (engineId) => ipcRenderer.invoke('session:get-engine-models', engineId),
-    judgeModelSupport: (engineId, values) =>
-      ipcRenderer.invoke('automode:judge-model-support', engineId, values),
-    judgeRouteResting: (engineId, model, accountId) =>
-      ipcRenderer.invoke('automode:judge-route-resting', engineId, model, accountId),
-    getOpencodeProviders: () => ipcRenderer.invoke('session:get-opencode-providers'),
-    setOpencodeProviderDisabled: (providerId, disabled) =>
-      ipcRenderer.invoke('session:set-opencode-provider-disabled', providerId, disabled),
-    removeOpencodeProvider: (providerId, kind) =>
-      ipcRenderer.invoke('session:remove-opencode-provider', providerId, kind),
-    getOpencodeProviderModels: (providerId) =>
-      ipcRenderer.invoke('session:get-opencode-provider-models', providerId),
-    getPiModelCatalogGroups: () => ipcRenderer.invoke('session:get-pi-model-catalog'),
-    engineIsInstalled: (engineId) => ipcRenderer.invoke('engine:is-installed', engineId),
-    harnessState: () => ipcRenderer.invoke('harness:state'),
-    harnessVersions: (id) => ipcRenderer.invoke('harness:versions', { id }),
-    setHarnessSelection: (id, selection) =>
-      ipcRenderer.invoke('harness:set-selection', { id, selection }),
-    installHarness: (id, version) => ipcRenderer.invoke('harness:install', { id, version }),
-    cancelHarnessInstall: (id, version) =>
-      ipcRenderer.invoke('harness:install-cancel', { id, version }),
-    detectHarnesses: (ids) => ipcRenderer.invoke('harness:detect', ids ? { ids } : {}),
-    setHarnessUpdateMode: (mode) => ipcRenderer.invoke('harness:set-update-mode', { mode }),
-    updateHarnesses: () => ipcRenderer.invoke('harness:update-all'),
-    checkHarnessUpdates: () => ipcRenderer.invoke('harness:check-updates'),
-    answerHarnessUpgradePrompt: () => ipcRenderer.invoke('harness:answer-upgrade-prompt'),
-    getPiBinaryPath: () => ipcRenderer.invoke('pi:binary-path'),
-    getPiAuthStatus: () => ipcRenderer.invoke('pi:auth-status'),
-    generateTitle: (conversationText) =>
-      ipcRenderer.invoke('session:generate-title', conversationText),
-    generateCommitMessage: (diff) => ipcRenderer.invoke('session:generate-commit-message', diff),
-    writeCustomTitle: (sessionId, projectKey, title) =>
-      ipcRenderer.invoke('session:write-custom-title', sessionId, projectKey, title),
-    getPlanContent: (routingId) => ipcRenderer.invoke('session:get-plan-content', routingId),
-    getSessionLogPath: (routingId) => ipcRenderer.invoke('session:get-session-log-path', routingId),
-    watchSession: (routingId, sessionId, projectKey, cwd) =>
-      ipcRenderer.invoke('session:watch-session', routingId, sessionId, projectKey, cwd),
-    unwatchSession: (routingId) => ipcRenderer.invoke('session:unwatch-session', routingId),
-
-    // Terminal
-    createTerminal: (cwd, index) => ipcRenderer.invoke('terminal:create', cwd, index),
-    writeTerminal: (id, data) => ipcRenderer.invoke('terminal:write', id, data),
-    resizeTerminal: (id, cols, rows) => ipcRenderer.invoke('terminal:resize', id, cols, rows),
-    killTerminal: (id) => ipcRenderer.invoke('terminal:kill', id),
-    killTerminalsByCwd: (cwd) => ipcRenderer.invoke('terminal:kill-by-cwd', cwd),
-    terminalAvailability: () => ipcRenderer.invoke('terminal:availability'),
-    terminalPool: (cwd) => ipcRenderer.invoke('terminal:pool', cwd),
-    // Remote IDE (ADR-064) — real IPC here exactly as in the preload.
-    ideAvailability: () => ipcRenderer.invoke('ide:availability'),
-    ideMintEntry: (folder, themeKind) =>
-      ipcRenderer.invoke('ide:mint-entry', { folder, themeKind }),
-    watchStreams: (sessionIds, automationIds) =>
-      ipcRenderer.invoke('stream:watch', { sessionIds, automationRuns: automationIds }),
     // Mirrors preload: step-up is remote-only, but attach/detach are real on the
     // desktop transport too (the terminal pool means a tab can resolve to a pty
     // this surface never spawned, and attach is what replays its scrollback).
     terminalStepUp: async () => ({ ok: true }),
     terminalStepUpPasskey: async () => ({ ok: true }),
-    attachTerminal: (id) => ipcRenderer.invoke('terminal:attach', id),
-    detachTerminal: (id) => ipcRenderer.invoke('terminal:detach', id),
     onTerminalDetached: () => () => {},
 
-    // Worktree
-    createWorktree: (cwd, name, opts) => unwrap('worktree:create', cwd, name, opts),
-    getWorktreeStatus: (worktreePath, originalHead) =>
-      unwrap('worktree:status', worktreePath, originalHead),
-    removeWorktree: (worktreePath, branch, gitRoot) =>
-      unwrap('worktree:remove', worktreePath, branch, gitRoot),
-    inventoryWorktrees: (cwd) => unwrap('worktree:inventory', cwd),
-    inspectWorktree: (cwd, id) => unwrap('worktree:inspect', cwd, id),
-    // The harness bridge has no progress channel: the callback is simply never called.
-    measureWorktree: (cwd, id) => unwrap('worktree:measure', cwd, id),
-    removeWorktrees: (cwd, ids) => unwrap('worktree:remove-many', cwd, ids),
+    // Passkeys — mirrors the preload split: the four management verbs are real
+    // desktop channels, the two ceremony verbs are not registered there at all.
+    webauthnRegisterOptions: async () => {
+      throw new Error('Passkey enrollment runs in a browser')
+    },
+    webauthnRegisterVerify: async () => {
+      throw new Error('Passkey enrollment runs in a browser')
+    },
 
-    // App
-    confirmQuit: (removeWorktreePaths) =>
-      ipcRenderer.invoke('app:quit-confirm', removeWorktreePaths ?? []),
-    cancelQuit: () => ipcRenderer.invoke('app:quit-cancel'),
-    ackQuitPrompt: () => ipcRenderer.invoke('app:quit-prompting'),
+    voiceAudio: (routingId, dataB64) => ipcRenderer.send('voice:audio', routingId, dataB64),
 
-    // Git
-    gitCheckRepo: (cwd) => unwrap('git:check-repo', cwd),
-    gitGetStatus: (cwd) => unwrap('git:status', cwd),
-    gitGetBranches: (cwd) => unwrap('git:branches', cwd),
-    gitCheckout: (cwd, branch) => unwrap('git:checkout', cwd, branch),
-    gitCreateBranch: (cwd, name, base) => unwrap('git:create-branch', cwd, name, base),
-    gitGetFilePatch: (cwd, filePath, staged, ignoreWhitespace) =>
-      unwrap('git:file-patch', cwd, filePath, staged, ignoreWhitespace),
-    gitGetFileContents: (cwd, filePath, staged) =>
-      unwrap('git:file-contents', cwd, filePath, staged),
-    gitStageFile: (cwd, filePath) => unwrap('git:stage-file', cwd, filePath),
-    gitUnstageFile: (cwd, filePath) => unwrap('git:unstage-file', cwd, filePath),
-    gitDiscardFile: (cwd, filePath) => unwrap('git:discard-file', cwd, filePath),
-    gitStageAll: (cwd) => unwrap('git:stage-all', cwd),
-    gitUnstageAll: (cwd) => unwrap('git:unstage-all', cwd),
-    gitCommit: (cwd, message) => unwrap('git:commit', cwd, message),
-    gitPush: (cwd) => unwrap('git:push', cwd),
-    gitPushWithUpstream: (cwd, branch) => unwrap('git:push-with-upstream', cwd, branch),
-    gitPull: (cwd, mode) => unwrap('git:pull', cwd, mode),
-    gitStashPush: (cwd) => unwrap('git:stash-push', cwd),
-    gitStashRestore: (cwd, sha) => unwrap('git:stash-restore', cwd, sha),
-    gitFetch: (cwd) => unwrap('git:fetch', cwd),
-    watchGit: (cwds) => unwrap('git:watch', { cwds }),
+    logError: (source, message) => {
+      ipcRenderer.send('log:error', source, message)
+    },
+    logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
 
-    deleteSession: (sessionId, projectKey, engineId?) =>
-      ipcRenderer.invoke('session:delete-session', sessionId, projectKey, engineId),
-    deleteProject: (projectKey) => ipcRenderer.invoke('session:delete-project', projectKey),
+    getMockupPreviewUrl: (cwd, directory) => `mockup-asset://test.m/${cwd}/${directory}`
+  }
 
-    listDir: (dirPath) => ipcRenderer.invoke('file:list-dir', dirPath),
-    listPlaces: () => ipcRenderer.invoke('file:list-places'),
-    openInVSCode: (cwd) => ipcRenderer.invoke('app:open-in-vscode', cwd),
-    loadSettings: () => ipcRenderer.invoke('config:load-settings'),
-    saveSettings: (settings) => ipcRenderer.invoke('config:save-settings', settings),
-    loadSessionConfig: () => ipcRenderer.invoke('config:load-sessions'),
-    saveSessionConfig: (config) => ipcRenderer.invoke('config:save-sessions', config),
-    loadSlashCommands: () => ipcRenderer.invoke('config:load-slash-commands'),
-    saveSlashCommands: (commands) => ipcRenderer.invoke('config:save-slash-commands', commands),
-    loadSkillDetails: (routingId, cwd) =>
-      ipcRenderer.invoke('config:load-skill-details', routingId, cwd),
-
-    fetchAccountUsage: () => ipcRenderer.invoke('usage:fetch'),
-    fetchChatgptLimits: (refresh) => ipcRenderer.invoke('usage:chatgpt-limits', refresh ?? false),
-    fetchBlockUsage: () => ipcRenderer.invoke('usage:fetch-block'),
+  // Inert stand-ins for channels the harness has no handler behind: they replace the table's
+  // pass-through of the same name.
+  const stubs: Partial<ClaudeAPI> = {
     setUsageAccountFilter: async () => {},
     refreshPrices: async () => ({ count: 0, refreshedAt: Date.now() }),
-    fetchAccountLimits: (refresh) => ipcRenderer.invoke('usage:limits', refresh ?? false),
-    fetchUsageWindows: (query) => ipcRenderer.invoke('usage:windows', query ?? {}),
-    fetchUsageDashboard: (range, scope) => ipcRenderer.invoke('usage:dashboard', { range, scope }),
-    usageHubStatus: () => ipcRenderer.invoke('usage-hub:status'),
-    configureUsageHub: (input) => ipcRenderer.invoke('usage-hub:configure', input),
-    setUsageHubSecret: (secret: string) => ipcRenderer.invoke('usage-hub:set-secret', secret),
-    syncUsageHubNow: () => ipcRenderer.invoke('usage-hub:sync-now'),
-    resyncUsageHub: () => ipcRenderer.invoke('usage-hub:resync'),
-    forgetUsageHub: () => ipcRenderer.invoke('usage-hub:forget'),
-    openrouterStatus: () => unwrap('openrouter:status'),
-    openrouterOverview: () => unwrap('openrouter:overview'),
-    openrouterModels: (scope) => unwrap('openrouter:models', scope),
-    openrouterModelEndpoints: (modelId) => unwrap('openrouter:model-endpoints', modelId),
-    signIn: () => ipcRenderer.invoke('auth:sign-in'),
-    submitOAuthCode: (code: string) => ipcRenderer.invoke('auth:submit-code', code),
-    cancelSignIn: () => ipcRenderer.invoke('auth:cancel'),
-    getAccounts: () => ipcRenderer.invoke('account:get'),
-    setMultiAccountEnabled: (enabled: boolean) =>
-      ipcRenderer.invoke('account:set-enabled', enabled),
-    addAccount: () => ipcRenderer.invoke('account:add'),
-    switchAccount: (id: string) => ipcRenderer.invoke('account:switch', id),
-    deleteAccount: (id: string) => ipcRenderer.invoke('account:delete', id),
-
-    loadClaudePermissions: (scope, cwd?) =>
-      ipcRenderer.invoke('claude:load-permissions', scope, cwd),
-    saveClaudePermissions: (scope, permissions, cwd?) =>
-      ipcRenderer.invoke('claude:save-permissions', scope, permissions, cwd),
-    getWorkspaceTrust: (cwd) => ipcRenderer.invoke('claude:workspace-trust', cwd),
-    setWorkspaceTrust: (cwd, trusted) =>
-      ipcRenderer.invoke('claude:set-workspace-trust', cwd, trusted),
-
-    mcpServerStatus: (routingId) => ipcRenderer.invoke('mcp:status', routingId),
-    mcpToggleServer: (routingId, serverName, enabled) =>
-      unwrap('mcp:toggle', routingId, serverName, enabled),
-    mcpReconnectServer: (routingId, serverName) => unwrap('mcp:reconnect', routingId, serverName),
-    mcpSetServers: (routingId, servers) => unwrap('mcp:set-servers', routingId, servers),
-    loadMcpServers: (scope, cwd?) => ipcRenderer.invoke('mcp:load-servers', scope, cwd),
-    saveMcpServers: (scope, servers, cwd?) =>
-      ipcRenderer.invoke('mcp:save-servers', scope, servers, cwd),
-    removeMcpServer: (scope, serverName, cwd?) =>
-      ipcRenderer.invoke('mcp:remove-server', scope, serverName, cwd),
-    loadMcpCatalog: (cwd) => ipcRenderer.invoke('mcp:load-catalog', cwd),
-    mcpCliAdd: (scope, name, config, cwd?) =>
-      ipcRenderer.invoke('mcp:cli-add', scope, name, config, cwd),
-    mcpCliRemove: (scope, name, cwd?) => ipcRenderer.invoke('mcp:cli-remove', scope, name, cwd),
-    mcpReloadServers: (routingId, expect) => unwrap('mcp:reload', routingId, expect),
-    mcpReadDisabled: (cwd) => ipcRenderer.invoke('mcp:read-disabled', cwd),
-    mcpToggleDisabled: (cwd, serverName, enabled) =>
-      ipcRenderer.invoke('mcp:toggle-disabled', cwd, serverName, enabled),
-    getCleanupPeriodDays: () => ipcRenderer.invoke('claude:get-cleanup-period'),
-    setCleanupPeriodDays: (days) => ipcRenderer.invoke('claude:set-cleanup-period', days),
-
-    listAutomations: () => ipcRenderer.invoke('automation:list'),
-    saveAutomation: (automation) => ipcRenderer.invoke('automation:save', automation),
-    deleteAutomation: (id) => ipcRenderer.invoke('automation:delete', id),
-    runAutomationNow: (id) => ipcRenderer.invoke('automation:run-now', id),
-    toggleAutomation: (id, enabled) => ipcRenderer.invoke('automation:toggle', id, enabled),
-    listAutomationRuns: (automationId) => ipcRenderer.invoke('automation:list-runs', automationId),
-    loadAutomationRunHistory: (automationId, runId) =>
-      ipcRenderer.invoke('automation:load-run-history', automationId, runId),
-    cancelAutomationRun: (id) => ipcRenderer.invoke('automation:cancel', id),
-    dismissAutomationRun: (automationId, runId) =>
-      ipcRenderer.invoke('automation:dismiss-run', automationId, runId),
-    sendAutomationMessage: (id, prompt) =>
-      ipcRenderer.invoke('automation:send-message', id, prompt),
-
-    testProxyConnection: (proxy) => unwrap('proxy:test-connection', proxy),
     vendorAuthProbe: async () => ({}),
     vendorAuthListOptions: async () => ({}),
     vendorAuthListKeys: async () => ({}),
@@ -397,17 +132,6 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     },
     vendorAuthRemove: async () => {},
     vendorAuthOauthCancel: async () => {},
-    loadEngineConfig: (engineId) => ipcRenderer.invoke('config:load-engine-config', engineId),
-    saveEngineConfig: (engineId, config) =>
-      ipcRenderer.invoke('config:save-engine-config', engineId, config),
-    loadVendorConfig: (vendorId) => ipcRenderer.invoke('config:load-vendor-config', vendorId),
-    saveVendorConfig: (vendorId, config) =>
-      ipcRenderer.invoke('config:save-vendor-config', vendorId, config),
-    loadSharedAutoMode: () => ipcRenderer.invoke('config:load-shared-automode'),
-    saveSharedAutoMode: (config) => ipcRenderer.invoke('config:save-shared-automode', config),
-    loadOpencodeSettings: () => unwrap('config:load-opencode-settings'),
-    saveOpencodeSettings: (settings, base) =>
-      unwrap('config:save-opencode-settings', settings, base),
     readOpencodeNativeRaw: async () => ({ config: {}, path: '' }),
     patchOpencodeNative: async () => {},
     setOpencodeToolDisabled: async () => {},
@@ -416,118 +140,29 @@ function buildTestApi(bridge: TestIpcBridge): ClaudeAPI {
     writePiNativeText: async () => {},
     readPiModelsRaw: async () => ({ config: {}, path: '', text: '', managedProviderIds: [] }),
     patchPiModels: async () => {},
-    setProviderModelAllowlist: (engine, providerId, models) =>
-      unwrap('models:set-provider-allowlist', engine, providerId, models),
     listOpencodeAgents: async () => [],
     listAgentTypes: async () => [],
     readOpencodeAgent: async () => null,
     saveOpencodeAgent: async () => {},
     deleteOpencodeAgent: async () => {},
     setOpencodeAgentDisabled: async () => {},
-    generateOpencodeAgent: async () => ({ identifier: '', whenToUse: '', systemPrompt: '' }),
+    generateOpencodeAgent: async () => ({ identifier: '', whenToUse: '', systemPrompt: '' })
+  }
 
-    logError: (source, message) => {
-      ipcRenderer.send('log:error', source, message)
-    },
-
-    getNetworkInterfaces: () => ipcRenderer.invoke('remote:interfaces'),
-    startRemoteServer: (opts?) => ipcRenderer.invoke('remote:start', opts),
-    stopRemoteServer: () => ipcRenderer.invoke('remote:stop'),
-    getRemoteStatus: () => ipcRenderer.invoke('remote:status'),
-    onRemoteStatus: onEvent('remote:status'),
-    getRemoteStatusView: () => ipcRenderer.invoke('remote:status-view'),
-    getRemoteConfig: () => ipcRenderer.invoke('remote:get-config'),
-    setRemoteConfig: (partial) => ipcRenderer.invoke('remote:set-config', partial),
-    setRemotePassword: (password) => ipcRenderer.invoke('remote:set-password', password),
-    clearRemotePassword: () => ipcRenderer.invoke('remote:clear-password'),
-    detectTailscale: () => ipcRenderer.invoke('remote:tailscale-detect'),
-    forceReserve: () => ipcRenderer.invoke('remote:force-reserve'),
-
-    // Remote-access settings (ADR-054 §6) — real desktop channels, like the
-    // preload's. The desktop connection is the host anchor and is exempt from
-    // the settings-session gate, so they behave here as `remote:set-config` does.
-    authcfgApply: (patch) => ipcRenderer.invoke('authcfg:apply', patch),
-    authcfgEnd: () => ipcRenderer.invoke('authcfg:end'),
-    authcfgSetPassword: (password) => ipcRenderer.invoke('authcfg:set-password', password),
-    authcfgLanLink: () => ipcRenderer.invoke('authcfg:lan-link'),
-    authcfgRotateLanKey: () => ipcRenderer.invoke('authcfg:rotate-lan-key'),
-
-    // Passkeys — mirrors the preload split: the four management verbs are real
-    // desktop channels, the two ceremony verbs are not registered there at all.
-    webauthnCredentials: () => ipcRenderer.invoke('webauthn:credentials'),
-    webauthnRename: (credId, nickname) => ipcRenderer.invoke('webauthn:rename', credId, nickname),
-    webauthnRevoke: (credId) => ipcRenderer.invoke('webauthn:revoke', credId),
-    webauthnMintEnrollToken: () => ipcRenderer.invoke('webauthn:mint-enroll-token'),
-    webauthnRegisterOptions: async () => {
-      throw new Error('Passkey enrollment runs in a browser')
-    },
-    webauthnRegisterVerify: async () => {
-      throw new Error('Passkey enrollment runs in a browser')
-    },
-
-    voiceStart: (routingId, language, opts) =>
-      unwrap('voice:start-recording', routingId, language, opts),
-    voiceAudio: (routingId, dataB64) => ipcRenderer.send('voice:audio', routingId, dataB64),
-    voiceStop: (routingId) => unwrap('voice:stop-recording', routingId),
-    onVoiceTranscript: onEvent('voice:transcript'),
-    onVoiceState: onEvent('voice:state'),
-    voicePackStatus: () => ipcRenderer.invoke('voice:pack-status'),
-    voicePackInstall: () => ipcRenderer.invoke('voice:pack-install'),
-    voicePackInstallCancel: () => ipcRenderer.invoke('voice:pack-install-cancel'),
-    voicePackRemove: () => ipcRenderer.invoke('voice:pack-remove'),
-
-    logRelay: (level, source, message) => ipcRenderer.send('log:relay', level, source, message),
-
-    getVersionInfo: () => ipcRenderer.invoke('app:version-info'),
-    listProviderRegistry: () => unwrap('provider-registry:list'),
-    listProviderAccounts: (providerId) => unwrap('provider-account:list', providerId),
-    switchProviderAccount: (providerId, accountId) =>
-      unwrap('provider-account:switch', providerId, accountId),
-    removeProviderAccount: (providerId, accountId) =>
-      unwrap('provider-account:remove', providerId, accountId),
-    listSharedProviders: () => unwrap('shared-provider:list'),
-    getSharedProviderStatuses: () => unwrap('shared-provider:statuses'),
-    listSharedProviderModels: (id) => unwrap('shared-provider:models', id),
-    saveSharedProvider: (definition) => unwrap('shared-provider:save', definition),
-    probeSharedEndpoint: (input) => unwrap('shared-provider:probe', input),
-    removeSharedProvider: (id) => unwrap('shared-provider:remove', id),
-    setSharedProviderRoute: (id, harness, enabled) =>
-      unwrap('shared-provider:set-route', id, harness, enabled),
-    // `replaceOwn` (the harnesses the user agreed to overwrite) goes on the
-    // wire only when it names one (S7f).
-    setSharedProviderApiKey: (id, key, replaceOwn) =>
-      unwrap('shared-provider:set-key', id, key, ...(replaceOwn?.length ? [replaceOwn] : [])),
-    adoptSharedProviderNativeKey: (id, keep) => unwrap('shared-provider:adopt-native', id, keep),
-    setSharedProviderCuration: (id, curation) =>
-      unwrap('shared-provider:set-curation', id, curation),
-    setSharedProviderDisabled: (id, disabled, replaceOwn) =>
-      unwrap(
-        'shared-provider:set-disabled',
-        id,
-        disabled,
-        ...(replaceOwn?.length ? [replaceOwn] : [])
-      ),
-    syncSharedProvider: (id) => unwrap('shared-provider:sync', id),
-    useSharedProviderStoredKey: (id, harness) =>
-      unwrap('shared-provider:use-stored-key', id, harness),
-    getSharedProviderOwnKeyHolders: (id) => unwrap('shared-provider:own-key-holders', id),
-    disconnectSharedProvider: (id) => unwrap('shared-provider:disconnect', id),
-    setSharedProviderDefaultModel: (id, harness, modelId) =>
-      unwrap('shared-provider:set-default', id, harness, modelId),
-    openLogViewer: () => ipcRenderer.invoke('log-viewer:open'),
-
-    listPlugins: () => ipcRenderer.invoke('plugin:list'),
-    reloadPlugin: (id) => ipcRenderer.invoke('plugin:reload', id),
-    getPluginViews: () => ipcRenderer.invoke('plugin:views'),
-    getPluginPreloadPath: () => ipcRenderer.invoke('plugin:preload-path') as Promise<string>,
-    onPluginViewsChanged: onEvent('plugin:views-changed'),
-
-    // Mockup preview
-    readMockupHtml: (cwd, directory) => unwrap('mockup:read-html', cwd, directory),
-    watchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:watch', cwd, directory),
-    unwatchMockup: (cwd, directory) => ipcRenderer.invoke('mockup:unwatch', cwd, directory),
-    getMockupPreviewUrl: (cwd, directory) => `mockup-asset://test.m/${cwd}/${directory}`
-  } as ClaudeAPI
+  const api: ClaudeAPI = {
+    ...buildInvokeApi(API_INVOKES, transport),
+    ...buildInvokeApi(DESKTOP_INVOKES, transport),
+    ...buildEventApi(API_EVENTS, transport),
+    ...buildEventApi(DESKTOP_EVENTS, transport),
+    ...own,
+    ...stubs
+  }
+  // `openPath` / `showInFolder` are OPTIONAL on ClaudeAPI (the web client has neither) and this
+  // harness has never carried them: a component test sets a mock to assert their presence and
+  // relies on the default to assert their absence (SentFilesWidget), so they stay out.
+  delete api.openPath
+  delete api.showInFolder
+  return api
 }
 
 export interface TestApp {

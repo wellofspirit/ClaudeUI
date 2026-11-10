@@ -31,6 +31,7 @@ import {
 } from '../../../core/shared/sync/state'
 import { STREAM_WATCH_COMMAND } from '../../../core/ipc/stream-watch'
 import { GIT_WATCH_COMMAND } from '../../../core/ipc/git-watch'
+import { API_EVENTS, DESKTOP_EVENTS } from '../../../shared/api-invoke-table'
 
 /** A canonical state holding one session — the minimum a stream frame needs. */
 function stateWithSession(routingId: string): CanonicalState {
@@ -323,9 +324,11 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     // adapter was hand-maintained. 4c moved those to the sync client, so anything
     // still here that replicates is a channel the desktop would receive by a
     // privileged path no other client has.
+    // The preload's subscriptions are the two event tables (`API_EVENTS`, `DESKTOP_EVENTS`)
+    // plus any `onEvent('…')` it still writes out.
     const src = readCode('src/preload/index.ts')
     const re = /onEvent\(\s*['"]([^'"]+)['"]\s*\)/g
-    const channels: string[] = []
+    const channels: string[] = [...Object.values(API_EVENTS), ...Object.values(DESKTOP_EVENTS)]
     for (let m = re.exec(src); m; m = re.exec(src)) channels.push(m[1])
     expect(channels.length).toBeGreaterThan(5)
     const unclassified = channels.filter((c) => !channelSpec(c)).sort()
@@ -340,7 +343,7 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
   it('the web adapter subscribes to HOST-LOCAL channels only (4c)', () => {
     const src = readCode('src/web/api-adapter.ts')
     const re = /\bon\(\s*['"]([^'"]+)['"]\s*\)/g
-    const channels: string[] = []
+    const channels: string[] = [...Object.values(API_EVENTS)]
     for (let m = re.exec(src); m; m = re.exec(src)) channels.push(m[1])
     const unclassified = channels.filter((c) => !channelSpec(c)).sort()
     expect(
