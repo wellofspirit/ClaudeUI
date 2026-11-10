@@ -85,7 +85,7 @@ export interface JudgePipelineHooks {
   cwd: string
   /** The live permission mode, for the G10 log line. */
   currentMode: () => string
-  /** Live `isAutoMode(currentMode())`. */
+  /** Live `JudgeSetup.active(currentMode())`. */
   autoModeActive: () => boolean
   /** The user's rules, for the two static gates (and nothing else). */
   permissions: () => Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>

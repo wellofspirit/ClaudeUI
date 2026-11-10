@@ -24,7 +24,6 @@ import { v4 as uuid } from 'uuid'
 import { HAND_BACK_TOOL } from '../../shared/dispatch-agent-description'
 import type { ReportReview } from '../../shared/handback-review'
 import type {
-  AutoModeConfig,
   ChatMessage,
   ClaudePermissions,
   EngineConfig,
@@ -41,15 +40,8 @@ import {
   readOnlyReviewBlock
 } from '../automode/denial-tracker'
 import { buildClassifierEnvironment } from '../automode/environment'
-import {
-  captureGitRemotes,
-  captureRepoVisibility,
-  recordToolOutcome,
-  shellCommandOf,
-  type GitRemote,
-  type RepoVisibility,
-  type ToolOutcome
-} from '../automode/ground-truth'
+import { JudgeSetup } from '../automode/judge-setup'
+import { recordToolOutcome, shellCommandOf, type ToolOutcome } from '../automode/ground-truth'
 import {
   runJudgePipeline,
   runJudgePipelineDetailed,
@@ -62,22 +54,10 @@ import {
 } from '../automode/judge-pipeline'
 import { captureShellActionMeta, opencodeShellFor } from '../automode/action-meta'
 import { refreshChatgptAccounts } from '../automode/judge-accounts'
-import {
-  fallbackJudgeAccountFor,
-  fallbackJudgeLabel,
-  fallbackJudgeModelFor,
-  fallbackUnavailableMessage,
-  judgeUnavailableMessage,
-  makeFallbackJudge,
-  makeSessionJudgeTransport,
-  staleJudgeModelMessage,
-  type SessionJudgeOptions
-} from '../automode/session-judge'
+import type { SessionJudgeOptions } from '../automode/session-judge'
 import { inTimeOrder } from '../automode/trajectory'
 import { blockGrantKey, type BlockedCallLedger } from '../automode/blocked-calls'
 import { RESULT_REPORT_MAX } from './dispatch-result-text'
-import { logger } from './logger'
-import { loadSharedAutoModeConfig } from './ui-config'
 
 // The trajectory helper moved to a leaf (`automode/trajectory.ts`, ADR-089) so
 // `pi/pi-child-runner.ts` can record a child's trajectory without importing
@@ -124,7 +104,7 @@ export interface DispatchTargetJudgeOptions {
   loadEngineConfig: (id: string) => EngineConfig
   /** Cache-only catalog peek for the stale-judge-model check (`peekOpencodeModels` / `peekPiModels`). */
   peekModels: () => EngineModelGroup[] | null
-  /** Default {@link makeSessionJudgeTransport}; tests inject a scripted one. */
+  /** Default `makeSessionJudgeTransport`; tests inject a scripted one. */
   makeTransport?: (opts: SessionJudgeOptions) => JudgeTransport
   /** Default {@link loadSharedAutoModeConfig}, read once. */
   loadSharedConfig?: () => SharedAutoModeConfig
@@ -193,33 +173,32 @@ export function reviewFromPipeline(
 }
 
 export class DispatchTargetJudge {
-  private readonly autoMode: AutoModeConfig
   private readonly denials = new AutoModeDenialTracker()
   private readonly outcomes = new Map<string, ToolOutcome>()
-  private sharedConfig: SharedAutoModeConfig | undefined
-  private remotes: GitRemote[] | undefined
-  private remotesPromise: Promise<GitRemote[]> | undefined
-  private visibility: RepoVisibility | undefined
-  private visibilityPromise: Promise<RepoVisibility> | undefined
-  private staleJudgeModelReported = false
-  private routeUnavailableReported = false
-  /** The fallback judge's own one banner, apart from the primary's. */
-  private fallbackRouteUnavailableReported = false
-  private staleFallbackJudgeLogged = false
+  private readonly setup: JudgeSetup
   /** The target judge's construction time: redirect mtimes at or after it are
    *  `modifiedSinceSessionStart`. A resumed session restarts the clock. */
   private readonly sessionStartMs = Date.now()
 
   constructor(private readonly opts: DispatchTargetJudgeOptions) {
+    this.setup = new JudgeSetup({
+      engine: opts.engine,
+      logSource: 'CrossEngineDispatcher',
+      cwd: opts.cwd,
+      model: () => opts.model(),
+      sessionId: opts.sessionId,
+      // A value or a thunk (the dispatcher can be re-keyed under a running target, ADR-105).
+      routingId: () => (typeof opts.routingId === 'function' ? opts.routingId() : opts.routingId),
+      // `entry.ctx` is replaced on every continuation: the sink is read at report time.
+      report: (message) => opts.emit()('session:error', message),
+      catalogValues: () => this.modelValues(),
+      loadEngineConfig: opts.loadEngineConfig,
+      ...(opts.loadSharedConfig ? { loadSharedConfig: opts.loadSharedConfig } : {}),
+      ...(opts.makeTransport ? { makeTransport: opts.makeTransport } : {})
+    })
     // Memoized for the target's life, like each session memoizes its own
-    // (a mid-dispatch config edit is not hot-reloaded).
-    let autoMode: AutoModeConfig
-    try {
-      autoMode = opts.loadEngineConfig(opts.engine).autoMode ?? {}
-    } catch {
-      autoMode = {}
-    }
-    this.autoMode = autoMode
+    // (a mid-dispatch config edit is not hot-reloaded); read here, not on first use.
+    this.setup.config()
   }
 
   /**
@@ -230,7 +209,7 @@ export class DispatchTargetJudge {
    * answered by an allow-everything base (the old behaviour).
    */
   autoModeActive(mode: string): boolean {
-    return (mode === 'auto' || mode === 'full') && this.autoMode.enabled !== false
+    return this.setup.active(mode)
   }
 
   /** Record how one of the target's own calls ended (the judge's `{"outcome":…}` lines). */
@@ -254,7 +233,7 @@ export class DispatchTargetJudge {
   judge(action: JudgePipelineAction, call: DispatchTargetJudgeCall): Promise<JudgePipelineOutcome> {
     return runJudgePipeline(
       action,
-      this.hooks(call, this.denials, () => this.transport(), true)
+      this.hooks(call, this.denials, () => this.setup.transport(), true)
     )
   }
 
@@ -312,7 +291,7 @@ export class DispatchTargetJudge {
           },
           new AutoModeDenialTracker(),
           () => {
-            const judge = this.transport((reason) => {
+            const judge = this.setup.transport((reason) => {
               routeReason ??= reason
             })
             const { signal } = call
@@ -359,11 +338,11 @@ export class DispatchTargetJudge {
       judgeAvailable: () =>
         // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
         // learn which one is active (and the fallback's plan, for its label) before deciding.
-        this.fallbackJudgeAccount()
+        this.setup.fallbackAccount()
           ? refreshChatgptAccounts().then(() => this.judgeAvailable())
           : this.judgeAvailable(),
       judgeTransport: transport,
-      fallbackJudgeTransport: () => this.fallbackJudge(onFallbackUnavailable),
+      fallbackJudgeTransport: () => this.setup.fallbackJudge(onFallbackUnavailable),
       messages: () => {
         const loading = this.opts.loadMessages?.()
         return loading ? loading.then((parent) => this.mergeMessages(parent)) : this.judgeMessages()
@@ -375,7 +354,7 @@ export class DispatchTargetJudge {
         this.captureActionMeta(toolName, input, call.honoursWorkdir, call.permissions()),
       outcomes: () => (this.outcomes.size ? Object.fromEntries(this.outcomes) : undefined),
       denials,
-      twoStageMode: () => this.autoMode.twoStageMode ?? 'both',
+      twoStageMode: () => this.setup.config().twoStageMode ?? 'both',
       sendReview: (id, review) => this.sendReview(id, review),
       ...(grants
         ? {
@@ -417,143 +396,12 @@ export class DispatchTargetJudge {
    * configured but missing → the human decides, with ONE banner per target.
    */
   judgeAvailable(): boolean {
-    const configured = this.autoMode.judgeModel
-    if (!configured) return true
-    const all = (this.opts.peekModels() ?? []).flatMap((g) => g.models)
-    if (all.length === 0) return true
-    if (all.some((m) => m.value === configured)) return true
-    if (!this.staleJudgeModelReported) {
-      this.staleJudgeModelReported = true
-      this.opts.emit()(
-        'session:error',
-        staleJudgeModelMessage(this.opts.engine, configured, this.fallbackLabel())
-      )
-    }
-    return false
+    return !this.setup.primaryStale(this.modelValues())
   }
 
-  /**
-   * The fallback judge model in effect (`autoMode.fallbackJudgeModel` of the TARGET engine), or
-   * undefined: none set, the same as the primary, no longer in the engine's catalog (one log
-   * line; never a crash — the human decides). The same cache-only peek as {@link judgeAvailable}.
-   */
-  private fallbackJudgeModel(): string | undefined {
-    const model = fallbackJudgeModelFor(
-      this.autoMode.fallbackJudgeModel,
-      this.autoMode.judgeModel ?? this.opts.model(),
-      this.autoMode.fallbackJudgeAccount
-    )
-    if (!model) return undefined
-    const all = (this.opts.peekModels() ?? []).flatMap((g) => g.models)
-    if (all.length === 0 || all.some((m) => m.value === model)) return model
-    if (!this.staleFallbackJudgeLogged) {
-      this.staleFallbackJudgeLogged = true
-      logger.warn(
-        'CrossEngineDispatcher',
-        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
-      )
-    }
-    return undefined
-  }
-
-  /** The ChatGPT vault account the fallback judge pays with (the TARGET engine's `autoMode.fallbackJudgeAccount`), if one is named. */
-  private fallbackJudgeAccount(): string | undefined {
-    return fallbackJudgeAccountFor(this.autoMode.fallbackJudgeAccount)
-  }
-
-  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
-  private fallbackLabel(): string | undefined {
-    const model = this.fallbackJudgeModel()
-    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
-  }
-
-  /**
-   * The pipeline's `fallbackJudgeTransport`. Its failure shows the target's one fallback banner,
-   * or goes to `onUnavailable` (a report review tells the REPORT, not the target) with the
-   * fallback's label.
-   */
-  private fallbackJudge(
-    onUnavailable?: (label: string, reason: string) => void
-  ): { transport: JudgeTransport; label: string } | undefined {
-    const model = this.fallbackJudgeModel()
-    if (!model) return undefined
-    const label = fallbackJudgeLabel(model, this.fallbackJudgeAccount())
-    return makeFallbackJudge(
-      model,
-      {
-        engine: this.opts.engine,
-        sessionId: this.opts.sessionId,
-        routingId:
-          typeof this.opts.routingId === 'function' ? this.opts.routingId() : this.opts.routingId,
-        chatgptAccountId: () => this.fallbackJudgeAccount(),
-        onUnavailable: (reason) => {
-          if (onUnavailable) return onUnavailable(label, reason)
-          if (this.fallbackRouteUnavailableReported) return
-          this.fallbackRouteUnavailableReported = true
-          this.opts.emit()(
-            'session:error',
-            fallbackUnavailableMessage(this.opts.engine, label, reason)
-          )
-        }
-      },
-      this.opts.makeTransport
-    )
-  }
-
-  /**
-   * ClaudeUI's own judge call (ADR-081), stateless. Judge model =
-   * `autoMode.judgeModel` of the TARGET engine, else the target's model,
-   * resolved per call; every call is a `judge` usage row under the
-   * DISPATCHING session's routing id (the target has no routing of its own).
-   */
-  private transport(onUnavailable?: (reason: string) => void): JudgeTransport {
-    const make = this.opts.makeTransport ?? makeSessionJudgeTransport
-    return make({
-      engine: this.opts.engine,
-      modelValue: () => this.autoMode.judgeModel ?? this.opts.model(),
-      sessionId: this.opts.sessionId,
-      routingId:
-        typeof this.opts.routingId === 'function' ? this.opts.routingId() : this.opts.routingId,
-      // A report review tells the REPORT why it was not reviewed (its note); the target's
-      // one banner is for the target's own gated actions.
-      onUnavailable:
-        onUnavailable ??
-        ((reason) => {
-          if (this.routeUnavailableReported) return
-          this.routeUnavailableReported = true
-          this.opts.emit()(
-            'session:error',
-            judgeUnavailableMessage(this.opts.engine, reason, this.fallbackLabel())
-          )
-        })
-    })
-  }
-
-  private shared(): SharedAutoModeConfig {
-    if (this.sharedConfig === undefined) {
-      try {
-        this.sharedConfig = (this.opts.loadSharedConfig ?? loadSharedAutoModeConfig)()
-      } catch {
-        this.sharedConfig = {}
-      }
-    }
-    return this.sharedConfig
-  }
-
-  /** Session-start git remotes, captured once per target (PiSession's shape). Never throws. */
-  private async gitRemotes(): Promise<GitRemote[]> {
-    if (this.remotes) return this.remotes
-    this.remotesPromise ??= captureGitRemotes(this.opts.cwd)
-    this.remotes = await this.remotesPromise
-    return this.remotes
-  }
-
-  /** Repo visibility, resolved at most once per target. */
-  private async repoVisibility(): Promise<RepoVisibility> {
-    if (this.visibility) return this.visibility
-    this.visibilityPromise ??= captureRepoVisibility(this.opts.cwd)
-    this.visibility = await this.visibilityPromise
-    return this.visibility
+  /** Every model value the engine's catalog cache lists; `[]` when it is cold. */
+  private modelValues(): string[] {
+    return (this.opts.peekModels() ?? []).flatMap((g) => g.models.map((m) => m.value))
   }
 
   /**
@@ -565,14 +413,14 @@ export class DispatchTargetJudge {
   private async environment(
     permissions: Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>
   ): Promise<EnvironmentInfo> {
-    const remotes = await this.gitRemotes()
+    const remotes = await this.setup.gitRemotes()
     return buildClassifierEnvironment({
       cwd: this.opts.cwd,
       platform: process.platform,
       remotes,
-      repoVisibility: this.visibility,
+      repoVisibility: this.setup.resolvedVisibility(),
       permissions,
-      shared: this.shared()
+      shared: this.setup.shared()
     })
   }
 
@@ -596,7 +444,7 @@ export class DispatchTargetJudge {
       shell: this.opts.engine === 'opencode' ? opencodeShellFor() : 'posix',
       additionalDirectories: permissions.additionalDirectories,
       sessionStartMs: this.sessionStartMs,
-      repoVisibility: () => this.repoVisibility()
+      repoVisibility: () => this.setup.repoVisibility()
     })
   }
 

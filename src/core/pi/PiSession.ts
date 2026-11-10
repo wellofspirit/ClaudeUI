@@ -8,8 +8,6 @@ import { resolvePiCapabilities } from '../../shared/model-capabilities'
 import { voicePackPlatformKey } from '../../shared/voice-pack'
 import type {
   AttachmentUpload,
-  AutoModeConfig,
-  SharedAutoModeConfig,
   ChatMessage,
   ContentBlock,
   ImageMediaType,
@@ -148,7 +146,7 @@ import {
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
-import type { ClassifyResult, EnvironmentInfo, JudgeTransport } from '../automode/classifier'
+import type { ClassifyResult, EnvironmentInfo } from '../automode/classifier'
 import {
   allowRuleReviewBlock,
   AutoModeDenialTracker,
@@ -161,28 +159,11 @@ import { runJudgePipeline } from '../automode/judge-pipeline'
 import { armBlockHold, blockHoldMs } from '../automode/block-hold'
 import { blockGrantKey, type BlockedCall } from '../automode/blocked-calls'
 import { inTimeOrder } from '../automode/trajectory'
-import {
-  captureGitRemotes,
-  captureRepoVisibility,
-  recordToolOutcome,
-  shellCommandOf,
-  type GitRemote,
-  type RepoVisibility,
-  type ToolOutcome
-} from '../automode/ground-truth'
+import { recordToolOutcome, shellCommandOf, type ToolOutcome } from '../automode/ground-truth'
 import { refreshChatgptAccounts } from '../automode/judge-accounts'
-import {
-  fallbackJudgeAccountFor,
-  fallbackJudgeLabel,
-  fallbackJudgeModelFor,
-  fallbackUnavailableMessage,
-  judgeUnavailableMessage,
-  makeFallbackJudge,
-  makeSessionJudgeTransport,
-  staleJudgeModelMessage
-} from '../automode/session-judge'
+import { JudgeSetup } from '../automode/judge-setup'
 import { buildClassifierEnvironment } from '../automode/environment'
-import { loadEngineConfig, loadSharedAutoModeConfig } from '../services/ui-config'
+import { loadEngineConfig } from '../services/ui-config'
 import { describeDispatchModels } from '../services/dispatch-model-hint'
 import {
   DISPATCH_SESSION_ID_REMOVED_TEXT,
@@ -555,25 +536,20 @@ export class PiSession extends BaseSession {
   } | null = null
 
   // ── Auto mode (`auto`/`full`) LLM gatekeeper — phase 4 ───────────────────────
-  /** Memoized `engines/pi.json#autoMode` (see autoModeConfig()). */
-  private _autoModeConfig: AutoModeConfig | undefined
-  /** Memoized `~/.claude/ui/automode.json` — the engine-SHARED trust lists
-   *  (ADR-065 phase 4). Same lifetime as `_autoModeConfig`: one read per
-   *  session, and a mid-session edit is not hot-reloaded. */
-  private _sharedAutoMode: SharedAutoModeConfig | undefined
+  /** The judge setup: memoized configs, git facts, the stale-model and route banners, the fallback judge. */
+  private readonly judge = new JudgeSetup({
+    engine: 'pi',
+    logSource: 'PiSession',
+    cwd: this.cwd,
+    model: () => this._model,
+    sessionId: () => this.piSessionId,
+    routingId: () => this.routingId,
+    report: (message) => this.send('session:error', message),
+    catalogValues: () => this.catalogValues
+  })
   /** Denial caps — 3 consecutive / 2 same-rule / 20 total blocks hand control
    *  back to the human. Shared with opencode (automode/denial-tracker.ts). */
   private autoDenials = new AutoModeDenialTracker()
-  // One `session:error` per session for a CONFIGURED judge model that is gone —
-  // the check runs on every gated approval (see judgeModelUnavailable).
-  private staleJudgeModelReported = false
-  // The same one-banner rule for a judge model ClaudeUI has no route to call
-  // (ADR-081 §3) — the resolver runs on every judge call.
-  private judgeRouteUnavailableReported = false
-  // …and for the FALLBACK judge model (`autoMode.fallbackJudgeModel`), apart from the primary's:
-  // its own banner when it cannot be called either, and one log line when it is gone.
-  private fallbackRouteUnavailableReported = false
-  private staleFallbackJudgeLogged = false
   /** pi's model values as the last `judgeAvailable()` saw them — what the synchronous fallback
    *  check reads. Empty = unknown (validates nothing). */
   private catalogValues: string[] = []
@@ -582,15 +558,6 @@ export class PiSession extends BaseSession {
    *  the judge, since the transcript slimmer drops tool RESULTS. Bounded by
    *  recordToolOutcome (MAX_TOOL_OUTCOMES). */
   private toolOutcomes = new Map<string, ToolOutcome>()
-  /** SESSION-START git remotes — resolved once, lazily, then frozen. Never
-   *  refreshed: a remote added mid-session is exactly what the exfiltration
-   *  rules exist to catch (ref §9.1). */
-  private sessionRemotes: GitRemote[] | null = null
-  private sessionRemotesPromise: Promise<GitRemote[]> | null = null
-  /** Repo visibility — also resolved at most once per session (a `gh` round trip). */
-  private sessionRepoVisibility: RepoVisibility | null = null
-  private sessionRepoVisibilityPromise: Promise<RepoVisibility> | null = null
-
   // ── Hosted tools (M4a) ───────────────────────────────────────────────────────
   /** Memoized once per session (constructing it is cheap, but there's no reason to redo it on every render_mermaid call — mockup is NOT memoized, see handleHostedTool's mockup case for why). */
   private mermaidServer: ReturnType<typeof createMermaidServer> | null = null
@@ -2364,8 +2331,8 @@ export class PiSession extends BaseSession {
    * inner fn only decides; it never mints a hosted-tool grant itself.
    *
    * AUTO MODE'S BASE (phase 4, mirrors OpencodeSession.applyPermissionMode's
-   * `const baseMode = this.isAutoMode(mode) ? 'acceptEdits' : mode`): the ladder is
-   * handed the user's effective mode and `judge: isAutoMode(mode)` and picks the base
+   * `const baseMode = this.judge.active(mode) ? 'acceptEdits' : mode`): the ladder is
+   * handed the user's effective mode and `judge: this.judge.active(mode)` and picks the base
    * itself (permission-engine.ts `ladderBase`). With the classifier active the base is
    * `acceptEdits`, not `auto`: without that the wiring would be dead code, because an
    * allow-everything base leaves nothing but a user ask rule to reach the branch below
@@ -2453,7 +2420,7 @@ export class PiSession extends BaseSession {
     if (isSessionToolName(toolName)) return this.decideSessionToolCall(payload, toolName, scope)
     const mode = this.gateMode(scope)
     const rules = this.currentRules()
-    const autoMode = this.isAutoMode(mode)
+    const autoMode = this.judge.active(mode)
     const verdict = decideWithSource(toolName, input, {
       // The user's effective mode and whether the judge is on: the ladder derives its base (and
       // strips the allow tier for a judged auto mode) from the pair — see `ladderBase`.
@@ -3086,63 +3053,10 @@ export class PiSession extends BaseSession {
   // This block deliberately mirrors OpencodeSession's equivalents
   // method-for-method so the two wirings stay comparable.
 
-  /** `engines/pi.json#autoMode`, memoized for the session's lifetime (a
-   *  mid-session config edit is not hot-reloaded — same as opencode). */
-  private autoModeConfig(): AutoModeConfig {
-    if (this._autoModeConfig === undefined) {
-      try {
-        this._autoModeConfig = loadEngineConfig('pi').autoMode ?? {}
-      } catch {
-        this._autoModeConfig = {}
-      }
-    }
-    return this._autoModeConfig
-  }
-
-  /** The engine-shared trust lists, DERIVED into this session's classifier
-   *  environment at session start (ADR-065 § Shared trust lists). One file for
-   *  every engine, so they are read from there rather than from
-   *  `autoModeConfig()`, which is pi's own judge block. */
-  private sharedAutoModeConfig(): SharedAutoModeConfig {
-    if (this._sharedAutoMode === undefined) {
-      try {
-        this._sharedAutoMode = loadSharedAutoModeConfig()
-      } catch {
-        this._sharedAutoMode = {}
-      }
-    }
-    return this._sharedAutoMode
-  }
-
-  /** Auto mode is active for `auto`/`full` autonomy unless explicitly disabled. */
-  private isAutoMode(mode: string): boolean {
-    return (mode === 'full' || mode === 'auto') && this.autoModeConfig().enabled !== false
-  }
-
   /** Record how a tool call ended, for the classifier's `{"outcome":…}`
    *  annotations. Bounded + decision-sticky — see recordToolOutcome. */
   private recordToolOutcome(toolUseId: string, outcome: ToolOutcome): void {
     recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
-  }
-
-  /** Session-start git remotes, captured ONCE and frozen (ref §9.1). The
-   *  promise is memoized too, so two approvals racing the first classifier call
-   *  share a single `git remote -v`. Never throws — an empty list is the
-   *  policy's restrictive fallback. */
-  private async sessionGitRemotes(): Promise<GitRemote[]> {
-    if (this.sessionRemotes) return this.sessionRemotes
-    this.sessionRemotesPromise ??= captureGitRemotes(this.cwd)
-    this.sessionRemotes = await this.sessionRemotesPromise
-    return this.sessionRemotes
-  }
-
-  /** Repo visibility, resolved at most once per session ('unknown' included —
-   *  it is a real answer meaning "we looked and could not tell"). */
-  private async sessionVisibility(): Promise<RepoVisibility> {
-    if (this.sessionRepoVisibility) return this.sessionRepoVisibility
-    this.sessionRepoVisibilityPromise ??= captureRepoVisibility(this.cwd)
-    this.sessionRepoVisibility = await this.sessionRepoVisibilityPromise
-    return this.sessionRepoVisibility
   }
 
   /** Host-supplied ground truth for the classifier's Environment section
@@ -3160,13 +3074,13 @@ export class PiSession extends BaseSession {
    *  reports them; the scratchpad, when the session has one, is listed with
    *  them. */
   private async classifierEnvironment(): Promise<EnvironmentInfo> {
-    const remotes = await this.sessionGitRemotes()
+    const remotes = await this.judge.gitRemotes()
     const rules = this.currentRules()
     return buildClassifierEnvironment({
       cwd: this.cwd,
       platform: process.platform,
       remotes,
-      repoVisibility: this.sessionRepoVisibility,
+      repoVisibility: this.judge.resolvedVisibility(),
       // The scratchpad is in scope for this session's file tools (path containment), so the judge
       // is told it is a directory the session may use.
       permissions: this.scratchpadDir
@@ -3175,7 +3089,7 @@ export class PiSession extends BaseSession {
             additionalDirectories: [...rules.additionalDirectories, this.scratchpadDir]
           }
         : rules,
-      shared: this.sharedAutoModeConfig()
+      shared: this.judge.shared()
     })
   }
 
@@ -3203,15 +3117,8 @@ export class PiSession extends BaseSession {
       shell: 'posix',
       additionalDirectories: this.currentRules().additionalDirectories,
       sessionStartMs: this.sessionStartMs,
-      repoVisibility: () => this.sessionVisibility()
+      repoVisibility: () => this.judge.repoVisibility()
     })
-  }
-
-  /** One banner per session, whatever made the configured judge model unusable. */
-  private reportStaleJudgeModel(configured: string): void {
-    if (this.staleJudgeModelReported) return
-    this.staleJudgeModelReported = true
-    this.send('session:error', staleJudgeModelMessage('pi', configured, this.fallbackLabel()))
   }
 
   /**
@@ -3229,13 +3136,8 @@ export class PiSession extends BaseSession {
    * through — it cannot tell "removed" from "never discovered".
    */
   private async judgeModelUnavailable(): Promise<boolean> {
-    const configured = this.autoModeConfig().judgeModel
-    if (!configured) return false
-    const values = await this.piModelValues()
-    if (values.length === 0) return false
-    if (values.includes(configured)) return false
-    this.reportStaleJudgeModel(configured)
-    return true
+    if (!this.judge.config().judgeModel) return false
+    return this.judge.primaryStale(await this.piModelValues())
   }
 
   /** Every model value pi's catalog lists; `[]` when discovery fails or finds nothing. */
@@ -3249,114 +3151,17 @@ export class PiSession extends BaseSession {
 
   /**
    * The pipeline's `judgeAvailable`: the primary's catalog check, and — when a fallback is
-   * configured — a refresh of the catalog the synchronous {@link fallbackJudgeModel} reads (a
+   * configured — a refresh of the catalog the synchronous {@link JudgeSetup.fallbackModel} reads (a
    * session with only a fallback configured would otherwise never have called discovery).
    */
   private async judgeAvailable(): Promise<boolean> {
-    if (this.autoModeConfig().fallbackJudgeModel?.trim()) {
+    if (this.judge.config().fallbackJudgeModel?.trim()) {
       this.catalogValues = await this.piModelValues()
       // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
       // learn which one is active (and the fallback's plan, for its label) before deciding.
-      if (this.fallbackJudgeAccount()) await refreshChatgptAccounts()
+      if (this.judge.fallbackAccount()) await refreshChatgptAccounts()
     }
     return !(await this.judgeModelUnavailable())
-  }
-
-  /** The judge model this session's primary judge calls: `autoMode.judgeModel`, else its own. */
-  private judgeModelValue(): string {
-    return this.autoModeConfig().judgeModel ?? this._model
-  }
-
-  /**
-   * The fallback judge model in effect (`autoMode.fallbackJudgeModel`), or undefined: none set,
-   * the same as the primary, or no longer in pi's catalog. A gone one is no fallback — the human
-   * decides — with one log line; it never crashes the judge. An unknown catalog cannot tell
-   * "removed" from "never discovered", so it passes (like the primary's check).
-   */
-  private fallbackJudgeModel(): string | undefined {
-    const model = fallbackJudgeModelFor(
-      this.autoModeConfig().fallbackJudgeModel,
-      this.judgeModelValue(),
-      this.autoModeConfig().fallbackJudgeAccount
-    )
-    if (!model) return undefined
-    const values = this.catalogValues
-    if (values.length === 0 || values.includes(model)) return model
-    if (!this.staleFallbackJudgeLogged) {
-      this.staleFallbackJudgeLogged = true
-      logger.warn(
-        'PiSession',
-        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
-      )
-    }
-    return undefined
-  }
-
-  /** The ChatGPT vault account the fallback judge pays with (`autoMode.fallbackJudgeAccount`), if one is named. */
-  private fallbackJudgeAccount(): string | undefined {
-    return fallbackJudgeAccountFor(this.autoModeConfig().fallbackJudgeAccount)
-  }
-
-  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
-  private fallbackLabel(): string | undefined {
-    const model = this.fallbackJudgeModel()
-    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
-  }
-
-  /** One banner per session for a judge model ClaudeUI can't call (ADR-081 §3). */
-  private reportJudgeRouteUnavailable(reason: string): void {
-    if (this.judgeRouteUnavailableReported) return
-    this.judgeRouteUnavailableReported = true
-    this.send('session:error', judgeUnavailableMessage('pi', reason, this.fallbackLabel()))
-  }
-
-  /** The fallback judge's own one banner: it could not be called either. */
-  private reportFallbackRouteUnavailable(model: string, reason: string): void {
-    if (this.fallbackRouteUnavailableReported) return
-    this.fallbackRouteUnavailableReported = true
-    this.send(
-      'session:error',
-      fallbackUnavailableMessage(
-        'pi',
-        fallbackJudgeLabel(model, this.fallbackJudgeAccount()),
-        reason
-      )
-    )
-  }
-
-  /** The pipeline's `fallbackJudgeTransport`: the user's fallback judge model, when one is in effect. */
-  private fallbackJudge(): { transport: JudgeTransport; label: string } | undefined {
-    const model = this.fallbackJudgeModel()
-    if (!model) return undefined
-    return makeFallbackJudge(model, {
-      engine: 'pi',
-      sessionId: () => this.piSessionId,
-      routingId: this.routingId,
-      chatgptAccountId: () => this.fallbackJudgeAccount(),
-      onUnavailable: (reason) => this.reportFallbackRouteUnavailable(model, reason)
-    })
-  }
-
-  /**
-   * The judge transport: ClaudeUI's own HTTP call to the judge model (ADR-081)
-   * — no second pi process, so the judge prompt is exactly the policy, the
-   * stage budgets and stop sequence apply, and the call's usage lands on the
-   * ledger as a `judge` row under this session. Stateless: nothing to dispose.
-   *
-   * Judge model = `autoMode.judgeModel` or this session's own, resolved per
-   * call, so a live `setModel()` applies to the next judge call. A model no
-   * ClaudeUI route covers is not judged by anyone else: the call fails,
-   * `classify()` returns unavailable, the human decides, and the session says
-   * why once.
-   */
-  private judgeTransport(): JudgeTransport {
-    return makeSessionJudgeTransport({
-      engine: 'pi',
-      modelValue: () => this.judgeModelValue(),
-      sessionId: () => this.piSessionId,
-      routingId: this.routingId,
-      onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
-    })
   }
 
   /**
@@ -3449,7 +3254,7 @@ export class PiSession extends BaseSession {
         logSource: 'PiSession',
         cwd: this.cwd,
         currentMode: () => this.gateMode(scope),
-        autoModeActive: () => this.isAutoMode(this.gateMode(scope)),
+        autoModeActive: () => this.judge.active(this.gateMode(scope)),
         permissions: () => this.currentRules(),
         honoursWorkdir: false,
         allowRuleAction: (name, input) => allowRuleActionFor(name, input, this.knownMcpServers),
@@ -3458,15 +3263,15 @@ export class PiSession extends BaseSession {
         // A configured judge model that no longer exists fails CLOSED — never
         // judged by a stand-in (see judgeModelUnavailable).
         judgeAvailable: () => this.judgeAvailable(),
-        judgeTransport: () => this.judgeTransport(),
-        fallbackJudgeTransport: () => this.fallbackJudge(),
+        judgeTransport: () => this.judge.transport(),
+        fallbackJudgeTransport: () => this.judge.fallbackJudge(),
         messages: () => this.messageHistory,
         environment: () => this.classifierEnvironment(),
         captureActionMeta: (name, args) => this.captureActionMeta(name, args),
         outcomes: () =>
           this.toolOutcomes.size ? Object.fromEntries(this.toolOutcomes) : undefined,
         denials: this.autoDenials,
-        twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
+        twoStageMode: () => this.judge.config().twoStageMode ?? 'both',
         sendReview: (id, review) => this.sendToolReview(id, review),
         // ADR-091 part 6 — the user approved an earlier block of this exact
         // call (by any agent of this session): allowed once, no judge call.

@@ -84,8 +84,6 @@ import type {
   PermissionDenialBlock,
   AccountRef,
   MeteringSnapshot,
-  AutoModeConfig,
-  SharedAutoModeConfig,
   AskUserQuestion,
   StatusLineData,
   SkillInfo,
@@ -174,16 +172,7 @@ import { cleanAgentLabel } from '../automode/agent-label'
 import { inTimeOrder } from '../automode/trajectory'
 import { ChildJudgeStates } from './child-judge-state'
 import { refreshChatgptAccounts } from '../automode/judge-accounts'
-import {
-  fallbackJudgeAccountFor,
-  fallbackJudgeLabel,
-  fallbackJudgeModelFor,
-  fallbackUnavailableMessage,
-  judgeUnavailableMessage,
-  makeFallbackJudge,
-  makeSessionJudgeTransport,
-  staleJudgeModelMessage
-} from '../automode/session-judge'
+import { JudgeSetup } from '../automode/judge-setup'
 import { buildClassifierEnvironment } from '../automode/environment'
 import {
   allowRuleReviewBlock,
@@ -194,20 +183,8 @@ import {
 import { captureShellActionMeta, opencodeShellFor } from '../automode/action-meta'
 import type { AllowSkipAction } from '../automode/allow-rule-skip'
 import { isShellToolName } from '../automode/shell-lexical'
-import {
-  captureGitRemotes,
-  captureRepoVisibility,
-  recordToolOutcome,
-  shellCommandOf,
-  type GitRemote,
-  type RepoVisibility,
-  type ToolOutcome
-} from '../automode/ground-truth'
-import {
-  loadEngineConfig,
-  loadSessionConfig,
-  loadSharedAutoModeConfig
-} from '../services/ui-config'
+import { recordToolOutcome, shellCommandOf, type ToolOutcome } from '../automode/ground-truth'
+import { loadSessionConfig } from '../services/ui-config'
 import type { ClaudePermissions, PermissionScope } from '../../shared/types'
 import { blockUsageService } from '../services/block-usage'
 import { opencodeAuthRequiredProviderId } from '../shared-providers/chatgpt-route'
@@ -489,20 +466,22 @@ export class OpencodeSession extends BaseSession {
   private locationReadAtResume = false
 
   // ── Auto mode (ADR-023) ────────────────────────────────────────────────────
-  private _autoModeConfig: AutoModeConfig | undefined
-  private _sharedAutoMode: SharedAutoModeConfig | undefined
+  /** The judge setup: memoized configs, git facts, the stale-model and route banners, the fallback judge. */
+  private readonly judge = new JudgeSetup({
+    engine: 'opencode',
+    logSource: 'OpencodeSession',
+    // The spawn cwd (not `location`) on purpose: the git facts describe where the session started.
+    cwd: this.cwd,
+    model: () => this._model,
+    sessionId: () => this.openSessionId,
+    routingId: () => this.routingId,
+    report: (message) => this.send('session:error', message),
+    catalogValues: () => this.modelValues()
+  })
   private autoDenials = new AutoModeDenialTracker()
-  private staleJudgeModelReported = false
-  private judgeRouteUnavailableReported = false
-  private fallbackRouteUnavailableReported = false
-  private staleFallbackJudgeLogged = false
   private toolOutcomes = new Map<string, ToolOutcome>()
   /** Per-subagent-child judge context (trajectory, outcomes, denial caps) by child session id. */
   private readonly childJudge = new ChildJudgeStates()
-  private sessionRemotes: GitRemote[] | null = null
-  private sessionRemotesPromise: Promise<GitRemote[]> | null = null
-  private sessionRepoVisibility: RepoVisibility | null = null
-  private sessionRepoVisibilityPromise: Promise<RepoVisibility> | null = null
 
   private knownCommandNames = new Set<string>()
   /** Catalog names opencode's own skill of that id won (set by `publishCommands`). */
@@ -2712,7 +2691,7 @@ export class OpencodeSession extends BaseSession {
     mode: string,
     location: string
   ): Promise<ReturnType<typeof buildSessionRuleset>> {
-    const autoMode = this.isAutoMode(mode)
+    const autoMode = this.judge.active(mode)
     const pending = this.pendingMove
     const transitionRules =
       pending && !samePath(pending, location) ? await this.transitionRulesFor(pending) : undefined
@@ -2883,28 +2862,6 @@ export class OpencodeSession extends BaseSession {
 
   // ── Auto mode (full) LLM permission gatekeeper (ADR-023) ──────────────────
 
-  private autoModeConfig(): AutoModeConfig {
-    if (this._autoModeConfig === undefined) {
-      try {
-        this._autoModeConfig = loadEngineConfig('opencode').autoMode ?? {}
-      } catch {
-        this._autoModeConfig = {}
-      }
-    }
-    return this._autoModeConfig
-  }
-
-  private sharedAutoModeConfig(): SharedAutoModeConfig {
-    if (this._sharedAutoMode === undefined) {
-      try {
-        this._sharedAutoMode = loadSharedAutoModeConfig()
-      } catch {
-        this._sharedAutoMode = {}
-      }
-    }
-    return this._sharedAutoMode
-  }
-
   /** The user's compiled rules (all tiers), compiled on demand before the first apply. */
   private userOriginRules(location = this.location): OpencodePermissionRule[] {
     if (this.lastUserRules === null) {
@@ -2927,29 +2884,15 @@ export class OpencodeSession extends BaseSession {
     else recordToolOutcome(this.toolOutcomes, toolUseId, outcome)
   }
 
-  private async sessionGitRemotes(): Promise<GitRemote[]> {
-    if (this.sessionRemotes) return this.sessionRemotes
-    this.sessionRemotesPromise ??= captureGitRemotes(this.cwd)
-    this.sessionRemotes = await this.sessionRemotesPromise
-    return this.sessionRemotes
-  }
-
-  private async sessionVisibility(): Promise<RepoVisibility> {
-    if (this.sessionRepoVisibility) return this.sessionRepoVisibility
-    this.sessionRepoVisibilityPromise ??= captureRepoVisibility(this.cwd)
-    this.sessionRepoVisibility = await this.sessionRepoVisibilityPromise
-    return this.sessionRepoVisibility
-  }
-
   private async classifierEnvironment(location: string): Promise<EnvironmentInfo> {
-    const remotes = await this.sessionGitRemotes()
+    const remotes = await this.judge.gitRemotes()
     return buildClassifierEnvironment({
       cwd: location,
       platform: process.platform,
       remotes,
-      repoVisibility: this.sessionRepoVisibility,
+      repoVisibility: this.judge.resolvedVisibility(),
       permissions: this.mergedUserPermissions(location),
-      shared: this.sharedAutoModeConfig()
+      shared: this.judge.shared()
     })
   }
 
@@ -2973,7 +2916,7 @@ export class OpencodeSession extends BaseSession {
       shell: opencodeShellFor(),
       additionalDirectories: this.mergedUserPermissions(location).additionalDirectories,
       sessionStartMs: this.sessionStartMs,
-      repoVisibility: () => this.sessionVisibility()
+      repoVisibility: () => this.judge.repoVisibility()
     })
   }
 
@@ -2984,7 +2927,7 @@ export class OpencodeSession extends BaseSession {
    */
   private readOnlyInput(approval: PendingApproval): Record<string, unknown> | null {
     if (!isShellToolName(approval.toolName)) return null
-    if (!this.isAutoMode(this.permissionMode)) return null
+    if (!this.judge.active(this.permissionMode)) return null
     const input = approval.input as Record<string, unknown> | undefined
     if (!input || typeof input.command !== 'string') {
       logger.debug('OpencodeSession', 'auto-mode read-only bypass refused (input:unverified)')
@@ -3033,111 +2976,20 @@ export class OpencodeSession extends BaseSession {
     return tool ? { action: { kind: 'mcp', server, tool }, mcpToolKey: sanitizeMcpName } : undefined
   }
 
-  private isAutoMode(mode: string): boolean {
-    return (mode === 'full' || mode === 'auto') && this.autoModeConfig().enabled !== false
-  }
-
   /** A CONFIGURED judge model opencode no longer offers: fail closed to the human. */
   private judgeModelUnavailable(): boolean {
-    const configured = this.autoModeConfig().judgeModel
-    if (!configured) return false
-    const all = (peekOpencodeModels() ?? []).flatMap((g) => g.models)
-    if (all.length === 0) return false
-    if (all.some((m) => m.value === configured)) return false
-    if (!this.staleJudgeModelReported) {
-      this.staleJudgeModelReported = true
-      this.send(
-        'session:error',
-        staleJudgeModelMessage('opencode', configured, this.fallbackLabel())
-      )
-    }
-    return true
+    return this.judge.primaryStale(this.modelValues())
   }
 
-  /** The judge model this session's primary judge calls: `autoMode.judgeModel`, else its own. */
-  private judgeModelValue(): string {
-    return this.autoModeConfig().judgeModel ?? this._model
-  }
-
-  /**
-   * The fallback judge model in effect (`autoMode.fallbackJudgeModel`), or undefined: none set,
-   * the same as the primary, or no longer offered by opencode. A gone one is no fallback — the
-   * human decides — with one log line; it never crashes the judge. Same rule as the primary's
-   * check: an empty catalog cannot tell "removed" from "not discovered", so it passes.
-   */
-  private fallbackJudgeModel(): string | undefined {
-    const model = fallbackJudgeModelFor(
-      this.autoModeConfig().fallbackJudgeModel,
-      this.judgeModelValue(),
-      this.autoModeConfig().fallbackJudgeAccount
-    )
-    if (!model) return undefined
-    const all = (peekOpencodeModels() ?? []).flatMap((g) => g.models)
-    if (all.length === 0 || all.some((m) => m.value === model)) return model
-    if (!this.staleFallbackJudgeLogged) {
-      this.staleFallbackJudgeLogged = true
-      logger.warn(
-        'OpencodeSession',
-        `auto-mode fallback judge model "${model}" is no longer available — no fallback`
-      )
-    }
-    return undefined
-  }
-
-  /** The ChatGPT vault account the fallback judge pays with (`autoMode.fallbackJudgeAccount`), if one is named. */
-  private fallbackJudgeAccount(): string | undefined {
-    return fallbackJudgeAccountFor(this.autoModeConfig().fallbackJudgeAccount)
-  }
-
-  /** The fallback judge as a banner names it: its model, plus the named account's plan. */
-  private fallbackLabel(): string | undefined {
-    const model = this.fallbackJudgeModel()
-    return model ? fallbackJudgeLabel(model, this.fallbackJudgeAccount()) : undefined
-  }
-
-  private reportJudgeRouteUnavailable(reason: string): void {
-    if (this.judgeRouteUnavailableReported) return
-    this.judgeRouteUnavailableReported = true
-    this.send('session:error', judgeUnavailableMessage('opencode', reason, this.fallbackLabel()))
-  }
-
-  /** The fallback judge's own one banner: it could not be called either. */
-  private reportFallbackRouteUnavailable(model: string, reason: string): void {
-    if (this.fallbackRouteUnavailableReported) return
-    this.fallbackRouteUnavailableReported = true
-    this.send(
-      'session:error',
-      fallbackUnavailableMessage(
-        'opencode',
-        fallbackJudgeLabel(model, this.fallbackJudgeAccount()),
-        reason
-      )
-    )
+  /** Every model value opencode's catalog cache lists; `[]` when it is cold. */
+  private modelValues(): string[] {
+    return (peekOpencodeModels() ?? []).flatMap((g) => g.models.map((m) => m.value))
   }
 
   /** ClaudeUI's own judge call (ADR-081), on `autoMode.judgeModel` or the session's model. */
   private makeJudgeFn(): JudgeTransport | null {
     if (this.judgeModelUnavailable()) return null
-    return makeSessionJudgeTransport({
-      engine: 'opencode',
-      modelValue: () => this.judgeModelValue(),
-      sessionId: () => this.openSessionId,
-      routingId: this.routingId,
-      onUnavailable: (reason) => this.reportJudgeRouteUnavailable(reason)
-    })
-  }
-
-  /** The pipeline's `fallbackJudgeTransport`: the user's fallback judge model, when one is in effect. */
-  private fallbackJudge(): { transport: JudgeTransport; label: string } | undefined {
-    const model = this.fallbackJudgeModel()
-    if (!model) return undefined
-    return makeFallbackJudge(model, {
-      engine: 'opencode',
-      sessionId: () => this.openSessionId,
-      routingId: this.routingId,
-      chatgptAccountId: () => this.fallbackJudgeAccount(),
-      onUnavailable: (reason) => this.reportFallbackRouteUnavailable(model, reason)
-    })
+    return this.judge.transport()
   }
 
   // ── ADR-085: host pre-check + session allows ───────────────────────────────
@@ -3159,7 +3011,7 @@ export class OpencodeSession extends BaseSession {
       return
     }
     const category = approval.toolName
-    const autoMode = this.isAutoMode(this.permissionMode)
+    const autoMode = this.judge.active(this.permissionMode)
     const verdict = hostPrecheck(approval, this.precheckContext(location))
     if (approval.subagent) {
       logger.debug(
@@ -3336,7 +3188,7 @@ export class OpencodeSession extends BaseSession {
    * ride a session allow.
    */
   private sessionAllowApplies(approval: PendingApproval, location: string): boolean {
-    if (!this.isAutoMode(this.permissionMode)) return true
+    if (!this.judge.active(this.permissionMode)) return true
     if (approval.toolName === 'subagent') return false
     return !(
       approval.toolName === 'edit' &&
@@ -3410,7 +3262,7 @@ export class OpencodeSession extends BaseSession {
         logSource: 'OpencodeSession',
         cwd: location,
         currentMode: () => this.permissionMode,
-        autoModeActive: () => this.isAutoMode(this.permissionMode),
+        autoModeActive: () => this.judge.active(this.permissionMode),
         permissions: () => this.mergedUserPermissions(location),
         honoursWorkdir: true,
         inputFor: async (stage) =>
@@ -3427,12 +3279,12 @@ export class OpencodeSession extends BaseSession {
           }
           // A fallback on the primary's own model is only a fallback on ANOTHER ChatGPT account:
           // learn which one is active (and the fallback's plan, for its label) before deciding.
-          return this.fallbackJudgeAccount()
+          return this.judge.fallbackAccount()
             ? refreshChatgptAccounts().then(available)
             : available()
         },
         judgeTransport: () => transport!,
-        fallbackJudgeTransport: () => this.fallbackJudge(),
+        fallbackJudgeTransport: () => this.judge.fallbackJudge(),
         environment: () => this.classifierEnvironment(location),
         captureActionMeta: (name, input) => this.captureActionMeta(name, input, location),
         messages: () =>
@@ -3444,7 +3296,7 @@ export class OpencodeSession extends BaseSession {
           return outcomes.size ? Object.fromEntries(outcomes) : undefined
         },
         denials: child ? child.denials : this.autoDenials,
-        twoStageMode: () => this.autoModeConfig().twoStageMode ?? 'both',
+        twoStageMode: () => this.judge.config().twoStageMode ?? 'both',
         sendReview: (_id, review) => this.sendToolReview(approval.toolUseId, review),
         consumeGrant: (name, input) =>
           this.blockedCalls.consumeGrant(blockGrantKey('opencode', name, input, location, true)),
