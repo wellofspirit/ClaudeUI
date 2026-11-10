@@ -1834,11 +1834,18 @@ describe('mapPiEvent — the model a message ran on', () => {
           modelId: 'claude-sonnet-4-6',
           tokens: { input: 1, output: 0, cacheRead: 900, cacheWrite: 0 },
           cost: { input: 0, output: 0, cacheRead: 0.0003, cacheWrite: 0, total: 0.0003 },
-          messageId: 'warm-1',
+          messageId: 'pi-warm:warm-1',
           cacheWarm: true
         }
       ])
       expect(state.totalCostUsd).toBe(0)
+    })
+
+    it('namespaces the ledger key with the pi session id (entry ids repeat across sessions)', () => {
+      const state = createPiMapperState()
+      state.sessionId = 'sess-a'
+      const [out] = mapPiEvent(warm(), state)
+      expect(out).toMatchObject({ kind: 'usage', messageId: 'pi-warm:sess-a:warm-1' })
     })
 
     it('ignores non-usage entries', () => {

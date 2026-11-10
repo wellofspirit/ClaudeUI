@@ -1095,7 +1095,7 @@ describe('PiSession — event dispatch (real mapper, mocked client)', () => {
         engineId: 'pi',
         vendorId: 'anthropic',
         modelId: 'claude-sonnet-4-6',
-        messageId: 'warm-1',
+        messageId: expect.stringMatching(/^pi-warm:(?:.+:)?warm-1$/),
         origin: 'session',
         parentRoutingId: null,
         engineCostUsd: 0.0003,

@@ -594,7 +594,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
     // pi 1.5.1 persists each successful prompt-cache warm as a UsageEntry and
     // emits it here, even between runs. Other entry types stay ignored.
     case 'entry_appended':
-      return mapUsageEntry((ev as { entry?: unknown }).entry)
+      return mapUsageEntry((ev as { entry?: unknown }).entry, state.sessionId)
 
     // agent_end, turn_start/turn_end, tool_execution_start/end
     // (start carries nothing new — the arguments are already in the
@@ -618,7 +618,7 @@ function piUsageTokens(usage: PiUsage): PiUsageTokens {
 }
 
 /** A `{type:'usage'}` session entry → its ledger output; anything else, or a malformed one, → ignore. */
-function mapUsageEntry(entry: unknown): PiMapperOutput[] {
+function mapUsageEntry(entry: unknown, sessionId: string | null): PiMapperOutput[] {
   const e = entry as
     | { type?: unknown; id?: unknown; provider?: unknown; model?: unknown; usage?: unknown }
     | null
@@ -642,7 +642,9 @@ function mapUsageEntry(entry: unknown): PiMapperOutput[] {
       modelId: e.model,
       tokens: piUsageTokens(u),
       cost: u.cost,
-      messageId: e.id,
+      // pi entry ids are 8 hex chars, unique only within one session, while the
+      // ledger's message_id is globally unique (insert-or-ignore): namespace it.
+      messageId: sessionId ? `pi-warm:${sessionId}:${e.id}` : `pi-warm:${e.id}`,
       cacheWarm: true
     }
   ]

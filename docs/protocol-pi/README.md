@@ -33,6 +33,31 @@ PI_CODING_AGENT_DIR=<real agent dir> <store>/pi/<version>/pi/pi auth check --pro
 openai-codex --no-refresh --credentials`. The store's `<version>/pi` is a directory; the binary is
   `pi/pi` inside it. The real `auth.json`'s sha256 and mtime were unchanged after the run.
 
+## Cache warming
+
+Since 1.5.1, `cacheWarming` defaults to `"idle"` (was `"streaming"`; owner, 2026-11-10: accept the
+default). pi sends billed prompt-cache refresh requests during runs and for up to 30 minutes
+between runs, when it estimates a refresh costs less than a cache miss. ClaudeUI keeps pi
+processes alive between turns, so these fire with no prompt in flight. A user can set
+`cacheWarming` in pi's global `settings.json`. Each successful warm is persisted as a session entry
+and emitted as
+`{"type":"entry_appended","entry":{"type":"usage","kind":"cache_warm","provider","model","usage":{…,"cost"},"note"?,"id",…}}`
+(`cache-warmer.ts` `onWarmed`, `agent-session.ts`).
+
+ClaudeUI records each such entry in the usage ledger (`event-mapper.ts` `mapUsageEntry` → a `usage`
+output flagged `cacheWarm`, ledger key `pi-warm:<pi session id>:<entry id>`, since pi entry ids are
+unique only within a session) for the session, or host-run subagent, whose process emitted it. A
+warm moves no session state: no transcript row, live headline cost, token sums or turn
+accounting. Other `entry_appended` types stay ignored.
+
+Known gaps:
+
+- **Resumed headline includes warms.** On resume, `PiSession` seeds the headline cost and token
+  sums from `get_session_stats`, which in 1.5.1 counts usage entries. So a reopened session's
+  headline includes the warm spend that the live session left out.
+- **Dispatch targets** don't record warms, and an error or timeout turn's reconciled cost absorbs
+  them ([#213](https://github.com/wellofspirit/ClaudeUI/issues/213)).
+
 ## 1.4.0 → 1.5.0 compatibility assessment (2026-11-04)
 
 `git diff v1.4.0..v1.5.0` (all paths below at `v1.5.0`). Nothing under
@@ -68,16 +93,6 @@ case-insensitive on Windows, `fork` writes through one file handle).
   while a subscription still reads the list price. Absent or `false` (every session recorded
   before 1.5.0) keeps the old rule: pi's total is the equivalent. `get_session_stats` reports one
   cumulative `cost` with no such flag, so a resumed session's seeded base keeps the old rule.
-- **Cache warming (1.5.1):** `cacheWarming` now defaults to `"idle"` (was `"streaming"`): pi sends
-  billed prompt-cache refresh requests during runs and for up to 30 minutes between runs, when it
-  estimates the refresh pays for itself. ClaudeUI keeps pi processes alive between turns, so these
-  fire with no prompt in flight. Each successful warm is persisted as a session entry and emitted as
-  `{"type":"entry_appended","entry":{"type":"usage","kind":"cache_warm","provider","model","usage":{…,"cost"},"note"?,"id",…}}`
-  (`cache-warmer.ts` `onWarmed`, `agent-session.ts`). ClaudeUI records every such entry in the usage
-  ledger (`event-mapper.ts` `mapUsageEntry` → a `usage` output flagged `cacheWarm`, `messageId` = the
-  entry id) for the session, or host-run subagent, whose process emitted it; it moves no session
-  state (no transcript row, headline, token sums or turn accounting). Other `entry_appended` types
-  stay ignored.
 - **Failure classification:** `packages/ai/src/utils/retry.ts` added Zhipu/Z.ai error code 1308
   (`'"code"\s*:\s*"?1308(?![0-9])'`) to the non-retryable provider-limits pattern, and
   `packages/ai/src/utils/overflow.ts` added the LiteLLM pre-call overflow text
