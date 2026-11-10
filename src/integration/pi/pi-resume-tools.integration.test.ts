@@ -115,7 +115,7 @@ describe.skipIf(!process.env.PI_INTEGRATION_TESTS || !launch)('pi resumed tool l
           CLAUDEUI_PI_DISPATCH_ENABLED: '',
           CLAUDEUI_PI_AGENT_TOOL: '',
           CLAUDEUI_PI_SEND_MESSAGE: '',
-          CLAUDEUI_PI_SKILL_DIRS: ''
+          CLAUDEUI_PI_SKILLS: ''
         }
       })
       const loadouts: string[][] = []

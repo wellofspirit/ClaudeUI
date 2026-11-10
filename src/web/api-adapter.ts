@@ -717,12 +717,8 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     // last cached.
     saveSlashCommands: (commands) =>
       connection.invoke('config:save-slash-commands', commands) as Promise<void>,
-    scanCustomCommands: (cwd) =>
-      connection.invoke('config:scan-custom-commands', cwd) as ReturnType<
-        ClaudeAPI['scanCustomCommands']
-      >,
-    loadSkillDetails: (cwd) =>
-      connection.invoke('config:load-skill-details', cwd) as ReturnType<
+    loadSkillDetails: (routingId, cwd) =>
+      connection.invoke('config:load-skill-details', routingId, cwd) as ReturnType<
         ClaudeAPI['loadSkillDetails']
       >,
 

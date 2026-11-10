@@ -81,7 +81,9 @@ const h = vi.hoisted(() => {
     /** Replaces `sessionToolsGate` for one test (the real gate answers when null). */
     sessionGate: null as null | ((...args: unknown[]) => unknown),
     /** The persisted `sessions.json` the worktree recorder reads and writes. */
-    sessionConfig: {} as Record<string, unknown>
+    sessionConfig: {} as Record<string, unknown>,
+    /** The shared Claude skill catalog the session resolves for its location. */
+    skillCatalog: { entries: [] as Record<string, unknown>[], skipped: [] }
   }
 })
 
@@ -144,6 +146,23 @@ vi.mock('../model-discovery', () => ({
       ? { providerID: 'opencode', modelID: model }
       : { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) }
   }
+}))
+// The catalog and its expansion are slice A's (their own suites); here only the wiring is under test.
+vi.mock('../../services/claude-skill-catalog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/claude-skill-catalog')>()),
+  resolveClaudeSkillCatalog: () => h.skillCatalog
+}))
+vi.mock('../../services/claude-skill-invoke', () => ({
+  parseSkillInvocation: (text: string, catalog: typeof h.skillCatalog) => {
+    const m = text.match(/^\/(\S+)(?:\s+([\s\S]*))?$/)
+    const entry = catalog.entries.find((e) => e.name === m?.[1] && e.userInvocable)
+    return entry && m ? { entry, args: (m[2] ?? '').trim() } : null
+  },
+  expandClaudeSkillInvocation: (
+    invocation: { entry: { name: string }; args: string },
+    context: { cwd: string; sessionId?: string }
+  ) => `EXPANDED ${invocation.entry.name} [${invocation.args}] ${context.cwd} ${context.sessionId}`,
+  parseSkillInvocationEnvelope: () => null
 }))
 vi.mock('../command-skill-discovery', () => ({
   discoverOpencodeSkills: vi.fn().mockResolvedValue([])
@@ -453,6 +472,7 @@ beforeEach(() => {
   h.resolveRoute = null
   h.peekModels = null
   h.sessionGate = null
+  h.skillCatalog = { entries: [], skipped: [] }
 })
 
 afterEach(() => {
@@ -465,6 +485,111 @@ afterEach(() => {
   }
   for (const [, , message] of h.client.cancelForm?.mock.calls ?? [])
     expect(String(message ?? '').trim()).toBeTruthy()
+})
+
+// ─── The shared Claude skill catalog ────────────────────────────────────────
+
+describe('shared Claude skills', () => {
+  const skill = (name: string, extra: Record<string, unknown> = {}) => ({
+    name,
+    description: `Claude ${name}`,
+    userInvocable: true,
+    ...extra
+  })
+
+  it('a typed /name args is posted as its expansion (the engine never sees the typed text)', async () => {
+    h.skillCatalog.entries = [skill('deploy')]
+    session = makeSession()
+    await startTurn('/deploy prod --fast')
+    expect(h.client.runCommand).not.toHaveBeenCalled()
+    expect(h.client.prompt.mock.calls[0][1].text).toBe(
+      `EXPANDED deploy [prod --fast] ${CWD} ${SID}`
+    )
+  })
+
+  it('an opencode command of the same name wins: runCommand, no expansion', async () => {
+    h.skillCatalog.entries = [skill('review')]
+    session = makeSession()
+    await session.run(null)
+    await flush()
+    await startTurn('/review the diff')
+    expect(h.client.runCommand).toHaveBeenCalledWith(
+      SID,
+      expect.objectContaining({ name: 'review', text: 'the diff' })
+    )
+    expect(h.client.prompt).not.toHaveBeenCalled()
+  })
+
+  it('text that is no catalog entry (unknown name, not user-invocable, plain prompt) goes out as typed', async () => {
+    h.skillCatalog.entries = [skill('hidden', { userInvocable: false })]
+    session = makeSession()
+    await startTurn('/hidden x')
+    await session.run('/nope y')
+    await session.run('plain /deploy')
+    await flush()
+    expect(h.client.prompt.mock.calls.map(([, body]) => body.text)).toEqual([
+      '/hidden x',
+      '/nope y',
+      'plain /deploy'
+    ])
+  })
+
+  it("the slash list is opencode's commands then the user-invocable catalog entries (a command wins a clash)", async () => {
+    h.skillCatalog.entries = [
+      skill('review'),
+      skill('deploy'),
+      skill('p:fmt', { description: 'Format' }),
+      skill('hidden', { userInvocable: false })
+    ]
+    session = makeSession()
+    await session.run(null)
+    await flush()
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect(list).toEqual([
+      { name: '/review', description: 'Review' },
+      { name: '/deploy', description: 'Claude deploy' },
+      { name: '/p:fmt', description: 'Format' }
+    ])
+  })
+
+  it('the first prompt publishes the slash list: nothing in production calls run(null)', async () => {
+    h.skillCatalog.entries = [skill('deploy')]
+    session = makeSession()
+    await startTurn('hello')
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect(list).toEqual([
+      { name: '/review', description: 'Review' },
+      { name: '/deploy', description: 'Claude deploy' }
+    ])
+  })
+
+  it("an id opencode's registry holds with another path is the engine's (R1): not offered, not expanded", async () => {
+    h.skillCatalog.entries = [
+      skill('won', { file: '/cat/won/SKILL.md' }),
+      skill('mine', { file: '/cat/mine/SKILL.md' })
+    ]
+    h.client.skills.mockResolvedValue([
+      { id: 'won', name: 'won', path: '/proj/.agents/skills/won/SKILL.md' },
+      { id: 'mine', name: 'mine', path: '/cat/mine/SKILL.md' }
+    ] as never)
+    session = makeSession()
+    await startTurn('/won now')
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect((list as { name: string }[]).map((c) => c.name)).toEqual(['/review', '/mine'])
+    expect(h.client.prompt.mock.calls[0][1].text).toBe('/won now')
+    await session.run('/mine x')
+    await flush()
+    expect(h.client.prompt.mock.calls.at(-1)?.[1].text).toContain('EXPANDED mine')
+  })
+
+  it('a failing skills() read leaves the whole catalog offered', async () => {
+    h.skillCatalog.entries = [skill('deploy', { file: '/cat/deploy/SKILL.md' })]
+    h.client.skills.mockRejectedValue(new Error('down'))
+    session = makeSession()
+    await startTurn('hello')
+    const list = sent.filter(([c]) => c === 'session:slash-commands').at(-1)?.[2]
+    expect((list as { name: string }[]).map((c) => c.name)).toEqual(['/review', '/deploy'])
+  })
 })
 
 // ─── Lifecycle ──────────────────────────────────────────────────────────────
@@ -916,6 +1041,22 @@ describe('queue via the inbox', () => {
     await run
     await flush()
     expect(h.client.prompt.mock.calls.map(([, body]) => body.text)).toEqual(['first', 'second'])
+  })
+
+  it('a queued opencode command leaves the queue once runCommand accepts it (no inbox id to deliver)', async () => {
+    session = makeSession()
+    await startTurn()
+    session.enqueuePrompt('/review the diff')
+    await flush()
+    expect(h.client.runCommand).toHaveBeenCalledWith(
+      SID,
+      expect.objectContaining({ name: 'review', text: 'the diff' })
+    )
+    expect(queueItems().filter((i) => i.state === 'queued')).toEqual([])
+    // As on a delivered prompt, the judge's transcript gets the user's word.
+    const history = (session as unknown as { messageHistory: Array<{ id: string; role: string }> })
+      .messageHistory
+    expect(history.some((m) => m.role === 'user' && m.id.startsWith('steer-'))).toBe(true)
   })
 
   it('teardown interrupts the running turn and takes ClaudeUI inbox items back BEFORE the lease ends', async () => {

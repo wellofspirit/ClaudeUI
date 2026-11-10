@@ -1,15 +1,14 @@
 /**
- * Layer 2: the rendered slash menu must show the MERGED command list.
+ * Layer 2: the rendered slash menu is the ACTIVE SESSION's own list.
  *
  * Renders the real InputBox → real useSlashMenu → real View → real
  * SlashCommandMenu (only useIsMobile is stubbed, to pin the desktop layout).
  *
- * Guard: InputBox used to hand the View the RAW engine list while the menu's
- * open/keyboard state came from the merged list, so filesystem-scanned entries
- * (custom commands AND skills) were keyboard-selectable but never drawn, and
- * the highlight index pointed at the wrong row whenever the lists differed.
+ * Guards: the menu rows, the filter and the keyboard index all come from one list
+ * (the session's), and a session never shows another session's commands (the
+ * list used to be app-level, so the last session to report filled every menu).
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from 'vitest'
 import { render, screen, act, fireEvent, cleanup } from '@testing-library/react'
 import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
@@ -21,6 +20,7 @@ vi.mock('../../../../hooks/useIsMobile', () => ({ useIsMobile: () => false }))
 if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = (): void => {}
 
 const ROUTE = 'slash-menu-route'
+const OTHER = 'other-route'
 
 let app: Awaited<ReturnType<typeof import('@test/helpers/boot-test-app').bootTestApp>>
 
@@ -44,19 +44,18 @@ beforeEach(async () => {
   app.bridge.ipcMain.handle('session:get-models', () => [])
   app.bridge.ipcMain.handle('session:get-engine-models', () => [])
   app.bridge.ipcMain.handle('file:list-dir', () => [])
-  // Filesystem fallback: a user-level skill, the case that was invisible.
-  app.bridge.ipcMain.handle('config:scan-custom-commands', async () => ['/delegate'])
 
   useSessionStore.setState({
     activeSessionId: null,
     sessions: {},
     recentSessionIds: [],
-    availableModels: [],
-    slashCommands: [{ name: '/model' }],
-    customCommands: []
+    availableModels: []
   })
   useSessionStore.getState().createNewSession(ROUTE, '/test/cwd')
+  useSessionStore.getState().createNewSession(OTHER, '/test/cwd')
   useSessionStore.setState({ activeSessionId: ROUTE })
+  app.emit('session:slash-commands', ROUTE, [{ name: '/model' }, { name: '/delegate' }])
+  app.emit('session:slash-commands', OTHER, [{ name: '/pi-only' }])
 })
 
 afterEach(() => {
@@ -65,19 +64,33 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('InputBox slash menu — merged list is what renders', () => {
-  it('renders both the engine command and the filesystem-scanned skill', async () => {
+describe('InputBox slash menu — the active session list is what renders', () => {
+  it('renders the session own commands, engine and catalog entries alike', async () => {
     await act(async () => {
       render(createElement(InputBox))
     })
-    expect(useSessionStore.getState().customCommands).toEqual([{ name: '/delegate' }])
 
     await typeSlash()
 
     expect(renderedRows()).toEqual(['/model', '/delegate'])
   })
 
-  it('typed prefix filters down to the filesystem-scanned skill', async () => {
+  it('does not show another session commands, and follows the active session', async () => {
+    await act(async () => {
+      render(createElement(InputBox))
+    })
+    await typeSlash()
+    expect(renderedRows()).not.toContain('/pi-only')
+
+    await act(async () => {
+      useSessionStore.setState({ activeSessionId: OTHER })
+    })
+    await typeSlash()
+
+    expect(renderedRows()).toEqual(['/pi-only'])
+  })
+
+  it('typed prefix filters the session list', async () => {
     await act(async () => {
       render(createElement(InputBox))
     })
@@ -100,8 +113,6 @@ describe('InputBox slash menu — merged list is what renders', () => {
     await typeSlash()
 
     const textarea = screen.getByTestId('InputBox.textarea')
-    // Row 1 (/delegate) — the row that did not exist in the rendered list
-    // pre-fix, so Enter inserted it while the highlight sat on /model.
     await act(async () => {
       fireEvent.keyDown(textarea, { key: 'ArrowDown' })
     })
@@ -112,17 +123,6 @@ describe('InputBox slash menu — merged list is what renders', () => {
       fireEvent.keyDown(textarea, { key: 'Enter' })
     })
     expect(useSessionStore.getState().sessions[ROUTE].draftText).toBe('/delegate ')
-  })
-
-  it('engine list wins on a name collision — no duplicate row', async () => {
-    app.bridge.ipcMain.handle('config:scan-custom-commands', async () => ['/model', '/delegate'])
-
-    await act(async () => {
-      render(createElement(InputBox))
-    })
-    await typeSlash()
-
-    expect(renderedRows()).toEqual(['/model', '/delegate'])
   })
 
   it('engine without slash-command support renders no menu at all', async () => {
@@ -145,5 +145,68 @@ describe('InputBox slash menu — merged list is what renders', () => {
     await typeSlash()
 
     expect(screen.queryByTestId('SlashCommandMenu')).toBeNull()
+  })
+})
+
+describe('InputBox slash menu — a draft with no list of its own yet', () => {
+  const DRAFT = 'draft-route'
+  let loadSkillDetails: Mock<(...args: any[]) => Promise<unknown>>
+  let loadSlashCommands: Mock<(...args: any[]) => Promise<unknown>>
+
+  async function openDraft(engineId: 'claude' | 'pi'): Promise<void> {
+    useSessionStore.getState().createNewSession(DRAFT, '/draft/cwd')
+    useSessionStore.setState((state) => ({
+      activeSessionId: DRAFT,
+      sessions: {
+        ...state.sessions,
+        [DRAFT]: { ...state.sessions[DRAFT], selectedEngineId: engineId }
+      }
+    }))
+    await act(async () => {
+      render(createElement(InputBox))
+    })
+  }
+
+  beforeEach(() => {
+    loadSkillDetails = vi.fn(async () => [
+      { name: 'deploy', description: 'ship it', userInvocable: true },
+      { name: 'hidden', description: 'x', userInvocable: false },
+      { name: 'clear', description: 'catalog clash', userInvocable: true }
+    ])
+    loadSlashCommands = vi.fn(async () => [{ name: '/clear', description: 'built-in' }])
+    app.bridge.ipcMain.handle('config:load-skill-details', loadSkillDetails)
+    app.bridge.ipcMain.handle('config:load-slash-commands', loadSlashCommands)
+  })
+
+  it('a draft Claude session shows the built-ins then the catalog (first list wins a name)', async () => {
+    await openDraft('claude')
+    await typeSlash()
+    expect(loadSkillDetails).toHaveBeenCalledTimes(1)
+    expect(loadSkillDetails.mock.calls[0].slice(1)).toEqual([null, '/draft/cwd'])
+    expect(renderedRows()).toEqual(['/clear', '/deploy'])
+  })
+
+  it('a draft pi session shows the catalog only, never the Claude built-ins', async () => {
+    await openDraft('pi')
+    await typeSlash()
+    expect(loadSlashCommands).not.toHaveBeenCalled()
+    expect(renderedRows()).toEqual(['/deploy', '/clear'])
+  })
+
+  it("the session's own list replaces the fallback", async () => {
+    await openDraft('pi')
+    await typeSlash()
+    expect(renderedRows()).toContain('/deploy')
+    await act(async () => {
+      app.emit('session:slash-commands', DRAFT, [{ name: '/own' }])
+    })
+    expect(renderedRows()).toEqual(['/own'])
+  })
+
+  it('a failing host read leaves an empty menu, not an error', async () => {
+    loadSkillDetails.mockRejectedValue(new Error('down'))
+    await openDraft('pi')
+    await typeSlash()
+    expect(renderedRows()).toEqual([])
   })
 })

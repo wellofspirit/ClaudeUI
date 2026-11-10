@@ -165,7 +165,6 @@ const EXTRA_EVENTS: PoolEvent[] = [
     }
   ],
   ['session:slash-commands', 'rid', [{ name: '/compact' }, { name: '/review' }]],
-  ['session:skills', 'rid', ['dataviz', 'patch-readme']],
   // The 4b payload additions: an event-carried user identity and an
   // emitter-timed thinking span. Both must survive a snapshot + catchup fold
   // exactly like everything else.

@@ -135,7 +135,9 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
       permissionHook: true,
       mcpDirect: true,
       modelGate: true,
-      allowlistLoaded: true
+      allowlistLoaded: true,
+      // no `skills` option in this config
+      skillsLoaded: false
     })
   })
 

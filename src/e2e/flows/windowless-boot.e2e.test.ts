@@ -107,8 +107,7 @@ const CONFIG_FIXTURE = {
     hiddenSessions: [],
     hiddenProjects: [],
     sessionEngines: {}
-  },
-  slashCommands: [{ name: 'seeded-command', description: 'from the cache' }]
+  }
 }
 
 vi.mock('../../core/services/ui-config', () => ({
@@ -116,7 +115,7 @@ vi.mock('../../core/services/ui-config', () => ({
   saveSettings: vi.fn(),
   loadSessionConfig: vi.fn(() => CONFIG_FIXTURE.sessionConfig),
   saveSessionConfig: vi.fn(),
-  loadSlashCommands: vi.fn(() => CONFIG_FIXTURE.slashCommands),
+  loadSlashCommands: vi.fn(() => []),
   saveSlashCommands: vi.fn(),
   // A no-op watcher: a real one would hold an fs handle on a temp dir for the
   // rest of the worker's life.
@@ -231,7 +230,6 @@ vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatchAvailable: (): boolean => false,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
-vi.mock('../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)
@@ -477,8 +475,8 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
 
   it('answers sync with a sync-full snapshot built from the canonical seeds', async () => {
     // A phone connecting to a freshly-booted server, with no renderer that could
-    // ever have hydrated anything: the settings, the session registry, the slash
-    // commands and the sidebar listing must all be in the snapshot because
+    // ever have hydrated anything: the settings, the session registry
+    // and the sidebar listing must all be in the snapshot because
     // `services/sync-seed.ts` read them at boot (phase 4b), not because a client did.
     await client.send({ type: 'sync', lastSeq: 0 })
     await waitFor(() => frames.some((f) => f.type === 'sync-full'))
@@ -493,15 +491,6 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     expect(full.state.recentSessionIds).toEqual(['seeded-recent'])
     expect(full.state.customTitles).toEqual({ 'seeded-recent': 'Seeded from disk' })
     expect(full.state.directories).toEqual([{ path: CWD, name: 'proj', sessions: [] }])
-
-    // The slash-command cache is seeded into CANONICAL, but `FullStateSnapshot`
-    // has no app-level field for it: `toSnapshot` fans the one list into every
-    // PER-SESSION entry, so a client that connects before any session exists
-    // cannot receive it (the "honest gap in the wire shape" already recorded in
-    // `shared/sync/state.ts`'s fromSnapshot note and sync-channels.md). Asserted
-    // against canonical, not the frame, so this pins the seed without pinning the
-    // gap — closing it is a wire change, out of scope for 4d by its non-goals.
-    expect(syncCore.getCanonicalState().slashCommands).toEqual(CONFIG_FIXTURE.slashCommands)
   })
 
   it('a WS client creates a session that spawns with no window handle', async () => {

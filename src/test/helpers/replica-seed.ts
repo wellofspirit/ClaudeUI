@@ -215,9 +215,7 @@ export function mirrorStoreIntoReplica(): void {
     sessionRefs: state.sessionRefs,
     hiddenSessions: state.hiddenSessionIds,
     hiddenProjects: state.hiddenProjectKeys,
-    directories: state.directories,
-    slashCommands: state.slashCommands,
-    sdkSkillNames: state.sdkSkillNames
+    directories: state.directories
   })
   for (const [routingId, s] of Object.entries(state.sessions)) {
     patchLocalSession(
@@ -242,6 +240,7 @@ export function mirrorStoreIntoReplica(): void {
         reasoningVariant: s.reasoningVariant,
         statusLine: s.statusLine,
         metering: s.metering,
+        slashCommands: s.slashCommands,
         sdkActive: s.sdkActive,
         selectedEngineId: s.selectedEngineId,
         selectedModel: s.selectedModel,
@@ -381,8 +380,6 @@ export const seed = {
 
   slashCommands: (routingId: string, commands: SlashCommandInfo[]) =>
     emitSync('session:slash-commands', [routingId, commands]),
-
-  skills: (routingId: string, names: string[]) => emitSync('session:skills', [routingId, names]),
 
   sessionsConfig: (config: Record<string, unknown>) =>
     emitSync('config:sessions-changed', [config]),

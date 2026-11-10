@@ -18,7 +18,6 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, default: { ...actual, homedir: () => home.dir }, homedir: () => home.dir }
 })
 
-vi.mock('../../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../../core/services/claude-settings', () => ({ saveCleanupPeriodDays: vi.fn() }))
 vi.mock('../../../core/services/ui-config', () => ({
   saveSessionConfig: vi.fn(),

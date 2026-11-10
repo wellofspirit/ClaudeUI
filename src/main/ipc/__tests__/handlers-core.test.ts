@@ -18,12 +18,18 @@ import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
 import { CommandRegistry, makeRemoteConnection } from '../../../core/ipc/command-registry'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
-vi.mock('../../../core/services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => [])
-}))
-
 vi.mock('../../../core/services/claude-settings', () => ({
   saveCleanupPeriodDays: vi.fn()
+}))
+
+const { resolveCatalog } = vi.hoisted(() => ({
+  resolveCatalog: vi.fn((_cwd: string): { entries: unknown[]; skipped: unknown[] } => ({
+    entries: [],
+    skipped: []
+  }))
+}))
+vi.mock('../../../core/services/claude-skill-catalog', () => ({
+  resolveClaudeSkillCatalog: resolveCatalog
 }))
 
 const { setWorkspaceTrust } = vi.hoisted(() => ({ setWorkspaceTrust: vi.fn() }))
@@ -105,6 +111,7 @@ import {
   judgeModelSupport,
   judgeRouteResting,
   sendPrompt,
+  loadSkillDetails,
   allowPeerMessages,
   setWorkspaceTrustAndNotify,
   TRUST_REFRESH_DELAY_MS
@@ -1879,5 +1886,57 @@ describe('setWorkspaceTrustAndNotify — the claude:set-workspace-trust body', (
     )
     vi.advanceTimersByTime(TRUST_REFRESH_DELAY_MS * 2)
     expect(s.notifySettingsChanged).not.toHaveBeenCalled()
+  })
+})
+
+describe('loadSkillDetails', () => {
+  const SKILL = { name: 'mine', description: 'd', source: 'user', path: '/p', content: 'c' }
+
+  beforeEach(() => resolveCatalog.mockClear())
+
+  it('asks the addressed session, with that session cwd', async () => {
+    const discoverSkills = vi.fn(async () => [SKILL])
+    const manager = makeManager(makeSessionStub({ cwd: '/sess/cwd', discoverSkills }))
+
+    await expect(loadSkillDetails(manager, 'route-1', '/other')).resolves.toEqual([SKILL])
+
+    expect(manager.get).toHaveBeenCalledWith('route-1')
+    expect(discoverSkills).toHaveBeenCalledWith('/sess/cwd')
+    expect(resolveCatalog).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the catalog for the cwd when no live session answers', async () => {
+    resolveCatalog.mockReturnValue({
+      entries: [
+        {
+          name: 'proj',
+          description: 'p',
+          source: 'project',
+          file: '/repo/.claude/skills/proj/SKILL.md',
+          body: 'body',
+          kind: 'skill',
+          userInvocable: true,
+          modelInvocable: true,
+          claudeOnly: ['context']
+        }
+      ],
+      skipped: []
+    })
+    const manager = { get: vi.fn(() => undefined) } as any
+
+    const result = await loadSkillDetails(manager, 'gone', '/repo')
+
+    expect(resolveCatalog).toHaveBeenCalledWith('/repo')
+    expect(result).toHaveLength(1)
+    expect(result[0]).toMatchObject({ name: 'proj', source: 'project', content: 'body' })
+    // The fallback is Claude's own view: nothing to flag as unapplied.
+    expect(result[0].claudeOnly).toBeUndefined()
+  })
+
+  it('uses the catalog when no routing id is given', async () => {
+    const manager = { get: vi.fn() } as any
+    await loadSkillDetails(manager, null, '/repo')
+    expect(manager.get).not.toHaveBeenCalled()
+    expect(resolveCatalog).toHaveBeenCalledWith('/repo')
   })
 })

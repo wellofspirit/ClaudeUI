@@ -28,7 +28,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   })
 
   it('is version 25 (the extension throws without bridge credentials)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('26')
+    expect(PI_BRIDGE_VERSION).toBe('27')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -71,13 +71,9 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).not.toMatch(/pi\.on\('project_trust'/)
   })
 
-  it('registers a resources_discover handler returning skillPaths (M3 shared skills)', () => {
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/resources_discover/)
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('skillPaths')
-  })
-
-  it('references the skill-dirs env var', () => {
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('CLAUDEUI_PI_SKILL_DIRS')
+  it('no longer registers resources_discover or reads the legacy skill-dirs env var', () => {
+    expect(PI_BRIDGE_EXTENSION_SOURCE).not.toContain('resources_discover')
+    expect(PI_BRIDGE_EXTENSION_SOURCE).not.toContain('CLAUDEUI_PI_SKILL_DIRS')
   })
 
   it('checks the bridge credentials right after the Electron-as-Node cleanup and before anything registers', () => {
@@ -92,12 +88,6 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     for (const registration of ['pi.on(', 'pi.registerTool(', 'pi.registerCommand(']) {
       expect(src.indexOf(registration), registration).toBeGreaterThan(throwIdx)
     }
-  })
-
-  it('splits skill dirs on a platform-appropriate delimiter without importing node:path', () => {
-    // Node's path.delimiter equivalent, spelled out inline (see the no-import
-    // constraint) rather than `require('node:path').delimiter`.
-    expect(PI_BRIDGE_EXTENSION_SOURCE).toMatch(/process\.platform === 'win32' \? ';' : ':'/)
   })
 
   it("is syntactically valid JavaScript (bonus tripwire beyond the spec's minimum set)", () => {
@@ -131,11 +121,13 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("bridgeUrl + '/tool-call'")
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("baseUrl + '/wait'")
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain('parsed.pending !== true')
-    // Exactly two fetch() call sites: the helper's own (every long-polled
-    // exchange), and the one-shot, time-bounded MCP catalog load (ADR-096),
-    // which is not an exchange — nothing is held open for a decision.
-    expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(2)
+    // Exactly three fetch() call sites: the helper's own (every long-polled
+    // exchange), and the one-shot, time-bounded MCP catalog (ADR-096) and
+    // Claude skill catalog loads, which are not exchanges — nothing is held
+    // open for a decision.
+    expect(PI_BRIDGE_EXTENSION_SOURCE.match(/await fetch\(/g)).toHaveLength(3)
     expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("fetch(bridgeUrl + '/mcp-servers'")
+    expect(PI_BRIDGE_EXTENSION_SOURCE).toContain("fetch(bridgeUrl + '/skills'")
   })
 
   it('references the hosted-tools and dispatch-enabled env vars', () => {
@@ -261,7 +253,7 @@ function runExtension(initialActiveTools: string[] = ['read', 'bash', 'edit', 'w
 const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_BRIDGE_URL',
   'CLAUDEUI_PI_BRIDGE_TOKEN',
-  'CLAUDEUI_PI_SKILL_DIRS',
+  'CLAUDEUI_PI_SKILLS',
   'CLAUDEUI_PI_HOSTED_TOOLS',
   'CLAUDEUI_PI_DISPATCH_ENABLED',
   'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
@@ -1891,6 +1883,151 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — shared MCP catalog (bridge v13, ADR-096
       expect(notes).toEqual([
         'MCP servers from ClaudeUI could not be registered:\n  the server list could not be loaded (TypeError)'
       ])
+    })
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — Claude skill catalog (bridge v27)', () => {
+  const realFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  type Handler = (...args: unknown[]) => unknown
+  function fakePi(): { pi: FakePi; handlers: Map<string, Handler[]> } {
+    const handlers = new Map<string, Handler[]>()
+    const pi = {
+      on: (event: string, handler: Handler) =>
+        handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+      registerTool: () => {},
+      registerCommand: () => {},
+      getActiveTools: () => [],
+      setActiveTools: () => {},
+      sendMessage: () => {}
+    }
+    return { pi, handlers }
+  }
+
+  const DESCRIPTORS = [
+    {
+      name: 'deploy',
+      description: 'ship it',
+      filePath: '/s/deploy/SKILL.md',
+      baseDir: '/s/deploy'
+    },
+    { name: 'dup', description: 'ours', filePath: '/s/dup/SKILL.md', baseDir: '/s/dup' }
+  ]
+
+  function serve(body: unknown, calls: Array<{ url: string; init: RequestInit }> = []): void {
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return { ok: true, status: 200, json: async () => body } as Response
+    }) as typeof fetch
+  }
+
+  function notifies(handlers: Map<string, Handler[]>): string[] {
+    const notes: string[] = []
+    const ctx = { ui: { notify: (message: string) => notes.push(message) } }
+    for (const h of handlers.get('session_start') ?? []) h({ type: 'session_start' }, ctx)
+    return notes
+  }
+
+  it('without CLAUDEUI_PI_SKILLS the handler is never registered and nothing is fetched', () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    serve({ skills: DESCRIPTORS }, calls)
+    withEnv({ ...BRIDGE_CREDS }, () => {
+      const { pi, handlers } = fakePi()
+      expect(loadExtensionFactory()(pi)).toBeUndefined()
+      expect(handlers.has('before_agent_start')).toBe(false)
+      expect(calls).toEqual([])
+    })
+  })
+
+  it('fetches /skills with the bearer token while loading and appends the descriptors; a name pi already lists wins', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    serve({ skills: DESCRIPTORS }, calls)
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SKILLS: '1' }, async () => {
+      const { pi, handlers } = fakePi()
+      await loadExtensionFactory()(pi)
+      expect(calls).toHaveLength(1)
+      expect(calls[0].url).toBe('http://127.0.0.1:9/skills')
+      expect((calls[0].init.headers as Record<string, string>).authorization).toBe('Bearer tok')
+      const native = { name: 'dup', description: 'pi own', filePath: '/pi/dup.md', baseDir: '/pi' }
+      const event = { systemPromptOptions: { skills: [native] } }
+      const [handler] = handlers.get('before_agent_start') ?? []
+      handler(event, {})
+      // Running again (the next turn re-enters with fresh options) adds nothing twice.
+      handler(event, {})
+      expect(event.systemPromptOptions.skills).toEqual([
+        native,
+        {
+          name: 'deploy',
+          description: 'ship it',
+          filePath: '/s/deploy/SKILL.md',
+          baseDir: '/s/deploy',
+          sourceInfo: {
+            path: '/s/deploy/SKILL.md',
+            source: 'claudeui:claude-skills',
+            scope: 'user',
+            origin: 'top-level',
+            baseDir: '/s/deploy'
+          },
+          disableModelInvocation: false
+        }
+      ])
+    })
+  })
+
+  it('an empty catalog registers nothing', async () => {
+    serve({ skills: [] })
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SKILLS: '1' }, async () => {
+      const { pi, handlers } = fakePi()
+      await loadExtensionFactory()(pi)
+      expect(handlers.has('before_agent_start')).toBe(false)
+    })
+  })
+
+  it('a failed fetch never throws out of the factory; it becomes one notify without the URL or token', async () => {
+    globalThis.fetch = (async () => ({ ok: false, status: 500 }) as Response) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SKILLS: '1' }, async () => {
+      const { pi, handlers } = fakePi()
+      await expect(loadExtensionFactory()(pi)).resolves.toBeUndefined()
+      expect(handlers.has('tool_call')).toBe(true)
+      expect(handlers.has('before_agent_start')).toBe(false)
+      expect(notifies(handlers)).toEqual([
+        'Claude skills from ClaudeUI could not be loaded (HTTP 500)'
+      ])
+    })
+    globalThis.fetch = (async () => {
+      throw new TypeError('fetch failed http://127.0.0.1:9 tok')
+    }) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SKILLS: '1' }, async () => {
+      const { pi, handlers } = fakePi()
+      await loadExtensionFactory()(pi)
+      expect(notifies(handlers)).toEqual([
+        'Claude skills from ClaudeUI could not be loaded (TypeError)'
+      ])
+    })
+  })
+
+  it('MCP and skills load together in one awaited promise', async () => {
+    const urls: string[] = []
+    globalThis.fetch = (async (url: string) => {
+      urls.push(url)
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (url.endsWith('/skills') ? { skills: DESCRIPTORS } : { servers: {} })
+      } as Response
+    }) as typeof fetch
+    await withEnv({ ...BRIDGE_CREDS, CLAUDEUI_PI_SKILLS: '1', CLAUDEUI_PI_MCP: '1' }, async () => {
+      const { pi, handlers } = fakePi()
+      ;(pi as unknown as { registerMcpServer: () => void }).registerMcpServer = () => {}
+      const loading = loadExtensionFactory()(pi) as unknown
+      expect(loading).toBeInstanceOf(Promise)
+      await loading
+      expect(urls.sort()).toEqual(['http://127.0.0.1:9/mcp-servers', 'http://127.0.0.1:9/skills'])
+      expect(handlers.has('before_agent_start')).toBe(true)
     })
   })
 })

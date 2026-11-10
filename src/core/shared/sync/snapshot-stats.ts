@@ -29,7 +29,7 @@ export interface SessionBytes {
   messages: number
   subagentMessages: number
   itemStreams: number
-  /** Everything else on the entry — including its copy of `slashCommands`/`sdkSkillNames`. */
+  /** Everything else on the entry — including its `slashCommands`. */
   rest: number
   /** Top-level messages in the entry (a count, not content). */
   messageCount: number
@@ -60,9 +60,9 @@ export interface SnapshotStats {
   /** Σ over sessions of `messages` / `subagentMessages` / `itemStreams` / `rest`. */
   sessionBytes: Pick<SessionBytes, 'messages' | 'subagentMessages' | 'itemStreams' | 'rest'>
   /**
-   * `slashCommands` + `sdkSkillNames` are repeated in EVERY session entry
-   * (`toSnapshot`), so their cost scales with the session count. These are the
-   * numbers for deciding whether to dedupe them.
+   * Each session entry carries its own `slashCommands` (engine list plus the shared
+   * Claude skill catalog, so entries are similar but not identical): `perEntry` is the
+   * first entry's size, `total` the sum over all entries.
    */
   slashRepeat: { perEntry: number; entries: number; total: number }
   /** The 5 largest session entries, largest first. */
@@ -118,7 +118,8 @@ export function describeSnapshot(snapshot: FullStateSnapshot): SnapshotStats {
   }
 
   const first = entries[0]?.[1]
-  const perEntry = first ? size(first.slashCommands) + size(first.sdkSkillNames) : 0
+  const perEntry = first ? size(first.slashCommands) : 0
+  const slashTotal = entries.reduce((n, [, entry]) => n + size(entry.slashCommands), 0)
 
   let live = 0
   let unseeded = 0
@@ -138,7 +139,7 @@ export function describeSnapshot(snapshot: FullStateSnapshot): SnapshotStats {
     },
     sessionCounts: { total: entries.length, live, unseeded },
     sessionBytes,
-    slashRepeat: { perEntry, entries: entries.length, total: perEntry * entries.length },
+    slashRepeat: { perEntry, entries: entries.length, total: slashTotal },
     top: [...perSession].sort((a, b) => b.bytes - a.bytes).slice(0, TOP_N)
   }
 }

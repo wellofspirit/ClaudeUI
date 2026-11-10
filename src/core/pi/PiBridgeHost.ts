@@ -28,9 +28,11 @@
  *    (PiSession.handleHostedTool); omitting it just fails closed on every
  *    /hosted-tool request (see runHostedTool).
  *
- * Plus ONE plain route that is not an exchange: `POST /mcp-servers` answers
+ * Plus TWO plain routes that are not exchanges: `POST /mcp-servers` answers
  * the spawn-time MCP catalog snapshot the extension registers while pi loads
- * (ADR-096; see {@link PiBridgeHostOptions.mcpServers} for the secrets note).
+ * (ADR-096; see {@link PiBridgeHostOptions.mcpServers} for the secrets note),
+ * and `POST /skills` the spawn-time Claude skill catalog snapshot it appends to
+ * pi's skill listing at `before_agent_start` ({@link PiBridgeHostOptions.skills}).
  *
  * ## Long-poll protocol (2026-09-09)
  *
@@ -77,6 +79,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../services/logger'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from './pi-bridge-source'
+import type { PiSkillDescriptor } from './pi-skill-bridge'
 
 /** Body size cap for POST /tool-call — generous for any realistic tool input, small enough to bound abuse. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -171,6 +174,13 @@ export interface PiBridgeHostOptions {
    * into the model's context) or into a file.
    */
   mcpServers?: Record<string, unknown>
+  /**
+   * The Claude skills `POST /skills` hands the bridge extension to add to pi's
+   * system-prompt skill listing — the catalog's model-invocable entries as pi
+   * `Skill`-shaped descriptors (`buildPiSkillDescriptors`), a snapshot taken at
+   * spawn. No secrets: a path and a description. Absent = an empty list.
+   */
+  skills?: PiSkillDescriptor[]
 }
 
 /**
@@ -192,6 +202,8 @@ const DEFAULT_ABANDON_MS = 30_000
 
 /** The one non-exchange route: the MCP servers the extension registers at load (ADR-096). */
 const MCP_SERVERS_ROUTE = '/mcp-servers'
+/** The other: the Claude skill descriptors the extension adds to pi's skill listing. */
+const SKILLS_ROUTE = '/skills'
 
 /** `req.url` → the exchange it addresses. `/wait` re-parks; the bare route starts. */
 const ROUTES: Record<string, { route: PiBridgeRoute; wait: boolean } | undefined> = {
@@ -272,6 +284,7 @@ export class PiBridgeHost {
   private readonly abandonMs: number
   private readonly onAbandoned?: (info: PiBridgeAbandoned) => void
   private readonly mcpServers: Record<string, unknown>
+  private readonly skills: PiSkillDescriptor[]
   /**
    * One entry per exchange that has been STARTED and whose result has not been
    * collected yet, keyed `${route}:${toolCallId}`.
@@ -300,6 +313,7 @@ export class PiBridgeHost {
     this.abandonMs = options?.abandonMs ?? DEFAULT_ABANDON_MS
     this.onAbandoned = options?.onAbandoned
     this.mcpServers = options?.mcpServers ?? {}
+    this.skills = options?.skills ?? []
   }
 
   /** Bind 127.0.0.1:0 (OS-assigned ephemeral port) and mint a fresh bearer token. */
@@ -351,9 +365,9 @@ export class PiBridgeHost {
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
-    const isMcpServers = req.url === MCP_SERVERS_ROUTE
+    const isSnapshot = req.url === MCP_SERVERS_ROUTE || req.url === SKILLS_ROUTE
     const target = ROUTES[req.url ?? '']
-    if (req.method !== 'POST' || (!target && !isMcpServers)) {
+    if (req.method !== 'POST' || (!target && !isSnapshot)) {
       res.writeHead(404).end()
       return
     }
@@ -393,7 +407,10 @@ export class PiBridgeHost {
       if (tooLarge) return
       // No body to read: the answer is the spawn-time snapshot, whole.
       if (!target) {
-        this.endJson(res, { servers: this.mcpServers })
+        this.endJson(
+          res,
+          req.url === SKILLS_ROUTE ? { skills: this.skills } : { servers: this.mcpServers }
+        )
         return
       }
       this.dispatchBody(target.route, target.wait, Buffer.concat(chunks).toString('utf-8'), res)

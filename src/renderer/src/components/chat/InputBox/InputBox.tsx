@@ -49,7 +49,7 @@ import {
   spawnAnnouncement
 } from '../../../lib/session-effort'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
-import { mergeSlashCommands } from '../SlashCommandMenu'
+import { useFallbackSlashCommands } from '../../../hooks/useFallbackSlashCommands'
 import { useFileMention } from '../../../hooks/useFileMention'
 import { useIsMobile } from '../../../hooks/useIsMobile'
 import { InputBoxView } from './View'
@@ -59,7 +59,7 @@ import { useHarnessReadiness } from '../../SettingsDialog/harness-store'
 import { HARNESS_LABEL, harnessCanRun } from '../../SettingsDialog/harness-view'
 import { engineMeta } from '../../../../../shared/engine-meta'
 import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
-import type { EngineId, PermissionMode } from '../../../../../shared/types'
+import type { EngineId, PermissionMode, SlashCommandInfo } from '../../../../../shared/types'
 import { HARNESS_IDS } from '../../../../../shared/harness-types'
 import {
   claudeAliasForModel,
@@ -74,6 +74,7 @@ import {
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
 const MAX_IMAGE_DIMENSION = 2048
+const NO_SLASH_COMMANDS: SlashCommandInfo[] = []
 
 function processImageFile(file: File): Promise<{ mediaType: string; base64Data: string }> {
   return new Promise((resolve, reject) => {
@@ -187,30 +188,27 @@ export function InputBox(): React.JSX.Element {
   const removeDraftAttachment = useSessionStore((s) => s.removeDraftAttachment)
   const setDraftAttachments = useSessionStore((s) => s.setDraftAttachments)
 
-  // Slash command autocomplete — merge SDK commands with filesystem-scanned custom commands
-  const slashCommands = useSessionStore((s) => s.slashCommands)
-  const customCommands = useSessionStore((s) => s.customCommands)
-  const setCustomCommands = useSessionStore((s) => s.setCustomCommands)
-  // Slash-command menu is gated on capabilities.slashCommands: when the engine
-  // doesn't support slash commands, the menu offers nothing (engine + filesystem
-  // commands alike) and `/` types as literal text. Claude: true → unchanged.
-  const mergedSlashCommands = useMemo(
-    () => (capabilities.slashCommands ? mergeSlashCommands(slashCommands, customCommands) : []),
-    [capabilities.slashCommands, slashCommands, customCommands]
+  // Slash command autocomplete: this session's own list (its engine's commands plus the
+  // shared Claude skill catalog, merged by the session in main). Gated on
+  // capabilities.slashCommands: when the engine doesn't support slash commands, the
+  // menu offers nothing and `/` types as literal text.
+  const sessionSlashCommands = useActiveSession((s) => s.slashCommands)
+  const draftEngineId = useActiveSession((s) => s.selectedEngineId)
+  // A draft has no list until its first message: the host's built-ins and catalog fill the gap.
+  const fallbackSlashCommands = useFallbackSlashCommands(
+    cwd,
+    draftEngineId,
+    sessionSlashCommands.length === 0
   )
-
-  // Eagerly scan custom commands when cwd changes
-  useEffect(() => {
-    if (!cwd) return
-    window.api
-      .scanCustomCommands(cwd)
-      .then((names) => {
-        setCustomCommands(names.map((name) => ({ name })))
-      })
-      .catch(() => {
-        /* scanner failed — keep existing commands */
-      })
-  }, [cwd, setCustomCommands])
+  const mergedSlashCommands = useMemo(
+    () =>
+      capabilities.slashCommands
+        ? sessionSlashCommands.length > 0
+          ? sessionSlashCommands
+          : fallbackSlashCommands
+        : NO_SLASH_COMMANDS,
+    [capabilities.slashCommands, sessionSlashCommands, fallbackSlashCommands]
+  )
 
   const {
     slashMenuOpen,

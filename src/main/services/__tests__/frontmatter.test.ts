@@ -2,11 +2,7 @@
  * @vitest-environment node
  */
 import { describe, it, expect } from 'vitest'
-import { parseFrontmatter, extractFirstLine } from '../../../core/services/skill-scanner'
-
-// parseFrontmatter / extractFirstLine used to be replicated verbatim in this
-// file, so the tests never actually exercised skill-scanner.ts. They are now
-// imported (marked @internal there) — the assertions below cover the real code.
+import { parseFrontmatter } from '../../../core/services/frontmatter'
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -173,50 +169,5 @@ Body`
 
     const { frontmatter } = parseFrontmatter(raw)
     expect(frontmatter.description).toBe('Start\ncontinued')
-  })
-})
-
-describe('extractFirstLine', () => {
-  it('returns first non-empty, non-heading line', () => {
-    const body = `# Heading
-
-This is the first real line.
-And another.`
-
-    expect(extractFirstLine(body)).toBe('This is the first real line.')
-  })
-
-  it('skips multiple headings', () => {
-    const body = `# Title
-## Subtitle
-First content line`
-
-    expect(extractFirstLine(body)).toBe('First content line')
-  })
-
-  it('returns empty string for heading-only content', () => {
-    expect(extractFirstLine('# Only heading')).toBe('')
-  })
-
-  it('returns empty string for empty body', () => {
-    expect(extractFirstLine('')).toBe('')
-  })
-
-  it('truncates to 200 characters', () => {
-    const longLine = 'x'.repeat(300)
-    expect(extractFirstLine(longLine)).toHaveLength(200)
-  })
-
-  it('skips empty lines', () => {
-    const body = `
-
-
-First real line`
-
-    expect(extractFirstLine(body)).toBe('First real line')
-  })
-
-  it('returns first line immediately if no headings', () => {
-    expect(extractFirstLine('Direct content')).toBe('Direct content')
   })
 })

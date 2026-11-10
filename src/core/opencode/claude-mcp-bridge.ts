@@ -33,7 +33,8 @@ import { logger } from '../services/logger'
 import { PERSISTED_SESSIONS_DIR } from '../services/persisted-sessions-dir'
 import * as path from 'node:path'
 
-function isHousekeepingDir(cwd: string): boolean {
+/** ClaudeUI's own housekeeping directory: it gets no bridged MCP servers and no skill catalog. */
+export function isHousekeepingDir(cwd: string): boolean {
   const norm = (p: string): string => {
     const r = path.resolve(p)
     return process.platform === 'win32' ? r.toLowerCase() : r

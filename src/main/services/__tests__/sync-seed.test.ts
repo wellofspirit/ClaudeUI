@@ -28,7 +28,6 @@ const {
   claudeSessionsWithNoRecord,
   loadSettings,
   loadSessionConfig,
-  loadSlashCommands,
   loadClaudePermissions,
   listDirectories,
   listOpencodeSessionsGlobal,
@@ -38,7 +37,6 @@ const {
   claudeSessionsWithNoRecord: vi.fn((_ids: readonly string[]): string[] => []),
   loadSettings: vi.fn(),
   loadSessionConfig: vi.fn(),
-  loadSlashCommands: vi.fn(),
   loadClaudePermissions: vi.fn(),
   listDirectories: vi.fn(),
   listOpencodeSessionsGlobal: vi.fn(),
@@ -47,8 +45,7 @@ const {
 
 vi.mock('../../../core/services/ui-config', () => ({
   loadSettings,
-  loadSessionConfig,
-  loadSlashCommands
+  loadSessionConfig
 }))
 vi.mock('../../../core/services/session-meta-prune', () => ({
   pruneOrphanClaudeSessionMeta,
@@ -139,7 +136,6 @@ beforeEach(() => {
     hiddenProjects: ['/old'],
     sessionEngines: { 'rid-b': { engineId: 'pi' } }
   })
-  loadSlashCommands.mockReturnValue([{ name: '/compact' }])
   loadClaudePermissions.mockReturnValue({ disableAutoMode: 'disable' })
   listDirectories.mockResolvedValue(DIRS)
 })
@@ -264,15 +260,6 @@ describe('seedCanonicalAppState', () => {
     expect(dispatchLedger.get(orphan.id)?.state).toBe('stopped')
     expect(dispatchLedger.get(kept.id)?.state).toBe('idle')
     claudeSessionsWithNoRecord.mockImplementation(() => [])
-  })
-
-  it('leaves sdkSkillNames alone — the renderer does not seed it either', async () => {
-    // It only ever arrives on `session:skills`, at engine spawn. Seeding it from
-    // a scanner would make canonical DISAGREE with the replica it now sources.
-    await seedCanonicalAppState()
-    expect(syncCore.getCanonicalState().sdkSkillNames).toEqual([])
-    // slashCommands, by contrast, IS a cached list the renderer loads at boot.
-    expect(syncCore.getCanonicalState().slashCommands).toEqual([{ name: '/compact' }])
   })
 
   it('prunes orphan registry rows BEFORE it reads the session config (GUARD)', async () => {

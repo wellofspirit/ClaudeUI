@@ -20,6 +20,7 @@
  * Imports no session class and not the dispatcher (require-cycle rule): only
  * the pi transport leaves, the automode trajectory leaf and the logger.
  */
+import type { PiSkillDescriptor } from './pi-skill-bridge'
 import { v4 as uuidv4 } from 'uuid'
 import type { ChatMessage } from '../../shared/types'
 import { engineMeta } from '../../shared/engine-meta'
@@ -60,6 +61,8 @@ export interface PiChildSpawnOpts {
   onAbandoned?: (info: PiBridgeAbandoned) => void
   /** The MCP servers the child's bridge host serves at `/mcp-servers` (ADR-096; subagents: the parent's catalog). */
   mcpServers?: Record<string, unknown>
+  /** The Claude skills the child's bridge host serves at `/skills` (subagents: the parent's catalog snapshot; dispatch targets: the dispatch cwd's). */
+  skills?: PiSkillDescriptor[]
   /** Flags after `--mode rpc -e <bridge>` (dispatch: `['--no-session']`). */
   args?: string[]
   /**
@@ -95,7 +98,9 @@ export function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.
     // The session tools are for a session's root agent only.
     CLAUDEUI_PI_SESSION_TOOLS: '',
     // No bridged MCP catalog unless the consumer's env asks for it (ADR-096).
-    CLAUDEUI_PI_MCP: ''
+    CLAUDEUI_PI_MCP: '',
+    // Likewise no Claude skill catalog.
+    CLAUDEUI_PI_SKILLS: ''
   }
 }
 
@@ -109,7 +114,8 @@ export const defaultSpawnPiChild: SpawnPiChildFn = async (opts) => {
   if (!launch) throw new Error(harnessUnavailableMessage('pi'))
   const bridgeHost = new PiBridgeHost(opts.gateHandler, opts.hostedToolHandler, {
     ...(opts.onAbandoned ? { onAbandoned: opts.onAbandoned } : {}),
-    ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {})
+    ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+    ...(opts.skills ? { skills: opts.skills } : {})
   })
   let bridge: { url: string; token: string }
   try {

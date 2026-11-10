@@ -11,7 +11,9 @@
  * - `plugins` — the `claudeui-xeng` DIRECTORY plugin (caller identity, the
  *   readiness RPC, the subagent model gate; `resources/opencode/claudeui-xeng/`),
  *   as a `{package, options}` entry whose options carry ClaudeUI's model
- *   allowlist (`options.modelAllowlist`, ADR-111). opencode hands a plugin its
+ *   allowlist (`options.modelAllowlist`, ADR-111) and the hosted `/skills` endpoint
+ *   (`options.skills`, the Claude skill catalog; not part of `configIdentity`: the
+ *   plugin fetches it per location, the endpoint is per server). opencode hands a plugin its
  *   entry's options in `setup`, so the gate is stateless: a location evicted
  *   after an idle hour and set up again reads them again.
  * - `agents.<name>.permissions` — the mode-less agent overlay (ADR-097 §3,
@@ -143,7 +145,14 @@ export function buildOpencodeConfig(
           plugins: [
             {
               package: input.pluginDir,
-              options: { modelAllowlist: canonicalAllowlist(input.modelAllowlist) }
+              options: {
+                modelAllowlist: canonicalAllowlist(input.modelAllowlist),
+                // The shared Claude skill catalog, fetched per location by the plugin.
+                skills: {
+                  url: `http://127.0.0.1:${hosted.port}/skills`,
+                  token: hosted.token
+                }
+              }
             }
           ]
         }

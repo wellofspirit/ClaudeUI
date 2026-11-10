@@ -287,7 +287,6 @@ export interface SyncEventMap {
   // Catalogs + diagnostics
   // -------------------------------------------------------------------------
   'session:slash-commands': (routingId: string, commands: SlashCommandInfo[]) => void
-  'session:skills': (routingId: string, names: string[]) => void
   'session:mcp-servers': (
     routingId: string,
     servers: Array<{ name: string; status: string }>

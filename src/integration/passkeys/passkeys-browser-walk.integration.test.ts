@@ -261,7 +261,6 @@ vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatchAvailable: (): boolean => false,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
-vi.mock('../../core/services/skill-scanner', () => ({ scanSkills: vi.fn(async () => []) }))
 vi.mock('../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../../core/services/usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
 // Ships a CloudFlare download path; RemoteServer constructs one unconditionally.

@@ -6,7 +6,7 @@
  * opencode process, so it is loaded here the way opencode loads it — as a
  * plain ES module — against a fake plugin context.
  */
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -34,6 +34,8 @@ interface Extra {
   options?: unknown
   session?: unknown
   agent?: unknown
+  location?: unknown
+  skill?: unknown
 }
 
 async function load(
@@ -48,6 +50,7 @@ async function load(
   const hooks: Record<string, Hook> = {}
   let rpc: Awaited<ReturnType<typeof load>>['rpc'] | undefined
   await plugin.setup({
+    skill: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
     ...extra,
     tool: {
       hook: async (name: string, cb: Hook) => {
@@ -145,7 +148,7 @@ describe('claudeui-xeng plugin (opencode 2.x directory plugin)', () => {
       'claudeui_create_mockup'
     ])
     expect(rpc.definition.id).toBe('claudeui-xeng')
-    expect(Object.keys(rpc.definition.methods)).toEqual(['tools', 'guard'])
+    expect(Object.keys(rpc.definition.methods)).toEqual(['tools', 'guard', 'reloadSkills'])
     expect(rpc.definition.events).toEqual({})
     await expect(rpc.handlers.tools({})).resolves.toEqual({
       tools: ['claudeui_create_mockup', 'claudeui_dispatch_agent', 'claudeui_show_mockup']
@@ -469,5 +472,145 @@ describe('claudeui-xeng plugin: opencode_worktree_remove is refused', () => {
       await hooks['execute.before'](event)
       expect(event.input, tool).toBe(input)
     }
+  })
+})
+
+// ── The shared Claude skill catalog (header §7) ─────────────────────────────
+
+describe('claudeui-xeng plugin: the shared Claude skill catalog', () => {
+  const ENDPOINT = { url: 'http://127.0.0.1:4242/skills', token: 'tok' }
+  const OPTIONS = { modelAllowlist: {}, skills: ENDPOINT }
+  const LOCATION = { directory: '/work/proj' }
+  type Editor = { get: (id: string) => unknown; add: (skill: unknown) => void }
+  const entry = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    name: id,
+    description: `desc ${id}`,
+    autoinvoke: true,
+    path: `/skills/${id}/SKILL.md`,
+    content: `body ${id}`,
+    ...extra
+  })
+
+  /** A fetch answering `skills` (or failing) and recording each call. */
+  function stubFetch(answer: () => unknown): { calls: { url: string; auth: string }[] } {
+    const calls: { url: string; auth: string }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: { headers: Record<string, string> }) => {
+        calls.push({ url, auth: init.headers.authorization })
+        const body = answer()
+        if (body instanceof Error) throw body
+        return { ok: true, status: 200, json: async () => body }
+      })
+    )
+    return { calls }
+  }
+
+  /** Load with a skill domain that keeps the transform, so a test can rebuild the registry. */
+  async function withSkills(options: unknown = OPTIONS) {
+    let transform: ((editor: Editor) => void) | undefined
+    const reload = vi.fn(async () => {})
+    const loaded = await load([], {
+      options,
+      location: LOCATION,
+      skill: {
+        transform: async (cb: (editor: Editor) => void) => {
+          transform = cb
+          return { dispose: async () => {} }
+        },
+        reload
+      }
+    })
+    /** The registry a rebuild yields: `existing` ids first (built-ins / earlier plugins), then ours. */
+    const rebuild = (existing: Record<string, unknown> = {}): Record<string, unknown> => {
+      const map = new Map(Object.entries(existing))
+      transform?.({
+        get: (id) => map.get(id),
+        add: (skill) => map.set((skill as { id: string }).id, skill)
+      })
+      return Object.fromEntries(map)
+    }
+    return { ...loaded, rebuild, reload }
+  }
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('fetches the location catalog with the bearer and adds every entry', async () => {
+    const { calls } = stubFetch(() => ({ skills: [entry('a'), entry('p:s')] }))
+    const { rebuild, rpc } = await withSkills()
+    expect(calls).toEqual([
+      { url: `${ENDPOINT.url}?directory=${encodeURIComponent('/work/proj')}`, auth: 'Bearer tok' }
+    ])
+    expect(Object.keys(rebuild())).toEqual(['a', 'p:s'])
+    await expect(rpc.handlers.guard({})).resolves.toMatchObject({ skillsLoaded: true })
+  })
+
+  it('an id the registry already has keeps the existing skill (the engine wins)', async () => {
+    stubFetch(() => ({ skills: [entry('a'), entry('b')] }))
+    const { rebuild } = await withSkills()
+    const own = { id: 'a', name: 'a', path: '/.agents/skills/a/SKILL.md', content: 'engine' }
+    const registry = rebuild({ a: own })
+    expect(registry.a).toBe(own)
+    expect(registry.b).toMatchObject({ content: 'body b' })
+  })
+
+  it('drops malformed entries', async () => {
+    stubFetch(() => ({ skills: [entry('ok'), { id: 'no-path', name: 'x', content: '' }, null] }))
+    const { rebuild } = await withSkills()
+    expect(Object.keys(rebuild())).toEqual(['ok'])
+  })
+
+  it('a failed fetch adds nothing, sets skillsLoaded false and never throws out of setup', async () => {
+    stubFetch(() => new Error('connection refused'))
+    const { rebuild, rpc } = await withSkills()
+    expect(rebuild()).toEqual({})
+    await expect(rpc.handlers.guard({})).resolves.toMatchObject({ skillsLoaded: false })
+  })
+
+  it('a throwing skill.transform still registers the guard, with skillsLoaded false', async () => {
+    stubFetch(() => ({ skills: [entry('a')] }))
+    const { rpc } = await load([], {
+      options: OPTIONS,
+      location: LOCATION,
+      skill: {
+        transform: async () => {
+          throw new Error('api moved')
+        },
+        reload: async () => {}
+      }
+    })
+    await expect(rpc.handlers.guard({})).resolves.toMatchObject({ skillsLoaded: false })
+  })
+
+  it('no endpoint option: nothing fetched, skillsLoaded false', async () => {
+    const { calls } = stubFetch(() => ({ skills: [entry('a')] }))
+    const { rebuild, rpc } = await withSkills({ modelAllowlist: {} })
+    expect(calls).toEqual([])
+    expect(rebuild()).toEqual({})
+    await expect(rpc.handlers.guard({})).resolves.toMatchObject({ skillsLoaded: false })
+  })
+
+  it('reloadSkills re-fetches, rebuilds through skill.reload, and keeps the old list on failure', async () => {
+    let answer: unknown = { skills: [entry('a')] }
+    stubFetch(() => answer)
+    const { rebuild, rpc, reload } = await withSkills()
+    answer = { skills: [entry('a'), entry('b')] }
+    await expect(rpc.handlers.reloadSkills({})).resolves.toEqual({ loaded: true, count: 2 })
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(Object.keys(rebuild())).toEqual(['a', 'b'])
+    answer = new Error('down')
+    await expect(rpc.handlers.reloadSkills({})).resolves.toEqual({ loaded: false, count: 2 })
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(Object.keys(rebuild())).toEqual(['a', 'b'])
+    await expect(rpc.handlers.guard({})).resolves.toMatchObject({ skillsLoaded: false })
+  })
+
+  it('the guard schema requires skillsLoaded', async () => {
+    stubFetch(() => ({ skills: [] }))
+    const { rpc } = await withSkills()
+    const required = (rpc.definition.methods.guard.output as { required: string[] }).required
+    expect(required).toContain('skillsLoaded')
+    expect(Object.keys(rpc.definition.methods)).toContain('reloadSkills')
   })
 })

@@ -3,13 +3,15 @@ import type { SessionManager } from '../services/session-manager'
 import { emitEvent } from '../services/sync-host'
 import { syncCore } from '../services/sync-host'
 import { seedCanonicalTranscript } from './seed-canonical-transcript'
-import { loadEngineConfig } from '../services/ui-config'
+import { loadEngineConfig, loadSlashCommands } from '../services/ui-config'
 import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 // Side-effect: guarantees the spawn-prep + session-factory registries are
 // populated wherever session:create runs (mirrors session-manager.ts's own
 // register-engines import).
 import '../providers/register-engines'
-import type { EngineId, ModelRef } from '../../shared/types'
+import type { EngineId, ModelRef, SlashCommandInfo } from '../../shared/types'
+import { resolveClaudeSkillCatalog } from '../services/claude-skill-catalog'
+import { claudeSkillSlashCommands, mergeSlashCommandLists } from '../services/claude-skill-info'
 import type { EngineSpawnOptions } from '../providers/ISession'
 import { getSessionMeta, setSessionMeta } from '../services/db'
 import { logger } from '../services/logger'
@@ -245,6 +247,26 @@ export async function prepareAndCreateSession(
       ...(createdBy ? { createdBy } : {})
     }
   ])
+  // A Claude session reports its commands only when cli.js starts (first prompt), so
+  // until then its menu is the last list a Claude session reported (the cache
+  // `ClaudeSession` writes: built-ins, bundled skills, MCP prompts) plus this folder's
+  // catalog skills. Claude's alone: another engine's list never fits.
+  if (resolvedEngineId === 'claude') {
+    let cached: SlashCommandInfo[] = []
+    let folder: SlashCommandInfo[] = []
+    try {
+      cached = loadSlashCommands()
+    } catch {
+      /* a missing cache only leaves the menu empty until the first turn */
+    }
+    try {
+      folder = claudeSkillSlashCommands(resolveClaudeSkillCatalog(cwd).entries)
+    } catch {
+      /* the first turn's init reports the folder's skills anyway */
+    }
+    const menu = mergeSlashCommandLists(cached, folder)
+    if (menu.length > 0) emitEvent('session:slash-commands', [routingId, menu])
+  }
   // A resumed session may have had items held for it while it was cold (slice 1a,
   // keyed by its engine session id): its replicas learn the count at birth.
   if (resumeSessionId) {

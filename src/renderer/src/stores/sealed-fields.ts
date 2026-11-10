@@ -72,6 +72,7 @@ export const SEALED_SESSION_FIELDS = [
   'reasoningVariant',
   'statusLine',
   'metering',
+  'slashCommands',
   'sdkActive',
   'selectedEngineId',
   'selectedModel',
@@ -112,6 +113,7 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
   reasoningVariant: 'reasoningVariant',
   statusLine: 'statusLine',
   metering: 'metering',
+  slashCommands: 'slashCommands',
   sdkActive: 'sdkActive',
   selectedEngineId: 'selectedEngineId',
   selectedModel: 'selectedModel',
@@ -123,9 +125,7 @@ export const SEALED_SESSION_FIELD_SOURCE: Readonly<
  * App-level store fields written ONLY by the replica projection.
  *
  * `hiddenSessionIds` / `hiddenProjectKeys` are the store's names for the wire's
- * `hiddenSessions` / `hiddenProjects`; `slashCommands` and `sdkSkillNames` are
- * app-level here but replicated per session on the wire (an as-built quirk
- * `toSnapshot` preserves).
+ * `hiddenSessions` / `hiddenProjects`.
  */
 export const SEALED_APP_FIELDS = [
   'directories',
@@ -139,9 +139,7 @@ export const SEALED_APP_FIELDS = [
   'sessionLinks',
   'sessionRefs',
   'hiddenSessionIds',
-  'hiddenProjectKeys',
-  'slashCommands',
-  'sdkSkillNames'
+  'hiddenProjectKeys'
 ] as const
 
 /** Wire field each sealed app-level store field projects from. */
@@ -157,10 +155,7 @@ export const SEALED_APP_FIELD_SOURCE: Readonly<Record<string, keyof FullStateSna
   sessionLinks: 'sessionLinks',
   sessionRefs: 'sessionRefs',
   hiddenSessionIds: 'hiddenSessions',
-  hiddenProjectKeys: 'hiddenProjects',
-  // Per-session on the wire, app-level in canonical AND in this store.
-  slashCommands: 'sessions',
-  sdkSkillNames: 'sessions'
+  hiddenProjectKeys: 'hiddenProjects'
 }
 
 /**

@@ -114,9 +114,7 @@ beforeEach(() => {
     worktreeInfoMap: {},
     sessionEngines: {},
     hiddenSessionIds: [],
-    hiddenProjectKeys: [],
-    slashCommands: [],
-    sdkSkillNames: []
+    hiddenProjectKeys: []
   })
 })
 

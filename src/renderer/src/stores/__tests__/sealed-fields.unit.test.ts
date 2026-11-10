@@ -96,11 +96,10 @@ describe('the sealed set is DERIVED from the snapshot, not chosen', () => {
     const unsealed = Object.keys(snapshot.sessions['r1']).filter(
       (k) =>
         !covered.has(k as never) &&
-        // `routingId` is the map KEY, not state; the catalogs are app-level here and
-        // sealed as such (the wire fans the one list into every session entry).
+        // `routingId` is the map KEY, not state.
         // `seeded` is replica-internal (ADR-087 §2): `hydrateReplica` reads it to set
         // the store's per-client `evicted` view flag, and no store field mirrors it.
-        !['routingId', 'slashCommands', 'sdkSkillNames', 'seeded'].includes(k)
+        !['routingId', 'seeded'].includes(k)
     )
     expect(
       unsealed,

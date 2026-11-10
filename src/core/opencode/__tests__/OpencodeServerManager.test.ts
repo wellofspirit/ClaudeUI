@@ -382,7 +382,13 @@ describe('OpencodeServerManager (2.x) — ref-counting', () => {
     expect(cfg.mcp.servers.claudeui.url).toBe(`http://127.0.0.1:${hosts[0].port}/mcp`)
     expect(cfg.mcp.servers.claudeui.headers.Authorization).toBe(`Bearer ${hosts[0].token}`)
     expect(cfg.plugins).toEqual([
-      { package: '/res/claudeui-xeng', options: { modelAllowlist: {} } }
+      {
+        package: '/res/claudeui-xeng',
+        options: {
+          modelAllowlist: {},
+          skills: { url: `http://127.0.0.1:${hosts[0].port}/skills`, token: hosts[0].token }
+        }
+      }
     ])
   })
 
@@ -1087,7 +1093,7 @@ describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
     const { manager, calls } = makeShimRig(() => ({ agents: {}, injected: [], diagnostics: [] }))
     await manager.acquire('/proj/a')
     expect(JSON.parse(calls[0].configContent).plugins).toHaveLength(1)
-    expect(JSON.parse(calls[0].configContent).plugins[0].options).toEqual({
+    expect(JSON.parse(calls[0].configContent).plugins[0].options).toMatchObject({
       modelAllowlist: { openai: ['gpt-a'] }
     })
     await manager.acquire('/proj/a')
@@ -1095,7 +1101,7 @@ describe('OpencodeServerManager (2.x) — injected Claude agents', () => {
     allowlist = { openai: ['gpt-a', 'gpt-b'] }
     await manager.acquire('/proj/a')
     expect(calls).toHaveLength(2)
-    expect(JSON.parse(calls[1].configContent).plugins[0].options).toEqual({
+    expect(JSON.parse(calls[1].configContent).plugins[0].options).toMatchObject({
       modelAllowlist: { openai: ['gpt-a', 'gpt-b'] }
     })
     // The old server keeps serving its holder until its last release.

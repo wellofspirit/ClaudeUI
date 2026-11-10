@@ -760,7 +760,6 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   let [
     savedSettings,
     sessionConfig,
-    slashCommands,
     loadedEngineConfig,
     opencodeSettings,
     piEngineConfig,
@@ -768,7 +767,6 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   ] = await Promise.all([
     window.api.loadSettings(),
     window.api.loadSessionConfig(),
-    window.api.loadSlashCommands(),
     window.api
       .loadEngineConfig('claude')
       .catch((): import('../../../shared/types').EngineConfig => ({})),
@@ -888,8 +886,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
     worktreeInfoMap: sessionConfig.worktreeInfoMap ?? {},
     hiddenSessions: sessionConfig.hiddenSessions ?? [],
     hiddenProjects: sessionConfig.hiddenProjects ?? [],
-    sessionEngines: sessionConfig.sessionEngines ?? {},
-    slashCommands: slashCommands ?? []
+    sessionEngines: sessionConfig.sessionEngines ?? {}
   })
 }
 
@@ -1150,6 +1147,8 @@ export interface PerSessionState {
   statusLine: StatusLineData | null
   /** Engine-neutral metering snapshot (Phase 7 Pass 2). Additive to statusLine. */
   metering: MeteringSnapshot | null
+  /** This session's slash menu: its engine's list plus the shared Claude skill catalog (replicated). */
+  slashCommands: SlashCommandInfo[]
   /** Queue of record, replicated from main (ADR-053). Only `queued` items live
    *  here — a consumed item has already become a chat message. */
   queuedItems: QueuedItem[]
@@ -1259,6 +1258,7 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
   reasoningVariant: null,
   statusLine: null,
   metering: null,
+  slashCommands: [],
   queuedItems: [],
   heldCount: 0,
   contextPressure: null,
@@ -1888,9 +1888,6 @@ export interface SessionState {
   engineConfig: EngineConfig
   settings: AppSettings
   availableModels: ModelInfo[]
-  slashCommands: SlashCommandInfo[]
-  customCommands: SlashCommandInfo[]
-  sdkSkillNames: string[]
   accountUsage: AccountUsage | null
   /**
    * The ChatGPT vault's stored accounts and the per-session policy over them
@@ -2150,7 +2147,6 @@ export interface SessionState {
   setDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
   /** Set the active session's model picker value within its selected engine. */
   setSelectedModel: (model: string) => void
-  setCustomCommands: (commands: SlashCommandInfo[]) => void
   setAvailableModels: (models: ModelInfo[]) => void
   /**
    * Replace ONE engine's slice of `availableModels` (a model without `engineId`
@@ -2346,9 +2342,6 @@ export const useSessionStore = create<SessionState>((set) => ({
   engineConfig: {},
   settings: DEFAULT_SETTINGS,
   availableModels: [],
-  slashCommands: [],
-  customCommands: [],
-  sdkSkillNames: [],
   accountUsage: null,
   providerAccounts: null,
   chatgptLimits: null,
@@ -3449,8 +3442,6 @@ export const useSessionStore = create<SessionState>((set) => ({
       saveSessionConfig(state, { sessionEngines })
     }
   },
-
-  setCustomCommands: (commands) => set({ customCommands: commands }),
 
   setAvailableModels: (models) => set({ availableModels: models }),
 

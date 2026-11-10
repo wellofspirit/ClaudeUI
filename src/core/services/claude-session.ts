@@ -61,7 +61,12 @@ import { loadEngineConfig, saveSlashCommands } from './ui-config'
 import { claudeBehaviorSettings } from '../sdk/args'
 import { readDisabledMcpServers } from './claude-mcp'
 import { loadClaudeUiLegacyMcpServers } from './claude-mcp-files'
-import { scanSkills } from './skill-scanner'
+import { resolveClaudeSkillCatalog } from './claude-skill-catalog'
+import {
+  claudeSkillEntryToInfo,
+  claudeSkillSlashCommands,
+  mergeSlashCommandLists
+} from './claude-skill-info'
 import { logger } from './logger'
 import { getContextWindowSize } from './context-window'
 import { isSyntheticModel } from './block-usage'
@@ -1508,14 +1513,25 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         // CLI-only commands that produce no output through the SDK
         const CLI_ONLY = new Set(['context', 'cost', 'login', 'logout', 'release-notes', 'doctor'])
         const raw = sys.slash_commands || []
-        const slashCommands = raw
+        const cliCommands = raw
           .filter((name) => !CLI_ONLY.has(name))
           .map((name) => ({ name: name.startsWith('/') ? name : '/' + name }))
-        this.send('session:slash-commands', slashCommands)
-        saveSlashCommands(slashCommands)
-
-        const skillNames = sys.skills || []
-        this.send('session:skills', skillNames)
+        // cli.js's list plus the catalog's typed-invocable names it lacks (the catalog is
+        // what the other engines' menus are built from, so every engine offers the same set).
+        let catalogCommands: ReturnType<typeof claudeSkillSlashCommands> = []
+        let catalogNames = new Set<string>()
+        try {
+          const { entries } = resolveClaudeSkillCatalog(this.cwd)
+          catalogCommands = claudeSkillSlashCommands(entries)
+          catalogNames = new Set(entries.map((e) => '/' + e.name))
+        } catch (err) {
+          logger.warn('ClaudeSession', `skill catalog failed: ${err}`)
+        }
+        this.send('session:slash-commands', mergeSlashCommandLists(cliCommands, catalogCommands))
+        // The cache seeds the next session, whatever its folder: keep cli.js's built-ins,
+        // bundled skills and MCP prompts, not this folder's skills (create-session re-adds
+        // the new folder's).
+        saveSlashCommands(cliCommands.filter((c) => !catalogNames.has(c.name)))
 
         const mcpServers = sys.mcp_servers || []
         this._initMcpServers = mcpServers
@@ -3123,9 +3139,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     if (!ok) logger.warn('ClaudeSession', 'mcpReloadServers: change not visible yet, giving up')
   }
 
-  /** ISession.discoverSkills — Claude scans project/user/plugin skill dirs. */
-  discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
-    return scanSkills(cwd)
+  /** ISession.discoverSkills: the shared catalog for `cwd`, which is what cli.js loads. */
+  async discoverSkills(cwd: string): Promise<import('../../shared/types').SkillInfo[]> {
+    return resolveClaudeSkillCatalog(cwd).entries.map((e) => claudeSkillEntryToInfo(e))
   }
 
   /**

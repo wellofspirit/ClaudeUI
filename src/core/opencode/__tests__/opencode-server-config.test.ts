@@ -22,6 +22,8 @@ import {
 import type { Config_InfoEncoded } from '../protocol-v2/openapi'
 
 const HOSTED = { port: 19000, token: 'hosted-secret-token' }
+/** The hosted `/skills` endpoint the plugin gets in its options (the per-server host's port + bearer). */
+const SKILLS_OPTION = { url: 'http://127.0.0.1:19000/skills', token: 'hosted-secret-token' }
 const BRIDGED: OpencodeConfigInput['bridgedMcp'] = {
   github: {
     type: 'local',
@@ -86,7 +88,7 @@ describe('buildOpencodeConfig (opencode 2.x)', () => {
 
   it('plugins lists the directory plugin as a {package, options} entry, and is absent without one', () => {
     expect(parse({ pluginDir: '/p/claudeui-xeng' }).plugins).toEqual([
-      { package: '/p/claudeui-xeng', options: { modelAllowlist: {} } }
+      { package: '/p/claudeui-xeng', options: { modelAllowlist: {}, skills: SKILLS_OPTION } }
     ])
     expect(parse({ pluginDir: null })).not.toHaveProperty('plugins')
     expect(parse({})).not.toHaveProperty('plugins')
@@ -113,6 +115,14 @@ describe('buildOpencodeConfig (opencode 2.x)', () => {
 })
 
 describe('configIdentity', () => {
+  it('does not depend on the hosted endpoint: the skill catalog is fetched per location, not injected', () => {
+    const input = { bridgedMcp: BRIDGED, pluginDir: '/p' }
+    expect(buildOpencodeConfig(input, HOSTED)).not.toEqual(
+      buildOpencodeConfig(input, { port: 19001, token: 'other' })
+    )
+    expect(configIdentity(input)).toBe(configIdentity({ ...input }))
+  })
+
   it('is equal for equal inputs whatever the key order', () => {
     const reordered: OpencodeConfigInput['bridgedMcp'] = {
       docs: {
@@ -154,7 +164,10 @@ describe('configIdentity', () => {
     expect(plugins).toEqual([
       {
         package: '/p/claudeui-xeng',
-        options: { modelAllowlist: { openai: ['gpt-a', 'gpt-b'], anthropic: [] } }
+        options: {
+          modelAllowlist: { openai: ['gpt-a', 'gpt-b'], anthropic: [] },
+          skills: SKILLS_OPTION
+        }
       }
     ])
   })

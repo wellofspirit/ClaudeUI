@@ -27,12 +27,11 @@ describe('every pi child env zeroes CLAUDEUI_PI_SESSION_TOOLS', () => {
     ['pi-child-runner defaultChildEnv', () => defaultChildEnv(BRIDGE)],
     [
       'pi-subagents buildPiSubagentChildEnv (may spawn)',
-      () => buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: true, listing: 'x', skillDirsEnv: {} })
+      () => buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: true, listing: 'x' })
     ],
     [
       'pi-subagents buildPiSubagentChildEnv (may not spawn)',
-      () =>
-        buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: false, listing: 'x', skillDirsEnv: {} })
+      () => buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: false, listing: 'x' })
     ],
     ['cross-engine-dispatcher buildPiTargetChildEnv', () => buildPiTargetChildEnv(BRIDGE)]
   ]

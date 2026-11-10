@@ -131,6 +131,8 @@ import {
   type SpawnPiChildFn
 } from '../pi/pi-child-runner'
 import { collectClaudeMcpForPi, piMcpRuleKey } from '../pi/pi-mcp-bridge'
+import { buildPiSkillDescriptors } from '../pi/pi-skill-bridge'
+import { resolveClaudeSkillCatalog } from './claude-skill-catalog'
 import { harnessAvailable } from '../harness/resolve'
 import {
   decideWithSource,
@@ -2284,8 +2286,8 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *    ~/.claude/ui/dispatch/pi/<ledgerId> --session-id <id>`, outside the
  *    `~/.pi/agent/sessions` the sidebar lists, so the target can be resumed
  *    from its ledger row after its parent restarts.
- *  - NO `CLAUDEUI_PI_HOSTED_TOOLS` / `CLAUDEUI_PI_DISPATCH_ENABLED` /
- *    `CLAUDEUI_PI_SKILL_DIRS` in the target's env — `buildPiTargetChildEnv`
+ *  - NO `CLAUDEUI_PI_HOSTED_TOOLS` / `CLAUDEUI_PI_DISPATCH_ENABLED`
+ *    in the target's env — `buildPiTargetChildEnv`
  *    both OMITS them from what it builds AND explicitly overrides them to
  *    `''` in the returned env object (PiRpcClient spawns with `{...process.
  *    env, ...opts.env}`, so omission ALONE would leak through whatever the
@@ -2309,16 +2311,19 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  *  - The shared MCP catalog IS registered (ADR-096, `CLAUDEUI_PI_MCP=1`, the
  *    servers handed to the target's bridge host at the spawn site), as an
  *    opencode target gets it — MCP tools are not a recursion path.
+ *  - The Claude skill catalog for the dispatch cwd IS listed (`CLAUDEUI_PI_SKILLS=1`, the
+ *    descriptors handed to the target's bridge host at the spawn site); a skill is a file
+ *    the model reads, not a recursion path.
  */
 /**
  * The env vars a pi dispatch TARGET's child process gets. Extracted as a pure
  * function (rather than inlined into `defaultSpawnPiTarget`) so the
  * recursion-guard property is DIRECTLY unit-testable without mocking
  * PiRpcClient/PiBridgeHost/locatePiLaunch: NO `CLAUDEUI_PI_HOSTED_TOOLS` /
- * `CLAUDEUI_PI_DISPATCH_ENABLED` / `CLAUDEUI_PI_SKILL_DIRS` — see
+ * `CLAUDEUI_PI_DISPATCH_ENABLED` — see
  * `defaultSpawnPiTarget`'s doc comment for the full rationale.
  *
- * The three gate vars are set to `''` EXPLICITLY, not merely left out of this
+ * The gate vars are set to `''` EXPLICITLY, not merely left out of this
  * object: `PiRpcClient` spawns with `{...process.env, ...opts.env}` (this
  * object is `opts.env`), so plain omission would let the flag leak straight
  * through from the ClaudeUI process's OWN env if IT happens to carry one
@@ -2327,7 +2332,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
  * to execute them, see `defaultSpawnPiTarget`'s doc comment, but visible and
  * always-erroring to the model). The bridge extension's gates are plain
  * truthiness/`=== '1'` checks (pi-bridge-source.ts) — `''` is falsy against
- * both, so this reliably disables all three regardless of what the parent
+ * both, so this reliably disables them regardless of what the parent
  * process happens to have set.
  */
 export function buildPiTargetChildEnv(
@@ -2345,7 +2350,6 @@ export function buildPiTargetChildEnv(
     // reaches its dispatcher (ADR-105 §4), as a one-element array: the bridge registers exactly
     // what the array holds, so there is no gate of its own.
     CLAUDEUI_PI_SESSION_TOOLS: messaging ? xAgentSessionToolsEnv() : '',
-    CLAUDEUI_PI_SKILL_DIRS: '',
     // ADR-089: a dispatch target never gets the host-run `agent` or
     // `send_message` tools (same leak argument as the three above).
     CLAUDEUI_PI_AGENT_TOOL: '',
@@ -2355,7 +2359,10 @@ export function buildPiTargetChildEnv(
     // ADR-096: a dispatch target registers the shared MCP catalog, as an
     // opencode target does; the configs come from the target's own bridge
     // host (`mcpServers` at the spawn site), never from this env.
-    CLAUDEUI_PI_MCP: '1'
+    CLAUDEUI_PI_MCP: '1',
+    // The shared Claude skill catalog for the dispatch cwd, likewise served by the target's own
+    // bridge host (`skills` at the spawn site).
+    CLAUDEUI_PI_SKILLS: '1'
   }
 }
 
@@ -8246,6 +8253,7 @@ export class CrossEngineDispatcher {
               }
             : {}),
           mcpServers: collectClaudeMcpForPi(cwd).servers,
+          skills: buildPiSkillDescriptors(resolveClaudeSkillCatalog(cwd)),
           ...piTargetSpawnFlags(
             dispatchPiSessionDir(row.id),
             harnessId,

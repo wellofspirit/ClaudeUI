@@ -945,3 +945,46 @@ describe('PiBridgeHost — POST /mcp-servers (ADR-096)', () => {
     expect(await res.json()).toEqual({ servers: {} })
   })
 })
+
+describe('PiBridgeHost — POST /skills (shared Claude skill catalog)', () => {
+  let host: PiBridgeHost | null = null
+  afterEach(() => {
+    host?.dispose()
+    host = null
+  })
+
+  const SKILLS = [
+    { name: 'deploy', description: 'ship it', filePath: '/s/deploy/SKILL.md', baseDir: '/s/deploy' }
+  ]
+
+  it('serves the spawn-time descriptors to an authenticated caller, on every load', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, { skills: SKILLS })
+    const { url, token } = await host.start()
+    for (let load = 0; load < 2; load++) {
+      const res = await fetch(`${url}/skills`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: '{}'
+      })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({ skills: SKILLS })
+    }
+  })
+
+  it('refuses a caller without the token (401) and anything but POST (404)', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }), undefined, { skills: SKILLS })
+    const { url } = await host.start()
+    const unauth = await fetch(`${url}/skills`, { method: 'POST', body: '{}' })
+    expect(unauth.status).toBe(401)
+    expect(await unauth.text()).not.toContain('deploy')
+    expect((await fetch(`${url}/skills`)).status).toBe(404)
+  })
+
+  it('answers an empty list when none was given, and leaves /mcp-servers on its own shape', async () => {
+    host = new PiBridgeHost(async () => ({ behavior: 'allow' }))
+    const { url, token } = await host.start()
+    const init = { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: '{}' }
+    expect(await (await fetch(`${url}/skills`, init)).json()).toEqual({ skills: [] })
+    expect(await (await fetch(`${url}/mcp-servers`, init)).json()).toEqual({ servers: {} })
+  })
+})

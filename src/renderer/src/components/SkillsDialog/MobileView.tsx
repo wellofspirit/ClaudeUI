@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import type { SkillInfo, SkillSource } from '../../../../shared/types'
 import { MarkdownRenderer } from '../chat/MarkdownRenderer'
 import type { SkillsDialogViewProps } from './View'
+import { SKILL_SOURCE_ORDER, claudeOnlyNote, skillTags } from './skill-display'
 
 /**
  * Mobile (viewport ≤768px) Skills UI — ADR-048's takeover + drill-down pattern.
@@ -26,34 +27,51 @@ import type { SkillsDialogViewProps } from './View'
  * same fields.
  */
 
-/**
- * Group order + captions.
- *
- * Duplicated from `View.tsx` rather than imported, because that file must stay
- * byte-identical in this change; if it is ever touched, these and its private
- * SOURCE_ORDER/SOURCE_META should become one exported pair.
- */
-const SOURCE_ORDER: SkillSource[] = ['project', 'user', 'plugin', 'bundled']
-
+/** Group captions (the order is shared with the desktop view, `skill-display.ts`). */
 const SOURCE_LABELS: Record<SkillSource, string> = {
   project: 'PROJECT',
   user: 'USER',
   plugin: 'PLUGINS',
-  bundled: 'BUNDLED'
+  bundled: 'BUNDLED',
+  managed: 'MANAGED',
+  engine: 'ENGINE'
 }
 
 const SOURCE_BADGE_LABELS: Record<SkillSource, string> = {
   project: 'Project',
   user: 'User',
   plugin: 'Plugin',
-  bundled: 'Bundled'
+  bundled: 'Bundled',
+  managed: 'Managed',
+  engine: 'Engine'
 }
 
 const SOURCE_BADGE_COLORS: Record<SkillSource, string> = {
   project: 'bg-accent/15 text-accent',
   user: 'bg-purple-500/15 text-purple-400',
   plugin: 'bg-emerald-500/15 text-emerald-400',
-  bundled: 'bg-text-muted/15 text-text-muted'
+  bundled: 'bg-text-muted/15 text-text-muted',
+  managed: 'bg-amber-500/15 text-amber-400',
+  engine: 'bg-text-muted/15 text-text-muted'
+}
+
+function MobileTags({ skill }: { skill: SkillInfo }): React.JSX.Element | null {
+  const tags = skillTags(skill)
+  if (tags.length === 0) return null
+  return (
+    <span className="flex flex-wrap items-center gap-1 mt-0.5">
+      {tags.map((t) => (
+        <span
+          key={t.id}
+          data-testid="SkillsMobileView.tag"
+          data-id={t.id}
+          className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-bg-secondary text-text-muted border border-border"
+        >
+          {t.label}
+        </span>
+      ))}
+    </span>
+  )
 }
 
 function CrossIcon(): React.JSX.Element {
@@ -120,7 +138,7 @@ export function SkillsMobileView({
       list.push(s)
       map.set(s.source, list)
     }
-    return SOURCE_ORDER.filter((src) => map.has(src)).map((src) => ({
+    return SKILL_SOURCE_ORDER.filter((src) => map.has(src)).map((src) => ({
       source: src,
       label: SOURCE_LABELS[src],
       skills: map.get(src)!
@@ -191,8 +209,17 @@ export function SkillsMobileView({
                 </span>
               </span>
             </div>
+            <MobileTags skill={skill} />
             {skill.description && (
               <p className="text-[11px] text-text-secondary break-words">{skill.description}</p>
+            )}
+            {claudeOnlyNote(skill) && (
+              <p
+                data-testid="SkillsMobileView.claudeOnlyNote"
+                className="text-[11px] text-amber-400 break-words"
+              >
+                {claudeOnlyNote(skill)}
+              </p>
             )}
             {skill.path && (
               <div className="text-[10px] text-text-muted/60 font-mono break-all">{skill.path}</div>
@@ -289,6 +316,7 @@ export function SkillsMobileView({
                   <span className="block text-[13px] text-text-primary truncate">
                     {skill.displayName || skill.name}
                   </span>
+                  <MobileTags skill={skill} />
                   {skill.description && (
                     <span className="block text-[11px] text-text-muted truncate">
                       {skill.description}

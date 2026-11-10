@@ -8,9 +8,16 @@ interface SkillsDialogProps {
   open: boolean
   onClose: () => void
   cwd: string | null
+  /** The session the dialog is about: its own skills are listed. */
+  routingId: string | null
 }
 
-export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.JSX.Element | null {
+export function SkillsDialog({
+  open,
+  onClose,
+  cwd,
+  routingId
+}: SkillsDialogProps): React.JSX.Element | null {
   const isMobile = useIsMobile()
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [loading, setLoading] = useState(false)
@@ -23,10 +30,10 @@ export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.J
     }
     if (!cwd) return
     setLoading(true)
-    // Clear old skills immediately so the View's auto-select effect re-fires on the new cwd
+    // Clear old skills immediately so the View's auto-select effect re-fires on the new cwd / session
     setSkills([])
     window.api
-      .loadSkillDetails(cwd)
+      .loadSkillDetails(routingId, cwd)
       .then((result) => {
         setSkills(result)
         setLoading(false)
@@ -34,7 +41,7 @@ export function SkillsDialog({ open, onClose, cwd }: SkillsDialogProps): React.J
       .catch(() => {
         setLoading(false)
       })
-  }, [open, cwd])
+  }, [open, cwd, routingId])
 
   useEffect(() => {
     if (!open) return

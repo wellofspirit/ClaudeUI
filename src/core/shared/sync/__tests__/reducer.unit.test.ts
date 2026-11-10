@@ -418,11 +418,9 @@ describe('reducer — session:conversation-cleared', () => {
     expect(session.seeded).toBe(true)
   })
 
-  it('carries the per-session catalogs over rather than blanking them (R10)', () => {
-    // Vestigial in canonical (the app-level lists are the real ones and
-    // `toSnapshot` fans them out), but they describe the ENGINE, not the
-    // conversation — a bare remote clear must not look like the slash menu went
-    // away.
+  it('carries the slash menu over rather than blanking it (R10)', () => {
+    // It describes the ENGINE, not the conversation — a bare remote clear must not
+    // look like the slash menu went away.
     const before = dirty()
     const seeded: CanonicalState = {
       ...before,
@@ -430,14 +428,12 @@ describe('reducer — session:conversation-cleared', () => {
         ...before.sessions,
         rid: {
           ...before.sessions['rid'],
-          slashCommands: [{ name: '/compact' }] as never,
-          sdkSkillNames: ['dataviz']
+          slashCommands: [{ name: '/compact' }] as never
         }
       }
     }
     const s = fold([['session:conversation-cleared', 'rid', {}]], seeded)
     expect(s.sessions['rid'].slashCommands).toEqual([{ name: '/compact' }])
-    expect(s.sessions['rid'].sdkSkillNames).toEqual(['dataviz'])
   })
 
   it('takes the fresh-run permission mode from the event', () => {
@@ -1724,17 +1720,28 @@ describe('reducer — app-level config', () => {
     expect(s.sessionEngines).toEqual({})
   })
 
-  it('slash commands and skills are app-level and fan out per session', () => {
+  it('slash commands are per session: two sessions, two lists, no bleed', () => {
     const s = fold([
       created('a'),
       created('b'),
       ['session:slash-commands', 'a', [{ name: '/foo' }]],
-      ['session:skills', 'a', ['skill-x']]
+      ['session:slash-commands', 'b', [{ name: '/bar', description: 'pi one' }]],
+      ['session:slash-commands', 'a', [{ name: '/foo' }, { name: '/baz' }]]
     ])
     const snap = toSnapshot(s, 1)
-    expect(snap.sessions['a'].slashCommands).toEqual([{ name: '/foo' }])
-    expect(snap.sessions['b'].slashCommands).toEqual([{ name: '/foo' }])
-    expect(snap.sessions['b'].sdkSkillNames).toEqual(['skill-x'])
+    expect(snap.sessions['a'].slashCommands).toEqual([{ name: '/foo' }, { name: '/baz' }])
+    expect(snap.sessions['b'].slashCommands).toEqual([{ name: '/bar', description: 'pi one' }])
+    expect(fromSnapshot(snap).sessions['b'].slashCommands).toEqual(snap.sessions['b'].slashCommands)
+  })
+
+  it('a slash-commands event for an unknown session changes nothing', () => {
+    const before = fold([created('a')])
+    const after = applyEvent(before, {
+      channel: 'session:slash-commands',
+      args: ['ghost', [{ name: '/x' }]],
+      seq: 99
+    })
+    expect(after).toBe(before)
   })
 })
 
@@ -1752,7 +1759,6 @@ describe('snapshot restore — fromSnapshot (phase 4b)', () => {
       ['session:metering', 'rid', { tokens: { total: 3 } } as never],
       ['session:config-changed', 'rid', { model: 'opus', effort: 'high' }],
       ['session:slash-commands', 'rid', [{ name: '/foo' }]],
-      ['session:skills', 'rid', ['skill-x']],
       ['config:settings-changed', { theme: 'monokai' }]
     ])
     const restored = fromSnapshot(toSnapshot(live, 42))
@@ -1797,8 +1803,7 @@ describe('snapshot restore — fromSnapshot (phase 4b)', () => {
           permissionMode: 'default',
           effort: null,
           statusLine: null,
-          slashCommands: [],
-          sdkSkillNames: []
+          slashCommands: []
         }
       },
       directories: [],

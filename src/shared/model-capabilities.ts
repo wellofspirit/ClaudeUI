@@ -1201,22 +1201,12 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     `consumed` transition on `session:queue-changed`).
  *   - slashCommands:true, skills:true → SHIPPED in M2b via `get_commands`
  *     (doStart(), once per spawn): emits `session:slash-commands` (all
- *     non-temporary-scope entries, '/'-prefixed) and `session:skills` (source
- *     === 'skill' entries, `skill:` prefix stripped) — same wire contract as
- *     OpencodeSession's listCommands/listSkills emission. `skills:true` is
- *     safe despite `discoverSkills` staying UNIMPLEMENTED here: SkillsDialog's
- *     only data path (`loadSkillDetails` IPC handler) already does
- *     `delegate?.discoverSkills?.(cwd) ?? scanSkills(cwd)` — the optional-call
- *     falls back to Claude's filesystem scanner instead of throwing.
- *     `session:skills` therefore only drives the TopBar Skills-button
- *     availability hint. M3 (shared skills) deliberately did NOT add
- *     `PiSession.discoverSkills` — the generic `scanSkills(cwd)` fallback
- *     already covers the SkillsDialog's directory listing adequately, and the
- *     actually-loaded skill set (M3's real deliverable) is driven by the
- *     bridge extension's `resources_discover` handler (`CLAUDEUI_PI_SKILL_DIRS`,
- *     computed in PiSession.doStart) feeding pi's OWN skill loader, which is
- *     what surfaces as `skill:<name>` in `get_commands` above — no second
- *     discovery path needed.
+ *     non-temporary-scope entries, '/'-prefixed) plus the shared Claude
+ *     skill catalog's user-invocable entries. `PiSession.discoverSkills`
+ *     returns the catalog plus pi's own skills (`source: 'engine'`). The
+ *     Claude skills reach pi's system prompt through the bridge
+ *     extension's `before_agent_start` handler (`CLAUDEUI_PI_SKILLS`, served
+ *     by the bridge host's `/skills`).
  *   - auth.canDriveLogin → flipped true in M6c. The "TUI-only, permanently
  *     false" note above is now obsolete for ONE vendor: `openai-codex`
  *     (ChatGPT). ClaudeUI's own auth vault (M6a AuthVault + M6b

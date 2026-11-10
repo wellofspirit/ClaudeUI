@@ -88,7 +88,7 @@ describe('SkillsDialog mobile fork', () => {
 
   async function renderDialog(): Promise<void> {
     await act(async () => {
-      render(<SkillsDialog open cwd={CWD} onClose={onClose} />)
+      render(<SkillsDialog open cwd={CWD} routingId="route-1" onClose={onClose} />)
     })
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0))

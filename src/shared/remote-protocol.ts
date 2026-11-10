@@ -1126,7 +1126,6 @@ export interface PerSessionSnapshot {
    */
   metering?: MeteringSnapshot
   slashCommands: SlashCommandInfo[]
-  sdkSkillNames: string[]
   /** Whether cli.js/the engine is live for this session. A remote client MUST
    *  carry this so its first send steers the running session instead of
    *  respawning it (as Claude) — see H15 / InputBox.doSend. */

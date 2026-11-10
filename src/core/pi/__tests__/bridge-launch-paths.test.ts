@@ -54,7 +54,7 @@ describe('every pi launch path that loads the bridge extension sets both credent
     ['pi-child-runner defaultChildEnv', () => defaultChildEnv(BRIDGE)],
     [
       'pi-subagents buildPiSubagentChildEnv',
-      () => buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: true, listing: 'x', skillDirsEnv: {} })
+      () => buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: true, listing: 'x' })
     ],
     ['cross-engine-dispatcher buildPiTargetChildEnv', () => buildPiTargetChildEnv(BRIDGE)],
     [

@@ -43,6 +43,14 @@ vi.mock('../../../core/auth/PiAuthProvider', () => ({
 const { mockRemoveScratchpad } = vi.hoisted(() => ({ mockRemoveScratchpad: vi.fn() }))
 vi.mock('../../../core/pi/pi-scratchpad', () => ({ removePiScratchpad: mockRemoveScratchpad }))
 
+// The envelope reader is slice A's; its matching rules are not this file's subject.
+const { mockEnvelope } = vi.hoisted(() => ({
+  mockEnvelope: vi.fn((_text: string): { commandName: string; commandArgs?: string } | null => null)
+}))
+vi.mock('../../../core/services/claude-skill-invoke', () => ({
+  parseSkillInvocationEnvelope: mockEnvelope
+}))
+
 import {
   convertPiEntryMessage,
   listPiSessionsGlobal,
@@ -1479,5 +1487,31 @@ describe('convertPiEntryMessage — the model a message ran on', () => {
 
   it('leaves the field off when the entry names no model', () => {
     expect(convertPiEntryMessage('e1', entry({ model: '' }), new Map())).not.toHaveProperty('model')
+  })
+})
+
+describe('convertPiEntryMessage — a Claude skill expansion', () => {
+  const user = (content: unknown): never =>
+    ({ role: 'user', content, timestamp: 1700000000000 }) as never
+
+  it('renders the expansion envelope as the typed command (cli_command, role system)', () => {
+    mockEnvelope.mockReturnValueOnce({ commandName: '/deploy', commandArgs: 'prod' })
+    const msg = convertPiEntryMessage(
+      'e1',
+      user('<command-name>/deploy</command-name> ...'),
+      new Map()
+    )
+    expect(msg).toEqual({
+      id: 'e1',
+      role: 'system',
+      content: [{ type: 'cli_command', commandName: '/deploy', commandArgs: 'prod' }],
+      timestamp: 1700000000000
+    })
+  })
+
+  it('leaves an ordinary user message alone', () => {
+    mockEnvelope.mockReturnValueOnce(null)
+    const msg = convertPiEntryMessage('e2', user('hello'), new Map())
+    expect(msg).toMatchObject({ role: 'user', content: [{ type: 'text', text: 'hello' }] })
   })
 })

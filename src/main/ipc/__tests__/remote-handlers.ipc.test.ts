@@ -196,14 +196,6 @@ vi.mock('../../../core/services/claude-mcp', () => ({
   readDisabledMcpServers: vi.fn(() => [])
 }))
 
-vi.mock('../../../core/services/skill-scanner', () => ({
-  scanSkills: vi.fn(async () => [])
-}))
-
-vi.mock('../../../core/services/custom-command-scanner', () => ({
-  scanCustomCommands: vi.fn(async () => [])
-}))
-
 vi.mock('../../../core/services/usage-fetcher', () => ({
   usageFetcher: { fetch: vi.fn(async () => ({ a: 1 })), setIntervalSecs: vi.fn() }
 }))
@@ -2080,7 +2072,6 @@ const PRE_PORT_REMOTE_CHANNELS = [
   'config:load-slash-commands',
   'config:save-sessions',
   'config:save-settings',
-  'config:scan-custom-commands',
   'engine:is-installed',
   'file:list-dir',
   'git:branches',

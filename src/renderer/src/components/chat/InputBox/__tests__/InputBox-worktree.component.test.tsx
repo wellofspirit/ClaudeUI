@@ -82,7 +82,6 @@ describe('InputBox — start in a worktree at the first send', () => {
     app.bridge.ipcMain.handle('session:get-engine-models', () => [
       { engineId: 'claude', vendorId: 'anthropic', vendorName: 'Anthropic', models: [] }
     ])
-    app.bridge.ipcMain.handle('session:scan-custom-commands', () => [])
     app.bridge.ipcMain.handle('file:list-dir', () => [])
     app.bridge.ipcMain.handle('session:send', () => null)
     app.bridge.ipcMain.handle('session:create', (_e: unknown, ...args: unknown[]) => {

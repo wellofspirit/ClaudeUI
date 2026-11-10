@@ -273,9 +273,9 @@ export interface ISession {
   /** Live token-usage snapshot. Claude-only; no capability flag. */
   getUsage?(): Promise<Record<string, unknown> | null>
 
-  /** Discover skills for a cwd. Implemented by ALL engines (Claude → scanSkills,
-   *  opencode → discoverOpencodeSkills). Optional so callers use optional-call +
-   *  scanSkills fallback for the no-active-session case. */
+  /** The skills this session offers for a cwd: the shared Claude skill catalog (with
+   *  `claudeOnly` on non-Claude engines) plus the engine's own as `source: 'engine'`.
+   *  Optional: `loadSkillDetails` falls back to the catalog alone. */
   discoverSkills?(cwd: string): Promise<SkillInfo[]>
 
   /** Update the inactivity timeout. Pass 0 to disable. */
