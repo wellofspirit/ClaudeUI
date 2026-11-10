@@ -1,0 +1,384 @@
+/**
+ * @vitest-environment node
+ *
+ * Guard tests for resume seeding (Slice A fix 2): a ClaudeSession constructed
+ * with a resumeSessionId must seed its in-memory accumulators from the resume
+ * target's transcript (via the shared reconcile path) at construction, so the
+ * turn-start status-line emission never publishes zeros over the renderer's
+ * history-loaded statusLine — the "backwards jump at prompt-send" regression.
+ *
+ * Pre-fix behavior these tests guard against: no computeTokenMetrics call at
+ * construction, so the first `session:status-line` after run() carried
+ * all-zero accumulators for resumed sessions.
+ *
+ * Mock scaffold mirrors claude-session-collab-gating.component.test.ts —
+ * everything touching disk/processes is stubbed; only construction is driven.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
+import * as fs from 'fs'
+import * as nodePath from 'path'
+import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
+import { clearSyncSubscribersForTests } from '../sync-host'
+import type { StatusLineData } from '../../../shared/types'
+
+const { mockComputeTokenMetrics } = vi.hoisted(() => ({
+  mockComputeTokenMetrics: vi.fn()
+}))
+
+// A temp home, so a resume target's transcript can EXIST: ClaudeSession spawns a
+// resume whose transcript is missing fresh, and skips the seed with it. Created
+// while mocks are hoisted — the import graph reads os.homedir() at load.
+const { TEMP_HOME } = await vi.hoisted(async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  return { TEMP_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'claude-resume-seed-')) }
+})
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os')
+  return {
+    ...actual,
+    homedir: () => TEMP_HOME,
+    default: { ...actual, homedir: () => TEMP_HOME }
+  }
+})
+
+/** Put a resume target's transcript on disk where cli.js would have written it.
+ *  Its content is irrelevant — computeTokenMetrics is mocked. */
+function seedTranscript(projectKey: string, sessionId: string): void {
+  const dir = nodePath.join(TEMP_HOME, '.claude', 'projects', projectKey)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(nodePath.join(dir, `${sessionId}.jsonl`), '{}\n')
+}
+
+vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
+
+vi.mock('../../sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../sdk')>()
+  return {
+    ...actual,
+    query: vi.fn(),
+    locateBunClaude: (): string => __filename,
+    getCliVersion: (): string => '0.0.0-test'
+  }
+})
+
+vi.mock('../../opencode/OpencodeServerManager', () => ({
+  opencodeServerManager: {
+    setServerStartedHook: () => {},
+    isBinaryAvailable: (): boolean => false
+  }
+}))
+vi.mock('../cross-engine-dispatcher', () => ({
+  crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },
+  crossEngineDispatchAvailable: (): boolean => false
+}))
+vi.mock('../logger', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+}))
+vi.mock('../ui-config', () => ({
+  saveSlashCommands: vi.fn(),
+  loadEngineConfig: vi.fn(() => ({}))
+}))
+vi.mock('../claude-mcp', () => ({
+  loadMcpServers: vi.fn(() => ({})),
+  readDisabledMcpServers: vi.fn(() => [])
+}))
+vi.mock('../session-history', () => ({
+  computeTokenMetrics: mockComputeTokenMetrics,
+  fallbackBlockText: vi.fn(() => '')
+}))
+vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
+vi.mock('../context-window', () => ({
+  getContextWindowSize: vi.fn(() => 200000)
+}))
+vi.mock('../usage-fetcher', () => ({
+  usageFetcher: { fetch: vi.fn(async () => null) }
+}))
+vi.mock('../usage-provider', () => ({ resolveUsageProvider: vi.fn() }))
+vi.mock('../../../main/services/account-manager', () => ({
+  accountManager: { getState: vi.fn(() => ({ enabled: false, activeId: null })) }
+}))
+vi.mock('../../../main/auth/ClaudeAuthProvider', () => ({
+  claudeAuthProvider: { buildAccountRef: vi.fn(() => null), updateAuthSource: vi.fn() }
+}))
+
+// Import AFTER mocks.
+import { ClaudeSession } from '../claude-session'
+import { query } from '../../sdk'
+import type { BrowserWindow } from 'electron'
+
+// Every `makeWin()` registers a funnel subscriber; drop them per test so a long
+// file does not fan every event out to hundreds of dead stubs.
+afterEach(() => {
+  clearSyncSubscribersForTests()
+  fs.rmSync(nodePath.join(TEMP_HOME, '.claude', 'projects'), { recursive: true, force: true })
+})
+
+afterAll(() => {
+  fs.rmSync(TEMP_HOME, { recursive: true, force: true })
+})
+
+/**
+ * A stub window that is also a CLIENT (SyncCore phase 4c).
+ *
+ * A session's events reach every SUBSCRIBER now, not a privileged window, so the
+ * stub subscribes to the funnel and replays each delivery into `sent` — the same
+ * `[channel, routingId, data]` shape every assertion below already reads.
+ */
+function makeWin(): { win: BrowserWindow; sent: Array<[string, string, unknown]> } {
+  const sent: Array<[string, string, unknown]> = []
+  const win = {
+    isDestroyed: () => false,
+    webContents: {
+      send: (channel: string, routingId: string, data: unknown): void => {
+        sent.push([channel, routingId, data])
+      }
+    }
+  } as unknown as BrowserWindow
+  subscribeWindowToSync(
+    win as unknown as { webContents: { send: (c: string, ...a: unknown[]) => void } }
+  )
+  return { win, sent }
+}
+
+/** Flush the async reconcile (computeTokenMetrics promise + .then chain). */
+const tick = (): Promise<void> => new Promise((r) => setImmediate(r))
+
+const FIXTURE_METRICS: StatusLineData = {
+  totalCostUsd: 0.42,
+  totalDurationMs: 123_000,
+  totalApiDurationMs: 0,
+  totalInputTokens: 100,
+  totalOutputTokens: 200,
+  cachedTokens: 300,
+  totalTokens: 600,
+  contextWindow: { used: 5_000, size: 200_000 },
+  usedPercentage: 3,
+  remainingPercentage: 97
+}
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  mockComputeTokenMetrics.mockResolvedValue(FIXTURE_METRICS)
+})
+
+describe('ClaudeSession — resume seeding of accumulators', () => {
+  it('seeds from the resume transcript at construction and emits the seeded status line', async () => {
+    seedTranscript('-tmp-proj', 'sess-123')
+    const { win, sent } = makeWin()
+    new ClaudeSession('routing-seed', win, '/tmp/proj', { resumeSessionId: 'sess-123' })
+    await tick()
+
+    // Reconcile ran once, against the resume target's transcript path
+    // (projectKey derivation: cwd with / and . replaced by -).
+    expect(mockComputeTokenMetrics).toHaveBeenCalledTimes(1)
+    const calledPath = String(mockComputeTokenMetrics.mock.calls[0][0])
+    expect(calledPath).toContain('sess-123.jsonl')
+    expect(calledPath).toContain('-tmp-proj')
+
+    // The seeded accumulators reached the renderer as a status line — no
+    // all-zero emission can now clobber the history-loaded values.
+    const statusLines = sent.filter(([c]) => c === 'session:status-line')
+    expect(statusLines.length).toBeGreaterThan(0)
+    const data = statusLines[statusLines.length - 1][2] as StatusLineData
+    expect(data.totalDurationMs).toBe(123_000)
+    expect(data.totalInputTokens).toBe(100)
+    expect(data.totalOutputTokens).toBe(200)
+    expect(data.cachedTokens).toBe(300)
+    expect(data.contextWindow.used).toBe(5_000)
+    // No turn in flight at construction.
+    expect(data.turnStartedAtMs).toBeNull()
+  })
+
+  it('derives the on-disk projectKey from a WINDOWS cwd (drive colon + backslashes → -)', async () => {
+    // Real disk layout: cwd D:\WorkPlace\ClaudeUI → projects/D--WorkPlace-ClaudeUI.
+    // The pre-fix derivation only replaced / and ., producing a nonexistent
+    // path for every Windows cwd — the seed (and all reconciliation) silently
+    // no-opped on Windows while POSIX cwds worked.
+    seedTranscript('D--Work-Proj', 'sess-win')
+    const { win } = makeWin()
+    new ClaudeSession('routing-win', win, 'D:\\Work\\Proj', { resumeSessionId: 'sess-win' })
+    await tick()
+
+    expect(mockComputeTokenMetrics).toHaveBeenCalledTimes(1)
+    const calledPath = String(mockComputeTokenMetrics.mock.calls[0][0])
+    expect(calledPath).toContain('sess-win.jsonl')
+    expect(calledPath).toContain('D--Work-Proj')
+  })
+
+  it('does not seed a fresh (non-resume) session', async () => {
+    const { win } = makeWin()
+    new ClaudeSession('routing-fresh', win, '/tmp/proj')
+    await tick()
+    expect(mockComputeTokenMetrics).not.toHaveBeenCalled()
+  })
+
+  it('does not seed a fork — the source transcript over-counts past the anchor', async () => {
+    const { win } = makeWin()
+    new ClaudeSession('routing-fork', win, '/tmp/proj', {
+      resumeSessionId: 'sess-src',
+      resumeSessionAt: 'uuid-anchor',
+      forkSession: true
+    })
+    await tick()
+    expect(mockComputeTokenMetrics).not.toHaveBeenCalled()
+  })
+
+  it('skips seeding when the transcript yields nothing (empty metrics)', async () => {
+    mockComputeTokenMetrics.mockResolvedValue({
+      ...FIXTURE_METRICS,
+      totalCostUsd: 0,
+      totalTokens: 0
+    })
+    // On disk, but it yields no metrics.
+    seedTranscript('-tmp-proj', 'sess-gone')
+    const { win, sent } = makeWin()
+    new ClaudeSession('routing-empty', win, '/tmp/proj', { resumeSessionId: 'sess-gone' })
+    await tick()
+    // Reconcile was attempted but bailed on the emptiness guard — no
+    // status-line emission from the seed path.
+    expect(mockComputeTokenMetrics).toHaveBeenCalledTimes(1)
+    expect(sent.filter(([c]) => c === 'session:status-line')).toHaveLength(0)
+  })
+})
+
+/** `query()` hands back a handle whose stream parks: cli.js "alive", no output. */
+function parkQuery(): void {
+  vi.mocked(query).mockImplementation(
+    () =>
+      ({
+        // eslint-disable-next-line require-yield
+        async *[Symbol.asyncIterator]() {
+          await new Promise<void>(() => {})
+        },
+        initializationResult: () => new Promise<never>(() => {}),
+        interrupt: vi.fn(async () => {})
+      }) as never
+  )
+}
+
+describe('ClaudeSession — resumeSeedReady (what the first prompt waits for)', () => {
+  /** A computeTokenMetrics the test settles by hand. */
+  function holdMetrics(): { land: (m?: StatusLineData) => void } {
+    let land!: (m?: StatusLineData) => void
+    mockComputeTokenMetrics.mockReturnValue(
+      new Promise((r) => (land = (m) => r(m ?? FIXTURE_METRICS)))
+    )
+    return { land }
+  }
+
+  it('is pending while the transcript fold is in flight and gone once it lands', async () => {
+    seedTranscript('-tmp-proj', 'sess-wait')
+    const { land } = holdMetrics()
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-wait', win, '/tmp/proj', {
+      resumeSessionId: 'sess-wait'
+    })
+    const ready = session.resumeSeedReady()
+    expect(ready).toBeInstanceOf(Promise)
+
+    let settled = false
+    void ready!.then(() => (settled = true))
+    await tick()
+    expect(settled).toBe(false)
+
+    land()
+    await ready
+    // Settled for good: the next send is synchronous again.
+    expect(session.resumeSeedReady()).toBeUndefined()
+  })
+
+  it('has nothing to wait for on a fresh session, a fork, or a resume whose transcript is gone', () => {
+    const { win } = makeWin()
+    expect(new ClaudeSession('routing-f', win, '/tmp/proj').resumeSeedReady()).toBeUndefined()
+    expect(
+      new ClaudeSession('routing-k', win, '/tmp/proj', {
+        resumeSessionId: 'sess-src',
+        resumeSessionAt: 'uuid-anchor',
+        forkSession: true
+      }).resumeSeedReady()
+    ).toBeUndefined()
+    // No transcript on disk: the session starts fresh, so there is nothing to seed.
+    expect(
+      new ClaudeSession('routing-g', win, '/tmp/proj', {
+        resumeSessionId: 'sess-nowhere'
+      }).resumeSeedReady()
+    ).toBeUndefined()
+  })
+
+  it('a seed that finds nothing still settles (a prompt is never wedged behind it)', async () => {
+    seedTranscript('-tmp-proj', 'sess-empty')
+    mockComputeTokenMetrics.mockResolvedValue({
+      ...FIXTURE_METRICS,
+      totalCostUsd: 0,
+      totalTokens: 0
+    })
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-e', win, '/tmp/proj', {
+      resumeSessionId: 'sess-empty'
+    })
+    await session.resumeSeedReady()
+    expect(session.resumeSeedReady()).toBeUndefined()
+  })
+
+  it('a failing fold still settles', async () => {
+    seedTranscript('-tmp-proj', 'sess-boom')
+    mockComputeTokenMetrics.mockRejectedValue(new Error('disk gone'))
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-b', win, '/tmp/proj', {
+      resumeSessionId: 'sess-boom'
+    })
+    await expect(session.resumeSeedReady()).resolves.toBeUndefined()
+  })
+
+  it('no zeros: the turn-start status line carries the seeded totals once the seed is awaited', async () => {
+    // The first prompt of a reopened session is held on `resumeSeedReady` (handlers-core),
+    // so the turn starts only after this resolves. The line it then emits must be the
+    // seeded one — the pre-wait failure mode was a zeros line landing over the history's.
+    seedTranscript('-tmp-proj', 'sess-nozero')
+    const { land } = holdMetrics()
+    parkQuery()
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-nozero', win, '/tmp/proj', {
+      resumeSessionId: 'sess-nozero'
+    })
+    // The fold lands LATER than the await starts: only a wait that is really tied to
+    // it sees the seeded accumulators (a seed already settled would pass either way).
+    setImmediate(() => land())
+    await session.resumeSeedReady()
+
+    void session.run('first prompt')
+    const turnLine = sent
+      .filter(([c]) => c === 'session:status-line')
+      .map(([, , d]) => d as StatusLineData)
+      .find((d) => d.turnStartedAtMs != null)
+    expect(turnLine).toBeDefined()
+    expect(turnLine).toMatchObject({
+      totalInputTokens: 100,
+      totalOutputTokens: 200,
+      cachedTokens: 300,
+      totalDurationMs: 123_000
+    })
+    expect(turnLine!.contextWindow.used).toBe(5_000)
+    session.cancel()
+  })
+
+  it('without the wait the same turn would start on zeros (what the gate prevents)', async () => {
+    seedTranscript('-tmp-proj', 'sess-zero')
+    holdMetrics() // the fold never lands before the prompt
+    parkQuery()
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('routing-zero', win, '/tmp/proj', {
+      resumeSessionId: 'sess-zero'
+    })
+    void session.run('too early')
+    const turnLine = sent
+      .filter(([c]) => c === 'session:status-line')
+      .map(([, , d]) => d as StatusLineData)
+      .find((d) => d.turnStartedAtMs != null)
+    expect(turnLine?.totalInputTokens).toBe(0)
+    expect(session.resumeSeedReady()).toBeInstanceOf(Promise) // so a gated send would still be waiting
+    session.cancel()
+  })
+})

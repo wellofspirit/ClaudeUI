@@ -4,7 +4,7 @@
  * The run registry and the live parent facade (ADR-105, slice B-2a): the two small
  * modules the dispatcher's run engine is built on. The dispatcher's own behaviour on
  * top of them (background launches, disposeFor, stop) is in
- * `main/services/__tests__/cross-engine-dispatcher.component.test.ts`.
+ * `core/services/__tests__/cross-engine-dispatcher.component.test.ts`.
  */
 import { describe, expect, it, vi } from 'vitest'
 

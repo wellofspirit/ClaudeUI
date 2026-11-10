@@ -10,7 +10,7 @@
  *
  * The wiring half (`listProviderRegistry`) is deliberately not exercised here —
  * it reads the real stores; its channel is pinned in
- * `main/ipc/__tests__/provider-registry-ipc.test.ts`.
+ * `core/shared-providers/__tests__/provider-registry-ipc.test.ts`.
  */
 import { describe, expect, it } from 'vitest'
 import { buildProviderRegistry, type ProviderRegistrySources } from '../provider-registry'

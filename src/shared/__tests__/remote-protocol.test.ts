@@ -24,7 +24,7 @@ import {
  *
  * These are SHAPE tests only — a copy of the wording cannot notice the wording
  * changing. The load-bearing pin runs the predicate over a real
- * `registry.dispatch` refusal in `main/ipc/__tests__/command-registry.test.ts`.
+ * `registry.dispatch` refusal in `core/ipc/__tests__/command-registry.test.ts`.
  */
 const registryDenial = (channel: string, capability: string): string =>
   `Permission denied: "${channel}" requires the "${capability}" capability`

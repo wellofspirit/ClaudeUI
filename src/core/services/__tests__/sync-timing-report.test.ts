@@ -4,7 +4,7 @@
  * `sync:report-timing`'s host half: strict numeric-only validation, the
  * host-formatted line (no client string can reach it), the warn threshold, and the
  * per-connection budget. The channel's registration (capability, enforcement) is
- * pinned in main/ipc/__tests__/remote-handlers.ipc.test.ts.
+ * pinned in core/ipc/__tests__/remote-handlers.ipc.test.ts.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'

@@ -154,7 +154,7 @@ const sent = (channel: string): unknown[][] =>
  * Three writers `bootTestApp` hard-stubs as no-op API methods, so they never
  * reach the bridge and cannot be asserted by channel here. They are spied at the
  * API-METHOD level instead; the method → channel mapping is preload's, and is
- * guarded by `main/ipc/__tests__/remote-channel-parity.test.ts`.
+ * guarded by `core/ipc/__tests__/remote-channel-parity.test.ts`.
  */
 const api = {
   vendorAuthSetKey: vi.fn(async (..._args: unknown[]) => {}),
