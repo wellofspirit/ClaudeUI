@@ -44,7 +44,9 @@ src/
                          retry-match.ts (retry fact), denial-tracker.ts,
                          judge-cooldown.ts (429 rests), judge-accounts.ts
                          (fallback-account snapshot), judge-capture.ts
-                         (opt-in prompt+reply JSONL) (ADR-023/050/106/107)
+                         (opt-in prompt+reply JSONL), judge-setup.ts (the per-owner
+                         judge setup PiSession, OpencodeSession and the dispatch-target
+                         judge each hold one of) (ADR-023/050/106/107)
     auth/              — EngineAuthProvider + opencode/pi implementations; vault/
                          (AuthVault, CredentialSync, chatgpt-oauth — ADR-036/037)
     shared-providers/  — canonical provider/model routing + native projections (ADR-037)
@@ -156,7 +158,9 @@ Key modules in `src/core/services/`:
 | `session-delete.ts`                                                                                             | Engine-neutral session/project delete dispatcher (ADR-025)                                                                                                                                           |
 | `subagent-watcher.ts`                                                                                           | Watches subagent task files, parses messages                                                                                                                                                         |
 | `assistant-message.ts`                                                                                          | Shared assistant-message transform (used by ClaudeSession + the dispatcher)                                                                                                                          |
-| `cross-engine-dispatcher.ts`                                                                                    | Headless cross-engine dispatch targets, approval forwarding, usage capture (ADR-033)                                                                                                                 |
+| `cross-engine-dispatcher.ts`                                                                                    | Cross-engine dispatch core (ADR-033/105): runs, the ledger, X-Agent messaging, hand-back review, approval forwarding, the public API                                                                 |
+| `dispatch-{opencode,claude,pi}-targets.ts`                                                                      | One class per engine's dispatch targets: create/resume, drive the turn, its permission ladder and asks. They never call each other                                                                   |
+| `dispatch-target-{host,types,shared}.ts`                                                                        | `DispatchTargetHost` (the one seam from those classes to the core, late-bound), the target entry types, functions several of them use                                                                |
 | `collab-tool.ts`                                                                                                | Hosted `dispatch_agent` MCP tool registration (ADR-033)                                                                                                                                              |
 | `automation-manager.ts`                                                                                         | Cron/interval scheduling, run history, cli.js execution                                                                                                                                              |
 | `git-service.ts`                                                                                                | Wraps simple-git: status, branches, stage/unstage, commit, push/pull, diff                                                                                                                           |
