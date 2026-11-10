@@ -17,6 +17,11 @@
  *   <usage><subagent_tokens>22020</subagent_tokens><tool_uses>0</tool_uses><duration_ms>1191</duration_ms></usage>
  *   </task-notification>
  *
+ * 2.1.321 keeps the envelope byte-for-byte but clips a background command's
+ * description inside `<summary>` over 1,000 characters to its first 500 and last
+ * 300 around `\n\n... [N characters truncated] ...\n\n`; the title is the summary's
+ * first line, so live and history titles still agree.
+ *
  * Older binaries wrote `<usage>` as `total_tokens: N` lines; both parse.
  */
 import type { TaskHandback, TaskNotification, TaskTerminalStatus } from '../../shared/types'

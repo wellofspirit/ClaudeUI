@@ -137,6 +137,28 @@ describe('equivalentCostUsd — anthropic pricing', () => {
     expect(cost).toBeCloseTo(10.0)
   })
 
+  it('fable-5-2 / mythos-5-2: $8/$40, cache write $10 / $16, cache read $0.20 (tier_8_40_cache_read_0_20, cli.js 2.1.321)', () => {
+    for (const model of [
+      'claude-fable-5-2',
+      'us.anthropic.claude-fable-5-2',
+      'claude-mythos-5-2'
+    ]) {
+      const tokens = (k: keyof TokenCostInput) => oneMTok({ [k]: 1_000_000 })
+      expect(equivalentCostUsd('anthropic', model, tokens('inputTokens'))).toBeCloseTo(8)
+      expect(equivalentCostUsd('anthropic', model, tokens('outputTokens'))).toBeCloseTo(40)
+      expect(equivalentCostUsd('anthropic', model, tokens('cacheWriteTokens'))).toBeCloseTo(10)
+      // 1h tokens are a subset of the cache-write total.
+      expect(
+        equivalentCostUsd(
+          'anthropic',
+          model,
+          oneMTok({ cacheWriteTokens: 1_000_000, cacheWrite1hTokens: 1_000_000 })
+        )
+      ).toBeCloseTo(16)
+      expect(equivalentCostUsd('anthropic', model, tokens('cacheReadTokens'))).toBeCloseTo(0.2)
+    }
+  })
+
   it('fable-5-1: cache reads at $0.25/MTok (tier_10_50_cache_read_0_25, cli.js 2.1.261)', () => {
     const cost = equivalentCostUsd(
       'anthropic',
@@ -829,6 +851,8 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
   it('preserves declared order — first substring match wins', () => {
     const order = ANTHROPIC_MODEL_PRICING.map((e) => e.match)
     expect(order).toEqual([
+      'fable-5-2',
+      'mythos-5-2',
       'fable-5-1',
       'mythos-5-1',
       'fable',
@@ -851,6 +875,8 @@ describe('ANTHROPIC_MODEL_PRICING (the view block-usage derives from)', () => {
     // The ordering constraint that actually matters: point-release entries must
     // precede their family catch-alls, and the cheap 4.5+ entries must precede
     // the catch-all 'opus-4' (4.0/4.1 pricing) and 'opus'.
+    expect(order.indexOf('fable-5-2')).toBeLessThan(order.indexOf('fable'))
+    expect(order.indexOf('mythos-5-2')).toBeLessThan(order.indexOf('mythos'))
     expect(order.indexOf('fable-5-1')).toBeLessThan(order.indexOf('fable'))
     expect(order.indexOf('mythos-5-1')).toBeLessThan(order.indexOf('mythos'))
     expect(order.indexOf('opus-4-5')).toBeLessThan(order.indexOf('opus-4'))

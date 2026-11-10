@@ -65,9 +65,18 @@ if (src.includes(PATCH_MARKER) && src.includes(EARLY_POLL_MARKER)) {
 // The resolver tail (`let X=Y;if(X)Y=null,X()`) is load-bearing for uniqueness:
 // the PowerShell tool has the same four assignments but no resolver, so it is
 // the only thing keeping this to one match. Never relax it to "first match".
+//
+// 2.1.321 opened the body with a late-callback guard: once the shell command is
+// killed/completed, the first stray call is dropped:
+//   onProgress(a,b,c,d,e){if(!X&&!Y&&(Z.status==="killed"||Z.status==="completed")){Y=!0;return}...
+// It is optional in the anchor, and Part A goes AFTER it so a dropped call
+// never reaches the SDK stream either.
+const lateGuard =
+  `if\\(!${V}&&!${V}&&\\(${V}\\.status==="killed"\\|\\|${V}\\.status==="completed"\\)\\)` +
+  `\\{${V}=!0;return\\}`
 
 const anchorRe = new RegExp(
-  `onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
+  `onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{(?:${lateGuard})?` +
     `(${V})=\\1,(${V})=\\2,(${V})=\\3,(${V})=\\5\\?\\4:0;` +
     `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)\\}`
 )
@@ -78,7 +87,7 @@ let anchorMatch = anchorRe.exec(src)
 if (!anchorMatch) {
   // Part A might already be applied — try matching with the patch marker present
   const patchedRe = new RegExp(
-    `onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{/\\*PATCHED:bash-output-streaming\\*/`
+    `onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{(?:${lateGuard})?/\\*PATCHED:bash-output-streaming\\*/`
   )
   anchorMatch = patchedRe.exec(src)
 }
@@ -131,7 +140,9 @@ if (src.includes(PATCH_MARKER)) {
     process.exit(1)
   }
 
-  const openBrace = anchorMatch[0].slice(0, anchorMatch[0].indexOf('{') + 1)
+  // Opening brace plus the optional late-callback guard (see lateGuard above).
+  const prefixLen = new RegExp(`^onProgress\\([^)]*\\)\\{(?:${lateGuard})?`).exec(anchorMatch[0])[0]
+    .length
 
   const injection =
     PATCH_MARKER +
@@ -149,7 +160,7 @@ if (src.includes(PATCH_MARKER)) {
     `})+"\\n")}catch(_bo_e){}` +
     `}}`
 
-  const insertIdx = src.indexOf(anchorMatch[0]) + openBrace.length
+  const insertIdx = src.indexOf(anchorMatch[0]) + prefixLen
   src = src.slice(0, insertIdx) + injection + src.slice(insertIdx)
 
   if (!src.includes(PATCH_MARKER)) {
@@ -210,7 +221,13 @@ if (src.includes(EARLY_POLL_MARKER)) {
   const searchArea = src.slice(anchorMatch.index, windowEnd)
 
   // 1. TaskOutput class binding + shell-command var, from the CLI's own call.
-  const pollRe = new RegExp(`(${V})\\.startPolling\\((${V})\\.taskOutput\\.taskId\\)`, 'g')
+  // 2.1.321 passes a second arg, `startPolling(id,so)`: `startPolling(e,n=!0)` stores it as the
+  // "read the output file" flag, and `so` is still `!0` when our early call runs, so the
+  // one-arg default we inject is equivalent until the CLI's own call sets it.
+  const pollRe = new RegExp(
+    `(${V})\\.startPolling\\((${V})\\.taskOutput\\.taskId(?:,${V})?\\)`,
+    'g'
+  )
   const pollMatches = [...searchArea.matchAll(pollRe)]
   if (pollMatches.length !== 1) {
     console.error(

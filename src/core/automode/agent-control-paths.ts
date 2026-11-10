@@ -18,7 +18,7 @@
  *    opencode `edit` ask patterns by {@link agentControlEditPatterns}
  *    (`opencode/permission-v2.ts`).
  *
- * The list is ours UNION cli.js 2.1.317's `DANGEROUS_DIRECTORIES` /
+ * The list is ours UNION cli.js 2.1.321's `DANGEROUS_DIRECTORIES` /
  * `DANGEROUS_FILES` (package-manager and shell rc files, build/linter configs,
  * hook runners): Claude raises a safety check for each of them, so the
  * edit-auto-accepting bases must not wave them through either.
@@ -53,7 +53,7 @@ export const AGENT_CONTROL_DIRS: readonly string[] = [
   // (vendor/pi-src/packages/coding-agent/docs/skills.md) — skills are
   // instructions future sessions load.
   '.agents',
-  // cli.js 2.1.317 DANGEROUS_DIRECTORIES beyond ours: IDE project config,
+  // cli.js 2.1.321 (unchanged since 2.1.317) DANGEROUS_DIRECTORIES beyond ours: IDE project config,
   // package-manager and build-tool config/caches, and git's XDG config (git
   // reads `$XDG_CONFIG_HOME/git/config` — `core.fsmonitor`/`core.sshCommand`
   // there arm code execution like `.git/config`).
@@ -77,7 +77,7 @@ export const AGENT_CONTROL_FILES: readonly string[] = [
   'opencode.jsonc',
   // The single-file form of `.devcontainer/` — same run-on-open mechanism.
   '.devcontainer.json',
-  // cli.js 2.1.317 DANGEROUS_FILES beyond ours: git config, shell rc/profile
+  // cli.js 2.1.321 (unchanged since 2.1.317) DANGEROUS_FILES beyond ours: git config, shell rc/profile
   // files (run on every shell start), direnv and ripgrep config, package-manager
   // and runtime config that runs scripts or redirects registries, build-tool
   // and hook-runner configs, wrapper properties that pick the downloaded

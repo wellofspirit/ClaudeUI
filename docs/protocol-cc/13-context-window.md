@@ -10,6 +10,30 @@ Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
 not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
 models, same context/pricing/capability records.
 
+**2.1.321 (2026-11-10):** two new models, compared field by field against 2.1.319's catalog (22 → 24
+models; `schema_version`, `alias_migration` (still `{}`) and every other record identical):
+
+- `claude-fable-5-2` (Fable 5.2): `window:1e6, native_1m, supports_1m_beta`, 128K output, pricing
+  `tier_8_40_cache_read_0_20` — input $8, output $40, cache write $10 (5m) / $16 (1h), cache read
+  $0.20, web search $0.01 (a new tier; Fable 5.1 stays `tier_10_50_cache_read_0_25`),
+  `default_effort:"medium"` (Fable 5.1 was `high`), no `effort_cost_index`, `fallback_3p:
+"claude-fable-5-1"`, `advisor_rank:10`, capabilities `effort`, `max_effort`, `xhigh_effort`,
+  `adaptive_thinking`, `fast_mode`, `refusal_fallback`, `fable_5_2_prompt_bundle` and the rest of the
+  Fable 5.1 set.
+- `claude-mythos-5-2` (Mythos 5.2): the same numbers and `tier_8_40_cache_read_0_20`, first party
+  only (every other provider id `null`).
+
+`aliases.fable.default` and `latest_per_family.fable` moved to `claude-fable-5-2` (gateway stays
+`claude-fable-5`); `best` moved from `fable` to `opus` (not mirrored). The catalog's signed served
+snapshot embedded in the same bundle (`provider_alias_targets`) still says `fable` →
+`claude-fable-5-1`; alias resolution is served per account (ADR-100), so a session may still report
+5.1 until the served catalog moves. Mirror changes: `pricing.ts` gained `fable-5-2` and
+`mythos-5-2` entries ahead of the generic ones, `defaultEffort()` returns `medium` for both,
+`canonicalizeModelValue('fable' | 'fable[1m]')` now returns `claude-fable-5-2` (it had no `fable`
+case; Fable 5.1's `high` default matched the unknown-family fallback, 5.2's `medium` does not).
+`IMPLICIT_1M_BASE_MODELS` needs no change (`claude-fable-5` / `claude-mythos-5` prefixes cover both)
+and neither do the xhigh/adaptive/max-output heuristics.
+
 **2.1.319 (2026-11-09):** the baked catalog is **byte-identical** to 2.1.317's; no mirror change in `src/shared/`.
 
 **2.1.317:** complete baked catalog compared model by model against 2.1.308: same 22 models,
@@ -115,6 +139,8 @@ claude-fable-5    claude-fable-5-1    claude-mythos-5    claude-mythos-5-1
 claude-opus-4-7   claude-opus-4-8     claude-opus-5      claude-sonnet-5
 ```
 
+(2.1.321 adds `claude-fable-5-2` and `claude-mythos-5-2`, both covered by the prefixes above.)
+
 Provider gating moved into the catalog: `native_1m_3p:{bedrock,vertex,foundry}`
 per model (in 2.1.261 only `claude-sonnet-5` grants all three; the opus/fable
 records carry `supports_1m_beta` / `supports_1m_suffix` instead).
@@ -132,7 +158,7 @@ them. In 2.1.261:
 
 | Alias         | Resolves to (first-party default)                                                                                                  | Window |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| `fable`       | `claude-fable-5-1` (gateway: `claude-fable-5`)                                                                                     | 1M     |
+| `fable`       | `claude-fable-5-2` since 2.1.321 (`claude-fable-5-1` before; gateway: `claude-fable-5`)                                            | 1M     |
 | `opus`        | `claude-opus-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`)                                                           | 1M     |
 | `sonnet`      | `claude-sonnet-5-5` since 2.1.285 (bedrock/vertex/foundry/mantle: `claude-sonnet-4-5`, anthropic_aws/gateway: `claude-sonnet-4-6`) | 1M¹    |
 | `haiku`       | `claude-haiku-4-5`                                                                                                                 | 200K   |

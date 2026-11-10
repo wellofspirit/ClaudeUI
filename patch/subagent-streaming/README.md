@@ -19,7 +19,7 @@ your system, and may trail behind in version.
 | ---------------------- | ------------------------------------------ |
 | SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
 | Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
-| Last re-anchored       | 2.1.319 (chunked)                          |
+| Last re-anchored       | 2.1.321 (chunked)                          |
 
 All versions exhibit the same behavior. Function names change between
 versions but the architecture is stable through v2.1.196. **v2.1.197 introduced a significant refactor** (BVe unification — see below) that required new patches F2 and changes to B and E; the logical problem and fix strategy are identical. **v2.1.261 changed the bundle format** (code-split ESM chunks — see the next section) and reshaped three anchors (F2, C, E); the patch design is unchanged.
@@ -1200,6 +1200,24 @@ syntactically and semantically identical to 2.1.316's.
 `apply.mjs` produces an identical `cli.js` for 2.1.308 (its first-arm candidate
 is still the `bash_progress` arm, at the same offset).
 
+#### v2.1.321 — the head's second argument became a call
+
+2.1.321 changed one token of the head: `yield*FN(e,n)` → `yield*FN(e,s())` (the session-id value that
+used to be a local `n` is now computed at the call). Everything behind the head is byte-identical to
+2.1.319 up to renames.
+
+```js
+// 2.1.321 darwin, char 19212584
+case"progress":if(zY(e))yield*rYo(e,s());else if(de()&&e.data.type==="repl_tool_call"){…yield{...y,session_id:G(),uuid:e.uuid}}else if(e.data.type==="tool_heartbeat")yield{…};…
+// 2.1.319 darwin, char 18999615
+case"progress":if(rY(e))yield*dqo(e,n);else if(le()&&e.data.type==="repl_tool_call"){…
+```
+
+The anchor accepts the second argument as `[\w$]+(?:\(\))?` and still requires exactly one match. The
+predicate (`zY`) still routes only `agent_progress` / `skill_progress`, so `agent_stream_event` falls
+through to the injected arm and the arm is live. Session-id getter is still `G()` (taken from the
+sibling yields). The 2.1.319 and 2.1.317 pristine bundles still match once each.
+
 #### v2.1.319 — a new first arm; the anchor moves to the dispatch head
 
 2.1.319 inserted `else if(le()&&e.data.type==="repl_tool_call"){…}` (Code Mode's REPL tool frames)
@@ -1214,8 +1232,10 @@ case"progress":if(O5(e))yield*_Do(e,n);else if(e.data.type==="tool_heartbeat")yi
 ```
 
 ```
-case"progress":if\(([\w$]+)\(([\w$]+)\)\)yield\*([\w$]+)\(\2,([\w$]+)\);
+case"progress":if\(([\w$]+)\(([\w$]+)\)\)yield\*([\w$]+)\(\2,[\w$]+(?:\(\))?\);
 ```
+
+(2.1.321: the second argument became an optional call, see "v2.1.321" below.)
 
 - **Exactly one match** across the concat (0 or >1 aborts with the offsets). The `[engine] yield-twin`
   converter has no such head, so it never matches.

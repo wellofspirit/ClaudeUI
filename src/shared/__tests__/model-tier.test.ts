@@ -6,6 +6,7 @@ import { MODEL_TIERS, modelTier } from '../model-tier'
 describe('modelTier', () => {
   it.each([
     ['claude-fable-5-1', 'top'],
+    ['claude-fable-5-2', 'top'],
     ['claude-opus-5-5', 'high'],
     ['claude-sonnet-5-5', 'mid'],
     ['claude-haiku-4-5-20251001', 'low'],

@@ -761,6 +761,7 @@ if (src.includes(patchBMarker)) {
 // `case"progress":` chain:
 //
 //   case"progress":if(PRED(e))yield*FN(e,n);                ← the anchor
+//                                    (2.1.321: the 2nd arg is a call, FN(e,s()))
 //   else if(…)yield{…tool_heartbeat…}
 //
 // becomes
@@ -783,11 +784,11 @@ const patchCMarker = '/*PATCHED:subagent-C*/'
 if (src.includes(patchCMarker)) {
   console.log('Already applied. Skipping.')
 } else {
-  // `case"progress":if(PRED(e))yield*FN(e,n);` — names are minified and
+  // `case"progress":if(PRED(e))yield*FN(e,n);` (2.1.321: `…FN(e,s());`) — names are minified and
   // chunk-local; `$` is legal in them, hence V = [\w$]+ (captures are only used
   // as a backreference and as injected text, never rebuilt into another RegExp).
   const headRe = new RegExp(
-    `case"progress":if\\((${V})\\((${V})\\)\\)yield\\*(${V})\\(\\2,(${V})\\);`,
+    `case"progress":if\\((${V})\\((${V})\\)\\)yield\\*(${V})\\(\\2,${V}(?:\\(\\))?\\);`,
     'g'
   )
   const headMatches = [...src.matchAll(headRe)]
