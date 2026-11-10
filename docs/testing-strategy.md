@@ -388,7 +388,7 @@ Replaces `sdkQuery()`. Returns an async generator yielding configurable events, 
 
 ### bootTestApp (`src/test/helpers/boot-test-app.ts`)
 
-Orchestrator for Layer 2/3 tests. Creates bridge, registers stub IPC handlers for internal store operations, builds `window.api`, returns `{ bridge, api, emit, teardown }`.
+Orchestrator for Layer 2/3 tests. Creates bridge, registers stub IPC handlers for internal store operations, builds `window.api` (the pass-through members from `shared/api-invoke-table.ts`, the table the preload uses, so the helper cannot lag it), returns `{ bridge, api, emit, teardown }`.
 
 ### Factory Functions (`src/test/factories/`)
 
