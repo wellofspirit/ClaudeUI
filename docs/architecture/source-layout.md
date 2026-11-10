@@ -11,7 +11,8 @@ window-independent service graph (no Electron, lint-enforced), and **`src/main`*
 
 ```
 src/
-  shared/              — engine-neutral types (types.ts), capability model
+  shared/              — engine-neutral types (types.ts, a barrel over
+                         types/<domain>.ts and types/api/<domain>.ts), capability model
                          (model-capabilities.ts), tool-kind taxonomy (tool-kinds.ts),
                          pricing, project-key, engine-meta, permission-modes,
                          remote protocol, E2E crypto, audio/ (PCM16 helpers),

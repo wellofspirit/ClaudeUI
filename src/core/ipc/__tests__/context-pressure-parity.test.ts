@@ -68,6 +68,6 @@ describe('session:context-pressure:respond has the same shape everywhere', () =>
   })
 
   it('the API type carries it too', () => {
-    expect(read('src/shared/types.ts')).toContain('respondContextPressure(')
+    expect(read('src/shared/types/api/session.ts')).toContain('respondContextPressure(')
   })
 })
