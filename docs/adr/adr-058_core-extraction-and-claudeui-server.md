@@ -245,7 +245,8 @@ credential bound to a name that will not exist tomorrow.
   `src/main/services` is exactly the Electron seven — `auth-manager`, `account-manager`,
   `plugin-manager`, `log-viewer`, `mockup-protocol`, `sync-port`, `session-invalidation`.
   Specs live next to their subjects: the legacy `src/main/**/__tests__/` specs for `src/core/**`
-  modules moved to `src/core/**/__tests__/` (2026-11-10); only specs of desktop-only modules stay.
+  modules moved to `src/core/**/__tests__/` (2026-11-10). What stays under `src/main` is the specs
+  of desktop-only modules and the build, script and patch specs in `src/main/__tests__/`.
 - **The desktop is unchanged, and that is the acceptance criterion.** Same native SQLite,
   same registrar order, same dispatch closure, same audit choke point. Every S2/S3 change
   is either a moved file, an injected seam, or a build script.
