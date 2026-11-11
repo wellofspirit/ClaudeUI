@@ -201,6 +201,53 @@ describe('AuthManager.finalize — a successful login stops the stale-credential
   })
 })
 
+describe('AuthManager.finalize — the login identity reaches callbacks, not the broadcast', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    hoisted.handle.current = undefined
+  })
+
+  async function login(result: unknown): Promise<{
+    cb: ReturnType<typeof vi.fn>
+    sent: Array<[string, unknown[]]>
+  }> {
+    const { sent, win } = makeWindow()
+    authManager.setWindow(win as never)
+    const cb = vi.fn()
+    authManager.onLoginSuccess(cb)
+    hoisted.handle.current = {
+      claudeAuthenticate: vi.fn(async () => ({ manualUrl: 'https://auth.example/?state=s' })),
+      claudeOAuthWaitForCompletion: vi.fn(() => new Promise(() => {})),
+      claudeOAuthCallback: vi.fn(async () => result)
+    }
+    await authManager.signIn()
+    await authManager.submitOAuthCode('the-code')
+    return { cb, sent }
+  }
+
+  // The in-app backend's identity reaching callbacks is covered end to end in
+  // claude-login-backend.test.ts; cli.js is never a source of one.
+  it('ignores an identity in a cli.js answer and keeps it out of auth:state', async () => {
+    const identity = {
+      accountId: 'fake-slot',
+      accountUuid: 'fake-acct',
+      organizationUuid: 'fake-org'
+    }
+    const { cb, sent } = await login({ account: { email: 'user@example.test' }, identity })
+    expect(cb).toHaveBeenCalledWith(expect.objectContaining({ email: 'user@example.test' }), null)
+    const payload = JSON.stringify(sent.filter(([ch]) => ch === 'auth:state'))
+    expect(payload).toContain('success')
+    expect(payload).not.toContain('fake-acct')
+    expect(payload).not.toContain('fake-org')
+    expect(payload).not.toContain('fake-slot')
+  })
+
+  it('passes null when the backend produced no identity (cli.js)', async () => {
+    const { cb } = await login({ account: { email: 'user@example.test' } })
+    expect(cb).toHaveBeenCalledWith(expect.anything(), null)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // ADR-070 slice D — the remote paste-back sign-in swallowed its own success.
 // ---------------------------------------------------------------------------

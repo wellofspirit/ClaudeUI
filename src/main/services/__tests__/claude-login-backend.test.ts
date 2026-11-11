@@ -7,6 +7,7 @@
  * loopback listener.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import * as path from 'node:path'
 
 const hoisted = vi.hoisted(() => ({
   handle: { current: undefined as unknown },
@@ -56,7 +57,8 @@ vi.mock('../../../core/auth/claude-oauth', () => ({
             tokenSource: null,
             apiKeySource: null,
             apiProvider: 'firstParty'
-          }
+          },
+          identity: { accountUuid: 'fake-acct', organizationUuid: 'fake-org' }
         })
         return outcome
       }),
@@ -159,8 +161,16 @@ describe('AuthManager on the in-app backend', () => {
     // Desktop: the loopback wait is armed on the in-app flow.
     expect(flow.waitForCompletion).toHaveBeenCalledTimes(1)
 
+    const onSuccess = vi.fn()
+    authManager.onLoginSuccess(onSuccess)
     const done = (await authManager.submitOAuthCode('CODE#in-app-state')) as AuthFlowState
     expect(flow.submitCode).toHaveBeenCalledWith('CODE', 'in-app-state')
+    // The slot is the dir the flow wrote, named by its basename.
+    expect(onSuccess).toHaveBeenCalledWith(expect.anything(), {
+      accountId: path.basename(DIR),
+      accountUuid: 'fake-acct',
+      organizationUuid: 'fake-org'
+    })
     expect(done.status).toBe('success')
     expect(done.account?.email).toBe('multi@example.com')
     expect(serviceSession.getControlHandle).not.toHaveBeenCalled()

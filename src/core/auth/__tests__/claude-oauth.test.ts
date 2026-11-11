@@ -468,3 +468,48 @@ describe('ClaudeLoginFlow — the credentials file', () => {
     expect((readCreds().claudeAiOauth as Record<string, unknown>).subscriptionType).toBeNull()
   })
 })
+
+describe('ClaudeLoginFlow — the identity the sign-in resolved', () => {
+  async function signIn(fetchFn: typeof fetch) {
+    const flow = new ClaudeLoginFlow({ accountDir: dir, fetch: fetchFn, loopback: false })
+    const { manualUrl } = await flow.start()
+    return flow.submitCode('C', stateOf(manualUrl))
+  }
+
+  it('carries the profile uuids, and keeps them off the broadcast `account`', async () => {
+    const result = await signIn(
+      fakeFetch({
+        profile: () =>
+          jsonResponse(200, {
+            ...PROFILE,
+            account: { ...PROFILE.account, uuid: 'fake-profile-acct' },
+            organization: { ...PROFILE.organization, uuid: 'fake-profile-org' }
+          })
+      }).fetch
+    )
+    expect(result.identity).toEqual({
+      accountUuid: 'fake-profile-acct',
+      organizationUuid: 'fake-profile-org'
+    })
+    expect(Object.keys(result.account).some((k) => /uuid/i.test(k))).toBe(false)
+  })
+
+  it('falls back to the token response’s uuids when the profile read fails', async () => {
+    const result = await signIn(
+      fakeFetch({ profile: () => jsonResponse(500, {}), roles: () => jsonResponse(500, {}) }).fetch
+    )
+    expect(result.identity).toEqual({ accountUuid: 'acc-uuid', organizationUuid: 'org-uuid' })
+  })
+
+  it('is null/null when neither source names them', async () => {
+    const { account: _a, organization: _o, ...bare } = TOKENS
+    const result = await signIn(
+      fakeFetch({
+        token: () => jsonResponse(200, bare),
+        profile: () => jsonResponse(500, {}),
+        roles: () => jsonResponse(500, {})
+      }).fetch
+    )
+    expect(result.identity).toEqual({ accountUuid: null, organizationUuid: null })
+  })
+})

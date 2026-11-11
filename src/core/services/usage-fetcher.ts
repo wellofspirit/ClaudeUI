@@ -593,7 +593,7 @@ export class UsageFetcher {
           ? identity.billingType
           : (buildClaudeAccountRef()?.billingType ?? 'unknown')
     }
-    this.rememberAccountIdentity(this.activeAccount)
+    this.rememberAccountIdentity(dir, this.activeAccount)
 
     const settled = this.settleUnreadIdentity(dir, switchAt)
     const staleRecord = this.lastLoggedRecord
@@ -881,6 +881,9 @@ export class UsageFetcher {
    */
   private async trackAccountFromClaudeJson(switchAt?: number): Promise<void> {
     const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
+    // Multi-account came on during the read: the shared file describes no
+    // account of the new active dir, so this pass is stale.
+    if (getSecurestorageEnv()) return
     const parsed = JSON.parse(raw) as {
       oauthAccount?: {
         accountUuid?: string
@@ -913,7 +916,6 @@ export class UsageFetcher {
       ...(organizationName ? { organizationName } : {}),
       billingType
     }
-    this.rememberAccountIdentity(this.activeAccount)
 
     await this.seedAccountLog()
     const settled = this.settleUnreadIdentity(null, switchAt)
@@ -1145,14 +1147,12 @@ export class UsageFetcher {
    * Write the active account's identity onto its own `account` row (ADR-071 §6).
    *
    * What the limits provider reads back when the account is NOT active, so that
-   * a stored account's reading has a key without a second network call. A no-op
-   * in single-account mode (no per-account directory, so no row to name) and
-   * best-effort: the identity is an optimization for a future read, never a
+   * a stored account's reading has a key without a second network call. Called
+   * only from the per-account dir pass, with the dir that pass resolved (single
+   * account mode has no row to name), and best-effort: the identity is an optimization for a future read, never a
    * reason to fail the poll that noticed it.
    */
-  private rememberAccountIdentity(account: ActiveAccount): void {
-    const dir = getSecurestorageEnv()?.dir
-    if (!dir) return
+  private rememberAccountIdentity(dir: string, account: ActiveAccount): void {
     try {
       updateAccountIdentity(basename(dir), {
         accountUuid: account.uuid,

@@ -3247,6 +3247,21 @@ export function updateAccountIdentity(
   )
 }
 
+/**
+ * Set an account row's two uuids, nothing else (org name, billing type and
+ * `identity_checked_at` stay, so the next usage poll still re-verifies).
+ * A no-op when the id names no row.
+ */
+export function setAccountUuids(
+  id: string,
+  accountUuid: string | null,
+  organizationUuid: string | null
+): void {
+  getDb()
+    .prepare('UPDATE account SET account_uuid = ?, organization_uuid = ? WHERE id = ?')
+    .run(accountUuid, organizationUuid, id)
+}
+
 // ---------------------------------------------------------------------------
 // Key/value marker table (migration v23)
 // ---------------------------------------------------------------------------

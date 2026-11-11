@@ -20,7 +20,8 @@
 
 import { serviceSession, type ServiceControlHandle } from '../../core/services/service-session'
 import { getSecurestorageEnv, onSecurestorageEnvChange } from '../../core/sdk/securestorage-env'
-import { ClaudeLoginFlow } from '../../core/auth/claude-oauth'
+import { basename } from 'node:path'
+import { ClaudeLoginFlow, type ClaudeLoginResult } from '../../core/auth/claude-oauth'
 
 export interface AuthorizeUrls {
   manualUrl?: string
@@ -36,6 +37,17 @@ export interface OAuthResult {
     apiKeySource?: string | null
     apiProvider?: string | null
   }
+  /**
+   * In-app flows only: the uuids the sign-in resolved and the slot whose
+   * credential it wrote. Never part of `AuthFlowState`.
+   */
+  identity?: LoginIdentity
+}
+
+export interface LoginIdentity {
+  accountId: string
+  accountUuid: string | null
+  organizationUuid: string | null
 }
 
 export interface ClaudeLoginBackend {
@@ -60,12 +72,16 @@ export class CliLoginBackend implements ClaudeLoginBackend {
     return (await this.handle.claudeAuthenticate(true)) as AuthorizeUrls
   }
 
+  // Only `account` is taken from cli.js's answer: an `identity` is the in-app
+  // flow's own claim about the slot it wrote, never something cli.js supplies.
   async waitForCompletion(): Promise<OAuthResult> {
-    return (await this.handle.claudeOAuthWaitForCompletion()) as OAuthResult
+    const r = (await this.handle.claudeOAuthWaitForCompletion()) as OAuthResult
+    return { account: r?.account }
   }
 
   async submitCode(code: string, state: string): Promise<OAuthResult> {
-    return (await this.handle.claudeOAuthCallback(code, state)) as OAuthResult
+    const r = (await this.handle.claudeOAuthCallback(code, state)) as OAuthResult
+    return { account: r?.account }
   }
 
   /**
@@ -86,9 +102,10 @@ export const ACCOUNT_CHANGED_DURING_SIGN_IN =
  *
  * The flow dies when the active account dir moves off `accountDir`, the way a
  * cli.js flow dies with the service session `AccountManager` stops on every
- * switch. Surviving it would be worse than it looks: the credential would land
- * in the right dir, but `AccountManager.noteLogin` stamps the login's email on
- * whichever account is active WHEN it succeeds.
+ * switch. Surviving it would be worse than it looks: the login would complete
+ * for a slot that is no longer active. `AccountManager.noteLogin` stamps the
+ * slot named by the result's `identity.accountId` (this backend's dir), so even
+ * a switch landing after the flow settles cannot move the stamp.
  */
 export class InAppLoginBackend implements ClaudeLoginBackend {
   readonly kind = 'in-app' as const
@@ -121,12 +138,16 @@ export class InAppLoginBackend implements ClaudeLoginBackend {
 
   waitForCompletion(): Promise<OAuthResult> {
     if (!this.flow) return Promise.reject(new Error('No active login flow'))
-    return this.flow.waitForCompletion()
+    return this.flow.waitForCompletion().then((r) => this.toResult(r))
   }
 
   submitCode(code: string, state: string): Promise<OAuthResult> {
     if (!this.flow) return Promise.reject(new Error('No active login flow'))
-    return this.flow.submitCode(code, state)
+    return this.flow.submitCode(code, state).then((r) => this.toResult(r))
+  }
+
+  private toResult(r: ClaudeLoginResult): OAuthResult {
+    return { account: r.account, identity: { accountId: basename(this.accountDir), ...r.identity } }
   }
 
   cancel(): void {

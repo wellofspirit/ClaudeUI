@@ -17,7 +17,10 @@ const hoisted = vi.hoisted(() => {
   const realOs = require('os') as typeof import('os')
   const realPath = require('path') as typeof import('path')
   const home = realFs.mkdtempSync(realPath.join(realOs.tmpdir(), 'claudeui-acct-test-'))
-  return { TEST_HOME: home, loginCb: { current: null as null | ((a: unknown) => void) } }
+  return {
+    TEST_HOME: home,
+    loginCb: { current: null as null | ((a: unknown, i?: unknown) => void) }
+  }
 })
 
 vi.mock('node:os', async () => {
@@ -32,7 +35,7 @@ vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'
 vi.mock('../../../core/services/service-session', () => ({ serviceSession: { stop: vi.fn() } }))
 vi.mock('../auth-manager', () => ({
   authManager: {
-    onLoginSuccess: vi.fn((cb: (a: unknown) => void) => {
+    onLoginSuccess: vi.fn((cb: (a: unknown, i?: unknown) => void) => {
       hoisted.loginCb.current = cb
     }),
     // Returns a promise so the fire-and-forget `void signIn().catch(...)` in
@@ -50,7 +53,7 @@ import { getSecurestorageEnv } from '../../../core/sdk/securestorage-env'
 import { serviceSession } from '../../../core/services/service-session'
 import { authManager } from '../auth-manager'
 import { logger } from '../../../core/services/logger'
-import { getAllAccounts, deleteAccountRow } from '../../../core/services/db'
+import { getAllAccounts, deleteAccountRow, getAccount } from '../../../core/services/db'
 
 const ACCOUNTS_DIR = path.join(hoisted.TEST_HOME, '.claude', 'ui', 'accounts')
 
@@ -291,5 +294,79 @@ describe('AccountManager', () => {
     const acc = accountManager.getState().accounts.find((a) => a.id === activeId)!
     expect(acc.email).toBe('user@example.com')
     expect(acc.subscriptionType).toBe('max')
+  })
+  describe('login identity (uuids)', () => {
+    const LOGIN = { email: 'user@example.test', subscriptionType: 'max', organization: 'Org' }
+
+    it('stamps the flow slot, not the active one, when a switch landed first', async () => {
+      await accountManager.setEnabled(true)
+      const first = accountManager.getState().activeId!
+      await accountManager.addAccount()
+      const second = accountManager.getState().activeId!
+      expect(second).not.toBe(first)
+
+      hoisted.loginCb.current?.(LOGIN, {
+        accountId: first,
+        accountUuid: 'fake-acct-uuid-1',
+        organizationUuid: 'fake-org-uuid-1'
+      })
+
+      const accs = accountManager.getState().accounts
+      const a = accs.find((x) => x.id === first)!
+      expect(a.email).toBe('user@example.test')
+      expect([a.accountUuid, a.organizationUuid]).toEqual(['fake-acct-uuid-1', 'fake-org-uuid-1'])
+      expect(getAccount(first)).toMatchObject({
+        accountUuid: 'fake-acct-uuid-1',
+        organizationUuid: 'fake-org-uuid-1'
+      })
+      const b = accs.find((x) => x.id === second)!
+      expect(b.email).not.toBe('user@example.test')
+      expect(getAccount(second)?.accountUuid ?? null).toBeNull()
+    })
+
+    it('writes null for both when the identity is partial', async () => {
+      await accountManager.setEnabled(true)
+      const id = accountManager.getState().activeId!
+      hoisted.loginCb.current?.(LOGIN, {
+        accountId: id,
+        accountUuid: 'fake-acct-uuid-1',
+        organizationUuid: 'fake-org-uuid-1'
+      })
+      hoisted.loginCb.current?.(LOGIN, {
+        accountId: id,
+        accountUuid: 'fake-acct-uuid-2',
+        organizationUuid: null
+      })
+      const row = getAccount(id)!
+      expect([row.accountUuid ?? null, row.organizationUuid ?? null]).toEqual([null, null])
+      const acc = accountManager.getState().accounts.find((x) => x.id === id)!
+      expect([acc.accountUuid, acc.organizationUuid]).toEqual([null, null])
+    })
+
+    it('a cli.js login (identity null) leaves the uuids alone', async () => {
+      await accountManager.setEnabled(true)
+      const id = accountManager.getState().activeId!
+      hoisted.loginCb.current?.(LOGIN, {
+        accountId: id,
+        accountUuid: 'fake-acct-uuid-1',
+        organizationUuid: 'fake-org-uuid-1'
+      })
+      hoisted.loginCb.current?.({ ...LOGIN, email: 'other@example.test' }, null)
+      const row = getAccount(id)!
+      expect(row.email).toBe('other@example.test')
+      expect(row.accountUuid).toBe('fake-acct-uuid-1')
+    })
+
+    it('does nothing with multi-account off', async () => {
+      await accountManager.setEnabled(true)
+      const id = accountManager.getState().activeId!
+      await accountManager.setEnabled(false)
+      hoisted.loginCb.current?.(LOGIN, {
+        accountId: id,
+        accountUuid: 'fake-acct-uuid-1',
+        organizationUuid: 'fake-org-uuid-1'
+      })
+      expect(getAccount(id)?.accountUuid ?? null).toBeNull()
+    })
   })
 })

@@ -32,8 +32,10 @@ import {
   getAllAccounts,
   upsertAccount,
   deleteAccountRow,
-  importAccountsOnce
+  importAccountsOnce,
+  setAccountUuids
 } from '../../core/services/db'
+import type { LoginIdentity } from './claude-login-backend'
 
 const ACCOUNTS_DIR = join(homedir(), '.claude', 'ui', 'accounts')
 const ACCOUNTS_FILE = join(ACCOUNTS_DIR, 'accounts.json')
@@ -70,7 +72,7 @@ class AccountManager {
     this.state = this.load()
     this.applyActive()
     // After a successful login, stamp the active account with its email/tier.
-    authManager.onLoginSuccess((account) => this.noteLogin(account))
+    authManager.onLoginSuccess((account, identity) => this.noteLogin(account, identity))
   }
 
   getState(): AccountsState {
@@ -175,19 +177,39 @@ class AccountManager {
   // Internal
   // ---------------------------------------------------------------------------
 
-  /** Stamp the active account with the freshly-signed-in identity. */
-  private noteLogin(account: OAuthAccount | null): void {
-    if (!this.state.enabled || !this.state.activeId || !account) return
-    const acc = this.state.accounts.find((a) => a.id === this.state.activeId)
+  /**
+   * Stamp the signed-in slot with the freshly-signed-in identity. The slot is
+   * the one the in-app flow wrote its credential to (`identity.accountId`), not
+   * whichever is active now: a switch landing between the flow settling and
+   * this callback must not stamp another account. A cli.js login has no
+   * identity and targets the active account, as before.
+   */
+  private noteLogin(account: OAuthAccount | null, identity: LoginIdentity | null): void {
+    const targetId = identity?.accountId ?? this.state.activeId
+    if (!this.state.enabled || !targetId || !account) return
+    const acc = this.state.accounts.find((a) => a.id === targetId)
     if (!acc) return
     acc.email = account.email ?? acc.email
     acc.subscriptionType = account.subscriptionType ?? acc.subscriptionType
     acc.organization = account.organization ?? acc.organization
+    if (identity) {
+      // Both or neither: a half-known pair would name a stale identity in spawns.
+      const both = identity.accountUuid && identity.organizationUuid
+      acc.accountUuid = both ? identity.accountUuid : null
+      acc.organizationUuid = both ? identity.organizationUuid : null
+    }
     // Persist new info to DB (source of truth) + pointer file.
     try {
       upsertAccount(acc)
     } catch (err) {
       logger.warn('AccountManager', `Failed to upsert account ${acc.id} to DB: ${err}`)
+    }
+    if (identity) {
+      try {
+        setAccountUuids(acc.id, acc.accountUuid ?? null, acc.organizationUuid ?? null)
+      } catch (err) {
+        logger.warn('AccountManager', `Failed to stamp uuids on ${acc.id}: ${err}`)
+      }
     }
     this.savePointer()
     this.broadcast()
