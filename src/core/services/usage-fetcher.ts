@@ -593,7 +593,7 @@ export class UsageFetcher {
           ? identity.billingType
           : (buildClaudeAccountRef()?.billingType ?? 'unknown')
     }
-    this.rememberAccountIdentity(this.activeAccount)
+    this.rememberAccountIdentity(dir, this.activeAccount)
 
     const settled = this.settleUnreadIdentity(dir, switchAt)
     const staleRecord = this.lastLoggedRecord
@@ -881,6 +881,9 @@ export class UsageFetcher {
    */
   private async trackAccountFromClaudeJson(switchAt?: number): Promise<void> {
     const raw = await readFile(CLAUDE_JSON_PATH, 'utf-8')
+    // Multi-account came on during the read: the shared file describes no
+    // account of the new active dir, so this pass is stale.
+    if (getSecurestorageEnv()) return
     const parsed = JSON.parse(raw) as {
       oauthAccount?: {
         accountUuid?: string
@@ -913,7 +916,6 @@ export class UsageFetcher {
       ...(organizationName ? { organizationName } : {}),
       billingType
     }
-    this.rememberAccountIdentity(this.activeAccount)
 
     await this.seedAccountLog()
     const settled = this.settleUnreadIdentity(null, switchAt)
@@ -1150,9 +1152,7 @@ export class UsageFetcher {
    * best-effort: the identity is an optimization for a future read, never a
    * reason to fail the poll that noticed it.
    */
-  private rememberAccountIdentity(account: ActiveAccount): void {
-    const dir = getSecurestorageEnv()?.dir
-    if (!dir) return
+  private rememberAccountIdentity(dir: string, account: ActiveAccount): void {
     try {
       updateAccountIdentity(basename(dir), {
         accountUuid: account.uuid,

@@ -20,7 +20,8 @@
 
 import { serviceSession, type ServiceControlHandle } from '../../core/services/service-session'
 import { getSecurestorageEnv, onSecurestorageEnvChange } from '../../core/sdk/securestorage-env'
-import { ClaudeLoginFlow } from '../../core/auth/claude-oauth'
+import { basename } from 'node:path'
+import { ClaudeLoginFlow, type ClaudeLoginResult } from '../../core/auth/claude-oauth'
 
 export interface AuthorizeUrls {
   manualUrl?: string
@@ -36,6 +37,17 @@ export interface OAuthResult {
     apiKeySource?: string | null
     apiProvider?: string | null
   }
+  /**
+   * In-app flows only: the uuids the sign-in resolved and the slot whose
+   * credential it wrote. Never part of `AuthFlowState`.
+   */
+  identity?: LoginIdentity
+}
+
+export interface LoginIdentity {
+  accountId: string
+  accountUuid: string | null
+  organizationUuid: string | null
 }
 
 export interface ClaudeLoginBackend {
@@ -121,12 +133,16 @@ export class InAppLoginBackend implements ClaudeLoginBackend {
 
   waitForCompletion(): Promise<OAuthResult> {
     if (!this.flow) return Promise.reject(new Error('No active login flow'))
-    return this.flow.waitForCompletion()
+    return this.flow.waitForCompletion().then((r) => this.toResult(r))
   }
 
   submitCode(code: string, state: string): Promise<OAuthResult> {
     if (!this.flow) return Promise.reject(new Error('No active login flow'))
-    return this.flow.submitCode(code, state)
+    return this.flow.submitCode(code, state).then((r) => this.toResult(r))
+  }
+
+  private toResult(r: ClaudeLoginResult): OAuthResult {
+    return { account: r.account, identity: { accountId: basename(this.accountDir), ...r.identity } }
   }
 
   cancel(): void {

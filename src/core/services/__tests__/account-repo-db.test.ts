@@ -9,7 +9,16 @@
  * Uses the node:sqlite-backed better-sqlite3 shim (never loads native .node).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { getAllAccounts, upsertAccount, deleteAccountRow, importAccountsOnce, closeDb } from '../db'
+import {
+  getAllAccounts,
+  getAccount,
+  upsertAccount,
+  deleteAccountRow,
+  importAccountsOnce,
+  setAccountUuids,
+  updateAccountIdentity,
+  closeDb
+} from '../db'
 import type { AccountInfo } from '../../../shared/types'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).
@@ -103,6 +112,42 @@ describe('importAccountsOnce', () => {
 
   it('is a no-op when accounts array is empty', () => {
     importAccountsOnce([])
+    expect(getAllAccounts()).toHaveLength(0)
+  })
+})
+
+describe('setAccountUuids', () => {
+  it('writes only the two uuid columns', () => {
+    const acc = makeAccount()
+    upsertAccount(acc)
+    updateAccountIdentity(
+      acc.id,
+      {
+        accountUuid: 'fake-acct-old',
+        organizationUuid: 'fake-org-old',
+        organizationName: 'Fake Org',
+        billingType: 'subscription'
+      },
+      1234
+    )
+    setAccountUuids(acc.id, 'fake-acct-new', 'fake-org-new')
+    expect(getAccount(acc.id)).toMatchObject({
+      accountUuid: 'fake-acct-new',
+      organizationUuid: 'fake-org-new',
+      organizationName: 'Fake Org',
+      billingType: 'subscription',
+      identityCheckedAt: 1234
+    })
+    setAccountUuids(acc.id, null, null)
+    expect(getAccount(acc.id)).toMatchObject({
+      accountUuid: null,
+      organizationUuid: null,
+      identityCheckedAt: 1234
+    })
+  })
+
+  it('is a no-op for an unknown id', () => {
+    expect(() => setAccountUuids('no-such-row', 'a', 'o')).not.toThrow()
     expect(getAllAccounts()).toHaveLength(0)
   })
 })

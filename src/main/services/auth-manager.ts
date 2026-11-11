@@ -51,6 +51,7 @@ import {
   openLoginBackend,
   type AuthorizeUrls,
   type ClaudeLoginBackend,
+  type LoginIdentity,
   type OAuthResult
 } from './claude-login-backend'
 
@@ -96,7 +97,8 @@ class AuthManager {
   private settledFlow: { flow: number; state: AuthFlowState } | null = null
 
   /** Listeners notified with the account on a successful login (ADR-015). */
-  private onSuccessCbs: ((account: OAuthAccount | null) => void)[] = []
+  private onSuccessCbs: ((account: OAuthAccount | null, identity: LoginIdentity | null) => void)[] =
+    []
 
   setWindow(win: BrowserWindow): void {
     this.window = win
@@ -112,7 +114,7 @@ class AuthManager {
 
   /** Subscribe to successful logins (used by the account manager to capture the
    *  signed-in account's email for the active account dir). */
-  onLoginSuccess(cb: (account: OAuthAccount | null) => void): void {
+  onLoginSuccess(cb: (account: OAuthAccount | null, identity: LoginIdentity | null) => void): void {
     this.onSuccessCbs.push(cb)
   }
 
@@ -368,7 +370,7 @@ class AuthManager {
     this.broadcast(state)
     for (const cb of this.onSuccessCbs) {
       try {
-        cb(account)
+        cb(account, res.identity ?? null)
       } catch {
         /* listener errors must not break the flow */
       }

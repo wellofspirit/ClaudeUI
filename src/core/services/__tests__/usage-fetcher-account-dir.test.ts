@@ -18,6 +18,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { homedir } from 'node:os'
+import { readFile } from 'node:fs/promises'
 
 vi.mock('../claude-session', () => ({
   ClaudeSession: { getExtraWindows: () => [] },
@@ -570,5 +571,64 @@ describe('UsageFetcher — multi-account enabled with no dir applied', () => {
     await fetcher.fetch()
 
     expect(fetcher.getActiveAccount()).toMatchObject({ uuid: 'acc_stale' })
+  })
+})
+
+describe('UsageFetcher — multi-account turning on during a `~/.claude.json` read', () => {
+  let fetcher: UsageFetcher
+
+  beforeEach(() => {
+    files.clear()
+    reads.length = 0
+    fetchMock.mockReset()
+    updateAccountIdentity.mockReset()
+    recordWindowSample.mockReset()
+    emitEvent.mockReset()
+    getMeta.mockReset()
+    setMeta.mockReset()
+    getAccount.mockReset()
+    getMeta.mockReturnValue('done')
+    resetWindowSampleDedup()
+    vi.stubGlobal('fetch', fetchMock)
+    routeByUrl()
+    seedClaudeJson()
+    setSecurestorageEnv(null)
+    setHostAuth(null)
+    fetcher = new UsageFetcher()
+  })
+
+  afterEach(() => {
+    fetcher.stopPolling()
+    setSecurestorageEnv(null)
+    vi.unstubAllGlobals()
+  })
+
+  it('treats the pass as stale: no row write, no active account, no log record', async () => {
+    const original = vi.mocked(readFile).getMockImplementation()!
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    vi.mocked(readFile).mockImplementation(async (p, ...rest) => {
+      if (key(p as string).endsWith('/.claude.json')) {
+        const data = await (original as (p: unknown) => Promise<string>)(p)
+        await gate
+        return data
+      }
+      return (original as (...a: unknown[]) => Promise<string>)(p, ...rest)
+    })
+    try {
+      const pass = (
+        fetcher as unknown as { trackAccountFromClaudeJson(): Promise<void> }
+      ).trackAccountFromClaudeJson()
+      // The pointer lands while the shared file's read is pending.
+      setSecurestorageEnv({ dir: DIR_A })
+      release()
+      await pass
+    } finally {
+      vi.mocked(readFile).mockImplementation(original)
+    }
+
+    expect(updateAccountIdentity).not.toHaveBeenCalled()
+    expect(fetcher.getActiveAccount()).toBeNull()
+    expect(logRecords()).toEqual([])
   })
 })

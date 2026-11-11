@@ -388,8 +388,18 @@ export interface ClaudeLoginAccount {
   apiProvider: string | null
 }
 
+/**
+ * The uuids the sign-in resolved. Kept off {@link ClaudeLoginAccount}, which
+ * mirrors cli.js's `account` and is broadcast to every client.
+ */
+export interface ClaudeLoginIdentity {
+  accountUuid: string | null
+  organizationUuid: string | null
+}
+
 export interface ClaudeLoginResult {
   account: ClaudeLoginAccount
+  identity: ClaudeLoginIdentity
 }
 
 export interface ClaudeLoginUrls {
@@ -598,6 +608,10 @@ export class ClaudeLoginFlow {
           tokenSource: null,
           apiKeySource: null,
           apiProvider: 'firstParty'
+        },
+        identity: {
+          accountUuid: profile?.account.uuid ?? tokens.account?.uuid ?? null,
+          organizationUuid: profile?.organization.uuid ?? tokens.organization?.uuid ?? null
         }
       })
     } catch (err) {
