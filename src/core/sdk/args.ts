@@ -445,6 +445,11 @@ export function buildSpawnEnv(base: NodeJS.ProcessEnv = process.env): SpawnEnv {
     delete env.SKIP_SECURESTORAGE
     delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR
     delete env.CLAUDE_CODE_OAUTH_TOKEN
+    // cli.js's identity for an env token (see applyHostTokenEnv): an inherited
+    // one would name a different account than the token, endpoint or not.
+    delete env.CLAUDE_CODE_ACCOUNT_UUID
+    delete env.CLAUDE_CODE_ORGANIZATION_UUID
+    delete env.CLAUDE_CODE_USER_EMAIL
     const spawn = readHostTokenSpawn()
     if (spawn) {
       applyHostTokenEnv(env, spawn.credential)
@@ -478,6 +483,18 @@ export function buildSpawnEnv(base: NodeJS.ProcessEnv = process.env): SpawnEnv {
  * token, the subscription and tier variables and the refresh flag out of every
  * child it spawns (Bash, MCP, hooks); `CLAUDE_CODE_OAUTH_SCOPES` does reach
  * them, and is only a scope list.
+ *
+ * ClaudeUI addition (Desktop parity unverified): `CLAUDE_CODE_ACCOUNT_UUID` +
+ * `CLAUDE_CODE_ORGANIZATION_UUID`, both or neither. They are cli.js's identity
+ * for an env token. Without them its served model-catalog cache is keyed by a
+ * hash of the access token (`tok-<hash>-ccd.json`), so every token the keeper
+ * rotates in starts cold and the picker falls back to the bootstrap list (no
+ * `fable` alias); with them the key is the account's, stable across tokens. The
+ * same pair keys Grove, telemetry and org-scoped readers to this account rather
+ * than whichever login last wrote ~/.claude.json. Only one alone would pair the
+ * account with that shared file's org, hence both or neither. cli.js does NOT
+ * strip them from its children: identifiers, not secrets, but a `claude` an
+ * agent starts from Bash inherits this account's org over its own login's.
  */
 function applyHostTokenEnv(env: NodeJS.ProcessEnv, credential: HostTokenCredential): void {
   env.CLAUDE_CODE_OAUTH_TOKEN = credential.accessToken
@@ -485,6 +502,10 @@ function applyHostTokenEnv(env: NodeJS.ProcessEnv, credential: HostTokenCredenti
   env.CLAUDE_CODE_SUBSCRIPTION_TYPE = credential.subscriptionType ?? ''
   env.CLAUDE_CODE_RATE_LIMIT_TIER = credential.rateLimitTier ?? ''
   env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH = '1'
+  if (credential.accountUuid && credential.organizationUuid) {
+    env.CLAUDE_CODE_ACCOUNT_UUID = credential.accountUuid
+    env.CLAUDE_CODE_ORGANIZATION_UUID = credential.organizationUuid
+  }
   delete env.ANTHROPIC_API_KEY
   delete env.ANTHROPIC_AUTH_TOKEN
   delete env.ANTHROPIC_CUSTOM_HEADERS

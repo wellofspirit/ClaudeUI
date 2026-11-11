@@ -39,7 +39,16 @@ const CREDENTIAL: HostTokenCredential = {
   accessToken: 'fake-host-access',
   scopes: ['user:inference', 'user:profile'],
   subscriptionType: 'max',
-  rateLimitTier: 'default_claude_max_20x'
+  rateLimitTier: 'default_claude_max_20x',
+  accountUuid: '00000000-0000-4000-8000-0000000000aa',
+  organizationUuid: '00000000-0000-4000-8000-0000000000bb'
+}
+
+/** Another account's identity a parent shell might carry. */
+const INHERITED_IDENTITY = {
+  CLAUDE_CODE_ACCOUNT_UUID: '00000000-0000-4000-8000-0000000000cc',
+  CLAUDE_CODE_ORGANIZATION_UUID: '00000000-0000-4000-8000-0000000000dd',
+  CLAUDE_CODE_USER_EMAIL: 'inherited@example.invalid'
 }
 
 /** What a parent shell might carry — each one a way to pick the wrong credential. */
@@ -95,6 +104,33 @@ describe('buildEnv under multi-account', () => {
     expect(hostToken).toEqual({ dir: DIR, token: 'fake-host-access' })
   })
 
+  it('names the account and its org, replacing an inherited identity', () => {
+    setHostTokenSource(source(CREDENTIAL))
+    setSecurestorageEnv({ dir: DIR })
+
+    const env = buildEnv({ ...INHERITED_IDENTITY })
+
+    expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBe(CREDENTIAL.accountUuid)
+    expect(env.CLAUDE_CODE_ORGANIZATION_UUID).toBe(CREDENTIAL.organizationUuid)
+    expect(env.CLAUDE_CODE_USER_EMAIL).toBeUndefined()
+  })
+
+  it.each([
+    ['account', { accountUuid: null }],
+    ['organization', { organizationUuid: null }],
+    ['both', { accountUuid: null, organizationUuid: null }]
+  ])('sets neither identity var when the %s uuid is unknown', (_, missing) => {
+    setHostTokenSource(source({ ...CREDENTIAL, ...missing }))
+    setSecurestorageEnv({ dir: DIR })
+
+    const env = buildEnv({ ...INHERITED_IDENTITY })
+
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('fake-host-access')
+    expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBeUndefined()
+    expect(env.CLAUDE_CODE_ORGANIZATION_UUID).toBeUndefined()
+    expect(env.CLAUDE_CODE_USER_EMAIL).toBeUndefined()
+  })
+
   it('sends empty strings for a credential with no plan, tier or scopes', () => {
     setHostTokenSource(
       source({ ...CREDENTIAL, scopes: [], subscriptionType: null, rateLimitTier: null })
@@ -117,10 +153,13 @@ describe('buildEnv under multi-account', () => {
       ANTHROPIC_AUTH_TOKEN: 'fake-endpoint-bearer'
     })
 
-    const { env, hostToken } = buildSpawnEnv({ ...INHERITED })
+    const { env, hostToken } = buildSpawnEnv({ ...INHERITED, ...INHERITED_IDENTITY })
 
     expect(src.read).not.toHaveBeenCalled()
     expect(hostToken).toBeNull()
+    expect(env.CLAUDE_CODE_ACCOUNT_UUID).toBeUndefined()
+    expect(env.CLAUDE_CODE_ORGANIZATION_UUID).toBeUndefined()
+    expect(env.CLAUDE_CODE_USER_EMAIL).toBeUndefined()
     expect(env.ANTHROPIC_BASE_URL).toBe('https://gateway.invalid')
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe('fake-endpoint-bearer')
     expect(env.CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH).toBeUndefined()
@@ -134,10 +173,11 @@ describe('buildEnv under multi-account', () => {
     const src = source(CREDENTIAL)
     setHostTokenSource(src)
 
-    const { env, hostToken } = buildSpawnEnv({ ...INHERITED })
+    const { env, hostToken } = buildSpawnEnv({ ...INHERITED, ...INHERITED_IDENTITY })
 
     expect(src.read).not.toHaveBeenCalled()
     expect(hostToken).toBeNull()
+    expect(env).toMatchObject(INHERITED_IDENTITY)
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('fake-inherited-oauth')
     expect(env.ANTHROPIC_API_KEY).toBe('fake-inherited-key')
     expect(env.SKIP_SECURESTORAGE).toBe('1')
