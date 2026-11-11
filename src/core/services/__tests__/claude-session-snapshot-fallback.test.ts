@@ -12,7 +12,7 @@
  * transcript for the rest of the turn.
  *
  * Mock scaffold mirrors
- * `src/main/services/__tests__/claude-session-thinking-span.test.ts`.
+ * `src/core/services/__tests__/claude-session-thinking-span.test.ts`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ChatMessage } from '../../../shared/types'

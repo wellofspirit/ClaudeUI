@@ -935,7 +935,7 @@ MCP connect → `mcp-identity` / `server-manager`, recycle and detached discover
 
 - Ported rather than dropped: the history status-line tests (to 2.x rows), the host pre-check
   tests (to `compileClaudeRulesV2` rules and 2.x tool ids), and the cross-engine permission
-  conformance matrix (`src/main/__tests__/permission-conformance.test.ts`, now the 2.x session
+  conformance matrix (`src/core/permissions/__tests__/permission-conformance.test.ts`, now the 2.x session
   ruleset under the agents' default rules, evaluated by a port of 2.x `Permission.evaluate`).
 - Renamed where the 1.x sibling is gone: `v2-event-mapper.ts` → `event-mapper.ts`, `v2-history.ts`
   → `history.ts`, `v2-content.ts` → `content.ts`, `v2-reconnect.ts` → `reconnect.ts` (+ tests),

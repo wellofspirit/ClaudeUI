@@ -5,7 +5,7 @@
  * `derivePasswordProof` is mocked: real scrypt at N=32768 costs ~100ms+ per call
  * and this file is about the UI states (idle → deriving → error), not the KDF.
  * Cross-library KDF agreement is pinned by
- * `src/main/services/__tests__/remote-auth-kdf.test.ts`.
+ * `src/core/services/__tests__/remote-auth-kdf.test.ts`.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'

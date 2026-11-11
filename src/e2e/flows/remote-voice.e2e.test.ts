@@ -3,7 +3,7 @@
  *
  * Layer 3: E2E — remote browser voice input over a real socket (phase 5 S3).
  *
- * The unit suite (`main/services/__tests__/voice-relay.test.ts`) proves the
+ * The unit suite (`core/services/__tests__/voice-relay.test.ts`) proves the
  * protocol against a fake cli.js. What only this layer can prove is the part
  * that spans the transport:
  *

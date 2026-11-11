@@ -134,12 +134,12 @@ const NODE_UNIT_DIRS = [
 const FORKS_ONLY: Record<string, string> = {
   // node-pty is a native addon: it is loaded once per process and cannot be loaded into a second
   // vm context.
-  'src/main/services/__tests__/pty-manager.test.ts': 'node-pty native addon',
-  'src/main/services/__tests__/pty-pool.test.ts': 'node-pty native addon',
-  'src/main/services/__tests__/pty-multi-attach.test.ts': 'node-pty native addon',
-  'src/main/ipc/__tests__/terminal.ipc.test.ts': 'node-pty native addon',
-  'src/main/services/__tests__/remote-terminal.test.ts': 'node-pty native addon',
-  'src/main/services/__tests__/remote-step-up-tiers.test.ts': 'node-pty native addon',
+  'src/core/services/__tests__/pty-manager.test.ts': 'node-pty native addon',
+  'src/core/services/__tests__/pty-pool.test.ts': 'node-pty native addon',
+  'src/core/services/__tests__/pty-multi-attach.test.ts': 'node-pty native addon',
+  'src/core/ipc/__tests__/terminal.ipc.test.ts': 'node-pty native addon',
+  'src/core/services/__tests__/remote-terminal.test.ts': 'node-pty native addon',
+  'src/core/services/__tests__/remote-step-up-tiers.test.ts': 'node-pty native addon',
   // `module.registerHooks` installs a hook on the process-wide module loader; it would stay
   // registered for every later file in the worker.
   'src/main/__tests__/electron-build-config.test.ts': 'module.registerHooks is process-global',
@@ -208,9 +208,9 @@ const unitTest = {
     // `*.browser.test.*` and the `browser` project (real Chromium, not jsdom).
     '**/*.component.test.{ts,tsx}',
     '**/*.browser.test.{ts,tsx}',
-    'src/main/services/__tests__/git-service*.test.ts',
-    'src/main/services/__tests__/worktree.test.ts',
-    'src/main/services/__tests__/worktree-git-*.test.ts'
+    'src/core/services/__tests__/git-service*.test.ts',
+    'src/core/services/__tests__/worktree.test.ts',
+    'src/core/services/__tests__/worktree-git-*.test.ts'
   ],
   testTimeout: 5000
 }
@@ -286,9 +286,9 @@ export default defineConfig({
           globals: true,
           setupFiles: ['./src/test/setup/node.setup.ts'],
           include: [
-            'src/main/services/__tests__/git-service*.test.ts',
-            'src/main/services/__tests__/worktree.test.ts',
-            'src/main/services/__tests__/worktree-git-*.test.ts'
+            'src/core/services/__tests__/git-service*.test.ts',
+            'src/core/services/__tests__/worktree.test.ts',
+            'src/core/services/__tests__/worktree-git-*.test.ts'
           ],
           testTimeout: 30000
         }

@@ -244,12 +244,9 @@ credential bound to a name that will not exist tomorrow.
   control to the same graph; neither is "the real one". The RUNTIME remainder in
   `src/main/services` is exactly the Electron seven — `auth-manager`, `account-manager`,
   `plugin-manager`, `log-viewer`, `mockup-protocol`, `sync-port`, `session-invalidation`.
-  The legacy `__tests__` trees did NOT move with their subjects: `src/main/services/__tests__/`
-  still holds ~104 specs, most of them testing modules that now live in
-  `src/core/services/` (`remote-server`, `db*`, `git-watch-registry`, …), and
-  `src/main/auth/vault/__tests__/` likewise tests `src/core/auth/vault/`. That is known
-  residue, deliberately deferred — `vitest.config.ts` still names the old path for the git
-  project, and relocating the specs is a mechanical follow-up, not part of the S2 move.
+  Specs live next to their subjects: the legacy `src/main/**/__tests__/` specs for `src/core/**`
+  modules moved to `src/core/**/__tests__/` (2026-11-10). What stays under `src/main` is the specs
+  of desktop-only modules and the build, script and patch specs in `src/main/__tests__/`.
 - **The desktop is unchanged, and that is the acceptance criterion.** Same native SQLite,
   same registrar order, same dispatch closure, same audit choke point. Every S2/S3 change
   is either a moved file, an injected seam, or a build script.
