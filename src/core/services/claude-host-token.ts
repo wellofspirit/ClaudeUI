@@ -30,7 +30,7 @@
  * (`sdk/host-token.ts`) by `startCoreServices`.
  */
 
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   hostTokenDir,
   setHostTokenSource,
@@ -56,6 +56,7 @@ import {
   credentialVersionSync
 } from './claude-refresh-guard'
 import { logger } from './logger'
+import { getAccount } from './db'
 
 /** Desktop's `renewAheadMs`: refresh before a spawn when the token expires within this. */
 export const RENEW_AHEAD_MS = 300_000
@@ -83,12 +84,32 @@ function credentialsPath(dir: string): string {
   return join(dir, CREDENTIALS_FILE)
 }
 
-function spawnCredential(creds: OAuthCredentials): HostTokenCredential {
+function spawnCredential(creds: OAuthCredentials, dir: string): HostTokenCredential {
   return {
     accessToken: creds.accessToken,
     scopes: Array.isArray(creds.scopes) ? creds.scopes : [],
     subscriptionType: creds.subscriptionType ?? null,
-    rateLimitTier: creds.rateLimitTier ?? null
+    rateLimitTier: creds.rateLimitTier ?? null,
+    ...accountIdentity(dir)
+  }
+}
+
+/**
+ * The account row's recorded identity for the account dir (`~/.claude/ui/accounts/<id>`).
+ * Never decides whether a token exists — the credentials file alone does — so a
+ * lookup that fails (no SQLite driver) gives nulls, not a refused spawn.
+ */
+function accountIdentity(
+  dir: string
+): Pick<HostTokenCredential, 'accountUuid' | 'organizationUuid'> {
+  try {
+    const row = getAccount(basename(dir))
+    return {
+      accountUuid: row?.accountUuid || null,
+      organizationUuid: row?.organizationUuid || null
+    }
+  } catch {
+    return { accountUuid: null, organizationUuid: null }
   }
 }
 
@@ -135,7 +156,7 @@ export class ClaudeHostTokenKeeper implements HostTokenSource {
 
   read(dir: string): HostTokenCredential | null {
     const creds = readCredentialsFileSync(credentialsPath(dir))
-    return creds ? spawnCredential(creds) : null
+    return creds ? spawnCredential(creds, dir) : null
   }
 
   async ensureFresh(): Promise<void> {

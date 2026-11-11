@@ -33,6 +33,13 @@ export interface HostTokenCredential {
   scopes: string[]
   subscriptionType: string | null
   rateLimitTier: string | null
+  /**
+   * The account's identity as ClaudeUI last recorded it (the account row, filled
+   * by the usage poll) → `CLAUDE_CODE_ACCOUNT_UUID` / `CLAUDE_CODE_ORGANIZATION_UUID`.
+   * Null until the first poll; spawns then go without them (see `applyHostTokenEnv`).
+   */
+  accountUuid: string | null
+  organizationUuid: string | null
 }
 
 /**
