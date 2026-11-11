@@ -64,7 +64,7 @@ describe('every pi child env zeroes CLAUDEUI_PI_SESSION_TOOLS', () => {
     expect(builders.map((file) => relative(root, file).replaceAll('\\', '/')).sort()).toEqual([
       'pi/pi-child-runner.ts',
       'pi/pi-subagents.ts',
-      'services/cross-engine-dispatcher.ts'
+      'services/dispatch-pi-targets.ts'
     ])
     for (const file of builders)
       expect(readFileSync(file, 'utf8'), relative(root, file)).toMatch(

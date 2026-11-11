@@ -234,12 +234,12 @@ describe('registration', () => {
     const rel = callers.map((p) => path.relative(process.cwd(), p).split(path.sep).join('/'))
     expect(rel.sort()).toEqual([
       'src/core/services/claude-session.ts',
-      'src/core/services/cross-engine-dispatcher.ts',
+      'src/core/services/dispatch-claude-targets.ts',
       'src/core/services/session-tools-server.ts'
     ])
     // …and the dispatcher builds nothing but that subset.
     const dispatcher = fs.readFileSync(
-      path.join(process.cwd(), 'src/core/services/cross-engine-dispatcher.ts'),
+      path.join(process.cwd(), 'src/core/services/dispatch-claude-targets.ts'),
       'utf8'
     )
     expect(dispatcher.match(/createSessionToolsServer\(/g)).toHaveLength(1)

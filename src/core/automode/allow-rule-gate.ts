@@ -33,7 +33,7 @@ export interface AllowRuleGateInput {
   cwd: string
   /** The user's merged Claude rules — allow rules INCLUDED (the engine ruleset's copy was stripped). */
   permissions: Pick<ClaudePermissions, 'allow' | 'ask' | 'deny' | 'additionalDirectories'>
-  /** The session's own `isAutoMode(this.permissionMode)`, read live. */
+  /** The session's own `JudgeSetup.active(permissionMode)`, read live. */
   autoModeActive: () => boolean
   /** Logger source tag (`OpencodeSession` / `PiSession`). */
   logSource: string

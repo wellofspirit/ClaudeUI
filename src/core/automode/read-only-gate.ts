@@ -39,7 +39,7 @@ export interface ReadOnlyGateInput {
    */
   shared?: SharedAutoModeConfig
   /**
-   * The session's own `isAutoMode(this.permissionMode)`, read live: checked
+   * The session's own `JudgeSetup.active(permissionMode)`, read live: checked
    * before anything runs and again after the git capture, since the user can
    * leave auto mode while it is in flight.
    */
