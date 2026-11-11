@@ -149,9 +149,17 @@ const git = (cwd: string, ...args: string[]) =>
     }
   )
 
-/** `repo` as a git repository: one commit holding `notes.txt` = `alpha repo`, no remote. */
+/**
+ * `repo` as a git repository: one commit holding `notes.txt` = `alpha repo`, no remote.
+ *
+ * Line endings are pinned in the repo's own config, which its linked worktrees share. Without it
+ * the repo inherits the machine's `core.autocrlf` (Git for Windows installs `true` system-wide), a
+ * worktree checkout rewrites `notes.txt` with CRLF, and every content assertion below fails on
+ * what git did, not on what the session did.
+ */
 function initRepo(repo: string): void {
   git(repo, 'init', '-q', '-b', 'main')
+  git(repo, 'config', 'core.autocrlf', 'false')
   writeFileSync(join(repo, NOTES_FILE), 'alpha repo\n')
   git(repo, 'add', '.')
   git(repo, 'commit', '-qm', 'init')
@@ -210,7 +218,8 @@ describeV2('opencode 2.x contract: a host session.move (wire facts)', () => {
       after: extFrom,
       where: (e) => e.data.action === 'external_directory'
     })
-    expect(external.data.resources).toEqual([`${repo}/*`])
+    // `<dir>/*`, slashed and absolute on every platform (docs/protocol-opencode › Permissions).
+    expect(external.data.resources).toEqual([`${repo.replaceAll('\\', '/')}/*`])
     await r.api.ok('session.permission.reply', {
       params: { sessionID: id, requestID: external.data.id },
       body: { decision: 'reject', message: 'contract: not needed' }

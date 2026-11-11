@@ -136,7 +136,11 @@ describe('sources and precedence', () => {
   })
 
   it('never throws on a missing config dir or cwd', () => {
-    const c = resolveClaudeSkillCatalog(path.join(root, 'nope'), {
+    // The missing cwd sits under the fake home, like every other case here: the project walk
+    // stops at `homeDir`, so it cannot climb out of the temp tree. A cwd beside the fake home
+    // would walk up through whatever really is above it — on Windows the temp directory is
+    // inside the developer's profile, so that reads their own `~/.claude/skills`.
+    const c = resolveClaudeSkillCatalog(path.join(home, 'nope'), {
       env: { CLAUDE_CONFIG_DIR: path.join(root, 'nocfg') },
       homeDir: home
     })
