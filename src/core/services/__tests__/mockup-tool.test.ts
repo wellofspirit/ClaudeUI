@@ -62,6 +62,10 @@ describe('CREATE_MOCKUP_DESCRIPTION', () => {
   // "default to vanilla, ask before JSX" policy. If someone edits the
   // description in a way that drops the guidance, tests will fail.
 
+  it('tells the model to copy local assets into the mockup directory', () => {
+    expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/Copy every local asset .* INTO the mockup directory/)
+  })
+
   it('tells the model to default to vanilla HTML + Tailwind + inline <script>', () => {
     expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/Default stack/i)
     expect(CREATE_MOCKUP_DESCRIPTION).toMatch(/vanilla|plain HTML/i)

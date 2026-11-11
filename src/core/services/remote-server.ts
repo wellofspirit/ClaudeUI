@@ -71,7 +71,7 @@ import { STREAM_BACKPRESSURE_BYTES } from '../shared/sync/stream'
 import { logger } from './logger'
 import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
-import { MOCKUP_HTTP_PREFIX } from '../../shared/mockup-url'
+import { MOCKUP_HTTP_PREFIX, splitMockupHttpToken } from '../../shared/mockup-url'
 import { createProgressThrottle } from '../../shared/progress-throttle'
 import { SENT_FILE_ROUTE, parseSentFileQuery } from '../../shared/sent-file-url'
 import { matchSentFilePath, sentFileDisposition } from '../sent-file-security'
@@ -2371,9 +2371,12 @@ export class RemoteServer {
     req: http.IncomingMessage,
     res: http.ServerResponse
   ): Promise<void> {
+    // The token is the first path segment (`/mockup/<token>/<id>/…`) so the
+    // mockup's relative asset URLs carry it too (see shared/mockup-url.ts).
     // LOW-RW9: constant-time compare — `!==` on the raw string leaks a prefix
     // oracle to a remote attacker who can time /mockup responses.
-    if (!safeTokenEqual(this.mockupToken, url.searchParams.get('token'))) {
+    const split = splitMockupHttpToken(url.pathname)
+    if (!split || !safeTokenEqual(this.mockupToken, split.token)) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('Forbidden')
       return
@@ -2383,7 +2386,7 @@ export class RemoteServer {
     // x-forwarded-proto for the scheme.
     const proto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0] || 'http'
     const selfSource = `${proto}://${req.headers.host}`
-    const served = await serveHostMockup(url.pathname, url.searchParams, selfSource)
+    const served = await serveHostMockup(split.innerPath, url.searchParams, selfSource)
     if (!served) {
       // No host mockup server wired (headless): the `/mockup` route is a
       // desktop-preview surface (the Electron `protocol.register*` half stays in

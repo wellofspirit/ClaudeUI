@@ -73,7 +73,7 @@ export function mockupOriginFor(id: string): string {
  * Path prefix for the remote server's HTTP mockup route. The web client can't
  * use the privileged `mockup-asset://` scheme (it only exists in Electron), so
  * the remote server serves the same HTML + sibling assets over HTTP at
- * `/{MOCKUP_HTTP_PREFIX}/<id>/<b64cwd>/[<subpath>]`.
+ * `/{MOCKUP_HTTP_PREFIX}/<token>/<id>/<b64cwd>/[<subpath>]`.
  */
 export const MOCKUP_HTTP_PREFIX = 'mockup'
 
@@ -89,10 +89,14 @@ export interface BuildMockupHttpUrlOpts extends BuildMockupUrlOpts {
 
 /**
  * Build the HTTP URL the web client points its preview iframe at. Layout:
- *   <origin>/mockup/<id>/<b64cwd>/?token=<t>&parent=<origin>&dark=1&v=<n>
+ *   <origin>/mockup/<token>/<id>/<b64cwd>/?parent=<origin>&dark=1&v=<n>
  *
- * `b64cwd` stays in the path (mirrors the protocol scheme) so the server can
- * reuse the same routing/validation logic for both transports.
+ * The token is a PATH segment, not a query parameter: the mockup's relative
+ * asset URLs (`<img src="./logo.png">`, CSS `url(...)`, `fetch('./data.json')`)
+ * resolve against the document's path and drop its query string, so a query
+ * token never reached the sibling-asset requests and every one of them was
+ * refused. `b64cwd` stays in the path too (mirrors the protocol scheme) so the
+ * server reuses the same routing/validation logic for both transports.
  */
 export function buildMockupHttpUrl(
   baseOrigin: string,
@@ -103,9 +107,27 @@ export function buildMockupHttpUrl(
   assertValidMockupId(id)
   const b64 = toBase64Url(cwd)
   const params = new URLSearchParams()
-  params.set('token', opts.token)
   if (opts.dark) params.set('dark', '1')
   if (opts.version !== undefined) params.set('v', String(opts.version))
   if (opts.parentOrigin) params.set('parent', opts.parentOrigin)
-  return `${baseOrigin.replace(/\/$/, '')}/${MOCKUP_HTTP_PREFIX}/${id}/${b64}/?${params.toString()}`
+  const qs = params.toString()
+  const token = encodeURIComponent(opts.token)
+  return `${baseOrigin.replace(/\/$/, '')}/${MOCKUP_HTTP_PREFIX}/${token}/${id}/${b64}/${qs ? `?${qs}` : ''}`
+}
+
+/**
+ * Split a `/mockup/<token>/<rest>` request path into the token and the
+ * token-less path `/mockup/<rest>` that `routeHttpMockup` resolves. `null` when
+ * the path is not a mockup route or carries no token segment (an empty token
+ * yields `/mockup//…`, which is refused here rather than shifting the segments).
+ */
+export function splitMockupHttpToken(
+  pathname: string
+): { token: string; innerPath: string } | null {
+  const prefix = `/${MOCKUP_HTTP_PREFIX}/`
+  if (!pathname.startsWith(prefix)) return null
+  const rest = pathname.slice(prefix.length)
+  const slash = rest.indexOf('/')
+  if (slash <= 0) return null
+  return { token: rest.slice(0, slash), innerPath: prefix + rest.slice(slash + 1) }
 }

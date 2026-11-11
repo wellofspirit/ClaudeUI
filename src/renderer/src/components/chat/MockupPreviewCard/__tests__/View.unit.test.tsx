@@ -25,6 +25,9 @@ function renderView(overrides: Partial<MockupPreviewCardViewProps> = {}): Return
     onExpand: vi.fn(),
     onCopyHtml: vi.fn(),
     onRefresh: vi.fn(),
+    reloadStatus: 'idle',
+    frameKey: 0,
+    onFrameLoad: vi.fn(),
     ...overrides
   }
   const ref = createRef<HTMLIFrameElement>()
@@ -139,5 +142,37 @@ describe('MockupPreviewCardView', () => {
     renderView()
     expect(screen.getByText('preview')).toBeInTheDocument()
     expect(screen.getByText('code')).toBeInTheDocument()
+  })
+
+  describe('reload feedback', () => {
+    it('spins the refresh icon and sets aria-busy while reloading', () => {
+      renderView({ reloadStatus: 'reloading' })
+      const btn = screen.getByTestId('MockupPreviewCard.refresh')
+      expect(btn.getAttribute('aria-busy')).toBe('true')
+      expect(btn.querySelector('svg')?.getAttribute('class')).toContain('animate-spin')
+      expect(screen.queryByTestId('MockupPreviewCard.reloadStatus')).not.toBeInTheDocument()
+    })
+
+    it('shows an Updated label when updated', () => {
+      renderView({ reloadStatus: 'updated' })
+      expect(screen.getByTestId('MockupPreviewCard.reloadStatus')).toHaveTextContent('Updated')
+      expect(screen.getByTestId('MockupPreviewCard.refresh').getAttribute('aria-busy')).not.toBe(
+        'true'
+      )
+    })
+
+    it('shows neither spinner nor label when idle', () => {
+      renderView()
+      const btn = screen.getByTestId('MockupPreviewCard.refresh')
+      expect(btn.getAttribute('aria-busy')).not.toBe('true')
+      expect(btn.querySelector('svg')?.getAttribute('class') ?? '').not.toContain('animate-spin')
+      expect(screen.queryByTestId('MockupPreviewCard.reloadStatus')).not.toBeInTheDocument()
+    })
+
+    it('wires iframe onLoad to onFrameLoad', () => {
+      const { props } = renderView()
+      fireEvent.load(document.querySelector('iframe')!)
+      expect(props.onFrameLoad).toHaveBeenCalled()
+    })
   })
 })

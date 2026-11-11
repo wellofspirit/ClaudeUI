@@ -1,4 +1,5 @@
 import { forwardRef, useState } from 'react'
+import type { MockupReloadStatus } from '../../hooks/useMockupReload'
 import { CodeView } from '../chat/CodeView'
 import { MockupConsoleDrawer } from './MockupConsoleDrawer'
 import type { MockupLogEntry, MockupErrorEntry } from '../../hooks/useMockupBridge'
@@ -22,6 +23,9 @@ export interface MockupPanelViewProps {
   onClose: () => void
   onCopyHtml: () => void
   onRefresh: () => void
+  reloadStatus: MockupReloadStatus
+  frameKey: number
+  onFrameLoad: () => void
   onDarkModeChange: (dark: boolean) => void
   darkMode: boolean
   consoleLogs: MockupLogEntry[]
@@ -44,6 +48,9 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
       onClose,
       onCopyHtml,
       onRefresh,
+      reloadStatus,
+      frameKey,
+      onFrameLoad,
       onDarkModeChange,
       darkMode,
       consoleLogs,
@@ -215,13 +222,21 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
             Copy
           </button>
 
+          {reloadStatus === 'updated' && (
+            <span data-testid="MockupPanel.reloadStatus" className="text-[11px] text-text-muted">
+              Updated
+            </span>
+          )}
+
           <button
             data-testid="MockupPanel.refresh"
             onClick={onRefresh}
             className="h-6 w-6 flex items-center justify-center rounded text-text-muted hover:text-text-primary hover:bg-bg-hover transition-colors cursor-default"
             title="Reload mockup"
+            aria-busy={reloadStatus === 'reloading'}
           >
             <svg
+              className={reloadStatus === 'reloading' ? 'animate-spin' : undefined}
               width="12"
               height="12"
               viewBox="0 0 24 24"
@@ -257,11 +272,13 @@ export const MockupPanelView = forwardRef<HTMLIFrameElement, MockupPanelViewProp
               }}
             >
               <iframe
+                key={frameKey}
                 ref={iframeRef}
                 src={src}
                 sandbox={sandbox}
                 referrerPolicy="no-referrer"
                 tabIndex={-1}
+                onLoad={onFrameLoad}
                 style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
                 title={mockupTitle || 'Mockup preview'}
               />

@@ -102,8 +102,9 @@ client never needs.
   key** `#k=` on a tunnel or LAN address, or `#enroll=` for a one-time enrollment
   link. The `#t=` access token is retired (ADR-056): a link opens a channel, it
   does not authenticate. The tailnet URL carries no fragment secret at all.
-- `GET /mockup?...&token=` — mockup preview assets, behind a separate low-privilege
-  token (ADR-007) handed to the client over the authenticated channel.
+- `GET /mockup/<token>/<id>/<b64cwd>/…` — mockup preview HTML and assets, behind a
+  separate low-privilege token (ADR-007) handed to the client over the authenticated
+  channel. The token is a path segment, so the mockup's relative asset URLs carry it.
 - `GET /sent-file?session=&path=&token=[&inline=1]` — files delivered by `SendUserFile`
   (ADR-043), behind a third scoped token. The path must match an entry in that session's
   `sentFiles` **read from canonical state in-process** — no renderer round-trip, so a

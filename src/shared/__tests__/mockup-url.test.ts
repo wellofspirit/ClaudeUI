@@ -9,6 +9,7 @@ import {
   buildMockupUrl,
   buildMockupHttpUrl,
   mockupOriginFor,
+  splitMockupHttpToken,
   MOCKUP_ASSET_SCHEME
 } from '../mockup-url'
 
@@ -137,5 +138,45 @@ describe('mockupOriginFor', () => {
     const url = buildMockupUrl('/x', 'abcdef01', { version: 1 })
     expect(new URL(url).hostname).toBe('abcdef01.m')
     expect(mockupOriginFor('abcdef01')).toBe('mockup-asset://abcdef01.m')
+  })
+})
+
+describe('buildMockupHttpUrl / splitMockupHttpToken', () => {
+  const TOKEN = 'ab'.repeat(32)
+
+  it('carries the token as the first path segment, not a query parameter', () => {
+    const url = new URL(
+      buildMockupHttpUrl('http://host:1234/', '/x', 'f92abf54', {
+        token: TOKEN,
+        dark: true,
+        parentOrigin: 'http://host:1234'
+      })
+    )
+    expect(url.pathname).toBe(`/mockup/${TOKEN}/f92abf54/L3g/`)
+    expect(url.searchParams.has('token')).toBe(false)
+    expect(url.searchParams.get('dark')).toBe('1')
+    expect(url.searchParams.get('parent')).toBe('http://host:1234')
+  })
+
+  it('keeps the token on relative asset URLs resolved against the document', () => {
+    const doc = buildMockupHttpUrl('http://host', '/x', 'f92abf54', { token: TOKEN })
+    for (const rel of ['./logo.png', 'images/hero.png', 'css/a.css']) {
+      const split = splitMockupHttpToken(new URL(rel, doc).pathname)
+      expect(split?.token).toBe(TOKEN)
+    }
+  })
+
+  it('splits the token off and returns the token-less route path', () => {
+    expect(splitMockupHttpToken(`/mockup/${TOKEN}/f92abf54/L3g/img/a.png`)).toEqual({
+      token: TOKEN,
+      innerPath: '/mockup/f92abf54/L3g/img/a.png'
+    })
+  })
+
+  it('refuses a missing or empty token segment and non-mockup paths', () => {
+    expect(splitMockupHttpToken('/mockup//f92abf54/L3g/')).toBeNull()
+    expect(splitMockupHttpToken(`/mockup/${TOKEN}`)).toBeNull()
+    expect(splitMockupHttpToken('/mockup/')).toBeNull()
+    expect(splitMockupHttpToken(`/other/${TOKEN}/f92abf54/`)).toBeNull()
   })
 })

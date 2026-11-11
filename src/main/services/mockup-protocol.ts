@@ -544,10 +544,16 @@ export const OMELETTE_BOOTSTRAP = `<script data-omelette="1">
     // keeps focus on the outer page while still refetching the HTML (no-store).
     window.addEventListener('message', function(ev){
       try {
+        // Source check only: the signal carries no data and only the embedding
+        // parent can be window.parent. No origin check — a file:// parent (built
+        // desktop app) stamps ev.origin as "null", never equal to target.
         if (ev.source !== window.parent) return;
-        if (ev.origin !== target) return;
         var d = ev.data;
-        if (d && d.type === 'mockup:reload') { location.reload(); }
+        if (d && d.type === 'mockup:reload') {
+          // Ack so the parent knows the reload is happening (else it remounts the iframe).
+          try { parent.postMessage({type:'mockup:reloading'}, target); } catch (e) {}
+          location.reload();
+        }
       } catch (err) {}
     });
   } catch (e) {}

@@ -22,6 +22,7 @@ import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-tes
 import { E2ECrypto } from '../../../shared/e2e-crypto'
 import type { ProgressReporter, WsServerMessage } from '../../../shared/remote-protocol'
 import { buildSentFileUrl } from '../../../shared/sent-file-url'
+import { buildMockupHttpUrl } from '../../../shared/mockup-url'
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before importing remote-server.
@@ -1015,9 +1016,7 @@ describe('RemoteServer — mockup HTTP route', () => {
 
   it('rejects /mockup requests with a wrong token', async () => {
     await server.start(port, '127.0.0.1')
-    const got = await httpGet(
-      `http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`
-    )
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${'a'.repeat(64)}/${ID}/${b64}/`)
     expect(got.status).toBe(403)
   })
 
@@ -1027,9 +1026,7 @@ describe('RemoteServer — mockup HTTP route', () => {
   it('compares the mockup token in constant time (GUARD — fails pre-fix)', async () => {
     await server.start(port, '127.0.0.1')
     timingSafeEqualSpy.mockClear()
-    const got = await httpGet(
-      `http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`
-    )
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${'a'.repeat(64)}/${ID}/${b64}/`)
     expect(got.status).toBe(403)
     // Pre-fix the raw `!==` never reached crypto.timingSafeEqual.
     expect(timingSafeEqualSpy).toHaveBeenCalledTimes(1)
@@ -1041,7 +1038,7 @@ describe('RemoteServer — mockup HTTP route', () => {
   it('rejects a wrong token of a DIFFERENT length without throwing', async () => {
     await server.start(port, '127.0.0.1')
     timingSafeEqualSpy.mockClear()
-    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=abcd`)
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/abcd/${ID}/${b64}/`)
     expect(got.status).toBe(403)
     // Length mismatch must short-circuit — timingSafeEqual throws on unequal
     // lengths, so reaching it would 500 instead of 403.
@@ -1054,10 +1051,9 @@ describe('RemoteServer — mockup HTTP route', () => {
     // nothing — not even an empty client token (Buffer.from('', 'hex') pairs
     // would otherwise compare equal).
     ;(server as unknown as { mockupToken: string }).mockupToken = ''
-    expect((await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=`)).status).toBe(403)
+    expect((await httpGet(`http://127.0.0.1:${port}/mockup//${ID}/${b64}/`)).status).toBe(403)
     expect(
-      (await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${'a'.repeat(64)}`))
-        .status
+      (await httpGet(`http://127.0.0.1:${port}/mockup/${'a'.repeat(64)}/${ID}/${b64}/`)).status
     ).toBe(403)
   })
 
@@ -1065,11 +1061,37 @@ describe('RemoteServer — mockup HTTP route', () => {
     await server.start(port, '127.0.0.1')
     const token = (await fetchMockupTokenViaWs())!
 
-    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${token}`)
+    // Built by the same function the web client uses, so builder and route agree.
+    const src = buildMockupHttpUrl(`http://127.0.0.1:${port}`, cwd, ID, { token })
+    const got = await httpGet(src)
     expect(got.status).toBe(200)
     expect(got.body).toContain('remote mockup')
     // The serve-time bridge must be injected.
     expect(got.body).toContain('data-omelette="1"')
+  })
+
+  // A mockup's `<img src="./logo.png">` resolves against the document's path and
+  // drops its query, so a query-string token never reached sibling assets and
+  // every image/CSS/JS next to index.html answered 403 on the web client.
+  it('serves a sibling asset referenced by a relative URL (GUARD — fails pre-fix)', async () => {
+    fs.writeFileSync(path.join(cwd, '.claude', 'ui', 'mockups', ID, 'logo.png'), 'png-bytes')
+    await server.start(port, '127.0.0.1')
+    const token = (await fetchMockupTokenViaWs())!
+    const src = buildMockupHttpUrl(`http://127.0.0.1:${port}`, cwd, ID, {
+      token,
+      parentOrigin: `http://127.0.0.1:${port}`
+    })
+    const asset = await httpGet(new URL('./logo.png', src).href)
+    expect(asset.status).toBe(200)
+    expect(asset.body).toBe('png-bytes')
+    expect(asset.headers['content-type']).toBe('image/png')
+  })
+
+  it('no longer accepts the token as a query parameter', async () => {
+    await server.start(port, '127.0.0.1')
+    const token = (await fetchMockupTokenViaWs())!
+    const got = await httpGet(`http://127.0.0.1:${port}/mockup/${ID}/${b64}/?token=${token}`)
+    expect(got.status).toBe(403)
   })
 })
 

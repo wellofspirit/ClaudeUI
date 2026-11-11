@@ -24,12 +24,20 @@ export function mockupCommands(
 ): Array<Omit<CommandRegistration, 'transport'>> {
   const env = envelopeFor(transport)
 
+  // One watch per mockup, shared by every viewer (inline cards, the side panel) and counted:
+  // `watch` adds a viewer, `unwatch` removes one, and the watch closes when none is left.
+  // Without the count, the FIRST viewer to unmount (closing the panel, a card scrolled out of
+  // the chat list, an older card for the same mockup) closed the watch under every other one,
+  // and their live refresh silently stopped. Accepted cost: a viewer that goes away without
+  // unwatching (a closed web tab, a renderer reload) keeps its watch open until quit or until
+  // the worktree remover closes it — one idle fs.watch per such mockup.
   const mockupWatchers = new Map<
     string,
     {
       watcher: fs.FSWatcher
       debounceTimer: ReturnType<typeof setTimeout> | null
       untrack: () => void
+      viewers: number
     }
   >()
 
@@ -66,7 +74,11 @@ export function mockupCommands(
       kind: 'query',
       handler: async (cwd: string, directory: string) => {
         const key = `${cwd}:${directory}`
-        if (mockupWatchers.has(key)) return // already watching
+        const existing = mockupWatchers.get(key)
+        if (existing) {
+          existing.viewers++
+          return
+        }
 
         const mockupsRoot = path.resolve(path.join(cwd, '.claude', 'ui', 'mockups'))
         const dirPath = path.resolve(path.join(mockupsRoot, directory))
@@ -76,7 +88,8 @@ export function mockupCommands(
         const entry = {
           watcher: null! as fs.FSWatcher,
           debounceTimer: null as ReturnType<typeof setTimeout> | null,
-          untrack: (): void => {}
+          untrack: (): void => {},
+          viewers: 1
         }
 
         // Recursive so edits to sibling subdirs (e.g. `images/hero.png`, `components/card.css`)
@@ -107,7 +120,11 @@ export function mockupCommands(
       capability: 'fs-read',
       kind: 'query',
       handler: async (cwd: string, directory: string) => {
-        closeMockupWatcher(`${cwd}:${directory}`)
+        const key = `${cwd}:${directory}`
+        const entry = mockupWatchers.get(key)
+        if (!entry) return
+        if (--entry.viewers > 0) return
+        closeMockupWatcher(key)
       }
     }
   ]
