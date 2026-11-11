@@ -169,24 +169,26 @@ describe('IPC handler argument slots (session:delete-session, session:delete-pro
     spy.mockRestore()
   })
 
-  // Source-level guard: asserts the real session.ipc.ts registrations declare
-  // the caller's first argument in the first slot — and no `_e`. The in-memory
-  // closures above prove the contract; this check binds it to the actual file
-  // we ship. A noisier alternative would be to load session.ipc.ts under the
-  // electron shim, but the import graph is too heavy for a single regression
-  // test.
-  it('session.ipc.ts registrations put the real first argument in slot 0', async () => {
+  // Source-level guard: asserts the real registrations (now the shared declaration in
+  // session-commands.ts, `env` being the transport's envelope) declare the caller's first
+  // argument in the first slot — and no `_e`. The in-memory closures above prove the
+  // contract; this check binds it to the actual file we ship. A noisier alternative would be
+  // to load the IPC module under the electron shim, but the import graph is too heavy for a
+  // single regression test.
+  it('the session:delete-* registrations put the real first argument in slot 0', async () => {
     const src = await fs.promises.readFile(
-      path.resolve(__dirname, '../../../core/ipc/session.ipc.ts'),
+      path.resolve(__dirname, '../../../core/ipc/session-commands.ts'),
       'utf8'
     )
     const sessionRegistration =
-      /channel: 'session:delete-session',[\s\S]{0,200}?handler: safeHandler\(\s*async\s*\(\s*sessionId\s*:/
+      /channel: 'session:delete-session',[\s\S]{0,200}?handler: env\(\s*async\s*\(\s*sessionId\s*:/
     const projectRegistration =
-      /channel: 'session:delete-project',[\s\S]{0,200}?handler: safeHandler\(\s*async\s*\(\s*projectKey\s*:/
+      /channel: 'session:delete-project',[\s\S]{0,200}?handler: env\(\s*async\s*\(\s*projectKey\s*:/
     expect(src).toMatch(sessionRegistration)
     expect(src).toMatch(projectRegistration)
     // No handler in the file may reclaim the event slot.
-    expect(src).not.toMatch(/handler:\s*(?:safeHandler\(\s*)?(?:async\s*)?\(\s*_e(?:vent)?[,:)\s]/)
+    expect(src).not.toMatch(
+      /handler:\s*(?:(?:safeHandler|env)\(\s*)?(?:async\s*)?\(\s*_e(?:vent)?[,:)\s]/
+    )
   })
 })

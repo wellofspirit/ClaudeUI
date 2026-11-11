@@ -12,6 +12,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { createWebSocketApi } from '../api-adapter'
 import { SyncClient } from '../../core/shared/sync/sync-client'
+import { API_EVENTS, API_INVOKES } from '../../shared/api-invoke-table'
 import type { RemoteConnection } from '../connection'
 
 type FakeConnection = {
@@ -994,19 +995,17 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
 
 describe('web api-adapter — the local surface is an explicit list', () => {
   /**
-   * A member is ON THE WIRE if its body reaches the connection (directly, or
-   * through this module's `unwrap` helper), or if it IS a connection listener —
-   * `on(channel)` returns the SyncClient's registrar, so those share one source
-   * string that the probe below captures rather than hard-codes.
+   * A member is ON THE WIRE if it is built from the shared invoke / event tables
+   * (`API_INVOKES`, `API_EVENTS`: every one of those goes through the connection by
+   * construction), or if its hand-written body reaches the connection (directly, or
+   * through this module's `unwrap` helper).
    */
   function localSurface(): string[] {
-    const probe = makeConnection()
-    const listenerSource = (probe.on('probe:channel') as unknown as AnyFn).toString()
     return Object.entries(api as unknown as Record<string, unknown>)
       .filter(([, value]) => typeof value === 'function')
+      .filter(([name]) => !(name in API_INVOKES) && !(name in API_EVENTS))
       .filter(([, value]) => {
         const source = (value as AnyFn).toString()
-        if (source === listenerSource) return false
         return !/\bconnection\./.test(source) && !/\bunwrap(WithProgress)?\(/.test(source)
       })
       .map(([name]) => name)

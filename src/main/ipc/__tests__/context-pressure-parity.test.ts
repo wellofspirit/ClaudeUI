@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
+import { API_INVOKES } from '../../../shared/api-invoke-table'
 
 const CHANNEL = 'session:context-pressure:respond'
 const read = (rel: string): string => fs.readFileSync(path.join(process.cwd(), rel), 'utf-8')
@@ -22,15 +23,27 @@ function registrationOf(source: string): string {
 }
 
 describe('session:context-pressure:respond has the same shape everywhere', () => {
-  it.each([
-    ['desktop', 'src/core/ipc/session.ipc.ts'],
-    ['remote', 'src/core/ipc/remote-handlers.ts']
-  ])('%s registers a chat command on the session that calls the service', (_, file) => {
-    const block = registrationOf(read(file))
+  it('is declared once, as a chat command on the session that calls the service', () => {
+    const block = registrationOf(read('src/core/ipc/session-commands.ts'))
     expect(block).toContain("capability: 'chat'")
     expect(block).toContain("kind: 'command'")
     expect(block).toContain('sessionIdArg: 0')
     expect(block).toContain('respondContextPressure(routingId, answer)')
+  })
+
+  it.each([
+    [
+      'desktop',
+      'src/core/ipc/session.ipc.ts',
+      /sessionCommands\(manager, 'desktop'\)[^]*?handleIpc\(/
+    ],
+    [
+      'remote',
+      'src/core/ipc/remote-handlers.ts',
+      /sessionCommands\(manager, 'remote'\)[^]*?handleRemote\(/
+    ]
+  ])('the %s registrar spreads that declaration', (_, file, spread) => {
+    expect(read(file)).toMatch(spread)
   })
 
   it('the desktop channel list unbinds it on re-registration', () => {
@@ -38,16 +51,23 @@ describe('session:context-pressure:respond has the same shape everywhere', () =>
   })
 
   it('the preload and the web adapter expose the same method with the same arguments', () => {
-    expect(read('src/preload/index.ts')).toMatch(
-      /respondContextPressure: \(routingId: string, answer: 'handoff' \| 'dismiss'\) =>\s*ipcRenderer\.invoke\('session:context-pressure:respond', routingId, answer\)/
-    )
-    expect(read('src/web/api-adapter.ts')).toMatch(
-      /respondContextPressure: \(routingId, answer\) =>\s*connection\.invoke\('session:context-pressure:respond', routingId, answer\)/
-    )
+    // One table entry: the preload, the web adapter and the test helper all build the member
+    // from it, over their own transport (`shared/api-invoke-table.ts`).
+    expect(API_INVOKES.respondContextPressure).toEqual({
+      channel: CHANNEL,
+      arity: 2,
+      mode: 'invoke'
+    })
+    for (const file of [
+      'src/preload/index.ts',
+      'src/web/api-adapter.ts',
+      'src/test/helpers/boot-test-app.ts'
+    ]) {
+      expect(read(file), file).toMatch(/buildInvokeApi\(API_INVOKES,/)
+    }
   })
 
-  it('the API type and the test boot helper carry it too', () => {
+  it('the API type carries it too', () => {
     expect(read('src/shared/types.ts')).toContain('respondContextPressure(')
-    expect(read('src/test/helpers/boot-test-app.ts')).toContain(`'${CHANNEL}'`)
   })
 })

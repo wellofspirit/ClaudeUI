@@ -361,7 +361,14 @@ vi.mock('../../../core/services/session-notes', async (importOriginal) => {
 })
 
 // Import AFTER mocks.
-import { registerSessionIpc, resetLoginStatusReportedForTests } from '../../../core/ipc/session.ipc'
+import {
+  getSessionManager,
+  registerSessionIpc,
+  resetLoginStatusReportedForTests
+} from '../../../core/ipc/session.ipc'
+import { registerRemoteHandlers } from '../../../core/ipc/remote-handlers'
+import { RemoteDispatcher } from '../../../core/services/remote-dispatcher'
+import { syncCore } from '../../../core/services/sync-host'
 import { setHostAuth } from '../../../core/host'
 import {
   resetCachedClaudeModels,
@@ -467,21 +474,119 @@ describe('session.ipc', () => {
       expect(createWorktree).toHaveBeenLastCalledWith('/tmp/repo', 'feature', undefined)
     })
 
-    it('returns { ok: true, data } on success for git:status', async () => {
-      const res = await harness.call<any>('git:status', '/tmp/repo')
-      expect(res.ok).toBe(true)
-      expect(res.data).toEqual({ files: [], branch: 'main' })
-    })
+    // The channels both transports serve from ONE declaration (`*-commands.ts`) differ in the
+    // envelope only: the desktop answers `{ ok, data }` / `{ ok: false, error }`, the WebSocket
+    // answers bare and a failure rejects (the web client calls these raw). This is every such
+    // channel; the factory takes the transport, so a registrar spreading the wrong one fails here.
+    describe('desktop envelopes, remote answers bare (every channel the factories envelope)', () => {
+      const git = (
+        method: keyof typeof gitSvcSpies,
+        channel: string,
+        args: unknown[],
+        data: unknown
+      ) => ({
+        channel,
+        args,
+        data,
+        fail: () => gitSvcSpies[method].mockRejectedValueOnce(new Error('boom'))
+      })
+      const provider = (
+        method: keyof typeof sharedProviderSpies,
+        channel: string,
+        args: unknown[]
+      ) => ({
+        channel,
+        args,
+        data: [],
+        fail: () => (sharedProviderSpies[method] as any).mockRejectedValueOnce(new Error('boom'))
+      })
+      const REPO = '/tmp/repo'
+      const rows: Array<{
+        channel: string
+        args: unknown[]
+        /** What a success answers (bare); undefined when the row only has a failure case. */
+        data?: unknown
+        fail: () => void
+      }> = [
+        git('isGitRepo', 'git:check-repo', [REPO], true),
+        git('getStatus', 'git:status', [REPO], { files: [], branch: 'main' }),
+        git('getBranches', 'git:branches', [REPO], { current: 'main', all: ['main'] }),
+        git('checkout', 'git:checkout', [REPO, 'main'], undefined),
+        git('createBranch', 'git:create-branch', [REPO, 'b'], undefined),
+        git('getFilePatch', 'git:file-patch', [REPO, 'f', false, false], 'patch'),
+        git('getFileContents', 'git:file-contents', [REPO, 'f', false], 'contents'),
+        git('stageFile', 'git:stage-file', [REPO, 'f'], undefined),
+        git('unstageFile', 'git:unstage-file', [REPO, 'f'], undefined),
+        git('discardFile', 'git:discard-file', [REPO, 'f'], undefined),
+        git('stageAll', 'git:stage-all', [REPO], undefined),
+        git('unstageAll', 'git:unstage-all', [REPO], undefined),
+        git('commit', 'git:commit', [REPO, 'msg'], { sha: 'abc' }),
+        git('push', 'git:push', [REPO], undefined),
+        git('pushWithUpstream', 'git:push-with-upstream', [REPO, 'main'], undefined),
+        git('pull', 'git:pull', [REPO], { ok: true }),
+        git('stashPush', 'git:stash-push', [REPO], undefined),
+        git('stashRestore', 'git:stash-restore', [REPO, 'sha'], undefined),
+        git('fetch', 'git:fetch', [REPO], undefined),
+        provider('listDefinitions', 'shared-provider:list', []),
+        provider('listStatuses', 'shared-provider:statuses', []),
+        provider('listProviderModels', 'shared-provider:models', ['p']),
+        {
+          // A directory that escapes the mockups root is refused by the shared body.
+          channel: 'mockup:read-html',
+          args: ['/tmp/repo', '../../x'],
+          fail: () => {}
+        },
+        {
+          // The deletes only have a failure case here: a success walks the whole persistence
+          // layer, which these tests do not stand up.
+          channel: 'session:delete-session',
+          args: ['sid', 'proj', 'not-an-engine'],
+          fail: () => {}
+        },
+        {
+          channel: 'session:delete-project',
+          args: ['proj'],
+          fail: () =>
+            vi.spyOn(syncCore, 'getCanonicalState').mockImplementationOnce(() => {
+              throw new Error('boom')
+            })
+        }
+      ]
 
-    it('returns { ok: true, data: true } for git:check-repo', async () => {
-      const res = await harness.call<any>('git:check-repo', '/tmp/repo')
-      expect(res).toEqual({ ok: true, data: true })
-    })
+      beforeEach(() => {
+        // Production order: the desktop registrar ran in the outer beforeEach, the remote one after.
+        registerRemoteHandlers(new RemoteDispatcher(), getSessionManager()!)
+      })
 
-    it('returns { ok: true, data } on success for git:branches', async () => {
-      const res = await harness.call<any>('git:branches', '/tmp/repo')
-      expect(res.ok).toBe(true)
-      expect(res.data).toEqual({ current: 'main', all: ['main'] })
+      const handler = (channel: string, transport: 'desktop' | 'remote') => {
+        const entry = commandRegistry.get(channel, transport)
+        expect(entry, `${channel} registered for ${transport}`).toBeDefined()
+        return entry!.handler
+      }
+
+      it.each(rows.map((r) => [r.channel, r] as const))(
+        '%s: a failure is { ok: false, error } on desktop and a rejection on remote',
+        async (_channel, row) => {
+          row.fail()
+          const desktop = await handler(row.channel, 'desktop')(...row.args)
+          expect(desktop).toMatchObject({ ok: false })
+          expect(typeof (desktop as { error: unknown }).error).toBe('string')
+          row.fail()
+          await expect(
+            Promise.resolve().then(() => handler(row.channel, 'remote')(...row.args))
+          ).rejects.toThrow()
+        }
+      )
+
+      it.each(rows.filter((r) => 'data' in r).map((r) => [r.channel, r] as const))(
+        '%s: a success is { ok: true, data } on desktop and the bare data on remote',
+        async (_channel, row) => {
+          const desktop = await handler(row.channel, 'desktop')(...row.args)
+          expect(desktop).toEqual({ ok: true, data: row.data })
+          const remote = await handler(row.channel, 'remote')(...row.args)
+          expect(remote).toEqual(row.data)
+        }
+      )
     })
 
     it('returns { ok: false, error } when underlying service throws', async () => {
@@ -1249,6 +1354,16 @@ describe('session.ipc', () => {
     it('closeMockupWatchersUnder closes the watch and frees the map key so the mockup can be watched again', async () => {
       await harness.call('mockup:watch', root, 'm1')
       expect(closeMockupWatchersUnder(path.join(root, '.claude'))).toBe(1)
+      await harness.call('mockup:watch', root, 'm1')
+      expect(closeMockupWatchersUnder(root)).toBe(1)
+    })
+
+    // The watch used to be confined on the remote registration only; the shared declaration
+    // confines it on both (the same directory is not armed over an arbitrary tree).
+    it('mockup:watch refuses a directory that escapes the mockups root', async () => {
+      await harness.call('mockup:watch', root, '../../..')
+      await harness.call('mockup:watch', root, '../../secret')
+      expect(closeMockupWatchersUnder(root)).toBe(0)
       await harness.call('mockup:watch', root, 'm1')
       expect(closeMockupWatchersUnder(root)).toBe(1)
     })

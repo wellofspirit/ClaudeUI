@@ -416,7 +416,7 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
     cls: 'replicated',
     ring: true,
     canonical: false,
-    why: 'Mockup live-reload notify. 4c made both watchers (desktop in session.ipc.ts, remote in remote-handlers.ts) reach every subscriber — the notify a reconnecting client already replayed from the ring.'
+    why: 'Mockup live-reload notify. 4c made both watchers (one per transport, from `ipc/mockup-commands.ts`) reach every subscriber — the notify a reconnecting client already replayed from the ring.'
   },
   'usage:data': {
     cls: 'replicated',

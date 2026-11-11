@@ -31,6 +31,12 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { AUTH_OFF_GRANTS, type Capability } from '../../../core/ipc/command-registry'
 import { channelSpec } from '../../../core/shared/sync/channels'
+import {
+  API_EVENTS,
+  API_INVOKES,
+  DESKTOP_INVOKES,
+  type InvokeEntry
+} from '../../../shared/api-invoke-table'
 
 const REPO = process.cwd()
 const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf-8')
@@ -107,13 +113,37 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'webauthn:revoke'
 ]
 
-/** Channels the web client invokes over the WS (connection.invoke / unwrap). */
+/** The channels a table's members invoke. */
+const channelsOf = (table: Record<string, InvokeEntry>): string[] =>
+  Object.values(table).map((entry) => entry.channel)
+
+/** Scan one client source file for the channels its remaining hand-written members use. */
+function scanChannels(rel: string, call: RegExp): string[] {
+  const src = read(rel)
+  const found: string[] = []
+  for (let m = call.exec(src); m; m = call.exec(src)) found.push(m[1])
+  return found
+}
+
+/**
+ * Channels the web client invokes over the WS: every `API_INVOKES` member (built over
+ * `connection.invoke`, see `shared/api-invoke-table.ts`) plus the members the adapter still
+ * writes out itself (connection.invoke / unwrap).
+ */
 function invokedChannels(): Set<string> {
-  const src = read('src/web/api-adapter.ts')
-  const set = new Set<string>()
-  const re = /(?:connection\.invoke|unwrap)\(\s*['"]([^'"]+)['"]/g
-  for (let m = re.exec(src); m; m = re.exec(src)) set.add(m[1])
-  return set
+  return new Set([
+    ...channelsOf(API_INVOKES),
+    ...scanChannels('src/web/api-adapter.ts', /(?:connection\.invoke|unwrap)\(\s*['"]([^'"]+)['"]/g)
+  ])
+}
+
+/** Channels the desktop preload invokes: both invoke tables plus its hand-written members. */
+function preloadInvokedChannels(): Set<string> {
+  return new Set([
+    ...channelsOf(API_INVOKES),
+    ...channelsOf(DESKTOP_INVOKES),
+    ...scanChannels('src/preload/index.ts', /ipcRenderer\.invoke\(\s*['"]([^'"]+)['"]/g)
+  ])
 }
 
 /**
@@ -152,7 +182,20 @@ const SHARED_DECLARATION_SOURCES = [
   // ADR-101 §6 — the speech pack (status `chat`, install/cancel/remove `admin`),
   // one declaration spread by both transports. The web client invokes them since
   // S4; the three `admin` ones are in UNGRANTED_AT_CONNECT_REMOTE_CHANNELS.
-  'src/core/ipc/voice-pack-commands.ts'
+  'src/core/ipc/voice-pack-commands.ts',
+  // The `git:*` working-tree surface — one declaration, spread by both transports.
+  'src/core/ipc/git-commands.ts',
+  // The mockup preview (read + confined watch) — one declaration, both transports.
+  'src/core/ipc/mockup-commands.ts',
+  // The `usage:*` metering channels — one declaration, both transports.
+  'src/core/ipc/usage-metering-commands.ts',
+  // The app-state reads / settings writes — one declaration, both transports.
+  'src/core/ipc/app-state-commands.ts',
+  // The model catalog, opencode providers and title / commit-message generation.
+  'src/core/ipc/model-commands.ts',
+  // The live-session channels and the session listing / history reads.
+  'src/core/ipc/session-commands.ts',
+  'src/core/ipc/session-history-commands.ts'
 ]
 
 /**
@@ -551,10 +594,7 @@ describe('remote channel parity (R5)', () => {
     // an invoke at a channel with no handler — a runtime throw, discovered by
     // whoever pressed the button. The same SOURCE-scan reasoning as the tests
     // above: importing the preload here would need a live Electron.
-    const preload = read('src/preload/index.ts')
-    const invoked = new Set<string>()
-    const re = /ipcRenderer\.invoke\(\s*['"](webauthn:[^'"]+)['"]/g
-    for (let m = re.exec(preload); m; m = re.exec(preload)) invoked.add(m[1])
+    const invoked = new Set([...preloadInvokedChannels()].filter((c) => c.startsWith('webauthn:')))
 
     const ipcSrc = read('src/core/ipc/webauthn.ipc.ts')
     const registered = new Set<string>()
@@ -571,9 +611,9 @@ describe('remote channel parity (R5)', () => {
   })
 
   it('the speech pack verbs reach exactly the declared channels on BOTH clients (ADR-101 section 6)', () => {
-    // The desktop preload and the web adapter are each a hand-written mirror of
-    // `voice-pack-commands.ts`; a verb that drifted would invoke a channel with
-    // no handler, discovered by whoever pressed Download.
+    // The desktop preload, the web adapter and the test helper all build these from
+    // `API_INVOKES`, mirroring `voice-pack-commands.ts`; a verb that drifted would invoke
+    // a channel with no handler, discovered by whoever pressed Download.
     const declared = new Set<string>()
     const declRe = /channel:\s*['"](voice:pack-[^'"]+)['"]/g
     const commands = read('src/core/ipc/voice-pack-commands.ts')
@@ -585,37 +625,83 @@ describe('remote channel parity (R5)', () => {
       'voice:pack-status'
     ])
 
-    const invokedBy = (file: string, call: RegExp): string[] => {
-      const src = read(file)
-      const found = new Set<string>()
-      for (let m = call.exec(src); m; m = call.exec(src)) found.add(m[1])
-      return [...found].sort()
+    const packChannels = (channels: Iterable<string>): string[] =>
+      [...new Set(channels)].filter((c) => c.startsWith('voice:pack-')).sort()
+    expect(packChannels(preloadInvokedChannels())).toEqual([...declared].sort())
+    expect(packChannels(invokedChannels())).toEqual([...declared].sort())
+    // All three clients (the test helper's copy must not lag the real one) take the pass-through
+    // members from the one table, so they cannot disagree about it.
+    for (const file of [
+      'src/preload/index.ts',
+      'src/web/api-adapter.ts',
+      'src/test/helpers/boot-test-app.ts'
+    ]) {
+      expect(read(file), file).toMatch(/buildInvokeApi\(API_INVOKES,/)
     }
-    expect(
-      invokedBy('src/preload/index.ts', /ipcRenderer\.invoke\(\s*['"](voice:pack-[^'"]+)['"]/g)
-    ).toEqual([...declared].sort())
-    expect(
-      invokedBy('src/web/api-adapter.ts', /connection\.invoke\(\s*['"](voice:pack-[^'"]+)['"]/g)
-    ).toEqual([...declared].sort())
-    // The test helper's preload copy must not lag the real one.
-    expect(
-      invokedBy(
-        'src/test/helpers/boot-test-app.ts',
-        /ipcRenderer\.invoke\(\s*['"](voice:pack-[^'"]+)['"]/g
-      )
-    ).toEqual([...declared].sort())
   })
 
   it('both clients pass the preview choice through as the start verb third argument', () => {
-    expect(read('src/preload/index.ts')).toMatch(
-      /unwrap\('voice:start-recording', routingId, language, opts\)/
-    )
-    expect(read('src/test/helpers/boot-test-app.ts')).toMatch(
-      /unwrap\('voice:start-recording', routingId, language, opts\)/
-    )
+    // The desktop side (preload and test helper) is one `DESKTOP_INVOKES` entry: all three
+    // positional args ride the wire unshaped, the envelope unwrapped.
+    expect(DESKTOP_INVOKES.voiceStart).toMatchObject({
+      channel: 'voice:start-recording',
+      arity: 3,
+      mode: 'unwrap'
+    })
+    expect('wire' in DESKTOP_INVOKES.voiceStart).toBe(false)
+    for (const file of ['src/preload/index.ts', 'src/test/helpers/boot-test-app.ts']) {
+      expect(read(file), file).toMatch(/buildInvokeApi\(DESKTOP_INVOKES,/)
+    }
     expect(read('src/web/api-adapter.ts')).toMatch(
       /connection\.invoke\('voice:start', routingId, language, opts\)/
     )
+  })
+
+  it('every table invoke is registered for BOTH transports (desktop ipcMain and remote)', () => {
+    // A table member whose channel is bound on only one transport is the same silent gap as an
+    // adapter invoke with no remote handler, but for the desktop: the preload would invoke a
+    // channel nobody handles. The declaration sources are the registrars plus every shared
+    // `*-commands` module both of them spread, so moving a declaration between those modules
+    // cannot make this vacuous or fail it.
+    const ipcDir = 'src/core/ipc'
+    const shared = fs
+      .readdirSync(path.join(REPO, ipcDir))
+      .filter((f) => /-commands\.ts$/.test(f) || /^(stream-watch|git-watch)\.ts$/.test(f))
+      .map((f) => `${ipcDir}/${f}`)
+    const channelsDeclaredIn = (files: string[]): Set<string> => {
+      const found = new Set<string>()
+      for (const file of files) {
+        const src = read(file)
+        for (const re of [
+          /channel:\s*['"]([^'"]+)['"]/g,
+          /ipcMain\.handle\(\s*['"]([^'"]+)['"]/g
+        ]) {
+          for (let m = re.exec(src); m; m = re.exec(src)) found.add(m[1])
+        }
+      }
+      return found
+    }
+    const ownIpc = ['authcfg', 'terminal', 'webauthn'].map((n) => `${ipcDir}/${n}.ipc.ts`)
+    const desktop = channelsDeclaredIn([
+      `${ipcDir}/session.ipc.ts`,
+      ...ownIpc,
+      'src/main/index.ts',
+      ...shared
+    ])
+    const remote = channelsDeclaredIn([`${ipcDir}/remote-handlers.ts`, ...ownIpc, ...shared])
+    // Non-vacuity: a scan that found nothing would pass the checks below.
+    expect(desktop.size).toBeGreaterThan(100)
+    expect(remote.size).toBeGreaterThan(100)
+    const channels = channelsOf(API_INVOKES)
+    expect(channels.length).toBeGreaterThan(200)
+    expect(
+      channels.filter((c) => !desktop.has(c)),
+      'table invokes with no desktop registration'
+    ).toEqual([])
+    expect(
+      channels.filter((c) => !remote.has(c)),
+      'table invokes with no remote registration'
+    ).toEqual([])
   })
 
   it('the web client subscribes only to CLASSIFIED event channels (4a)', () => {
@@ -623,10 +709,12 @@ describe('remote channel parity (R5)', () => {
     // contract. A channel the web client listens for that nothing classifies can
     // never arrive, because the funnel is fail-closed — the same class of silent
     // gap this file was written to catch on the invoke side.
-    const src = read('src/web/api-adapter.ts')
-    const re = /\bon\(\s*['"]([^'"]+)['"]\s*\)/g
-    const listened: string[] = []
-    for (let m = re.exec(src); m; m = re.exec(src)) listened.push(m[1])
+    // The web client's subscriptions are the `API_EVENTS` table (built over `connection.on`)
+    // plus any `on('…')` the adapter still writes out.
+    const listened: string[] = [
+      ...Object.values(API_EVENTS),
+      ...scanChannels('src/web/api-adapter.ts', /\bon\(\s*['"]([^'"]+)['"]\s*\)/g)
+    ]
     // SyncCore phase 4c shrank this surface by design: the adapter's replicated
     // subscriptions moved to the shared sync client, so what is left here is
     // host-local only. `sync-funnel-guard.test.ts` owns the full EVENT-surface scan

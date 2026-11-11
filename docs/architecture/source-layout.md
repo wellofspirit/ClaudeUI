@@ -14,7 +14,10 @@ src/
   shared/              — engine-neutral types (types.ts), capability model
                          (model-capabilities.ts), tool-kind taxonomy (tool-kinds.ts),
                          pricing, project-key, engine-meta, permission-modes,
-                         remote protocol, E2E crypto, audio/ (PCM16 helpers)
+                         remote protocol, E2E crypto, audio/ (PCM16 helpers),
+                         api-invoke-table.ts (every pass-through ClaudeAPI member,
+                         declared once; the preload, the web adapter and the test
+                         helper build from it)
   core/                — the Electron-free service graph. Both hosts boot THIS.
     host.ts            — the host-adapter seams (see §Host seams below)
     boot/              — core-services.ts (the ordered service graph — its order IS
@@ -45,7 +48,10 @@ src/
     shared-providers/  — canonical provider/model routing + native projections (ADR-037)
     ipc/               — the registrars (session/terminal/automation/webauthn/authcfg)
                          + command-registry, remote-handlers, the shared command
-                         factories (auth/authcfg/webauthn/config/automation) and
+                         factories (`*-commands.ts`: a channel both transports serve
+                         is declared once there and spread by both registrars; the
+                         terminal, authcfg and webauthn families still register once
+                         per transport, over shared functions) and
                          desktop-transport-binding.ts (the pluggable ipcMain seam)
     sync/              — SyncCore itself: sync-core.ts (canonical state + funnel),
                          event-ring.ts
@@ -84,7 +90,8 @@ src/
                          bootstrap chain)
     voice-worker-launcher.ts — `claudeui-server voice-worker`: the server relaunching itself
                          as the on-device voice worker (ADR-101)
-  preload/             — context bridges: window.api (ClaudeAPI), plugin, log viewer
+  preload/             — context bridges: window.api (ClaudeAPI, built from
+                         shared/api-invoke-table.ts), plugin, log viewer
   renderer/src/
     stores/            — Zustand stores (session-store.ts + replica.ts, the reducer
                          projection; sealed-fields.ts names the sealed set)

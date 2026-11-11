@@ -1185,6 +1185,23 @@ describe('registerRemoteHandlers', () => {
       expect(ok).toBe('<h1>hello</h1>')
     })
 
+    // The watch is recursive, so an escaping directory would arm an fs.watch over an
+    // arbitrary tree. The handler must refuse silently (no watcher), not throw.
+    it('mockup:watch refuses a path-traversal directory and arms nothing', async () => {
+      try {
+        await expect(
+          dispatcher.handle(makeRequest('mockup:watch', cwd, '../../..'), remoteConn)
+        ).resolves.toBeUndefined()
+        await dispatcher.handle(makeRequest('mockup:watch', cwd, '../../secret'), remoteConn)
+        expect(closeMockupWatchersUnder(cwd)).toBe(0)
+        // Sanity: the in-root path still arms a watcher (non-vacuous).
+        await dispatcher.handle(makeRequest('mockup:watch', cwd, 'm1'), remoteConn)
+        expect(closeMockupWatchersUnder(cwd)).toBe(1)
+      } finally {
+        closeMockupWatchersUnder(cwd)
+      }
+    })
+
     it('mockup:watch/unwatch are idempotent and tolerate a missing directory', async () => {
       // Missing dir → no-op, no throw.
       await expect(
