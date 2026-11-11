@@ -11,7 +11,7 @@
  * flag is module state — a fresh import is exactly what "the next app run" is.
  * The developer's real `~/.claude/ui` is never read or written.
  *
- * (Deliberately NOT the shape of `main/services/__tests__/ui-config-migration.test.ts`,
+ * (Deliberately NOT the shape of `core/services/__tests__/ui-config-migration.test.ts`,
  * which re-implements the migration inline and therefore cannot fail when the
  * implementation is wrong.)
  *

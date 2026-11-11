@@ -9,7 +9,7 @@
  * and then the whole renderer onto `ModelPicker` / `SelectMenu`. Nothing in the
  * type system stops the next contributor from reaching for `<select>` again, so
  * the invariant is enforced as a static SOURCE scan (same technique as
- * `src/main/ipc/__tests__/remote-channel-parity.test.ts`).
+ * `src/core/ipc/__tests__/remote-channel-parity.test.ts`).
  *
  * Fix, when this fails: use `SelectMenu` (src/renderer/src/components/shared/
  * SelectMenu.tsx) for a generic choice, or `ModelPicker` when the choice is a

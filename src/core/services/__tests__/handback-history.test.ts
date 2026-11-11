@@ -3,7 +3,7 @@
  *
  * applyHandbacks — the join of a transcript's hand-back notifications with their peer rows
  * and the subagent's sidechain (the loader-level cases are in
- * src/main/services/__tests__/session-history-handback.test.ts).
+ * src/core/services/__tests__/session-history-handback.test.ts).
  */
 import { describe, it, expect, vi } from 'vitest'
 import type { ChatMessage, TaskNotification } from '../../../shared/types'

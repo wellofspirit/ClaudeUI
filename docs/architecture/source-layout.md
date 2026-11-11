@@ -11,7 +11,9 @@ window-independent service graph (no Electron, lint-enforced), and **`src/main`*
 
 ```
 src/
-  shared/              — engine-neutral types (types.ts), capability model
+  shared/              — engine-neutral types (types.ts, a barrel over
+                         types/<domain>.ts; types/api/<domain>.ts holds the interfaces
+                         ClaudeAPI is composed of, not re-exported), capability model
                          (model-capabilities.ts), tool-kind taxonomy (tool-kinds.ts),
                          pricing, project-key, engine-meta, permission-modes,
                          remote protocol, E2E crypto, audio/ (PCM16 helpers),
@@ -79,9 +81,6 @@ src/
     services/          — the desktop-only RUNTIME remainder: account-manager,
                          auth-manager, plugin-manager, log-viewer, mockup-protocol,
                          sync-port, session-invalidation
-    services/__tests__/  — legacy: ~104 specs that did NOT move with their subjects;
-                         most test modules that now live in src/core/services/
-                         (look here for a core service's tests)
     quit-coordinator.ts
   server/              — HOST 2: `claudeui-server`, the headless entrypoint
     main.ts            — driver selection, headless host adapters, boot, shutdown
@@ -189,11 +188,7 @@ Key modules in `src/core/services/`:
 | `voice-relay.ts`                                                                                                | Voice relay per capture owner: renderer-pushed PCM (desktop `voice:audio` IPC, web `voice-audio` frame) in, transcripts back to that owner                                                           |
 
 What deliberately stayed in `src/main/services/` — every RUNTIME module that is Electron
-or is the desktop's own. (Tests are the exception, and the honest caveat: the legacy
-`src/main/services/__tests__/` and `src/main/auth/vault/__tests__/` trees did not move
-with their subjects, so most of those ~104 specs exercise `src/core/**` from a
-`src/main` path — `vitest.config.ts` still names it for the git project. Known residue,
-deferred as a mechanical follow-up to the S2 move.)
+or is the desktop's own.
 
 | Service                                  | Why it stays                                                                                                                                   |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |

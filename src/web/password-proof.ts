@@ -6,7 +6,7 @@
  * wire is `hex(H)`. The server compares `sha256(H)` to the stored hash, so this
  * function MUST agree with node's `crypto.scryptSync` byte-for-byte — the
  * cross-library equivalence test
- * (`src/main/services/__tests__/remote-auth-kdf.test.ts`) pins that against the
+ * (`src/core/services/__tests__/remote-auth-kdf.test.ts`) pins that against the
  * same fixed vector the server test uses.
  *
  * `scryptAsync` (not the sync variant) so the ~0.5–2s derivation on a phone
