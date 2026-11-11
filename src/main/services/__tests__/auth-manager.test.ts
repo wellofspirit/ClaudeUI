@@ -225,17 +225,16 @@ describe('AuthManager.finalize — the login identity reaches callbacks, not the
     return { cb, sent }
   }
 
-  it('passes the identity to success callbacks and keeps it out of auth:state', async () => {
+  // The in-app backend's identity reaching callbacks is covered end to end in
+  // claude-login-backend.test.ts; cli.js is never a source of one.
+  it('ignores an identity in a cli.js answer and keeps it out of auth:state', async () => {
     const identity = {
       accountId: 'fake-slot',
       accountUuid: 'fake-acct',
       organizationUuid: 'fake-org'
     }
     const { cb, sent } = await login({ account: { email: 'user@example.test' }, identity })
-    expect(cb).toHaveBeenCalledWith(
-      expect.objectContaining({ email: 'user@example.test' }),
-      identity
-    )
+    expect(cb).toHaveBeenCalledWith(expect.objectContaining({ email: 'user@example.test' }), null)
     const payload = JSON.stringify(sent.filter(([ch]) => ch === 'auth:state'))
     expect(payload).toContain('success')
     expect(payload).not.toContain('fake-acct')

@@ -1147,9 +1147,9 @@ export class UsageFetcher {
    * Write the active account's identity onto its own `account` row (ADR-071 §6).
    *
    * What the limits provider reads back when the account is NOT active, so that
-   * a stored account's reading has a key without a second network call. A no-op
-   * in single-account mode (no per-account directory, so no row to name) and
-   * best-effort: the identity is an optimization for a future read, never a
+   * a stored account's reading has a key without a second network call. Called
+   * only from the per-account dir pass, with the dir that pass resolved (single
+   * account mode has no row to name), and best-effort: the identity is an optimization for a future read, never a
    * reason to fail the poll that noticed it.
    */
   private rememberAccountIdentity(dir: string, account: ActiveAccount): void {

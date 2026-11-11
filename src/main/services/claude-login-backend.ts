@@ -72,12 +72,16 @@ export class CliLoginBackend implements ClaudeLoginBackend {
     return (await this.handle.claudeAuthenticate(true)) as AuthorizeUrls
   }
 
+  // Only `account` is taken from cli.js's answer: an `identity` is the in-app
+  // flow's own claim about the slot it wrote, never something cli.js supplies.
   async waitForCompletion(): Promise<OAuthResult> {
-    return (await this.handle.claudeOAuthWaitForCompletion()) as OAuthResult
+    const r = (await this.handle.claudeOAuthWaitForCompletion()) as OAuthResult
+    return { account: r?.account }
   }
 
   async submitCode(code: string, state: string): Promise<OAuthResult> {
-    return (await this.handle.claudeOAuthCallback(code, state)) as OAuthResult
+    const r = (await this.handle.claudeOAuthCallback(code, state)) as OAuthResult
+    return { account: r?.account }
   }
 
   /**
@@ -98,9 +102,10 @@ export const ACCOUNT_CHANGED_DURING_SIGN_IN =
  *
  * The flow dies when the active account dir moves off `accountDir`, the way a
  * cli.js flow dies with the service session `AccountManager` stops on every
- * switch. Surviving it would be worse than it looks: the credential would land
- * in the right dir, but `AccountManager.noteLogin` stamps the login's email on
- * whichever account is active WHEN it succeeds.
+ * switch. Surviving it would be worse than it looks: the login would complete
+ * for a slot that is no longer active. `AccountManager.noteLogin` stamps the
+ * slot named by the result's `identity.accountId` (this backend's dir), so even
+ * a switch landing after the flow settles cannot move the stamp.
  */
 export class InAppLoginBackend implements ClaudeLoginBackend {
   readonly kind = 'in-app' as const
