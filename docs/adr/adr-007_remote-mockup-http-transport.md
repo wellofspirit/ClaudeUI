@@ -61,6 +61,13 @@ transport.)
 reusing the desktop serving logic, and render them in an iframe sandboxed
 _without_ `allow-same-origin`.**
 
+**Changed 2026-11-11:** the mockup token moved from `?token=` into the path
+(`/mockup/<token>/<id>/<b64cwd>/…`), because relative asset URLs drop the query
+and every sibling image/CSS/JS was refused; and the in-mockup reload listener
+trusts `ev.source === window.parent` only, because a `file://` parent (the
+packaged desktop renderer) arrives as origin `"null"` and the origin check
+dropped every reload.
+
 ### Transport-agnostic serving core
 
 `mockup-protocol.ts` was refactored so the routing/validation/serving logic is
@@ -80,7 +87,8 @@ shared by both transports (DRY — one set of security checks):
 
 ### HTTP route
 
-`remote-server.ts` serves `/mockup/<id>/<b64cwd>/…`, reusing
+`remote-server.ts` serves `/mockup/<token>/<id>/<b64cwd>/…`: it splits the
+token off (`splitMockupHttpToken`) and resolves the rest with
 `routeHttpMockup` + `serveMockup`. The CSP `selfSource` is derived per-request
 from `x-forwarded-proto` (the tunnel terminates TLS and forwards over http) +
 `Host`. The web client builds the iframe URL with `buildMockupHttpUrl` against
@@ -107,16 +115,18 @@ changes the postMessage contract on web (captured in
 | bridge expected `event.origin` | `mockup-asset://<id>.m`           | `'null'`        |
 
 The bridge's primary trust check (`event.source === iframe.contentWindow`)
-holds in both modes; the origin check is defense-in-depth.
+holds in both modes; the origin check is defense-in-depth. Inside the mockup,
+the reload listener checks only `ev.source === window.parent` and acks with
+`mockup:reloading`; the parent remounts the iframe when no ack arrives.
 
 ### Mockup-scoped token (NOT the WS token)
 
 Because the iframe URL is readable by the mockup's own scripts
-(`location.search`), it must not carry the WS token. The server generates a
+(`location`), it must not carry the WS token. The server generates a
 **separate `mockupToken`** at start and injects it into the served web-client
 HTML as `window.__MOCKUP_TOKEN__` — but **only when the request carries a valid
-WS token** (`/remote?t=<wsToken>`). The `/mockup` route validates `?token=`
-against `mockupToken`.
+WS token** (`/remote?t=<wsToken>`). The `/mockup` route validates the token
+path segment against `mockupToken`.
 
 Blast radius if a hostile mockup exfiltrates its scoped token: reading
 extension-allow-listed files under `.claude/ui/mockups/<id>/` for guessable
@@ -133,7 +143,7 @@ iframe `src` — `mockup-asset://…` from the desktop preload,
 
 ### New
 
-- HTTP route `/mockup/<id>/<b64cwd>/…` on the remote server, token-gated.
+- HTTP route `/mockup/<token>/<id>/<b64cwd>/…` on the remote server, token-gated.
 - `routeHttpMockup`, `routeMockupParts`, `serveMockup`, `ServedMockup`,
   `buildMockupCsp(settings, selfSource)` in `mockup-protocol.ts`.
 - `buildMockupHttpUrl` / `MOCKUP_HTTP_PREFIX` in `shared/mockup-url.ts`.

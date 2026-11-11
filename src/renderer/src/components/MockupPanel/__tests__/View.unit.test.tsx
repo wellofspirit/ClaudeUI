@@ -24,6 +24,9 @@ function renderView(overrides: Partial<MockupPanelViewProps> = {}): ReturnType<t
     onClose: vi.fn(),
     onCopyHtml: vi.fn(),
     onRefresh: vi.fn(),
+    reloadStatus: 'idle',
+    frameKey: 0,
+    onFrameLoad: vi.fn(),
     onDarkModeChange: vi.fn(),
     darkMode: false,
     consoleLogs: [],
@@ -171,5 +174,35 @@ describe('MockupPanelView', () => {
     // Label shows "2" total plus "1 error"
     expect(screen.getByText(/2/)).toBeInTheDocument()
     expect(screen.getByText(/1 error/)).toBeInTheDocument()
+  })
+
+  describe('reload feedback', () => {
+    it('spins the refresh icon and sets aria-busy while reloading', () => {
+      renderView({ reloadStatus: 'reloading' })
+      const btn = screen.getByTestId('MockupPanel.refresh')
+      expect(btn.getAttribute('aria-busy')).toBe('true')
+      expect(btn.querySelector('svg')?.getAttribute('class')).toContain('animate-spin')
+      expect(screen.queryByTestId('MockupPanel.reloadStatus')).not.toBeInTheDocument()
+    })
+
+    it('shows an Updated label when updated', () => {
+      renderView({ reloadStatus: 'updated' })
+      expect(screen.getByTestId('MockupPanel.reloadStatus')).toHaveTextContent('Updated')
+      expect(screen.getByTestId('MockupPanel.refresh').getAttribute('aria-busy')).not.toBe('true')
+    })
+
+    it('shows neither spinner nor label when idle', () => {
+      renderView()
+      const btn = screen.getByTestId('MockupPanel.refresh')
+      expect(btn.getAttribute('aria-busy')).not.toBe('true')
+      expect(btn.querySelector('svg')?.getAttribute('class') ?? '').not.toContain('animate-spin')
+      expect(screen.queryByTestId('MockupPanel.reloadStatus')).not.toBeInTheDocument()
+    })
+
+    it('wires iframe onLoad to onFrameLoad', () => {
+      const { props } = renderView()
+      fireEvent.load(document.querySelector('iframe')!)
+      expect(props.onFrameLoad).toHaveBeenCalled()
+    })
   })
 })

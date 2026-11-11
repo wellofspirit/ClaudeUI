@@ -7,7 +7,7 @@
  * No Electron mocking: all tests hit the pure functions.
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import { join, resolve, sep } from 'path'
@@ -303,14 +303,47 @@ describe('OMELETTE_BOOTSTRAP', () => {
     expect(OMELETTE_BOOTSTRAP).toMatch(/details suppressed/)
   })
 
-  it('listens for mockup:reload from parent with origin + source validation', () => {
-    // We reload the iframe via postMessage (instead of mutating the src
-    // attribute) to avoid Chromium's focus-and-scroll-on-iframe-reload
-    // behavior. The handler must validate sender to prevent spoofing.
+  it('accepts mockup:reload by source only (file:// parents report origin "null") and acks', () => {
+    // Reload via postMessage avoids Chromium's focus-and-scroll-on-iframe-reload.
+    // A file:// parent stamps MessageEvent.origin as "null", so the listener
+    // must trust ev.source === window.parent and not gate on origin.
     expect(OMELETTE_BOOTSTRAP).toContain("'mockup:reload'")
-    expect(OMELETTE_BOOTSTRAP).toContain('location.reload()')
     expect(OMELETTE_BOOTSTRAP).toContain('ev.source !== window.parent')
-    expect(OMELETTE_BOOTSTRAP).toContain('ev.origin !== target')
+    expect(OMELETTE_BOOTSTRAP).not.toContain('ev.origin !==')
+    expect(OMELETTE_BOOTSTRAP).toContain("type:'mockup:reloading'")
+  })
+
+  it('reload listener fires for a message with origin "null" from the parent', () => {
+    const script = OMELETTE_BOOTSTRAP.replace(/^<script[^>]*>/, '').replace(/<\/script>$/, '')
+    const listeners: Array<(ev: unknown) => void> = []
+    const posted: unknown[] = []
+    const reload = vi.fn()
+    const fakeParent = { postMessage: (m: unknown, t: string) => posted.push([m, t]) }
+    const win = {
+      parent: fakeParent,
+      location: { search: '?parent=file%3A%2F%2F', reload },
+      addEventListener: (n: string, fn: (ev: unknown) => void) => {
+        if (n === 'message') listeners.push(fn)
+      }
+    }
+    const doc = { addEventListener: () => {}, readyState: 'complete', querySelectorAll: () => [] }
+    new Function('window', 'document', 'parent', 'location', 'URLSearchParams', script)(
+      win,
+      doc,
+      fakeParent,
+      win.location,
+      URLSearchParams
+    )
+    expect(listeners.length).toBeGreaterThan(0)
+    for (const l of listeners) {
+      l({ source: {}, origin: 'null', data: { type: 'mockup:reload' } })
+    }
+    expect(reload).not.toHaveBeenCalled()
+    for (const l of listeners) {
+      l({ source: fakeParent, origin: 'null', data: { type: 'mockup:reload' } })
+    }
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(posted).toContainEqual([{ type: 'mockup:reloading' }, 'file://'])
   })
 
   it('targets postMessage at the parent-origin param (never "*")', () => {

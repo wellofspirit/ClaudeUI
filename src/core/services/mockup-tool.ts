@@ -22,6 +22,9 @@ export const CREATE_MOCKUP_DESCRIPTION =
   'Sibling assets: You may drop additional files (images, custom CSS, fonts, JS) into the mockup directory ' +
   'alongside index.html and reference them with relative paths, e.g. `<img src="./logo.png">`, ' +
   '`<link rel="stylesheet" href="./extra.css">`, `<script src="./app.js"></script>`. ' +
+  'Copy every local asset the mockup uses (screenshots, images, fonts, scripts) INTO the mockup directory first: ' +
+  'only files inside it are served, so absolute filesystem paths, `file://` URLs, root-relative `/...` paths ' +
+  'and `../` paths that leave the directory do not load, on the desktop or in the remote web client. ' +
   'Supported extensions: png, jpg, jpeg, gif, webp, avif, svg, ico, woff, woff2, ttf, otf, css, js, mjs, json, txt, mp3, mp4, webm.\n\n' +
   'JavaScript runs: the iframe is sandboxed to its own origin and allows scripts. ' +
   'Tailwind v3 is loaded from the Play CDN (`cdn.tailwindcss.com`), so standard utility classes work. ' +

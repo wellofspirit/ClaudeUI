@@ -1,4 +1,5 @@
 import { forwardRef, useState } from 'react'
+import type { MockupReloadStatus } from '../../../hooks/useMockupReload'
 import { CodeView } from '../CodeView'
 
 export interface MockupPreviewCardViewProps {
@@ -10,11 +11,26 @@ export interface MockupPreviewCardViewProps {
   onExpand: () => void
   onCopyHtml: () => void
   onRefresh: () => void
+  reloadStatus: MockupReloadStatus
+  frameKey: number
+  onFrameLoad: () => void
 }
 
 export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreviewCardViewProps>(
   function MockupPreviewCardView(
-    { title, html, error, src, sandbox, onExpand, onCopyHtml, onRefresh },
+    {
+      title,
+      html,
+      error,
+      src,
+      sandbox,
+      onExpand,
+      onCopyHtml,
+      onRefresh,
+      reloadStatus,
+      frameKey,
+      onFrameLoad
+    },
     iframeRef
   ) {
     const [tab, setTab] = useState<'preview' | 'code'>('preview')
@@ -49,13 +65,24 @@ export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreview
             Copy
           </button>
 
+          {reloadStatus === 'updated' && (
+            <span
+              data-testid="MockupPreviewCard.reloadStatus"
+              className="text-[11px] text-text-muted"
+            >
+              Updated
+            </span>
+          )}
+
           <button
             data-testid="MockupPreviewCard.refresh"
             onClick={onRefresh}
             className="h-6 w-6 flex items-center justify-center rounded text-text-muted hover:text-text-secondary transition-colors cursor-pointer hover:bg-bg-hover"
             title="Reload mockup"
+            aria-busy={reloadStatus === 'reloading'}
           >
             <svg
+              className={reloadStatus === 'reloading' ? 'animate-spin' : undefined}
               width="12"
               height="12"
               viewBox="0 0 24 24"
@@ -108,11 +135,13 @@ export const MockupPreviewCardView = forwardRef<HTMLIFrameElement, MockupPreview
                   style={{ aspectRatio: '16 / 9' }}
                 >
                   <iframe
+                    key={frameKey}
                     ref={iframeRef}
                     src={src}
                     sandbox={sandbox}
                     referrerPolicy="no-referrer"
                     tabIndex={-1}
+                    onLoad={onFrameLoad}
                     style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
                     title={title || 'Mockup preview'}
                   />

@@ -1370,6 +1370,27 @@ describe('session.ipc', () => {
       await harness.call('mockup:unwatch', root, 'm1')
       expect(closeMockupWatchersUnder(root)).toBe(0)
     })
+
+    // Two viewers of one mockup (a card + the side panel, or two cards): the first to unmount
+    // used to close the shared watch, silently ending live refresh for the other.
+    it('mockup:unwatch keeps the watch open while another viewer still watches (GUARD — fails pre-fix)', async () => {
+      await harness.call('mockup:watch', root, 'm1')
+      await harness.call('mockup:watch', root, 'm1')
+      await harness.call('mockup:unwatch', root, 'm1')
+      expect(closeMockupWatchersUnder(root)).toBe(1)
+    })
+
+    it('mockup:unwatch closes the watch once the last viewer leaves', async () => {
+      await harness.call('mockup:watch', root, 'm1')
+      await harness.call('mockup:watch', root, 'm1')
+      await harness.call('mockup:unwatch', root, 'm1')
+      await harness.call('mockup:unwatch', root, 'm1')
+      expect(closeMockupWatchersUnder(root)).toBe(0)
+      // An extra unwatch is harmless, and a fresh watch starts a new count.
+      await harness.call('mockup:unwatch', root, 'm1')
+      await harness.call('mockup:watch', root, 'm1')
+      expect(closeMockupWatchersUnder(root)).toBe(1)
+    })
   })
 
   // -------------------------------------------------------------------------
