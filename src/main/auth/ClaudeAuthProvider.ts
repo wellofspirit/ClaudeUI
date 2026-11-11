@@ -52,7 +52,10 @@ class ClaudeAuthProvider implements EngineAuthProvider {
    */
   init(win: BrowserWindow | null): void {
     // Intercept successful logins to keep cachedAccount fresh.
-    authManager.onLoginSuccess((account) => {
+    authManager.onLoginSuccess((account, _identity, forActive) => {
+      // A login that landed in a slot that is no longer active says nothing
+      // about the active account's state.
+      if (!forActive) return
       if (account) this.cachedAccount = account
       // …and the auth STATE, not just the label (ADR-070 §2). `cachedAuthSource`
       // was fed only by `session:auth-source`, which arrives on a cli.js spawn,

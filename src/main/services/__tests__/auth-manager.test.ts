@@ -5,9 +5,12 @@
  * never-rejecting signIn() (C-7). Heavy collaborators (electron, service
  * session, logger) are mocked.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
-const hoisted = vi.hoisted(() => ({ handle: { current: undefined as unknown } }))
+const hoisted = vi.hoisted(() => ({
+  handle: { current: undefined as unknown },
+  env: { current: undefined as { dir: string } | undefined }
+}))
 
 vi.mock('electron', async () => await import('../../../test/stubs/electron-shim'))
 vi.mock('../../../core/services/service-session', () => ({
@@ -15,12 +18,18 @@ vi.mock('../../../core/services/service-session', () => ({
     getControlHandle: vi.fn(async () => hoisted.handle.current)
   }
 }))
+vi.mock('../../../core/sdk/securestorage-env', () => ({
+  getSecurestorageEnv: () => hoisted.env.current,
+  onSecurestorageEnvChange: vi.fn(() => () => {})
+}))
+vi.mock('../../../core/services/sync-host', () => ({ emitEvent: vi.fn() }))
 vi.mock('../../../core/services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
 import { authManager } from '../auth-manager'
 import { serviceSession } from '../../../core/services/service-session'
+import { emitEvent } from '../../../core/services/sync-host'
 import { setLiveSessionCanceller } from '../session-invalidation'
 import type { AuthFlowState } from '../../../shared/types'
 
@@ -234,7 +243,11 @@ describe('AuthManager.finalize — the login identity reaches callbacks, not the
       organizationUuid: 'fake-org'
     }
     const { cb, sent } = await login({ account: { email: 'user@example.test' }, identity })
-    expect(cb).toHaveBeenCalledWith(expect.objectContaining({ email: 'user@example.test' }), null)
+    expect(cb).toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'user@example.test' }),
+      null,
+      true
+    )
     const payload = JSON.stringify(sent.filter(([ch]) => ch === 'auth:state'))
     expect(payload).toContain('success')
     expect(payload).not.toContain('fake-acct')
@@ -244,7 +257,7 @@ describe('AuthManager.finalize — the login identity reaches callbacks, not the
 
   it('passes null when the backend produced no identity (cli.js)', async () => {
     const { cb } = await login({ account: { email: 'user@example.test' } })
-    expect(cb).toHaveBeenCalledWith(expect.anything(), null)
+    expect(cb).toHaveBeenCalledWith(expect.anything(), null, true)
   })
 })
 
@@ -728,5 +741,157 @@ describe('AuthManager — an error on a LIVE flow carries its sign-in link (slic
     const late = internals().fail(thisLogin, new Error('late failure')) as AuthFlowState
     expect(late.status).toBe('success')
     expect(late.manualUrl).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #229 — a login that stored a credential keeps its side effects after Cancel
+// or a restart, and one that landed in a slot that is no longer active does
+// not masquerade as the active account's.
+// ---------------------------------------------------------------------------
+
+describe('AuthManager.finalize — a success for a cancelled or superseded flow (#229)', () => {
+  const authResolved = (): unknown[] =>
+    vi.mocked(emitEvent).mock.calls.filter(([ch]) => ch === 'provider:auth-resolved')
+
+  let sent: Array<[string, unknown[]]>
+  let cb: ReturnType<typeof vi.fn<Parameters<typeof authManager.onLoginSuccess>[0]>>
+  let cancelled: number
+  let wait: ReturnType<typeof deferred<unknown>>
+  let waits: Array<ReturnType<typeof deferred<unknown>>>
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    hoisted.env.current = undefined
+    const w = makeWindow()
+    sent = w.sent
+    authManager.setWindow(w.win as never)
+    cb = vi.fn<Parameters<typeof authManager.onLoginSuccess>[0]>()
+    authManager.onLoginSuccess(cb)
+    cancelled = 0
+    setLiveSessionCanceller(() => cancelled++)
+    waits = []
+    wait = deferred<unknown>()
+    hoisted.handle.current = {
+      claudeAuthenticate: vi.fn(async () => ({ manualUrl: 'https://auth.example/?state=s' })),
+      claudeOAuthWaitForCompletion: vi.fn(() => {
+        wait = deferred<unknown>()
+        waits.push(wait)
+        return wait.promise
+      }),
+      claudeOAuthCallback: vi.fn(async () => ACCOUNT)
+    }
+  })
+
+  afterEach(() => setLiveSessionCanceller(null))
+
+  const states = (): string[] =>
+    sent.filter(([ch]) => ch === 'auth:state').map(([, a]) => (a[0] as { status: string }).status)
+
+  it('T5/T8: Cancel then a late success runs the side effects once and broadcasts no success', async () => {
+    await authManager.signIn()
+    const flow = internals().flowId
+    await authManager.cancelSignIn()
+    wait.resolve(ACCOUNT)
+    await flush()
+
+    expect(cancelled).toBe(1)
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(cb).toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'user@example.com' }),
+      null,
+      true
+    )
+    expect(authResolved()).toHaveLength(1)
+    expect(states()).not.toContain('success')
+    expect(states().at(-1)).toBe('idle')
+    // T6: a second arrival for the same flow (loopback + paste) does nothing more.
+    expect(internals().finalize(flow, ACCOUNT).status).toBe('idle')
+    expect(cancelled).toBe(1)
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(authResolved()).toHaveLength(1)
+  })
+
+  it('T5: a success for a flow a new signIn superseded leaves the new flow untouched', async () => {
+    await authManager.signIn()
+    const oldFlow = internals().flowId
+    await authManager.signIn()
+    const before = states().length
+    // Only the OLD flow's loopback wait answers.
+    waits[0].resolve(ACCOUNT)
+    await flush()
+
+    expect(internals().flowId).toBe(oldFlow + 1)
+    expect(cancelled).toBe(1)
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(authResolved()).toHaveLength(1)
+    expect(states()).toHaveLength(before)
+    // The newer flow is still live: its own success is a normal one.
+    expect(internals().finalize(internals().flowId, ACCOUNT).status).toBe('success')
+    expect(cancelled).toBe(2)
+  })
+
+  it('T7: the current flow records its side effects, so a later stale arrival adds none', async () => {
+    await authManager.signIn()
+    const flow = internals().flowId
+    expect(internals().finalize(flow, ACCOUNT).status).toBe('success')
+    await authManager.signIn()
+    internals().finalize(flow, ACCOUNT)
+    expect(cancelled).toBe(1)
+    expect(cb).toHaveBeenCalledTimes(1)
+  })
+
+  describe('T9: the active account moved while the credential was written', () => {
+    const identity = {
+      accountId: 'old-slot',
+      accountUuid: 'fake-acct',
+      organizationUuid: 'fake-org'
+    }
+    const moved = { account: { email: 'old@example.test' }, identity }
+
+    it('records the login against its slot only, and tells the dialog why', async () => {
+      hoisted.env.current = { dir: '/accounts/new-slot' }
+      await authManager.signIn()
+      const state = internals().finalize(internals().flowId, moved)
+
+      expect(cb).toHaveBeenCalledWith(expect.anything(), identity, false)
+      expect(cancelled).toBe(0)
+      expect(authResolved()).toHaveLength(0)
+      expect(state.status).toBe('error')
+      expect(state.error).toBe(
+        "Signed in to old@example.test, but you switched accounts during sign-in. It's ready when you switch back."
+      )
+      expect(states().at(-1)).toBe('error')
+    })
+
+    it('names "that account" when the login carries no email', async () => {
+      hoisted.env.current = { dir: '/accounts/new-slot' }
+      await authManager.signIn()
+      const state = internals().finalize(internals().flowId, { identity })
+      expect(state.error).toMatch(/^Signed in to that account, but/)
+    })
+
+    it('a login into the still-active slot is an ordinary success', async () => {
+      hoisted.env.current = { dir: '/accounts/old-slot' }
+      await authManager.signIn()
+      const state = internals().finalize(internals().flowId, moved)
+
+      expect(state.status).toBe('success')
+      expect(cb).toHaveBeenCalledWith(expect.anything(), identity, true)
+      expect(cancelled).toBe(1)
+      expect(authResolved()).toHaveLength(1)
+    })
+
+    it('a stale flow for another slot also skips the active-account effects', async () => {
+      hoisted.env.current = { dir: '/accounts/new-slot' }
+      await authManager.signIn()
+      const stale = internals().flowId
+      await authManager.cancelSignIn()
+      internals().finalize(stale, moved)
+
+      expect(cb).toHaveBeenCalledWith(expect.anything(), identity, false)
+      expect(cancelled).toBe(0)
+      expect(authResolved()).toHaveLength(0)
+    })
   })
 })

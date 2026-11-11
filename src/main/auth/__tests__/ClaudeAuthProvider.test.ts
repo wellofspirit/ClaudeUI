@@ -147,3 +147,34 @@ describe('ClaudeAuthProvider.buildAccountRef()', () => {
     expect(ref.accountId).toBeUndefined()
   })
 })
+
+describe('ClaudeAuthProvider.init() — login-success cache (#229)', () => {
+  const OLD = {
+    email: 'old@example.test',
+    organization: null,
+    subscriptionType: null,
+    tokenSource: null,
+    apiKeySource: null,
+    apiProvider: null
+  }
+
+  async function loginCallback(): Promise<(...a: unknown[]) => void> {
+    const { authManager } = await import('../../services/auth-manager')
+    const onLogin = vi.mocked(authManager.onLoginSuccess)
+    onLogin.mockClear()
+    claudeAuthProvider.init(null)
+    return onLogin.mock.calls[0][0] as unknown as (...a: unknown[]) => void
+  }
+
+  it('caches the signed-in state when the login is for the active account', async () => {
+    claudeAuthProvider.updateAuthSource('none', null)
+    ;(await loginCallback())(OLD, null, true)
+    expect((await claudeAuthProvider.probe()).anthropic!.authState).toBe('authenticated')
+  })
+
+  it('leaves the cache alone when the login landed in a slot that is no longer active', async () => {
+    claudeAuthProvider.updateAuthSource('none', null)
+    ;(await loginCallback())(OLD, null, false)
+    expect((await claudeAuthProvider.probe()).anthropic!.authState).toBe('unauthenticated')
+  })
+})

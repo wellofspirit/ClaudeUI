@@ -166,11 +166,15 @@ describe('AuthManager on the in-app backend', () => {
     const done = (await authManager.submitOAuthCode('CODE#in-app-state')) as AuthFlowState
     expect(flow.submitCode).toHaveBeenCalledWith('CODE', 'in-app-state')
     // The slot is the dir the flow wrote, named by its basename.
-    expect(onSuccess).toHaveBeenCalledWith(expect.anything(), {
-      accountId: path.basename(DIR),
-      accountUuid: 'fake-acct',
-      organizationUuid: 'fake-org'
-    })
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        accountId: path.basename(DIR),
+        accountUuid: 'fake-acct',
+        organizationUuid: 'fake-org'
+      },
+      true
+    )
     expect(done.status).toBe('success')
     expect(done.account?.email).toBe('multi@example.com')
     expect(serviceSession.getControlHandle).not.toHaveBeenCalled()

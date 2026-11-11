@@ -422,7 +422,7 @@ export interface ClaudeLoginFlowOptions {
   now?: () => number
 }
 
-type Phase = 'new' | 'awaiting-code' | 'exchanging' | 'done'
+type Phase = 'new' | 'awaiting-code' | 'exchanging' | 'committing' | 'done'
 
 /**
  * One login attempt. `start()` binds the listener and returns both URLs;
@@ -454,6 +454,8 @@ export class ClaudeLoginFlow {
   private heldResponse: ServerResponse | undefined
   private timer: NodeJS.Timeout | undefined
   private readonly abort = new AbortController()
+  /** Aborts only the roles fetch, the one step a cancel may still cut short after the write. */
+  private readonly rolesAbort = new AbortController()
   private settle: { resolve: (r: ClaudeLoginResult) => void; reject: (e: Error) => void }
   private readonly outcome: Promise<ClaudeLoginResult>
   /** Resolves (never rejects) once the flow has reached any terminal outcome. */
@@ -521,8 +523,17 @@ export class ClaudeLoginFlow {
     return this.outcome
   }
 
-  /** Abort the flow: close the listener, abandon any exchange, reject the outcome. */
+  /**
+   * Abort the flow: close the listener, abandon any exchange, reject the
+   * outcome. Once the credential write has started the new token is (or is about
+   * to be) on disk, so the login is committed: a cancel then only cuts the
+   * organization-name lookup short and the outcome still settles as a success.
+   */
   cancel(reason = 'Login cancelled'): void {
+    if (this.phase === 'committing') {
+      this.rolesAbort.abort()
+      return
+    }
     void this.terminate(new Error(reason))
   }
 
@@ -592,12 +603,19 @@ export class ClaudeLoginFlow {
       )
       const profile = await fetchClaudeProfile(tokens.access_token, this.fetchFn, signal)
       if (this.phase !== 'exchanging') return // cancelled mid-exchange: write nothing
+      this.phase = 'committing'
       const stored = await writeClaudeCredentials(this.accountDir, (prior) =>
         buildStoredCredential(tokens, profile, prior, this.now())
       )
       this.redirectHeld(CLI_OAUTH.claudeAiSuccessUrl)
+      // Nothing after the write may throw: the credential is already stored, so
+      // the abort (which this fetch rethrows) is just "no name from roles".
       const organization =
-        (await fetchClaudeOrganizationName(tokens.access_token, this.fetchFn, signal)) ??
+        (await fetchClaudeOrganizationName(
+          tokens.access_token,
+          this.fetchFn,
+          this.rolesAbort.signal
+        ).catch(() => null)) ??
         tokens.organization?.name ??
         null
       await this.terminate(null, {
@@ -638,7 +656,7 @@ export class ClaudeLoginFlow {
 
   private async terminate(err: Error | null, result?: ClaudeLoginResult): Promise<void> {
     if (this.phase === 'done') return
-    const wasExchanging = this.phase === 'exchanging'
+    const wasExchanging = this.phase === 'exchanging' || this.phase === 'committing'
     this.phase = 'done'
     this.clearTimer()
     if (err && wasExchanging) this.abort.abort()
