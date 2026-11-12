@@ -19,14 +19,14 @@ The invoke surface: one command registry served to the desktop renderer (`ipcMai
 1. `src/shared/types/api/*.ts` (the `*API` interface for the domain, or `ClaudeAPI` in `src/shared/types/claude-api.ts`): add the method. Result type carries no `ok` key. [compiler]
 2. `src/core/ipc/*-commands.ts`: add an entry to the family's factory with `channel`, `capability`, `kind`, `handler`. A body that is long or shared goes in `src/core/ipc/handlers-core.ts`. [test: `remote-channel-parity.test.ts` once step 8 lists the member: every table invoke must be declared for both transports]
 3. A new family file: spread it in `registerSessionIpc` (`handleIpc`) and `registerRemoteHandlers` (`handleRemote`). [test: `remote-handlers.ipc.test.ts` for the remote spread, after step 10; nothing for the desktop spread: the parity spec reads the family file, not the registrars, so a missed spread fails at call time]
-4. A new family file must also join `SHARED_DECLARATION_SOURCES` in `src/core/ipc/__tests__/remote-channel-parity.test.ts`. [test: `remote-channel-parity.test.ts`]
+4. A new family file is found by its name: `remote-channel-parity.test.ts` reads every `src/core/ipc/*-commands.ts`, so keep the suffix. [nothing]
 5. Capability: pick from `CAPABILITIES` in `command-registry.ts`. `chat`, `session-config`, `config`, `git`, `fs-read` are the base remote grants (`AUTH_OFF_GRANTS`); `shell`, `ide`, `admin`, `enroll`, `host` are granted separately (`docs/architecture/security.md`, "Capability grants"). `kind: 'command'` is audited, `'query'` is not.
 6. A channel outside the base set: add it to `PINNED_CAPABILITIES`. [nothing: unpinned, a later edit can relabel it into a grantable capability unnoticed]
 7. A channel outside the base set that the web client invokes: add it to `UNGRANTED_AT_CONNECT_REMOTE_CHANNELS` in `remote-channel-parity.test.ts`. [test: `remote-channel-parity.test.ts`]
 8. `src/shared/api-invoke-table.ts`: add the member to `API_INVOKES` (`DESKTOP_INVOKES` if desktop-only; the preload, web adapter and test helper build from it); `mode: 'unwrap'` iff the handler answers the `safeHandler` envelope. [compiler] for the member, [nothing] for `mode`
 9. A member that differs per client stays hand-written in `src/preload/index.ts` and `src/web/api-adapter.ts` instead of the table. [compiler]
-10. `src/core/ipc/__tests__/remote-handlers.ipc.test.ts`: add the channel to a hand list that feeds the exact remote channel set (the test "exposes exactly the pre-port channel set"). [test: `remote-handlers.ipc.test.ts`]
-11. A pinned channel registered for remote also joins the sanctioned set in that spec (test "exposes no channel whose capability the old denylist stood for"). [test: `remote-handlers.ipc.test.ts`]
+10. Regenerate the remote surface dump and commit it: `UPDATE_REMOTE_SURFACE=1 bunx vitest run src/core/ipc/__tests__/remote-handlers.ipc.test.ts -t "checked-in dump"` rewrites `src/core/ipc/__tests__/remote-surface.jsonl`. The new line in the diff is what a reviewer reads; never hand-edit the file. [test: `remote-handlers.ipc.test.ts`, "the remote surface equals the checked-in dump"]
+11. A channel registered for remote whose capability is outside the base set also needs a line in `NOT_GRANTED_AT_CONNECT` in that spec. [test: `remote-handlers.ipc.test.ts`]
 12. `src/test/helpers/boot-test-app.ts`: stub the member only if a harness test calls a channel the harness has no handler for. [nothing]
 
 ## Invariants

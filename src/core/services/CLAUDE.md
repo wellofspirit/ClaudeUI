@@ -20,13 +20,13 @@ Flat directory of the Electron-free service layer; `src/core/boot/core-services.
 
 1. `src/core/services/db.ts`: append a version to `MIGRATIONS`, then the `...DbRow` and public row types, the mapper, INSERT columns and placeholders, and the UPDATE/patch if mutable. [compiler] for the types, [nothing] for the SQL strings.
 2. The facade (`src/core/services/dispatch-target-ledger.ts` for that table) and its fake `src/test/helpers/fake-dispatch-ledger.ts`. [compiler]
-3. The schema-version assertions in `src/core/services/__tests__/` (grep for the latest version number). [test: db.test.ts and others] Add a `*-vN-migration.test.ts` beside `codex-removal-v41-migration.test.ts` and update the schema paragraph in `docs/architecture/persistence.md`. [nothing] for both.
+3. No version pin to bump: specs read `LATEST_SCHEMA_VERSION` from `src/test/helpers/migration-db.ts`. Add a `*-vN-migration.test.ts` beside `codex-removal-v41-migration.test.ts` (`openRawDb` and `userVersion` come from the same helper) and update the schema paragraph in `docs/architecture/persistence.md`. [nothing] for both.
 
 **A new service started at boot.** Exemplar: `usageHubClient` (`src/core/services/usage-hub/client.ts`).
 
 1. Module exporting a singleton with `start()` and `stop()`, or a `start*`/`watch*` function taking its collaborators as arguments; take them as parameters, not by importing the session manager (cycle). See the cycle note in `src/core/boot/core-services.ts`.
-2. `src/core/boot/core-services.ts` `startCoreServices`: construct and start at the right point in the order. Add the handle to `CoreServices` and its return value so hosts can stop it. [nothing] for the order, [compiler] for the handle.
-3. Stop it in both teardown lists: `src/main/index.ts` (`teardownServices`) and `src/server/main.ts` (`shutdown`). [nothing]. Skipped, timers or children outlive quit.
+2. `src/core/boot/core-services.ts` `startCoreServices`: construct and start at the right point in the order. [nothing] for the order.
+3. If it holds timers, sockets or children, stop it in the one sequence both hosts run: add it to `CoreStopDeps` in `src/core/boot/core-stop.ts`, call it in `stop()` (or in `prepareStop()` when it needs the other services alive), and pass it where `startCoreServices` calls `createCoreStop`. [compiler] for the dep, [nothing] for calling it; the order is pinned in `src/core/boot/__tests__/core-stop.test.ts`. Skipped, timers or children outlive quit. Host-only teardown (the desktop's log viewer and plugins) stays in `src/main/index.ts`.
 4. The boot specs mock the composition root's imports: add the new module to `src/core/boot/__tests__/harness-arrival-boot.test.ts`, `usage-poll-boot-order.test.ts` and `src/e2e/flows/windowless-boot.e2e.test.ts`. [test: those three]
 
 **The host half of a hosted MCP tool, all three engines.** Exemplar: `render_mermaid`. Claude wire reference: `docs/protocol-cc/10-mcp-hosting.md`.
