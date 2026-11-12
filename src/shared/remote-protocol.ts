@@ -1198,11 +1198,12 @@ export interface FullStateSnapshot {
   settings: Record<string, unknown>
   /**
    * Whether the host's Claude settings carry `disableAutoMode: "disable"`
-   * (ADR-050). The remote client can't read `~/.claude/settings.json` itself,
-   * and it needs this to gate the auto default when IT creates a session.
-   * Optional: an older host omits it, which reads as "not disabled" — the
-   * post-spawn rejection fallback stays the backstop for that mixed-version
-   * window.
+   * (ADR-050). Claude Code's own setting: it gates auto for Claude sessions
+   * only. The remote client can't read `~/.claude/settings.json` itself, and it
+   * needs this to gate the auto default and the mode picker when IT creates or
+   * shows a Claude session. Optional: an older host omits it, which reads as
+   * "not disabled" — the post-spawn rejection fallback stays the backstop for
+   * that mixed-version window.
    */
   autoModeDisabledBySettings?: boolean
   /** Recent session IDs */

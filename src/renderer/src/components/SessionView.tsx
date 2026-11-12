@@ -269,12 +269,15 @@ export function SessionView(): React.JSX.Element {
         // when !capabilities.plan). Claude has plan=true, so the full cycle stands.
         const canPlan = session?.status.capabilities.plan ?? true
         // Auto mode is default-available (subscription accounts get it out of the
-        // box); the only negative gate is Claude's launch-time model info reporting
-        // that no available model supports it. Non-Claude engines' 'auto' is a local
-        // full-autonomy mode with no account gate, so it's always available there.
+        // box). The negative gates are Claude's own: its settings turn auto mode
+        // off (ADR-050; cli.js would refuse the pick, so the cycle skips it rather
+        // than step in and be bounced), or the launch-time model info reports that
+        // no available model supports it. Non-Claude engines' 'auto' is ClaudeUI's
+        // own judged mode with neither gate, so it is always offered there.
         const autoAvailable = autoModeAvailableForEngine(
           session?.selectedEngineId,
-          state.availableModels
+          state.availableModels,
+          state.autoModeDisabledBySettings
         )
         const next = nextPermissionMode(permissionMode, { canPlan, autoAvailable })
         state.changePermissionMode(activeSessionId, next)

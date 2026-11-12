@@ -1222,9 +1222,17 @@ export function InputBox(): React.JSX.Element {
   // early-returns there too).
   const showModePicker = !!activeSessionId
   const canPlan = capabilities.plan ?? true
+  // A store selector, not `getState()`: a browser client learns the flag from the
+  // host snapshot, which can arrive after this component mounted.
+  const autoModeDisabledBySettings = useSessionStore((s) => s.autoModeDisabledBySettings)
   const autoAvailable = useMemo(
-    () => autoModeAvailableForEngine(sessionEngineId ?? effectiveEngineId, models),
-    [sessionEngineId, effectiveEngineId, models]
+    () =>
+      autoModeAvailableForEngine(
+        sessionEngineId ?? effectiveEngineId,
+        models,
+        autoModeDisabledBySettings
+      ),
+    [sessionEngineId, effectiveEngineId, models, autoModeDisabledBySettings]
   )
   const handleSelectMode = useCallback(
     (mode: PermissionMode) => {

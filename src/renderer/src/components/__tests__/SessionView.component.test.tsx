@@ -24,8 +24,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import React from 'react'
 import { render, screen, act, cleanup } from '@testing-library/react'
 import { useSessionStore } from '../../stores/session-store'
+import { seedLocalApp } from '../../stores/replica'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import { seed, seedSession, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import type { EngineId } from '../../../../shared/types'
 
 // ---------------------------------------------------------------------------
 // Mobile flag — mutated per-test, read lazily by the mocked hook
@@ -395,6 +397,78 @@ describe('SessionView — mobile task takeover', () => {
 
     await act(async () => {
       useSessionStore.getState().setTerminalPanelOpen(false)
+    })
+  })
+
+  // ADR-050: `disableAutoMode` is Claude Code's own setting. With it set the
+  // Shift+Tab cycle skips Auto for a Claude session (cli.js would refuse the
+  // pick and bounce it with a warning). opencode and pi are not bound by it:
+  // their auto mode is ClaudeUI's own, and the cycle still reaches it.
+  describe('Shift+Tab and auto mode turned off in Claude settings', () => {
+    const ENGINES: EngineId[] = ['claude', 'opencode', 'pi']
+    const NOT_CLAUDE: EngineId[] = ['opencode', 'pi']
+
+    /** The session on `engineId`, sitting on Plan: the mode right before Auto in the cycle. */
+    function onPlan(engineId: EngineId): void {
+      seedSession(ROUTE, { selectedEngineId: engineId, permissionMode: 'plan' })
+    }
+
+    async function shiftTab(): Promise<void> {
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true })
+        )
+      })
+    }
+
+    const modeNow = (): string => useSessionStore.getState().sessions[ROUTE].permissionMode
+
+    afterEach(() => {
+      seedLocalApp({ autoModeDisabledBySettings: false })
+    })
+
+    it.each(ENGINES)('%s: Plan steps to Auto while the setting is off', async (engineId) => {
+      onPlan(engineId)
+      await renderSessionView()
+      await shiftTab()
+      expect(modeNow()).toBe('auto')
+    })
+
+    it('claude: Plan steps past Auto to Default with the setting on', async () => {
+      onPlan('claude')
+      seedLocalApp({ autoModeDisabledBySettings: true })
+      await renderSessionView()
+      await shiftTab()
+      expect(modeNow()).toBe('default')
+      // A whole lap never lands on Auto.
+      const seen: string[] = []
+      for (let i = 0; i < 4; i++) {
+        await shiftTab()
+        seen.push(modeNow())
+      }
+      expect(seen).not.toContain('auto')
+    })
+
+    it.each(NOT_CLAUDE)(
+      '%s: Plan still steps to Auto with the setting on, which is not its setting',
+      async (engineId) => {
+        onPlan(engineId)
+        seedLocalApp({ autoModeDisabledBySettings: true })
+        await renderSessionView()
+        await shiftTab()
+        expect(modeNow()).toBe('auto')
+      }
+    )
+
+    it('a client that learns the setting after mounting skips Auto for a Claude session from then on', async () => {
+      onPlan('claude')
+      await renderSessionView()
+      // The host snapshot, or a change made in Settings, lands after the view is up.
+      await act(async () => {
+        seedLocalApp({ autoModeDisabledBySettings: true })
+      })
+      await shiftTab()
+      expect(modeNow()).toBe('default')
     })
   })
 })
