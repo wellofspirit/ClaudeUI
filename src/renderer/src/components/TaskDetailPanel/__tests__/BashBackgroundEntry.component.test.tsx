@@ -10,6 +10,7 @@ import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import type { ChatMessage } from '../../../../../shared/types'
 import { BashBackgroundEntry } from '../BashBackgroundEntry'
+import { STOP_PILL_FALLBACK_MS } from '../../../lib/stop-pill'
 
 const ROUTE = 'route-bash-entry'
 const AGENT = 'tu-agent'
@@ -152,5 +153,34 @@ describe('BashBackgroundEntry', () => {
       fireEvent.click(screen.getByTestId('BashBackgroundEntry.copy'))
     })
     expect(screen.getByTestId('BashBackgroundEntry.copy').textContent).toBe('Copy')
+  })
+
+  // The fallback for a stop whose notification never comes used to clear the pill on
+  // whichever session was active when its timer fired, so a session switch left the
+  // stopped session's pill up for good.
+  it('clears the "stopping" pill on the session Stop was pressed in, after a switch', async () => {
+    const OTHER = 'route-other'
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    app.bridge.ipcMain.handle('session:stop-task', async () => ({ success: true }))
+    const clearTaskStopping = vi.spyOn(useSessionStore.getState(), 'clearTaskStopping')
+    seedSession({ owner: false })
+    render(<BashBackgroundEntry toolUseId={SHELL} />)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('BashBackgroundEntry.stop'))
+    })
+    expect(useSessionStore.getState().sessions[ROUTE].stoppingTaskIds).toContain(SHELL)
+
+    // The user moves to another session before the fallback is due.
+    act(() => {
+      useSessionStore.getState().createNewSession(OTHER, '/d/other')
+      useSessionStore.setState({ activeSessionId: OTHER })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(STOP_PILL_FALLBACK_MS + 1_000)
+    })
+
+    expect(useSessionStore.getState().sessions[ROUTE].stoppingTaskIds).not.toContain(SHELL)
+    expect(clearTaskStopping.mock.calls.map(([routingId]) => routingId)).toEqual([ROUTE])
   })
 })

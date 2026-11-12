@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
 import { useStickToBottom } from '../../hooks/useStickToBottom'
 import { latestNotification } from '../chat/task-state'
+import { armStopPillFallback } from '../../lib/stop-pill'
 import { findTaskBlocks } from './utils'
 
 /** How long the Copy button says "Copied". */
@@ -126,10 +127,9 @@ export function BashBackgroundEntry({
       clearTaskStopping(activeSessionId, toolUseId)
       return
     }
-    setTimeout(() => {
-      const rid = useSessionStore.getState().activeSessionId
-      if (rid) clearTaskStopping(rid, toolUseId)
-    }, 10000)
+    // The shared fallback, for the session Stop was pressed in: the user may be looking at
+    // another one by the time it is due.
+    armStopPillFallback(activeSessionId, toolUseId)
   }
 
   const tailLen = bgOutput ? new TextEncoder().encode(bgOutput.tail).length : 0
