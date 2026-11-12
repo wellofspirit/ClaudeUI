@@ -8,13 +8,19 @@ import { isShellToolName } from '../automode/shell-lexical'
 import { existingDirectories } from './additional-directories'
 import { collectToolUseIds } from '../automode/trajectory'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
-import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeBehaviorSettings, claudeSandboxOption } from '../sdk/args'
 import { loadEngineConfig } from './ui-config'
+import { appSetting } from './app-settings'
+import { cachedClaudeModels } from './claude-model-cache'
 import { transformAssistantMessage } from './assistant-message'
 import { claudeToolResults, claudeUsageTokens } from './claude-transcript'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
 import { modelFallbackText, retractedMessageIds, retractionKey } from './claude-model-fallback'
-import { claudeThinkingRequest } from '../../shared/model-capabilities'
+import {
+  claudeThinkingRequest,
+  resolveAutomationEffort,
+  type EffortLevel
+} from '../../shared/model-capabilities'
 import { query as sdkQuery } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import type {
@@ -58,7 +64,7 @@ import {
   HAND_BACK_UNATTRIBUTED_TEXT
 } from '../../shared/dispatch-agent-description'
 import { type RunContext } from './dispatch-parent'
-import type { ChatMessage, PendingApproval } from '../../shared/types'
+import type { ChatMessage, PendingApproval, SandboxSettings } from '../../shared/types'
 import { XENG_REQUEST_PREFIX } from './dispatch-target-types'
 import type {
   DispatchRequest,
@@ -193,6 +199,61 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
 }
 
 /**
+ * The `sandbox` option a Claude target is spawned with (ADR-116): the Claude engine's sandbox
+ * settings through the mapping a session uses (`claudeSandboxOption`), except that sandboxed
+ * commands are never auto-approved. A session's auto-approve would take a target's Bash away
+ * from everything that gates it: the forwarded card, cli.js's classifier in auto, and the
+ * host's deny/ask matcher in `awaitClaudeTargetApproval` (ADR-085). cli.js also suspends the
+ * auto-approve in plan mode, which a target never runs in (`plan` maps to `default` above), so
+ * a plan-mode parent's target would run commands a plan-mode session asks about. Sent as an
+ * explicit `false`: cli.js reads an absent key as true. `undefined` when the sandbox is off.
+ */
+export function claudeTargetSandbox(
+  config: SandboxSettings | null | undefined
+): Record<string, unknown> | undefined {
+  const sandbox = claudeSandboxOption(config)
+  return sandbox && { ...sandbox, autoAllowBashIfSandboxed: false }
+}
+
+/**
+ * Real default for `DispatcherDeps.claudeTargetEffort` (ADR-116): the effort a NEW Claude
+ * session gets for `model` with no pick of its own, by the sessions' ladder for a headless
+ * Claude run (`resolveAutomationEffort`, which an automation run uses too): the user's saved
+ * starting effort for the model, else the model's default, clamped to the levels it accepts.
+ *
+ * `undefined` sends no `--effort`, so cli.js uses its own default: when the model takes no
+ * effort, and when it cannot be judged. `default` names no model by itself, so until the
+ * catalog cli.js reported has its row, neither its saved effort nor its default is knowable,
+ * and a guess would replace cli.js's own answer with a worse one. The catalog is the cached
+ * one: no wait and no cli.js spawn on the dispatch path. Never throws: a failure to resolve
+ * an effort must not fail a dispatch.
+ */
+export function defaultClaudeTargetEffort(model: string): EffortLevel | undefined {
+  try {
+    const catalog = cachedClaudeModels()
+    if (model === 'default' && !catalog.some((row) => row.value === model)) return undefined
+    return (
+      resolveAutomationEffort({
+        explicit: undefined,
+        modelValue: model,
+        catalog,
+        modelEffortDefaults: appSetting('modelEffortDefaults')
+      }) ?? undefined
+    )
+  } catch (err) {
+    logger.warn(
+      'CrossEngineDispatcher',
+      `claude target: starting effort not resolved (${errText(err)})`
+    )
+    return undefined
+  }
+}
+
+/** How much of a target process's stderr a failure quotes: its last lines, each cut short. */
+const CLAUDE_STDERR_TAIL_LINES = 12
+const CLAUDE_STDERR_LINE_CHARS = 400
+
+/**
  * Real default for `DispatcherDeps.spawnClaudeQuery`. Duplicates
  * `getSdkExecutableOpts()` (claude-session.ts) inline rather than importing
  * it — claude-session.ts imports cross-engine-dispatcher.ts, which imports
@@ -232,6 +293,11 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
       ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
       ...(opts.onInboundFrame ? { onInboundFrame: opts.onInboundFrame } : {}),
       ...(opts.thinking ? { thinking: opts.thinking } : {}),
+      // ADR-116: `buildArgs` folds `sandbox` into the one `--settings` JSON beside `settings`
+      // and requires the sandbox to start (`failIfUnavailable`), as it does for a session.
+      ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.stderr ? { stderr: opts.stderr } : {}),
       abortController: opts.abortController,
       canUseTool: opts.canUseTool,
       // ADR-033 M3: stream_event text/thinking deltas so driveClaudeTurn can
@@ -244,6 +310,7 @@ async function defaultSpawnClaudeQuery(opts: ClaudeQuerySpawnOpts): Promise<Quer
 export class ClaudeTargets {
   private readonly host: DispatchTargetHost
   private readonly spawnClaudeQuery: SpawnClaudeQueryFn
+  private readonly claudeTargetEffort: (model: string) => EffortLevel | undefined
   private readonly locateTranscript: (sessionId: string, cwd: string) => string | null
   private readonly ownWorkWaitMs: number
 
@@ -251,6 +318,7 @@ export class ClaudeTargets {
     this.host = host
     const deps = host.deps
     this.spawnClaudeQuery = deps.spawnClaudeQuery ?? defaultSpawnClaudeQuery
+    this.claudeTargetEffort = deps.claudeTargetEffort ?? defaultClaudeTargetEffort
     this.locateTranscript = deps.locateClaudeTranscript ?? locateClaudeTranscript
     this.ownWorkWaitMs = deps.ownWorkWaitMs ?? OWN_WORK_WAIT_MS
   }
@@ -714,13 +782,16 @@ export class ClaudeTargets {
             : await settledWithin(pending, Math.max(0, opts.deadlineAt - this.host.now()))
       } catch (err) {
         entry.nextFrame = null
-        throw err
+        throw this.claudeProcessFailure(entry, err)
       }
       if (read === undefined) return null
       entry.nextFrame = null
       const { value, done } = read
       if (done) {
-        throw new Error('Claude target process ended unexpectedly')
+        throw this.claudeProcessFailure(
+          entry,
+          new Error('Claude target process ended unexpectedly')
+        )
       }
       const msg = value as SDKMessage
       // Proof of life for the inactivity watchdog — EVERY message counts,
@@ -754,6 +825,36 @@ export class ClaudeTargets {
         return result
       }
     }
+  }
+
+  /**
+   * Keep the last lines the target's process wrote to stderr, and log them (a session logs its
+   * own). Nothing else records them: the run reads the process through its stdout frames.
+   */
+  private noteClaudeStderr(entry: ClaudeTargetEntry, chunk: Buffer): void {
+    for (const raw of chunk.toString().split('\n')) {
+      const line = raw.trim()
+      if (!line) continue
+      // The voice patch's own chatter, as `ClaudeSession` files it.
+      if (line.includes('[Voice:Patch]')) {
+        logger.debug('Voice', line)
+        continue
+      }
+      logger.warn('CrossEngineDispatcher', `claude target ${entry.ledgerId} stderr: ${line}`)
+      entry.stderrTail.push(line.slice(0, CLAUDE_STDERR_LINE_CHARS))
+    }
+    if (entry.stderrTail.length > CLAUDE_STDERR_TAIL_LINES)
+      entry.stderrTail.splice(0, entry.stderrTail.length - CLAUDE_STDERR_TAIL_LINES)
+  }
+
+  /**
+   * The error of a target whose process died, with what it last wrote to stderr. cli.js says
+   * why it refused to start only there (a required sandbox that cannot run on this machine,
+   * ADR-116), and without it the run reports a bare exit code.
+   */
+  private claudeProcessFailure(entry: ClaudeTargetEntry, err: unknown): Error {
+    if (entry.stderrTail.length === 0) return err instanceof Error ? err : new Error(errText(err))
+    return new Error(`${errText(err)}\nClaude Code stderr:\n${entry.stderrTail.join('\n')}`)
   }
 
   /**
@@ -1041,11 +1142,20 @@ export class ClaudeTargets {
     // behaviour switches (`engines/claude.json#claudeConfig`, read per spawn):
     // the same `--settings` object as the permission tiers below, never inside
     // them.
-    const behavior = claudeBehaviorSettings(this.host.deps.loadEngineConfig('claude').claudeConfig)
+    const claudeConfig = this.host.deps.loadEngineConfig('claude')
+    const behavior = claudeBehaviorSettings(claudeConfig.claudeConfig)
+    // And the engine's sandbox and a new session's starting effort for the model (ADR-116),
+    // both read here, per spawn: a target resumed after a setting changed runs under the
+    // setting of the moment, as its `--settings` rules and `--add-dir` scope do.
+    const sandbox = claudeTargetSandbox(claudeConfig.sandbox)
+    const effort = this.claudeTargetEffort(model)
     entry.query = await this.spawnClaudeQuery({
       cwd,
       model,
       thinking: claudeThinkingRequest(model, 'adaptive'),
+      ...(sandbox ? { sandbox } : {}),
+      ...(effort ? { effort } : {}),
+      stderr: (chunk) => this.noteClaudeStderr(entry, chunk),
       permissionMode: mode.permissionMode,
       allowDangerouslySkipPermissions: mode.allowDangerouslySkipPermissions,
       canUseTool: shell.canUseTool,
@@ -1168,6 +1278,7 @@ export class ClaudeTargets {
       pushedUuids: new Set(),
       ownTurnStarted: false,
       nextFrame: null,
+      stderrTail: [],
       interruptedReport: null,
       cumulativeCostUsd: 0,
       lastReportedTotalCostUsd: 0,

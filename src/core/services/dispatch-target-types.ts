@@ -42,6 +42,7 @@ import type {
   EngineId,
   PendingApproval
 } from '../../shared/types'
+import type { EffortLevel } from '../../shared/model-capabilities'
 import type { ClaudeInputChannel } from './dispatch-target-shared'
 
 // ── Public surface ────────────────────────────────────────────────────────────
@@ -265,6 +266,22 @@ export interface ClaudeQuerySpawnOpts {
    * target's Opus 4.7+ thinking arrives as a bare signature with no text.
    */
   thinking?: ThinkingConfig
+  /**
+   * The Claude engine's sandbox settings as the `sandbox` query option (ADR-116):
+   * `claudeSandboxOption(engines/claude.json#sandbox)`, the mapping a session spawns with, read
+   * when THIS process is spawned, with `autoAllowBashIfSandboxed` forced to false. Absent when
+   * the sandbox is off. It rides the same `--settings` JSON as {@link settings}; the process
+   * loads no settings source, so this is the only way a target's Bash is sandboxed.
+   */
+  sandbox?: Record<string, unknown>
+  /**
+   * `--effort` (ADR-116): a new Claude session's starting effort for {@link model}
+   * (`DispatcherDeps.claudeTargetEffort`). Absent when the model takes none, or when it cannot
+   * be judged; cli.js then uses its own default.
+   */
+  effort?: EffortLevel
+  /** The process's stderr, chunk by chunk: the only place cli.js says why it refused to start. */
+  stderr?: (chunk: Buffer) => void
 }
 
 /**
@@ -298,6 +315,13 @@ export interface DispatcherDeps {
   loadEngineConfig: (engineId: string) => EngineConfig
   /** Defaults to the real sdkQuery + claudeSpawnPrep. */
   spawnClaudeQuery?: SpawnClaudeQueryFn
+  /**
+   * The effort a Claude target's process is started at, for its model (ADR-116): what a new
+   * Claude session would get with no pick of its own. `undefined` sends no `--effort`.
+   * Defaults to `defaultClaudeTargetEffort` (`dispatch-claude-targets.ts`), which reads the
+   * user's saved starting efforts and the model catalog cli.js last reported.
+   */
+  claudeTargetEffort?: (model: string) => EffortLevel | undefined
   /**
    * The user's merged Claude permission rules for a cwd (ADR-085 §3 — every
    * target gets their deny/ask tiers, never their allow tier). Defaults to
@@ -755,6 +779,12 @@ export interface ClaudeTargetEntry extends TargetLedgerFields {
   ownTurnStarted: boolean
   /** The iterator's pending `next()`, kept so a read with a deadline loses no frame. */
   nextFrame: Promise<IteratorResult<SDKMessage>> | null
+  /**
+   * The last lines the process wrote to stderr (bounded). A process that dies says why only
+   * there (a refusal to start, such as a required sandbox that cannot run), so the failure
+   * the run reports quotes them.
+   */
+  stderrTail: string[]
   /** The report whose tool result already went by and got the turn interrupted. */
   interruptedReport: object | null
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */
