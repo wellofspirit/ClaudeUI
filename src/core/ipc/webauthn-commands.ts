@@ -198,11 +198,16 @@ export async function webauthnRevoke(
 /**
  * Mint a one-time enrollment link for ANOTHER device.
  *
- * Session-gated like the other two management writes, and for the strongest
- * reason of the three: the link is a credential that lets its holder register a
- * permanent passkey. The server console's first-boot mint does not come through
- * here (`src/server/first-boot.ts` asks the server directly), and the desktop
+ * Session-gated like the other two management writes: the link is a credential
+ * that lets a device that is not signed in at all register a permanent passkey.
+ * The server console's first-boot mint does not come through here
+ * (`src/server/first-boot.ts` asks the server directly), and the desktop
  * connection is exempt, so neither host-anchor path is affected.
+ *
+ * What this gate does NOT cover: self-enrolment. A full-grant connection holds
+ * `enroll`, so it can register a passkey on its OWN socket through
+ * {@link webauthnRegisterOptions} / {@link webauthnRegisterVerify}, which are
+ * classified by `kind` and need no session.
  */
 export function mintEnrollToken(
   connection: CommandConnection,

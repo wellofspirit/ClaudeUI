@@ -357,7 +357,8 @@ investigation. Channels: `auth:webauthn-assert`, `auth:enroll-token`, `auth:poli
   `authcfg`), and their bodies assert it again. `webauthn:credentials` is a free `admin` read, like
   `authcfg:get`: it is the pane's default state and discloses no secret. The enrollment ceremony verbs
   (`webauthn:register-options`, `webauthn:register-verify`, capability `enroll`) are not in the class, since an
-  enrollment-link socket can never open a session. (2026-11-12: passkey management joined the settings session;
+  enrollment-link socket can never open a session; self-enrolment from a full-grant connection therefore needs
+  no session either. (2026-11-12: passkey management joined the settings session;
   until then the three verbs were classified by `kind` as ordinary mutations.) The `authcfg:*` verbs live in
   their own namespace; the `off` writer stays out of it (`authcfg:apply` refuses `off` with
   `auth-off-is-host-anchor-only`).
