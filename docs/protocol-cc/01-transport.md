@@ -40,7 +40,7 @@ cli.js is not an interactive binary in this mode — it is a JSON-RPC-like proto
 
 Because `cli.js` is embedded in the binary and Bun's loader resolves its own baked `file:///` URLs natively, we ship no separate Node shims, no vendored ripgrep, no separate `.node` addons — they all ride along inside the Bun binary.
 
-Rationale: **[ADR-006](../adr/adr-006_rebundle-bun-binary.md)**. The previous pipeline unwrapped `cli.js` and spawned it under Electron-as-Node (`ELECTRON_RUN_AS_NODE=1`) with a `Module._resolveFilename` shim redirecting Bun's virtual paths to our vendored locations — fragile against CI-baked absolute paths that the shim didn't cover.
+Rationale: **[ADR-006](../adr/claude-engine.md)**. The previous pipeline unwrapped `cli.js` and spawned it under Electron-as-Node (`ELECTRON_RUN_AS_NODE=1`) with a `Module._resolveFilename` shim redirecting Bun's virtual paths to our vendored locations — fragile against CI-baked absolute paths that the shim didn't cover.
 
 ### Where the binary lives on disk
 
@@ -306,7 +306,7 @@ const status = await handle.mcpServerStatus()
 
 ## 1.12 Build pipeline: extract → patch → rebundle
 
-How `bun-claude[.exe]` gets produced. Architectural rationale: **[ADR-006](../adr/adr-006_rebundle-bun-binary.md)**.
+How `bun-claude[.exe]` gets produced. Architectural rationale: **[ADR-006](../adr/claude-engine.md)**.
 
 ```
 downloads.claude.ai/claude-code-releases/<ver>/<plat>/claude[.exe]   (upstream Bun binary)

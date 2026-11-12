@@ -491,19 +491,19 @@ deletions; it is moot as built, because the hub folds its own buckets from the e
 
 ## Related
 
-- [ADR-071](../adr/adr-071_metering-ledger-and-window-value.md): one ledger, two costs,
+- [ADR-071](../adr/metering.md): one ledger, two costs,
   machine-independent account keys, the window-value ledger, the dashboard layout.
-- [ADR-072](../adr/adr-072_usage-hub-self-hosted-sync.md): the opt-in self-hosted usage hub.
-- [ADR-030](../adr/adr-030_capability-honesty.md): an unknown is counted, never shown as zero.
-- [ADR-011](../adr/adr-011_canonical-usage-windows-and-account-attribution.md): canonical window ends
+- [ADR-072](../adr/metering.md): the opt-in self-hosted usage hub.
+- [ADR-030](../adr/engine-model.md): an unknown is counted, never shown as zero.
+- [ADR-011](../adr/metering.md): canonical window ends
   and time-based attribution.
-- [ADR-015](../adr/adr-015_multi-account-file-credentials.md): per-account Claude credential
+- [ADR-015](../adr/auth-and-accounts.md): per-account Claude credential
   directories.
-- [ADR-033](../adr/adr-033_cross-engine-dispatch.md) and
-  [ADR-034](../adr/adr-034_session-time-and-cost-accounting.md): dispatched spend, and what a session
+- [ADR-033](../adr/dispatch.md) and
+  [ADR-034](../adr/metering.md): dispatched spend, and what a session
   headline means.
-- [ADR-068](../adr/adr-068_chatgpt-identity-vault-owned-codex-injection.md) and
-  [ADR-069](../adr/adr-069_codex-host-per-home-and-account.md) (retired with the Codex engine): ChatGPT accounts.
+- [ADR-068](../adr/auth-and-accounts.md) and
+  [ADR-069](../adr/adr.md) (retired with the Codex engine): ChatGPT accounts.
 - [persistence.md](persistence.md) for the operational database, [sync-core.md](sync-core.md) for the
   event channels the dashboard listens on, [remote.md](remote.md) and [security.md](security.md) for
   the transport and the capability the `usage:*` and `usage-hub:*` channels sit at.

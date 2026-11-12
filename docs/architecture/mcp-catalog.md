@@ -1,7 +1,7 @@
 # Shared MCP catalog
 
 The MCP servers a ClaudeUI Claude session in a cwd would load, resolved host-side so the opencode and pi bridges
-inherit exactly that set ([ADR-096](../adr/adr-096_pi-mcp-shared-catalog.md)). Built against cli.js 2.1.317;
+inherit exactly that set ([ADR-096](../adr/shared-catalogs.md)). Built against cli.js 2.1.317;
 re-check the rules below on a Claude Code bump (`bump-harness`).
 
 | Module                                     | Role                                                                                                                          |

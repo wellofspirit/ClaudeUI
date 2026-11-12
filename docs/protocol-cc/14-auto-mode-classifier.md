@@ -614,7 +614,7 @@ ClaudeUI mirrors this predicate in `src/core/permissions/shell-rules.ts`
 `isClassifierBypassingRule` (one union of the Bash and PowerShell lists,
 `classifyAllShell` read from the user settings by the caller) and uses it, plus
 a carve-out and safety checks cli.js does not make, to let narrow allow rules
-skip the opencode/pi judge — `docs/adr/adr-085_deny-ask-rules-hold-allow-rules-skip-judge.md`
+skip the opencode/pi judge — `docs/adr/permissions.md`
 §4.
 
 ### 3.1 The safe allowlist (`rIe`, char `9835278`)
@@ -1473,7 +1473,7 @@ What actually makes this work, ranked by how much it matters and how cheap it is
    rules as a "catch circumvention" SOFT bullet and never sends allow/ask rules
    (§9). ClaudeUI deviates on purpose: it strips **every** allow rule from
    the engine ruleset in auto mode, so it sends allow rules as standing consent
-   (and ask rules as "catch circumvention") instead — [ADR-083](../adr/adr-083_judge-policy-rebalance-and-permission-context.md) §3.
+   (and ask rules as "catch circumvention") instead — [ADR-083](../adr/auto-mode-judge.md) §3.
 
 **Must have, not cheap:**
 
