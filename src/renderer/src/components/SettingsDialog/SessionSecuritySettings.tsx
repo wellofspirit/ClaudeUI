@@ -417,7 +417,10 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     return card(
       'unlocking',
       null,
-      <div className="flex justify-center py-2">
+      // `items-start`: a STRETCHED flex item has a definite height, so the
+      // prompt's own `h-full` would resolve against the card and push its last
+      // line over the card's bottom border.
+      <div className="flex justify-center items-start py-2">
         <div className="w-full max-w-[300px] rounded-lg border border-border/60 bg-bg-primary/40 px-5 py-6 text-center">
           <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-accent/40 bg-accent/10 text-accent">
             <LockIcon size={20} />
