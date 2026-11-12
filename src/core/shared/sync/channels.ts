@@ -369,6 +369,11 @@ const SYNC_CHANNEL_SPECS = {
     canonical: true,
     why: 'App settings. 4c made the desktop save path echo back to the saver too (uniform delivery); the reducer applies a replace, so the echo is a no-op there.'
   },
+  'config:claude-auto-mode-changed': {
+    cls: 'replicated',
+    canonical: true,
+    why: 'Claude Code disableAutoMode (ADR-050), written by the Settings control. Folds into the app-level autoModeDisabledBySettings, which the boot seed also fills; a client cannot read the host settings file.'
+  },
   'config:sessions-changed': {
     cls: 'replicated',
     canonical: true,

@@ -1430,6 +1430,13 @@ const FOLDS: FoldHandlers = {
     return { ...state, settings }
   },
 
+  'config:claude-auto-mode-changed': (state, event) => {
+    const disabled = event.args[0]
+    if (typeof disabled !== 'boolean') return state
+    if (state.autoModeDisabledBySettings === disabled) return state
+    return { ...state, autoModeDisabledBySettings: disabled }
+  },
+
   'config:sessions-changed': (state, event) => {
     const config = event.args[0]
     if (!isRecord(config)) return state

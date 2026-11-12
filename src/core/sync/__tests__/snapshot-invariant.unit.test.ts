@@ -207,6 +207,7 @@ const EXTRA_EVENTS: PoolEvent[] = [
   ],
   ['session:conversation-cleared', 'uuid-9', { permissionMode: 'default' }],
   ['session:removed', 'temp-1'],
+  ['config:claude-auto-mode-changed', true],
   // The 4b payload additions: an event-carried user identity and an
   // emitter-timed thinking span. Both must survive a snapshot + catchup fold
   // exactly like everything else.

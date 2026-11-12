@@ -590,6 +590,7 @@ describe('the page pane', () => {
     renderView({ activePage: 'claude' })
     expect(screen.getAllByTestId('SettingsGroup').map((el) => el.dataset.id)).toEqual([
       'session',
+      'auto-mode',
       'endpoint',
       'model-mapping',
       'sandbox',

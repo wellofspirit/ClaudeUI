@@ -111,6 +111,7 @@ export const API_INVOKES = {
   loadClaudePermissions: { channel: 'claude:load-permissions', arity: 2, mode: 'invoke' },
   saveClaudePermissions: { channel: 'claude:save-permissions', arity: 3, mode: 'invoke' },
   setCleanupPeriodDays: { channel: 'claude:set-cleanup-period', arity: 1, mode: 'invoke' },
+  setClaudeDisableAutoMode: { channel: 'claude:set-disable-auto-mode', arity: 1, mode: 'invoke' },
   setWorkspaceTrust: { channel: 'claude:set-workspace-trust', arity: 2, mode: 'invoke' },
   getWorkspaceTrust: { channel: 'claude:workspace-trust', arity: 1, mode: 'invoke' },
   listAgentTypes: { channel: 'config:list-agent-types', arity: 2, mode: 'unwrap' },

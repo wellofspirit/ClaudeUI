@@ -32,7 +32,8 @@ import {
 import {
   DEFAULT_AUTONOMY_MODE,
   PERMISSION_TO_AUTONOMY,
-  autoModeAvailableForEngine
+  autoModeAvailableForEngine,
+  claudeAutoModeDisabled
 } from '../../../shared/permission-modes'
 import {
   engineMeta,
@@ -689,7 +690,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   // snapshot arrives — otherwise boot flashes defaults.
   seedLocalApp({
     settings: settings as unknown as Record<string, unknown>,
-    autoModeDisabledBySettings: userPermissions?.disableAutoMode === 'disable',
+    autoModeDisabledBySettings: claudeAutoModeDisabled(userPermissions),
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
     customTitles: sessionConfig.customTitles ?? {},

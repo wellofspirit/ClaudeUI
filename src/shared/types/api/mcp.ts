@@ -61,4 +61,8 @@ export interface McpAPI {
   /** Transcript retention window (cleanupPeriodDays). undefined = not set (CLI default of 30). */
   getCleanupPeriodDays(): Promise<number | undefined>
   setCleanupPeriodDays(days: number): Promise<void>
+  /** Turn Claude Code's `disableAutoMode` on or off in ~/.claude/settings.json. Rejects with a
+   *  readable message when that file is not valid JSON. The applied value arrives as the
+   *  `config:claude-auto-mode-changed` event, not as the result. */
+  setClaudeDisableAutoMode(disabled: boolean): Promise<void>
 }

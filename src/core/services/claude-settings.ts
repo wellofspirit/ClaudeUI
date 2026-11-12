@@ -151,6 +151,63 @@ export function saveCleanupPeriodDays(days: number): void {
   logger.debug('ClaudeSettings', `Saved cleanupPeriodDays=${data.cleanupPeriodDays} to ${filePath}`)
 }
 
+// ---------------------------------------------------------------------------
+// disableAutoMode — Claude Code's own opt-out from auto mode
+// ---------------------------------------------------------------------------
+//
+// The Settings control on the Claude page edits this key in the user-scope
+// file (ADR-009, ADR-050). cli.js honours it nested under `permissions` and at
+// the top level, so turning it off clears both. Unlike the older writers this
+// one reads strictly: a file it cannot parse is refused, never replaced.
+
+function readJsonStrict(filePath: string): Record<string, unknown> {
+  let text: string
+  try {
+    text = fs.readFileSync(filePath, 'utf-8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    throw err
+  }
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+  if (text.trim() === '') return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error(`${filePath} is not valid JSON; fix or remove it, then try again`)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${filePath} is not a JSON object; fix or remove it, then try again`)
+  }
+  return parsed as Record<string, unknown>
+}
+
+export function saveClaudeDisableAutoMode(disabled: boolean): void {
+  const filePath = settingsFilePath('user')
+  const data = readJsonStrict(filePath)
+  const perms =
+    data.permissions && typeof data.permissions === 'object' && !Array.isArray(data.permissions)
+      ? (data.permissions as Record<string, unknown>)
+      : undefined
+
+  if (disabled) {
+    data.permissions = { ...(perms ?? {}), disableAutoMode: 'disable' }
+  } else {
+    if (data.disableAutoMode === 'disable') delete data.disableAutoMode
+    if (perms) {
+      if (perms.disableAutoMode === 'disable') delete perms.disableAutoMode
+      if (Object.keys(perms).length === 0) delete data.permissions
+    }
+  }
+
+  const dir = path.dirname(filePath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  }
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 })
+  logger.debug('ClaudeSettings', `Saved disableAutoMode=${disabled} to ${filePath}`)
+}
+
 export function saveClaudePermissions(
   scope: PermissionScope,
   permissions: ClaudePermissions,
@@ -176,9 +233,10 @@ export function saveClaudePermissions(
   //
   // Preserved from DISK, not from the argument: the loader normalizes a
   // top-level `disableAutoMode` into the same field, and echoing that back here
-  // would copy an admin's top-level key down into `permissions`. The UI never
-  // edits this setting, so round-tripping the on-disk nested value verbatim is
-  // both sufficient and the least surprising thing to do to someone's file.
+  // would copy an admin's top-level key down into `permissions`. Only
+  // `saveClaudeDisableAutoMode` edits this setting, so round-tripping the
+  // on-disk nested value verbatim is both sufficient and the least surprising
+  // thing to do to someone's file.
   const existingPerms =
     data.permissions && typeof data.permissions === 'object'
       ? (data.permissions as Record<string, unknown>)

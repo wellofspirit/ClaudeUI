@@ -30,6 +30,7 @@
 {"channel":"claude:load-permissions","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"claude:save-permissions","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"claude:set-cleanup-period","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"claude:set-disable-auto-mode","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"claude:set-workspace-trust","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"claude:workspace-trust","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"config:list-agent-types","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}

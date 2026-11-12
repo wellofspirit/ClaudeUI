@@ -5,7 +5,7 @@
  */
 
 import type { AutonomyMode } from './model-capabilities'
-import type { EngineId, ModelInfo, PermissionMode } from './types'
+import type { ClaudePermissions, EngineId, ModelInfo, PermissionMode } from './types'
 
 export const PERMISSION_MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'auto'] as const
 
@@ -124,6 +124,17 @@ export function claudeAutoModeAvailable(
   const claudeModels = models.filter((m) => (m.engineId ?? 'claude') === 'claude')
   if (claudeModels.length === 0) return true
   return !claudeModels.every((m) => m.supportsAutoMode === false)
+}
+
+/**
+ * Whether Claude Code's `disableAutoMode` setting is on in the user settings
+ * file (`loadClaudePermissions` folds the top-level key into the nested field).
+ * The one comparison behind `autoModeDisabledBySettings` (ADR-050).
+ */
+export function claudeAutoModeDisabled(
+  permissions: Pick<ClaudePermissions, 'disableAutoMode'> | null | undefined
+): boolean {
+  return permissions?.disableAutoMode === 'disable'
 }
 
 /**
