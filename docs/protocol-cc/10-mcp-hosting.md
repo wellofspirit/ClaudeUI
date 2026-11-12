@@ -221,45 +221,9 @@ If cli.js sends `mcp_message` for a server we don't host:
 
 ## 10.6 Registering SDK servers
 
-Use `createSdkMcpServer()` and `tool()` from `src/core/sdk`:
+`createSdkMcpServer()` and `tool()` from `src/core/sdk` build an in-process server that is passed to `query()` through `options.mcpServers`. This registers the tool for Claude sessions only; a hosted tool that opencode and pi sessions also need has a host half and a renderer half, described in `src/core/services/CLAUDE.md` and `src/renderer/src/components/chat/tool-registry/CLAUDE.md`.
 
-```ts
-import { createSdkMcpServer, tool } from 'src/core/sdk'
-import { z } from 'zod'
-
-const mermaidServer = createSdkMcpServer({
-  name: 'claude-ui',
-  version: '1.0.0',
-  tools: [
-    tool(
-      'render_mermaid',
-      'Render a Mermaid diagram',
-      {
-        source: z.string().describe('Mermaid source'),
-        title: z.string().optional()
-      },
-      async (input) => {
-        return {
-          content: [{ type: 'text', text: `Rendered: ${input.source}` }]
-        }
-      }
-    )
-  ]
-})
-```
-
-Pass via `mcpServers` on `query()`:
-
-```ts
-query({
-  prompt: '...',
-  options: {
-    mcpServers: { 'claude-ui': mermaidServer }
-  }
-})
-```
-
-`args.ts::splitMcpServers()` separates SDK servers (kept local) from CLI servers (written to `--mcp-config`). The initialize payload's `sdkMcpServers` field is an array of **name strings**, NOT descriptor objects — this is non-obvious and critical. cli.js uses the names to route tool calls back to us via `mcp_message`.
+`splitMcpServers()` in `src/core/sdk/args.ts` separates SDK servers (kept local) from CLI servers (written to `--mcp-config`). The initialize payload's `sdkMcpServers` field is an array of **name strings**, NOT descriptor objects — this is non-obvious and critical. cli.js uses the names to route tool calls back to us via `mcp_message`.
 
 ---
 

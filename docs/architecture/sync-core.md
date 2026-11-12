@@ -48,7 +48,7 @@ follow-on. **That move has now landed (S2):** the window-independent service gra
 (SyncCore, the shared reducer/wire types, the engine adapters, the PTY manager, the
 HTTP/WS server, the command registry and the services they need) physically lives under
 `src/core`, and the Electron-free constraint is now enforced by lint on `src/core/**`
-(no longer on the pre-move `src/main/sync/**` + `src/shared/sync/**` paths). Every
+(no longer on the pre-move sync paths under `src/main` and `src/shared`). Every
 host-shaped concern is injected through the seven neutral adapters in `src/core/host.ts`
 (window handle, app paths, the packaged-build flag, the native folder picker, native
 notifications, data-only account-state reads, mockup serving), whose desktop
@@ -97,17 +97,17 @@ Every feature must express each interaction as exactly one of these. There is no
 
    **Owner ruling, recorded:** there is NO backward-compatibility lane for cached client bundles — no dual emission, no shim. The desktop and web clients ship with the server; an older cached bundle sees text update at message boundaries instead of token by token, which is a degraded animation rather than a broken transcript.
 
-   **Per-item extension (2026-09-17):** Codex root/direct-child text, reasoning and
-   plans now use `item-stream` frames: explicit `append` or atomic `replace` of
+   **Per-item extension:** root and direct-child text, reasoning and
+   plans use `item-stream` frames: explicit `append` or atomic `replace` of
    the session's active set. Reliable `session:item-open`/`session:item-seal`
    establish the scaffold and commit final content. Target = owner/message/block
    slot/kind; generation = open sequence. Snapshots carry `itemStreams` and
    `itemStreamRevision`; clients require the reliable watermark before folding
-   volatile frames. `item-stream.ts` owns both folds and the render-only overlay.
+   volatile frames. `src/core/shared/sync/item-stream.ts` owns both folds and the render-only overlay.
    Congested sockets retain session ids and retry fresh replay after the existing
    buffered-amount gate allows delivery, even without another token.
-   **Extended the same day:** Claude, opencode, pi and every cross-engine dispatch
-   target moved onto these channels (`83106588`) and the old session stream lane was
+   **Every engine and every cross-engine dispatch
+   target** uses these channels (`83106588`) and the old session stream lane was
    deleted (`7837f7e7`), so `session:item-delta` is now the only accumulating
    volatile flavor. [Design and as built](../per-item-streaming-design.md).
 
@@ -511,8 +511,8 @@ line is a named next step with the reason it is not phase-4 work.
 
 **The named follow-on phase** (was "headless", rescoped in 4a):
 
-- **Physical `src/core` extraction — LANDED (S2).** `src/main/sync/**` +
-  `src/shared/sync/**` (and the engine adapters, PTY manager, HTTP/WS server, command
+- **Physical `src/core` extraction — LANDED (S2).** The sync directories under `src/main` and
+  `src/shared` (and the engine adapters, PTY manager, HTTP/WS server, command
   registry and the services they need) moved to `src/core`; the Electron-free lint fence
   now targets `src/core/**`. It was a MOVE plus narrow host-adapter seams in
   `src/core/host.ts` — five in S2 (window handle, app paths, native notifications, and — added when the service-graph closure proved larger than first scoped — data-only account-state reads and mockup HTTP serving), two more in S3 (the packaged-build flag and the native folder picker, `HostPicker`), for **seven**. The picker was scoped OUT of S2 as eliminable and reinstated in S3 rather than abstracted away: the desktop wires `dialog.showOpenDialog` in `boot-core.ts` and the server sets it to `null`, which is the answer a cancelled dialog already gives — and `session:pick-folder` declares the `host` capability, so it is unreachable from a remote client either way. The OAuth-browser flow stays desktop-only in `src/main`.
