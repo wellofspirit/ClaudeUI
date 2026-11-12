@@ -60,9 +60,23 @@ export interface WalkPage {
  */
 export async function launchEdge(): Promise<Browser> {
   const { chromium } = await import('playwright')
+  const os = await import('node:os')
+  // The test run points USERPROFILE at a temp dir for the APP under test (and the
+  // worker already starts with an isolated one, so there is no "prior" value to
+  // restore). Edge must not inherit that: given a profile directory that is not
+  // the account's own, it refuses the debugging pipe ("requires a non-default
+  // data directory") although Playwright gives it a throwaway `--user-data-dir`.
+  // `os.userInfo()` asks the OS, not the environment, so it still names the real
+  // one. The browser stores nothing outside the throwaway directory.
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value
+  }
+  env.USERPROFILE = os.userInfo().homedir
   return await chromium.launch({
     channel: 'msedge',
-    headless: process.env.CLAUDEUI_WALK_HEADED !== '1'
+    headless: process.env.CLAUDEUI_WALK_HEADED !== '1',
+    env
   })
 }
 
