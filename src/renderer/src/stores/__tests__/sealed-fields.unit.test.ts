@@ -74,7 +74,9 @@ describe('the sealed-field lint brand', () => {
     ).toBe(true)
     expect(perSession.some((s) => s.startsWith("Property[key.name='sessions'] "))).toBe(true)
     for (const selector of perSession) {
-      expect(alternationOf(selector)).toEqual([...SEALED_SESSION_FIELDS])
+      // Sorted: the config lists the names in declaration order, the store module in
+      // `emptySession` order, and a regex alternation has no order.
+      expect([...alternationOf(selector)!].sort()).toEqual([...SEALED_SESSION_FIELDS].sort())
     }
   })
 

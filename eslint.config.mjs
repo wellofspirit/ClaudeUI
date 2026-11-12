@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { defineConfig } from 'eslint/config'
 import tseslint from '@electron-toolkit/eslint-config-ts'
@@ -35,7 +36,12 @@ const TEST_AND_SCRIPT_FILES = [
 // against `sealed-fields.ts`. An interface that is missing or empty throws: an empty alternation
 // would switch the seal off without a sound.
 function sealedSessionFieldNames() {
-  const file = path.resolve('src/core/shared/sync/state.ts')
+  // Beside this config, so that ESLint run from a subdirectory finds it too. A test runner
+  // that loads this module under another URL scheme runs from the repository root.
+  const root = import.meta.url.startsWith('file:')
+    ? path.dirname(fileURLToPath(import.meta.url))
+    : process.cwd()
+  const file = path.join(root, 'src/core/shared/sync/state.ts')
   const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest)
   const declaration = source.statements.find(
     (node) => ts.isInterfaceDeclaration(node) && node.name.text === 'CanonicalSessionState'
