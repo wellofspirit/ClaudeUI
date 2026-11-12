@@ -1,16 +1,19 @@
 {
   "extends": "@electron-toolkit/tsconfig/tsconfig.web.json",
+  // Of src/core only core/shared is listed: it is all the renderer and the web client may import
+  // from core (lint rule layer/zones), and tsconfig.node.json checks the whole of src/core and
+  // src/integration. A core file that src/test or src/e2e imports is still pulled into this program.
   "include": [
     "src/renderer/src/env.d.ts",
     "src/renderer/src/**/*",
     "src/renderer/src/**/*.tsx",
+    "src/renderer/log-viewer/**/*",
     "src/web/**/*",
     "src/preload/*.d.ts",
     "src/shared/**/*",
-    "src/core/**/*",
+    "src/core/shared/**/*",
     "src/test/**/*",
-    "src/e2e/**/*",
-    "src/integration/**/*"
+    "src/e2e/**/*"
   ],
   "compilerOptions": {
     "composite": true,

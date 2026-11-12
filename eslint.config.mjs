@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { defineConfig } from 'eslint/config'
 import tseslint from '@electron-toolkit/eslint-config-ts'
 import eslintConfigPrettier from 'eslint-config-prettier'
@@ -42,6 +43,182 @@ const ZOOM_TRAP = (selector) => ({
     'site is outside the zoomed root, already divides by uiFontScale, or is not mounted, ' +
     'say so: `// eslint-disable-next-line no-restricted-syntax -- <why>`.'
 })
+
+// LAYER ZONES. `no-restricted-imports` matches specifier STRINGS, which cannot say
+// "outside this directory" for a nested file (`../../main/x` and `../../../main/x`
+// are different strings for the same target). This local plugin resolves every
+// import to a repo-relative path and checks the zone table passed as the rule's
+// OPTIONS (below), so editing the table changes the config hash and invalidates
+// the `--cache` lint cache.
+//
+// Inspected: `import … from`, `export … from`, `export * from`, `import('lit')` and
+// the inline type form `import('lit').T`. Type-only imports count (as in the
+// Electron fence below). Resolution touches no file system: a relative specifier is joined onto the importer's directory,
+// `@renderer/x` is `src/renderer/src/x`, `@test/x` is `src/test/x`; packages are
+// ignored. Test files are exempt as importers.
+//
+// Zone fields (all paths repo-relative, segment-aware prefixes):
+//   from          importer prefixes the zone applies to
+//   to / except   imported prefixes forbidden / still allowed
+//   toPattern     regex source, an extra forbidden target (test code)
+//   why           the instruction shown in the message
+//
+// The rule's logic is NOT part of the config hash, only `meta.version` is: BUMP IT
+// whenever the rule body below changes, or a stale cache keeps the old verdict.
+const TEST_IMPORTER_RE =
+  /(^|\/)__tests__\/|\.(test|spec)\.[cm]?[jt]sx?$|^src\/(test|e2e|integration)\//
+const ALIASES = [
+  ['@renderer/', 'src/renderer/src/'],
+  ['@test/', 'src/test/']
+]
+const underPrefix = (p, prefix) => p === prefix || p.startsWith(prefix + '/')
+
+const layerZonesRule = {
+  meta: {
+    type: 'problem',
+    schema: [
+      {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          zones: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['from', 'why'],
+              properties: {
+                from: { type: 'array', items: { type: 'string' } },
+                to: { type: 'array', items: { type: 'string' } },
+                except: { type: 'array', items: { type: 'string' } },
+                toPattern: { type: 'string' },
+                why: { type: 'string' }
+              }
+            }
+          },
+          allow: {
+            type: 'array',
+            items: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 2 }
+          }
+        }
+      }
+    ],
+    messages: {
+      zone: '{{importer}} must not import {{target}}. {{why}}'
+    }
+  },
+  create(context) {
+    const { zones = [], allow = [] } = context.options[0] ?? {}
+    const importer = path.relative(context.cwd, context.filename).split(path.sep).join('/')
+    if (importer.startsWith('..') || TEST_IMPORTER_RE.test(importer)) return {}
+    const inZones = zones
+      .filter((z) => z.from.some((p) => underPrefix(importer, p)))
+      .map((z) => ({ ...z, toRe: z.toPattern === undefined ? null : new RegExp(z.toPattern) }))
+    if (inZones.length === 0) return {}
+    const check = (node, spec) => {
+      let target
+      const alias = ALIASES.find(([a]) => spec.startsWith(a))
+      if (alias) target = alias[1] + spec.slice(alias[0].length)
+      else if (spec.startsWith('.')) target = path.posix.join(path.posix.dirname(importer), spec)
+      else return
+      target = target.replace(/\/$/, '')
+      const bare = target.replace(/\.[cm]?[jt]sx?$/, '')
+      if (allow.some(([f, m]) => f === importer && m === bare)) return
+      for (const z of inZones) {
+        const hit =
+          ((z.to ?? []).some((p) => underPrefix(target, p)) || z.toRe?.test(target)) &&
+          !(z.except ?? []).some((p) => underPrefix(target, p))
+        if (hit) context.report({ node, messageId: 'zone', data: { importer, target, why: z.why } })
+      }
+    }
+    const source = (node) => {
+      if (node.source && typeof node.source.value === 'string') check(node, node.source.value)
+    }
+    return {
+      ImportDeclaration: source,
+      ExportNamedDeclaration: source,
+      ExportAllDeclaration: source,
+      ImportExpression: source,
+      // `import('x').T` in a type position. The specifier sits in `source` or in
+      // `argument.literal`, depending on the parser's major version.
+      TSImportType(node) {
+        const spec = node.source?.value ?? node.argument?.literal?.value
+        if (typeof spec === 'string') check(node, spec)
+      }
+    }
+  }
+}
+const layerPlugin = {
+  meta: { name: 'claudeui-layers', version: '1' },
+  rules: { zones: layerZonesRule }
+}
+
+// A resolved import usually has no extension: `./x.test` must match as `./x.test.ts` does.
+const TEST_CODE_RE = '(^|/)__tests__(/|$)|\\.(test|spec)(\\.[cm]?[jt]sx?)?$'
+const PI_OPENCODE_WHY =
+  'The pi and opencode adapters must not import each other. Move the shared code into src/core/shared or a neutral module.'
+const LAYER_ZONES = [
+  {
+    from: ['src/core'],
+    to: ['src/main', 'src/renderer', 'src/web', 'src/preload', 'src/server'],
+    why: 'src/core is the window-independent service graph (ADR-051/058): it sits below every host and UI layer. Inject host behaviour through src/core/host.ts, or move the shared type into src/core/shared or src/shared.'
+  },
+  {
+    from: ['src/renderer', 'src/web'],
+    to: ['src/core'],
+    except: ['src/core/shared'],
+    why: 'The renderer and the web client may import only src/core/shared from core. Move what you need into src/core/shared or src/shared, or reach it over IPC / the wire.'
+  },
+  {
+    from: ['src/renderer', 'src/web'],
+    to: ['src/main', 'src/preload', 'src/server'],
+    why: 'The renderer and the web client must not import a host process. Share types through src/shared and talk over IPC / the wire.'
+  },
+  {
+    from: ['src/shared'],
+    to: ['src/core'],
+    except: ['src/core/shared'],
+    why: 'src/shared is imported by every layer and may depend only on src/core/shared from core. Move the code into src/core/shared or src/shared.'
+  },
+  {
+    from: ['src/server'],
+    to: ['src/main', 'src/renderer', 'src/web', 'src/preload'],
+    why: 'The headless server (claudeui-server) runs without Electron or a UI. Use src/core, or move shared code into src/shared or src/core/shared.'
+  },
+  {
+    from: ['src/preload'],
+    to: ['src/core', 'src/main', 'src/renderer'],
+    except: ['src/core/shared'],
+    why: 'The preload bridge may import only src/core/shared from core, and nothing from main or the renderer. Share types through src/shared or src/core/shared.'
+  },
+  {
+    from: ['src'],
+    to: ['src/test', 'src/e2e', 'src/integration'],
+    toPattern: TEST_CODE_RE,
+    why: 'Production code must not import test code. Move the helper into production code, or inject it from the test.'
+  },
+  {
+    from: ['src/core/shared'],
+    to: ['src/core'],
+    except: ['src/core/shared'],
+    why: 'src/core/shared sits below the rest of core. Move the dependency into src/core/shared (or inject it) instead of importing upward.'
+  },
+  { from: ['src/core/pi'], to: ['src/core/opencode'], why: PI_OPENCODE_WHY },
+  { from: ['src/core/opencode'], to: ['src/core/pi'], why: PI_OPENCODE_WHY }
+]
+// Existing violations of the last three zones, as [importing file, imported module
+// without extension]. A later arc moves the shared modules to a neutral home; this
+// list must only shrink, never grow.
+const LAYER_ALLOW = [
+  ['src/core/shared/tool-review.ts', 'src/core/pi/permission-engine'],
+  ['src/core/pi/PiSession.ts', 'src/core/opencode/permission-compiler'],
+  ['src/core/pi/PiSession.ts', 'src/core/opencode/bash-stream-gate'],
+  ['src/core/pi/permission-engine.ts', 'src/core/opencode/permission-compiler'],
+  ['src/core/pi/pi-json-raw.ts', 'src/core/opencode/opencode-jsonc-io'],
+  ['src/core/pi/pi-native-raw.ts', 'src/core/opencode/opencode-jsonc-io'],
+  ['src/core/opencode/OpencodeSession.ts', 'src/core/pi/permission-engine'],
+  ['src/core/opencode/host-precheck.ts', 'src/core/pi/permission-engine']
+]
 
 export default defineConfig(
   {
@@ -167,7 +344,7 @@ export default defineConfig(
     }
   },
 
-  // No-Electron fence for `src/core` (ADR-051 decision 5 "Headless-first",
+  // No-Electron fence for `src/core` and `src/server` (ADR-051 decision 5 "Headless-first",
   // realized by ADR-058; physical extraction landed in the S2 series).
   //
   // `src/core` is the window-independent service graph — SyncCore, the engine
@@ -187,7 +364,7 @@ export default defineConfig(
   // Type-only imports are blocked too: a `BrowserWindow` in a signature makes
   // core's API Electron-shaped even when nothing is emitted at runtime.
   {
-    files: ['src/core/**/*.{ts,tsx}'],
+    files: ['src/core/**/*.{ts,tsx}', 'src/server/**/*.{ts,tsx}'],
     ignores: ['**/__tests__/**'],
     rules: {
       'no-restricted-imports': [
@@ -197,12 +374,20 @@ export default defineConfig(
             {
               group: ['electron', 'electron/*', '@electron/*', '@electron-toolkit/*'],
               message:
-                'src/core must not import Electron (ADR-058). Inject host behaviour through src/core/host.ts instead.'
+                'src/core and src/server must not import Electron (ADR-058). Inject host behaviour through src/core/host.ts instead.'
             }
           ]
         }
       ]
     }
+  },
+
+  // Layer zones (LAYER_ZONES above). Its own block: the rule options are the zone
+  // table, and tests are exempted inside the rule itself.
+  {
+    files: ['src/**/*.{ts,tsx,mts,cts,js,mjs,cjs}'],
+    plugins: { layer: layerPlugin },
+    rules: { 'layer/zones': ['error', { zones: LAYER_ZONES, allow: LAYER_ALLOW }] }
   },
 
   // Sealed-field brand for the renderer replica (SyncCore phase 4c, ADR-051

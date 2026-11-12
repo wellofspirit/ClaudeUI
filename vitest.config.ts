@@ -6,8 +6,16 @@ import { dirname, join, resolve } from 'path'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { playwright } from '@vitest/browser-playwright'
+import { namesOnlyNonBrowserSpecs } from './scripts/lib/vitest-focus.mjs'
 import { MOBILE_PROFILES } from './scripts/lib/mobile-profiles.mjs'
 import { createTestHomeRoot, pruneTestHomes } from './scripts/lib/test-home-root.mjs'
+
+/**
+ * A command line that names only non-browser spec files (`vitest run src/x/y.test.ts`) leaves the
+ * browser project out: it would load its plugins and a second Vite server and match nothing. Every
+ * `package.json` test script and `scripts/gates.sh` pass `--project`, so they are untouched.
+ */
+const skipBrowserProject = namesOnlyNonBrowserSpecs(process.argv.slice(2))
 
 /**
  * The developer's real home, captured ONCE. Vitest re-resolves this config in the same process
@@ -27,7 +35,7 @@ const realHarnessStore = (process.env.CLAUDEUI_REAL_HARNESS_STORE ??=
   process.env.CLAUDEUI_HARNESS_STORE ?? resolve(realHome, '.claude', 'ui', 'harnesses'))
 
 /**
- * An isolated pi agent directory for the pi model-call suites (`docs/protocol-pi/README.md`):
+ * An isolated pi agent directory for the pi model-call suites (`docs/protocol-pi/bumps.md`):
  * PI_CODING_AGENT_DIR is dropped below like the other home-derived variables, and only the
  * integration project gets it back. Kept in the environment the same way, for a re-evaluation.
  */
@@ -306,39 +314,43 @@ export default defineConfig({
           testTimeout: 10000
         }
       },
-      {
-        // Layout tests (docs/testing-strategy.md, Layer 2b): real Chromium at the
-        // owner's phone size, real Tailwind CSS. jsdom evaluates no layout, so
-        // anything that is a claim about geometry lives here. NOT the jsdom/sqlite
-        // setup: this project has its own.
-        resolve: { alias: sharedAlias },
-        plugins: [react(), tailwindcss()],
-        test: {
-          name: 'browser',
-          globals: true,
-          setupFiles: ['./src/test/setup/browser.setup.ts'],
-          include: ['src/**/__tests__/**/*.browser.test.{ts,tsx}'],
-          testTimeout: 10000,
-          // Failure screenshots and attachments would otherwise land in the
-          // source tree (`__screenshots__`, `.vitest-attachments`).
-          attachmentsDir: '.cache/vitest-attachments',
-          browser: {
-            enabled: true,
-            headless: true,
-            screenshotFailures: false,
-            provider: playwright(),
-            instances: [
-              {
-                browser: 'chromium',
-                viewport: {
-                  width: MOBILE_PROFILES['s25-ultra-edge'].width,
-                  height: MOBILE_PROFILES['s25-ultra-edge'].height
+      ...(skipBrowserProject
+        ? []
+        : [
+            {
+              // Layout tests (docs/testing-strategy.md, Layer 2b): real Chromium at the
+              // owner's phone size, real Tailwind CSS. jsdom evaluates no layout, so
+              // anything that is a claim about geometry lives here. NOT the jsdom/sqlite
+              // setup: this project has its own.
+              resolve: { alias: sharedAlias },
+              plugins: [react(), tailwindcss()],
+              test: {
+                name: 'browser',
+                globals: true,
+                setupFiles: ['./src/test/setup/browser.setup.ts'],
+                include: ['src/**/__tests__/**/*.browser.test.{ts,tsx}'],
+                testTimeout: 10000,
+                // Failure screenshots and attachments would otherwise land in the
+                // source tree (`__screenshots__`, `.vitest-attachments`).
+                attachmentsDir: '.cache/vitest-attachments',
+                browser: {
+                  enabled: true,
+                  headless: true,
+                  screenshotFailures: false,
+                  provider: playwright(),
+                  instances: [
+                    {
+                      browser: 'chromium',
+                      viewport: {
+                        width: MOBILE_PROFILES['s25-ultra-edge'].width,
+                        height: MOBILE_PROFILES['s25-ultra-edge'].height
+                      }
+                    }
+                  ]
                 }
               }
-            ]
-          }
-        }
-      },
+            }
+          ]),
       {
         resolve: { alias: sharedAlias },
         test: {

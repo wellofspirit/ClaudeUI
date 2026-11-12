@@ -7,7 +7,7 @@
  * pure-function copy like usage-fetcher.test.ts does) by mocking the
  * narrow boundaries:
  *
- *   - `./claude-session`  — provides `getCliVersion` + `ClaudeSession.getExtraWindows`
+ *   - `../sdk/harness`    — provides `getCliVersion`
  *   - `./logger`          — silence log output
  *   - `node:fs/promises`  — virtualize disk cache + credentials file
  *   - global `fetch`      — control network responses
@@ -24,15 +24,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 // ---------------------------------------------------------------------------
-// Mock the claude-session module — usage-fetcher.ts imports
-//   `ClaudeSession` (for getExtraWindows()) and `getCliVersion()`.
-// Both are trivially mockable.
+// Mock the sdk harness module — usage-fetcher.ts imports `getCliVersion()`
+// from it. Trivially mockable.
 // ---------------------------------------------------------------------------
 
-vi.mock('../claude-session', () => ({
-  ClaudeSession: {
-    getExtraWindows: () => []
-  },
+vi.mock('../../sdk/harness', () => ({
   getCliVersion: () => '2.1.97'
 }))
 

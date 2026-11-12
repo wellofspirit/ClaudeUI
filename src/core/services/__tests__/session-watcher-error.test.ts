@@ -32,9 +32,6 @@ vi.mock('fs', async () => {
   return { ...actual, existsSync: () => true, watch: watchMock }
 })
 
-vi.mock('../../../main/services/providers/BaseSession', () => ({
-  BaseSession: { getExtraWindows: () => [] }
-}))
 vi.mock('../session-history', () => ({
   loadSessionHistory: vi.fn(async () => ({ messages: [], taskNotifications: [], statusLine: null }))
 }))

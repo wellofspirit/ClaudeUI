@@ -20,8 +20,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import { MIGRATIONS, runMigrations, closeDb, type Db } from '../db'
+import { openRawDb, userVersion } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
@@ -38,14 +38,6 @@ const CHATGPT = 'chatgpt:w-a:user-a'
  * the `chatgpt:` ones and a `LIKE 'chatgpt:%'` sweep would leave them forever.
  */
 const CHATGPT_NATIVE = 'codex:openai:native'
-
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
-
-function userVersion(db: Db): number {
-  return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
-}
 
 function columns(db: Db, table: string): string[] {
   return (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name)

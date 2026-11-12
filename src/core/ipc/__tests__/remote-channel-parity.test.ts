@@ -6,10 +6,12 @@
  * client hit before R5 (git:*, account:get, live watching, multi-engine
  * catalogs, title/commit generation, … all threw "Channel not available").
  *
- * It's a static SOURCE scan on purpose: importing the web api-adapter (browser
- * module) and remote-handlers (full Electron/service graph) into one test would
- * be heavy and fragile. The scan pairs the two source files instead, so a future
- * api-adapter invoke with no matching registration fails CI.
+ * The web-client and desktop sides are static SOURCE scans on purpose: importing
+ * the web api-adapter (browser module) into this test would be heavy and fragile.
+ * The remote side is the checked-in dump of the static remote surface
+ * (remote-surface.jsonl), which remote-handlers.ipc.test.ts holds equal to the
+ * live registry, so a future api-adapter invoke with no matching registration
+ * fails CI.
  *
  * Since SyncCore phase 1 the dispatcher denylist is gone: reachability is
  * "registered for the remote transport AND capability ∈ grants". The third test
@@ -30,6 +32,7 @@ import { describe, it, expect } from 'vitest'
 import * as fs from 'fs'
 import * as path from 'path'
 import { AUTH_OFF_GRANTS, type Capability } from '../command-registry'
+import { readRemoteSurface } from '../../../test/helpers/remote-surface'
 import { channelSpec } from '../../shared/sync/channels'
 import {
   API_EVENTS,
@@ -147,167 +150,7 @@ function preloadInvokedChannels(): Set<string> {
 }
 
 /**
- * remote-handlers.ts, plus every module whose transport-agnostic declarations it
- * SPREADS. A channel registered for both transports from one shared constant
- * (`handleRemote(STREAM_WATCH_COMMAND)`, `for (…of configCommands(manager))`) is
- * still a remote registration; the constants exist precisely so the two surfaces
- * cannot declare it differently, and a scan that only read the inline form would
- * report those channels as missing.
- */
-const SHARED_DECLARATION_SOURCES = [
-  'src/core/ipc/remote-handlers.ts',
-  'src/core/ipc/stream-watch.ts',
-  'src/core/ipc/git-watch.ts',
-  // S1b — the config/worktree sweep and the automation port.
-  'src/core/ipc/config-commands.ts',
-  'src/core/ipc/automation-commands.ts',
-  // S4 (ADR-057) — the vendor-OAuth / account / native-OAuth family.
-  'src/core/ipc/auth-commands.ts',
-  // ADR-064 — the remote-IDE pair, spread by both transports from one
-  // declaration (`registerIdeIpc` on the desktop side, from core-services).
-  'src/core/ipc/ide-commands.ts',
-  // The redacted status read (owner ruling, 2026-08-28) — the ONE `remote:*`
-  // channel served on both transports. Every `remote:*` MUTATION is absent from
-  // this list because it is absent from the registry entirely.
-  'src/core/ipc/remote-view-commands.ts',
-  // ADR-072 §7 — the usage hub's six channels, one declaration spread by both
-  // transports (`registerSessionIpc` on the desktop side).
-  'src/core/ipc/usage-hub-commands.ts',
-  // The OpenRouter tab's four reads (`config` queries), one declaration spread
-  // by both transports.
-  'src/core/ipc/openrouter-commands.ts',
-  // ADR-082 arc 2 — the harness manager, one declaration spread by both
-  // transports (`registerSessionIpc` on the desktop side).
-  'src/core/ipc/harness-commands.ts',
-  // ADR-101 §6 — the speech pack (status `chat`, install/cancel/remove `admin`),
-  // one declaration spread by both transports. The web client invokes them since
-  // S4; the three `admin` ones are in UNGRANTED_AT_CONNECT_REMOTE_CHANNELS.
-  'src/core/ipc/voice-pack-commands.ts',
-  // The `git:*` working-tree surface — one declaration, spread by both transports.
-  'src/core/ipc/git-commands.ts',
-  // The mockup preview (read + confined watch) — one declaration, both transports.
-  'src/core/ipc/mockup-commands.ts',
-  // The `usage:*` metering channels — one declaration, both transports.
-  'src/core/ipc/usage-metering-commands.ts',
-  // The app-state reads / settings writes — one declaration, both transports.
-  'src/core/ipc/app-state-commands.ts',
-  // The model catalog, opencode providers and title / commit-message generation.
-  'src/core/ipc/model-commands.ts',
-  // The live-session channels and the session listing / history reads.
-  'src/core/ipc/session-commands.ts',
-  'src/core/ipc/session-history-commands.ts'
-]
-
-/**
- * The S1b sweep: channel → the ONE declaration both transports must serve it
- * with. Written out rather than derived, because "what capability is this
- * reachable under" is the decision the review gate exists to freeze.
- */
-const S1B_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
-  'worktree:create': { capability: 'git', kind: 'command' },
-  'worktree:status': { capability: 'git', kind: 'query' },
-  'worktree:remove': { capability: 'git', kind: 'command' },
-  // ADR-112 — the worktree manager.
-  'worktree:inventory': { capability: 'git', kind: 'query' },
-  'worktree:inspect': { capability: 'git', kind: 'query' },
-  'worktree:measure': { capability: 'git', kind: 'query' },
-  'worktree:remove-many': { capability: 'git', kind: 'command' },
-  'config:save-slash-commands': { capability: 'config', kind: 'command' },
-  'config:load-engine-config': { capability: 'config', kind: 'query' },
-  'config:save-engine-config': { capability: 'config', kind: 'command' },
-  'config:load-vendor-config': { capability: 'config', kind: 'query' },
-  'config:save-vendor-config': { capability: 'config', kind: 'command' },
-  'config:load-opencode-settings': { capability: 'config', kind: 'query' },
-  'config:save-opencode-settings': { capability: 'config', kind: 'command' },
-  'config:read-opencode-native-raw': { capability: 'config', kind: 'query' },
-  'config:patch-opencode-native': { capability: 'config', kind: 'command' },
-  'config:set-opencode-tool-disabled': { capability: 'config', kind: 'command' },
-  'config:read-pi-native-raw': { capability: 'config', kind: 'query' },
-  'config:patch-pi-native': { capability: 'config', kind: 'command' },
-  'config:write-pi-native-text': { capability: 'config', kind: 'command' },
-  'config:read-pi-models-raw': { capability: 'config', kind: 'query' },
-  'config:patch-pi-models': { capability: 'config', kind: 'command' },
-  'opencode-agents:list': { capability: 'config', kind: 'query' },
-  'opencode-agents:read': { capability: 'config', kind: 'query' },
-  'opencode-agents:save': { capability: 'config', kind: 'command' },
-  'opencode-agents:delete': { capability: 'config', kind: 'command' },
-  'opencode-agents:set-disabled': { capability: 'config', kind: 'command' },
-  // Spends model tokens, so `chat` rather than `config`.
-  'opencode-agents:generate': { capability: 'chat', kind: 'command' },
-  'mcp:toggle': { capability: 'config', kind: 'command' },
-  'mcp:reconnect': { capability: 'config', kind: 'command' },
-  'mcp:set-servers': { capability: 'config', kind: 'command' },
-  'mcp:save-servers': { capability: 'config', kind: 'command' },
-  'mcp:remove-server': { capability: 'config', kind: 'command' },
-  'mcp:cli-add': { capability: 'config', kind: 'command' },
-  'mcp:cli-remove': { capability: 'config', kind: 'command' },
-  'mcp:reload': { capability: 'config', kind: 'command' },
-  'mcp:toggle-disabled': { capability: 'config', kind: 'command' },
-  'proxy:test-connection': { capability: 'config', kind: 'command' },
-  'usage:refresh-prices': { capability: 'config', kind: 'command' },
-  'automation:list': { capability: 'config', kind: 'query' },
-  'automation:list-runs': { capability: 'config', kind: 'query' },
-  'automation:load-run-history': { capability: 'config', kind: 'query' },
-  'automation:save': { capability: 'config', kind: 'command' },
-  'automation:delete': { capability: 'config', kind: 'command' },
-  'automation:toggle': { capability: 'config', kind: 'command' },
-  'automation:run-now': { capability: 'config', kind: 'command' },
-  'automation:cancel': { capability: 'config', kind: 'command' },
-  'automation:send-message': { capability: 'config', kind: 'command' },
-  'automation:dismiss-run': { capability: 'config', kind: 'command' }
-}
-
-/**
- * ADR-065 phase 4 — the shared classifier trust lists, declared in the same
- * shared module as the S1b family and therefore checked by the same equality.
- *
- * Its own table for the reason {@link REMOTE_VIEW_SWEEP} has one: S1B_SWEEP is
- * the record of ONE dated sweep, and folding a later decision into it would
- * make both unreadable. `config` because it is engine configuration like every
- * other `config:*` verb here — what it writes is the judge's view of which
- * hosts, registries and resources the user trusts, so the shape is validated at
- * the perimeter (`config-commands-shared-automode.test.ts`) rather than by the
- * id-segment guard the engine/vendor pairs use: this path carries no id.
- */
-const TRUST_LIST_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
-  'config:load-shared-automode': { capability: 'config', kind: 'query' },
-  'config:save-shared-automode': { capability: 'config', kind: 'command' }
-}
-
-/**
- * ADR-074 §2 — the ONE writer of a provider's model allowlist, for opencode or
- * pi. Its own table for the same reason as {@link TRUST_LIST_SWEEP}. `config`
- * like the settings saves it narrows: it edits one leaf of `engines/<id>.json`,
- * with the engine checked against a closed pair and the provider id against the
- * id-segment guard at the perimeter (`config-commands-model-allowlist.test.ts`).
- */
-const MODEL_ALLOWLIST_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> =
-  {
-    'models:set-provider-allowlist': { capability: 'config', kind: 'command' }
-  }
-
-/**
- * ADR-094 — the agent types an engine can spawn, for the type tile's settings.
- * Its own table for the reason {@link TRUST_LIST_SWEEP} has one. `config` and a
- * `query`: it reads agent definitions (names and colours, never a prompt) and
- * the engine is checked against the closed `EngineId` set at the perimeter.
- */
-const AGENT_TYPE_SWEEP: Record<string, { capability: Capability; kind: 'command' | 'query' }> = {
-  'config:list-agent-types': { capability: 'config', kind: 'query' }
-}
-
-/** Every channel the two shared config modules declare: S1b plus what followed. */
-const SHARED_CONFIG_SWEEP = {
-  ...S1B_SWEEP,
-  ...TRUST_LIST_SWEEP,
-  ...MODEL_ALLOWLIST_SWEEP,
-  ...AGENT_TYPE_SWEEP
-}
-
-/**
- * The 2026-08-28 status-view ruling, in the same shape as {@link S1B_SWEEP} and
- * deliberately NOT inside it — that table is the record of one dated sweep, and
- * folding a later decision into it would make both unreadable.
+ * The redacted status read: the one `remote:*` channel on the remote surface.
  *
  * ONE channel, and the reason it is worth its own table is the namespace it
  * lives in: `remote:*` is otherwise host-anchor-only by construction, so this is
@@ -325,13 +168,13 @@ const REMOTE_VIEW_SWEEP: Record<string, { capability: Capability; kind: 'command
  * `ipc/auth-commands.ts` beside the `shared-provider:*` family whose stores it
  * reads.
  *
- * Its own table, for the reason {@link TRUST_LIST_SWEEP} has one: S1B_SWEEP and
- * S4 are records of dated sweeps. `config` and a `query` — it composes the
- * shared definitions, opencode's provider catalog and pi's vendor entries into
- * one row set and returns counts, badges and chips; no key material crosses it,
- * and every mutation the rows drive is an EXISTING channel already on this
- * surface. Being on both transports from one declaration is the point: the
- * phone's provider page must read the same list the desktop does.
+ * Its own table, for the reason {@link REMOTE_VIEW_SWEEP} has one. `config` and
+ * a `query` — it composes the shared definitions, opencode's provider catalog
+ * and pi's vendor entries into one row set and returns counts, badges and chips;
+ * no key material crosses it, and every mutation the rows drive is an EXISTING
+ * channel already on this surface. Being on both transports from one declaration
+ * is the point: the phone's provider page must read the same list the desktop
+ * does.
  */
 const PROVIDER_REGISTRY_SWEEP: Record<
   string,
@@ -357,13 +200,29 @@ const PROVIDER_ACCOUNT_SWEEP: Record<
   'provider-account:remove': { capability: 'config', kind: 'command' }
 }
 
-/** channel → declared capability, parsed from remote-handlers.ts registrations. */
+/** channel → declared capability, read from the checked-in remote surface dump. */
 function remoteDeclarations(): Map<string, Capability> {
-  const src = SHARED_DECLARATION_SOURCES.map(read).join('\n')
-  const map = new Map<string, Capability>()
-  const re = /channel:\s*['"]([^'"]+)['"],\s*capability:\s*['"]([^'"]+)['"]/g
-  for (let m = re.exec(src); m; m = re.exec(src)) map.set(m[1], m[2] as Capability)
-  return map
+  return new Map(readRemoteSurface().map((e) => [e.channel, e.capability]))
+}
+
+/** Every channel the two shared config modules declare, read from their source. */
+function sharedConfigDeclarations(): Map<string, { capability: Capability; kind: string }> {
+  const shared = [
+    read('src/core/ipc/config-commands.ts'),
+    read('src/core/ipc/automation-commands.ts')
+  ].join('\n')
+  const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
+  const found = new Map<string, { capability: Capability; kind: string }>()
+  for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
+    expect(found.has(m[1]), `${m[1]} is declared twice in the shared modules`).toBe(false)
+    found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+  }
+  // A scan that found nothing would pass every per-channel check below.
+  expect(found.size).toBeGreaterThanOrEqual(50)
+  for (const anchor of ['automation:save', 'config:save-engine-config', 'worktree:create']) {
+    expect(found.has(anchor), `${anchor} not found in the shared modules`).toBe(true)
+  }
+  return found
 }
 
 describe('remote channel parity (R5)', () => {
@@ -413,31 +272,24 @@ describe('remote channel parity (R5)', () => {
     // The guard the everything-remote ruling needs: a future desktop-only
     // registration must be a DECISION, not drift. Two halves.
     //
-    // (1) Each swept channel is declared exactly once, in a shared module, with
-    //     the capability/kind this table freezes — and NOT re-declared inline in
-    //     either transport registrar, which is the only way the two surfaces
-    //     could come to disagree.
-    const shared = [
-      read('src/core/ipc/config-commands.ts'),
-      read('src/core/ipc/automation-commands.ts')
-    ].join('\n')
-    const declRe = /channel:\s*'([^']+)',\s*capability:\s*'([^']+)',\s*kind:\s*'([^']+)'/g
-    const found = new Map<string, { capability: Capability; kind: string }>()
-    for (let m = declRe.exec(shared); m; m = declRe.exec(shared)) {
-      expect(found.has(m[1]), `${m[1]} is declared twice in the shared modules`).toBe(false)
-      found.set(m[1], { capability: m[2] as Capability, kind: m[3] })
+    // (1) Each channel the shared modules declare is declared exactly once there,
+    //     is on the remote surface with the same capability/kind (the checked-in
+    //     dump), and is NOT re-declared inline in either transport registrar,
+    //     which is the only way the two surfaces could come to disagree.
+    const found = sharedConfigDeclarations()
+    const dump = new Map(readRemoteSurface().map((e) => [e.channel, e]))
+    for (const [channel, decl] of found) {
+      expect(
+        { capability: dump.get(channel)?.capability, kind: dump.get(channel)?.kind },
+        `${channel}: the dump must record what the shared module declares`
+      ).toEqual(decl)
     }
-    expect(Object.fromEntries([...found].sort())).toEqual(
-      Object.fromEntries(Object.entries(SHARED_CONFIG_SWEEP).sort())
-    )
 
     const registrars = [
       read('src/core/ipc/session.ipc.ts'),
       read('src/core/ipc/remote-handlers.ts')
     ].join('\n')
-    const inline = Object.keys(SHARED_CONFIG_SWEEP)
-      .filter((c) => registrars.includes(`channel: '${c}'`))
-      .sort()
+    const inline = [...found.keys()].filter((c) => registrars.includes(`channel: '${c}'`)).sort()
     expect(
       inline,
       `these S1b channels are re-declared inline in a transport registrar: ${inline.join(', ')}`
@@ -466,13 +318,10 @@ describe('remote channel parity (R5)', () => {
     // from the remote UI. `git`, `config` and `chat` are all in AUTH_OFF_GRANTS,
     // so an ordinary authenticated connection reaches every one of them.
     const declared = remoteDeclarations()
-    const missing = Object.keys(SHARED_CONFIG_SWEEP)
-      .filter((c) => !declared.has(c))
-      .sort()
+    const found = [...sharedConfigDeclarations().keys()]
+    const missing = found.filter((c) => !declared.has(c)).sort()
     expect(missing, `S1b channels with no remote registration: ${missing.join(', ')}`).toEqual([])
-    const ungranted = Object.keys(SHARED_CONFIG_SWEEP)
-      .filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!))
-      .sort()
+    const ungranted = found.filter((c) => !AUTH_OFF_GRANTS.has(declared.get(c)!)).sort()
     expect(ungranted).toEqual([])
   })
 
@@ -688,7 +537,8 @@ describe('remote channel parity (R5)', () => {
       'src/main/index.ts',
       ...shared
     ])
-    const remote = channelsDeclaredIn([`${ipcDir}/remote-handlers.ts`, ...ownIpc, ...shared])
+    // The remote half is the checked-in dump of the static remote surface.
+    const remote = new Set(readRemoteSurface().map((e) => e.channel))
     // Non-vacuity: a scan that found nothing would pass the checks below.
     expect(desktop.size).toBeGreaterThan(100)
     expect(remote.size).toBeGreaterThan(100)

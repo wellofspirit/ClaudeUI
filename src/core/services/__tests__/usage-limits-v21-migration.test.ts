@@ -15,19 +15,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import { MIGRATIONS, runMigrations, closeDb, type Db } from '../db'
+import { openRawDb, userVersion } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
-
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
-
-function userVersion(db: Db): number {
-  return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
-}
 
 function columns(db: Db, table: string): string[] {
   return (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map((c) => c.name)

@@ -56,7 +56,6 @@ vi.mock('../../InputBox', () => ({ InputBox: () => <div data-testid="InputBox" /
 vi.mock('../../FloatingApproval', () => ({ FloatingApproval: () => null }))
 vi.mock('../../BtwCard', () => ({ BtwCard: () => null }))
 vi.mock('../../FloatingError', () => ({ FloatingError: () => null }))
-vi.mock('../../VendorAuthRequiredCard', () => ({ VendorAuthRequiredCard: () => null }))
 vi.mock('../../SandboxViolationToast', () => ({ SandboxViolationToast: () => null }))
 // A close button while active, so a test can end a search the way the real bar does.
 vi.mock('../../ChatSearch', () => ({

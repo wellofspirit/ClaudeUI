@@ -9,7 +9,6 @@
  *   - ADR-054: the nullable `detail` column and the retention sweep
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import * as dbModule from '../db'
 import {
   runMigrations,
@@ -19,18 +18,14 @@ import {
   listAuditLog,
   pruneAuditLog,
   DEFAULT_AUDIT_RETENTION_DAYS,
-  MIN_AUDIT_RETENTION_DAYS,
-  type Db
+  MIN_AUDIT_RETENTION_DAYS
 } from '../db'
+import { openRawDb } from '../../../test/helpers/migration-db'
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
-
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
 
 function entry(
   over: Partial<Parameters<typeof appendAuditLog>[0]> = {}

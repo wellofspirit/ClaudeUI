@@ -10,7 +10,6 @@
  * value reads as AUTO rather than as `off`.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import {
   MIGRATIONS,
   REMOTE_AUTH_POLICIES,
@@ -26,16 +25,12 @@ import {
   runMigrations,
   setRemoteConfig,
   setRemotePassword,
-  touchWebauthnCredential,
-  type Db
+  touchWebauthnCredential
 } from '../db'
+import { openRawDb } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
-
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
 
 const KEY = Buffer.from('a5010203262001215820deadbeef', 'hex')
 
