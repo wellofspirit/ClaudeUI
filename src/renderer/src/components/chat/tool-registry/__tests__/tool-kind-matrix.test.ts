@@ -13,6 +13,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { piToolKind } from '../../../../../../core/pi/permission-engine'
+import { HOSTED_TOOL_NAMES } from '../../../../../../shared/hosted-tools'
 import { SESSION_TOOL_NAMES } from '../../../../../../shared/session-tools-description'
 import { hostedMcpKind } from '../../../../../../shared/tool-kinds'
 import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
@@ -165,8 +166,10 @@ function table(row: (name: string) => string[]): string {
 }
 
 describe('tool kinds and labels, every known name on every engine', () => {
-  it('lists every session tool', () => {
+  it('lists every hosted tool and every session tool', () => {
     expect(SESSION_TOOLS).toEqual([...SESSION_TOOL_NAMES])
+    // A new row in HOSTED_TOOLS must be added to HOSTED above, so its kind and label are pinned.
+    expect(HOSTED.map(([bare]) => bare).sort()).toEqual([...HOSTED_TOOL_NAMES].sort())
     expect(new Set(NAMES).size).toBe(NAMES.length)
   })
 
