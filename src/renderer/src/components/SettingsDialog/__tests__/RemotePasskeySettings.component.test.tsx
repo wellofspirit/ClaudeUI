@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RemotePasskeySettings } from '../RemotePasskeySettings'
-import { LAST_CREDENTIAL_LOCKOUT_ERROR } from '../../../../../shared/remote-protocol'
-import type { RemoteConfig, WebauthnCredential } from '../../../../../shared/types'
+import {
+  LAST_CREDENTIAL_LOCKOUT_ERROR,
+  NEEDS_SETTINGS_SESSION_ERROR
+} from '../../../../../shared/remote-protocol'
+import { installEnrollBridge, type EnrollBridge } from '../enroll-flow'
+import { endSettingsSession, recordSettingsSession } from '../remote-settings-transport'
+import type {
+  RemoteAuthMethod,
+  RemoteConfig,
+  WebauthnCredential
+} from '../../../../../shared/types'
 
 // qrcode is dynamically imported by the mint path so it stays off the eager
 // settings chunk; the drawing itself is not what these tests are about.
@@ -55,6 +64,8 @@ const api = {
   webauthnRename: vi.fn(),
   webauthnRevoke: vi.fn(),
   webauthnMintEnrollToken: vi.fn(),
+  terminalStepUpPasskey: vi.fn(),
+  authcfgEnd: vi.fn(),
   onRemoteStatus: vi.fn((cb: () => void) => {
     statusSubscribers.push(cb)
     return () => {
@@ -88,9 +99,16 @@ describe('RemotePasskeySettings', () => {
       ...baseConfig,
       ...partial
     }))
+    api.authcfgEnd.mockResolvedValue({ ok: true })
+    recordSettingsSession(undefined)
     ;(window as unknown as { api: typeof api }).api = api
   })
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    installEnrollBridge(null)
+    recordSettingsSession(undefined)
+    vi.useRealTimers()
+  })
 
   // The POLICY SELECTOR and the `off` master switch moved to
   // `SessionSecuritySettings` with the rest of the editable set (ADR-054 §6
@@ -341,6 +359,276 @@ describe('RemotePasskeySettings', () => {
     it('still shows the off-mode banner — the posture travels, the switch does not', async () => {
       renderPane({ effectiveAuthPolicy: 'off' })
       expect(await screen.findByTestId('RemotePasskeySettings.offBanner')).toBeInTheDocument()
+    })
+  })
+  describe('settings-session gating (web)', () => {
+    let authMethod: ReturnType<typeof vi.fn<() => RemoteAuthMethod | undefined>>
+    let bridgeSubscribers: (() => void)[]
+    const refusal = (): Error => new Error(NEEDS_SETTINGS_SESSION_ERROR)
+    const minted = (n = 'a') => ({
+      token: n,
+      expiresAt: Date.now() + 1000,
+      url: `https://h/remote#enroll=${n}`
+    })
+    const grant = (): void =>
+      void api.terminalStepUpPasskey.mockResolvedValue({
+        ok: true,
+        settingsSessionExpiresAt: Date.now() + 300_000
+      })
+    const confirm = async (): Promise<void> => {
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('RemotePasskeySettings.prompt.passkey'))
+      })
+    }
+    async function startRename(value: string): Promise<HTMLElement> {
+      fireEvent.click(await screen.findByTestId('RemotePasskeySettings.credentialName'))
+      const input = await screen.findByTestId('RemotePasskeySettings.credentialNameInput')
+      fireEvent.change(input, { target: { value } })
+      return input
+    }
+    async function startRevoke(): Promise<void> {
+      const button = await screen.findByTestId('RemotePasskeySettings.credentialRevoke')
+      fireEvent.click(button)
+      fireEvent.click(button)
+    }
+
+    beforeEach(() => {
+      api.platform = 'web'
+      authMethod = vi.fn<() => RemoteAuthMethod | undefined>(() => 'webauthn')
+      bridgeSubscribers = []
+      installEnrollBridge({
+        authMethod,
+        capableOrigin: () => true,
+        browserCapable: () => true,
+        enroll: async () => {},
+        subscribe: (cb: () => void) => {
+          bridgeSubscribers.push(cb)
+          return () => {
+            bridgeSubscribers = bridgeSubscribers.filter((x) => x !== cb)
+          }
+        }
+      } satisfies EnrollBridge)
+      grant()
+      api.webauthnCredentials.mockResolvedValue([credential()])
+    })
+
+    it('rename: refused, prompts, and after the ceremony retries the same call', async () => {
+      api.webauthnRename.mockRejectedValueOnce(refusal()).mockResolvedValueOnce({ ok: true })
+      renderPane({ credentialCount: 1 })
+      fireEvent.keyDown(await startRename('Work phone'), { key: 'Enter' })
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      expect(api.webauthnRename).toHaveBeenCalledTimes(1)
+      await confirm()
+      await waitFor(() => expect(api.webauthnRename).toHaveBeenCalledTimes(2))
+      expect(api.webauthnRename).toHaveBeenLastCalledWith('Y3JlZC0x', 'Work phone')
+      expect(screen.queryByTestId('RemotePasskeySettings.prompt')).toBeNull()
+    })
+
+    it('revoke: refused, prompts, and after the ceremony retries the same call', async () => {
+      api.webauthnRevoke.mockRejectedValueOnce(refusal()).mockResolvedValueOnce({ ok: true })
+      const { onReload } = renderPane({ credentialCount: 1 })
+      await startRevoke()
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      await confirm()
+      await waitFor(() => expect(api.webauthnRevoke).toHaveBeenCalledTimes(2))
+      expect(api.webauthnRevoke).toHaveBeenLastCalledWith('Y3JlZC0x')
+      await waitFor(() => expect(onReload).toHaveBeenCalled())
+    })
+
+    it('Show QR code: refused, prompts, retried, and the QR renders', async () => {
+      api.webauthnMintEnrollToken.mockRejectedValueOnce(refusal()).mockResolvedValueOnce(minted())
+      renderPane()
+      fireEvent.click(await screen.findByTestId('RemotePasskeySettings.addDevice'))
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      await confirm()
+      await screen.findByTestId('RemotePasskeySettings.enrollQr')
+      expect(api.webauthnMintEnrollToken).toHaveBeenCalledTimes(2)
+    })
+
+    it('Try again is held and retried like Show QR code', async () => {
+      api.webauthnMintEnrollToken
+        .mockRejectedValueOnce(new Error('enroll-unavailable'))
+        .mockRejectedValueOnce(refusal())
+        .mockResolvedValueOnce(minted())
+      renderPane()
+      fireEvent.click(await screen.findByTestId('RemotePasskeySettings.addDevice'))
+      fireEvent.click(await screen.findByTestId('RemotePasskeySettings.addDeviceRetry'))
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      await confirm()
+      await screen.findByTestId('RemotePasskeySettings.enrollQr')
+    })
+
+    it.each([
+      ['copyLink', 'Unlocked. Press Copy link again.'],
+      ['openInBrowser', 'Unlocked. Press Open in browser again.']
+    ])('%s: prompts, on grant does NOT mint again, says to press again', async (id, text) => {
+      api.webauthnMintEnrollToken.mockRejectedValue(refusal())
+      renderPane()
+      fireEvent.click(await screen.findByTestId(`RemotePasskeySettings.${id}`))
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      await confirm()
+      expect(api.webauthnMintEnrollToken).toHaveBeenCalledTimes(1)
+      expect(screen.getByTestId('RemotePasskeySettings.enrollNotice')).toHaveTextContent(text)
+      expect(screen.queryByTestId('RemotePasskeySettings.prompt')).toBeNull()
+    })
+
+    it('session already open: the call succeeds and no prompt is raised', async () => {
+      api.webauthnRename.mockResolvedValue({ ok: true })
+      renderPane({ credentialCount: 1 })
+      fireEvent.keyDown(await startRename('Work phone'), { key: 'Enter' })
+      await waitFor(() => expect(api.webauthnRename).toHaveBeenCalledTimes(1))
+      expect(screen.queryByTestId('RemotePasskeySettings.prompt')).toBeNull()
+      expect(api.terminalStepUpPasskey).not.toHaveBeenCalled()
+    })
+
+    it('Not now drops the held action: no further call', async () => {
+      api.webauthnRevoke.mockRejectedValue(refusal())
+      renderPane({ credentialCount: 1 })
+      await startRevoke()
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      fireEvent.click(screen.getByTestId('RemotePasskeySettings.prompt.cancel'))
+      expect(screen.queryByTestId('RemotePasskeySettings.prompt')).toBeNull()
+      expect(api.webauthnRevoke).toHaveBeenCalledTimes(1)
+      expect(api.terminalStepUpPasskey).not.toHaveBeenCalled()
+    })
+
+    it('a second refusal after a granted unlock is an error, not a second prompt', async () => {
+      api.webauthnRevoke.mockRejectedValue(refusal())
+      renderPane({ credentialCount: 1 })
+      await startRevoke()
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      await confirm()
+      expect(await screen.findByTestId('RemotePasskeySettings.revokeError')).toHaveTextContent(
+        'Passkey management locked again before this could run. Try again.'
+      )
+      expect(api.webauthnRevoke).toHaveBeenCalledTimes(2)
+      expect(screen.queryByTestId('RemotePasskeySettings.prompt')).toBeNull()
+    })
+
+    it('latest press wins: a refusal while the prompt shows replaces the held action', async () => {
+      api.webauthnRevoke.mockRejectedValueOnce(refusal()).mockResolvedValue({ ok: true })
+      api.webauthnMintEnrollToken.mockRejectedValueOnce(refusal()).mockResolvedValue(minted())
+      renderPane({ credentialCount: 1 })
+      await startRevoke()
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      fireEvent.click(screen.getByTestId('RemotePasskeySettings.addDevice'))
+      await waitFor(() => expect(api.webauthnMintEnrollToken).toHaveBeenCalledTimes(1))
+      await confirm()
+      await screen.findByTestId('RemotePasskeySettings.enrollQr')
+      expect(api.webauthnRevoke).toHaveBeenCalledTimes(1)
+    })
+
+    it('no admin on this connection: the plain error and no prompt', async () => {
+      authMethod.mockReturnValue('none')
+      api.webauthnRevoke.mockRejectedValue(refusal())
+      api.webauthnMintEnrollToken.mockRejectedValue(refusal())
+      renderPane({ credentialCount: 1 })
+      await startRevoke()
+      expect(await screen.findByTestId('RemotePasskeySettings.revokeError')).toHaveTextContent(
+        'This connection cannot manage passkeys.'
+      )
+      fireEvent.click(screen.getByTestId('RemotePasskeySettings.addDevice'))
+      expect(await screen.findByTestId('RemotePasskeySettings.enrollError')).toHaveTextContent(
+        'This connection cannot manage passkeys.'
+      )
+      expect(screen.queryByTestId('RemotePasskeySettings.prompt')).toBeNull()
+    })
+
+    it.each(['web', 'darwin'])(
+      'an unchanged name makes no rename call, on blur and on Enter (%s)',
+      async (platform) => {
+        api.platform = platform
+        renderPane({ credentialCount: 1 })
+        let input = await startRename('  Pixel 9 ')
+        fireEvent.keyDown(input, { key: 'Enter' })
+        expect(screen.queryByTestId('RemotePasskeySettings.credentialNameInput')).toBeNull()
+        input = await startRename('Pixel 9')
+        fireEvent.blur(input)
+        expect(screen.queryByTestId('RemotePasskeySettings.credentialNameInput')).toBeNull()
+        await act(async () => {})
+        expect(api.webauthnRename).not.toHaveBeenCalled()
+        expect(screen.queryByTestId('RemotePasskeySettings.prompt')).toBeNull()
+      }
+    )
+
+    it('an unnamed credential left empty is unchanged (null equals empty)', async () => {
+      api.webauthnCredentials.mockResolvedValue([credential({ nickname: null })])
+      renderPane({ credentialCount: 1 })
+      fireEvent.blur(await startRename('   '))
+      await act(async () => {})
+      expect(api.webauthnRename).not.toHaveBeenCalled()
+    })
+
+    it('the pill appears after a granted unlock', async () => {
+      api.webauthnRename.mockRejectedValueOnce(refusal()).mockResolvedValueOnce({ ok: true })
+      renderPane({ credentialCount: 1 })
+      expect(screen.queryByTestId('RemotePasskeySettings.countdown')).toBeNull()
+      fireEvent.keyDown(await startRename('Work phone'), { key: 'Enter' })
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      await confirm()
+      const pill = await screen.findByTestId('RemotePasskeySettings.countdown')
+      expect(pill).toHaveTextContent(/Unlocked · [45]:\d\d/)
+    })
+
+    it('the pill shows the remaining time and disappears at expiry', () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-11-12T10:00:00Z'))
+      recordSettingsSession(Date.now() + 125_000)
+      renderPane()
+      expect(screen.getByTestId('RemotePasskeySettings.countdown')).toHaveTextContent(
+        'Unlocked · 2:05'
+      )
+      act(() => {
+        vi.advanceTimersByTime(5000)
+      })
+      expect(screen.getByTestId('RemotePasskeySettings.countdown')).toHaveTextContent(
+        'Unlocked · 2:00'
+      )
+      act(() => {
+        vi.advanceTimersByTime(121_000)
+      })
+      expect(screen.queryByTestId('RemotePasskeySettings.countdown')).toBeNull()
+    })
+
+    it('the pill goes when the session is ended, and when the connection state moves', async () => {
+      recordSettingsSession(Date.now() + 100_000)
+      renderPane()
+      expect(screen.getByTestId('RemotePasskeySettings.countdown')).toBeInTheDocument()
+      await act(async () => {
+        await endSettingsSession()
+      })
+      expect(screen.queryByTestId('RemotePasskeySettings.countdown')).toBeNull()
+
+      act(() => recordSettingsSession(Date.now() + 100_000))
+      expect(screen.getByTestId('RemotePasskeySettings.countdown')).toBeInTheDocument()
+      act(() => {
+        for (const cb of bridgeSubscribers) cb()
+      })
+      expect(screen.queryByTestId('RemotePasskeySettings.countdown')).toBeNull()
+    })
+
+    it('unmount after this pane opened a session ends it', async () => {
+      api.webauthnRevoke.mockRejectedValueOnce(refusal()).mockResolvedValueOnce({ ok: true })
+      const { unmount } = render(
+        <RemotePasskeySettings config={baseConfig} onReload={async () => {}} />
+      )
+      await startRevoke()
+      await screen.findByTestId('RemotePasskeySettings.prompt')
+      await confirm()
+      await waitFor(() => expect(api.webauthnRevoke).toHaveBeenCalledTimes(2))
+      expect(api.authcfgEnd).not.toHaveBeenCalled()
+      unmount()
+      expect(api.authcfgEnd).toHaveBeenCalledTimes(1)
+    })
+
+    it('unmount with a session this pane did not open leaves it alone', async () => {
+      recordSettingsSession(Date.now() + 100_000)
+      const { unmount } = render(
+        <RemotePasskeySettings config={baseConfig} onReload={async () => {}} />
+      )
+      await screen.findByTestId('RemotePasskeySettings')
+      unmount()
+      expect(api.authcfgEnd).not.toHaveBeenCalled()
     })
   })
 })

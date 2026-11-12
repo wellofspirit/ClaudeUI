@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor
+} from '@testing-library/react'
 import { SessionSecuritySettings } from '../SessionSecuritySettings'
+import { recordSettingsSession, useSettingsSessionDeadline } from '../remote-settings-transport'
 import {
   chooseSelectMenuOption,
   selectMenuOptionValues
@@ -178,6 +187,34 @@ describe('SessionSecuritySettings', () => {
         expect(screen.getByTestId('SessionSecuritySettings')).toHaveAttribute('data-state', 'view')
       )
       expect(api.authcfgApply).not.toHaveBeenCalled()
+    })
+
+    it('WEB: a granted unlock records the deadline for the passkey pane; Cancel clears it', async () => {
+      api.platform = 'web'
+      recordSettingsSession(undefined)
+      const deadline = Date.now() + 300_000
+      api.terminalStepUpPasskey.mockResolvedValue({ ok: true, settingsSessionExpiresAt: deadline })
+      const hook = renderHook(() => useSettingsSessionDeadline())
+      expect(hook.result.current).toBeNull()
+      renderPane()
+      await openEditor(true)
+      expect(hook.result.current).toBe(deadline)
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('SessionSecuritySettings.cancel'))
+      })
+      expect(hook.result.current).toBeNull()
+    })
+
+    it('WEB: Save clears the recorded deadline', async () => {
+      api.platform = 'web'
+      renderPane()
+      await openEditor(true)
+      const hook = renderHook(() => useSettingsSessionDeadline())
+      expect(hook.result.current).not.toBeNull()
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('SessionSecuritySettings.save'))
+      })
+      await waitFor(() => expect(hook.result.current).toBeNull())
     })
 
     it('DESKTOP: Edit opens the editor with no ceremony and no countdown', async () => {
