@@ -1,7 +1,6 @@
 /**
- * Harness ground truth for the auto-mode classifier — phase 3 of
- * `docs/automode-rework-plan.md` §5, behavioural reference
- * `docs/protocol-cc/14-auto-mode-classifier.md` §5.
+ * Harness ground truth for the auto-mode classifier (ADR-023), behavioural
+ * reference `docs/protocol-cc/14-auto-mode-classifier.md` §5.
  *
  * Four kinds of fact the judge cannot get from the transcript. The first three
  * are missing because the slimmer deliberately drops tool RESULTS; the fourth

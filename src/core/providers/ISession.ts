@@ -56,9 +56,9 @@ export interface WorktreeToolResult {
 
 /**
  * Engine-neutral session interface. All methods here are implemented by
- * every backend (Claude, opencode, etc.). Engine-specific capabilities
- * (voice, MCP, background tasks, etc.) live on ClaudeSession directly and
- * are gated behind `capabilities` flags.
+ * every backend (Claude, opencode, pi); optional members are gated behind
+ * `capabilities` flags. Engine-specific features beyond this interface live
+ * on the concrete session classes.
  */
 export interface ISession {
   readonly engineId: EngineId
@@ -138,7 +138,8 @@ export interface ISession {
    * Queue a prompt that arrived while the session was busy. Implemented once in
    * BaseSession for every engine; the only per-engine difference is WHEN the
    * item reaches the engine (claude pushes into cli.js's native queue
-   * immediately, opencode/pi hold until the next sub-turn boundary).
+   * immediately, opencode posts to its inbox immediately, pi holds until the
+   * next sub-turn boundary).
    *
    * `attachments` are the engine-bound uploads; `refs` are what the broadcast
    * item carries (ADR-087). `sendPrompt` interns once and passes both; a caller
@@ -336,26 +337,26 @@ export interface ISession {
  * ignore options they do not consume (noted per member).
  */
 export interface EngineSpawnOptions {
-  /** Reasoning-effort tier. Claude + pi (M2b: applied via `set_thinking_level`
-   *  at spawn when the resolved model supports it) — opencode uses per-model
+  /** Reasoning-effort tier. Claude + pi (applied via `set_thinking_level` at
+   *  spawn when the resolved model supports it) — opencode uses per-model
    *  reasoning variants instead. */
   effort?: string
-  /** Engine session id to resume. Consumed by both engines. */
+  /** Engine session id to resume. Consumed by all three engines. */
   resumeSessionId?: string
-  /** Initial permission mode. Consumed by both engines. */
+  /** Initial permission mode. Consumed by all three engines. */
   permissionMode?: string
-  /** Model value in the engine's convention (Claude alias / opencode "vendorId/modelId"). Both engines. */
+  /** Model value in the engine's convention (Claude alias / opencode "vendorId/modelId" / pi model id). All three engines. */
   model?: string
-  /** Sandbox settings. Claude-only — opencode's permission model is ADR-022. */
+  /** Sandbox settings. Claude-only — opencode and pi never read it (ADR-022, ADR-030). */
   sandboxConfig?: SandboxSettings
   /** Thinking mode ('adaptive' | 'enabled' | 'disabled'). Claude-only. */
   thinkingMode?: string
   /** Fork ("branch off") anchor, in the engine's own convention: a JSONL line
    *  uuid for Claude (ADR-010), or a pi entryId / the clone-latest sentinel
-   *  for pi (M5c) — see PiSession.doStart's fork block. opencode fork is
+   *  for pi — see PiSession.doStart's fork block. opencode fork is
    *  unwired (ADR-030). */
   resumeSessionAt?: string
-  /** Fork at resumeSessionAt into a new session (ADR-010 Claude; M5c pi via
+  /** Fork at resumeSessionAt into a new session (ADR-010 Claude; pi via
    *  clone/fork RPCs). opencode fork is unwired (ADR-030). */
   forkSession?: boolean
 }

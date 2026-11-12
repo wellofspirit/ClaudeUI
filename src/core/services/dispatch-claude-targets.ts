@@ -195,8 +195,8 @@ function mapAutonomyToClaudeTargetMode(autonomyMode: string): {
 /**
  * Real default for `DispatcherDeps.spawnClaudeQuery`. Duplicates
  * `getSdkExecutableOpts()` (claude-session.ts) inline rather than importing
- * it — claude-session.ts imports THIS module (for the collab server /
- * disposeFor wiring), so importing back would form a require-cycle. Like it,
+ * it — claude-session.ts imports cross-engine-dispatcher.ts, which imports
+ * THIS module, so importing back would form a require-cycle. Like it,
  * this names no executable: `query()` spawns the resolver's Claude Code launch
  * (ADR-082 §2).
  */

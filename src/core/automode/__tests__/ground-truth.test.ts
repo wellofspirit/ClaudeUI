@@ -1,7 +1,6 @@
 /**
- * Harness ground truth for the auto-mode classifier (phase 3 of
- * `docs/automode-rework-plan.md` §5, reference
- * `docs/protocol-cc/14-auto-mode-classifier.md` §5).
+ * Harness ground truth for the auto-mode classifier (ADR-023), reference
+ * `docs/protocol-cc/14-auto-mode-classifier.md` §5.
  *
  * Three things are worth testing here:
  *  1. **The detection tables** — they decide whether we pay for a capture at

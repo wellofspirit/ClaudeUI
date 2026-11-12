@@ -1,5 +1,5 @@
 /**
- * Auto-mode rule corpus (phase 2 of docs/automode-rework-plan.md).
+ * Auto-mode rule corpus (ADR-023).
  *
  * Our own condensed policy — structure and mechanics mirror cli.js's auto mode
  * (docs/protocol-cc/14-auto-mode-classifier.md §6/§9), the prose is ours, tuned to

@@ -1,5 +1,5 @@
 /**
- * Auto-mode policy document assembly (phase 2, docs/automode-rework-plan.md §5).
+ * Auto-mode policy document assembly (ADR-083).
  *
  * Renders the full classifier system prompt from the rule corpus plus
  * host-supplied environment facts. Structure mirrors cli.js's prompt

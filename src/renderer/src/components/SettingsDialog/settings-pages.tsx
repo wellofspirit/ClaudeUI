@@ -8,7 +8,7 @@
  * opencode and pi, dispatch twice, model defaults in four sections) and left
  * ~20 of the 43 sections with three rows or fewer.
  *
- * Here, settings are organised by TASK: 12 pages in 3 rail groups, each page an
+ * Here, settings are organised by TASK: pages in rail groups, each page an
  * ordered list of GROUPS, each group a card of rows. Storage location becomes a
  * tag on the group header — information, never navigation.
  *

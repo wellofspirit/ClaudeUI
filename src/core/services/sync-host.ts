@@ -472,7 +472,7 @@ export const syncCore = new SyncCore({
     logger.error(
       LOG_SOURCE,
       `refusing to emit unclassified channel "${channel}" — add it to ` +
-        `src/shared/sync/channels.ts (see docs/architecture/sync-channels.md)`
+        `src/core/shared/sync/channels.ts (see docs/architecture/sync-channels.md)`
     ),
   onApplyError: (channel, err) =>
     logger.error(

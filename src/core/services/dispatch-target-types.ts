@@ -104,8 +104,8 @@ export interface DispatchContext {
    * BaseSession.addDispatchedCost — folds a completed dispatch turn's spend
    * into the dispatching session's own cost breakdown (ADR-033 Slice C).
    * Optional (never fail a dispatch over a missing wiring, same philosophy
-   * as `toolUseId` below) — both production callers (collab-tool.ts,
-   * opencode-hosted-tools.ts) always set it; only test doubles omit it.
+   * as `toolUseId` below) — every production caller (the Claude, opencode
+   * and pi session paths) sets it; only test doubles omit it.
    */
   addDispatchedCost?: (engineId: EngineId, modelId: string, costUsd: number) => void
   /**

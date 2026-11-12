@@ -31,18 +31,18 @@ import { emitEvent } from '../services/sync-host'
 import { localVoiceServer } from '../voice/local-voice-server'
 
 /**
- * Abstract base class holding engine-neutral plumbing shared by all session
- * implementations (ClaudeSession, future opencode session, etc.).
+ * Abstract base class holding engine-neutral plumbing shared by the three
+ * session implementations (ClaudeSession, OpencodeSession, PiSession).
  *
  * Owns:
- *  - Instance fields: win, routingId, cwd, messageHistory, inactivity timer
+ *  - Instance fields: win (host handle), routingId, cwd, messageHistory, inactivity timer
  *  - protected send() — one emission through the funnel, to every subscriber
- *  - getMessages() / setInactivityTimeout() — common ISession implementations
- *  - baseStatusFields() — injects engineId + capabilities into a SessionStatus object
+ *  - The queue of record (ADR-053), the user-stop window (ADR-090), the blocked-call
+ *    ledger and the dispatched-cost map
+ *  - getMessages() / setInactivityTimeout() / baseStatusFields() — common ISession parts
  *
  * Subclasses must implement:
- *  - abstract readonly engineId: EngineId
- *  - abstract readonly capabilities: ResolvedCapabilities
+ *  - abstract readonly engineId, capabilities and willQueue
  *  - All remaining ISession methods (run, interrupt, cancel, resolveApproval, etc.)
  *  - dispose() — resource teardown
  */
@@ -257,12 +257,13 @@ export abstract class BaseSession implements ISession {
   /**
    * What happens the instant an item lands in the queue.
    *
-   * The default HOLDS it: opencode and pi commit-on-post (their steer/coalesce
-   * posts are unrecallable the moment they land), so forwarding at keypress
-   * would leave a zero-length take-back window. They forward from
-   * {@link flushQueuedItems} at the next observed sub-turn boundary instead.
-   * ClaudeSession overrides this to push straight into cli.js's native queue,
-   * which already has real sub-turn timing AND a real per-item dequeue.
+   * The default HOLDS it: pi's steer/coalesce posts are unrecallable the moment
+   * they land, so forwarding at keypress would leave a zero-length take-back
+   * window. PiSession forwards from {@link flushQueuedItems} at the next observed
+   * sub-turn boundary instead. ClaudeSession overrides this to push straight
+   * into cli.js's native queue, which already has real sub-turn timing AND a real
+   * per-item dequeue. OpencodeSession overrides it too: it posts the item to
+   * opencode's inbox at once, which supports a per-item DELETE.
    */
   protected onPromptQueued(_item: QueuedItem): void {
     // Held until a boundary — see the doc comment.

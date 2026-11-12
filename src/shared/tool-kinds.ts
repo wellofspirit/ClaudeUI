@@ -4,7 +4,7 @@
  * Each engine maps its tool names onto these kinds via EngineToolMap. Renderers
  * are keyed on kind, so Claude's Bash and opencode's bash both render through
  * the 'command' kind renderer. The per-engine name→kind tables live in
- * renderer/src/components/chat/tool-registry/{Claude,Opencode}EngineToolMap.ts.
+ * renderer/src/components/chat/tool-registry/{Claude,Opencode,Pi}EngineToolMap.ts.
  */
 
 import { DISPATCH_LABEL } from './first-party-tool-names'
