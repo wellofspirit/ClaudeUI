@@ -19,6 +19,14 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import type { WsInvokeRequest } from '../../../shared/remote-protocol'
+import {
+  describeRemoteSurface,
+  readRemoteSurface,
+  serializeRemoteSurface,
+  REMOTE_SURFACE_PATH,
+  REMOTE_SURFACE_UPDATE_COMMAND,
+  type RemoteSurfaceEntry
+} from '../../../test/helpers/remote-surface'
 
 // ---------------------------------------------------------------------------
 // Mocks for every service remote-handlers.ts imports.
@@ -2777,6 +2785,43 @@ describe('remote surface parity (phase 1 port)', () => {
         ...SYNC_TIMING_CHANNELS
       ].sort()
     )
+  })
+
+  it('the remote surface equals the checked-in dump', () => {
+    const live = describeRemoteSurface(commandRegistry)
+    expect(live.length).toBeGreaterThan(200) // a registrar that did not run must not pass
+    if (process.env.UPDATE_REMOTE_SURFACE === '1') {
+      if (process.env.CI) throw new Error('refusing to rewrite the remote surface dump in CI')
+      fs.writeFileSync(REMOTE_SURFACE_PATH, serializeRemoteSurface(live))
+      return
+    }
+    const dump = readRemoteSurface()
+    const liveBy = new Map(live.map((e) => [e.channel, e]))
+    const dumpBy = new Map(dump.map((e) => [e.channel, e]))
+    const added = live.filter((e) => !dumpBy.has(e.channel)).map((e) => e.channel)
+    const removed = dump.filter((e) => !liveBy.has(e.channel)).map((e) => e.channel)
+    const changed: string[] = []
+    for (const e of live) {
+      const old = dumpBy.get(e.channel)
+      if (!old) continue
+      const fields = (Object.keys(e) as (keyof RemoteSurfaceEntry)[])
+        .filter((k) => e[k] !== old[k])
+        .map((k) => `${k}: ${JSON.stringify(old[k])} -> ${JSON.stringify(e[k])}`)
+      if (fields.length) changed.push(`${e.channel} (${fields.join('; ')})`)
+    }
+    const list = (title: string, xs: string[]): string[] =>
+      xs.length ? [`${title}:`, ...xs.map((x) => `  ${x}`)] : []
+    const message = [
+      'The static remote surface (what registerRemoteHandlers registers; plugin channels are not covered) differs from remote-surface.jsonl.',
+      ...list('In the registry, not in the dump (added)', added),
+      ...list('In the dump, not in the registry (removed)', removed),
+      ...list('Declaration changed (dump -> registry)', changed),
+      `If the change is intended, regenerate the dump: ${REMOTE_SURFACE_UPDATE_COMMAND}`,
+      'Then commit the regenerated remote-surface.jsonl: the dump diff is how a change to the remote surface gets reviewed.',
+      'A channel whose capability is outside the base grant set (AUTH_OFF_GRANTS) also needs a line in the hand-kept non-base table in this file.'
+    ].join('\n')
+    if (added.length || removed.length || changed.length) throw new Error(message)
+    expect(live).toEqual(dump)
   })
 
   it('automode:judge-model-support is a base-reachable config QUERY, like get-engine-models', () => {
