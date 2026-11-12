@@ -38,7 +38,7 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 ## Invariants
 
 - Sealed fields are written only by the replica; a component or store action writing one is a lint error: `eslint.config.mjs` (`no-restricted-syntax`), pinned by `src/renderer/src/stores/__tests__/sealed-fields.unit.test.ts`.
-- `mirrorStoreIntoReplica` in `src/test/helpers/replica-seed.ts` is a bridge for old fixtures and omits some sealed fields; the next projection reverts a sealed field staged with `setState`.
+- A sealed field staged with `setState` in a test is reverted by the next projection unless `mirrorStoreIntoReplica` (`src/test/helpers/replica-seed.ts`) is called right after; it copies every sealed field into the replica and is a bridge for old fixtures, not a pattern.
 - View-only per-session fields live on `PerSessionState` in the one `sessions` record; they survive projection and rekey in `src/renderer/src/stores/replica.ts`. Never a second store.
 - A new per-session field must be considered for the hand-written reset list in `clearConversation` (`src/renderer/src/stores/session-store.ts`) [nothing forces it].
 - No viewport units (`vh`, `vw`, `dvh`, `h-screen`, ...) in components: the app renders under CSS `zoom`; `ZOOM_TRAP` in `eslint.config.mjs` (ADR-093).
