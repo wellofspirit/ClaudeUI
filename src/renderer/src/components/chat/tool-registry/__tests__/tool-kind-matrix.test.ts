@@ -127,6 +127,9 @@ const NOT_OURS = [
   'mcp__claude-ui__',
   'mcp__',
   'mcp_claude-ui_render_mermaid',
+  // pi's sanitised MCP spelling (`-` becomes `_`): a foreign server name, not ours.
+  'mcp__claude_ui__render_mermaid',
+  'mcp__claude_ui_sessions__session_list',
   'claudeui_',
   'claudeui_bash',
   'claudeui_session_nope',
@@ -303,6 +306,8 @@ describe('tool kinds and labels, every known name on every engine', () => {
       "mcp__claude-ui__": mcp | mcp | mcp | mcp | mcp
       "mcp__": mcp | mcp | mcp | mcp | mcp
       "mcp_claude-ui_render_mermaid": - | unknown | unknown | unknown | unknown
+      "mcp__claude_ui__render_mermaid": mcp | mcp | mcp | mcp | mcp
+      "mcp__claude_ui_sessions__session_list": mcp | mcp | mcp | mcp | mcp
       "claudeui_": - | unknown | unknown | unknown | unknown
       "claudeui_bash": - | unknown | unknown | unknown | unknown
       "claudeui_session_nope": - | unknown | unknown | unknown | unknown
@@ -460,6 +465,8 @@ describe('tool kinds and labels, every known name on every engine', () => {
       "mcp__claude-ui__": mcp__claude-ui__ | mcp__claude-ui__ | mcp__claude-ui__
       "mcp__": mcp__ | mcp__ | mcp__
       "mcp_claude-ui_render_mermaid": mcp_claude-ui_render_mermaid | mcp_claude-ui_render_mermaid | mcp_claude-ui_render_mermaid
+      "mcp__claude_ui__render_mermaid": mcp__claude_ui__render_mermaid | mcp__claude_ui__render_mermaid | mcp__claude_ui__render_mermaid
+      "mcp__claude_ui_sessions__session_list": mcp__claude_ui_sessions__session_list | mcp__claude_ui_sessions__session_list | mcp__claude_ui_sessions__session_list
       "claudeui_": claudeui_ | claudeui_ | claudeui_
       "claudeui_bash": claudeui_bash | claudeui_bash | claudeui_bash
       "claudeui_session_nope": claudeui_session_nope | claudeui_session_nope | claudeui_session_nope
