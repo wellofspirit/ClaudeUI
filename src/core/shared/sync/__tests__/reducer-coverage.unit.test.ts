@@ -3,33 +3,26 @@
  *
  * The `canonical` column of `CHANNEL_SPECS` and the reducer must agree: a channel
  * classified canonical that `applyEvent` does not fold is silently dropped from
- * every snapshot, and a fold for a channel classified otherwise never runs
- * (`applyEvent` returns early on the classification).
+ * every snapshot, and a fold for a channel classified otherwise never runs.
+ * The compiler holds the handler map to `FoldedChannel`; this suite pins the same
+ * set at runtime and the type itself.
  */
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import {
   canonicalChannels,
   isVolatileStream,
   volatileStreamChannels,
   type FoldedChannel
 } from '../channels'
-
-/** The channels `applyEvent` has a branch for, read from its source. */
-function reducerCases(): string[] {
-  const code = readFileSync(join(process.cwd(), 'src/core/shared/sync/reducer.ts'), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1')
-  return [...code.matchAll(/^\s*case '([^']+)':/gm)].map((m) => m[1]).sort()
-}
+import { applyEvent, foldedChannels } from '../reducer'
+import { emptyCanonicalState } from '../state'
 
 describe('reducer coverage', () => {
   it('applyEvent folds exactly the canonical channels of the event lane', () => {
     const eventLane = canonicalChannels().filter((channel) => !isVolatileStream(channel))
     expect(eventLane.length).toBeGreaterThan(30)
-    expect(reducerCases()).toEqual(eventLane)
+    expect(foldedChannels()).toEqual(eventLane)
   })
 
   it('the only canonical channel off the event lane is the item-stream lane', () => {
@@ -49,8 +42,15 @@ describe('reducer coverage', () => {
     const transient: FoldedChannel = 'session:error'
     // @ts-expect-error a canonical volatile channel is not folded by `applyEvent`
     const volatile: FoldedChannel = 'session:item-delta'
-    expect(reducerCases()).toContain(folded)
-    expect(reducerCases()).not.toContain(transient)
-    expect(reducerCases()).not.toContain(volatile)
+    expect(foldedChannels()).toContain(folded)
+    expect(foldedChannels()).not.toContain(transient)
+    expect(foldedChannels()).not.toContain(volatile)
+  })
+
+  it('a channel named after an Object.prototype member is not found on the prototype', () => {
+    const state = emptyCanonicalState()
+    for (const channel of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      expect(applyEvent(state, { channel, args: ['rid', {}] })).toBe(state)
+    }
   })
 })

@@ -599,9 +599,10 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
 
 /**
  * The channels `applyEvent` folds: classified `canonical` on the event lane,
- * as a type computed from the table. `reducer-coverage.unit.test.ts` holds the
- * reducer to exactly this set. (A canonical volatile channel is folded as an
- * item-stream frame by `SyncCore.process`, not by `applyEvent`.)
+ * as a type computed from the table. The reducer's handler map is keyed by
+ * exactly this union, so a canonical row without a handler, or a handler for a
+ * row that is not canonical, does not compile. (A canonical volatile channel is
+ * folded as an item-stream frame by `SyncCore.process`, not by `applyEvent`.)
  */
 export type FoldedChannel = {
   [C in keyof typeof SYNC_CHANNEL_SPECS]: (typeof SYNC_CHANNEL_SPECS)[C] extends {
@@ -676,7 +677,7 @@ export function volatileStreamChannels(flavor?: VolatileFlavor): string[] {
 
 /**
  * Every channel that changes canonical state: the ones `applyEvent` folds plus
- * the item-stream lane. `reducer-coverage.unit.test.ts` holds the reducer to it.
+ * the item-stream lane.
  */
 export function canonicalChannels(): string[] {
   return Object.entries(CHANNEL_SPECS)

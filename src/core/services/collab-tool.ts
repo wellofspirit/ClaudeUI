@@ -1,3 +1,4 @@
+import type { EmitSessionEvent } from '../shared/sync/events'
 import { createSdkMcpServer, tool } from '../sdk'
 import type { SdkMcpServer } from '../sdk'
 import { z } from 'zod'
@@ -44,7 +45,7 @@ export interface CollabServerContext {
   /** The session's approvable blocks and grants (ADR-091 part 6), for the same judge. */
   blockedCalls?: BlockedCallLedger
   /** BaseSession.send — re-emits under the dispatching session's routing. */
-  emit: (channel: string, data: unknown) => void
+  emit: EmitSessionEvent
   /** BaseSession.addDispatchedCost — folds a dispatched turn's spend into this
    *  session's own cost breakdown (ADR-033 Slice C). */
   addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void

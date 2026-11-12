@@ -23,7 +23,7 @@ import {
   ringedChannels,
   volatileStreamChannels
 } from '../../shared/sync/channels'
-import { applyEvent } from '../../shared/sync/reducer'
+import { applyEvent, foldedChannels } from '../../shared/sync/reducer'
 import { streamEventScopeOf } from '../../shared/sync/stream'
 import { emptyCanonicalState, emptySession, type CanonicalState } from '../../shared/sync/state'
 import { STREAM_WATCH_COMMAND } from '../stream-watch'
@@ -227,11 +227,11 @@ describe('emission funnel (item 2)', () => {
 
   it('BaseSession.send delegates to the funnel rather than sending directly', () => {
     const src = read('src/core/providers/BaseSession.ts')
-    expect(src).toMatch(/protected send\([\s\S]{0,400}?emitEvent\(/)
+    expect(src).toMatch(/protected send<[^(]*>\([\s\S]{0,400}?emitEvent\(/)
     expect(src).not.toMatch(/this\.win\.webContents\.send\(/)
     // 4c: a session emission names no window at all — every channel it emits is
     // replicated or volatile, so the per-session `win` is not a delivery target.
-    expect(src).toMatch(/emitEvent\(channel, \[this\.routingId, data\]\)/)
+    expect(src).toMatch(/emitEvent\(channel, \[this\.routingId, data\] as EmitArgs<C>\)/)
   })
 })
 
@@ -278,7 +278,9 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
    * Every channel literal the main process emits, from both emission shapes:
    * `emitEvent('x', …)` and `this.send('x', …)` (BaseSession, which funnels).
    * Also picks up the remaining host-local `webContents.send('x', …)` sites, so
-   * a host-local channel cannot dodge classification either.
+   * a host-local channel cannot dodge classification either. An unclassified literal in
+   * `emitEvent` / `this.send` is now also a compile error (the channel is typed); the
+   * `webContents.send('x')` and `sendFn('x')` shapes are what this scan still covers alone.
    */
   function emittedChannels(): Set<string> {
     const found = new Set<string>()
@@ -523,11 +525,10 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
   })
 
   it('volatile ⇒ no reducer branch, and applyEvent refuses one', () => {
-    // Both halves matter. The SOURCE half: a `case 'session:stream':` growing
-    // back would be a second transcript accumulator racing the item lifecycle.
-    const reducerSrc = readCode('src/core/shared/sync/reducer.ts')
+    // Both halves matter. The REGISTRY half: a handler for a volatile channel
+    // growing back would be a second transcript accumulator racing the item lifecycle.
     for (const channel of volatile) {
-      expect(reducerSrc).not.toContain(`case '${channel}':`)
+      expect(foldedChannels()).not.toContain(channel)
     }
     // The BEHAVIORAL half: even routed onto the event lane by mistake, the fold
     // is identity-stable rather than a duplicate append.

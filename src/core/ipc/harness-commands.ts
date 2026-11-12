@@ -41,6 +41,7 @@
  * second per install, from the installer). Both are replicated sync events, so
  * the desktop renderer and every remote client get them the same way.
  */
+import type { EmitEvent } from '../shared/sync/events'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type {
@@ -613,7 +614,7 @@ export function harnessCommands(
 
 // ── Events ────────────────────────────────────────────────────────────────────
 
-export type HarnessEventEmitter = (channel: string, args: unknown[]) => void
+export type HarnessEventEmitter = EmitEvent
 
 let stopEvents: (() => void) | null = null
 
@@ -625,7 +626,7 @@ let stopEvents: (() => void) | null = null
  */
 export function startHarnessEvents(emit: HarnessEventEmitter): () => void {
   stopEvents?.()
-  const send = (channel: string, args: unknown[]): void => {
+  const send: EmitEvent = (channel, args) => {
     try {
       emit(channel, args)
     } catch {

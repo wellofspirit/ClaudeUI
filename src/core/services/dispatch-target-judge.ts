@@ -20,6 +20,7 @@
  * Imports no session class (the dispatcher's require-cycle rule): only the
  * automode leaves and type-only shared types.
  */
+import type { EmitSessionEvent } from '../shared/sync/events'
 import { v4 as uuid } from 'uuid'
 import { HAND_BACK_TOOL } from '../../shared/dispatch-agent-description'
 import type { ReportReview } from '../../shared/handback-review'
@@ -79,7 +80,7 @@ export interface DispatchTargetJudgeOptions {
   /** The target's model — the judge model when `autoMode.judgeModel` is unset. */
   model: () => string
   /** `entry.ctx.emit`, read live (the ctx is replaced on every continuation). */
-  emit: () => (channel: string, data: unknown) => void
+  emit: () => EmitSessionEvent
   /** `entry.ctx.getMessages()` — the dispatching session's transcript, read live. */
   messages: () => ChatMessage[]
   /**

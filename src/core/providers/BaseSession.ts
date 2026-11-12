@@ -28,6 +28,7 @@ import { hasRunningDispatch } from '../services/dispatch-runs'
 import { logger } from '../services/logger'
 import { reholdNonUserItem } from '../services/session-delivery'
 import { emitEvent } from '../services/sync-host'
+import type { EmitArgs, SessionEventChannel, SessionEventData } from '../shared/sync/events'
 import { localVoiceServer } from '../voice/local-voice-server'
 
 /**
@@ -424,7 +425,7 @@ export abstract class BaseSession implements ISession {
   }
 
   /** Public wrapper over the protected send() — see ISession.emit doc comment. */
-  emit(channel: string, data: unknown): void {
+  emit<C extends SessionEventChannel>(channel: C, data: SessionEventData<C>): void {
     this.send(channel, data)
   }
 
@@ -630,8 +631,10 @@ export abstract class BaseSession implements ISession {
    * encoding"). It is read fresh on every send, so a rekey mid-turn is picked up
    * without any re-registration.
    */
-  protected send(channel: string, data: unknown): void {
-    emitEvent(channel, [this.routingId, data])
+  protected send<C extends SessionEventChannel>(channel: C, data: SessionEventData<C>): void {
+    // `SessionEventChannel` is exactly the channels whose args are `(routingId, data)`;
+    // TypeScript cannot prove that for a generic `C`, so the tuple is stated once here.
+    emitEvent(channel, [this.routingId, data] as EmitArgs<C>)
   }
 
   /**

@@ -1141,8 +1141,14 @@ describe('ADR-054 step-up tiers over the socket', () => {
       await invoke(c, 'stream:watch', { sessionIds: [RID] })
       c.frames.length = 0
 
-      emitEvent('session:bash-output', [RID, { toolUseId: 'tu-1', output: 'mine' }])
-      emitEvent('session:bash-output', [OTHER, { toolUseId: 'tu-2', output: 'theirs' }])
+      emitEvent('session:bash-output', [
+        RID,
+        { toolUseId: 'tu-1', output: 'mine', totalLines: 1, totalBytes: 4 }
+      ])
+      emitEvent('session:bash-output', [
+        OTHER,
+        { toolUseId: 'tu-2', output: 'theirs', totalLines: 1, totalBytes: 6 }
+      ])
       await new Promise((r) => setTimeout(r, 50))
 
       // Verbatim: the whole point of the flavor is that the client's existing
@@ -1151,7 +1157,7 @@ describe('ADR-054 step-up tiers over the socket', () => {
         {
           type: 'stream-ev',
           channel: 'session:bash-output',
-          args: [RID, { toolUseId: 'tu-1', output: 'mine' }]
+          args: [RID, { toolUseId: 'tu-1', output: 'mine', totalLines: 1, totalBytes: 4 }]
         }
       ])
     })
@@ -1224,11 +1230,14 @@ describe('ADR-054 step-up tiers over the socket', () => {
       // controlling it drives the production branch rather than a test seam.
       congest(2 * 1024 * 1024)
       emitWatchItem(RID, 'LOST')
-      emitEvent('session:bash-output', [RID, { toolUseId: 'tu-1', output: 'also lost' }])
+      emitEvent('session:bash-output', [
+        RID,
+        { toolUseId: 'tu-1', output: 'also lost', totalLines: 1, totalBytes: 9 }
+      ])
       // THE EVENT LANE IS NEVER DROPPED. A missing event is a permanent hole in a
       // seq-ordered stream; this is the tool_result that makes losing the tail
       // above honest rather than lossy-with-consequences.
-      emitEvent('session:tool-result', [RID, { toolUseId: 'tu-1', result: 'done' }])
+      emitEvent('session:tool-result', [RID, { toolUseId: 'tu-1', result: 'done', isError: false }])
       await replica.settle()
 
       expect(replica.streams).toEqual([])

@@ -45,7 +45,8 @@ import { hasWakingTask } from '../lib/task-types'
 import { isCreatedWorktree } from '../../../shared/linked-worktree'
 import { sessionWorkdir } from '../lib/session-workdir'
 import { approvalActionName } from '../components/chat/tool-registry/approval-action'
-import type { SessionResult, SessionStatus, TaskNotification } from '../../../shared/types'
+import type { SessionStatus } from '../../../shared/types'
+import { wireArgs } from '../../../core/shared/sync/events'
 
 /** Send a system notification if the session is not currently focused */
 function notifyIfNeeded(routingId: string, title: string, body: string, tag?: string): void {
@@ -597,14 +598,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
 
   switch (channel) {
     case 'session:created': {
-      const data = args[1] as
-        | {
-            cwd?: string
-            resumeSessionId?: string
-            resumeSessionAt?: string
-            createdBy?: 'agent'
-          }
-        | undefined
+      const data = wireArgs(channel, args)[1]
       const resident = wasResidentAtCreate.get(routingId)
       wasResidentAtCreate.delete(routingId)
       // The reducer has already bootstrapped the entry (cwd, sdkActive, seeded);
@@ -645,8 +639,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       // The fold (bootstrap + cwd) has already run; the CONTENT is a refetch
       // since S4. `args[0]` is the payload object here, not a routing id — this
       // is the one channel whose session scoping lives inside its payload.
-      const payload = args[0] as
-        { routingId?: string; sessionId?: string; projectKey?: string } | undefined
+      const payload = wireArgs(channel, args)[0]
       const watchedId = payload?.routingId
       if (!watchedId || !payload?.sessionId || !payload?.projectKey) return
       // Evicted entries are skipped on purpose: their heavy arrays were dropped
@@ -673,13 +666,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     }
 
     case 'session:approval-request': {
-      const approval = args[1] as
-        | {
-            toolName?: string
-            reRaised?: boolean
-            agent?: { subagentType?: string }
-          }
-        | undefined
+      const approval = wireArgs(channel, args)[1]
       // A card the host put back after the parent's disconnect (ADR-105 §5) was announced
       // when it first came: the reducer lists it again, nothing else fires.
       if (approval?.reRaised) return
@@ -698,7 +685,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     }
 
     case 'session:status': {
-      const status = args[1] as SessionStatus | undefined
+      const status = wireArgs(channel, args)[1]
       const id = effectiveIdFor(routingId, status)
       // Clear attention when a new turn starts. Nothing else is inferred from a
       // status edge (ADR-038): approvals and queue transitions are event-driven,
@@ -720,7 +707,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
       // subagent's hand-back) is not the user's turn: that turn's result decides.
       // The timer is the net for a flag with no turn behind it (see
       // PENDING_WAKE_GRACE_MS); the next running status cancels it.
-      if ((args[1] as SessionResult | undefined)?.pendingWake) {
+      if (wireArgs(channel, args)[1]?.pendingWake) {
         pendingWakeTimers.set(
           routingId,
           setTimeout(() => {
@@ -738,7 +725,7 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
     case 'session:task-notification': {
       // The notification list and `activeTasks` are the reducer's; the stop
       // spinner and the live bash tail are per-client and die here.
-      const notification = args[1] as TaskNotification | undefined
+      const notification = wireArgs(channel, args)[1]
       if (notification?.toolUseId) {
         store.clearTaskStopping(routingId, notification.toolUseId)
         store.clearBashOutput(routingId, notification.toolUseId)
@@ -758,7 +745,10 @@ function observeReplicatedEvent(channel: string, args: unknown[]): void {
  * (`rekeyTargetFor`), in which case the entry the observer wants is under the new
  * key and the old one no longer resolves.
  */
-function effectiveIdFor(routingId: string, status: SessionStatus | undefined): string {
+function effectiveIdFor(
+  routingId: string,
+  status: Pick<Partial<SessionStatus>, 'sessionId'> | undefined
+): string {
   const target = status?.sessionId
   if (!target || target === routingId) return routingId
   return getReplicaState().sessions[target] ? target : routingId

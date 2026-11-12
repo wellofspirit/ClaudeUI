@@ -36,6 +36,22 @@ import {
 // owning it.
 import { setHostWindow } from '../host-window'
 
+const STATUS_UPDATE = {
+  cwd: '/x',
+  status: {
+    branch: 'main',
+    ahead: 0,
+    behind: 0,
+    trackingBranch: null,
+    files: [],
+    staged: [],
+    unstaged: [],
+    untracked: [],
+    linesAdded: 0,
+    linesRemoved: 0
+  }
+}
+
 interface FakeWindow {
   isDestroyed: () => boolean
   webContents: { send: ReturnType<typeof vi.fn> }
@@ -64,13 +80,13 @@ describe('sync-host delivery', () => {
     addSyncSubscriber(a)
     addSyncSubscriber(b)
 
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
 
     // The desktop window is a subscriber like everyone else now — it is NOT a
     // distinguished `webContents.send` target for replicated state.
     expect(main.webContents.send).not.toHaveBeenCalled()
-    expect(a).toHaveBeenCalledWith(expect.any(Number), 'git:status-update', [{ cwd: '/x' }])
-    expect(b).toHaveBeenCalledWith(expect.any(Number), 'git:status-update', [{ cwd: '/x' }])
+    expect(a).toHaveBeenCalledWith(expect.any(Number), 'git:status-update', [STATUS_UPDATE])
+    expect(b).toHaveBeenCalledWith(expect.any(Number), 'git:status-update', [STATUS_UPDATE])
   })
 
   it('the desktop-originated session:created no longer skips anyone (4c)', () => {
@@ -91,7 +107,7 @@ describe('sync-host delivery', () => {
     setHostWindow(main as unknown as BrowserWindow)
     addSyncSubscriber(sink)
 
-    emitEvent('auth:state', [{ status: 'success' }])
+    syncCore.emit('auth:state', [{ status: 'success' }])
 
     expect(main.webContents.send).toHaveBeenCalledWith('auth:state', { status: 'success' })
     expect(sink).not.toHaveBeenCalled()
@@ -102,13 +118,15 @@ describe('sync-host delivery', () => {
     const other = fakeWindow()
     setHostWindow(primary as unknown as BrowserWindow)
 
-    emitEvent('mockup:file-changed', ['dir'], other as unknown as BrowserWindow)
+    syncCore.emit('mockup:file-changed', ['dir'], { window: other as unknown as BrowserWindow })
     // `mockup:file-changed` is REPLICATED, so the window argument is ignored: no
     // call site can redirect a replicated event at a window any more.
     expect(other.webContents.send).not.toHaveBeenCalled()
     expect(primary.webContents.send).not.toHaveBeenCalled()
 
-    emitEvent('terminal:data', [{ terminalId: 't1', data: 'x' }], other as unknown as BrowserWindow)
+    syncCore.emit('terminal:data', [{ terminalId: 't1', data: 'x' }], {
+      window: other as unknown as BrowserWindow
+    })
     expect(other.webContents.send).toHaveBeenCalledWith('terminal:data', {
       terminalId: 't1',
       data: 'x'
@@ -120,7 +138,7 @@ describe('sync-host delivery', () => {
     const main = fakeWindow(true)
     setHostWindow(main as unknown as BrowserWindow)
 
-    expect(() => emitEvent('auth:state', [{ status: 'success' }])).not.toThrow()
+    expect(() => syncCore.emit('auth:state', [{ status: 'success' }])).not.toThrow()
     expect(main.webContents.send).not.toHaveBeenCalled()
   })
 
@@ -129,14 +147,17 @@ describe('sync-host delivery', () => {
     addSyncSubscriber(sink)
 
     const before = syncCore.currentSeq()
-    emitEvent('session:message', ['rid', { id: 'm1', role: 'assistant', content: [] }])
+    emitEvent('session:message', [
+      'rid',
+      { id: 'm1', role: 'assistant', content: [], timestamp: 0 }
+    ])
 
     expect(sink).toHaveBeenCalledTimes(1)
     const [seq, channel, args] = sink.mock.calls[0]
     expect(seq).toBe(before + 1)
     expect(seq).toBe(syncCore.currentSeq())
     expect(channel).toBe('session:message')
-    expect(args).toEqual(['rid', { id: 'm1', role: 'assistant', content: [] }])
+    expect(args).toEqual(['rid', { id: 'm1', role: 'assistant', content: [], timestamp: 0 }])
   })
 
   it('one emission ⇒ exactly one ring entry, whose seq is the delivered seq', () => {
@@ -144,7 +165,10 @@ describe('sync-host delivery', () => {
     addSyncSubscriber(sink)
 
     const before = syncCore.currentSeq()
-    emitEvent('session:message', ['rid', { id: 'm1', role: 'assistant', content: [] }])
+    emitEvent('session:message', [
+      'rid',
+      { id: 'm1', role: 'assistant', content: [], timestamp: 0 }
+    ])
     expect(syncCore.currentSeq()).toBe(before + 1)
 
     const appended = (syncCore.getAfter(before) ?? []).filter(
@@ -164,7 +188,7 @@ describe('sync-host delivery', () => {
     addSyncSubscriber(boom)
     addSyncSubscriber(healthy)
 
-    expect(() => emitEvent('git:status-update', [{ cwd: '/x' }])).not.toThrow()
+    expect(() => emitEvent('git:status-update', [STATUS_UPDATE])).not.toThrow()
     expect(healthy).toHaveBeenCalledTimes(1)
   })
 
@@ -175,7 +199,7 @@ describe('sync-host delivery', () => {
     off = addSyncSubscriber(first)
     addSyncSubscriber(second)
 
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
 
     expect(second).toHaveBeenCalledTimes(1)
     expect(syncSubscriberCount()).toBe(1)
@@ -188,7 +212,7 @@ describe('sync-host delivery', () => {
     off()
     expect(syncSubscriberCount()).toBe(0)
 
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     expect(sink).not.toHaveBeenCalled()
   })
 
@@ -199,7 +223,7 @@ describe('sync-host delivery', () => {
     addSyncSubscriber(sink)
     const before = syncCore.currentSeq()
 
-    emitEvent('never:classified', [{}])
+    syncCore.emit('never:classified', [{}])
 
     expect(main.webContents.send).not.toHaveBeenCalled()
     expect(sink).not.toHaveBeenCalled()

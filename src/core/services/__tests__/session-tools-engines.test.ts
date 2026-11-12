@@ -16,7 +16,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { EngineId } from '../../../shared/types'
+import type { EngineId, PermissionMode } from '../../../shared/types'
 import { ACTING_SESSION_TOOLS } from '../../../shared/session-tools-description'
 import { TurnOriginLedger } from '../../providers/turn-origin-ledger'
 import type { CreateSessionArgs } from '../../ipc/create-session'
@@ -74,7 +74,7 @@ beforeEach(() => {
   configureSessionTools({ manager, createSession, sendPrompt })
 })
 
-function born(label: string, engine: EngineId, mode = 'default') {
+function born(label: string, engine: EngineId, mode: PermissionMode = 'default') {
   const routingId = `${label}-${randomUUID()}`
   const cwd = path.join(ROOT, 'proj')
   fs.mkdirSync(cwd, { recursive: true })

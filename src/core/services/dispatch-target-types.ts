@@ -1,6 +1,7 @@
 /**
  * Types and constants shared by the dispatcher core and the per-engine dispatch target modules.
  */
+import type { EmitSessionEvent } from '../shared/sync/events'
 import type { ServerConnection } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
 import type { Agent_Info } from '../opencode/protocol-v2/openapi'
@@ -99,7 +100,7 @@ export interface DispatchContext {
    */
   blockedCalls?: BlockedCallLedger
   /** Re-emits under the dispatching session's routing (BaseSession.send). */
-  emit: (channel: string, data: unknown) => void
+  emit: EmitSessionEvent
   /**
    * BaseSession.addDispatchedCost — folds a completed dispatch turn's spend
    * into the dispatching session's own cost breakdown (ADR-033 Slice C).
@@ -928,7 +929,7 @@ export interface OpencodePendingApproval {
   askingSessionId: string
   targetSessionId: string
   client: DispatchTargetClient
-  emit: (channel: string, data: unknown) => void
+  emit: EmitSessionEvent
 }
 
 export interface ClaudePendingApproval {
@@ -938,7 +939,7 @@ export interface ClaudePendingApproval {
    *  such an entry simply never gets swept by target-scoped dismissal (it
    *  still resolves via the abort-listener / explicit resolveApproval). */
   targetSessionId: string | null
-  emit: (channel: string, data: unknown) => void
+  emit: EmitSessionEvent
   resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
 }
 
@@ -950,7 +951,7 @@ export interface ClaudePendingApproval {
 export interface PiPendingApproval {
   kind: 'pi'
   targetSessionId: string | null
-  emit: (channel: string, data: unknown) => void
+  emit: EmitSessionEvent
   resolve: (decision: ApprovalDecision, answers?: Record<string, string>) => void
 }
 

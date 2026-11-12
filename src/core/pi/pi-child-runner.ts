@@ -20,6 +20,7 @@
  * Imports no session class and not the dispatcher (require-cycle rule): only
  * the pi transport leaves, the automode trajectory leaf and the logger.
  */
+import type { EmitSessionEvent } from '../shared/sync/events'
 import type { PiSkillDescriptor } from './pi-skill-bridge'
 import { v4 as uuidv4 } from 'uuid'
 import type { ChatMessage } from '../../shared/types'
@@ -161,7 +162,7 @@ export interface PiChildRunnerOpts {
   spawnOpts: Omit<PiChildSpawnOpts, 'cwd'>
   /** Stream owner (the spawning tool_use id) and emitter, both read LIVE (dispatch replaces ctx per continuation). */
   ownerToolUseId: () => string | undefined
-  emit: () => (channel: string, data: unknown) => void
+  emit: () => EmitSessionEvent
   /** Accounting hook for every `usage` output (dispatch: nothing extra; subagents: a child usage row). */
   onUsage?: (out: Extract<PiMapperOutput, { kind: 'usage' }>) => void
   /** Every `tool_result` output (subagents record the judge's ground-truth outcome). */
@@ -833,7 +834,7 @@ export class PiChildRunner {
 export function forwardPiChildStream(
   out: PiMapperOutput,
   ownerToolUseId: string | undefined,
-  emit: (channel: string, data: unknown) => void,
+  emit: EmitSessionEvent,
   turnToolUseIds: Set<string>
 ): void {
   const toolUseId = ownerToolUseId
