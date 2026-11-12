@@ -5,7 +5,7 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 ## What lives here
 
 - `components/`: one folder per component, a container plus a pure `View.tsx` where split; tests in each `__tests__/`.
-- `stores/session-store.ts`: the one Zustand store. Regions by symbol: `AppSettings`, `DEFAULT_SETTINGS`, `PerSessionState`, `EMPTY_SESSION_STATE`, `SessionState` (signatures), the `create()` body (bodies).
+- `stores/session-store.ts`: the one Zustand store. Regions by symbol: `PerSessionState`, `EMPTY_SESSION_STATE`, `SessionState` (signatures), the `create()` body (bodies). It re-exports `AppSettings` and `DEFAULT_SETTINGS` from `src/shared/app-settings.ts`, the schema core reads too.
 - `stores/replica.ts`, `stores/sealed-fields.ts`: the store is a replica of host state; the replica fold is the only writer of sealed fields. `sync/` holds only the desktop transport, not the replica.
 - `hooks/useClaudeEvents.ts`: the event listener hub; host events reach the store through the replica, this file runs the side effects.
 - `lib/`, `utils/`: plain TypeScript helpers (`lib/session-history-load.ts` loads transcripts).
@@ -15,16 +15,15 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 
 **A persisted app setting with its Settings control** (exemplar: `START_IN_WORKTREE` in `src/renderer/src/components/SettingsDialog/settings-pages.tsx`)
 
-1. `src/renderer/src/stores/session-store.ts`, `AppSettings`: add the key; optional, so `undefined` is the default [nothing].
-2. Same file, `DEFAULT_SETTINGS`: only for a non-`undefined` default; a required key forces it [compiler].
+1. `src/shared/app-settings.ts`, `AppSettings`: add the key, required, and its default in `DEFAULT_SETTINGS` [compiler: a required key forces the default]. That default is the only one: the store merges it and core resolves through it.
+2. Optional with no default only when unset is its own state (Reset then deletes the key); a resolver in `src/shared/` then owns what unset means, as `sessionToolsEnabled` does [nothing].
 3. `src/renderer/src/components/SettingsDialog/settings-pages.tsx`: new `SettingItem` const, add it to `PAGE_LOCAL_ITEMS`, place it in a `PAGES` group; the newest app settings use this, `SECTIONS` in `settings-sections.tsx` is the older home [test: settings-pages.unit.test.tsx].
 4. `src/renderer/src/components/SettingsDialog/__tests__/settings-pages.unit.test.tsx`: add the key to the pinned `PAGE_LOCAL_ITEMS` list [test: settings-pages.unit.test.tsx].
 5. A new group, not just a row, also changes the group-id lists in `src/renderer/src/components/SettingsDialog/__tests__/SettingsDialogView.component.test.tsx` [test: SettingsDialogView.component.test.tsx].
-6. Consumer: a `useSessionStore` selector on `settings` [nothing]. Search, the phone settings view and sync to other clients need no step.
-7. If `src/core` must honour it, read it there: `loadSettings()` in `src/core/services/ui-config.ts` (disk), or `syncCore.getCanonicalState().settings` as `src/core/services/session-tools.ts` and `src/core/services/context-pressure.ts` do [nothing]. Values are `unknown`.
-8. Core never sees `DEFAULT_SETTINGS`: re-encode the default at the read site; a default that disagrees with step 2 compiles [nothing].
-9. To apply on change, add it to `saveUiSettings` in `src/core/ipc/handlers-core.ts` and to the boot block of `src/core/ipc/session.ipc.ts`; skip one and it applies only on save or only at start [nothing].
-10. `saveUiSettings` drops `sandbox`, `proxy`, `anthropicEndpoint` and `modelOverride` (engine and vendor owned, `docs/architecture/persistence.md`); a key with those names is lost on save.
+6. Renderer consumer: a `useSessionStore` selector on `settings` [nothing]. Search, the phone settings view and sync to other clients need no step.
+7. If `src/core` must honour it: read `appSetting('<key>')` from `src/core/services/app-settings.ts`. It is typed and returns the saved value or the default from step 1. A direct `loadSettings()` or canonical-state read fails [test: app-settings-readers.test.ts].
+8. If core must act when it changes (a timer, a level, a cache): add the effect to `applySettings` in `src/core/services/app-settings-apply.ts`. It runs at boot and after every change, whether a client saved or `settings.json` changed on disk [nothing: without it the new value is seen only where step 7 reads it].
+9. `saveUiSettings` in `src/core/ipc/handlers-core.ts` drops `sandbox`, `proxy`, `anthropicEndpoint` and `modelOverride` (engine and vendor owned, `docs/architecture/persistence.md`); a key with those names is lost on save.
 
 **A component test with two-tier test ids** (copy the closest exemplar's structure; files are `*.component.test.tsx` in `__tests__/`)
 

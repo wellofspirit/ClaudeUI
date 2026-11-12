@@ -11,6 +11,7 @@ Flat directory of the Electron-free service layer; `src/core/boot/core-services.
 - `src/core/services/worktree*.ts`, `git-service.ts`: worktree and git operations. `sync-*.ts`: host side of the sync core.
 - `src/core/services/remote-*.ts`, `tailscale-manager.ts`, `tunnel-manager.ts`, `vscode-web-service.ts`: remote access. `pty-manager.ts`, `terminal-service.ts`: shells.
 - Hosted tools: `src/core/services/mermaid-tool.ts`, `mockup-tool.ts`, `session-tools-server.ts`. Persistence: `db.ts` (schema, migrations, typed repositories), `sqlite-driver.ts`, `ui-config.ts` (JSON config plane).
+- App settings: `src/core/services/app-settings.ts` (`appSetting`, core's one reader) and `app-settings-apply.ts` (`applySettings`, every side effect of a settings change); the schema is `src/shared/app-settings.ts`. Recipe: `src/renderer/src/CLAUDE.md`.
 - Claude-only despite neutral names: `session-history.ts` and `session-watcher.ts` (`~/.claude/projects` JSONL), `subagent-watcher.ts`, `service-session.ts` (usage-poll CLI fallback), `block-usage.ts`, `context-window.ts` (cli.js rules), `assistant-message.ts` (also used by `dispatch-claude-targets.ts`).
 - Traps: `src/core/services/pi-session-list.ts` is pi's cold history (JSONL under `~/.pi`), `opencode-session-list.ts` is opencode's; two host-token files, `src/core/sdk/host-token.ts` (spawn seam) and `claude-host-token.ts` (the keeper); `src/main/services/` is Electron-only, a different directory.
 
@@ -42,6 +43,7 @@ Flat directory of the Electron-free service layer; `src/core/boot/core-services.
 
 - The order of `startCoreServices` is a contract: prices before sessions, the host-token keeper before any cli.js spawn, `usageFetcher.startPolling()` after `afterSessionGraph`, `usageHubClient.start()` after the credential wiring.
 - Migrations are additive: guard on table existence, never drop a table or column an older build sharing `operational.db` reads, one transaction per version, a newer `user_version` is never rewound (`db.ts` `runMigrations`).
+- Core reads an app setting only through `appSetting` (canonical state resolved against `DEFAULT_SETTINGS`), never from disk or with a default of its own, and acts on a change only in `applySettings`: `src/shared/__tests__/app-settings-readers.test.ts` fails on a direct read.
 
 ## Fast test
 

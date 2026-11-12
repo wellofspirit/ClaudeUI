@@ -19,7 +19,9 @@ src/
                          remote protocol, E2E crypto, audio/ (PCM16 helpers),
                          api-invoke-table.ts (every pass-through ClaudeAPI member,
                          declared once; the preload, the web adapter and the test
-                         helper build from it)
+                         helper build from it), app-settings.ts (the app-settings
+                         schema: keys, types, defaults; the renderer and core both
+                         read it)
   core/                — the Electron-free service graph. Both hosts boot THIS.
     host.ts            — the host-adapter seams (see §Host seams below)
     boot/              — core-services.ts (the ordered service graph — its order IS
@@ -186,6 +188,7 @@ A partial catalog of `src/core/services/`; `src/core/services/CLAUDE.md` holds t
 | `db.ts`                                                                                                         | Operational SQLite DB — migrations + typed repos, on the driver seam (below)                                                                                                                         |
 | `sqlite-driver.ts` + `sqlite/`                                                                                  | The storage seam: one API, three engines (`better-sqlite3-driver`, `bun-sqlite-driver`, `node-sqlite-driver`); the ENTRYPOINT installs one (ADR-058)                                                 |
 | `ui-config.ts`                                                                                                  | Plain-text config: settings.json, engines/vendors JSON, sessions, slash commands                                                                                                                     |
+| `app-settings.ts` / `app-settings-apply.ts`                                                                     | `appSetting(key)`: core's one typed reader of app settings (canonical state, shared defaults); `applySettings()`: every core side effect of a settings change, at boot and on each change            |
 | `claude-settings.ts` / `claude-mcp.ts`                                                                          | Claude's own settings.json edited in place (plane ②, ADR-009); MCP: `claude-mcp*.ts` / `claude-plugin-mcp.ts`, see [mcp-catalog.md](mcp-catalog.md)                                                  |
 | `frontmatter.ts` / `claude-skill-info.ts`                                                                       | Line-scanner frontmatter reader (agent types); catalog entry → `SkillInfo` / slash-menu mapping shared by every engine session                                                                       |
 | `sync-host.ts`                                                                                                  | SyncCore's host adapter: the process-wide core, the subscriber registry (every client is one sink), the stream registry, and `emitEvent` — the ONE place a domain event leaves the process (ADR-051) |
