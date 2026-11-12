@@ -473,6 +473,15 @@ describe('E2E: windowless boot (SyncCore phase 4d)', () => {
     expect(hostOAuthLoopback()).toBe(true)
   })
 
+  it('applies the saved settings to core at boot, before any client connects', () => {
+    // Boot is the canonical seed followed by `applySettings` (`registerSessionIpc`): the
+    // fixture's 30 minute idle timeout, not the schema default of 15, is what the real
+    // manager now hands a new session. Read off the manager itself: it is the one sink
+    // this file does not mock.
+    const manager = getSessionManager() as unknown as { _sessionTimeoutMs: number }
+    expect(manager._sessionTimeoutMs).toBe(CONFIG_FIXTURE.settings.sessionTimeoutMins * 60 * 1000)
+  })
+
   it('answers sync with a sync-full snapshot built from the canonical seeds', async () => {
     // A phone connecting to a freshly-booted server, with no renderer that could
     // ever have hydrated anything: the settings, the session registry
