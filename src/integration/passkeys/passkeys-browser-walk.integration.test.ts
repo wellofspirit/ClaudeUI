@@ -206,6 +206,8 @@ vi.mock('../../core/auth/vault/CredentialSync', () => ({
 }))
 vi.mock('../../core/shared-providers', () => ({
   sharedProviderService: {
+    configure: vi.fn(),
+    adoptNativeKeys: vi.fn(async () => {}),
     syncAll: vi.fn(async () => {}),
     listDefinitions: vi.fn(() => []),
     listStatuses: vi.fn(async () => []),
@@ -221,6 +223,7 @@ vi.mock('../../core/shared-providers', () => ({
 }))
 vi.mock('../../core/opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
+    setServerStartedHook: vi.fn(),
     isBinaryAvailable: vi.fn(() => false),
     setCallerSessionLookup: vi.fn(),
     setDispatchAgent: vi.fn(),
@@ -254,6 +257,7 @@ vi.mock('../../core/pi/pi-locate', () => ({
 vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatcher: {
     dispatch: vi.fn(),
+    configureParents: vi.fn(() => () => {}),
     resolveApproval: vi.fn(() => false),
     disposeFor: vi.fn(),
     stopDispatch: vi.fn(() => false)

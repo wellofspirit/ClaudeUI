@@ -26,7 +26,7 @@ import { taskWakesParent } from '../../shared/waking-task-types'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { transformAssistantMessage } from './assistant-message'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
-import { extractToolResultContent } from './tool-result-content'
+import { claudeToolResults, claudeUsageTokens, claudeContextLength } from './claude-transcript'
 import {
   AGENT_ID_RE,
   readAgentIdentity,
@@ -146,7 +146,8 @@ import type {
   AccountRef,
   ModelCostEntry,
   EngineId,
-  QueuedItem
+  QueuedItem,
+  TaskTerminalStatus
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
@@ -2238,7 +2239,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     this.send('session:task-notification', {
       taskId,
       toolUseId: matchedToolUseId,
-      status: msg.status || 'completed',
+      // cli.js reports a free string; its documented values are the terminal statuses.
+      status: (msg.status || 'completed') as TaskTerminalStatus,
       outputFile,
       ...report,
       usage,
@@ -3152,21 +3154,17 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     const betaMessage = msg.message as Record<string, unknown> | undefined
     // A synthetic line (cli.js's own, zero usage) would reset the context length to 0.
     if (!betaMessage || isSyntheticModel(betaMessage.model)) return false
-    const usage = betaMessage.usage as Record<string, number> | undefined
-    if (!usage) return false
+    if (!betaMessage.usage) return false
 
-    const inputTokens = usage.input_tokens || 0
-    const outputTokens = usage.output_tokens || 0
-    const cacheRead = usage.cache_read_input_tokens || 0
-    const cacheCreation = usage.cache_creation_input_tokens || 0
+    const tokens = claudeUsageTokens(betaMessage.usage)
 
-    this.accInputTokens += inputTokens
-    this.accOutputTokens += outputTokens
-    this.accCachedTokens += cacheRead + cacheCreation
+    this.accInputTokens += tokens.input
+    this.accOutputTokens += tokens.output
+    this.accCachedTokens += tokens.cacheRead + tokens.cacheWrite
 
     // Context length from the most recent non-sidechain assistant message
     if (!isSidechain) {
-      this.lastContextLength = inputTokens + cacheRead + cacheCreation
+      this.lastContextLength = claudeContextLength(tokens)
     }
 
     return true
@@ -3619,17 +3617,10 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     content: Array<Record<string, unknown>>,
     parentToolUseId?: string
   ): void {
-    for (const block of content) {
-      if (typeof block !== 'object' || !block) continue
-      const b = block as Record<string, unknown>
-      if (b.type !== 'tool_result') continue
-
-      const toolUseId = b.tool_use_id as string
-      if (!toolUseId) continue
-
-      // Images the tool RETURNED ride along in the same array content — see
-      // tool-result-content.ts. The text collapse is unchanged.
-      const { text: resultText, images } = extractToolResultContent(b.content)
+    // Images the tool RETURNED ride along in the same array content — see
+    // tool-result-content.ts. The text collapse is unchanged.
+    for (const r of claudeToolResults(content)) {
+      const { toolUseId, text: resultText, isError, images } = r
 
       // Record agentId→toolUseId mapping for task notifications. Main agent
       // only: a nested result's text must not seed agent identity, and
@@ -3647,14 +3638,14 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
           toolUseId: parentToolUseId,
           toolResultToolUseId: toolUseId,
           result: resultText,
-          isError: !!b.is_error,
+          isError,
           ...(images ? { images } : {})
         })
       } else {
         this.send('session:tool-result', {
           toolUseId,
           result: resultText,
-          isError: !!b.is_error,
+          isError,
           ...(images ? { images } : {})
         })
       }

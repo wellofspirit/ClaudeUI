@@ -52,6 +52,7 @@
 import type { HostWindowHandle } from '../host'
 import { SyncCore, type Delivery } from '../sync/sync-core'
 import { streamEventScopeOf, type StreamLaneFrame } from '../shared/sync/stream'
+import type { EmitArgs, EmitChannel } from '../shared/sync/events'
 import { isItemTarget, itemStreamKey } from '../shared/sync/item-stream'
 import { getHostWindow } from './host-window'
 import { logger } from './logger'
@@ -511,16 +512,13 @@ syncCore.onRekey((oldId, newId) => {
 /**
  * Emit a domain event through the funnel.
  *
- * @param channel  the event channel (must be classified — fail-closed)
+ * @param channel  a replicated or volatile channel of the typed event map
+ *                 (host-local channels are not in it: they go straight to the window)
  * @param args     the wire args, positional exactly as `webContents.send` sent
  *                 them (`(routingId, data)` for session-scoped channels)
- * @param win      HOST-LOCAL emissions only: the window this event belongs to,
- *                 when it is not the app's primary window. Ignored for every
- *                 replicated / volatile channel — those go to every subscriber
- *                 and a call site has no say in it (4c).
  */
-export function emitEvent(channel: string, args: unknown[], win?: HostWindowHandle | null): void {
-  syncCore.emit(channel, args, { window: win ?? undefined })
+export function emitEvent<C extends EmitChannel>(channel: C, args: EmitArgs<C>): void {
+  syncCore.emit(channel, args)
 }
 
 // ---------------------------------------------------------------------------

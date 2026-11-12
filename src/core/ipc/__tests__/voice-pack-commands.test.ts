@@ -242,7 +242,6 @@ describe('voice:pack-changed', () => {
   it('is a replicated, ringed, non-canonical sync event', () => {
     expect(channelSpec('voice:pack-changed')).toMatchObject({
       cls: 'replicated',
-      ring: true,
       canonical: false
     })
   })

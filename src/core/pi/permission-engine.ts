@@ -15,9 +15,8 @@
 import path from 'node:path'
 import { homedir } from 'node:os'
 import type { ToolKind } from '../../shared/tool-kinds'
-import { hostedMcpKind } from '../../shared/tool-kinds'
+import { piToolKind } from '../../shared/pi-tool-kinds'
 import {
-  isSessionToolName,
   SESSION_TOOL_NAMES,
   SESSION_TOOLS_SERVER_NAME,
   type SessionToolName
@@ -182,84 +181,10 @@ export interface PermissionEngineContext {
 }
 
 // ---------------------------------------------------------------------------
-// piToolKind — SAME mapping as the renderer's PiEngineToolMap.kindOf
+// piToolKind — lives in src/shared/pi-tool-kinds.ts; the ladder reads its answer
 // ---------------------------------------------------------------------------
 
-/**
- * Mirrors `PiEngineToolMap.kindOf`
- * (src/renderer/src/components/chat/tool-registry/PiEngineToolMap.ts) for this
- * engine's mode-base decisions. Core code does not import from `src/renderer`,
- * so this switch is DUPLICATED here rather than shared —
- * `tool-registry/__tests__/PiEngineToolMap.test.ts` asserts the two tables
- * agree for every known pi tool name (single-source guard): a change to one
- * without the other fails that test.
- */
-export function piToolKind(toolName: string): ToolKind {
-  const mcpKind = hostedMcpKind(toolName)
-  if (mcpKind !== null) return mcpKind
-
-  switch (toolName) {
-    case 'bash':
-      return 'command'
-    case 'edit':
-      return 'fileEdit'
-    case 'write':
-      return 'fileWrite'
-    case 'read':
-      return 'fileRead'
-    case 'grep':
-    case 'find':
-    case 'ls':
-      return 'search'
-    // Plan mode (M5a): the bridge extension's locally-executed exit_plan
-    // tool (pi-bridge-source.ts, gated on CLAUDEUI_PI_PLAN_TOOLS) — reuses
-    // the SAME 'plan' kind Claude's ExitPlanMode maps to (tool-kinds.ts),
-    // so it gets its own mode-base treatment (planModeBaseDecision below)
-    // and renders ExitPlanModeCard on the renderer side. Mirrors
-    // PiEngineToolMap.kindOf's IDENTICAL case — the single-source guard
-    // test (PiEngineToolMap.test.ts) asserts the two tables agree.
-    case 'exit_plan':
-      return 'plan'
-    // Hosted tools (M4a+b) registered via pi.registerTool() in the bridge
-    // extension use BARE names — hostedMcpKind above only matches `mcp__*`
-    // prefixed names, so these need explicit cases here too. Mirrors
-    // PiEngineToolMap.kindOf's IDENTICAL cases (renderer side) — the
-    // single-source guard test (PiEngineToolMap.test.ts) asserts the two
-    // tables agree for every known pi tool name.
-    case 'render_mermaid':
-      return 'diagram'
-    case 'create_mockup':
-    case 'show_mockup':
-      return 'mockup'
-    case 'dispatch_agent':
-      return 'task'
-    // Host-run pi subagents (ADR-089): the bridge's own `agent` tool
-    // (pi-bridge-source.ts v9, gated on CLAUDEUI_PI_AGENT_TOOL) — the SAME
-    // 'task' kind dispatch_agent uses (TaskCard is engine-neutral). Mirrors
-    // PiEngineToolMap.kindOf's IDENTICAL case (single-source guard test).
-    case 'agent':
-      return 'task'
-    // `subagent`: legacy M5b transcripts (the retired in-pi extension) and
-    // pi's upstream example subagent extension a user may load themselves.
-    // Same 'task' kind; mirrored in PiEngineToolMap.kindOf.
-    case 'subagent':
-      return 'task'
-    // ADR-089 S3b: the bridge's `send_message` / `task_stop` — Claude's
-    // SendMessage / TaskStop row kinds. Mirrored in PiEngineToolMap.kindOf.
-    case 'send_message':
-      return 'detail'
-    case 'task_stop':
-      return 'note'
-    // The bridge's `list_models` (read-only; a one-line note row).
-    case 'list_models':
-      return 'note'
-    default:
-      // The session tools (bridge v15) are bare-named hosted tools too; the generic
-      // MCP kind, as Claude's `mcp__claude-ui-sessions__*` take. Mirrored in
-      // PiEngineToolMap.kindOf. Their gate is `sessionToolsGate`, not this ladder.
-      return isSessionToolName(toolName) ? 'mcp' : 'unknown'
-  }
-}
+export { piToolKind }
 
 // ---------------------------------------------------------------------------
 // Hosted-tool auto-allow (M4a)

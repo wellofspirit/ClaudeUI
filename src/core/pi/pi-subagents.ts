@@ -35,6 +35,7 @@
  *
  * Imports no session class and not the dispatcher (require-cycle rule).
  */
+import type { EmitSessionEvent } from '../shared/sync/events'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { v4 as uuidv4 } from 'uuid'
@@ -126,7 +127,7 @@ export interface PiSubagentHost {
    */
   bridgedMcpServers?(): Record<string, PiMcpServerEntry>
   /** BaseSession.send — NEVER dispatchOutput (see the module doc). */
-  send(channel: string, data: unknown): void
+  send: EmitSessionEvent
   /** The parent's gate, parametrized by the child scope (ADR-089 D2). */
   gateChild(scope: PiChildScope, payload: PiToolCallPayload): Promise<GateDecision>
   /** pi stopped waiting for a child's `/tool-call` exchange: retract its approval card, if any. */

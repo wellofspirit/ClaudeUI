@@ -133,8 +133,7 @@ vi.mock('../../core/services/session-history', () => ({
   buildSubagentFileMap: vi.fn(() => ({})),
   loadBackgroundOutput: vi.fn(() => ''),
   resolveForkAnchor: vi.fn(async () => null),
-  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
-  fallbackBlockText: vi.fn(() => '')
+  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 }))
 }))
 
 // ── Leaf services that would spawn / poll / download ───────────────────────

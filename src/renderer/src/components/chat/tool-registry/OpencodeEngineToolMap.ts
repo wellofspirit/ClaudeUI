@@ -16,19 +16,21 @@
  * opencode sanitizes tool names as `sanitize(serverName)_sanitize(toolName)`,
  * so our tools arrive prefixed: `claudeui_render_mermaid`, `claudeui_create_mockup`,
  * `claudeui_show_mockup`. hostedMcpKind (which matches `mcp__*`) does NOT catch
- * these — they have the claudeui_ prefix, not mcp__. opencode field names match
+ * these — they have the claudeui_ prefix, not mcp__; the hosted-tools table
+ * (src/shared/hosted-tools.ts) answers for them. opencode field names match
  * the MCP tool args (source/title, directory/title), so the diagram/mockup
- * normalizers are shared.
+ * views are shared (`hostedToolView`).
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
-import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
-import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
 import {
-  sessionToolBareName,
-  sessionToolMcpFields
-} from '../../../../../shared/session-tools-description'
+  firstPartyDisplayName,
+  hostedToolKind,
+  hostedToolView
+} from '../../../../../shared/hosted-tools'
+import type { AskUserQuestion, ContentBlock } from '../../../../../shared/types'
+import { sessionToolMcpFields } from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
@@ -39,8 +41,9 @@ function opencodeKindOf(toolName: string): ToolKind {
   // Real MCP tools (mcp__*) resolve engine-independently first.
   const mcpKind = hostedMcpKind(toolName)
   if (mcpKind !== null) return mcpKind
-  // The session tools (slice 2): `claudeui_session_*`, the generic MCP row.
-  if (toolName.startsWith('claudeui_') && sessionToolBareName(toolName)) return 'mcp'
+  // ClaudeUI's own tools in opencode's spelling (`claudeui_<tool>`).
+  const hosted = hostedToolKind(toolName, 'claudeui_')
+  if (hosted !== null) return hosted
 
   switch (toolName) {
     case 'bash':
@@ -69,18 +72,6 @@ function opencodeKindOf(toolName: string): ToolKind {
       return 'question'
     case 'plan_exit':
       return 'plan'
-    // Hosted-tools MCP names (claudeui_ prefixed — see file header). Their args
-    // match the diagram/mockup normalizers, rendering the same engine-agnostic cards.
-    case 'claudeui_render_mermaid':
-      return 'diagram'
-    case 'claudeui_create_mockup':
-    case 'claudeui_show_mockup':
-      return 'mockup'
-    // Cross-engine dispatch (ADR-033 M3) — opencode sanitizes the hosted
-    // 'claudeui' MCP server's dispatch_agent tool to this name (see
-    // opencode-hosted-tools.ts's file header). Reuses TaskCard via 'task'.
-    case 'claudeui_dispatch_agent':
-      return 'task'
     // skill/lsp/invalid → unknown (graceful; dedicated kinds are out of scope)
     default:
       return 'unknown'
@@ -94,6 +85,10 @@ function opencodeNormalize(
   toolName?: string
 ): ToolView {
   const inp = input ?? {}
+
+  // ClaudeUI's own card kinds (diagram, mockup) read the same on every engine.
+  const hosted = hostedToolView(kind, inp, result)
+  if (hosted) return hosted
 
   switch (kind) {
     case 'command':
@@ -219,22 +214,6 @@ function opencodeNormalize(
         plan: inp.plan != null ? String(inp.plan) : ''
       }
 
-    case 'diagram':
-      // plugin render_mermaid args: { source, title? } — same as Claude.
-      return {
-        kind: 'diagram',
-        source: inp.source != null ? String(inp.source) : '',
-        title: inp.title != null ? String(inp.title) : undefined
-      }
-
-    case 'mockup':
-      // plugin create_mockup/show_mockup args: { directory? / html, title? }.
-      return {
-        kind: 'mockup',
-        directory: inp.directory != null ? String(inp.directory) : extractMockupDirectory(result),
-        title: inp.title != null ? String(inp.title) : undefined
-      }
-
     case 'mcp':
       // The server and tool of a session tool call; any other opencode MCP name is
       // underscore-joined and cannot be split, so it keeps the JSON dump.
@@ -250,12 +229,6 @@ function opencodeNormalize(
 function filePathOf(inp: Record<string, unknown>): string {
   const path = inp.path ?? inp.filePath
   return path != null ? String(path) : ''
-}
-
-function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
-  if (!result?.toolResult) return undefined
-  const match = result.toolResult.match(/Directory:\s*(\S+)/)
-  return match ? match[1] : undefined
 }
 
 /** Prettify map for opencode's lowercase/underscore tool names. */
@@ -280,10 +253,11 @@ const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
 }
 
 function opencodeDisplayName(toolName: string): string {
-  // ClaudeUI's own hosted tools are `claudeui_<tool>` (first-party-tool-names.ts).
-  return (
-    firstPartyDisplayName(toolName, 'claudeui_') ?? OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
-  )
+  // ClaudeUI's own hosted tools are `claudeui_<tool>` (hosted-tools.ts).
+  const own = Object.hasOwn(OPENCODE_DISPLAY_NAMES, toolName)
+    ? OPENCODE_DISPLAY_NAMES[toolName]
+    : undefined
+  return firstPartyDisplayName(toolName, 'claudeui_') ?? own ?? toolName
 }
 
 export const OpencodeEngineToolMap: EngineToolMap = {

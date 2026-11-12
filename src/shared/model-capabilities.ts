@@ -1262,7 +1262,7 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     persisted), so `resolveForkAnchor`'s pi branch (session-history.ts,
  *     delegating to pi-session-list.ts's `resolvePiForkAnchor`) resolves by
  *     POSITION instead — the store's `idx` into its own `messages` array,
- *     which is the SAME sequence pi-session-list.ts's `convertPiSessionEntries`
+ *     which is the SAME sequence pi/history.ts's `convertPiSessionEntries`
  *     produces from disk. PiSession.doStart, when `forkSession`, resumes the
  *     SOURCE then (BEFORE any set_model/effort application, so configuring
  *     the fork never mutates the source) either `fork {entryId}` (drop that

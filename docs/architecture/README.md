@@ -16,7 +16,7 @@ How ClaudeUI is put together. This directory splits the architecture by concern 
 | [local-voice.md](local-voice.md)     | **On-device voice** as built — the speech pack (manifest, store, installer), the one voice worker per host, the cli.js-compatible protocol with live preview and segmented final pass, the relay/session wiring, pack commands and events (ADR-101)                           |
 | [mcp-catalog.md](mcp-catalog.md)     | The **shared MCP catalog** as built — how cli.js assembles its MCP servers (scopes, project key, approval veto, disabled list, policy, plugins), the layers ClaudeUI re-implements for the opencode and pi bridges, per-engine expansion, McpDialog's native writes (ADR-096) |
 | [skill-catalog.md](skill-catalog.md) | The **shared Claude skill catalog** as built — where cli.js reads skills and legacy commands, precedence, `skillOverrides`, plugin skills/commands, host-side `/name args` expansion for the opencode and pi engines                                                          |
-| [sync-channels.md](sync-channels.md) | Every event channel classified — ring / canonical / delivery, plus the recorded gaps and the payload additions (SyncCore phases 4a-4b + the post-4 `session:created` birth config)                                                                                            |
+| [sync-channels.md](sync-channels.md) | How event channels are classified (rows: `CHANNEL_SPECS`), plus the recorded gaps and the payload additions (SyncCore phases 4a-4b + the post-4 `session:created` birth config)                                                                                               |
 
 ## Overview
 

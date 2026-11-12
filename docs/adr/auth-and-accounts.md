@@ -58,7 +58,9 @@ re-implementing OAuth in Electron (the client id, endpoints, scopes and storage 
 - **The manual paste is `code#state`** (ADR-057 §sign-in). The state comes from the paste when it contains `#`; the
   state the app holds from the authorize URL is used only for a paste without `#`. A half-copied paste is reported
   without settling the flow, so the same flow accepts the next attempt.
-- **The usage poll is the one reader of cli.js's store in single-account mode.** `UsageFetcher.fetchDirect` reads
+- **The usage poll uses the credential of the mode it runs in** (confirmed 2026-11-12): ClaudeUI's host-owned
+  credential in multi-account mode, the user's own Claude Code credential in single-account mode. That makes it the
+  one reader of cli.js's store, in single-account mode only. `UsageFetcher.fetchDirect` reads
   `~/.claude/.credentials.json` (and on macOS falls back to `security find-generic-password -s "Claude Code-credentials"`)
   and `authorizedOAuthGet` may refresh an expired or 401 token, writing the rotated token back to the file
   (`refreshClaudeToken`), under ADR-071 §6's guard. It never decides sign-in state. Open code question: on macOS in

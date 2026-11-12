@@ -5,6 +5,12 @@
  * module cannot import the session manager (the session classes import it), and is wired
  * from `core-services.ts`, which sits above both.
  */
+import type {
+  EmitArgs,
+  EmitEvent,
+  SessionEventChannel,
+  SessionEventData
+} from '../shared/sync/events'
 import type { ChatMessage, EngineId } from '../../shared/types'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { claudeProjectKeyFor } from './claude-transcript-locator'
@@ -20,7 +26,7 @@ export interface DispatchParentLookupDeps {
   /** The session object that answers to a routing id (`SessionManager.get`); it may be cancelled. */
   getSession: (routingId: string) => LiveParentSession | undefined
   /** `emitEvent(channel, [routingId, data])`'s args form. */
-  emitEvent: (channel: string, args: unknown[]) => void
+  emitEvent: EmitEvent
   /** The parent's canonical session state, if canonical has one. */
   canonical: (
     routingId: string
@@ -48,7 +54,9 @@ export function makeDispatchParentLookup(deps: DispatchParentLookupDeps): Dispat
   return {
     ...(deliverResult ? { deliver: (parentId, item) => deliverResult(parentId, item) } : {}),
     session: (parentId) => deps.getSession(parentId),
-    emit: (parentId, channel, data) => deps.emitEvent(channel, [parentId, data]),
+    emit<C extends SessionEventChannel>(parentId: string, channel: C, data: SessionEventData<C>) {
+      deps.emitEvent(channel, [parentId, data] as EmitArgs<C>)
+    },
     identityCwd: (parentId) => deps.canonical(parentId)?.cwd || undefined,
     canonicalMessages: (parentId) => deps.canonical(parentId)?.messages ?? [],
     readMessages: async (parentId) => {

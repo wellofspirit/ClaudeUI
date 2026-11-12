@@ -43,6 +43,12 @@ export interface ItemStreamSeal {
   ownerToolUseId?: string
 }
 
+/** One append to an open item: the payload of `session:item-delta`. */
+export interface ItemStreamDelta {
+  target: ItemStreamTarget
+  chunk: string
+}
+
 export type ItemStreamFrame =
   | {
       type: 'item-stream'

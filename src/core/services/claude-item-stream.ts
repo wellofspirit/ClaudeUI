@@ -1,5 +1,6 @@
 import type { ChatMessage, ContentBlock } from '../../shared/types'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
+import { claudeContentBlock } from './claude-transcript'
 
 type Owner = string | undefined
 
@@ -90,25 +91,6 @@ const ownerKey = (owner: Owner): string => JSON.stringify(owner ?? null)
 const messageKey = (owner: Owner, messageId: string): string =>
   JSON.stringify([owner ?? null, messageId])
 
-function initialBlock(raw: Record<string, unknown>): ContentBlock {
-  switch (raw.type) {
-    case 'text':
-      return { type: 'text', text: typeof raw.text === 'string' ? raw.text : '' }
-    case 'thinking':
-      return { type: 'thinking', text: typeof raw.thinking === 'string' ? raw.thinking : '' }
-    case 'tool_use':
-      return {
-        type: 'tool_use',
-        toolName: typeof raw.name === 'string' ? raw.name : '',
-        toolInput:
-          raw.input && typeof raw.input === 'object' ? (raw.input as Record<string, unknown>) : {},
-        toolUseId: typeof raw.id === 'string' ? raw.id : ''
-      }
-    default:
-      return { type: 'text', text: JSON.stringify(raw) }
-  }
-}
-
 /** Claude stream-event lifecycle, isolated so headless dispatch can reuse it later. */
 export class ClaudeItemStreamLifecycle {
   private readonly messages = new Map<string, MessageState>()
@@ -150,7 +132,7 @@ export class ClaudeItemStreamLifecycle {
         !event.content_block
       )
         return
-      const block = initialBlock(event.content_block)
+      const block = claudeContentBlock(event.content_block)
       const entry: BlockState = { block, opened: false, stopped: false }
       state.blocks.push(entry)
       // A block the item lane does not carry (a tool_use) would otherwise be

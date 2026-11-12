@@ -8,7 +8,7 @@
  * `dispatch:hand_back`).
  */
 import { ENGINE_META } from '../../../../../shared/engine-meta'
-import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
+import { firstPartyDisplayName } from '../../../../../shared/hosted-tools'
 import type { EngineId, PendingApproval } from '../../../../../shared/types'
 import { engineToolMap } from './engine-tool-maps'
 

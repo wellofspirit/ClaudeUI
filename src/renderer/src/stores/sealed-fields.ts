@@ -10,8 +10,8 @@
  *
  * The sealed set is *derived*: it is exactly the snapshot-carried state —
  * `PerSessionSnapshot` per session, `FullStateSnapshot` app-level, equivalently
- * the fields `CanonicalState` holds, equivalently the channels
- * `docs/architecture/sync-channels.md` marks `canonical: true`. If the reducer
+ * the fields `CanonicalState` holds, equivalently the channels `CHANNEL_SPECS`
+ * (`core/shared/sync/channels.ts`) classifies `canonical: true`. If the reducer
  * folds it, the replica writes it.
  *
  * The complement is just as deliberate. Channels classified `canonical: false`
@@ -36,90 +36,64 @@
  *    a snapshot field without sealing it and the test fails; seal a field that is
  *    not in the snapshot and it fails too.
  *
- * The lists are string literals rather than `keyof` gymnastics because the lint
- * rule needs the same names as a regex, and one source beating two is the whole
- * point. The `satisfies` clauses below are what keep them honest at compile time.
+ * The per-session list is derived from `SESSION_FIELDS` (`core/shared/sync/state.ts`)
+ * and the two exception constants below, so a new canonical field is sealed without
+ * an edit here. `eslint.config.mjs` reads the member names of `CanonicalSessionState`
+ * itself and restates the exceptions; `sealed-fields.unit.test.ts` pins the two
+ * against each other. The app-level lists stay literals.
  */
 
-import type { PerSessionSnapshot, FullStateSnapshot } from '../../../shared/remote-protocol'
+import type { FullStateSnapshot } from '../../../shared/remote-protocol'
+import { SESSION_FIELDS, type CanonicalSessionState } from '../../../core/shared/sync/state'
 
 /**
- * Per-session store fields written ONLY by the replica projection.
- *
- * Names are the STORE's, which differ from the wire's in exactly one place —
- * `queuedItems` mirrors `PerSessionSnapshot.queue` — so the mapping is spelled out
- * in {@link SEALED_SESSION_FIELD_SOURCE} rather than assumed.
+ * Canonical per-session fields with no store field: `routingId` is the record key,
+ * and `seeded` is replica-internal (`hydrateReplica` reads it to set the store's
+ * per-client `evicted` flag).
  */
-export const SEALED_SESSION_FIELDS = [
-  'cwd',
-  'messages',
-  'itemStreams',
-  'itemStreamRevision',
-  'status',
-  'pendingApprovals',
-  'todos',
-  'sentFiles',
-  'queuedItems',
-  'heldCount',
-  'contextPressure',
-  'taskNotifications',
-  'activeTasks',
-  'taskProgressMap',
-  'subagentMessages',
-  'permissionMode',
-  'effort',
-  'thinkingMode',
-  'reasoningVariant',
-  'statusLine',
-  'metering',
-  'slashCommands',
-  'sdkActive',
-  'selectedEngineId',
-  'selectedModel',
-  'authRequired',
-  /**
-   * Not a snapshot field of its own: the per-session mirror of the app-level
-   * `worktreeInfoMap`, projected from it (an explicit entry wins), else synthesised from the
-   * directory listing's `linkedWorktree` marker for the session's cwd. Sealed so the mirror and
-   * the map cannot disagree. `session:status` no longer drops an entry on its cwd (slice 3: the
-   * status cwd is always the spawn cwd, so that rule erased every detected entry); an
-   * `ExitWorktree` result or an opencode `session.moved` forgets it in main instead.
-   */
-  'worktreeInfo'
-] as const
+export const SESSION_FIELDS_WITHOUT_STORE_FIELD = ['routingId', 'seeded'] as const
 
-/** Wire field each sealed per-session store field projects from. */
+/** The store's name for a canonical per-session field that is named differently. */
+export const STORE_NAME_OF_SESSION_FIELD = { queue: 'queuedItems' } as const
+
+type CanonicalWithStoreField = Exclude<
+  keyof CanonicalSessionState,
+  (typeof SESSION_FIELDS_WITHOUT_STORE_FIELD)[number]
+>
+type StoreNameOf<K extends keyof CanonicalSessionState> =
+  K extends keyof typeof STORE_NAME_OF_SESSION_FIELD ? (typeof STORE_NAME_OF_SESSION_FIELD)[K] : K
+
+/** Per-session store fields written ONLY by the replica projection. */
+export type SealedSessionField = StoreNameOf<CanonicalWithStoreField> | 'worktreeInfo'
+
+/**
+ * Wire field each sealed per-session store field projects from. Store names equal the
+ * canonical ones except `queuedItems` (`queue`); `worktreeInfo` is not a snapshot field
+ * of its own: the per-session mirror of the app-level `worktreeInfoMap`, projected from
+ * it (an explicit entry wins), else synthesised from the directory listing's
+ * `linkedWorktree` marker for the session's cwd. Sealed so the mirror and the map cannot
+ * disagree. `session:status` no longer drops an entry on its cwd (slice 3: the status
+ * cwd is always the spawn cwd, so that rule erased every detected entry); an
+ * `ExitWorktree` result or an opencode `session.moved` forgets it in main instead.
+ */
 export const SEALED_SESSION_FIELD_SOURCE: Readonly<
-  Record<string, keyof PerSessionSnapshot | 'worktreeInfoMap'>
-> = {
-  cwd: 'cwd',
-  messages: 'messages',
-  itemStreams: 'itemStreams',
-  itemStreamRevision: 'itemStreamRevision',
-  status: 'status',
-  pendingApprovals: 'pendingApprovals',
-  todos: 'todos',
-  sentFiles: 'sentFiles',
-  queuedItems: 'queue',
-  heldCount: 'heldCount',
-  contextPressure: 'contextPressure',
-  taskNotifications: 'taskNotifications',
-  activeTasks: 'activeTasks',
-  taskProgressMap: 'taskProgressMap',
-  subagentMessages: 'subagentMessages',
-  permissionMode: 'permissionMode',
-  effort: 'effort',
-  thinkingMode: 'thinkingMode',
-  reasoningVariant: 'reasoningVariant',
-  statusLine: 'statusLine',
-  metering: 'metering',
-  slashCommands: 'slashCommands',
-  sdkActive: 'sdkActive',
-  selectedEngineId: 'selectedEngineId',
-  selectedModel: 'selectedModel',
-  authRequired: 'authRequired',
-  worktreeInfo: 'worktreeInfoMap'
-}
+  Record<SealedSessionField, keyof CanonicalSessionState | 'worktreeInfoMap'>
+> = (() => {
+  const source: Record<string, string> = {}
+  const noStoreField: readonly string[] = SESSION_FIELDS_WITHOUT_STORE_FIELD
+  const renamed: Readonly<Record<string, string>> = STORE_NAME_OF_SESSION_FIELD
+  for (const key of SESSION_FIELDS) {
+    if (noStoreField.includes(key)) continue
+    source[renamed[key] ?? key] = key
+  }
+  source.worktreeInfo = 'worktreeInfoMap'
+  return source as Record<SealedSessionField, keyof CanonicalSessionState | 'worktreeInfoMap'>
+})()
+
+/** The sealed per-session store fields, in `SESSION_FIELDS` order, `worktreeInfo` last. */
+export const SEALED_SESSION_FIELDS = Object.keys(
+  SEALED_SESSION_FIELD_SOURCE
+) as readonly SealedSessionField[]
 
 /**
  * App-level store fields written ONLY by the replica projection.
@@ -188,5 +162,4 @@ export const TRANSIENT_APP_FIELDS = [
   'pluginViews' // plugin:views-changed (host-local)
 ] as const
 
-export type SealedSessionField = (typeof SEALED_SESSION_FIELDS)[number]
 export type SealedAppField = (typeof SEALED_APP_FIELDS)[number]

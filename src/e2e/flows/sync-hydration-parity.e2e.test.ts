@@ -60,7 +60,10 @@ function openCoreItem(
         timestamp: 1,
         content: Array.from({ length: target.blockIndex + 1 }, (_, index) =>
           index === target.blockIndex
-            ? { type: target.kind, text: '' }
+            ? {
+                type: target.kind === 'thinking' ? ('thinking' as const) : ('text' as const),
+                text: ''
+              }
             : { type: 'text' as const, text: '' }
         )
       }
@@ -254,7 +257,7 @@ describe('E2E: SyncCore hydration parity', () => {
       } as never
     ])
     emitEvent('session:status', ['rid-1', makeStatus({ state: 'idle', sessionId: 'rid-1' })])
-    emitEvent('session:result', ['rid-1', {}])
+    emitEvent('session:result', ['rid-1', { totalCostUsd: 0, durationMs: 0, result: '' }])
 
     // Sanity: the stream really did land on both sides (a parity check between
     // two empty states would pass vacuously).

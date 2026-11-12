@@ -146,7 +146,8 @@ import type {
   ApprovalDecision,
   DispatchConfig,
   EngineId,
-  PermissionSuggestion
+  PermissionSuggestion,
+  TaskStartedData
 } from '../../shared/types'
 import { isEngineId } from '../../shared/engine-label'
 import { XENG_REQUEST_PREFIX } from './dispatch-target-types'
@@ -469,10 +470,7 @@ function emitDispatchProgress(ctx: DispatchContext, elapsedTimeSeconds: number):
  * background agents have, so the card, the roster and the attention gate read a
  * dispatch the way they read an agent. `taskId` is the X-Agent's ledger id.
  */
-function dispatchTaskStartedRecord(
-  run: DispatchRun,
-  ledgerId: string
-): Record<string, unknown> | null {
+function dispatchTaskStartedRecord(run: DispatchRun, ledgerId: string): TaskStartedData | null {
   if (!run.toolUseId) return null
   return {
     toolUseId: run.toolUseId,

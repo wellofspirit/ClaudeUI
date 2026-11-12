@@ -561,8 +561,21 @@ function bodyHeight(
           )
       return args + (hasText ? resultSection(result!, columnPx, o, true) : 0)
     }
-    default:
+    // The kinds with no body of their own take the generic tail below.
+    case 'image':
+    case 'todo':
+    case 'task':
+    case 'plan':
+    case 'question':
+    case 'diagram':
+    case 'mockup':
+    case 'detail':
+    case 'findings':
+    case 'note':
+    case 'unknown':
       break
+    default:
+      view satisfies never
   }
   // search without rows, detail, image, unknown: the generic JSON input + result text.
   return (o.hideToolInput ? 0 : dump()) + (hasText ? resultSection(result!, columnPx, o, true) : 0)
@@ -634,7 +647,20 @@ function toolHeight(
     case 'diagram':
     case 'mockup':
       return MEDIA_CARD
+    case 'command':
+    case 'fileEdit':
+    case 'fileWrite':
+    case 'fileRead':
+    case 'search':
+    case 'web':
+    case 'image':
+    case 'mcp':
+    case 'detail':
+    case 'findings':
+    case 'unknown':
+      return passiveCardHeight(kind, view, block, result, decided, columnPx, o)
     default:
+      view satisfies never
       return passiveCardHeight(kind, view, block, result, decided, columnPx, o)
   }
 }

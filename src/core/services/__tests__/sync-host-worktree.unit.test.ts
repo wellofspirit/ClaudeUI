@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { UISessionConfig } from '../../../shared/types'
+import { makeSessionStatus } from '../../../test/factories/messages'
 import {
   fabricateRepo,
   fabricateWorktree,
@@ -86,14 +87,14 @@ describe('worktree tool results through the funnel', () => {
     // status.cwd is the spawn cwd (== originalCwd): the old reducer rule dropped the entry here.
     emitEvent('session:status', [
       'rid',
-      {
+      makeSessionStatus({
         state: 'idle',
         sessionId: null,
         model: null,
         cwd: repo,
         totalCostUsd: 0,
         engineId: 'claude'
-      }
+      })
     ])
     expect(entry()?.worktreePath).toBe(wtFoo)
 

@@ -17,22 +17,19 @@
  *   turn_end → … → agent_end → agent_settled (the real turn-complete signal).
  */
 import { v4 as uuid } from 'uuid'
-import type { ChatMessage, ContentBlock, FileDiff, ToolResultImage } from '../../shared/types'
-import { isImageMediaType } from '../../shared/types'
-import { blobStore } from '../services/blob-store'
+import type { ChatMessage, FileDiff, ToolResultImage } from '../../shared/types'
 import type { ItemStreamTarget } from '../shared/sync/item-stream'
 import type {
   PiAssistantContentBlock,
   PiAssistantMessage,
   PiEvent,
-  PiImageContent,
-  PiTextContent,
   PiToolExecutionPartialResult,
   PiUsage
 } from './pi-protocol'
 import { piCustomMessageToChat } from './pi-custom-message'
 import { piAgentDeliveryDetails } from './pi-delivery'
 import { isPiAuthStatus, piErrorStatusCode } from './pi-error-status'
+import { piAssistantBlock, piToolResultBlock } from './pi-blocks'
 
 // ---------------------------------------------------------------------------
 // Caller-owned state
@@ -388,7 +385,7 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
 
         // M-PI4: only surface a message that has content. An instant Esc-abort
         // ends the turn with an EMPTY assistant message; the persisted converter
-        // (pi-session-list.ts `convertPiEntryMessage`) drops empty-content
+        // (pi/history.ts `convertPiEntryMessage`) drops empty-content
         // assistant messages, so the LIVE stream must too — otherwise the
         // store's message array (which feeds POSITION-based pi fork anchoring in
         // fork-anchor.ts) drifts one ahead of the on-disk transcript and every
@@ -431,13 +428,12 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
       }
 
       if (msg.role === 'toolResult') {
-        const result = piToolResultText(msg.content)
-        // Images the tool RETURNED (pi's read on a .png, screenshot tools).
-        // NOTE: only the FINAL result carries them through — the in-flight
-        // `tool_execution_update` path (extractPartialResultText) stays
+        const block = piToolResultBlock(msg)
+        // Images the tool RETURNED (pi's read on a .png, screenshot tools) ride in
+        // the block. NOTE: only the FINAL result carries them through — the
+        // in-flight `tool_execution_update` path (extractPartialResultText) stays
         // text-only by design, so a long-running image tool shows its image
         // once it completes.
-        const images = piToolResultImages(msg.content)
 
         // M2: rich diff — pi's `edit` tool result carries a ready-made unified
         // diff at msg.details.patch, but (unlike opencode's apply_patch/edit)
@@ -460,11 +456,11 @@ export function mapPiEvent(ev: PiEvent, state: PiMapperState): PiMapperOutput[] 
         const outputs: PiMapperOutput[] = [
           {
             kind: 'tool_result',
-            toolUseId: msg.toolCallId,
-            result,
-            isError: msg.isError,
+            toolUseId: block.toolUseId,
+            result: block.toolResult,
+            isError: block.isError,
             ...(fileDiffs ? { fileDiffs } : {}),
-            ...(images ? { images } : {})
+            ...(block.images ? { images: block.images } : {})
           }
         ]
         return outputs
@@ -869,45 +865,6 @@ function buildPiEditFileDiffs(
 }
 
 /**
- * Join the text blocks of a pi toolResult's content. Exported because
- * `pi-session-list.ts` replays the SAME `PiToolResultMessage` shape off disk and
- * must produce the identical `toolResult` string as the live path.
- */
-export function piToolResultText(content: Array<PiTextContent | PiImageContent>): string {
-  if (!Array.isArray(content)) return ''
-  return content
-    .filter((b): b is PiTextContent => b.type === 'text')
-    .map((b) => b.text)
-    .join('')
-}
-
-/**
- * Images a pi tool RETURNED, from its toolResult content blocks
- * (`PiImageContent`: `{type:'image', data:<base64>, mimeType}` — note the
- * camelCase `mimeType`, unlike Claude's nested `source.media_type`).
- *
- * `mimeType` is a free-form string on the wire, so it is filtered through
- * `IMAGE_MEDIA_TYPES`; pi carries no filename, so `fileName` is omitted.
- * The bytes are interned into the blob store and the images carry refs
- * (ADR-087). Returns undefined (not []) when there is nothing to carry.
- *
- * Shared with the stored-replay path in pi-session-list.ts.
- */
-export function piToolResultImages(
-  content: Array<PiTextContent | PiImageContent>
-): ToolResultImage[] | undefined {
-  if (!Array.isArray(content)) return undefined
-  const images: ToolResultImage[] = []
-  for (const b of content) {
-    if (b.type !== 'image') continue
-    if (!isImageMediaType(b.mimeType) || !b.data) continue
-    const ref = blobStore.put(b.mimeType, b.data)
-    if (ref) images.push({ mediaType: b.mimeType, ...ref })
-  }
-  return images.length > 0 ? images : undefined
-}
-
-/**
  * Join the text blocks of a `tool_execution_update.partialResult` (the same
  * `{content: [{type,text}]}` shape as a toolResult message's content — see
  * the toolResult branch of `message_end` above). Non-text blocks (images) are
@@ -921,26 +878,13 @@ function extractPartialResultText(partialResult: PiToolExecutionPartialResult): 
     .join('')
 }
 
-/**
- * Map pi's AssistantMessage content blocks to ClaudeUI's ContentBlock[].
- * text → text, thinking → thinking (NOTE: wire field is `thinking`, not `text`),
- * toolCall → tool_use { toolUseId: id, toolName: name, toolInput: arguments }.
- */
+/** Map pi's AssistantMessage content blocks to ClaudeUI's ContentBlock[] (see `piAssistantBlock`). */
 export function buildPiChatMessage(
   messageId: string,
   content: PiAssistantContentBlock[],
   model?: string | null
 ): ChatMessage {
-  const blocks: ContentBlock[] = content.map((block): ContentBlock => {
-    if (block.type === 'text') return { type: 'text', text: block.text }
-    if (block.type === 'thinking') return { type: 'thinking', text: block.thinking }
-    return {
-      type: 'tool_use',
-      toolUseId: block.id,
-      toolName: block.name,
-      toolInput: block.arguments
-    }
-  })
+  const blocks = content.map(piAssistantBlock)
   return {
     id: messageId,
     role: 'assistant',

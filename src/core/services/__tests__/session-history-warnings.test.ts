@@ -23,7 +23,8 @@ vi.mock('os', async (importOriginal) => {
   return { ...actual, homedir: (): string => TMP_HOME }
 })
 
-import { loadSessionHistory, fallbackBlockText } from '../session-history'
+import { loadSessionHistory } from '../session-history'
+import { fallbackBlockText } from '../claude-transcript'
 
 const PROJECT_KEY = 'test-project'
 const SESSION_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'

@@ -9,7 +9,7 @@ import { CronExpressionParser } from 'cron-parser'
 import { getSdkExecutableOpts } from './claude-session'
 import { emitEvent } from './sync-host'
 import { loadSessionHistory } from './session-history'
-import { extractToolResultContent } from './tool-result-content'
+import { claudeToolResultBlock, claudeToolResults } from './claude-transcript'
 import { logger } from './logger'
 import { isPathInside } from './path-containment'
 import { isValidAutomationId } from './automation-id'
@@ -882,23 +882,7 @@ export class AutomationManager {
   }
 
   private extractToolResults(content: Array<Record<string, unknown>>): ContentBlock[] {
-    const results: ContentBlock[] = []
-    for (const block of content) {
-      if (typeof block !== 'object' || !block || block.type !== 'tool_result') continue
-      const toolUseId = block.tool_use_id as string
-      if (!toolUseId) continue
-
-      const { text: resultText, images } = extractToolResultContent(block.content)
-
-      results.push({
-        type: 'tool_result',
-        toolUseId,
-        toolResult: resultText,
-        isError: !!block.is_error,
-        ...(images ? { images } : {})
-      })
-    }
-    return results
+    return claudeToolResults(content).map(claudeToolResultBlock)
   }
 
   // ---- Run History --------------------------------------------------------

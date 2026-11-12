@@ -14,6 +14,7 @@ import type {
   EngineId,
   JudgeModelSupport,
   ListPlacesResult,
+  PermissionMode,
   PermissionScope,
   PromptOrigin,
   WorkspaceTrust
@@ -606,7 +607,7 @@ export async function clearConversation(
   const permissionMode =
     typeof mode === 'string' &&
     PERMISSION_MODE_CYCLE.includes(mode as (typeof PERMISSION_MODE_CYCLE)[number])
-      ? mode
+      ? (mode as PermissionMode)
       : undefined
   if (mode !== undefined && permissionMode === undefined) {
     logger.warn('IPC', `session:clear-conversation: ignoring unknown mode "${mode}"`)

@@ -20,6 +20,23 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
+// A valid `git:status-update` payload: these tests care that an event is delivered, not what it says.
+const STATUS_UPDATE = {
+  cwd: '/x',
+  status: {
+    branch: 'main',
+    ahead: 0,
+    behind: 0,
+    trackingBranch: null,
+    files: [],
+    staged: [],
+    unstaged: [],
+    untracked: [],
+    linesAdded: 0,
+    linesRemoved: 0
+  }
+}
+
 /** A `MessagePortMain` pair, minimal but with real two-way plumbing. */
 class FakePort {
   peer: FakePort | null = null
@@ -148,7 +165,7 @@ describe('attachSyncPort', () => {
     // A port exists, but nothing is pushed: the client has no epoch and no cursor,
     // so an event now would be unplaceable.
     expect(syncSubscriberCount()).toBe(0)
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     expect(framesOfType(latestPort1(), 'event')).toHaveLength(0)
   })
 
@@ -166,7 +183,7 @@ describe('attachSyncPort', () => {
     expect(syncSubscriberCount()).toBe(1)
 
     // From here on the ring reaches the renderer, carrying the ring's own seq.
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     const events = framesOfType(port, 'event')
     expect(events).toHaveLength(1)
     expect(events[0].channel).toBe('git:status-update')
@@ -180,7 +197,7 @@ describe('attachSyncPort', () => {
     const port = latestPort1()
 
     const before = syncCore.currentSeq()
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     port.deliver({ type: 'sync', lastSeq: before, epoch: syncCore.epoch() })
 
     expect(framesOfType(port, 'sync-full')).toHaveLength(0)
@@ -197,7 +214,7 @@ describe('attachSyncPort', () => {
     win.finishLoad()
     const port = latestPort1()
 
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     port.deliver({ type: 'sync', lastSeq: syncCore.currentSeq(), epoch: 'epoch-from-a-past-run' })
 
     expect(framesOfType(port, 'sync-full')).toHaveLength(1)
@@ -222,7 +239,7 @@ describe('attachSyncPort', () => {
     second.deliver({ type: 'sync', lastSeq: 0 })
     expect(syncSubscriberCount()).toBe(1)
 
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     expect(framesOfType(first, 'event')).toHaveLength(0)
     expect(framesOfType(second, 'event')).toHaveLength(1)
   })
@@ -248,7 +265,7 @@ describe('attachSyncPort', () => {
 
     // The renderer went away between the fan-out and the post.
     port.closed = true
-    expect(() => emitEvent('git:status-update', [{ cwd: '/x' }])).not.toThrow()
+    expect(() => emitEvent('git:status-update', [STATUS_UPDATE])).not.toThrow()
     expect(syncSubscriberCount()).toBe(0)
   })
 
@@ -306,7 +323,7 @@ describe('SyncStats lines on the port', () => {
 
   it('names the reason when a stale epoch forces the full', () => {
     const port = ready()
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     port.deliver({ type: 'sync', lastSeq: syncCore.currentSeq(), epoch: 'epoch-from-a-past-run' })
 
     expect(stats()).toHaveLength(1)
@@ -316,7 +333,7 @@ describe('SyncStats lines on the port', () => {
   it('logs nothing for a catchup', () => {
     const port = ready()
     const before = syncCore.currentSeq()
-    emitEvent('git:status-update', [{ cwd: '/x' }])
+    emitEvent('git:status-update', [STATUS_UPDATE])
     port.deliver({ type: 'sync', lastSeq: before, epoch: syncCore.epoch() })
 
     expect(framesOfType(port, 'sync-catchup')).toHaveLength(1)

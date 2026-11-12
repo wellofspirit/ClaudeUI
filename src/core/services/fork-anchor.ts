@@ -172,7 +172,7 @@ export const PI_FORK_CLONE_LATEST_SENTINEL = 'pi:clone-latest'
  * uuid synthesized by event-mapper.ts, never pi's own entry id. But the fork
  * POSITION is stable — the store computes `idx`, the target message's index
  * in its own `messages` array, and that array is built by the SAME converter
- * (pi-session-list.ts's `convertPiSessionEntries`) whether live or replayed.
+ * (pi/history.ts's `convertPiSessionEntries`) whether live or replayed.
  * So `messages` here must be exactly that converter's output (id = the real
  * pi entryId, role = 'user'|'assistant'|'system') for position `messageIndex`
  * to line up with the caller's `idx`.

@@ -85,8 +85,7 @@ vi.mock('../claude-mcp', () => ({
   readDisabledMcpServers: vi.fn(() => [])
 }))
 vi.mock('../session-history', () => ({
-  computeTokenMetrics: mockComputeTokenMetrics,
-  fallbackBlockText: vi.fn(() => '')
+  computeTokenMetrics: mockComputeTokenMetrics
 }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../context-window', () => ({

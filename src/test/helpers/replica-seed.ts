@@ -39,6 +39,7 @@ import {
   resetReplicaForTests
 } from '../../renderer/src/stores/replica'
 import { isVolatileStream, volatileFlavorOf } from '../../core/shared/sync/channels'
+import { SEALED_SESSION_FIELD_SOURCE } from '../../renderer/src/stores/sealed-fields'
 import { useSessionStore } from '../../renderer/src/stores/session-store'
 import { resetHistoryLoadForTests } from '../../renderer/src/lib/session-history-load'
 import type { CanonicalSessionState } from '../../core/shared/sync/state'
@@ -218,36 +219,12 @@ export function mirrorStoreIntoReplica(): void {
     directories: state.directories
   })
   for (const [routingId, s] of Object.entries(state.sessions)) {
-    patchLocalSession(
-      routingId,
-      {
-        cwd: s.cwd,
-        messages: s.messages,
-        itemStreams: s.itemStreams,
-        itemStreamRevision: s.itemStreamRevision,
-        status: s.status,
-        pendingApprovals: s.pendingApprovals,
-        todos: s.todos,
-        sentFiles: s.sentFiles,
-        queue: s.queuedItems,
-        taskNotifications: s.taskNotifications,
-        activeTasks: s.activeTasks,
-        taskProgressMap: s.taskProgressMap,
-        subagentMessages: s.subagentMessages,
-        permissionMode: s.permissionMode,
-        effort: s.effort,
-        thinkingMode: s.thinkingMode,
-        reasoningVariant: s.reasoningVariant,
-        statusLine: s.statusLine,
-        metering: s.metering,
-        slashCommands: s.slashCommands,
-        sdkActive: s.sdkActive,
-        selectedEngineId: s.selectedEngineId,
-        selectedModel: s.selectedModel,
-        seeded: true
-      },
-      { create: true }
-    )
+    const patch: Record<string, unknown> = { seeded: true }
+    for (const [storeKey, canonicalKey] of Object.entries(SEALED_SESSION_FIELD_SOURCE)) {
+      if (storeKey === 'worktreeInfo') continue
+      patch[canonicalKey] = s[storeKey as keyof typeof s]
+    }
+    patchLocalSession(routingId, patch as Partial<CanonicalSessionState>, { create: true })
   }
 }
 

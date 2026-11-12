@@ -27,18 +27,21 @@ either way. Trivial edits and conversational answers are exempt.
 
 | Role                                          | Owns                                                                                                    | Never                                           |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Orchestrator (the session leading the change) | Scope, tiers, design, every ruling, slice review, commits, the pull request                             | Hands a product decision to anyone but the user |
+| Orchestrator (the session leading the change) | Scope, tiers, design, every ruling, building small slices, slice review, commits, the pull request      | Hands a product decision to anyone but the user |
 | Implementer                                   | Code and tests against the spec                                                                         | Commits, or certifies its own work              |
 | Reviewer                                      | Design review of Critical slices, review of diffs too big for the orchestrator to hold, the exit review | Edits the change it reviews                     |
 | Verifier                                      | Live verification of the running app, when the tier calls for it                                        | Is the agent that built the change              |
 
-Each review and verification comes from a fresh context, never the one that wrote the code.
+Each review and verification comes from a fresh context, never the one that wrote the code. The orchestrator builds
+a small slice itself at any tier (as a starting rule, up to about 100 changed lines in up to 3 files) and hands
+larger ones to implementers; the size is tuned from experience (changed 2026-11-12).
 
 ### Tiers, findings and stopping
 
 Each slice gets a tier from its risk, not its size, stated to the user up front:
 
-- **Light** (a contained change, no contract change): one fresh review of the diff.
+- **Light** (a contained change, no contract change): one fresh review of the diff. A test-only or docs-only change
+  that running it proves needs no reviewer (changed 2026-11-12).
 - **Standard** (a feature across files, or a changed contract such as an API, IPC, wire format, schema or config):
   the orchestrator reviews each slice, and the branch gets one exit review. Live verification only when tests can't
   show the behaviour.
@@ -61,10 +64,11 @@ A slice touching any of these is Critical:
 
 ### Gates
 
-- `scripts/gates.sh`, once per commit-ready tree: typecheck, lint and the whole default suite. Never pipe a gate
-  into a filter before acting on its result: the pipeline takes the filter's exit code.
+- `scripts/gates.sh`, once per commit-ready tree: typecheck, lint, the format of the files the branch changed and
+  the whole default suite. A run on a tree that already passed returns at once (changed 2026-11-12). Never pipe a
+  gate into a filter before acting on its result: the pipeline takes the filter's exit code.
 - Add `bun run test:ci` after touching git-service or worktree code, `bun run build` for anything the packaged app
-  runs, and `bun run format:check`.
+  runs, and `bun run format:check` when the Prettier config or version changed.
 - Engine work adds that engine's gated suite (`docs/testing-strategy.md`). A suite that only skipped has not passed.
 - Live verification starts from the `verifier-electron` skill, which holds the isolation recipe for this app.
 - A change to a seam the engines share is checked to preserve Claude's behaviour. Claude is the daily driver, and an
@@ -105,10 +109,11 @@ Design detail, probe facts, wire shapes and as-built notes belong in `docs/archi
 
 ### Work notes
 
-An arc's handoff, specs and reports live in `.work/<arc>/` in the main checkout (gitignored; worktrees are deleted
-at merge). Open items are GitHub issues labelled `backlog` or `housekeeping`. Research that cannot be public follows
-the `claudeui-notes` skill where it is installed, otherwise `.work/<arc>/`. Retiring an arc is part of its merge:
-lasting facts move, scrubbed, into ADRs and `docs/`; what is still open becomes issues; `.work/<arc>/` is deleted.
+An arc's handoff, specs and reports live in `.work/<arc>/` in the arc's own worktree (gitignored; changed
+2026-11-12 from the main checkout, which a session working inside a worktree cannot write). Open items are GitHub
+issues labelled `backlog` or `housekeeping`. Research that cannot be public follows the `claudeui-notes` skill where
+it is installed, otherwise `.work/<arc>/`. Retiring an arc is part of its merge: lasting facts move, scrubbed, into
+ADRs and `docs/`; what is still open becomes issues; `.work/<arc>/` goes with the worktree.
 
 ### Rules for all work in this repository
 
@@ -183,7 +188,8 @@ between files; Bun cannot host Vitest 5 workers or replace its API (`vi.hoisted`
    fails in `afterAll`); the context's `Error[Symbol.hasInstance]` also accepts `util.types.isNativeError`, so errors
    from Node's own modules are `instanceof Error` as in production. Not guarded: built-in module state and the
    filesystem outside the per-file home.
-5. **The gate never retries.** `scripts/gates.sh` runs typecheck, `eslint --cache .` and the default suite and does
+5. **The gate never retries.** `scripts/gates.sh` runs typecheck, `eslint --cache .`, a format check of the files
+   the branch changed and the default suite, and does
    not retry a failed test run: "failed run, zero failed tests" also matches an unhandled error, which is how a
    cross-file leak appears under `vmForks`.
 6. **CI** runs the tests on Linux, macOS and Windows in 3 shards each (every project except `browser`), and the

@@ -36,7 +36,7 @@ and nothing to patch. This list is what past bumps forgot.
   with `--maxWorkers=4`. Without the variable the suite skips and looks green.
 - Contract homes inside a git checkout need `git init`: opencode treats the whole enclosing repo as
   the project.
-- Windows lifecycle and shell run before a release (ADR-097 §8.2, `docs/opencode-v2-windows-test.md`).
+- Windows lifecycle and shell run before a release (ADR-097 §8.2; isolate the managed store with `CLAUDEUI_HARNESS_STORE`).
 - Real-app verifier: a turn with a tool call, an outside-workspace path in default mode (must
   ask), a subagent (`explore`), a reload.
 

@@ -17,6 +17,7 @@
  * Without a lookup (`DispatcherDeps.parents` unset — a headless test double) the
  * facade is the launching call's own context, as before.
  */
+import type { SessionEventChannel, SessionEventData } from '../shared/sync/events'
 import { stricterMode } from '../../shared/mode-class'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 import type { ChatMessage, EngineId } from '../../shared/types'
@@ -69,7 +70,7 @@ export interface DispatchParentLookup {
   /** The session object that answers to `parentId` now (it may be cancelled), or undefined. */
   session(parentId: string): LiveParentSession | undefined
   /** Emit under the parent's routing (`emitEvent(channel, [parentId, data])`). */
-  emit(parentId: string, channel: string, data: unknown): void
+  emit<C extends SessionEventChannel>(parentId: string, channel: C, data: SessionEventData<C>): void
   /**
    * The parent's identity (spawn) directory, from canonical state: `undefined` once the parent is
    * unknown. A context rebuilt from a ledger row (which stores only the working directory the

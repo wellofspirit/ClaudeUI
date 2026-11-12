@@ -9,7 +9,7 @@ A desktop client for coding agents: Electron + React 19 + TypeScript, package ma
 - Format with `bunx prettier --write <files you touched>`; `bun run format` rewrites the whole repo.
 - `bun-claude.exe` / `bun-claude` also runs the agent sessions themselves: never kill it by process name.
 - One worktree per arc, under `.claude/worktrees/<name>`; never switch branches in the main checkout. A worktree's `node_modules` and `vendor` are usually junctions to the main checkout's: never delete recursively through them; unlink the junction itself.
-- Work notes (ADR-026 "Work notes"): open items (backlog features, housekeeping bugs, an arc's leftover follow-ups) are GitHub issues on this repo, labelled `backlog` or `housekeeping`. An arc's working files (handoff, specs, implementer/reviewer reports, live-drive logs) go in `.work/<arc>/` in the **main checkout** (worktrees are deleted at merge): gitignored, never committed. Research that can't be public (probe captures, reverse-engineering notes, third-party excerpts): follow the `claudeui-notes` skill if it's installed; otherwise keep it in `.work/<arc>/`.
+- Work notes (ADR-026 "Work notes"): open items (backlog features, housekeeping bugs, an arc's leftover follow-ups) are GitHub issues on this repo, labelled `backlog` or `housekeeping`. An arc's working files (handoff, specs, implementer/reviewer reports, live-drive logs) go in `.work/<arc>/` in the **arc's own worktree**: gitignored, never committed, and gone with the worktree when the arc is retired. Research that can't be public (probe captures, reverse-engineering notes, third-party excerpts): follow the `claudeui-notes` skill if it's installed; otherwise keep it in `.work/<arc>/`.
 - Commit gate: `scripts/gates.sh`, once per commit-ready tree. Never judge a gate from output piped into `grep`/`tail`: the pipeline takes the filter's exit code.
 - Bash on Windows: the working directory is in POSIX form (`/d/WorkPlace/ClaudeUI`). Never prefix a command with `cd D:/...` (redundant, and it causes a permission prompt: cli.js filters `cd <cwd>` by exact string match). A path in a command argument uses the POSIX form too.
 - When a conversation changes or makes a design decision, ask the user whether to record it. The rules are in ADR-026 "Decision records"; a new ADR takes the next free number across every remote branch.
@@ -25,7 +25,7 @@ A desktop client for coding agents: Electron + React 19 + TypeScript, package ma
 - `src/main/` — host 1, the Electron desktop (`index.ts`, `boot-core.ts`, the Electron-only services in `src/main/services/`). `src/server/` — host 2, the headless `claudeui-server`.
 - `src/preload/` — the desktop bridge that builds `window.api`. `src/web/` — the browser client: the same renderer over a WebSocket (`api-adapter.ts`).
 - `src/renderer/src/` — the React UI: `components/`, `stores/` (`session-store.ts`, and `replica.ts`, which makes the store a replica of host state), `hooks/`, `lib/`.
-- `src/shared/` — types and pure helpers every process imports (`types/`, `api-invoke-table.ts`, `tool-kinds.ts`, `model-capabilities.ts`, `app-settings.ts`: the app-settings schema). `src/test/` — test infrastructure (bridges, factories, helpers, setup). `src/e2e/flows/` — end-to-end flows. `src/integration/` — gated suites against real engine binaries.
+- `src/shared/` — types and pure helpers every process imports (`types/`, `api-invoke-table.ts`, `tool-kinds.ts`, `hosted-tools.ts`, `model-capabilities.ts`, `app-settings.ts`: the app-settings schema). `src/test/` — test infrastructure (bridges, factories, helpers, setup). `src/e2e/flows/` — end-to-end flows. `src/integration/` — gated suites against real engine binaries.
 
 These directories carry their own `CLAUDE.md` (what lives there, the recipes for the common small changes, the invariants that live only in comments, the fast test): `src/core/ipc/`, `src/core/shared/sync/`, `src/core/providers/`, `src/core/pi/`, `src/core/automode/`, `src/core/services/`, `src/renderer/src/`, `src/renderer/src/components/chat/tool-registry/`. Read the note before editing there. Claude Code loads it when it reads a file in that directory; pi loads only this root file and opencode reads only `AGENTS.md`, so a brief for those agents names the note, and an opencode brief also carries the rules above (ADR-103). A change that alters a recipe or an invariant a note states updates the note in the same change.
 
@@ -33,21 +33,22 @@ These directories carry their own `CLAUDE.md` (what lives there, the recipes for
 
 - Claude has no directory of its own: its engine code is `src/core/services/claude-*.ts` plus `src/core/sdk/`.
 - `src/core/pi/permission-engine.ts` is the rule ladder every engine shares; opencode and the dispatcher import it. `src/core/permissions/` holds only the shell rule matcher.
-- pi's cold history, fork anchor and session delete are in `src/core/services/pi-session-list.ts`; opencode's session list, cold load and delete are in `src/core/services/opencode-session-list.ts`, over the converters in `src/core/opencode/history.ts`.
+- pi's session list, cold load, fork anchor and session delete are in `src/core/services/pi-session-list.ts`, over the converters in `src/core/pi/history.ts`; opencode's session list, cold load and delete are in `src/core/services/opencode-session-list.ts`, over the converters in `src/core/opencode/history.ts`.
 - "Provider" means three things: `src/core/providers/` is the engine session seam, `src/core/shared-providers/` is model providers, and `EngineAuthProvider` in `src/core/auth/` is per-engine sign-in. Two unrelated files are named `provider-registry.ts` (`src/shared/provider-registry.ts`, `src/core/shared-providers/provider-registry.ts`).
 - `src/core/shared/` (the sync contract and `tool-review.ts`) is not `src/shared/`. `src/core/harness/` (engine binaries) is not `src/core/sdk/harness.ts` (which patches a Claude build carries).
 
 ## Fast loop
 
-- One spec: `bunx vitest run <spec file>` (`--project '!browser'` is harmless and skips the browser project's startup). One test: add `-t "<test name>"`. The specs that cover a source file: `bunx vitest related --run <source file>` (about ten seconds).
+- One spec: `bunx vitest run <spec file>` (naming spec files skips the browser project by itself). One test: add `-t "<test name>"`. The specs that cover a source file: `bunx vitest related --run <source file>` (about ten seconds; add `--project '!browser'` to it, and to a directory filter, to skip the browser project).
 - Types: `bun run typecheck:node` or `bun run typecheck:web` (incremental, a few seconds). Lint: `bunx eslint --cache <files>`; always pass `--cache`.
-- `scripts/gates.sh` is not the inner loop: run it once, on the commit-ready tree. Run `bun run format:check` before pushing (CI runs it).
+- `scripts/gates.sh` is not the inner loop: run it once, on the commit-ready tree. It checks the format of the files the branch changed, and a second run on an identical tree returns at once (`--force` after `node_modules` or `vendor/` changed).
+- Guards that a structural change can trip: the `layer/zones` lint rule (which directory may import which), `src/shared/__tests__/import-cycles.test.ts` (it also fails when a known cycle changes or disappears: delete its entry), `src/shared/__tests__/doc-paths.test.ts` and `src/shared/__tests__/adr-index.test.ts` (a path or an ADR part label a doc cites must exist), `src/shared/__tests__/vi-mock-targets.test.ts`.
 
 ## Critical areas (ADR-026)
 
 A slice that touches any of these is Critical whatever its size: its design is reviewed before it is built and it is verified live. A change to a seam the engines share must preserve Claude's behaviour.
 
-- the permission ladders and the auto-mode judge (`src/core/pi/permission-engine.ts`, `src/core/permissions/`, `src/core/automode/`, the rulesets in `src/core/opencode/`);
+- the permission ladders and the auto-mode judge (`src/core/pi/permission-engine.ts`, `src/core/permissions/`, `src/core/automode/`, the rulesets in `src/core/opencode/`), with the tool-kind tables the ladder reads (`src/shared/pi-tool-kinds.ts`, the `kind` column of `src/shared/hosted-tools.ts`, `hostedMcpKind` in `src/shared/tool-kinds.ts`);
 - path containment and session scratchpads;
 - credentials and the auth vault (`src/core/auth/`);
 - remote server authentication and capabilities (`src/core/services/remote-server.ts`, `src/core/ipc/command-registry.ts`);

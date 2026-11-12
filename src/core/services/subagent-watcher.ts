@@ -6,12 +6,17 @@
  * so the UI gets live updates. Also serves as the mechanism for loading subagent
  * history on session reload.
  */
+import type { EmitSessionEvent } from '../shared/sync/events'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import type { ChatMessage, ContentBlock } from '../../shared/types'
+import type { ChatMessage } from '../../shared/types'
 import { logger } from './logger'
-import { extractToolResultContent } from './tool-result-content'
+import {
+  claudeAssistantMessage,
+  claudeToolResultBlock,
+  claudeToolResults
+} from './claude-transcript'
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
 
@@ -117,19 +122,7 @@ function parseJsonlLine(line: string): ChatMessage | null {
 
       // Tool results — return as-is so the UI can attach them
       if (isArray) {
-        const toolResults: ContentBlock[] = []
-        for (const block of content) {
-          if (block.type === 'tool_result' && block.tool_use_id) {
-            const { text: resultText, images } = extractToolResultContent(block.content)
-            toolResults.push({
-              type: 'tool_result',
-              toolUseId: block.tool_use_id,
-              toolResult: resultText,
-              isError: !!block.is_error,
-              ...(images ? { images } : {})
-            })
-          }
-        }
+        const toolResults = claudeToolResults(content).map(claudeToolResultBlock)
         if (toolResults.length > 0) {
           return {
             id: obj.uuid || `tool-result-${Date.now()}`,
@@ -144,48 +137,10 @@ function parseJsonlLine(line: string): ChatMessage | null {
     }
 
     if (type === 'assistant') {
-      const betaMessage = obj.message as Record<string, unknown> | undefined
-      if (!betaMessage?.content || !Array.isArray(betaMessage.content)) return null
-
-      const blocks: ContentBlock[] = (betaMessage.content as Array<Record<string, unknown>>).map(
-        (block) => {
-          const blockType = block.type as string
-          if (blockType === 'text') return { type: 'text' as const, text: block.text as string }
-          if (blockType === 'tool_use') {
-            return {
-              type: 'tool_use' as const,
-              toolName: block.name as string,
-              toolInput: block.input as Record<string, unknown>,
-              toolUseId: block.id as string
-            }
-          }
-          if (blockType === 'tool_result') {
-            const { text, images } = extractToolResultContent(block.content)
-            return {
-              type: 'tool_result' as const,
-              toolUseId: block.tool_use_id as string,
-              toolResult: text,
-              isError: block.is_error as boolean,
-              ...(images ? { images } : {})
-            }
-          }
-          if (blockType === 'thinking')
-            return { type: 'thinking' as const, text: block.thinking as string }
-          return { type: 'text' as const, text: JSON.stringify(block) }
-        }
-      )
-
-      const messageId =
-        (betaMessage.id as string) || (obj.uuid as string) || `assistant-${Date.now()}`
-      return {
-        id: messageId,
-        role: 'assistant',
-        content: blocks,
-        timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
-        ...(typeof betaMessage.model === 'string' && betaMessage.model
-          ? { model: betaMessage.model }
-          : {})
-      }
+      return claudeAssistantMessage(obj, {
+        fallbackId: () => `assistant-${Date.now()}`,
+        timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
+      })
     }
 
     return null
@@ -260,7 +215,7 @@ export function watchSubagent(
   sessionId: string,
   projectKey: string,
   prompt: string | undefined,
-  sendFn: (channel: string, data: unknown) => void
+  sendFn: EmitSessionEvent
 ): void {
   // Already watching this toolUseId
   if (watched.has(toolUseId)) return

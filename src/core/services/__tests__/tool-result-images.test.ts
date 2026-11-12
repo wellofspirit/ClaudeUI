@@ -164,7 +164,7 @@ describe('transformAssistantMessage — assistant-embedded tool_result', () => {
       type: 'tool_result',
       toolUseId: 'tu-2',
       toolResult: 'just text',
-      isError: undefined
+      isError: false
     })
   })
 })

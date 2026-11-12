@@ -1,7 +1,7 @@
 /**
  * Per-tool card specs for Claude's non-file, non-shell tools.
  *
- * cli.js 2.1.268 hands ClaudeUI 32 tools (docs/tool-survey.md § 7). Eleven map
+ * cli.js 2.1.268 hands ClaudeUI 32 tools (docs/protocol-cc/04-system-subtypes.md § 4.2). Eleven map
  * onto a semantic kind, one is hidden, and the other twenty used to fall to
  * `unknown` — which renders `JSON.stringify(input)` in the header AND a JSON dump
  * in the body. A tool that schedules a job, stops a task or loads a skill
@@ -355,5 +355,5 @@ export const CLAUDE_TOOL_SPECS: Record<string, ClaudeToolSpec> = {
 
 /** The spec for a tool name, or null when the name has none. */
 export function claudeToolSpec(toolName: string): ClaudeToolSpec | null {
-  return CLAUDE_TOOL_SPECS[toolName] ?? null
+  return Object.hasOwn(CLAUDE_TOOL_SPECS, toolName) ? CLAUDE_TOOL_SPECS[toolName] : null
 }

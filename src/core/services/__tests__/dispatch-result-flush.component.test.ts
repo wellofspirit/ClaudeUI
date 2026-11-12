@@ -12,6 +12,7 @@
  * real inbox (the node:sqlite-backed `session_inbox`).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { makeSessionStatus } from '../../../test/factories/messages'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { addHostObserver, clearSyncSubscribersForTests, emitEvent } from '../sync-host'
 
@@ -49,8 +50,7 @@ vi.mock('../claude-mcp', () => ({
   readDisabledMcpServers: vi.fn(() => [])
 }))
 vi.mock('../session-history', () => ({
-  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
-  fallbackBlockText: vi.fn(() => '')
+  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 }))
 }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../context-window', () => ({
@@ -213,7 +213,7 @@ describe('the flush of a held X-Agent result', () => {
     const watch = watchDispatchResultFlush(manager, addHostObserver)
     try {
       // The new object's own `idle` (engine not up, nothing armed) is not the edge...
-      emitEvent('session:status', [id, { state: 'idle' }])
+      emitEvent('session:status', [id, makeSessionStatus({ state: 'idle' })])
       expect(heldInboxCount(id)).toBe(1)
       expect(handles).toHaveLength(0)
       // ...a disconnect only arms the edge...
@@ -232,7 +232,7 @@ describe('the flush of a held X-Agent result', () => {
       expect(watch.armed()).not.toContain(id)
       // A later turn end flushes nothing: delivered once.
       const sentBefore = handles.at(-1)!.frames.length
-      emitEvent('session:status', [id, { state: 'idle' }])
+      emitEvent('session:status', [id, makeSessionStatus({ state: 'idle' })])
       await new Promise((r) => setTimeout(r, 20))
       expect(handles.at(-1)!.frames).toHaveLength(sentBefore)
     } finally {
@@ -271,7 +271,10 @@ describe('the flush of a held X-Agent result', () => {
     )
     try {
       watch.arm('temp-id')
-      emitEvent('session:status', ['temp-id', { state: 'running', sessionId: 'durable-id' }])
+      emitEvent('session:status', [
+        'temp-id',
+        makeSessionStatus({ state: 'running', sessionId: 'durable-id' })
+      ])
       expect(watch.armed()).toEqual(['durable-id'])
     } finally {
       watch.stop()
@@ -340,7 +343,7 @@ describe('the flush of a held X-Agent result', () => {
       addHostObserver
     )
     try {
-      emitEvent('session:status', [id, { state: 'idle' }])
+      emitEvent('session:status', [id, makeSessionStatus({ state: 'idle' })])
       await new Promise((r) => setTimeout(r, 20))
       expect(heldInboxItems(id)).toHaveLength(1)
     } finally {
@@ -365,10 +368,10 @@ describe('the flush of a held X-Agent result', () => {
     )
     try {
       watch.arm(id)
-      emitEvent('session:status', [id, { state: 'running' }])
+      emitEvent('session:status', [id, makeSessionStatus({ state: 'running' })])
       await new Promise((r) => setTimeout(r, 20))
       expect(heldInboxCount(id)).toBe(1)
-      emitEvent('session:status', [id, { state: 'idle' }])
+      emitEvent('session:status', [id, makeSessionStatus({ state: 'idle' })])
       await vi.waitFor(() => expect(heldInboxCount(id)).toBe(0))
     } finally {
       watch.stop()

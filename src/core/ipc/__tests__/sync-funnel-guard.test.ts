@@ -20,9 +20,10 @@ import {
   CHANNEL_SPECS,
   channelSpec,
   deliveryDeltas,
+  ringedChannels,
   volatileStreamChannels
 } from '../../shared/sync/channels'
-import { applyEvent } from '../../shared/sync/reducer'
+import { applyEvent, foldedChannels } from '../../shared/sync/reducer'
 import { streamEventScopeOf } from '../../shared/sync/stream'
 import { emptyCanonicalState, emptySession, type CanonicalState } from '../../shared/sync/state'
 import { STREAM_WATCH_COMMAND } from '../stream-watch'
@@ -226,11 +227,11 @@ describe('emission funnel (item 2)', () => {
 
   it('BaseSession.send delegates to the funnel rather than sending directly', () => {
     const src = read('src/core/providers/BaseSession.ts')
-    expect(src).toMatch(/protected send\([\s\S]{0,400}?emitEvent\(/)
+    expect(src).toMatch(/protected send<[^(]*>\([\s\S]{0,400}?emitEvent\(/)
     expect(src).not.toMatch(/this\.win\.webContents\.send\(/)
     // 4c: a session emission names no window at all — every channel it emits is
     // replicated or volatile, so the per-session `win` is not a delivery target.
-    expect(src).toMatch(/emitEvent\(channel, \[this\.routingId, data\]\)/)
+    expect(src).toMatch(/emitEvent\(channel, \[this\.routingId, data\] as EmitArgs<C>\)/)
   })
 })
 
@@ -277,7 +278,9 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
    * Every channel literal the main process emits, from both emission shapes:
    * `emitEvent('x', …)` and `this.send('x', …)` (BaseSession, which funnels).
    * Also picks up the remaining host-local `webContents.send('x', …)` sites, so
-   * a host-local channel cannot dodge classification either.
+   * a host-local channel cannot dodge classification either. An unclassified literal in
+   * `emitEvent` / `this.send` is now also a compile error (the channel is typed); the
+   * `webContents.send('x')` and `sendFn('x')` shapes are what this scan still covers alone.
    */
   function emittedChannels(): Set<string> {
     const found = new Set<string>()
@@ -366,7 +369,8 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     // transient toast/banner channels with no snapshot field. So the count below
     // dropped from >30 to the size of that set, and the coverage that used to come
     // from counting call sites now comes from the classification itself: every
-    // canonical channel has a reducer branch, pinned by the reducer-coverage test.
+    // canonical channel has a reducer branch, pinned by
+    // `shared/sync/__tests__/reducer-coverage.unit.test.ts`.
     const declared = [...read('src/core/shared/sync/events.ts').matchAll(/^\s{2}'([^']+)':/gm)].map(
       (m) => m[1]
     )
@@ -403,13 +407,23 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     ).toEqual([])
   })
 
-  it('a host-local channel never rings and never touches canonical state', () => {
-    // host-local means the owning window only, so a ringed host-local channel
-    // would be replayed to remote clients on catchup. (The old companion check —
-    // `delivery === 'main-only'` — is gone with the column: delivery IS the class
-    // now, so the two can no longer disagree.)
+  it('the ring holds exactly the replicated channels', () => {
+    // The ring is derived from the class (`ringsEvents`), so a host-local channel
+    // cannot be replayed to a remote client on catchup, a volatile one cannot take
+    // a seq, and a replicated one cannot stop ringing. One assertion on the
+    // derivation replaces the per-row checks the `ring` column needed.
+    const replicated = Object.entries(CHANNEL_SPECS)
+      .filter(([, s]) => s.cls === 'replicated')
+      .map(([c]) => c)
+      .sort()
+    expect(replicated.length).toBeGreaterThan(50)
+    expect(ringedChannels()).toEqual(replicated)
+  })
+
+  it('a host-local channel never touches canonical state', () => {
+    // The host-local table's type already says so; this holds the merged table to it.
     const violations = Object.entries(CHANNEL_SPECS)
-      .filter(([, s]) => s.cls === 'host-local' && (s.ring || s.canonical))
+      .filter(([, s]) => s.cls === 'host-local' && s.canonical)
       .map(([c]) => c)
     expect(violations).toEqual([])
   })
@@ -424,20 +438,7 @@ describe('channel classification coverage (item 3, fail-closed)', () => {
     ])
   })
 
-  it('an EVENT-lane canonical channel always rings (they would contradict)', () => {
-    // Canonical-without-ring on the EVENT lane would mean core applies an event a
-    // reconnecting client can never replay — the snapshot and the stream would
-    // disagree. The `volatile` class is the sanctioned exception and the reason
-    // this test names a lane: its channels are canonical-backed AND ringless by
-    // design, because their frames are not events at all (phase 5 S1). The
-    // classification-invariant suite below is what holds them to that.
-    const contradictions = Object.entries(CHANNEL_SPECS)
-      .filter(([, s]) => s.canonical && !s.ring && s.cls !== 'volatile')
-      .map(([c]) => c)
-    expect(contradictions).toEqual([])
-  })
-
-  it('every spec carries a rationale (the docs table is generated from these)', () => {
+  it('every spec carries a rationale (the table is the only place it is written)', () => {
     const missing = Object.entries(CHANNEL_SPECS)
       .filter(([, s]) => !s.why || s.why.length < 20)
       .map(([c]) => c)
@@ -475,11 +476,12 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
   })
 
   it('volatile ⇒ NEVER rings, whichever flavor', () => {
+    // No ring ⇒ no seq ⇒ neither a turn of tokens nor a noisy bash command can
+    // flush the 5000-entry ring and force a `sync-full` on the next reconnect.
+    // That IS the phase-5 exit criterion.
+    const ringed = new Set(ringedChannels())
     for (const channel of volatile) {
-      // No ring ⇒ no seq ⇒ neither a turn of tokens nor a noisy bash command can
-      // flush the 5000-entry ring and force a `sync-full` on the next reconnect.
-      // That IS the phase-5 exit criterion.
-      expect(channelSpec(channel)!.ring, `${channel} still rings`).toBe(false)
+      expect(ringed.has(channel), `${channel} still rings`).toBe(false)
     }
   })
 
@@ -523,11 +525,10 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
   })
 
   it('volatile ⇒ no reducer branch, and applyEvent refuses one', () => {
-    // Both halves matter. The SOURCE half: a `case 'session:stream':` growing
-    // back would be a second transcript accumulator racing the item lifecycle.
-    const reducerSrc = readCode('src/core/shared/sync/reducer.ts')
+    // Both halves matter. The REGISTRY half: a handler for a volatile channel
+    // growing back would be a second transcript accumulator racing the item lifecycle.
     for (const channel of volatile) {
-      expect(reducerSrc).not.toContain(`case '${channel}':`)
+      expect(foldedChannels()).not.toContain(channel)
     }
     // The BEHAVIORAL half: even routed onto the event lane by mistake, the fold
     // is identity-stable rather than a duplicate append.
@@ -540,15 +541,6 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
       })
       expect(after, `applyEvent still folds ${channel}`).toBe(before)
     }
-  })
-
-  it('replicated channels are untouched by the migration', () => {
-    // The bounded half of the claim: the lane took five rows and nothing else.
-    // Any `replicated` row that stopped ringing would be an unnoticed lane change.
-    const broken = Object.entries(CHANNEL_SPECS)
-      .filter(([, s]) => s.cls === 'replicated' && !s.ring)
-      .map(([c]) => c)
-    expect(broken).toEqual([])
   })
 
   it('obsolete transcript channels stay outside SyncEventMap; the tails remain', () => {
@@ -628,7 +620,8 @@ describe('the volatile lane (phase 5 S1 + S2)', () => {
     expect(registry).not.toMatch(/GIT_WATCH_OWNER/)
     expect(registry).not.toMatch(/releaseOwner|startWatching|stopWatching/)
     // And the wire event is untouched: still replicated, still ringed.
-    expect(channelSpec('git:status-update')).toMatchObject({ cls: 'replicated', ring: true })
+    expect(channelSpec('git:status-update')).toMatchObject({ cls: 'replicated' })
+    expect(ringedChannels()).toContain('git:status-update')
   })
 })
 

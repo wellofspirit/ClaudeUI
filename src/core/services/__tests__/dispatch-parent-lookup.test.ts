@@ -29,8 +29,9 @@ describe('makeDispatchParentLookup', () => {
       emitEvent,
       canonical: () => undefined
     })
-    lookup.emit('uuid-1', 'session:task-started', { toolUseId: 't1' })
-    expect(emitEvent).toHaveBeenCalledWith('session:task-started', ['uuid-1', { toolUseId: 't1' }])
+    const started = { toolUseId: 't1', taskId: 'x1', taskType: 'dispatch' }
+    lookup.emit('uuid-1', 'session:task-started', started)
+    expect(emitEvent).toHaveBeenCalledWith('session:task-started', ['uuid-1', started])
   })
 
   it('answers with whatever session object the manager has at that moment', () => {

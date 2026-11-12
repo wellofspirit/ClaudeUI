@@ -4,10 +4,12 @@
  * Each engine maps its tool names onto these kinds via EngineToolMap. Renderers
  * are keyed on kind, so Claude's Bash and opencode's bash both render through
  * the 'command' kind renderer. The per-engine name→kind tables live in
- * renderer/src/components/chat/tool-registry/{Claude,Opencode,Pi}EngineToolMap.ts.
+ * renderer/src/components/chat/tool-registry/{Claude,Opencode}EngineToolMap.ts and,
+ * for pi, in pi-tool-kinds.ts (the permission ladder reads that one too).
+ * ClaudeUI's own hosted tools are one table for every engine: hosted-tools.ts.
  */
 
-import { DISPATCH_LABEL } from './first-party-tool-names'
+import { DISPATCH_LABEL, hostedToolKind } from './hosted-tools'
 import type { AskUserQuestion, ContentBlock, FileDiff } from './types'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
@@ -242,26 +244,13 @@ export function dispatchLabel(dispatch: { engine: string; model?: string }): str
 // ---------------------------------------------------------------------------
 
 /**
- * Classify hosted-MCP tool names that ClaudeUI injects at the engine level.
- * These are engine-independent: both Claude and opencode receive the same MCP
- * tools when our plugin is loaded.
+ * Classify an MCP-spelled tool name (`mcp__<server>__<tool>`): one of ClaudeUI's
+ * own tools takes the kind of its row in `hosted-tools.ts`, any other is `mcp`.
+ * Asked before each engine's `kindOf`, and by `piToolKind`, which the permission
+ * ladder reads.
  *
- * Returns `null` for names that are not hosted-MCP tools (let the engine's
- * kindOf handle them).
+ * Returns `null` for a name that is not MCP-spelled (the engine's kindOf decides).
  */
 export function hostedMcpKind(toolName: string): ToolKind | null {
-  if (toolName === 'mcp__claude-ui__render_mermaid') return 'diagram'
-  if (
-    toolName === 'mcp__claude-ui-mockup__create_mockup' ||
-    toolName === 'mcp__claude-ui-mockup__show_mockup'
-  )
-    return 'mockup'
-  // Cross-engine dispatch (ADR-033 M3) — Claude's dispatch_agent lives on its
-  // own 'claude-ui-collab' MCP server (collab-tool.ts, deliberately NOT the
-  // auto-allowed 'claude-ui' prefix). Reuses TaskCard via the 'task' kind so
-  // dispatched work gets the same live-streaming/progress/stop UX as a native
-  // subagent. Checked BEFORE the generic 'mcp__' fallback below.
-  if (toolName === 'mcp__claude-ui-collab__dispatch_agent') return 'task'
-  if (toolName.startsWith('mcp__')) return 'mcp'
-  return null
+  return hostedToolKind(toolName, 'mcp') ?? (toolName.startsWith('mcp__') ? 'mcp' : null)
 }
