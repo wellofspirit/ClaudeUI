@@ -47,7 +47,7 @@ import type {
   SubagentMessageData,
   SubagentToolResultData,
   TaskNotification,
-  TaskProgress,
+  TaskProgressPatch,
   TaskStartedData,
   TodoItem,
   ToolResultImage,
@@ -62,7 +62,7 @@ import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-
 import type { VoicePackStatus } from '../../../shared/voice-pack'
 import type { SessionLinksPayload } from '../../../shared/session-links'
 import type { ContextPressureBanner } from '../../../shared/context-pressure'
-import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
+import type { ItemStreamDelta, ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 export interface SyncEventMap {
   // -------------------------------------------------------------------------
@@ -101,7 +101,8 @@ export interface SyncEventMap {
        * itself must cut at the same line the engine did.
        */
       resumeSessionAt?: string
-      permissionMode?: PermissionMode
+      /** The caller's string as given (not validated against `PermissionMode`). */
+      permissionMode?: string
       engineId?: EngineId
       model?: string
       effort?: string | null
@@ -232,7 +233,7 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   // Tasks + subagents
   // -------------------------------------------------------------------------
-  'session:task-progress': (routingId: string, data: TaskProgress) => void
+  'session:task-progress': (routingId: string, data: TaskProgressPatch) => void
   'session:task-notification': (routingId: string, data: TaskNotification) => void
   /** Task exists and is running — see TaskStartedData for why this is needed. */
   'session:task-started': (routingId: string, data: TaskStartedData) => void
@@ -262,7 +263,12 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   // Per-session config
   // -------------------------------------------------------------------------
-  'session:permission-mode': (routingId: string, mode: PermissionMode) => void
+  /**
+   * The mode the session is in now. A `string`, not `PermissionMode`: a session
+   * sends the mode its engine reports, unvalidated, and cli.js can name a mode
+   * outside the four the client offers (`bypassPermissions`, `dontAsk`).
+   */
+  'session:permission-mode': (routingId: string, mode: string) => void
   /**
    * Per-session config replication. A PARTIAL patch: only the fields the setter
    * changed are present, and each is a replace. Emitted before spawn too, so a
@@ -473,3 +479,61 @@ export interface SyncEventMap {
 
 /** Every channel a client may subscribe to through the sync transport. */
 export type SyncChannel = keyof SyncEventMap
+
+/**
+ * Channels the host emits that never reach a channel listener, so they are kept
+ * out of the subscription map above. An item delta rides the volatile lane as an
+ * item-stream frame, and the replica folds it into the open item.
+ */
+export interface EmitOnlyEventMap {
+  'session:item-delta': (routingId: string, data: ItemStreamDelta) => void
+}
+
+/**
+ * Every channel `emitEvent` takes, with the positional args it sends. The sync
+ * half of `CHANNEL_SPECS` (`channels.ts`) must have exactly these keys, so a
+ * replicated or volatile channel cannot be classified without being typed here,
+ * or typed here without being classified. Host-local channels are not in it:
+ * they are sent straight to the owning window and never through the funnel.
+ */
+export type EmitEventMap = SyncEventMap & EmitOnlyEventMap
+export type EmitChannel = keyof EmitEventMap
+export type EmitArgs<C extends EmitChannel> = Parameters<EmitEventMap[C]>
+
+/**
+ * The channels whose args are exactly `(routingId, data)`: what a session sends
+ * about itself, with the routing id supplied by the sender (`BaseSession.send`).
+ */
+export type SessionEventChannel = {
+  [C in EmitChannel]: EmitArgs<C> extends [string, unknown] ? C : never
+}[EmitChannel]
+export type SessionEventData<C extends SessionEventChannel> = EmitArgs<C>[1]
+
+/** The shape of `emitEvent`, for code that takes the emitter as a dependency. */
+export type EmitEvent = <C extends EmitChannel>(channel: C, args: EmitArgs<C>) => void
+/** The shape of a session-scoped emitter whose owner supplies the routing id. */
+export type EmitSessionEvent = <C extends SessionEventChannel>(
+  channel: C,
+  data: SessionEventData<C>
+) => void
+
+/**
+ * A payload as received. The host that produced it may be older than this build
+ * and a fixture may be hand-written, so no field is guaranteed present: an object
+ * type becomes `Partial` of itself, an array type stays as declared (the reader
+ * still checks `Array.isArray`), anything else stays as declared.
+ */
+export type Wire<T> = T extends readonly unknown[] ? T : T extends object ? Partial<T> : T
+
+type WireTuple<A extends unknown[]> = { [K in keyof A]?: Wire<A[K]> }
+
+/** The args of channel `C` as received: every position optional, every payload `Wire`. */
+export type WireArgs<C extends EmitChannel> = WireTuple<EmitArgs<C>>
+
+/**
+ * View raw args as channel `C`'s declared args. This is a cast, by design, and the
+ * one place that makes it: the caller must still guard every position it reads.
+ */
+export function wireArgs<C extends EmitChannel>(_channel: C, args: unknown[]): WireArgs<C> {
+  return args as WireArgs<C>
+}

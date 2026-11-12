@@ -10,6 +10,7 @@
  * electron at runtime), so electron is shimmed.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
+import { makeSessionStatus } from '../../../test/factories/messages'
 import {
   existsSync,
   mkdirSync,
@@ -7726,7 +7727,10 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
       const canonical = (): ReturnType<typeof syncCore.getCanonicalState>['sessions'][string] =>
         syncCore.getCanonicalState().sessions['routing-1']
       const disconnect = (): void =>
-        emitEvent('session:status', ['routing-1', { state: 'disconnected' }])
+        emitEvent('session:status', [
+          'routing-1',
+          makeSessionStatus({ state: 'disconnected', engineId: 'opencode' })
+        ])
 
       async function launchOnRealFunnel(): Promise<
         Awaited<ReturnType<typeof launchClaude>> & { requestId: string; gate: Promise<unknown> }
@@ -7737,7 +7741,7 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
         const record = parents.parents.emit
         parents.parents.emit = (parentId, channel, data) => {
           record(parentId, channel, data)
-          emitEvent(channel, [parentId, data])
+          syncCore.emit(channel, [parentId, data])
         }
         const t = await launchClaude({ parents })
         release = t.dispatcher.configureParents(parents.parents, undefined, (observer) =>
@@ -7788,7 +7792,10 @@ describe('CrossEngineDispatcher — runs (ADR-105 B-2a)', () => {
       it('restores only the disconnected parent’s own run, and never one that already ended', async () => {
         const t = await launchOnRealFunnel()
         emitEvent('session:created', ['routing-2', { cwd: '/x', engineId: 'opencode' }])
-        emitEvent('session:status', ['routing-2', { state: 'disconnected' }])
+        emitEvent('session:status', [
+          'routing-2',
+          makeSessionStatus({ state: 'disconnected', engineId: 'opencode' })
+        ])
         expect(t.parents.on('session:task-started')).toHaveLength(1)
 
         t.dispatcher.resolveApproval(t.requestId, 'allow')

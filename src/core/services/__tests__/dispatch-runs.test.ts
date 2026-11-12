@@ -187,12 +187,12 @@ describe('makeRunContext — the live parent', () => {
 
   it('emits under the parent’s durable id, never through the launching call’s closure', () => {
     const t = setup()
-    t.ctx.emit('session:task-progress', { n: 1 })
+    t.ctx.emit('session:task-progress', { toolUseId: 't1', elapsedTimeSeconds: 1 })
     t.registry.rekey('tmp-1', 'uuid-1')
-    t.ctx.emit('session:task-progress', { n: 2 })
+    t.ctx.emit('session:task-progress', { toolUseId: 't1', elapsedTimeSeconds: 2 })
     expect(t.emitted).toEqual([
-      ['tmp-1', 'session:task-progress', { n: 1 }],
-      ['uuid-1', 'session:task-progress', { n: 2 }]
+      ['tmp-1', 'session:task-progress', { toolUseId: 't1', elapsedTimeSeconds: 1 }],
+      ['uuid-1', 'session:task-progress', { toolUseId: 't1', elapsedTimeSeconds: 2 }]
     ])
     expect(t.base.emit).not.toHaveBeenCalled()
     expect(t.ctx.fromRoutingId).toBe('uuid-1')

@@ -122,19 +122,19 @@ beforeEach(() => {
     sendPrompt: async (routingId, prompt, options) => {
       if (sendFails) throw sendFails
       sent.push({ routingId, prompt, origin: options.origin })
+      // The wire only names the host-instruction origin; a user prompt carries none.
+      const origin = options.origin === 'host-instruction' ? options.origin : undefined
       // What the real sendPrompt does: a busy session queues the item, an idle one starts a turn.
       if (syncCore.getCanonicalState().sessions[routingId]?.status.state === 'running') {
         if (silentQueue) return
         emitEvent('session:queue-changed', [
           routingId,
           {
-            items: [
-              { itemId: `h-${sent.length}`, state: 'queued', text: prompt, origin: options.origin }
-            ]
+            items: [{ itemId: `h-${sent.length}`, state: 'queued', text: prompt, origin }]
           }
         ])
       } else {
-        emitEvent('session:user-message', [routingId, { prompt, origin: options.origin }])
+        emitEvent('session:user-message', [routingId, { prompt, origin }])
       }
     }
   })

@@ -65,12 +65,14 @@ import {
   emptyCanonicalState,
   emptySession,
   fromSnapshot,
+  sessionFields,
   type CanonicalSessionState,
   type CanonicalState
 } from '../../../core/shared/sync/state'
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 import { AUTONOMY_TO_PERMISSION } from '../../../shared/permission-modes'
 import type { PermissionMode, SessionStatus, WorktreeInfo } from '../../../shared/types'
+import type { SealedSessionField } from './sealed-fields'
 import { linkedWorktreeFor, worktreeInfoFromLinked } from '../../../shared/linked-worktree'
 import {
   useSessionStore,
@@ -921,33 +923,37 @@ function projectSession(
   const base = resident ?? { ...EMPTY_SESSION_STATE, cwd: c.cwd }
   return {
     ...base,
-    cwd: c.cwd,
-    messages: c.messages,
-    itemStreams: c.itemStreams,
-    itemStreamRevision: c.itemStreamRevision,
-    status: c.status,
-    pendingApprovals: c.pendingApprovals,
-    todos: c.todos,
-    sentFiles: c.sentFiles,
-    queuedItems: c.queue,
-    heldCount: c.heldCount,
-    contextPressure: c.contextPressure,
-    taskNotifications: c.taskNotifications,
-    activeTasks: c.activeTasks,
-    taskProgressMap: c.taskProgressMap,
-    subagentMessages: c.subagentMessages,
-    permissionMode: c.permissionMode as PermissionMode,
-    effort: c.effort as PerSessionState['effort'],
-    thinkingMode: c.thinkingMode as PerSessionState['thinkingMode'],
-    reasoningVariant: c.reasoningVariant,
-    statusLine: c.statusLine,
-    metering: c.metering,
-    slashCommands: c.slashCommands,
-    sdkActive: c.sdkActive,
-    selectedEngineId: c.selectedEngineId,
-    selectedModel: c.selectedModel,
-    authRequired: c.authRequired,
+    ...projectCanonicalFields(c),
     // The per-session mirror of the app-level map (plus the linked-worktree marker of its cwd).
     worktreeInfo: worktreeInfo ?? null
   }
+}
+
+/**
+ * Every canonical field that has a store field, under its store name: all of them as they
+ * are, except the ones named here. `satisfies` is what fails to compile when a canonical
+ * field has no store field of that name, or one of another type.
+ *
+ * - `routingId` is the record key and `seeded` is replica-internal: neither has a store field.
+ * - `queue` is the store's `queuedItems`.
+ * - Canonical holds `permissionMode`, `effort` and `thinkingMode` as plain strings where the
+ *   store has narrower unions; the producers only write the union's values.
+ */
+function projectCanonicalFields(c: CanonicalSessionState) {
+  const {
+    routingId: _routingId,
+    seeded: _seeded,
+    queue,
+    permissionMode,
+    effort,
+    thinkingMode,
+    ...same
+  } = sessionFields(c)
+  return {
+    ...same,
+    queuedItems: queue,
+    permissionMode: permissionMode as PermissionMode,
+    effort: effort as PerSessionState['effort'],
+    thinkingMode: thinkingMode as PerSessionState['thinkingMode']
+  } satisfies Pick<PerSessionState, Exclude<SealedSessionField, 'worktreeInfo'>>
 }

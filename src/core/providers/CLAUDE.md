@@ -6,7 +6,7 @@ The engine-session seam: the interface and shared base every engine session impl
 
 - Name trap: "provider" here means the engine session seam. Model providers are `src/core/shared-providers/`; per-engine sign-in is `EngineAuthProvider` in `src/core/auth/`.
 - `src/core/providers/ISession.ts`: `ISession`, the optional capability-gated members, and `EngineSpawnOptions` (the named spawn options every factory receives).
-- `src/core/providers/BaseSession.ts`: shared plumbing: `send`, the queue of record, the user-stop window, `baseStatusFields()`. It owns no turn or usage bookkeeping.
+- `src/core/providers/BaseSession.ts`: shared plumbing: `send` (typed from the event map in `src/core/shared/sync/events.ts`: a channel or payload that does not match it does not compile), the queue of record, the user-stop window, `baseStatusFields()`. It owns no turn or usage bookkeeping.
 - `src/core/providers/EngineRegistry.ts`, `src/core/providers/SpawnPrepRegistry.ts`, `src/core/providers/register-engines.ts`: engine id to session factory and to spawn prep.
 - `src/core/providers/claude-spawn-prep.ts` (spawn prep resolves the model only; siblings `src/core/pi/pi-spawn-prep.ts`, `src/core/opencode/opencode-spawn-prep.ts`), `src/core/providers/session-queue.ts`, `src/core/providers/turn-origin-ledger.ts`, `src/core/providers/client-prompt-observer.ts`.
 - Each engine keeps its session code in a different shape. Claude: `src/core/services/claude-session.ts`, the other `src/core/services/claude-*.ts`, harness `src/core/sdk/`. opencode: `src/core/opencode/` (`OpencodeSession.ts`, `event-mapper.ts` live, `history.ts` cold).

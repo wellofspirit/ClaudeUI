@@ -11,6 +11,7 @@ import type {
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { HostWindowHandle } from '../host'
+import type { EmitSessionEvent } from '../shared/sync/events'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
 import type { TurnOriginLedger } from './turn-origin-ledger'
 
@@ -297,7 +298,7 @@ export interface ISession {
    * class (the opencode-hosted `dispatch_agent` tool handler has no other
    * access to the protected `send()`).
    */
-  emit(channel: string, data: unknown): void
+  emit: EmitSessionEvent
 
   /**
    * Accumulate spend from a cross-engine dispatched-agent turn (ADR-033

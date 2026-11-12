@@ -33,6 +33,7 @@
  * server serves every directory and connects its MCP clients per directory, so
  * the mockup tools resolve their cwd per CALL from the calling session.
  */
+import type { EmitSessionEvent } from '../shared/sync/events'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js'
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js'
@@ -106,7 +107,7 @@ export interface CallerSessionHandle {
   /** The caller's approvable blocks and grants (ISession.blockedCalls, ADR-091 part 6). */
   blockedCalls?: BlockedCallLedger
   /** Re-emits an event under the caller session's routing (ISession.emit). */
-  emit: (channel: string, data: unknown) => void
+  emit: EmitSessionEvent
   /** ISession.addDispatchedCost — folds a dispatched turn's spend into the
    *  caller session's own cost breakdown (ADR-033 Slice C). */
   addDispatchedCost: (engineId: EngineId, modelId: string, costUsd: number) => void

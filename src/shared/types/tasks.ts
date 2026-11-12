@@ -69,6 +69,14 @@ export interface TaskProgress {
 }
 
 /**
+ * What `session:task-progress` carries: only `toolUseId` is always present. Two wire
+ * messages feed the channel and each knows half the row (`tool_progress` the elapsed
+ * clock, `system/task_progress` the usage and last tool), so the reducer merges a
+ * patch into the held {@link TaskProgress}.
+ */
+export type TaskProgressPatch = Partial<TaskProgress> & Pick<TaskProgress, 'toolUseId'>
+
+/**
  * Emitted the moment cli.js spawns a Task/Agent (or background Bash) — mirrors
  * `session:task-notification`'s payload conventions but for the START edge.
  * Claude 2.1.219+ makes Agent/Task tasks background-by-default and the tool_use

@@ -3,20 +3,20 @@
  *
  * `sealed-fields.ts` is prose + lists; the thing that actually STOPS a sealed
  * writer from coming back is the `no-restricted-syntax` rule in
- * `eslint.config.mjs`. Two artefacts that must agree, in two files, one of which
- * ESLint's flat config cannot import (it is `.mjs`, the lists are `.ts`). So this
- * test is the joint: it parses the lint patterns out of the config and pins them
- * against the lists, and pins the lists against the canonical types.
+ * `eslint.config.mjs`. The config builds its per-session alternation from the
+ * `CanonicalSessionState` declaration and cannot import the exception constants,
+ * so this test is the joint: it reads the resolved selectors from the config and
+ * pins them against the lists, and pins the lists against the canonical types.
  *
- * Without it the failure mode is silent and permanent — someone adds a snapshot
- * field, seals it in the list, forgets the regex, and the brand has a hole nobody
- * will notice until a store action writes through it.
+ * Without it the failure mode is silent and permanent: the config restates the
+ * exceptions, and a drift would leave a store field unsealed until a store action
+ * wrote through it.
  */
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import {
+  SESSION_FIELDS_WITHOUT_STORE_FIELD,
+  STORE_NAME_OF_SESSION_FIELD,
   SEALED_SESSION_FIELDS,
   SEALED_APP_FIELDS,
   SEALED_SESSION_FIELD_SOURCE,
@@ -27,42 +27,72 @@ import {
 import { emptySession, emptyCanonicalState, toSnapshot } from '../../../../core/shared/sync/state'
 import { channelSpec, CHANNEL_SPECS } from '../../../../core/shared/sync/channels'
 
-const config = readFileSync(join(process.cwd(), 'eslint.config.mjs'), 'utf8')
+interface RestrictedSelector {
+  selector: string
+}
+interface ConfigObject {
+  ignores?: string[]
+  rules?: Record<string, unknown>
+}
 
-/** Every `key.name=/^(a|b|c)$/` alternation in the sealed-field rule block. */
-function lintPatternGroups(): string[][] {
-  return [...config.matchAll(/Property\[key\.name=\/\^\(([^)]+)\)\$\/\]/g)].map((m) =>
-    m[1].split('|')
-  )
+/** The `no-restricted-syntax` config object that carries the seal (it exempts `replica.ts`). */
+async function sealConfig(): Promise<{ ignores: string[]; selectors: string[] }> {
+  const { default: configs } = (await import('../../../../../eslint.config.mjs')) as {
+    default: ConfigObject[]
+  }
+  const block = configs.find((c) => c.ignores?.includes('src/renderer/src/stores/replica.ts'))
+  expect(block, 'no config object exempts stores/replica.ts').toBeDefined()
+  const options = block!.rules!['no-restricted-syntax'] as unknown[]
+  const selectors = options
+    .filter((o): o is RestrictedSelector => typeof o === 'object' && o !== null && 'selector' in o)
+    .map((o) => o.selector)
+  return { ignores: block!.ignores!, selectors }
+}
+
+/** The alternation of a `Property[key.name=/^(a|b)$/]` selector, or undefined. */
+function alternationOf(selector: string): string[] | undefined {
+  return /Property\[key\.name=\/\^\(([^)]+)\)\$\/\]/.exec(selector)?.[1].split('|')
 }
 
 describe('the sealed-field lint brand', () => {
-  it('is actually installed in the ESLint config', () => {
-    expect(config).toContain("'no-restricted-syntax'")
-    expect(config).toContain('src/renderer/src/stores/replica.ts')
+  it('is installed in the ESLint config, exempting only the replica and its field list', async () => {
+    const { ignores, selectors } = await sealConfig()
+    expect(selectors.length).toBeGreaterThanOrEqual(3)
     // The sanctioned writer is the ONLY exemption for app code (tests build whole
     // `PerSessionState` fixtures and are exempt as a class).
-    expect(config).toContain('sealed-fields.ts')
+    expect(ignores).toContain('src/renderer/src/stores/replica.ts')
+    expect(ignores).toContain('src/renderer/src/stores/sealed-fields.ts')
   })
 
-  it('names exactly the per-session sealed fields — no drift in either direction', () => {
-    const groups = lintPatternGroups()
-    const perSession = groups.find((g) => g.includes('messages'))
-    expect(perSession, 'no per-session alternation found in eslint.config.mjs').toBeDefined()
-    expect([...perSession!].sort()).toEqual([...SEALED_SESSION_FIELDS].sort())
+  it('names exactly the per-session sealed fields — no drift in either direction', async () => {
+    const { selectors } = await sealConfig()
+    const perSession = selectors.filter((s) => alternationOf(s)?.includes('messages'))
+    // `updateSession(...)` and a literal `sessions: { … }` — see the config's note.
+    expect(perSession).toHaveLength(2)
+    expect(
+      perSession.some((s) => s.startsWith("CallExpression[callee.name='updateSession'] "))
+    ).toBe(true)
+    expect(perSession.some((s) => s.startsWith("Property[key.name='sessions'] "))).toBe(true)
+    for (const selector of perSession) {
+      // Sorted: the config lists the names in declaration order, the store module in
+      // `emptySession` order, and a regex alternation has no order.
+      expect([...alternationOf(selector)!].sort()).toEqual([...SEALED_SESSION_FIELDS].sort())
+    }
   })
 
-  it('names exactly the app-level sealed fields', () => {
-    const groups = lintPatternGroups()
-    const appLevel = groups.find((g) => g.includes('recentSessionIds'))
+  it('names exactly the app-level sealed fields', async () => {
+    const { selectors } = await sealConfig()
+    const appLevel = selectors.map(alternationOf).find((g) => g?.includes('recentSessionIds'))
     expect(appLevel, 'no app-level alternation found in eslint.config.mjs').toBeDefined()
     expect([...appLevel!].sort()).toEqual([...SEALED_APP_FIELDS].sort())
   })
 
-  it('covers the per-session shape through both `set` shapes a store action can use', () => {
-    // `updateSession(...)` and a literal `sessions: { … }` — see the config's note.
-    expect(config).toContain("CallExpression[callee.name='updateSession']")
-    expect(config).toContain("Property[key.name='sessions']")
+  it('restates the exception facts the config cannot import', () => {
+    // The config hard-codes these three; sealed-fields.ts owns them. The per-session
+    // alternation test above fails if either side moves without the other.
+    expect([...SESSION_FIELDS_WITHOUT_STORE_FIELD]).toEqual(['routingId', 'seeded'])
+    expect(STORE_NAME_OF_SESSION_FIELD).toEqual({ queue: 'queuedItems' })
+    expect(SEALED_SESSION_FIELDS.at(-1)).toBe('worktreeInfo')
   })
 })
 

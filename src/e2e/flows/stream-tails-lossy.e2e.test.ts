@@ -145,7 +145,7 @@ describe('E2E: the tails are lossy and off the ring (phase 5 S2)', () => {
       ROUTING_ID,
       { toolUseId: TOOL_USE_ID, result: 'build succeeded', isError: false }
     ])
-    emitEvent('session:result', [ROUTING_ID, {}])
+    emitEvent('session:result', [ROUTING_ID, { totalCostUsd: 0, durationMs: 0, result: '' }])
 
     await first.client.close()
 

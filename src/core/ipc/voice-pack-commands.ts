@@ -34,6 +34,7 @@
  * all clients watch the same status, so there is one Cancel.
  */
 
+import type { EmitEvent } from '../shared/sync/events'
 import type {
   VoicePackInstallCancelResult,
   VoicePackInstallResult,
@@ -92,7 +93,7 @@ export function voicePackCommands(
 
 // ── Events ────────────────────────────────────────────────────────────────────
 
-export type VoicePackEventEmitter = (channel: string, args: unknown[]) => void
+export type VoicePackEventEmitter = EmitEvent
 
 let stopEvents: (() => void) | null = null
 

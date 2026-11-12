@@ -565,7 +565,10 @@ export function saveVendorConfig(
 export function startConfigWatcher(): () => void {
   ensureDir()
 
-  const watched = [
+  const watched: {
+    filePath: string
+    channel: 'config:settings-changed' | 'config:sessions-changed'
+  }[] = [
     { filePath: SETTINGS_FILE, channel: 'config:settings-changed' },
     { filePath: SESSIONS_FILE, channel: 'config:sessions-changed' }
   ]

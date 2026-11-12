@@ -42,7 +42,7 @@ import {
 } from '../shared/sync/item-stream'
 import { EventRing } from './event-ring'
 import type { EventEntry, FullStateSnapshot } from '../../shared/remote-protocol'
-import { channelSpec, type ChannelClass } from '../shared/sync/channels'
+import { channelSpec, ringsEvents, type ChannelClass } from '../shared/sync/channels'
 import {
   applyEvent,
   applyWatchedContent,
@@ -327,7 +327,7 @@ export class SyncCore {
       return
     }
 
-    const seq = spec.ring ? this.ring.append(channel, args) : 0
+    const seq = ringsEvents(spec) ? this.ring.append(channel, args) : 0
 
     if (spec.canonical) {
       // The apply is FENCED. The reducer sees payloads shaped by engines and by

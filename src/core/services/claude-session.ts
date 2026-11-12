@@ -146,7 +146,8 @@ import type {
   AccountRef,
   ModelCostEntry,
   EngineId,
-  QueuedItem
+  QueuedItem,
+  TaskTerminalStatus
 } from '../../shared/types'
 import { claudeModel } from '../../shared/types'
 import { BaseSession } from '../providers/BaseSession'
@@ -2238,7 +2239,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     this.send('session:task-notification', {
       taskId,
       toolUseId: matchedToolUseId,
-      status: msg.status || 'completed',
+      // cli.js reports a free string; its documented values are the terminal statuses.
+      status: (msg.status || 'completed') as TaskTerminalStatus,
       outputFile,
       ...report,
       usage,

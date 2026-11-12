@@ -19,6 +19,7 @@
  * Electron.
  */
 
+import type { EmitEvent } from '../shared/sync/events'
 import * as fs from 'fs'
 import * as path from 'path'
 import type { WorktreeInfo } from '../../shared/types'
@@ -126,7 +127,7 @@ export function deriveWorktreeName(worktreePath: string, worktreeBranch: string)
 export function recordWorktreeEntry(
   routingId: string,
   info: WorktreeInfo,
-  emit: (channel: string, args: unknown[]) => void
+  emit: EmitEvent
 ): boolean {
   const config = loadSessionConfig()
   const worktreeInfoMap = { ...(config.worktreeInfoMap ?? {}) }
@@ -150,10 +151,7 @@ export function recordWorktreeEntry(
  * whether one was dropped. A `created` entry is never dropped here: detection forgets what it
  * detected, and only the removal path ({@link forgetWorktreeEntries}) retires what ClaudeUI made.
  */
-export function forgetSessionWorktree(
-  routingId: string,
-  emit: (channel: string, args: unknown[]) => void
-): boolean {
+export function forgetSessionWorktree(routingId: string, emit: EmitEvent): boolean {
   const config = loadSessionConfig()
   const prior = config.worktreeInfoMap?.[routingId]
   if (!prior || isCreatedWorktree(prior)) return false
@@ -282,7 +280,7 @@ export function recordDetectedWorktree(
   routingId: string,
   vetted: DetectedWorktree | DetectionMiss,
   spawnCwd: string,
-  emit: (channel: string, args: unknown[]) => void
+  emit: EmitEvent
 ): boolean {
   if (typeof vetted === 'string') {
     logger.debug(LOG, `no worktree recorded for ${routingId}: ${vetted}`)
@@ -325,10 +323,7 @@ function createdWorktreeInfo(worktreePath: string): WorktreeInfo | undefined {
  * `config:sessions-changed` once, and only when something was dropped. Returns the routing ids
  * dropped.
  */
-export function forgetWorktreeEntries(
-  worktreePaths: string[],
-  emit: (channel: string, args: unknown[]) => void
-): string[] {
+export function forgetWorktreeEntries(worktreePaths: string[], emit: EmitEvent): string[] {
   if (worktreePaths.length === 0) return []
   const config = loadSessionConfig()
   const worktreeInfoMap = { ...(config.worktreeInfoMap ?? {}) }
@@ -357,7 +352,7 @@ export function applySessionMoved(
   routingId: string,
   dest: string,
   spawnCwd: string,
-  emit: (channel: string, args: unknown[]) => void
+  emit: EmitEvent
 ): 'recorded' | 'forgot' | 'unchanged' {
   if (!samePath(dest, spawnCwd)) {
     const vetted = vetDetectedWorktree(dest, spawnCwd)

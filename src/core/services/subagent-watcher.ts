@@ -6,6 +6,7 @@
  * so the UI gets live updates. Also serves as the mechanism for loading subagent
  * history on session reload.
  */
+import type { EmitSessionEvent } from '../shared/sync/events'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -214,7 +215,7 @@ export function watchSubagent(
   sessionId: string,
   projectKey: string,
   prompt: string | undefined,
-  sendFn: (channel: string, data: unknown) => void
+  sendFn: EmitSessionEvent
 ): void {
   // Already watching this toolUseId
   if (watched.has(toolUseId)) return

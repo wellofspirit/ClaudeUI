@@ -158,9 +158,33 @@ describe('E2E: the volatile stream lane survives a reconnect (phase 5 exit crite
     }
     // Plus the handful of real domain events a turn produces. These DO ring, and
     // they are what the catchup must still carry.
-    emitEvent('session:status-line', [ROUTING_ID, { model: 'sonnet', totalCostUsd: 0.1 }])
-    emitEvent('session:metering', [ROUTING_ID, { engineId: 'claude', contextWindow: null }])
-    emitEvent('session:result', [ROUTING_ID, {}])
+    emitEvent('session:status-line', [
+      ROUTING_ID,
+      {
+        totalCostUsd: 0.1,
+        totalDurationMs: 0,
+        totalApiDurationMs: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+        cachedTokens: 0,
+        totalTokens: 0,
+        contextWindow: { used: 0, size: 0 },
+        usedPercentage: null,
+        remainingPercentage: null
+      }
+    ])
+    emitEvent('session:metering', [
+      ROUTING_ID,
+      {
+        engineId: 'claude',
+        vendorId: 'anthropic',
+        billingType: 'unknown',
+        tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, total: 0 },
+        equivalentCostUsd: null,
+        contextWindow: { used: 0, size: 0 }
+      }
+    ])
+    emitEvent('session:result', [ROUTING_ID, { totalCostUsd: 0, durationMs: 0, result: '' }])
 
     await first.client.close()
 

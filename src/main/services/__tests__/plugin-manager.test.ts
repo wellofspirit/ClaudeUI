@@ -17,6 +17,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { emitEvent, clearSyncSubscribersForTests, syncCore } from '../../../core/services/sync-host'
+import type { ChatMessage } from '../../../shared/types'
 import * as fs from 'fs'
 import * as path from 'path'
 
@@ -213,7 +214,8 @@ function fireSessionEventViaBridge(
   // unplaceable frame. Production gets the entry from the `session:created` that
   // `prepareAndCreateSession` emits at spawn; this seed is that, minus the spawn.
   if (!syncCore.getCanonicalState().sessions[routingId]) syncCore.seedSession(routingId, {})
-  emitEvent(channel, [routingId, data])
+  // An arbitrary channel and payload by design: this helper is the untyped lane, like the engine.
+  syncCore.emit(channel, [routingId, data])
 }
 
 function fireItemDelta(routingId: string, chunk: string): void {
@@ -594,7 +596,7 @@ describe('PluginManager', () => {
         })
         await s.manager.loadAll()
         syncCore.seedSession('R-1', { selectedEngineId: engineId })
-        const target = { messageId: 'pi-item', blockIndex: 0, kind: 'text' }
+        const target = { messageId: 'pi-item', blockIndex: 0, kind: 'text' as const }
         emitEvent('session:item-open', [
           'R-1',
           {
@@ -628,9 +630,9 @@ describe('PluginManager', () => {
       })
       await s.manager.loadAll()
       syncCore.seedSession('R-targeted', { selectedEngineId: 'opencode' })
-      const text = { messageId: 'multi', blockIndex: 0, kind: 'text' }
-      const thinking = { messageId: 'multi', blockIndex: 1, kind: 'thinking' }
-      const messageScaffold = {
+      const text = { messageId: 'multi', blockIndex: 0, kind: 'text' as const }
+      const thinking = { messageId: 'multi', blockIndex: 1, kind: 'thinking' as const }
+      const messageScaffold: ChatMessage = {
         id: 'multi',
         role: 'assistant',
         timestamp: 1,
@@ -705,19 +707,16 @@ describe('PluginManager', () => {
         const target = {
           messageId: 'child-message',
           blockIndex: 0,
-          kind: 'text',
+          kind: 'text' as const,
           ownerToolUseId: 'task-call'
         }
-        const message = {
+        const message: ChatMessage = {
           id: 'child-message',
           role: 'assistant',
           timestamp: 1,
           content: [{ type: 'text', text: '' }]
         }
-        emitEvent('session:item-open', [
-          'R-child',
-          { target, ownerToolUseId: 'task-call', message }
-        ])
+        emitEvent('session:item-open', ['R-child', { target, message }])
         emitEvent('session:item-delta', ['R-child', { target, chunk: 'child output' }])
         emitEvent('session:item-seal', [
           'R-child',
