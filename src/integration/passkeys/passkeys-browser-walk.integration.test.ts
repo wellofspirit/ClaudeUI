@@ -417,6 +417,11 @@ interface WalkPageApi {
   loadSettings(): Promise<unknown>
   saveSettings(settings: unknown): Promise<void>
   terminalAvailability(): Promise<Record<string, unknown>>
+  /** The passkey management verbs (the list is free; the three writes need a session). */
+  webauthnCredentials(): Promise<unknown[]>
+  webauthnRename(credId: string, nickname: string | null): Promise<unknown>
+  webauthnRevoke(credId: string): Promise<unknown>
+  webauthnMintEnrollToken(): Promise<{ token: string; expiresAt: number; url: string }>
 }
 
 /** Run `fn` against the page's live `window.api`. */
@@ -463,6 +468,16 @@ async function until(label: string, predicate: () => boolean, timeoutMs = 30_000
     if (predicate()) return
     if (Date.now() > deadline) throw new Error(`Timed out waiting for: ${label}`)
     await new Promise((r) => setTimeout(r, 100))
+  }
+}
+
+/** Async `until`: true once `predicate` holds, false on timeout (the caller asserts). */
+async function untilAsync(predicate: () => Promise<boolean>, timeoutMs = 15_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await predicate()) return true
+    if (Date.now() > deadline) return false
+    await new Promise((r) => setTimeout(r, 200))
   }
 }
 
@@ -811,6 +826,203 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
       `step 3b: reload → connected with zero new assertions; audit auth:resume +1 {label:"Walk Edge"} → ${shotResume}`
     )
   }, 180_000)
+
+  /**
+   * Passkey management is a settings-session verb (ADR-054 decision 6): rename,
+   * revoke and mint are refused at the wire without a live editing session, and
+   * the web pane answers the refusal with its own labelled unlock prompt.
+   */
+  it('3c. passkey management needs the settings-editing session', async () => {
+    const credId = (await listCredentials())[0].credId
+    const sessionRows = (): AuditLogRow[] =>
+      auditRows('auth:settings-session').filter((r) => r.outcome === 'ok')
+    const policyRowsBefore = auditRows('auth:policy-change').length
+
+    /** One management write from the page: 'ok' or `err:<message>`. */
+    // The callbacks are serialized into the page, so each is self-contained (no closure over `verb`).
+    const attempts = {
+      rename: (api: WalkPageApi): Promise<string> =>
+        api.webauthnRename('no-such-cred', 'x').then(
+          () => 'ok',
+          (err: unknown) => `err:${err instanceof Error ? err.message : String(err)}`
+        ),
+      revoke: (api: WalkPageApi): Promise<string> =>
+        api.webauthnRevoke('no-such-cred').then(
+          () => 'ok',
+          (err: unknown) => `err:${err instanceof Error ? err.message : String(err)}`
+        ),
+      mint: (api: WalkPageApi): Promise<string> =>
+        api.webauthnMintEnrollToken().then(
+          () => 'ok',
+          (err: unknown) => `err:${err instanceof Error ? err.message : String(err)}`
+        )
+    }
+    const attempt = (wp: WalkPage, verb: keyof typeof attempts): Promise<string> =>
+      evalOnPage<string>(wp, attempts[verb])
+    const onlyWalkEdge = async (label: string): Promise<void> => {
+      const rows = await listCredentials()
+      expect(rows, label).toHaveLength(1)
+      expect(rows[0].nickname, label).toBe('Walk Edge')
+    }
+
+    // ── 1. refused at the wire, from the real browser ──────────────────────
+    for (const [name, wp] of [
+      ['loginPage (resumed, admin)', loginPage!],
+      ['enrollPage (armed passkey connection)', enrollPage!]
+    ] as const) {
+      for (const verb of ['rename', 'revoke', 'mint'] as const) {
+        expect(await attempt(wp, verb), `${verb} on ${name}`).toContain('needs-settings-session')
+      }
+      expect(await hasTestId(wp.page, 'StepUpOverlay'), `generic gate on ${name}`).toBe(false)
+      const listed = await evalOnPage<number>(
+        wp,
+        async (api) => (await api.webauthnCredentials()).length
+      )
+      expect(listed, `the list is free on ${name}`).toBe(1)
+      note(
+        `step 3c: on ${name} rename, revoke and mint-enroll-token each rejected with needs-settings-session; no StepUpOverlay; webauthnCredentials() still resolves (1 row)`
+      )
+    }
+    await onlyWalkEdge('refused writes changed nothing')
+    note('step 3c: server-side listCredentials() still exactly 1 row, "Walk Edge"')
+
+    // ── 2. the pane unlocks, in the real UI (desktop layout: 1280x900) ─────
+    const page = loginPage!.page
+    const byId = (id: string): ReturnType<typeof page.locator> =>
+      page.locator(`[data-testid="${id}"]`)
+    await byId('SettingsPanel.toggle').click()
+    await byId('SettingsPanel.allSettings').click()
+    await waitForTestId(page, 'SettingsDialog')
+    await page.locator('[data-testid="SettingsDialog.railItem"][data-id="remote"]').click()
+    await waitForTestId(page, 'RemotePasskeySettings')
+    const row = page.locator(
+      `[data-testid="RemotePasskeySettings.credential"][data-id="${credId}"]`
+    )
+    await row.waitFor({ state: 'visible' })
+    note(
+      'step 3c: Settings → Remote access (railItem remote) mounts RemotePasskeySettings with the Walk Edge row'
+    )
+
+    const sessionsBefore = sessionRows().length
+    const assertsBefore = auditRows('auth:webauthn-assert').filter((r) => r.outcome === 'ok').length
+    await row.locator('[data-testid="RemotePasskeySettings.credentialName"]').click()
+    const input = row.locator('[data-testid="RemotePasskeySettings.credentialNameInput"]')
+    await input.fill('Walk Edge renamed')
+    await input.press('Enter')
+    await waitForTestId(page, 'RemotePasskeySettings.prompt')
+    expect((await listCredentials())[0].nickname, 'held until the unlock').toBe('Walk Edge')
+    expect(sessionRows().length).toBe(sessionsBefore)
+    note(
+      `step 3c: rename + Enter → unlock prompt shown, nickname unchanged server-side → ${await shot(page, '16-passkey-pane-prompt')}`
+    )
+
+    await byId('RemotePasskeySettings.prompt.passkey').click()
+    const renamed = await untilAsync(
+      async () => (await listCredentials())[0].nickname === 'Walk Edge renamed'
+    )
+    expect(renamed, 'the held rename ran after the unlock').toBe(true)
+    await page
+      .locator('[data-testid="RemotePasskeySettings.prompt"]')
+      .waitFor({ state: 'detached' })
+    await waitForTestId(page, 'RemotePasskeySettings.countdown')
+    const opened = sessionRows()
+    expect(opened.length).toBe(sessionsBefore + 1)
+    expect(opened[0].detail ?? '').toMatch(/settings-editing session opened via passkey step-up/)
+    expect(auditRows('auth:webauthn-assert').filter((r) => r.outcome === 'ok').length).toBe(
+      assertsBefore + 1
+    )
+    note(
+      `step 3c: passkey tap → prompt gone, nickname="Walk Edge renamed", countdown pill visible; audit auth:settings-session +1 ok {detail:"${opened[0].detail}"}, auth:webauthn-assert +1 → ${await shot(page, '17-passkey-pane-unlocked')}`
+    )
+
+    // ── 3. reuse inside the session: mint, enrol a second device, revoke ───
+    await byId('RemotePasskeySettings.addDevice').click()
+    await waitForTestId(page, 'RemotePasskeySettings.enroll')
+    expect(await hasTestId(page, 'RemotePasskeySettings.prompt')).toBe(false)
+    expect(sessionRows().length, 'reuse opens no second session').toBe(sessionsBefore + 1)
+    note(
+      `step 3c: Show QR code inside the session → enroll card, NO prompt → ${await shot(page, '18-passkey-pane-enroll')}`
+    )
+
+    const minted = await evalOnPage<{ url: string }>(loginPage!, (api) =>
+      api.webauthnMintEnrollToken()
+    )
+    expect(minted.url).toContain('#enroll=')
+    const secondPage = await openWalkPage(browser, { virtualAuthenticator: true })
+    try {
+      await secondPage.page.goto(minted.url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      await waitForTestId(secondPage.page, 'EnrollDevice')
+      await secondPage.page.locator('[data-testid="EnrollDevice.nickname"]').fill('Walk Second')
+      await secondPage.page.locator('[data-testid="EnrollDevice.submit"]').click()
+      await waitForSurface(secondPage, 'SessionView', {
+        timeoutMs: APP_SURFACE_TIMEOUT_MS,
+        label: 'step3c-second-device'
+      })
+    } finally {
+      await closeWalkPage(secondPage)
+    }
+    const two = await listCredentials()
+    expect(two).toHaveLength(2)
+    const second = two.find((c) => c.nickname === 'Walk Second')!
+    expect(second).toBeDefined()
+    expect(auditRows('auth:policy-change').length, '1→2 moves no policy').toBe(policyRowsBefore)
+    note(
+      'step 3c: mint (allowed in session) → second device "Walk Second" enrolled: 2 credentials, no new auth:policy-change'
+    )
+
+    // The pane re-reads on window focus.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    const secondRow = page.locator(
+      `[data-testid="RemotePasskeySettings.credential"][data-id="${second.credId}"]`
+    )
+    await secondRow.waitFor({ state: 'visible', timeout: 15_000 })
+    await secondRow.locator('[data-testid="RemotePasskeySettings.credentialRevoke"]').click()
+    await secondRow.locator('[data-testid="RemotePasskeySettings.credentialRevoke"]').click()
+    expect(await untilAsync(async () => (await listCredentials()).length === 1)).toBe(true)
+    expect(await hasTestId(page, 'RemotePasskeySettings.prompt')).toBe(false)
+    expect(auditRows('auth:policy-change').length, '2→1 moves no policy').toBe(policyRowsBefore)
+    expect(sessionRows().length).toBe(sessionsBefore + 1)
+    note(
+      `step 3c: Remove ×2 on Walk Second inside the session → 1 credential, no prompt, no new auth:policy-change → ${await shot(page, '19-passkey-pane-revoked')}`
+    )
+
+    // ── 4. restore for the later steps ─────────────────────────────────────
+    const restore = await evalOnPage<string>(loginPage!, async (api) => {
+      try {
+        const rows = (await api.webauthnCredentials()) as { credId: string }[]
+        await api.webauthnRename(rows[0].credId, 'Walk Edge')
+        return 'ok'
+      } catch (err) {
+        return `err:${err instanceof Error ? err.message : String(err)}`
+      }
+    })
+    expect(restore, 'rename back inside the session').toBe('ok')
+    await onlyWalkEdge('restored')
+    await byId('SettingsDialog.close').click()
+    await page.locator('[data-testid="SettingsDialog"]').waitFor({ state: 'detached' })
+    await waitForTestId(page, 'SessionView')
+    // Leaving Settings unmounts the pane, which ends the session it opened.
+    const afterClose = await untilAsync(async () =>
+      (await attempt(loginPage!, 'rename')).includes('needs-settings-session')
+    )
+    if (!afterClose) {
+      await evalOnPage(loginPage!, (api) => api.authcfgEnd())
+      note(
+        'step 3c: FINDING — closing Settings did NOT end the settings session; ended with authcfg:end'
+      )
+    } else {
+      note(
+        'step 3c: closing Settings unmounted the pane and ended the session — a rename is refused with needs-settings-session again'
+      )
+    }
+    expect(afterClose, 'the pane must end the session it opened on unmount').toBe(true)
+    await onlyWalkEdge('end state')
+    expect(auditRows('auth:policy-change').length).toBe(policyRowsBefore)
+    expect(await hasTestId(page, 'StepUpOverlay')).toBe(false)
+    note(
+      'step 3c: end state = after 3b: one credential "Walk Edge", same two pages, no open session, policy unchanged'
+    )
+  }, 300_000)
 
   it('4. break-glass password signs in AT THE TAILNET ORIGIN', async () => {
     // A device with NO authenticator at all — the passkey path is impossible
