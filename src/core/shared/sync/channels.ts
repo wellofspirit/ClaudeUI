@@ -1,14 +1,19 @@
 /**
  * Channel classification — SyncCore phase 4a (ADR-051).
  *
- * Every event channel the main process emits is classified here. The table is
- * the machine-readable twin of `docs/architecture/sync-channels.md` and it is
+ * Every event channel the main process emits is classified here, and this is
+ * the only table of them: `docs/architecture/sync-channels.md` explains the
+ * classes and the rules and sends its reader here for the rows. The table is
  * **fail-closed**: `SyncCore.emit` refuses a channel that has no entry, so
  * adding an event without deciding whether it replicates is a hard error rather
  * than an accidental privacy/parity change.
  *
- * Deliberately Electron-free and dependency-free (lint-fenced) — core, the
- * renderer, and the web client all read the same table.
+ * Deliberately Electron-free and free of runtime dependencies (lint-fenced; the
+ * one import is a type) — core, the renderer, and the web client all read the
+ * same table.
+ *
+ * The ring is not a column: an emission appends to it iff the class is
+ * `replicated` ({@link ringsEvents}).
  *
  * ## Classes (sync-core.md §"State classification")
  *
@@ -60,6 +65,8 @@
  * additions, and the funnel guard still pins that set exactly.
  */
 
+import type { EmitChannel } from './events'
+
 /** How an event is treated by the ring, canonical state, and the fan-out. */
 export type ChannelClass = 'replicated' | 'volatile' | 'host-local'
 
@@ -68,8 +75,6 @@ export type VolatileFlavor = 'pass-through' | 'item-stream'
 
 export interface ChannelSpec {
   cls: ChannelClass
-  /** Does the emission append to the event ring? Must equal today's behavior. */
-  ring: boolean
   /** Required iff `cls === 'volatile'`; meaningless otherwise. */
   volatileFlavor?: VolatileFlavor
   /**
@@ -81,9 +86,14 @@ export interface ChannelSpec {
   canonical: boolean
   /** Present iff 4a changes what any client sees. Sanctioned set only. */
   deliveryDelta?: string
-  /** One-liner rationale, mirrored into docs/architecture/sync-channels.md. */
+  /** Why the channel has this class: the only place that reason is written down. */
   why: string
 }
+
+/** A row of the sync table: a host-local channel does not belong in it. */
+type SyncChannelSpec = ChannelSpec & { cls: 'replicated' | 'volatile' }
+/** A row of the host-local table: nothing folds one, so it is never canonical. */
+type HostLocalChannelSpec = ChannelSpec & { cls: 'host-local'; canonical: false }
 
 /**
  * Channels whose names are generated at runtime and therefore cannot be listed.
@@ -94,7 +104,6 @@ const PREFIX_SPECS: ReadonlyArray<readonly [string, ChannelSpec]> = [
     'plugin:',
     {
       cls: 'host-local',
-      ring: false,
       canonical: false,
       why: 'Plugin-declared events (`plugin:<id>:<event>`, ADR-005) reach the hosting window only today; plugin-declared capabilities are the follow-up that decides whether they may replicate.'
     }
@@ -102,182 +111,159 @@ const PREFIX_SPECS: ReadonlyArray<readonly [string, ChannelSpec]> = [
 ]
 
 /**
- * The classification table. Sorted by domain, then alphabetically.
+ * The replicated and volatile channels: everything that goes through `emitEvent`.
+ * Sorted by domain.
+ *
+ * The keys are exactly the keys of `EmitEventMap` (`events.ts`), checked by the
+ * `satisfies` at the end: a channel classified here must be typed there, and a
+ * channel typed there must be classified here.
  *
  * `session:*` entries that carry `(routingId, data)` are session-scoped by
  * position (`args[0]`) — the wire encoding of contract 2's `sessionId` field
  * (see sync-core.md §"Wire encoding").
  */
-export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
+const SYNC_CHANNEL_SPECS = {
   // -------------------------------------------------------------------------
   // Session domain — replicated
   // -------------------------------------------------------------------------
   'session:created': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
-    why: 'Session registry. 4c deleted the notifyMainWindow asymmetry in create-session.ts, so the originating client receives its own `session:created` like every other subscriber.'
+    why: 'Session registry. The originating client receives its own `session:created` like every other subscriber. The payload carries the birth config (`permissionMode`, `engineId`, the resolved `model`), each optional and falling back to the existing session value, so an old-shape event folds unchanged.'
   },
   'session:removed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'The other half of the registry: an explicit delete (session or whole project). Deleting the FILES was never replicated, so canonical and every non-deleting client kept the entry forever and a late engine event re-minted a ghost.'
   },
   'session:conversation-cleared': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Resets a session to its birth state (transcript, streams, todos, queue, tasks, subagents, per-session config) without removing it. Was a local `patchLocalSession` on the clearing client only, so canonical kept the whole transcript and the next resync handed it straight back. `sdkActive` is deliberately preserved — clearing is a UI reset, not a process action.'
   },
   'session:user-message': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'The single source of truth for a non-queued user turn entering the transcript.'
   },
   'session:item-open': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Establishes a stream target and transcript position once, before volatile appends.'
   },
   'session:item-seal': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Commits final content and retires only that item atomically.'
   },
   'session:item-delta': {
     cls: 'volatile',
-    ring: false,
     canonical: true,
     volatileFlavor: 'item-stream',
     why: 'Item-addressed appends; canonical accumulation, no event ring entry.'
   },
   'session:message': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Assistant messages, upsert-by-id. Also the trigger for the derived todos / sentFiles fields (reducer-internal).'
   },
   'session:messages-retracted': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
-    why: 'Removes messages by id and clears in-flight streaming buffers.'
+    why: 'Removes messages by id and retires their active item streams.'
   },
   'session:tool-uses-retracted': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Removes tool calls cut off mid-stream (never run, never answered) and their keyed blocks from one message.'
   },
   'session:tool-result': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Attaches a tool_result block to its tool_use (first result wins) and re-derives todos / sentFiles.'
   },
   'session:tool-review': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: "Attaches a permission judge's verdict (tool_review) to its tool_use, idempotent by reviewId."
   },
   'session:permission-denial': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Attaches a non-judge pre-ask denial (permission_denial) to its tool_use, idempotent by denialId.'
   },
   'session:queue-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Queue of record (ADR-053): the FULL item list, applied as a replace; consumed items synthesize a `steer-<itemId>` transcript message.'
   },
   'session:held-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Held inbox size (slice 1a): items from other sessions waiting for the next turn of this session. A replace of one number, so a client that joins late reads it from the snapshot and an indicator never counts events.'
   },
   'session:context-pressure': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Context-pressure banner above a session’s composer (slice 4): a replace of one small object, null to clear. Canonical so that an answer on any client clears it on every client and a late joiner reads it from the snapshot; it is carried on PerSessionSnapshot as `contextPressure`.'
   },
   'session:approval-request': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Approval lifecycle is event-driven ONLY (ADR-038) — never inferred from turn state.'
   },
   'session:approval-dismiss': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'The other half of the event-driven approval lifecycle (externally resolved approvals).'
   },
   'session:status': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Status + the status-driven rekey rule. Core owns the rekey as of 4a (item 7); clients rekey on this event in stream order.'
   },
   'session:result': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Turn boundary. Canonical effect is the completed-todo-list dismissal only; nothing else is inferred from the running→idle edge.'
   },
   'session:task-started': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'activeTasks — without it a client that syncs mid-task reads an async Task as complete. Keyed by the agent’s origin tool_use id, so a resumed run re-arms the same record (ADR-073).'
   },
   'session:task-progress': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'taskProgressMap, keyed by toolUseId.'
   },
   'session:task-notification': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Terminal task state (ADR-040): appends the notification and drops the task from activeTasks.'
   },
   'session:subagent-message': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
-    why: 'subagentMessages map, upsert-by-id; clears the streaming buffers for that subagent.'
+    why: 'subagentMessages map, upsert-by-id.'
   },
   'session:subagent-message-batch': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Batched form of the same upsert (subagent-watcher coalescing).'
   },
   'session:subagent-tool-result': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Tool results inside a subagent transcript.'
   },
   'session:permission-mode': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
-    why: 'Per-session config. The pre-spawn echo (handlers-core.setPermissionMode) delivers all — the pattern session:config-changed mirrors.'
+    why: 'Per-session config, emitted by the live session itself (including the reverted mode when the engine rejects a change). There is no pre-spawn echo: a session that has not spawned exists only in its creating client’s replica, so an echo reached nobody. `session:config-changed` is gated the same way.'
   },
   'session:config-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     deliveryDelta:
       'NEW channel (sanctioned 4a addition). model / effort / thinkingMode / reasoningVariant picks were previously invisible to other clients (remote.md defect 1); they now replicate as a partial, per-field replace.',
@@ -285,13 +271,11 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   },
   'session:status-line': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'statusLine replace. Cost fields inside it are cumulative-per-process snapshots — replace, never accumulate.'
   },
   'session:metering': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     deliveryDelta:
       'Delivery UNCHANGED. The 4a change is a snapshot FIELD (PerSessionSnapshot.metering) — before it, every resync silently dropped metering.',
@@ -299,75 +283,63 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   },
   'session:plan': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Plan steps arrive as an explicit todo list (pi) — replaces the derived todos.'
   },
   'session:slash-commands': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: "The session's own slash menu (its engine list plus the shared Claude skill catalog), folded into that session's slashCommands."
   },
   'session:watch-update': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     deliveryDelta: undefined,
     why: 'A NOTIFY as of phase 5 S4: `{routingId, sessionId, projectKey, cwd?}`, no transcript. Funneled in 4a so canonical holds watched sessions (without that, 4b would drop them), but the payload was a full re-read, so a 5000-entry ring could hold hundreds of transcripts and every reconnecting client replayed them. The content is a seed now (`SyncCore.seedWatchedSession`, applied before this event); clients answer the notify with one debounced refetch through the cold-history path. Still canonical, and its branch keeps the ONE surviving bootstrap — a watched session has no birth event.'
   },
   'session:error': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Rings and fans out today, but FullStateSnapshot carries no error list — per-client transient. Known 4b/5 gap, recorded not fixed.'
   },
   'session:warning': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Same as session:error — no snapshot field.'
   },
   'session:dispatch-result-held': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'An X-Agent finished but its result had to wait in the parent’s inbox (ADR-105 §3): a signal for the sidebar attention and an OS notification, no snapshot field (the waiting count is held-changed).'
   },
   'session:sandbox-violation': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Same as session:error — no snapshot field.'
   },
   'session:auth-required': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'ADR-068 §4: the session remembers which provider/account was rejected until the next turn starts, so a client that reconnects mid-outage still knows a sign-in is owed. Carried on PerSessionSnapshot as `authRequired`; it replaced `session:vendor-auth-required` in slice 3. ADR-070 §1 put the engine’s verbatim `message` ON this event and FORBADE the companion `session:error` every engine used to send beside it — one rejected credential produced two separately-dismissable cards.'
   },
   'session:auth-source': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'App-level auth banner input; no snapshot field.'
   },
   'session:mcp-servers': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'MCP status list; no snapshot field (clients refetch via `session:mcp-status`).'
   },
   'session:directories-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
-    why: 'The merged (claude + opencode + pi) sidebar listing, applied as a replace. Was a payload-less notify each client answered with its OWN three-query merge, while canonical held the claude-only subset every sync-full then force-projected back over it.'
+    why: 'The merged (claude + opencode + pi) sidebar listing, applied as a replace. Was a payload-less notify each client answered with its OWN three-query merge, while canonical held the claude-only subset every sync-full then force-projected back over it. Rate-limited at the emitter (`services/sync-seed.ts`), because the trigger is a file watcher that fires for the whole length of a turn and each emission is a full payload in the ring.'
   },
 
   'session:link-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Origin links between sessions (with their `grouped` flag) and the id of each session they name (slice 1b): the WHOLE table, applied as a replace, so a late joiner reads the same value from the snapshot and an event never depends on a previous one. Small by nature (one row per started session).'
   },
@@ -379,14 +351,12 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   'session:bash-output': {
     cls: 'volatile',
     volatileFlavor: 'pass-through',
-    ring: false,
     canonical: false,
     why: 'Live bash tail. Phase 5 S2 took it off the ring: a noisy command emitted thousands of chunks and every one took a seq. Pass-through (the payload carries counters, not an accumulation) and honest-lossy — the durable record is the tool_result on the event lane.'
   },
   'session:background-output': {
     cls: 'volatile',
     volatileFlavor: 'pass-through',
-    ring: false,
     canonical: false,
     why: 'Background-task tail. Same lane, same flavor, same durable record as bash-output.'
   },
@@ -396,91 +366,76 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   // -------------------------------------------------------------------------
   'config:settings-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'App settings. 4c made the desktop save path echo back to the saver too (uniform delivery); the reducer applies a replace, so the echo is a no-op there.'
   },
   'config:sessions-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: true,
     why: 'Session registry config (recent / pinned / titles / worktrees / hidden / sessionEngines). Per-key presence semantics (H15) are honored by the reducer.'
   },
   'git:status-update': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
-    why: 'Per-cwd git summary. Fans out today; FullStateSnapshot carries no git summaries in 4a, so canonical does not hold them (recorded gap — sync-core.md lists them as replicated state for a later stage).'
+    why: 'Per-cwd git summary. Reaches every subscriber; FullStateSnapshot carries no git summaries, so canonical does not hold them (recorded gap — sync-core.md lists them as replicated state for a later stage). Ring hygiene, accepted: `git:watch` re-emits the cached status for every cwd in the set, and clients re-state their set on every answered sync, so a flapping phone costs one redundant ring entry per watched cwd per reconnect. That re-emit is the always-emit-first rule the mobile git pill depends on (the poller is change-only after its first tick).'
   },
   'mockup:file-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Mockup live-reload notify. 4c made both watchers (one per transport, from `ipc/mockup-commands.ts`) reach every subscriber — the notify a reconnecting client already replayed from the ring.'
   },
   'usage:data': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Account rate-limit usage. Fans out today; no snapshot field.'
   },
   'usage:block-data': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Block analytics. Fans out today; no snapshot field.'
   },
   'usage:chatgpt-limits-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'ADR-068 §2: per-account ChatGPT rate limits moved — a bare nudge with NO payload, because the map is read through `usage:chatgpt-limits` and a fan-out carrying it would be a second copy of state the query already owns. No snapshot field, like the two usage channels above it.'
   },
   'usage:limits-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'ADR-071 §6: an account limits reading moved, for ANY vendor — the same bare nudge as `usage:chatgpt-limits-changed` beside it, and for the same reason: the readings are read through `usage:limits`, which takes a `refresh` flag a fan-out payload could not carry. No snapshot field.'
   },
   'usage-hub:changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: "ADR-072 §7: the usage hub client's state moved — the same bare nudge as the two usage channels above it. Replicated because a phone looking at the dashboard has to learn that another machine's rows arrived, and PAYLOAD-FREE because `usage-hub:status` is the one shape and it must never carry the device credential a fan-out would copy. No snapshot field."
   },
   'harness:changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'ADR-082 arc 2: the harness resolver was invalidated for one harness (a detection finished, an install finished, a selection was saved, retention removed a version), or its update entry or the updater status moved (§6: a check found a version, an update run started or ended, the update mode was saved) — a nudge carrying only `{ id }`; clients re-read `harness:state`, the one shape. Replicated because every device shows the Installed page and the engine-installed gates, and a harness can appear or disappear while the app runs (ADR-082 Consequences). No snapshot field.'
   },
   'harness:install-progress': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: "ADR-082 §4: a managed install's phase and bytes (`HarnessInstallProgress`), at most four a second per install. Replicated, not the volatile lane: the lane is scoped to watched sessions and an install belongs to none. It rings, so a reconnecting client can replay stale progress; `harness:state`'s `installs` is the truth, and a `done`/`failed` phase is always the last event of an install. No snapshot field."
   },
   'voice:pack-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: "ADR-101 §6: the on-device speech pack's status (`VoicePackStatus`: missing, installing with bytes, ready, failed with why) on every state change and, while a download runs, at most four a second. Replicated, not the volatile lane: the lane is scoped to watched sessions and the pack belongs to the host, and a phone must see the install the desktop started (and the other way round). It rings, so a reconnecting client can replay stale progress; `voice:pack-status` is the truth, and the last event of an install is always a `ready`, `failed` or `missing` state. No snapshot field."
   },
   'engine:models-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: "An engine's model catalog filled after main answered some client a DEGRADED empty one (pi: a failed probe, its backoff, or invalidations overtaking it — `pi/model-discovery.ts`). A nudge carrying only `{ engineId }`; clients re-read that engine's `session:get-engine-models(engineId)`, the one shape. Replicated because the degraded answer may have gone to any client, desktop or remote, and none of them asks again on its own. Rings like `harness:changed`: a replay costs one warm-cache reload. No snapshot field."
   },
   'provider:credentials-changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'An API key was stored or removed in the vault (setApiKey, adoptNativeKey, removeDefinition, disconnectProvider). A payload-free nudge: no provider id and no key, so there is nothing to leak to a remote client; the Usage Analytics tab re-reads `openrouter:status` (a boolean) to show or hide its OpenRouter tab. Replicated because the tab is on every device, and a key saved on the desktop must appear on the phone. Rings like `harness:changed`: a replay costs one status read. No snapshot field.'
   },
   'provider:auth-resolved': {
     cls: 'replicated',
-    ring: true,
     // `canonical: true` because this flag means exactly "does `applyEvent` change
     // canonical state?" (see ChannelSpec.canonical) and this one does: the fold
     // marks every matching session's `authRequired.resolved`. It needs NO snapshot
@@ -496,42 +451,58 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   // -------------------------------------------------------------------------
   'automation:changed': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
-    why: 'Automation list. Fans out to extras today; no snapshot field, so a remote client sees live changes but resyncs empty until the automation surface gets snapshot coverage.'
+    why: 'Automation list. Reaches every subscriber; no snapshot field, so a client sees live changes but resyncs empty until the automation surface gets snapshot coverage.'
   },
   'automation:run-update': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Run lifecycle; no snapshot field.'
   },
   'automation:run-message': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Run transcript message; no snapshot field.'
   },
   'automation:stream-event': {
     cls: 'volatile',
     volatileFlavor: 'pass-through',
-    ring: false,
     canonical: false,
     why: 'Run streaming deltas. Phase 5 S2 moved them onto the lane, scoped by AUTOMATION rather than by run — the payload carries `automationId` and no run id, and the renderer already derives the viewed run from its own store.'
   },
   'automation:processing': {
     cls: 'replicated',
-    ring: true,
     canonical: false,
     why: 'Per-automation busy flag; no snapshot field.'
   },
 
-  // -------------------------------------------------------------------------
-  // Host-local — desktop window only, never ringed (rule 2)
-  // -------------------------------------------------------------------------
+  // NOTE the anomaly, still recorded as it behaves. `voice:error` is host-local
+  // in nature but was raised through `BaseSession.send` too (ClaudeSession's
+  // early-capture failure), so it was classified replicated: it rings and reaches
+  // every client. 4a rule 1 forbids reducing ring membership, so it stays.
+  //
+  // Phase 5 S3 refused to make it worse — the remote capture, which would have
+  // been a THIRD emitter, does not emit this channel. Moving desktop capture into
+  // the renderer then removed the ClaudeSession emitter outright: the ONE emitter
+  // left is the desktop owner in `voice-relay.ts`, through the funnel. Narrowing
+  // the class to host-local is now a classification change only, but it is still
+  // the ring-membership change rule 1 forbids, so it remains open.
+  'voice:error': {
+    cls: 'replicated',
+    canonical: false,
+    why: 'One emitter since desktop capture moved into the renderer: the desktop owner in voice-relay.ts, through the funnel (ClaudeSession no longer raises it). Args `[routingId, message, tone?]` — every voice message for the mic notice pill, outcomes included; `tone` is `info` | `warn` (absent = `warn`). Rings, so it reaches every subscriber; no snapshot field. Remote captures stay OFF this channel (targeted lane frames with the same args instead, phase 5 S3); narrowing it to host-local is the ring-membership change rule 1 forbids.'
+  }
+} satisfies Record<EmitChannel, SyncChannelSpec>
+
+/**
+ * The host-local channels: sent to the owning desktop window by a targeted
+ * `webContents.send`, never ringed, never folded. `emitEvent` does not take
+ * one; their payload types are the `window.api.on*` signatures. They are
+ * classified so that a host-local channel can be told from an unclassified one.
+ */
+const HOST_LOCAL_CHANNEL_SPECS = {
   'auth:state': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     // ADR-057 made a remote sign-in real, so the old rationale ("meaningless to
     // a remote client") no longer holds — but the classification does, for a
@@ -540,37 +511,31 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   },
   'account:changed': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Main-window-only today (remote.md defect 5). Promoting it is a deliberate later step, not a 4a side effect.'
   },
   'account:respawn-sessions': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'A command to the hosting renderer, not state.'
   },
   'remote:status': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'The remote server describing itself to its host. A remote client learns its own connectivity from the socket.'
   },
   'log-viewer:entry': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Feeds the separate log-viewer BrowserWindow. Host diagnostics; an `admin`-capability surface later, never ringed.'
   },
   'log-viewer:entry-batch': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Coalesced form of log-viewer:entry.'
   },
   'log-viewer:batch': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Full ring dump on log-viewer open.'
   },
@@ -586,70 +551,66 @@ export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
   // why the renderer needed no rewiring.
   'voice:state': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: "The desktop window's capture (security.md §Host-local). A remote capture does not emit this channel at all — it targets the capturing connection on the volatile lane (phase 5 S3)."
   },
   'voice:transcript': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: "The desktop window's capture. Remote captures target the capturing connection on the volatile lane (phase 5 S3) — a transcript belongs to the microphone that produced it, not to everyone watching the session."
   },
-  // NOTE the anomaly, still recorded as it behaves. `voice:error` is host-local
-  // in nature but was raised through `BaseSession.send` too (ClaudeSession's
-  // early-capture failure), so it was classified replicated: it rings and reaches
-  // every client. 4a rule 1 forbids reducing ring membership, so it stays.
-  //
-  // Phase 5 S3 refused to make it worse — the remote capture, which would have
-  // been a THIRD emitter, does not emit this channel. Moving desktop capture into
-  // the renderer then removed the ClaudeSession emitter outright: the ONE emitter
-  // left is the desktop owner in `voice-relay.ts`, through the funnel. Narrowing
-  // the class to host-local is now a classification change only, but it is still
-  // the ring-membership change rule 1 forbids, so it remains open.
-  'voice:error': {
-    cls: 'replicated',
-    ring: true,
-    canonical: false,
-    why: 'One emitter since desktop capture moved into the renderer: the desktop owner in voice-relay.ts, through the funnel (ClaudeSession no longer raises it). Args `[routingId, message, tone?]` — every voice message for the mic notice pill, outcomes included; `tone` is `info` | `warn` (absent = `warn`). Rings, so it reaches every subscriber; no snapshot field. Remote captures stay OFF this channel (targeted lane frames with the same args instead, phase 5 S3); narrowing it to host-local is the ring-membership change rule 1 forbids.'
-  },
   'terminal:data': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Desktop PTY bytes, plus the scrollback replay a desktop `terminal:attach` pulls (`replay: true` = reset and take this as the whole history). Remote terminals ride the dedicated volatile WS lane (`term-data`), which is never logged — security.md §Audit.'
   },
   'terminal:resized': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
-    why: 'Desktop PTY geometry: another surface refitted the shared shell (ADR-060). Output-class, like the bytes — the remote lane has its own `term-resized` frame. Never rings: it is a fact about a live pty, worthless to replay, and a reconnecting client re-reads the grid from its `terminal:attach` reply.'
+    why: 'Desktop PTY geometry: another surface refitted the shared shell (ADR-060). Output-class, like the bytes — the remote lane has its own `term-resized` frame. Never rings: it is a fact about a live pty, worthless to replay, and a reconnecting client re-reads the grid from its `terminal:attach` reply. The desktop renderer needs it because a narrow Electron window runs the mobile layout, which mirrors the pty’s width instead of pushing its own.'
   },
   'terminal:exit': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Desktop PTY lifecycle; the remote lane has its own `term-exit` frame.'
   },
   'plugin:views-changed': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Main-window-only today; plugin-declared capabilities decide later whether plugin surfaces replicate.'
   },
   'window:maximized-change': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Window chrome (`host` capability).'
   },
   'app:before-quit': {
     cls: 'host-local',
-    ring: false,
     canonical: false,
     why: 'Host lifecycle handshake with the owning renderer.'
   }
+} satisfies Record<string, HostLocalChannelSpec>
+
+/** Every classified channel. `SyncCore.process` refuses one that is not here. */
+export const CHANNEL_SPECS: Readonly<Record<string, ChannelSpec>> = {
+  ...SYNC_CHANNEL_SPECS,
+  ...HOST_LOCAL_CHANNEL_SPECS
 }
+
+/**
+ * The channels `applyEvent` folds: classified `canonical` on the event lane,
+ * as a type computed from the table. `reducer-coverage.unit.test.ts` holds the
+ * reducer to exactly this set. (A canonical volatile channel is folded as an
+ * item-stream frame by `SyncCore.process`, not by `applyEvent`.)
+ */
+export type FoldedChannel = {
+  [C in keyof typeof SYNC_CHANNEL_SPECS]: (typeof SYNC_CHANNEL_SPECS)[C] extends {
+    cls: 'replicated'
+    canonical: true
+  }
+    ? C
+    : never
+}[keyof typeof SYNC_CHANNEL_SPECS]
 
 /** Look up a channel, honoring the runtime-generated prefixes. */
 export function channelSpec(channel: string): ChannelSpec | undefined {
@@ -666,10 +627,19 @@ export function isClassified(channel: string): boolean {
   return channelSpec(channel) !== undefined
 }
 
-/** Every channel whose class means "append to the ring". */
+/**
+ * Does an emission on a channel of this class append to the event ring? The
+ * class decides: a replicated event is what a reconnecting client replays; a
+ * volatile frame is lossy by contract and a host-local event belongs to one window.
+ */
+export function ringsEvents(spec: ChannelSpec): boolean {
+  return spec.cls === 'replicated'
+}
+
+/** Every channel whose emissions append to the ring. */
 export function ringedChannels(): string[] {
   return Object.entries(CHANNEL_SPECS)
-    .filter(([, spec]) => spec.ring)
+    .filter(([, spec]) => ringsEvents(spec))
     .map(([channel]) => channel)
     .sort()
 }
@@ -704,7 +674,10 @@ export function volatileStreamChannels(flavor?: VolatileFlavor): string[] {
     .sort()
 }
 
-/** Every channel `applyEvent` is expected to act on. */
+/**
+ * Every channel that changes canonical state: the ones `applyEvent` folds plus
+ * the item-stream lane. `reducer-coverage.unit.test.ts` holds the reducer to it.
+ */
 export function canonicalChannels(): string[] {
   return Object.entries(CHANNEL_SPECS)
     .filter(([, spec]) => spec.canonical)

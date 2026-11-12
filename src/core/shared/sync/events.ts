@@ -62,7 +62,7 @@ import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-
 import type { VoicePackStatus } from '../../../shared/voice-pack'
 import type { SessionLinksPayload } from '../../../shared/session-links'
 import type { ContextPressureBanner } from '../../../shared/context-pressure'
-import type { ItemStreamOpen, ItemStreamSeal } from './item-stream'
+import type { ItemStreamDelta, ItemStreamOpen, ItemStreamSeal } from './item-stream'
 
 export interface SyncEventMap {
   // -------------------------------------------------------------------------
@@ -473,3 +473,40 @@ export interface SyncEventMap {
 
 /** Every channel a client may subscribe to through the sync transport. */
 export type SyncChannel = keyof SyncEventMap
+
+/**
+ * Channels the host emits that never reach a channel listener, so they are kept
+ * out of the subscription map above. An item delta rides the volatile lane as an
+ * item-stream frame, and the replica folds it into the open item.
+ */
+export interface EmitOnlyEventMap {
+  'session:item-delta': (routingId: string, data: ItemStreamDelta) => void
+}
+
+/**
+ * Every channel `emitEvent` takes, with the positional args it sends. The sync
+ * half of `CHANNEL_SPECS` (`channels.ts`) must have exactly these keys, so a
+ * replicated or volatile channel cannot be classified without being typed here,
+ * or typed here without being classified. Host-local channels are not in it:
+ * they are sent straight to the owning window and never through the funnel.
+ */
+export type EmitEventMap = SyncEventMap & EmitOnlyEventMap
+export type EmitChannel = keyof EmitEventMap
+export type EmitArgs<C extends EmitChannel> = Parameters<EmitEventMap[C]>
+
+/**
+ * The channels whose args are exactly `(routingId, data)`: what a session sends
+ * about itself, with the routing id supplied by the sender (`BaseSession.send`).
+ */
+export type SessionEventChannel = {
+  [C in EmitChannel]: EmitArgs<C> extends [string, unknown] ? C : never
+}[EmitChannel]
+export type SessionEventData<C extends SessionEventChannel> = EmitArgs<C>[1]
+
+/** The shape of `emitEvent`, for code that takes the emitter as a dependency. */
+export type EmitEvent = <C extends EmitChannel>(channel: C, args: EmitArgs<C>) => void
+/** The shape of a session-scoped emitter whose owner supplies the routing id. */
+export type EmitSessionEvent = <C extends SessionEventChannel>(
+  channel: C,
+  data: SessionEventData<C>
+) => void

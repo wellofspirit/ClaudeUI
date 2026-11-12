@@ -2585,7 +2585,6 @@ describe('reducer — session:held-changed (held inbox size)', () => {
   it('is a ringed replicated channel that canonical folds', () => {
     expect(channelSpec('session:held-changed')).toMatchObject({
       cls: 'replicated',
-      ring: true,
       canonical: true
     })
   })
@@ -2644,7 +2643,6 @@ describe('reducer — session:context-pressure (the banner above the composer)',
   it('is a ringed replicated channel that canonical folds', () => {
     expect(channelSpec('session:context-pressure')).toMatchObject({
       cls: 'replicated',
-      ring: true,
       canonical: true
     })
   })
@@ -2724,7 +2722,6 @@ describe('reducer — session:link-changed (parent/child links, slice 1b)', () =
   it('is a ringed replicated channel that canonical folds', () => {
     expect(channelSpec('session:link-changed')).toMatchObject({
       cls: 'replicated',
-      ring: true,
       canonical: true
     })
   })

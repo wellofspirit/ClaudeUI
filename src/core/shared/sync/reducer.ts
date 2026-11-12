@@ -1500,8 +1500,8 @@ export function applyEvent(state: CanonicalState, event: ReducerEvent): Canonica
     }
 
     default:
-      // Classified `canonical: true` but unhandled: a coding error the
-      // classification-coverage test catches, not something to guess at here.
+      // Classified `canonical: true` but unhandled: a coding error that
+      // `reducer-coverage.unit.test.ts` catches, not something to guess at here.
       return state
   }
 }
