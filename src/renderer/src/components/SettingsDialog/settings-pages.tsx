@@ -24,6 +24,7 @@
 import type { EngineId } from '../../../../shared/types'
 import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
+import { sessionToolsEnabled } from '../../../../shared/app-settings'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
 import { SettingRow, SettingsToggle, ActionRow, type AppliesOn } from './settings-controls'
 import type { SettingsPageId, SettingsTarget } from './settings-target'
@@ -326,9 +327,9 @@ const SESSION_TOOLS: SettingItem = {
       label="Session tools"
       description="Lets agents list, read, message, start and hand off to your other sessions (and see the tools' guidance in their prompt). Turn off to remove them from every engine. Applies to sessions started after the change; an open session's tools answer that they are off."
       appliesOn="next-session"
-      modified={s.sessionTools === false}
+      modified={!sessionToolsEnabled(s)}
       onReset={() => u({ sessionTools: undefined })}
-      checked={s.sessionTools !== false}
+      checked={sessionToolsEnabled(s)}
       onChange={(v) => u({ sessionTools: v ? undefined : false })}
     />
   )

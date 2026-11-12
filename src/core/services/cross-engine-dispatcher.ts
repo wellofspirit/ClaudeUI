@@ -42,7 +42,8 @@ import { armBlockHold } from '../automode/block-hold'
 
 import { STAGE2_TIMEOUT_MS } from '../automode/classifier'
 
-import { loadEngineConfig, loadSettings } from './ui-config'
+import { loadEngineConfig } from './ui-config'
+import { appSetting } from './app-settings'
 import { worktreeCwdKey } from '../../shared/linked-worktree'
 import { resolveDispatchMaxConcurrent } from '../../shared/dispatch-concurrency'
 
@@ -240,11 +241,11 @@ export type PiTargetPrimitives = PiChildPrimitives
  * The default app-wide dispatch cap, read fresh on EVERY dispatch call so a
  * Settings change binds the next one without an app restart — the same
  * re-read-per-call contract `loadEngineConfig(engine).dispatch` already has for
- * the per-target cost/timeout gates. `loadSettings` is a small JSON read and a
- * dispatch is a rare, expensive event, so there is nothing to cache.
+ * the per-target cost/timeout gates. Canonical state is current after any save or
+ * settings.json watcher change, and `appSetting` is a lookup, so nothing is cached.
  */
 const defaultResolveMaxConcurrent = (): number =>
-  resolveDispatchMaxConcurrent(loadSettings().dispatchMaxConcurrent)
+  resolveDispatchMaxConcurrent(appSetting('dispatchMaxConcurrent'))
 
 const HEARTBEAT_MS = 15 * 1000
 /**

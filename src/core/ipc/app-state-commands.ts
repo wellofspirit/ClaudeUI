@@ -54,7 +54,7 @@ export function appStateCommands(
       channel: 'config:save-settings',
       capability: 'config',
       kind: 'command',
-      handler: async (settings: UISettings) => saveUiSettings(manager, settings)
+      handler: async (settings: UISettings) => saveUiSettings(settings)
     },
     {
       channel: 'config:load-sessions',

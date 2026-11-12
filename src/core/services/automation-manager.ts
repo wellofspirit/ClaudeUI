@@ -16,11 +16,11 @@ import { isValidAutomationId } from './automation-id'
 import {
   resolveAutomationThinking,
   resolveAutomationEffort,
-  type EffortLevel,
   type ThinkingMode
 } from '../../shared/model-capabilities'
 import { ensureClaudeModels } from './claude-model-catalog'
-import { loadEngineConfig, loadSettings } from './ui-config'
+import { loadEngineConfig } from './ui-config'
+import { appSetting } from './app-settings'
 import type { Automation, AutomationRun, ChatMessage, ContentBlock } from '../../shared/types'
 import type { HostNotifier } from '../host'
 
@@ -691,9 +691,7 @@ export class AutomationManager {
           explicit: automation.effort,
           modelValue,
           catalog,
-          modelEffortDefaults: (
-            loadSettings() as { modelEffortDefaults?: Record<string, EffortLevel> }
-          ).modelEffortDefaults
+          modelEffortDefaults: appSetting('modelEffortDefaults')
         }) ?? undefined
 
       // Multi-account: renew the active account's token, or fail the run with

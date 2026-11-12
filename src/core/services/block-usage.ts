@@ -63,6 +63,7 @@ import { claudeTranscriptRow } from './usage-recorder'
 import { recomputeUsageWindows } from './usage-window-ledger'
 import { ANTHROPIC_MODEL_PRICING, type ModelPricing } from '../../shared/pricing'
 import { emitEvent } from './sync-host'
+import { DEFAULT_SETTINGS } from '../../shared/app-settings'
 import { isDispatchTargetSession } from './dispatch-target-ledger'
 
 // ---------------------------------------------------------------------------
@@ -78,7 +79,8 @@ const SCAN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000 // only scan entries from last 7 
 const CHART_WINDOW_MS = 91 * 24 * 60 * 60 * 1000
 const MS_PER_HOUR = 3600_000
 const MS_PER_MINUTE = 60_000
-const RECALC_DEBOUNCE_MS = 30_000 // 30 seconds — debounce after file change events
+/** The debounce after a file change event for a refresh setting in seconds (floor 5 s). */
+const recalcDebounceMsFor = (secs: number): number => Math.max(5, secs) * 1000
 
 // WINDOW_START_GRACE_MS moved to usage-aggregation.ts (grace-zone window lookup).
 
@@ -365,7 +367,7 @@ export class BlockUsageService {
   /** Debounce timer for recalculation after file changes. */
   private recalcDebounceTimer: ReturnType<typeof setTimeout> | null = null
   /** Configurable debounce interval (ms) — set via settings. */
-  private recalcDebounceMs: number = RECALC_DEBOUNCE_MS
+  private recalcDebounceMs: number = recalcDebounceMsFor(DEFAULT_SETTINGS.analyticsRefreshSecs)
   /** Set of file paths that changed since last recalculation. */
   private changedFiles: Set<string> = new Set()
 
@@ -387,7 +389,7 @@ export class BlockUsageService {
 
   /** Update the debounce interval for incremental recalculations. */
   setDebounceSecs(secs: number): void {
-    this.recalcDebounceMs = Math.max(5, secs) * 1000
+    this.recalcDebounceMs = recalcDebounceMsFor(secs)
     logger.debug('BlockUsage', `Debounce interval set to ${this.recalcDebounceMs}ms`)
   }
 

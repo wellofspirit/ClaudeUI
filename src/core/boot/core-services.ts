@@ -273,8 +273,8 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   //
   // The contract, for anything added here later: nothing may resolve an account
   // IDENTITY, or subscribe to the switch that changes it, before this line.
-  // `setIntervalSecs` stays in `registerSessionIpc` — it only configures the
-  // timer and is where the settings are read. A host that wires no hook (the
+  // `applySettings` sets the interval (from `registerSessionIpc`) — it only
+  // configures the timer; the poll starts here. A host that wires no hook (the
   // headless `claudeui-server`) reaches this line just the same.
   usageFetcher.startPolling()
 

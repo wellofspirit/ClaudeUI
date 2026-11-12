@@ -5,6 +5,7 @@ import { claudeLoginSignal } from '../services/claude-login-state'
 import { SessionManager } from '../services/session-manager'
 import { configureContextPressure } from '../services/context-pressure'
 import { configureSessionTools } from '../services/session-tools'
+import { startApplyingSettings } from '../services/app-settings-apply'
 import { emitEvent } from '../services/sync-host'
 import { STREAM_WATCH_COMMAND } from './stream-watch'
 import { GIT_WATCH_COMMAND } from './git-watch'
@@ -12,7 +13,7 @@ import { getHostWindow } from '../services/host-window'
 import { seedCanonicalAppState, refreshCanonicalDirectories } from '../services/sync-seed'
 import { voiceRefusal } from '../services/voice-gate'
 import { desktopVoiceOwner, desktopVoiceOwnerKey, voiceRelay } from '../services/voice-relay'
-import { loadSettings, startConfigWatcher } from '../services/ui-config'
+import { startConfigWatcher } from '../services/ui-config'
 import { gitWatchRegistry } from '../services/git-watch-registry'
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
@@ -447,33 +448,14 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // first client connects. Non-blocking — nothing here gates IPC registration.
   void seedCanonicalAppState()
 
-  const savedSettings = loadSettings() as Record<string, unknown>
-
-  // Apply saved session idle timeout
-  if (typeof savedSettings.sessionTimeoutMins === 'number') {
-    manager.setSessionTimeout(savedSettings.sessionTimeoutMins * 60 * 1000)
-  }
-  // Apply saved log level + filter (merged with CLAUDE_UI_LOG env var)
-  {
-    const level =
-      typeof savedSettings.logLevel === 'string'
-        ? (savedSettings.logLevel as 'debug' | 'info' | 'warn' | 'error')
-        : undefined
-    const filter = typeof savedSettings.logFilter === 'string' ? savedSettings.logFilter : ''
-    if (level || filter) {
-      logger.applyFilter(filter, level)
-    }
-  }
-  // Apply saved analytics refresh interval
-  if (typeof savedSettings.analyticsRefreshSecs === 'number') {
-    blockUsageService.setDebounceSecs(savedSettings.analyticsRefreshSecs)
-  }
+  // Order is load-bearing: the seed sets canonical settings synchronously, before its first await.
+  startApplyingSettings(manager)
 
   // Account usage polling (5hr / 7-day rate limits).
   // Real-time updates come from SDK rate_limit_event messages (free, from
-  // inference headers). Background polling (every 30 min) fetches supplementary
-  // data (per-model breakdowns, extra_usage). Disk cache avoids API calls on
-  // every launch.
+  // inference headers). Background polling (the `usageRefreshSecs` setting,
+  // default 120 s) fetches supplementary data (per-model breakdowns,
+  // extra_usage). Disk cache avoids API calls on every launch.
   // Wire up SDK usage relay — tries active user sessions first, then
   // the always-on service session as fallback.
   usageFetcher.setSessionGetter(async () => {
@@ -491,13 +473,9 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     // Fall back to the service session (spawns lazily on first call)
     return serviceSession.getUsage()
   })
-  // Apply the saved refresh interval. The poll ITSELF is started by
-  // `startCoreServices`, after the host's `afterSessionGraph` hook has applied
-  // the active credential dir — see the comment there. Setting the interval
-  // here is safe and has to stay here: this is where the settings are read.
-  if (typeof savedSettings.usageRefreshSecs === 'number') {
-    usageFetcher.setIntervalSecs(savedSettings.usageRefreshSecs)
-  }
+  // The poll ITSELF is started by `startCoreServices`, after the host's
+  // `afterSessionGraph` hook has applied the active credential dir; `applySettings`
+  // sets its interval above.
 
   // Block usage analytics — watches JSONL files for changes (no polling).
   // Full scan on startup, then event-driven recalculation on file changes.

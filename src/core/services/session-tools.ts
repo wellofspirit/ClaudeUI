@@ -78,6 +78,8 @@ import {
   type ResolvedSession
 } from './session-links'
 import { emitEvent, syncCore } from './sync-host'
+import { appSetting } from './app-settings'
+import { sessionToolsEnabled as sessionToolsOn } from '../../shared/app-settings'
 import { realOrResolved } from './worktree-root'
 import { createWorktree, validateWorktreeName } from './worktree'
 import { recordWorktreeEntry } from './worktree-detect'
@@ -142,7 +144,7 @@ export function configureSessionTools(next: SessionToolsHost | null): void {
  * only an explicit `false` turns the family off.
  */
 function sessionToolsEnabled(): boolean {
-  return syncCore.getCanonicalState().settings.sessionTools !== false
+  return sessionToolsOn({ sessionTools: appSetting('sessionTools') })
 }
 
 /**

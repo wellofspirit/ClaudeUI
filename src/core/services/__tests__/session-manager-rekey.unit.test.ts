@@ -12,6 +12,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { BrowserWindow } from 'electron'
 import type { SessionStatus } from '../../../shared/types'
+import type { ISession } from '../../providers/ISession'
+import { DEFAULT_SETTINGS } from '../../../shared/app-settings'
 
 vi.mock('../db', () => ({
   renameUsageEventParent: vi.fn(),
@@ -26,6 +28,7 @@ vi.mock('../session-history', () => ({
 vi.mock('../../providers/register-engines', () => ({}))
 
 const { SessionManager } = await import('../session-manager')
+const { engineRegistry } = await import('../../providers/EngineRegistry')
 const { moveSessionInbox, moveSessionMeta } = await import('../db')
 const { syncCore, emitEvent } = await import('../sync-host')
 
@@ -126,6 +129,23 @@ describe('SessionManager — core-owned rekey', () => {
     // Canonical still rekeyed (it always does); the detached registry did not.
     expect(Object.keys(syncCore.getCanonicalState().sessions)).toEqual(['uuid-9'])
     expect(manager.has('temp-1')).toBe(true)
+  })
+
+  it('hands a new session the idle timeout Settings shows before any setting is applied', () => {
+    // The default is the schema's (`shared/app-settings.ts`), not a second copy in core.
+    const setInactivityTimeout = vi.fn()
+    const created = vi
+      .spyOn(engineRegistry, 'createSession')
+      .mockReturnValue({ setInactivityTimeout } as unknown as ISession)
+    const manager = new SessionManager()
+
+    manager.create('r1', null, '/tmp/proj')
+
+    expect(setInactivityTimeout).toHaveBeenCalledWith(
+      DEFAULT_SETTINGS.sessionTimeoutMins * 60 * 1000
+    )
+    created.mockRestore()
+    manager.disposeRekeyObserver()
   })
 
   it('create() is unaffected by the subscription (win is still per-session)', () => {

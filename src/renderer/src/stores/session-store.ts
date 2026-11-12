@@ -7,9 +7,7 @@ import {
   claudeConfigWithAliases,
   resolveClaudeCapabilities
 } from '../../../shared/model-capabilities'
-import type { EffortLevel } from '../../../shared/model-capabilities'
 import type { SharedProviderAccountList } from '../../../shared/shared-provider'
-import type { AgentColorId, AgentTypeColorOverrides } from '../../../shared/agent-type-colors'
 import type { ProviderRegistrySnapshot } from '../../../shared/provider-registry'
 import type { AuthRequiredState } from '../../../shared/remote-protocol'
 import type { ItemStreams } from '../../../core/shared/sync/item-stream'
@@ -20,15 +18,11 @@ import {
   effectiveStartInWorktree,
   generateWorktreeName,
   isManagedWorktreePath,
-  type PendingWorktree,
-  type WorktreeProjectChoice
+  type PendingWorktree
 } from '../../../shared/worktree-start'
 import { cwdToProjectKey } from '../../../shared/project-key'
 import { liveProjectMembers, projectScope } from '../../../shared/worktree-fold'
-import type {
-  ContextPressureBanner,
-  ContextPressureSetting
-} from '../../../shared/context-pressure'
+import type { ContextPressureBanner } from '../../../shared/context-pressure'
 import {
   anthropicAuthState,
   chatgptAuthFromRegistry,
@@ -40,7 +34,6 @@ import {
   PERMISSION_TO_AUTONOMY,
   autoModeAvailableForEngine
 } from '../../../shared/permission-modes'
-import type { AutonomyMode } from '../../../shared/model-capabilities'
 import {
   engineMeta,
   ENGINE_META,
@@ -79,7 +72,6 @@ import type {
   TerminalTab,
   WorktreeInfo,
   VoiceState,
-  VoiceLanguageCode,
   ActiveView,
   PluginViewWithOwner,
   EngineId,
@@ -387,10 +379,11 @@ import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../sha
 import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
 import { sessionWorkdir } from '../lib/session-workdir'
 
-export type ThemeId = 'dark' | 'light' | 'monokai'
-
-/** See {@link AppSettings.newSessionModel}. */
-export type NewSessionModel = 'last-picked' | 'configured-default'
+import { DEFAULT_SETTINGS, type AppSettings, type ThemeId } from '../../../shared/app-settings'
+// The app-settings schema lives in `src/shared/app-settings.ts` (core reads it
+// too); re-exported so the renderer's importers keep one door.
+export { DEFAULT_SETTINGS }
+export type { AppSettings, NewSessionModel, ThemeId } from '../../../shared/app-settings'
 
 const NO_SEEDING_PICKS: Readonly<Partial<Record<EngineId, string>>> = Object.freeze({})
 
@@ -445,189 +438,6 @@ function pickSeedModel(
     : resolveEngineDefaultModel(engineId, state.availableModels, defaults)
   const stale = model === null ? configuredDefaultModelOf(engineId, defaults) : null
   return { model, stale }
-}
-
-export interface AppSettings {
-  theme: ThemeId
-  /**
-   * The two agent-roster surfaces (ADR-073). The pill is the scroll-independent
-   * door to the panel and stays while the session has any agent; the tab sits
-   * on the composer's top-right corner and exists only while one is running.
-   * Both default on; with both off the transcript card is the way in, as before.
-   */
-  showAgentPill: boolean
-  showAgentTab: boolean
-  expandToolCalls: boolean
-  expandReadResults: boolean
-  hideToolInput: boolean
-  expandThinking: boolean
-  searchCaseSensitive: boolean
-  /** Find-in-chat skips content marked as tool output (TOOL_OUTPUT_SCOPE). */
-  searchExcludeToolOutput: boolean
-  diffViewSplit: boolean
-  diffIgnoreWhitespace: boolean
-  diffWrapLines: boolean
-  chatWidthMode: 'px' | 'percent'
-  chatWidthPx: number
-  chatWidthPercent: number
-  maxRecentSessions: number
-  chatFontScale: number
-  uiFontScale: number
-  statusLineAlign: 'left' | 'center' | 'right'
-  statusLineTemplate: string
-  gitPanelLayout: 'single' | 'double'
-  gitCommitMode: 'commit' | 'commit-push'
-  usageRefreshSecs: number // how often to call the /usage API (background poll)
-  analyticsRefreshSecs: number // how often to recalculate token analytics from JSONL changes
-  sessionTimeoutMins: number // 0 = never auto-disconnect
-  remoteFollowActions: boolean // follow remote client's session switches & messages
-  voiceEnabled: boolean
-  voiceLanguage: VoiceLanguageCode
-  /**
-   * Per-model STARTING effort — Claude's (pi keeps its own in
-   * `engineEffortDefaults`; opencode remembers none). Keyed by
-   * `claudeEffortKey` (`shared/model-capabilities`): the family alias (`opus`, `sonnet`) for an alias row, else the resolved model id
-   * (`claude-opus-4-7`, `claude-fable-5`). Written by the Settings table and by a
-   * composer effort pick ("remembered per model"). When set, overrides the
-   * cli.js-derived default for a session that has not started; at spawn the
-   * resolved value freezes into the session's own `effort`, so a later change here
-   * does not touch a running session.
-   */
-  modelEffortDefaults: Partial<Record<string, EffortLevel>>
-  /**
-   * The same starting effort for every other remembering engine (pi), keyed by
-   * engine id then by the model's picker VALUE verbatim (pi's `provider/model` is
-   * unique per provider, so no normalisation — and no collision with Claude's
-   * `claudeEffortKey` namespace in `modelEffortDefaults`). Written by a composer
-   * effort pick only, and only while `newSessionModel` is not `'configured-default'`
-   * (there is no Settings table for it); read and written ONLY
-   * through `savedEffortFor` / `rememberEffortPatch` (`shared/model-capabilities`),
-   * which decide which engines remember. A session freezes the resolved value at
-   * spawn, exactly as for Claude.
-   */
-  engineEffortDefaults: Partial<Record<EngineId, Partial<Record<string, EffortLevel>>>>
-  /**
-   * What a NEW session starts on, per engine (providers-v3 slice 9, owner
-   * ruling 2026-09-23). `'last-picked'` — absent means this — is today's
-   * behaviour: the model last picked on that engine wins over its configured
-   * default. `'configured-default'` ignores that pick for seeding (it is still
-   * recorded), so the configured default — or the engine's built-in one — seeds.
-   * The same switch governs the effort a composer pick remembers
-   * (`modelEffortDefaults` / `engineEffortDefaults`): under `'configured-default'`
-   * an effort pick changes only its own session and writes neither map
-   * (`carriesPicksIntoNewSessions`).
-   */
-  newSessionModel?: NewSessionModel
-  mermaidTheme: 'auto' | 'dark' | 'default' | 'neutral' | 'forest' // mermaid diagram theme
-  logLevel: 'debug' | 'info' | 'warn' | 'error' // global log level
-  logFilter: string // per-source overrides: "UsageFetcher:debug,BlockUsage:debug"
-  mockupConnectAllowlist: string // newline-separated origin allowlist for mockup iframe `connect-src`
-  mockupAllowHttp: boolean // when true, mockup iframes may connect over plaintext http:/ws:
-  /**
-   * Maximum characters shown in a tool output before the "Show more" toggle
-   * appears. 0 = no truncation. Default 5000.
-   */
-  toolOutputMaxChars: number
-  /**
-   * Autonomy mode new sessions start in, for every engine. Defaults to
-   * {@link DEFAULT_AUTONOMY_MODE} ('full' → the classifier-gated `auto`).
-   *
-   * ClaudeUI-owned on purpose. This used to be read straight from
-   * `~/.claude/settings.json permissions.defaultMode`, which meant Claude Code's
-   * config silently governed opencode and pi sessions too, and that changing the
-   * default in ClaudeUI rewrote the user's bare-CLI behaviour. Existing
-   * `defaultMode` values are still honoured — once, as the seed for this
-   * setting — but from then on the two are independent.
-   */
-  defaultAutonomyMode: AutonomyMode
-  /**
-   * How many dispatched agents may run at once, across every session
-   * (ADR-033, 2026-09-18). Unset means
-   * `DEFAULT_MAX_CONCURRENT_DISPATCHES` (3); `0` means no limit.
-   *
-   * The one AppSettings key with NO entry in {@link DEFAULT_SETTINGS}, and
-   * deliberately so: "unset" is a distinct state from "3" for the resolver
-   * (`resolveDispatchMaxConcurrent` in `shared/dispatch-concurrency.ts` owns
-   * the rule, shared with the dispatcher), and it is what lets the row's Reset
-   * clear the key rather than bake today's default into every profile on disk.
-   */
-  dispatchMaxConcurrent?: number
-  /**
-   * Per-engine overrides of an agent type's tile colour (ADR-094): engine →
-   * type name → palette colour id. A type with no entry is coloured by its
-   * engine's own agent colour, else by a stable hash. Like
-   * `dispatchMaxConcurrent`, absent from {@link DEFAULT_SETTINGS}: "no
-   * override" is the unset state, and Reset deletes the key.
-   */
-  agentTypeColors?: AgentTypeColorOverrides
-  /** The cross-engine dispatch tile's (the letter X) palette colour; unset is orange. */
-  dispatchTileColor?: AgentColorId
-  /**
-   * What to do when a session's context crosses a threshold (session tools, slice 4). Absent from
-   * {@link DEFAULT_SETTINGS}: unset is `off` with a 70 % threshold, and Reset deletes the key.
-   * `normalizeContextPressure` (shared) owns the rules; the host applies it on save and on read.
-   */
-  contextPressure?: ContextPressureSetting
-  /**
-   * The session tools (the agent-facing `session_*` family and its guidance) on every engine.
-   * Absent from {@link DEFAULT_SETTINGS}: unset is on, and Reset deletes the key. Read when a
-   * session spawns, so turning it off applies to new sessions.
-   */
-  sessionTools?: boolean
-  /**
-   * "Start new sessions in a worktree": the global default. Absent from {@link DEFAULT_SETTINGS}:
-   * unset is off, and Reset deletes the key. See `shared/worktree-start.ts`.
-   */
-  startInWorktree?: boolean
-  /** Per-project override of {@link startInWorktree}, keyed by the sidebar group's project key; a missing key uses the default. */
-  worktreeByProject?: Record<string, WorktreeProjectChoice>
-  /**
-   * Colour an agent's name in the roster, and the task card's model chip, by the
-   * tier of the model it runs on (`shared/model-tier.ts`). On by default.
-   */
-  agentModelTierColors: boolean
-}
-
-/** Exported for the replica's settings projection (one merge base, not two). */
-export const DEFAULT_SETTINGS: AppSettings = {
-  theme: 'dark',
-  showAgentPill: true,
-  showAgentTab: true,
-  agentModelTierColors: true,
-  expandToolCalls: true,
-  expandReadResults: false,
-  hideToolInput: false,
-  expandThinking: false,
-  searchCaseSensitive: false,
-  searchExcludeToolOutput: false,
-  diffViewSplit: false,
-  diffIgnoreWhitespace: false,
-  diffWrapLines: false,
-  chatWidthMode: 'percent',
-  chatWidthPx: 740,
-  chatWidthPercent: 80,
-  maxRecentSessions: 5,
-  chatFontScale: 1,
-  uiFontScale: 1,
-  statusLineAlign: 'center',
-  statusLineTemplate: 'In: {in} / Out: {out} / Total: {total} · {used}% context used',
-  gitPanelLayout: 'single',
-  gitCommitMode: 'commit' as const,
-  usageRefreshSecs: 120,
-  analyticsRefreshSecs: 30,
-  sessionTimeoutMins: 15,
-  voiceEnabled: false,
-  voiceLanguage: 'en' as VoiceLanguageCode,
-  remoteFollowActions: true,
-  modelEffortDefaults: {},
-  engineEffortDefaults: {},
-  mermaidTheme: 'auto',
-  logLevel: 'warn',
-  logFilter: '',
-  mockupConnectAllowlist: '',
-  mockupAllowHttp: false,
-  toolOutputMaxChars: 5000,
-  defaultAutonomyMode: DEFAULT_AUTONOMY_MODE
 }
 
 export function applyTheme(theme: ThemeId): void {

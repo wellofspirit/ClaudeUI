@@ -5,29 +5,24 @@
  *   - `mockupAllowHttp` — whether to allow plaintext `http:` and `ws:` as
  *      fallback schemes (HTTPS-only when off).
  *
- * A tiny in-memory cache is populated by `loadSettings()` on first request
- * and refreshed via `invalidateMockupSecuritySettings()` whenever the
- * settings IPC handler writes them. Avoids hitting disk on every asset
- * request (mockups often load dozens of sibling files per page).
+ * Read through `appSetting` on every call: canonical state is current after a
+ * client's save and after a settings.json watcher change alike, so there is no
+ * cache to invalidate. The parse is a few string splits, cheap next to the
+ * asset request it guards.
  */
 
-import { loadSettings } from './ui-config'
+import { appSetting } from './app-settings'
 
 export interface MockupSecuritySettings {
   connectAllowlist: string[]
   allowHttp: boolean
 }
 
-let cache: MockupSecuritySettings | null = null
-
 export function getMockupSecuritySettings(): MockupSecuritySettings {
-  if (cache) return cache
-  cache = readFromDisk()
-  return cache
-}
-
-export function invalidateMockupSecuritySettings(): void {
-  cache = null
+  return parseMockupSettings({
+    mockupConnectAllowlist: appSetting('mockupConnectAllowlist'),
+    mockupAllowHttp: appSetting('mockupAllowHttp')
+  })
 }
 
 /**
@@ -56,13 +51,4 @@ export function parseMockupSettings(raw: Record<string, unknown>): MockupSecurit
   }
 
   return { connectAllowlist, allowHttp }
-}
-
-function readFromDisk(): MockupSecuritySettings {
-  try {
-    const raw = loadSettings() as Record<string, unknown>
-    return parseMockupSettings(raw)
-  } catch {
-    return { connectAllowlist: [], allowHttp: false }
-  }
 }
