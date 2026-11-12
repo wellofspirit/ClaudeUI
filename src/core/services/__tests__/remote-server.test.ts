@@ -5003,14 +5003,18 @@ describe('RemoteServer — chunked sync-full', () => {
     await client.ready
 
     const internals = server as unknown as {
+      clients: Map<WebSocket, unknown>
       handleSync(ws: WebSocket, lastSeq: number, epoch?: string, chunked?: boolean): unknown
       sendTo(ws: WebSocket, msg: WsServerMessage): void
     }
     const sendTo = vi.spyOn(internals, 'sendTo')
 
     // Called on the socket the handshake registered, exactly as the dispatcher
-    // does (`void this.handleSync(ws, …)`).
-    const returned = internals.handleSync(client.ws, 0, undefined, true)
+    // does (`void this.handleSync(ws, …)`): the SERVER's end, which is the one
+    // `handleSync` knows a client for. A socket it has no client for is refused.
+    expect(internals.clients.size).toBe(1)
+    const [serverWs] = internals.clients.keys()
+    const returned = internals.handleSync(serverWs, 0, undefined, true)
 
     // Read the spy BEFORE any await: these counts are what the call left behind.
     const chunks = sendTo.mock.calls

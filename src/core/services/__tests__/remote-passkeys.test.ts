@@ -126,6 +126,7 @@ import { RemoteDispatcher } from '../remote-dispatcher'
 import { webauthnService } from '../webauthn-service'
 import { registerRemoteHandlers } from '../../ipc/remote-handlers'
 import { commandRegistry, type CommandConnection } from '../../ipc/command-registry'
+import { emitEvent } from '../sync-host'
 import { logger } from '../logger'
 
 // ---------------------------------------------------------------------------
@@ -1310,6 +1311,81 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     // `admin` and `enroll` — the full passkey set, on the very same socket.
     await expect(invoke(actor, 'webauthn:credentials')).resolves.toHaveLength(1)
     await expect(invoke(actor, 'webauthn:register-options')).resolves.toBeTruthy()
+  })
+
+  // -------------------------------------------------------------------------
+  // The sync lane and the grant set
+  // -------------------------------------------------------------------------
+  //
+  // A command is refused by the registry when its capability is not granted.
+  // Synced state does not travel through a command: a snapshot is the answer to a
+  // `sync` frame and events are pushed, so that lane needs the same answer to
+  // "does this connection hold the ordinary surface".
+
+  const SYNC_ANSWERS = new Set(['sync-full', 'sync-full-chunk', 'sync-catchup'])
+  const syncAnswers = (client: RawClient): string[] =>
+    client.frames.filter((f) => SYNC_ANSWERS.has(f.type)).map((f) => f.type)
+  const eventChannels = (client: RawClient): string[] =>
+    client.frames.flatMap((f) => (f.type === 'event' ? [f.channel] : []))
+
+  async function connectEnrollOnly(): Promise<RawClient> {
+    const { token } = server.mintEnrollToken()
+    const client = await connect()
+    client.send({ type: 'auth', enrollToken: token })
+    expect(await client.waitFor('auth-response')).toMatchObject({
+      ok: true,
+      method: 'enroll-token'
+    })
+    return client
+  }
+
+  /**
+   * A refused command round-trip. Frames to one socket leave in order, so anything
+   * the server sent for an earlier frame or event has arrived once this returns.
+   */
+  async function fence(client: RawClient): Promise<void> {
+    await expect(invoke(client, 'config:load-settings')).rejects.toThrow(/Permission denied/)
+  }
+
+  it('an enroll-only connection gets no answer to a sync request', async () => {
+    await boot('passkey-always')
+    const client = await connectEnrollOnly()
+
+    client.frames.length = 0
+    client.send({ type: 'sync', lastSeq: 0 })
+    client.send({ type: 'sync', lastSeq: 0, chunked: true })
+    await fence(client)
+
+    expect(syncAnswers(client)).toEqual([])
+  })
+
+  it('an enroll-only connection receives no events, while an ordinary one does', async () => {
+    await boot(null) // AUTO with nothing enrolled ⇒ the ordinary connection uses the password
+    const ordinary = await connect()
+    ordinary.send({ type: 'auth', pwProof: PROOF })
+    expect(await ordinary.waitFor('auth-response')).toMatchObject({ ok: true, method: 'password' })
+    const enrolling = await connectEnrollOnly()
+
+    enrolling.frames.length = 0
+    emitEvent('session:created', ['sync-grants-a', { cwd: '/repo' }])
+
+    await vi.waitFor(() => expect(eventChannels(ordinary)).toContain('session:created'))
+    await fence(enrolling)
+    expect(eventChannels(enrolling)).toEqual([])
+  })
+
+  it('the same socket is served once the enrollment upgrade gives it the full set', async () => {
+    await boot(null)
+    const actor = await connectEnrollOnly()
+    const device = await registerOver(actor, 'Upgraded device')
+    actor.frames.length = 0
+    expect(await ceremony(actor, device)).toMatchObject({ ok: true, method: 'webauthn' })
+
+    actor.send({ type: 'sync', lastSeq: 0 })
+    expect(await actor.waitFor('sync-full')).toMatchObject({ type: 'sync-full' })
+
+    emitEvent('session:created', ['sync-grants-b', { cwd: '/repo' }])
+    await vi.waitFor(() => expect(eventChannels(actor)).toContain('session:created'))
   })
 
   it('a SECOND credential changes nothing effective, so it fires nothing', async () => {
