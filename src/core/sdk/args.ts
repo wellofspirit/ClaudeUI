@@ -8,7 +8,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { QueryOptions, McpServerConfig, SdkMcpServer } from './types'
-import type { ClaudeEngineConfig } from '../../shared/types'
+import type { ClaudeEngineConfig, SandboxSettings } from '../../shared/types'
 import { getProxyEnv } from './proxy'
 import { getEndpointEnv } from './endpoint-env'
 import { getModelEnv } from './model-env'
@@ -249,6 +249,61 @@ export function claudeBehaviorSettings(config: ClaudeEngineConfig | undefined): 
   return {
     idleCompaction: config?.idleCompaction === true,
     enabledPlugins: { [PRIVACY_PLUGIN_ID]: config?.privacyEmailCheck !== false }
+  }
+}
+
+/**
+ * The Claude engine's sandbox settings (`engines/claude.json#sandbox`) as the
+ * `sandbox` query option, which `mergeSettingsAndSandbox` below folds into the
+ * spawn's `--settings`. `undefined` when the sandbox is off or unset: the spawn
+ * then carries no `sandbox` key at all.
+ *
+ * ONE mapping for every cli.js process that runs commands under the engine's
+ * settings: a session (`claude-session.ts`) and a dispatched Claude agent
+ * (`dispatch-claude-targets.ts`, ADR-116), so the two are never confined by
+ * different rules.
+ *
+ *  - The three switches and the excluded commands go out as set. cli.js reads
+ *    an ABSENT `autoAllowBashIfSandboxed` as true.
+ *  - `network` is sent in full only when domains are restricted. Leaving the
+ *    key out is what "unrestricted" means to cli.js, so a domain list left over
+ *    from a time the restriction was on is not sent; local binding and the unix
+ *    socket allowances still are, in a block without a domain list.
+ *  - Each filesystem list is sent only when it has entries.
+ */
+export function claudeSandboxOption(
+  config: SandboxSettings | null | undefined
+): Record<string, unknown> | undefined {
+  if (!config?.enabled) return undefined
+  const { network, filesystem } = config
+  const sockets = {
+    ...(network.allowAllUnixSockets ? { allowAllUnixSockets: true } : {}),
+    ...(network.allowUnixSockets.length > 0 ? { allowUnixSockets: network.allowUnixSockets } : {})
+  }
+  return {
+    enabled: true,
+    autoAllowBashIfSandboxed: config.autoAllowBashIfSandboxed,
+    allowUnsandboxedCommands: config.allowUnsandboxedCommands,
+    excludedCommands: config.excludedCommands,
+    ...(network.restrictNetwork
+      ? {
+          network: {
+            allowLocalBinding: network.allowLocalBinding,
+            allowedDomains: network.allowedDomains,
+            ...(network.allowManagedDomainsOnly ? { allowManagedDomainsOnly: true } : {}),
+            ...sockets
+          }
+        }
+      : network.allowLocalBinding ||
+          network.allowAllUnixSockets ||
+          network.allowUnixSockets.length > 0
+        ? { network: { allowLocalBinding: network.allowLocalBinding, ...sockets } }
+        : {}),
+    filesystem: {
+      ...(filesystem.allowWrite.length > 0 ? { allowWrite: filesystem.allowWrite } : {}),
+      ...(filesystem.denyWrite.length > 0 ? { denyWrite: filesystem.denyWrite } : {}),
+      ...(filesystem.denyRead.length > 0 ? { denyRead: filesystem.denyRead } : {})
+    }
   }
 }
 

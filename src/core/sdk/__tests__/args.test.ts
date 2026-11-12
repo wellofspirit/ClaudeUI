@@ -12,8 +12,9 @@
  * rides in (`claude-session.ts` and the dispatcher merge it in).
  */
 import { describe, it, expect } from 'vitest'
-import { PRIVACY_PLUGIN_ID, buildArgs, claudeBehaviorSettings } from '../args'
+import { PRIVACY_PLUGIN_ID, buildArgs, claudeBehaviorSettings, claudeSandboxOption } from '../args'
 import type { QueryOptions } from '../types'
+import type { SandboxSettings } from '../../../shared/types'
 
 const flagCount = (args: string[]): number =>
   args.filter((a) => a === '--forward-subagent-text').length
@@ -107,5 +108,55 @@ describe('claudeBehaviorSettings — idle compaction and the privacy check', () 
       idleCompaction: true,
       enabledPlugins: { 'cc-plugin-privacy@builtin': false }
     })
+  })
+})
+
+/**
+ * The Claude engine's sandbox settings as the `sandbox` spawn option: the one mapping a
+ * session and a dispatched Claude agent share (ADR-116). The shapes it produces for each
+ * settings combination are pinned through a real session spawn in
+ * `claude-session-sandbox-option.test.ts`; here, when it produces nothing at all.
+ */
+describe('claudeSandboxOption — the engine sandbox settings as a spawn option', () => {
+  const settings = (enabled: boolean): SandboxSettings => ({
+    enabled,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: true,
+    excludedCommands: ['docker'],
+    network: {
+      restrictNetwork: true,
+      allowLocalBinding: true,
+      allowedDomains: ['example.com'],
+      allowManagedDomainsOnly: false,
+      allowAllUnixSockets: false,
+      allowUnixSockets: []
+    },
+    filesystem: { allowWrite: ['/data'], denyWrite: [], denyRead: [] }
+  })
+
+  it('is nothing when the engine has no sandbox settings or the sandbox is off', () => {
+    expect(claudeSandboxOption(undefined)).toBeUndefined()
+    expect(claudeSandboxOption(null)).toBeUndefined()
+    expect(claudeSandboxOption(settings(false))).toBeUndefined()
+  })
+
+  it('is the whole configuration when the sandbox is on', () => {
+    expect(claudeSandboxOption(settings(true))).toStrictEqual({
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: true,
+      excludedCommands: ['docker'],
+      network: { allowLocalBinding: true, allowedDomains: ['example.com'] },
+      filesystem: { allowWrite: ['/data'] }
+    })
+  })
+
+  it('with nothing produced, no sandbox reaches cli.js', () => {
+    const sandbox = claudeSandboxOption(settings(false))
+    const args = buildArgs({
+      settings: claudeBehaviorSettings(undefined),
+      ...(sandbox ? { sandbox } : {})
+    } as QueryOptions)
+    expect(emittedSettings(args)).not.toHaveProperty('sandbox')
   })
 })
