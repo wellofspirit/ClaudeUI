@@ -269,7 +269,8 @@ rows names the capability the event is about, not one held at the time.
 **§Enrollment.** The first device requires the host anchor, by construction: with zero credentials and no
 password nothing connects, so the first passkey comes from the desktop's QR or copied link or the console-printed
 URL on a headless first boot. More devices: "Add device" from any `admin`-capable client mints a one-time token
-(single-use, 10-minute TTL, in memory so a restart invalidates it). Minting requires `tailscale serve` to be up
+(single-use, 10-minute TTL, in memory so a restart invalidates it); from a remote client that takes a live
+settings-editing session (ADR-054 §6). Minting requires `tailscale serve` to be up
 and fails with `enroll-unavailable` otherwise: the URL's hostname is the RP ID the credential binds to, so
 enrollment always happens at the tailnet origin. A `#enroll=` link yields an `enroll`-only socket; after
 `webauthn:register-verify` the client runs the assertion on the same socket and is upgraded in place to
@@ -350,11 +351,16 @@ investigation. Channels: `auth:webauthn-assert`, `auth:enroll-token`, `auth:poli
   view can list connected clients; `remote-handlers.ipc.test.ts` pins the absence of every mutation.
 - **Routine remote-access settings are web-reachable inside a settings-editing session:** step-up tier, the
   timing dials, break-glass toggle, auth-mode changes among the non-`off` modes, password rotation, audit
-  retention. These are the `authcfg:*` verbs, and this makes headless administrable without SSH. Credential
-  management (`webauthn:credentials`, `webauthn:rename`, `webauthn:revoke`, `webauthn:mint-enroll-token`) is
-  `admin`-gated and classified by `kind` like any other channel; whether it joins the settings session is an
-  open decision, not settled by this section. The `authcfg:*` verbs live in their own namespace; the `off` writer
-  stays out of it (`authcfg:apply` refuses `off` with `auth-off-is-host-anchor-only`).
+  retention. These are the `authcfg:*` verbs, and this makes headless administrable without SSH. Passkey
+  management is in the same class: `webauthn:rename`, `webauthn:revoke` and `webauthn:mint-enroll-token` demand
+  a live settings-editing session on every tier (`PASSKEY_ADMIN_CHANNELS` in `step-up-tier.ts`, classified
+  `authcfg`), and their bodies assert it again. `webauthn:credentials` is a free `admin` read, like
+  `authcfg:get`: it is the pane's default state and discloses no secret. The enrollment ceremony verbs
+  (`webauthn:register-options`, `webauthn:register-verify`, capability `enroll`) are not in the class, since an
+  enrollment-link socket can never open a session. (2026-11-12: passkey management joined the settings session;
+  until then the three verbs were classified by `kind` as ordinary mutations.) The `authcfg:*` verbs live in
+  their own namespace; the `off` writer stays out of it (`authcfg:apply` refuses `off` with
+  `auth-off-is-host-anchor-only`).
 - **A password step-up may administer the settings area** (ratified): the break-glass password already carries
   `admin` + `enroll`, and a passkey-only settings area would be unreachable from the LAN and tunnel transports an
   operator falls back to when something is wrong.
@@ -378,7 +384,9 @@ upgrades included; `authcfg:apply` is the editor's Save as one validated batch, 
 and one 4009 sweep (except-actor); Save, Cancel, pane close, disconnect or TTL expiry revokes it, checked lazily
 at dispatch. `authcfg:end` and `authcfg:get` are free (gating a revocation is backwards), and a locked editor
 answers the typed `needs-settings-session`, which the web client must never cure ambiently (a stale pane must not
-raise a biometric prompt nobody asked for; the contract is do not retry, re-lock, let the operator press Edit).
+raise a biometric prompt nobody asked for; the generic step-up gate never retries it, the security editor
+re-locks and lets the operator press Edit, and the passkey pane answers the operator's own write press with its
+own labelled unlock prompt and retries that one action once).
 `authcfg:set-password` is gated but outside the batch (write-only, its 4008 semantics differ). The desktop pane
 has the same states but unlocks without ceremony or TTL (host anchor); the `off` switch and its typed confirm
 stay desktop-only inside edit mode. A session that lapses mid-edit re-locks and keeps the draft. Every

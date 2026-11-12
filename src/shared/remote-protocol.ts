@@ -773,8 +773,10 @@ export const NEEDS_STEP_UP_ERROR = 'needs-step-up'
 export const TERMINAL_DISABLED_ERROR = 'terminal-disabled'
 
 /**
- * Error an `authcfg` MUTATION throws when this connection holds no live
- * settings-editing session (ADR-054 §6 amendment).
+ * Error a settings-class command throws when this connection holds no live
+ * settings-editing session (ADR-054 §6 amendment): the gated `authcfg:*` verbs
+ * and passkey management (`webauthn:rename`, `webauthn:revoke`,
+ * `webauthn:mint-enroll-token`).
  *
  * Typed separately from {@link NEEDS_STEP_UP_ERROR}, and the distinction is the
  * whole point of the amendment. `needs-step-up` means "prove presence and I will
@@ -784,8 +786,11 @@ export const TERMINAL_DISABLED_ERROR = 'terminal-disabled'
  * because a stale pane happened to fire a write would re-create the ambient
  * administering authority the amendment exists to remove.
  *
- * So the client's contract for this code is: do not retry, re-lock the editor,
- * and let the operator press Edit again.
+ * So the client's contract for this code is: the generic gate never retries it,
+ * and nothing raises a ceremony the operator did not ask for. The security
+ * editor re-locks and lets the operator press Edit again. The passkey pane
+ * answers the operator's own write press with its own labelled unlock prompt
+ * and, on a granted ceremony, retries that one action once.
  */
 export const NEEDS_SETTINGS_SESSION_ERROR = 'needs-settings-session'
 

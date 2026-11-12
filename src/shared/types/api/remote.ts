@@ -89,7 +89,9 @@ export interface RemoteAPI {
    * `intent: 'settings'` unlocks the editor for five minutes, and every mutation
    * here demands it. A locked editor answers the typed
    * `needs-settings-session`, which the web transport deliberately does NOT cure
-   * ambiently — unlocking is the operator pressing Edit, not a retry.
+   * ambiently — unlocking is the operator pressing Edit, not a retry. The passkey
+   * management writes (`webauthnRename`, `webauthnRevoke`,
+   * `webauthnMintEnrollToken`) demand the same session and answer the same code.
    *
    * Registered on BOTH transports so the capability/kind declaration is a single
    * reviewed fact. The desktop connection is exempt — it IS the host anchor, so

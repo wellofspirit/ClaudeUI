@@ -14,6 +14,11 @@ import type { WebauthnCredential, WebauthnEnrollToken } from '../remote'
  *   `file://` / the vite dev server. The desktop implementations therefore
  *   REJECT rather than invoke a channel that is not registered for that
  *   transport (`webauthn.ipc.ts` registers four, not six).
+ *
+ * From a web client the three management WRITES (`webauthnRename`,
+ * `webauthnRevoke`, `webauthnMintEnrollToken`) need a live settings-editing
+ * session (ADR-054 decision 6) and THROW the typed `needs-settings-session`
+ * without one; the list is a free read. The desktop connection is exempt.
  */
 export interface WebauthnAPI {
   /** Enrolled credentials, newest-first ordering is the caller's business. */
