@@ -70,13 +70,13 @@ bunx eslint --cache . || exit 1
 # other file is the base's own, which CI checked when it merged.
 if [ -n "$format_base" ]; then
   echo "== format (files changed since ${format_base:0:9})"
+  # Listed first, on its own: a git failure here must fail the step, not leave it with no files.
+  changed_list="$(git -c core.quotepath=off diff --name-only --diff-filter=ACMR "$format_base" &&
+    git -c core.quotepath=off ls-files --others --exclude-standard)" || exit 1
   changed=()
   while IFS= read -r file; do
     [ -f "$file" ] && changed+=("$file")
-  done < <(
-    git -c core.quotepath=off diff --name-only --diff-filter=ACMR "$format_base"
-    git -c core.quotepath=off ls-files --others --exclude-standard
-  )
+  done <<< "$changed_list"
   if [ "${#changed[@]}" -gt 0 ]; then
     # In batches: a branch that touches hundreds of files would not fit one Windows command line.
     printf '%s\0' "${changed[@]}" | xargs -0 -n 100 bunx prettier --check --ignore-unknown || exit 1
