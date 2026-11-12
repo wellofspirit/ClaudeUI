@@ -1,7 +1,6 @@
 /**
- * Unit tests for the engine-neutral auto-mode classifier core (ADR-023, amended
- * by `docs/automode-rework-plan.md` §4) — pure functions plus the orchestrator
- * with an injected fake transport. No model calls.
+ * Unit tests for the engine-neutral auto-mode classifier core (ADR-023) — pure
+ * functions plus the orchestrator with an injected fake transport. No model calls.
  */
 import { describe, it, expect, vi } from 'vitest'
 import {

@@ -1,0 +1,50 @@
+# src/renderer/src
+
+The React UI. The desktop window and the web client (`src/web`) both run it, so it talks to the host only through `window.api`. ADR-027, ADR-051, ADR-093.
+
+## What lives here
+
+- `components/`: one folder per component, a container plus a pure `View.tsx` where split; tests in each `__tests__/`.
+- `stores/session-store.ts`: the one Zustand store. Regions by symbol: `AppSettings`, `DEFAULT_SETTINGS`, `PerSessionState`, `EMPTY_SESSION_STATE`, `SessionState` (signatures), the `create()` body (bodies).
+- `stores/replica.ts`, `stores/sealed-fields.ts`: the store is a replica of host state; the replica fold is the only writer of sealed fields. `sync/` holds only the desktop transport, not the replica.
+- `hooks/useClaudeEvents.ts`: the event listener hub; host events reach the store through the replica, this file runs the side effects.
+- `lib/`, `utils/`: plain TypeScript helpers (`lib/session-history-load.ts` loads transcripts).
+- Neighbours: `src/web/` (web shell, `src/web/api-adapter.ts`), `src/preload/index.ts` (desktop bridge), `src/shared/window-api.d.ts` (types `window.api` as `ClaudeAPI`).
+
+## Recipes
+
+**A persisted app setting with its Settings control** (exemplar: `START_IN_WORKTREE` in `src/renderer/src/components/SettingsDialog/settings-pages.tsx`)
+
+1. `src/renderer/src/stores/session-store.ts`, `AppSettings`: add the key; optional, so `undefined` is the default [nothing].
+2. Same file, `DEFAULT_SETTINGS`: only for a non-`undefined` default; a required key forces it [compiler].
+3. `src/renderer/src/components/SettingsDialog/settings-pages.tsx`: new `SettingItem` const, add it to `PAGE_LOCAL_ITEMS`, place it in a `PAGES` group; the newest app settings use this, `SECTIONS` in `settings-sections.tsx` is the older home [test: settings-pages.unit.test.tsx].
+4. `src/renderer/src/components/SettingsDialog/__tests__/settings-pages.unit.test.tsx`: add the key to the pinned `PAGE_LOCAL_ITEMS` list [test: settings-pages.unit.test.tsx].
+5. A new group, not just a row, also changes the group-id lists in `src/renderer/src/components/SettingsDialog/__tests__/SettingsDialogView.component.test.tsx` [test: SettingsDialogView.component.test.tsx].
+6. Consumer: a `useSessionStore` selector on `settings` [nothing]. Search, the phone settings view and sync to other clients need no step.
+7. If `src/core` must honour it, read it there: `loadSettings()` in `src/core/services/ui-config.ts` (disk), or `syncCore.getCanonicalState().settings` as `src/core/services/session-tools.ts` and `src/core/services/context-pressure.ts` do [nothing]. Values are `unknown`.
+8. Core never sees `DEFAULT_SETTINGS`: re-encode the default at the read site; a default that disagrees with step 2 compiles [nothing].
+9. To apply on change, add it to `saveUiSettings` in `src/core/ipc/handlers-core.ts` and to the boot block of `src/core/ipc/session.ipc.ts`; skip one and it applies only on save or only at start [nothing].
+10. `saveUiSettings` drops `sandbox`, `proxy`, `anthropicEndpoint` and `modelOverride` (engine and vendor owned, `docs/architecture/persistence.md`); a key with those names is lost on save.
+
+**A component test with two-tier test ids** (copy the closest exemplar's structure; files are `*.component.test.tsx` in `__tests__/`)
+
+1. Settings row: `src/renderer/src/components/SettingsDialog/__tests__/StartInWorktreeSetting.component.test.tsx` (renders the row through `pageOf`, no store).
+2. Chat card with store state: `src/renderer/src/components/chat/__tests__/TaskCard.component.test.tsx` (`bootTestApp` from `src/test/helpers/boot-test-app.ts`, `seed` and `emitSync` from `src/test/helpers/replica-seed.ts`).
+3. Store action: `src/renderer/src/stores/__tests__/session-store-actions.component.test.ts`; stage session state with `seedSession` or `seed`, not `setState` on a sealed field.
+4. Pure view, props in and DOM out: `src/renderer/src/components/MockupPanel/__tests__/View.unit.test.tsx`.
+5. Geometry (wrapping, overflow, tap size, zoom) jsdom cannot see: `src/renderer/src/components/chat/__tests__/TaskCardLayout.browser.test.tsx`, real Chromium.
+6. Ids (ADR-027): `data-testid="<ComponentName>"` on the outermost element; interactive parts `<ComponentName>.<part>` in camelCase. `src/renderer/src/components/chat/ChatPanel/ContextPressureBanner.tsx` stamps both; query by id before any screenshot.
+
+## Invariants
+
+- Sealed fields are written only by the replica; a component or store action writing one is a lint error: `eslint.config.mjs` (`no-restricted-syntax`), pinned by `src/renderer/src/stores/__tests__/sealed-fields.unit.test.ts`.
+- `mirrorStoreIntoReplica` in `src/test/helpers/replica-seed.ts` is a bridge for old fixtures and omits some sealed fields; the next projection reverts a sealed field staged with `setState`.
+- View-only per-session fields live on `PerSessionState` in the one `sessions` record; they survive projection and rekey in `src/renderer/src/stores/replica.ts`. Never a second store.
+- A new per-session field must be considered for the hand-written reset list in `clearConversation` (`src/renderer/src/stores/session-store.ts`) [nothing forces it].
+- No viewport units (`vh`, `vw`, `dvh`, `h-screen`, ...) in components: the app renders under CSS `zoom`; `ZOOM_TRAP` in `eslint.config.mjs` (ADR-093).
+- Nothing here imports Electron; host access is `window.api` only, and every feature must work in `src/web`. No lint rule enforces the import ban in this directory.
+
+## Fast test
+
+- `bunx vitest run <spec> --project '!browser'` (`*.unit.test.*` run in `unit`, `*.component.test.*` in `component`); `bun run test:browser` for `*.browser.test.tsx`; `bun run typecheck:web`.
+- `bunx vitest run src/renderer/src/components/SettingsDialog/__tests__/settings-pages.unit.test.tsx src/renderer/src/stores/__tests__/sealed-fields.unit.test.ts`

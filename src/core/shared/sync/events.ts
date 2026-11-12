@@ -264,10 +264,9 @@ export interface SyncEventMap {
   // -------------------------------------------------------------------------
   'session:permission-mode': (routingId: string, mode: PermissionMode) => void
   /**
-   * Per-session config replication (SyncCore phase 4a). A PARTIAL patch: only the
-   * fields the setter changed are present, and each is a replace. Emitted
-   * pre-spawn too — before this, a model pick on one client was invisible to every
-   * other (docs/architecture/remote.md defect 1).
+   * Per-session config replication. A PARTIAL patch: only the fields the setter
+   * changed are present, and each is a replace. Emitted before spawn too, so a
+   * model pick on one client reaches every other.
    */
   'session:config-changed': (
     routingId: string,

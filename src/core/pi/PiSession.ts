@@ -145,7 +145,7 @@ import {
 } from '../services/session-tools'
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
-// ClaudeUI's own judge transport (docs/automode-rework-plan.md phase 4, ADR-081).
+// ClaudeUI's own judge transport (ADR-081).
 import type { ClassifyResult, EnvironmentInfo } from '../automode/classifier'
 import {
   allowRuleReviewBlock,
@@ -3045,8 +3045,8 @@ export class PiSession extends BaseSession {
   }
 
   // ── Auto mode (`auto`/`full`) LLM gatekeeper ─────────────────────────────────
-  // Phase 4 of docs/automode-rework-plan.md. The POLICY is engine-neutral
-  // (src/core/automode/) and shared verbatim with opencode, and so is the judge
+  // The POLICY is engine-neutral (src/core/automode/) and shared verbatim with
+  // opencode, and so is the judge
   // transport since ADR-081 (automode/session-judge.ts: ClaudeUI calls the judge
   // model itself). Only two seams below are pi's own: the permission intercept
   // (gateToolCallInner's 'ask' branch) and the ground-truth capture points.

@@ -67,7 +67,8 @@ src/
                          segmented final pass, sherpa loader), local-voice-server.ts (the
                          host's one worker), pack-store.ts + pack-installer.ts (the speech
                          pack in ~/.claude/ui/voice)
-    services/          — ~65 service modules (key ones below)
+    services/          — the service modules (a partial catalog below; the prefix map is in
+                         `src/core/services/CLAUDE.md`)
   main/                — HOST 1: the Electron desktop
     index.ts           — app lifecycle, BrowserWindow setup, SQLite driver install
     boot-core.ts       — the desktop composition root: transport binder, host
@@ -82,7 +83,8 @@ src/
                          populate the registry
     services/          — the desktop-only RUNTIME remainder: account-manager,
                          auth-manager, plugin-manager, log-viewer, mockup-protocol,
-                         sync-port, session-invalidation
+                         sync-port, session-invalidation, claude-login-backend,
+                         quit-worktree-removal
     quit-coordinator.ts
   server/              — HOST 2: `claudeui-server`, the headless entrypoint
     main.ts            — driver selection, headless host adapters, boot, shutdown
@@ -128,17 +130,20 @@ patch/                 — cli.js content-regex patches (registry: lib/patch-reg
 ## Host seams
 
 `src/core/host.ts` holds every host-shaped concern as a neutral, absence-tolerant seam.
-Seven of them, each with a documented headless behaviour:
+The seams below are the ones that need a headless story; the full set is whatever `src/core/host.ts` exports:
 
-| Seam               | Desktop implementation                                                                                                                                                  | Headless                                                                                                                 |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `HostWindowHandle` | the real `BrowserWindow` (read at USE time via `services/host-window.ts`)                                                                                               | `null` — a real mode                                                                                                     |
-| `HostPaths`        | `app.getAppPath()`                                                                                                                                                      | the directory containing `out/renderer` (`resolveAppPath`)                                                               |
-| `hostIsPackaged`   | `app.isPackaged`                                                                                                                                                        | `true` — a deployed server is not a dev build                                                                            |
-| `HostPicker`       | `dialog.showOpenDialog`                                                                                                                                                 | unset; `pickHostDirectory()` resolves `null` (the channel is `host`-capability, so no remote client can reach it anyway) |
-| `HostNotifier`     | Electron `Notification`, passed to `startCoreServices({ notifier })` and handed to `AutomationManager` — a bare type, NOT one of the five `setHostX` module-level seams | omitted — no desktop to notify                                                                                           |
-| `HostAuth`         | account/Claude-auth **reads only**                                                                                                                                      | unset — a fabricated account state would be worse than none                                                              |
-| `HostMockup`       | `mockup-protocol`'s pure `routeHttpMockup` + `serveMockup`                                                                                                              | unset                                                                                                                    |
+| Seam                | Desktop implementation                                                                                                                                   | Headless                                                                                                                 |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `HostWindowHandle`  | the real `BrowserWindow` (read at USE time via `services/host-window.ts`)                                                                                | `null` — a real mode                                                                                                     |
+| `HostPaths`         | `app.getAppPath()`                                                                                                                                       | the directory containing `out/renderer` (`resolveAppPath`)                                                               |
+| `hostIsPackaged`    | `app.isPackaged`                                                                                                                                         | `true` — a deployed server is not a dev build                                                                            |
+| `HostPicker`        | `dialog.showOpenDialog`                                                                                                                                  | unset; `pickHostDirectory()` resolves `null` (the channel is `host`-capability, so no remote client can reach it anyway) |
+| `HostNotifier`      | Electron `Notification`, passed to `startCoreServices({ notifier })` and handed to `AutomationManager` — a bare type, NOT a `setHostX` module-level seam | omitted — no desktop to notify                                                                                           |
+| `HostAuth`          | account/Claude-auth **reads only**                                                                                                                       | unset — a fabricated account state would be worse than none                                                              |
+| `HostMockup`        | `mockup-protocol`'s pure `routeHttpMockup` + `serveMockup`                                                                                               | unset                                                                                                                    |
+| `hostAccountsDir`   | `AccountManager`'s per-account credential root (`~/.claude/ui/accounts`) unless redirected; a test points it at a fixture tree                           | the same default                                                                                                         |
+| `hostAppVersion`    | `src/main/index.ts` publishes the display version derived from `app.getVersion()`                                                                        | `src/server/main.ts` publishes the server's resolved version                                                             |
+| `hostOAuthLoopback` | `true` (set in `src/main/boot-core.ts`): the browser it opens can reach this process's loopback                                                          | `null`, read as `false`: the redirect lands on the remote browser, so the code arrives by paste-back or device code      |
 
 `HostAuth` is DATA/STATUS-ONLY by hard constraint: no sign-in, no `shell.openExternal`,
 no code submission. Vendor OAuth from a browserless host is ADR-057's paste-back flow,
@@ -146,7 +151,7 @@ not a seam method.
 
 ## Service catalog
 
-Key modules in `src/core/services/`:
+A partial catalog of `src/core/services/`; `src/core/services/CLAUDE.md` holds the prefix map.
 
 | Service                                                                                                         | Purpose                                                                                                                                                                                              |
 | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -191,8 +196,8 @@ Key modules in `src/core/services/`:
 | `voice-stream-client.ts`                                                                                        | The cli.js voice-server TCP protocol; the base of the relay's push-fed client                                                                                                                        |
 | `voice-relay.ts`                                                                                                | Voice relay per capture owner: renderer-pushed PCM (desktop `voice:audio` IPC, web `voice-audio` frame) in, transcripts back to that owner                                                           |
 
-What deliberately stayed in `src/main/services/` — every RUNTIME module that is Electron
-or is the desktop's own.
+What deliberately stayed in `src/main/services/` — the RUNTIME modules that are Electron
+or are the desktop's own.
 
 | Service                                  | Why it stays                                                                                                                                   |
 | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -202,3 +207,5 @@ or is the desktop's own.
 | `mockup-protocol.ts`                     | The Electron `protocol.register*` half; its pure routing/serving half is injected into core as `HostMockup`                                    |
 | `sync-port.ts`                           | The renderer's `MessagePortMain` transport — client #1 (phase 4c)                                                                              |
 | `session-invalidation.ts`                | "The credential these engine processes hold is stale", main-side                                                                               |
+| `claude-login-backend.ts`                | The `ClaudeLoginBackend` the in-app Claude sign-in picks per flow (see [persistence.md](persistence.md))                                       |
+| `quit-worktree-removal.ts`               | The desktop's quit-time worktree removal                                                                                                       |

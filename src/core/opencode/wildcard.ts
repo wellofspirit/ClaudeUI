@@ -3,8 +3,8 @@ import { wildcardMatch as sharedWildcardMatch } from '../../shared/opencode-wild
 
 /**
  * Host-side port of opencode's permission matcher, used by the ask-rule
- * precedence guard (G9, `docs/automode-rework-plan.md` §4.5 — since ADR-085 S2
- * part of the host pre-check, `host-precheck.ts`, in every mode), by the host
+ * precedence guard (G9, ADR-085 — part of the host pre-check,
+ * `host-precheck.ts`, in every mode), by the host
  * session-allow set's coverage test (`session-allows.ts`) and by the 2.x
  * evaluators below.
  *

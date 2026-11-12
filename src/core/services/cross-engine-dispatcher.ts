@@ -1,27 +1,21 @@
 /**
  * Cross-engine agent dispatch (ADR-033).
  *
- * A single main-process service owning all `dispatch_agent` logic: target
- * creation, guards (concurrency cap, per-dispatch timeout, model allowlist),
- * approval forwarding, result await, and cancellation.
+ * A single main-process service owning the core of `dispatch_agent`: guards
+ * (concurrency cap, per-dispatch timeout, model allowlist), the target ledger,
+ * parent/caller bookkeeping, result await, cancellation and cleanup. Each
+ * engine's target mechanics live in its own module, reached through
+ * `DispatchTargetHost` (dispatch-target-host.ts); shared types and constants
+ * are in dispatch-target-types.ts:
+ *  - dispatch-claude-targets.ts: a raw `sdkQuery()` kept alive across turns.
+ *  - dispatch-opencode-targets.ts: an opencode 2.x session on a turn-running
+ *    lease of the server manager (ADR-097), followed on the shared event feed.
+ *  - dispatch-pi-targets.ts: one headless `pi --mode rpc` child per target
+ *    plus its own loopback PiBridgeHost approval gate.
  *
- * Targets are headless dispatcher-owned mini-sessions built on engine client
- * primitives — NOT SessionManager/ISession. Two directions are supported:
- *  - Claude → opencode (M1, opencode 2.x since ADR-097 S9): a target is an
- *    opencode session on a turn-running lease of the S2 server manager, driven
- *    with the S3 `OpencodeClient` — an inbox prompt answered at once, the turn
- *    followed on the SERVER's shared event feed through the target's own S4
- *    mapper, which also yields its text, usage and asks. Asks go through the
- *    session's host pre-check (S6 rules), then ClaudeUI's judge or a card.
- *  - opencode → Claude (M2): targets use a raw `sdkQuery()` (the
- *    service-session.ts precedent) kept alive across turns via a pushable
- *    streaming-input channel, driven by a manual iterator loop (see the
- *    `.return()`-kills-the-process hazard noted on `driveClaudeTurn`).
- *  - claude/opencode → pi (M4c): one headless `pi --mode rpc` child per
- *    target plus its own loopback PiBridgeHost approval gate.
- *
- * All failures come back as `isError` tool text — nothing throws across the
- * MCP boundary.
+ * Targets are headless dispatcher-owned mini-sessions — NOT SessionManager/
+ * ISession. All failures come back as `isError` tool text — nothing throws
+ * across the MCP boundary.
  */
 import { existsSync } from 'node:fs'
 import { v4 as uuidv4 } from 'uuid'

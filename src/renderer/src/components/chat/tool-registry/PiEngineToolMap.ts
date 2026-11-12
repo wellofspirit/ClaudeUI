@@ -11,7 +11,7 @@
  * `grep {pattern, path?, glob?, ignoreCase?, literal?, context?, limit?}`,
  * `find {pattern, path?, limit?}`, `ls {path?, limit?}`.
  *
- * M2: rich diff — the live event-mapper (src/main/pi/event-mapper.ts) threads
+ * M2: rich diff — the live event-mapper (src/core/pi/event-mapper.ts) threads
  * the ORIGINAL `edit`/`write` toolCall's `arguments.path` through to the
  * matching toolResult and attaches `fileDiffs: [{path, patch, ...}]` (from
  * pi's ready-made `details.patch` unified diff) to the `tool_result` content
@@ -22,7 +22,7 @@
  * ready-made patch). The single-pair before/after view (below) is only the
  * INPUT-side fallback: it still renders while the result (and its fileDiffs)
  * hasn't arrived yet, or for a call whose result never carries a usable
- * patch. The stored-history converter (src/main/services/pi-session-list.ts)
+ * patch. The stored-history converter (src/core/services/pi-session-list.ts)
  * does NOT yet get the same treatment — replayed/resumed sessions still show
  * the before/after fallback for edits; out of scope for this fix (see its own
  * M2 note).
@@ -31,7 +31,7 @@
  * dispatch (dispatch_agent) are registered by the bridge extension via
  * `pi.registerTool()` with BARE names (no `mcp__` prefix) — hostedMcpKind
  * below only matches `mcp__*`-prefixed names, so these four need explicit
- * `kindOf` cases, mirroring src/main/pi/permission-engine.ts's `piToolKind`
+ * `kindOf` cases, mirroring src/core/pi/permission-engine.ts's `piToolKind`
  * IDENTICAL cases (the single-source guard test asserts the two tables
  * agree). `dispatch_agent`'s input shape/normalize output mirrors
  * OpencodeEngineToolMap's `claudeui_dispatch_agent` case (same field names —

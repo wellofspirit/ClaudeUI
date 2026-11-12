@@ -29,12 +29,10 @@ Any component that reads store state AND calls IPC or mutates the store gets spl
 // ComponentName.tsx — the FC (logic layer)
 function ComponentName() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
-  const removePendingApproval = useSessionStore((s) => s.removePendingApproval)
 
   const handleRespond = async (decision: 'allow' | 'deny') => {
     if (!activeSessionId) return
     await window.api.respondApproval(activeSessionId, approval.requestId, decision)
-    removePendingApproval(activeSessionId, approval.requestId)
   }
 
   return <ComponentNameView onRespond={handleRespond} ... />
@@ -53,8 +51,8 @@ function ComponentNameView({ onRespond, ... }: Props) {
 **Why this split?**
 
 - The View is trivially unit-testable: render with props, assert DOM, simulate clicks, check callbacks fired.
-- The FC's business logic (event → store transitions) is tested at Layer 2 via TestIpcBridge — no React rendering needed.
-- The handler that calls `window.api` then updates the store is glue code — it doesn't need its own extracted function or test.
+- The FC's business logic (event → store transitions) is tested at Layer 2: a `*.component.test.tsx` that renders the FC against the real store with a faked transport, usually through `bootTestApp`. See `src/renderer/src/CLAUDE.md` for an exemplar per kind of test.
+- The handler that calls `window.api` is glue code — it doesn't need its own extracted function or test. It does not update the store itself: the approval card retires when the resulting event arrives (ADR-038).
 
 **When NOT to split:**
 
@@ -150,6 +148,10 @@ A 5-line function that checks two conditions doesn't need its own file and test 
 
 Don't use `createContext` + `useContext` to pass state from an FC to its View. Context is designed for broadcasting state to an arbitrary subtree of consumers — it adds ceremony (provider, hook, 70-field interface) and defeats `useMemo` if any callback in the context value isn't wrapped in `useCallback`. Plain props are simpler, type-safer, and don't create hidden re-render cascades.
 
+## Test ids
+
+Components carry `data-testid` attributes in two tiers (ADR-027): the component's name on its outermost element, and dot-namespaced ids on its interactive parts. Tests and the real-app verification drive assert on these structurally first and use screenshots last. Read ADR-027 before adding or renaming one.
+
 ## Test Layer Mapping
 
 | What to test                              | Where               | How                                              |
@@ -157,8 +159,8 @@ Don't use `createContext` + `useContext` to pass state from an FC to its View. C
 | View renders correctly given props        | Layer 1 (unit)      | `render(<View {...props} />)`, assert DOM        |
 | User clicks button, callback fires        | Layer 1 (unit)      | `fireEvent.click(...)`, assert `onX` called      |
 | Pure state machine returns correct result | Layer 1 (unit)      | Direct function call, assert return value        |
-| IPC event → store state transition        | Layer 2 (component) | TestIpcBridge `webContents.send()`, assert store |
-| User action → IPC call → store cleanup    | Layer 2 (component) | Bridge handler captures IPC args, assert store   |
+| IPC event → store state transition        | Layer 2 (component) | `bootTestApp()` or `TestIpcBridge`, assert store |
+| User action → IPC call                    | Layer 2 (component) | Bridge handler captures IPC args, assert call    |
 | Full workflow across subsystems           | Layer 3 (e2e)       | `bootTestApp()`, emit event sequences            |
 
 The FC's inline handlers are glue code covered implicitly by Layer 2 component tests. They don't need their own extracted function or dedicated test.

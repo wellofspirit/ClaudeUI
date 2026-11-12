@@ -309,9 +309,10 @@ export class PiTargets {
 
   /**
    * Shared cost-delta bookkeeping for a NON-success pi turn outcome (timeout/
-   * stop/err) — mirrors the Claude target's failed-subtype handling (§ "the
-   * cap is a SPEND limit, not a success limit", :1797-1802): a turn that
-   * streamed real spend before erroring/timing-out/being stopped must still
+   * stop/err) — mirrors the failed-subtype handling in `driveClaudeTurn`
+   * (dispatch-claude-targets.ts): the cap is a SPEND limit, not a success
+   * limit, so a turn that streamed real spend before erroring/timing-out/being
+   * stopped must still
    * count that spend toward the cap and the dispatching session's cost
    * breakdown, exactly like a successful turn does. `entry.runner.mapperState.
    * totalCostUsd` is the right source here (NOT anything derived from the

@@ -17,8 +17,7 @@ import { deriveCategorySet } from './rules/corpus'
 import { buildPolicyPrompt, type EnvironmentInfo } from './rules/policy'
 
 /**
- * Auto-mode LLM permission gatekeeper — engine-neutral policy core (ADR-023,
- * amended by `docs/automode-rework-plan.md` §4).
+ * Auto-mode LLM permission gatekeeper — engine-neutral policy core (ADR-023).
  *
  * Parity target: Claude cli.js's "security monitor" (`docs/protocol-cc/14-auto-mode-classifier.md`).
  * An independent judge decides a would-be-`ask` tool call from the slimmed

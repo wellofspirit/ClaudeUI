@@ -24,7 +24,7 @@ Sources, in precedence order; the first entry with a name wins, and a file reach
    file or dir), closest first; outside git, up to the filesystem root. The walk always stops before `$HOME`, so the
    home's own `.claude/skills` is never a project dir. In a linked worktree whose own root has no `.claude/skills`, the
    main checkout's is appended.
-4. **Legacy commands** `<managed>/.claude/commands`, `<configDir>/commands`, `.claude/commands` (same walk and
+4. **Legacy commands** `<managed>/.claude/commands`, `<configDir>/commands`, `<project>/.claude/commands` (same walk and
    worktree rule).
 5. **Plugin commands**, then **plugin skills**, of the enabled plugins.
 

@@ -1,12 +1,13 @@
 /**
  * Pure assistant-SDK-message → ChatMessage conversion.
  *
- * Factored out of `ClaudeSession.transformAssistantMessage` (ADR-033 M3) so the
- * cross-engine dispatcher's headless Claude targets can build the SAME
- * `ChatMessage` shape for `session:subagent-message` forwarding, without
- * duplicating the block-mapping logic. `claude-session.ts` keeps importing
- * this module (its own call site was replaced) so there is exactly one
- * implementation.
+ * Used by `claude-session.ts` and by the cross-engine dispatcher's headless
+ * Claude targets (`dispatch-claude-targets.ts`), so live and forwarded
+ * `session:subagent-message` carry the same `ChatMessage` shape. It is NOT the
+ * only block mapper: the two inline mappers in `session-history.ts` (transcript
+ * replay), `parseJsonlLine` in `subagent-watcher.ts` and
+ * `AutomationManager.transformAssistantMessage` in `automation-manager.ts` map
+ * the same blocks separately — keep all of them in step.
  *
  * Deliberately stateless — no `this`, no side effects — so it's safe to call
  * from either a live session or a headless dispatch target.

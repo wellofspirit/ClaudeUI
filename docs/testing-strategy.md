@@ -17,7 +17,7 @@ The app has two natural boundaries:
 │         ↕ SDK / fs / git / pty       │  ← Boundary 2: External deps
 ├──────────────────────────────────────┤
 │         External World               │
-│  claude-agent-sdk, simple-git,       │
+│  src/core/sdk, simple-git,           │
 │  node-pty, filesystem, HTTP          │
 └──────────────────────────────────────┘
 ```
@@ -99,54 +99,13 @@ This is the highest-value test layer. It catches the bugs that actually ship: br
 
 **What NOT to test here:**
 
-- React rendering (that's Layer 1)
+- Pure rendering or pure functions (that's Layer 1)
 - Full pipeline end-to-end (that's Layer 3)
 - Real SDK behavior (that's Layer 4)
 
-**How to write:**
+**How to write:** a component test is a `*.component.test.tsx` file that renders the real React component (or hook) with `@testing-library/react` against the real store and a faked Electron transport. Most boot the whole stack through `bootTestApp` (`src/test/helpers/boot-test-app.ts`), which installs the replica and builds the typed `window.api` over `TestIpcBridge` with stub handlers, so events fold through the same reducer and projection as in the app; a few drive `TestIpcBridge` directly. `src/renderer/src/CLAUDE.md` names one exemplar file per kind of component test; copy the nearest one rather than a skeleton.
 
-```typescript
-// File: src/renderer/src/hooks/__tests__/myLogic.component.test.ts
-// Note: .ts not .tsx — no React rendering
-
-import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
-import { useSessionStore } from '../../stores/session-store'
-import { makeSessionStatus } from '@test/factories/messages'
-
-let bridge: TestIpcBridge
-
-beforeEach(() => {
-  bridge = new TestIpcBridge()
-  // Stub window.api for store internal calls
-  window.api = { saveSessionConfig: () => {} /* ... */ } as any
-  // Reset store
-  useSessionStore.setState({ activeSessionId: null, sessions: {} })
-  // Wire event handlers (same logic as useClaudeEvents)
-  wireMyEventHandlers(bridge)
-})
-
-afterEach(() => {
-  bridge.reset()
-})
-
-it('rekeys session when status has different sessionId', () => {
-  useSessionStore.getState().createNewSession('temp-id', '/test')
-  bridge.webContents.send(
-    'session:status',
-    'temp-id',
-    makeSessionStatus({
-      state: 'running',
-      sessionId: 'stable-uuid'
-    })
-  )
-  expect(useSessionStore.getState().sessions['stable-uuid']).toBeDefined()
-  expect(useSessionStore.getState().sessions['temp-id']).toBeUndefined()
-})
-```
-
-**Key pattern:** Wire event handlers manually using `TestIpcBridge` — replicate the logic from `useClaudeEvents` but without React. The bridge's `webContents.send()` fires events to registered `ipcRenderer.on()` listeners, which call store actions.
-
-**File naming:** `*.component.test.ts`
+**File naming:** `*.component.test.tsx` (a few are `.ts`)
 
 **File location:** `src/**/__tests__/`
 
@@ -207,7 +166,7 @@ Check at every scale in the profile plus 1.25, and revert the fix to prove the a
 
 **The pinned font:** the app's UI font is the system stack (`-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', …`), so a geometry assertion used to measure whatever the host had: Noto/Helvetica on Linux CI, SF Pro on the macOS release runner, neither of them the reference phone's Roboto. The same TaskCard header test passed on Linux and failed on macOS. `browser.setup.ts` now loads Roboto (`@fontsource/roboto`, dev-only, the weights the components use) and makes it the UI font for every browser test, and waits for it to load before any test measures. A layout result is therefore the same on every OS and matches the profile's device. The monospace font (JetBrains Mono) is already bundled by the app and unaffected.
 
-**Where they run:** once, in CI (`ci.yml`, Linux, inside `test:ci`). The release workflows run `test:ci:no-browser`: with the font pinned, another OS adds no signal, only a Chromium download.
+**Where they run:** once, in CI (`ci.yml`, Linux, as its own `test:browser` job; the shards run `test:ci:no-browser`). The release workflows run `test:ci:no-browser`: with the font pinned, another OS adds no signal, only a Chromium download.
 
 **File naming:** `*.browser.test.tsx`, under `src/**/__tests__/`. The `unit` project excludes them.
 
@@ -297,35 +256,7 @@ replica, so `app.emit` folds through the shared reducer and projects into the st
 
 **Gating:** Tests that hit the real SDK require `CLAUDE_INTEGRATION_TESTS=1` environment variable and valid API auth. They are excluded from CI. Factory shape validation tests run always.
 
-**How to write:**
-
-```typescript
-// File: src/integration/sdk-contract/my-contract.integration.test.ts
-// @vitest-environment node
-
-const SKIP = !process.env.CLAUDE_INTEGRATION_TESTS
-
-describe.skipIf(SKIP)('real SDK behavior', () => {
-  it('text response yields correct event order', async () => {
-    const { query: sdkQuery } = await import('@anthropic-ai/claude-agent-sdk')
-    const events = []
-    for await (const msg of sdkQuery({ prompt: 'Say hello', options: { ... } })) {
-      events.push(msg)
-    }
-    expect(events.some(e => e.type === 'assistant')).toBe(true)
-    expect(events[events.length - 1].type).toBe('result')
-  })
-})
-
-// Always-run tests that validate factory shapes
-describe('factory validation', () => {
-  it('textResponseSequence is structurally valid', async () => {
-    const { textResponseSequence } = await import('@test/factories/sdk-events')
-    const events = textResponseSequence('s1', 'Hello')
-    expect(events[0]).toMatchObject({ type: 'system', subtype: 'init' })
-  })
-})
-```
+**How to write:** copy `src/integration/sdk-contract/event-sequences.integration.test.ts`: a gated `describe.skipIf` block that drives the real harness through `src/core/sdk`, beside always-run tests that validate the factory shapes in `@test/factories/sdk-events`.
 
 **File naming:** `*.integration.test.ts`
 

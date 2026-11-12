@@ -3006,9 +3006,8 @@ describe('PiSession — approval bridge wiring (M2a)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Auto mode (`auto`/`full`) LLM gatekeeper — phase 4 of
-// docs/automode-rework-plan.md. The classifier core is unit-tested in
-// src/main/automode/__tests__; these tests cover PI'S WIRING: the acceptEdits
+// Auto mode (`auto`/`full`) LLM gatekeeper (ADR-023). The classifier core is
+// unit-tested in src/core/automode/__tests__; these tests cover PI'S WIRING: the acceptEdits
 // base downgrade that makes the classifier reachable at all, the four routes
 // out of classifyAutoMode (allow / block / user-ask-rule / unavailable), the
 // denial caps, G10, and the ground-truth annotations.

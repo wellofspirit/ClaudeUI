@@ -549,8 +549,8 @@ value the same way, which is exactly why the comparator stayed quiet about it.
 
 This section used to name three rows of snapshot fields that **client actions**
 wrote, so canonical could not match them at an arbitrary instant, and both shadow
-flows skipped them through one shared definition (`CLIENT_WRITTEN_FIELDS` in
-`src/main/sync/shadow.ts`). That file, that set and the comparator are **deleted**:
+flows skipped them through one shared definition (`CLIENT_WRITTEN_FIELDS`, in a
+shadow-comparison module). That module, that set and the comparator are **deleted**:
 the renderer folds the shared reducer now, so its store IS the projection of
 canonical and there is no second interpretation to diff.
 

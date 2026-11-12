@@ -1,5 +1,5 @@
 /**
- * The rule corpus + policy document (phase 2 of `docs/automode-rework-plan.md`,
+ * The rule corpus + policy document (ADR-023, ADR-083),
  * behavioural reference `docs/protocol-cc/14-auto-mode-classifier.md` §4/§6/§9).
  *
  * Two things are worth testing about a prompt document:

@@ -1,9 +1,9 @@
 /**
  * Replay cases for the auto-mode judge (ADR-091). Each case is a slimmed-down
  * transcript + one proposed action + the verdict the policy INTENDS. The
- * `#n` cases are the nine real blocks from the 2026-10-03 tart/VNC session
- * (docs/automode-judge-tuning-handoff.md); `N*` are negative controls that must
- * still block, so a loosened rule shows up as a regression, not as a pass.
+ * `#n` cases are the nine real blocks from the 2026-10-03 tart/VNC session;
+ * `N*` are negative controls that must still block, so a loosened rule shows
+ * up as a regression, not as a pass.
  *
  * Content is synthetic: the task is a local VNC-auth investigation against a
  * tart VM, the credential a throwaway test value.

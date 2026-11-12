@@ -16,8 +16,7 @@ const HOST_SUFFIX = '.m'
 /**
  * CDN allowlist for external scripts/styles/fonts. Intentionally narrow —
  * matches the set Anthropic's own artifact sandbox uses, minus the ones
- * ClaudeUI has no need for. See docs/mockup-sandbox-research.md §2 for
- * rationale.
+ * ClaudeUI has no need for.
  */
 const CDN_SCRIPT = [
   'https://cdn.tailwindcss.com',

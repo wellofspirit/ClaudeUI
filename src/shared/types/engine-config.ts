@@ -197,9 +197,9 @@ export interface DispatchConfig {
 
 /**
  * Auto-mode (`auto`/`full` autonomy) LLM permission-gatekeeper config
- * (ADR-023, amended by `docs/automode-rework-plan.md`).
+ * (ADR-023).
  *
- * Engine-neutral as of phase 4: read per engine from `engines/<engineId>.json`
+ * Engine-neutral: read per engine from `engines/<engineId>.json`
  * by BOTH opencode and pi, which share the whole policy core
  * (`src/core/automode/`) and differ only in their permission intercept and
  * judge transport. Claude is the exception — cli.js ships its own classifier,

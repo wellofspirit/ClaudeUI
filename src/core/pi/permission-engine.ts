@@ -46,9 +46,9 @@ export type PermissionDecision = 'allow' | 'ask' | 'deny'
  * WHICH rung of `decide()`'s ladder produced the verdict. Provenance, not a
  * second decision: `decide()` collapses this away and is unchanged.
  *
- * The load-bearing case is `'ask-rule'` — auto mode (phase 4 of
- * `docs/automode-rework-plan.md`) must send an ask the USER authored straight
- * to the human rather than letting the classifier auto-approve it (G9 / ref §3
+ * The load-bearing case is `'ask-rule'` — auto mode (ADR-085) must send an ask
+ * the USER authored straight to the human rather than letting the classifier
+ * auto-approve it (G9 / ref §3
  * step 1), and an `'ask'` decision alone cannot tell a user rule from the mode
  * base. pi is the engine that CAN answer this natively — opencode discards the
  * matched rule before publishing `permission.asked`, so its wiring has to
@@ -186,12 +186,13 @@ export interface PermissionEngineContext {
 // ---------------------------------------------------------------------------
 
 /**
- * Mirrors `PiEngineToolMap.kindOf` (src/renderer/.../PiEngineToolMap.ts) for
- * this engine's mode-base decisions. Main cannot import renderer code (they
- * are separate Electron processes/bundles), so this switch is intentionally
- * DUPLICATED here rather than shared — PiEngineToolMap.test.ts asserts the two
- * tables agree for every known pi tool name (single-source guard): a change to
- * one without the other fails that test.
+ * Mirrors `PiEngineToolMap.kindOf`
+ * (src/renderer/src/components/chat/tool-registry/PiEngineToolMap.ts) for this
+ * engine's mode-base decisions. Core code does not import from `src/renderer`,
+ * so this switch is DUPLICATED here rather than shared —
+ * `tool-registry/__tests__/PiEngineToolMap.test.ts` asserts the two tables
+ * agree for every known pi tool name (single-source guard): a change to one
+ * without the other fails that test.
  */
 export function piToolKind(toolName: string): ToolKind {
   const mcpKind = hostedMcpKind(toolName)

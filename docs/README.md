@@ -1,6 +1,6 @@
 # ClaudeUI Documentation Index
 
-Read the doc that matches your task — don't load them speculatively.
+Read the doc that matches your task — don't load them speculatively. The recipes for common small changes are not here: they are in the `CLAUDE.md` of the directory being edited (the root `CLAUDE.md` lists them).
 
 - [architecture/](architecture/README.md) — how the app is put together, split by concern: source layout + services, the multi-engine seam, IPC & data flow, persistence/settings planes, UI, the remote layer as built ([remote.md](architecture/remote.md)), the remote security model as built ([security.md](architecture/security.md)), and the sync architecture as built ([sync-core.md](architecture/sync-core.md) — phases 0-5 plus the headless arc, with a follow-ons ledger for what is still open). **Start at its README for any structural question.**
 - [protocol-cc/](protocol-cc/README.md) — the cli.js wire manual: every stream-json message, control subtype, CLI flag, MCP hosting, cancellation, the extract→patch→rebundle build pipeline (01-transport §1.12) and patch registry. **Authoritative — consult before theorizing about cli.js behavior or touching `src/core/sdk/` / `patch/`.**
@@ -8,6 +8,8 @@ Read the doc that matches your task — don't load them speculatively.
 - [protocol-opencode/](protocol-opencode/README.md) - opencode 2.x (ADR-097): the pin, server lifecycle, routes and SSE events ClaudeUI uses, permissions and rulesets, the inbox, credentials, the `claudeui-xeng` plugin, injected config, session list, dispatch targets, the gated contract suite and the bump procedure.
 - [opencode-v2-windows-test.md](opencode-v2-windows-test.md) - the Windows x64 test pass for the opencode 2.x branch (ADR-097 §8.2).
 - [tool-survey.md](tool-survey.md) - the cross-harness tool and history-item inventory against the card vocabulary (roadmap item 1), with the history-mapper proposal and its mockup page.
+- [protocol-pi/](protocol-pi/README.md) - the pi wire protocol as verified against the pinned release; per-bump compatibility assessments are in [protocol-pi/bumps.md](protocol-pi/bumps.md).
+- [commands.md](commands.md) - build, setup, packaging and whole-suite test commands (the inner loop is in the root `CLAUDE.md`).
 - [testing-strategy.md](testing-strategy.md) — the four-layer test architecture (unit/component/e2e/git/integration), what belongs in each layer, test infra.
 - [component-guide.md](component-guide.md) — React component patterns and conventions for testability.
 - [plugin-development.md](plugin-development.md) — writing ClaudeUI plugins (VS Code-style, ADR-004/005).
