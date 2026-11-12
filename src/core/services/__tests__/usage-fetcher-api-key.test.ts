@@ -19,8 +19,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { homedir } from 'node:os'
 
-vi.mock('../claude-session', () => ({
-  ClaudeSession: { getExtraWindows: () => [] },
+vi.mock('../../sdk/harness', () => ({
   getCliVersion: () => '2.1.268'
 }))
 
