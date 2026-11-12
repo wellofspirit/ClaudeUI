@@ -291,7 +291,8 @@ import {
   makeRemoteConnection,
   AUTH_OFF_GRANTS,
   ENROLL_ONLY_GRANTS,
-  PINNED_CAPABILITIES
+  PINNED_CAPABILITIES,
+  type Capability
 } from '../command-registry'
 import { setAutomationManager } from '../automation-commands'
 import {
@@ -2044,249 +2045,17 @@ describe('registerRemoteHandlers', () => {
 })
 
 // ---------------------------------------------------------------------------
-// PARITY PIN — "zero change to the effective remote surface" (SyncCore phase 1).
-//
-// Encoded LITERALLY from the pre-port registrations (`dispatcher.register(...)`
-// in remote-handlers.ts) minus the then-dispatcher's BLOCKED denylist — which
-// subtracted nothing, because the denylist and the registration set never
-// overlapped: the denylist was belt-and-braces over an explicit allowlist.
-//
-// This is the review gate for the port. It runs against the REAL shared
-// registry after the real registrars, so it fails on a channel that silently
-// gained or lost remote reachability — including via a capability change,
-// since every listed channel must also resolve under the legacy grant set.
-//
-// Later phases add to this list ONLY with a deliberate, reviewed entry:
-//   - `session:recall-queued` (phase 3 / ADR-053) — the itemized replacement
-//     for `session:dequeue-message`, same `chat` capability as the channel it
-//     supersedes, so the effective remote surface is unchanged in substance.
-//   - `session:approve-blocked` (ADR-091 part 6) — approving an auto-mode
-//     block after the fact; a `chat` command on the named session, gated
-//     exactly like `session:approval-response`, which it extends.
-//   - `session:allow-peer-messages` (session tools, slice 1a) — the "Allow messages
-//     from other Claude sessions here" action on a held peer message; a `chat`
-//     command on the named session, so the browser client can answer the hold row
-//     exactly as the desktop does.
-//   - `session:link:set-grouped` (session tools, slice 5; was `session:link:detach`) — the
-//     "Detach from group" / "Add to group" row menu action; a `chat` command naming the
-//     session, so the browser and phone clients can move a session in or out of its group as
-//     the desktop can.
-//   - `session:proposal:start` / `session:proposal:dismiss` (session tools, slice 1c-b, 5) — the
-//     two Start buttons (in this group / as standalone work) and Dismiss on a proposal card; `chat` commands naming a proposal, so the
-//     browser and phone clients can act on a card exactly as the desktop does.
-//   - `session:context-pressure:respond` (session tools, slice 4) — Hand off / Not now on the
-//     banner above the composer; a `chat` command naming the session, so the browser and
-//     phone clients answer exactly as the desktop does.
+// The remote surface is pinned by the checked-in dump (remote-surface.jsonl; the
+// test "the remote surface equals the checked-in dump" in the describe below):
+// every channel registerRemoteHandlers registers, with its capability, kind and
+// routing flags. What the dump cannot say is kept by hand here: which channels
+// a base connection cannot reach (NOT_GRANTED_AT_CONNECT) and how the authcfg
+// namespace splits for the step-up classifier (AUTHCFG_WRITE_CHANNELS and
+// AUTHCFG_FREE_CHANNELS_PIN).
 // ---------------------------------------------------------------------------
 
-const PRE_PORT_REMOTE_CHANNELS = [
-  'account:get',
-  'app:version-info',
-  'claude:get-cleanup-period',
-  'claude:load-permissions',
-  'claude:save-permissions',
-  'claude:set-cleanup-period',
-  'claude:set-workspace-trust',
-  'claude:workspace-trust',
-  'config:load-sessions',
-  'config:load-settings',
-  'config:load-skill-details',
-  'config:load-slash-commands',
-  'config:save-sessions',
-  'config:save-settings',
-  'engine:is-installed',
-  'file:list-dir',
-  'git:branches',
-  'git:check-repo',
-  'git:checkout',
-  'git:commit',
-  'git:create-branch',
-  'git:discard-file',
-  'git:fetch',
-  'git:file-contents',
-  'git:file-patch',
-  'git:pull',
-  'git:push',
-  'git:push-with-upstream',
-  'git:stage-all',
-  'git:stage-file',
-  'git:stash-push',
-  'git:stash-restore',
-  'git:status',
-  'git:watch',
-  'git:unstage-all',
-  'git:unstage-file',
-  'mcp:load-servers',
-  'mcp:load-catalog',
-  'mcp:read-disabled',
-  'mcp:status',
-  'mockup:read-html',
-  'mockup:unwatch',
-  'mockup:watch',
-  'pi:auth-status',
-  'pi:binary-path',
-  'session:allow-peer-messages',
-  'session:approval-response',
-  'session:approve-blocked',
-  'session:ask-side-question',
-  'session:background-task',
-  'session:build-subagent-file-map',
-  'session:cancel',
-  'session:context-pressure:respond',
-  'session:create',
-  'session:delete-project',
-  'session:delete-session',
-  'session:dequeue-message',
-  'session:generate-commit-message',
-  'session:generate-title',
-  'session:get-engine-models',
-  'session:get-models',
-  'session:get-opencode-provider-models',
-  'session:get-opencode-providers',
-  'session:get-pi-model-catalog',
-  'session:get-plan-content',
-  'session:get-session-log-path',
-  'session:interrupt',
-  'session:link:set-grouped',
-  'session:list-directories',
-  'session:list-opencode',
-  'session:list-pi',
-  'session:load-background-output',
-  'session:load-history',
-  'session:load-opencode-history',
-  'session:load-pi-history',
-  'session:load-subagent-history',
-  'session:proposal:dismiss',
-  'session:proposal:start',
-  'session:read-background-range',
-  'session:recall-queued',
-  'session:rekey',
-  'session:remove-opencode-provider',
-  'session:resolve-fork-anchor',
-  'session:send',
-  'session:set-effort',
-  'session:set-model',
-  'session:set-opencode-provider-disabled',
-  'session:set-permission-mode',
-  'session:set-reasoning-variant',
-  'session:set-thinking-mode',
-  'session:stop-task',
-  'session:unwatch-background',
-  'session:unwatch-session',
-  'session:watch-background',
-  'session:watch-session',
-  'session:write-custom-title',
-  'shared-provider:list',
-  'shared-provider:models',
-  'shared-provider:statuses',
-  // The volatile lane's subscription verb (SyncCore phase 5 S1). `chat`, and a
-  // QUERY — a subscription toggle with no domain effect, so it is unaudited.
-  'stream:watch',
-  'usage:fetch',
-  'usage:fetch-block',
-  'usage:set-account-filter'
-] as const
-
 /**
- * THE ONE SANCTIONED SURFACE CHANGE since the phase-1 port (SyncCore phase 2,
- * ADR-052 decision 6 / security.md §"Terminal posture").
- *
- * Why this is not the failure mode the pin above exists to catch: every channel
- * here declares `shell`, which is NOT in {@link AUTH_OFF_GRANTS}, so
- * registering them changes nothing about what an authenticated connection can
- * do. Reaching them requires all three gates, all enforced server-side —
- * (1) the desktop-only `allow_terminal` toggle (persisted in `remote_config`,
- * never in remotely-writable settings), (2) a step-up ceremony that verifies a
- * fresh password proof against the same failure budget as auth, and (3) an idle
- * decay on the grant that ceremony arms.
- *
- * `terminal:availability` is the exception's exception: `config`-capability
- * (hence reachable) because a client must be able to ask "may I?" WITHOUT
- * already holding the answer. It returns three booleans and nothing else.
- *
- * `terminal:kill-by-cwd` is deliberately absent — that lifecycle sweep belongs
- * to the desktop's own cold-session cleanup, and a remote client has no reason
- * to mass-kill the operator's shells.
- */
-const PHASE2_TERMINAL_CHANNELS = [
-  'terminal:attach',
-  'terminal:availability',
-  'terminal:create',
-  'terminal:detach',
-  'terminal:kill',
-  'terminal:resize',
-  'terminal:write'
-] as const
-
-/**
- * Terminal channels added AFTER the phase-2 widening, listed separately for the
- * same reason {@link POST_PORT_CHANNELS} is: the set above is the record of
- * what that widening exposed, and later additions must read as their own
- * decision rather than be back-dated into it.
- *
- * `terminal:pool` reports which slots of a cwd hold a live pty — what the tab
- * strip badges "a shell is still running here" from, now that closing a tab
- * only detaches. It declares `shell`, so it joins the gated set below and
- * inherits every pin in this file.
- */
-const POST_PHASE2_TERMINAL_CHANNELS = ['terminal:pool'] as const
-
-/** Every terminal channel behind the `shell` capability (i.e. all but availability). */
-const SHELL_GATED_CHANNELS = [
-  ...PHASE2_TERMINAL_CHANNELS.filter((c) => c !== 'terminal:availability'),
-  ...POST_PHASE2_TERMINAL_CHANNELS
-]
-
-/**
- * Channels added AFTER the phase-1 port, listed separately so the pre-port set
- * above stays a faithful record of what the port had to preserve.
- *
- * `session:clear-conversation` (F4) is `chat`, the same capability as
- * `session:cancel` and `session:send`: "start fresh" is a conversation action a
- * phone must be able to take, and it touches nothing outside the session it
- * names.
- *
- * `file:list-places` (ADR-046 dialog) is `fs-read`, the same capability as the
- * `file:list-dir` it rides beside: home path, hostname and drive roots are a
- * strictly weaker read than the arbitrary-path listing that channel already
- * grants, so the effective remote surface widens by nothing.
- */
-const POST_PORT_CHANNELS = [
-  'session:clear-conversation',
-  'file:list-places',
-  // ADR-102 Arc 2: the status line a `deferStatusLine` history read left out.
-  // `fs-read`, the capability of the `session:load-history` it is the second half
-  // of — the same transcript bytes, summed instead of returned.
-  'session:load-status-line',
-  // ADR-087: the bytes behind a transcript BlobRef. `chat`, the capability that
-  // already read these exact bytes inside the snapshot — an invoke, not an HTTP
-  // route, so on an E2E origin they stay inside the encrypted channel.
-  'blob:get'
-] as const
-
-/**
- * ADR-052 passkeys. Listed separately for the same reason the terminal set is:
- * these are the SECOND deliberate widening of the remote surface, and the pins
- * below must show them as an explicit decision rather than absorb them into the
- * pre-port baseline.
- *
- * Every one declares `enroll` or `admin`, neither of which is in
- * {@link AUTH_OFF_GRANTS} — so registering them changed what a
- * passkey-authenticated connection can reach, and changed NOTHING for a
- * token/tailnet one.
- */
-const PASSKEY_CHANNELS = [
-  'webauthn:credentials',
-  'webauthn:mint-enroll-token',
-  'webauthn:register-options',
-  'webauthn:register-verify',
-  'webauthn:rename',
-  'webauthn:revoke'
-] as const
-
-/**
- * ADR-054 decision 6 — the remote-access SETTINGS WRITES. The THIRD deliberate
- * widening, listed separately for the same reason the other two are.
+ * ADR-054 decision 6 — the remote-access SETTINGS WRITES.
  *
  * Every one declares `admin` (outside {@link AUTH_OFF_GRANTS}, so
  * authenticating never suffices) AND is gated on a presence proof inside the
@@ -2321,398 +2090,77 @@ const AUTHCFG_FREE_CHANNELS_PIN = ['authcfg:end', 'authcfg:get'] as const
 const AUTHCFG_CHANNELS = [...AUTHCFG_FREE_CHANNELS_PIN, ...AUTHCFG_WRITE_CHANNELS] as const
 
 /**
- * SyncCore phase 5 S3 — remote browser voice input. Listed separately for the
- * same reason every other widening is: it must read as its own decision.
+ * Every remote channel whose capability is outside AUTH_OFF_GRANTS, i.e. that an
+ * authenticated token/tailnet connection cannot reach at connect. Registered
+ * remotely all the same, each behind a proof the registry's grant set encodes:
  *
- * Unlike the three above, these declare `chat` — INSIDE
- * {@link AUTH_OFF_GRANTS} — so they widen what an ordinary token/tailnet
- * connection can do, and that is deliberate: a capture produces a draft message,
- * which is exactly what `session:send` already lets the same connection do. What
- * makes it a narrow widening rather than a broad one is what these verbs
- * DON'T reach: no host device (the microphone is the browser's), no filesystem,
- * no shell. The audio never comes through the registry at all — it rides the
- * `voice-audio` lane frame, accepted only while one of these has bound a capture
- * to the connection.
- */
-const VOICE_CHANNELS = ['voice:start', 'voice:stop'] as const
-
-/**
- * S1b — the registration sweep for the everything-remote ruling (2026-08-17):
- * everything is changeable from the remote UI except host-PHYSICAL verbs.
+ * - terminal (`shell`): reached only with the desktop-only `allow_terminal`
+ *   toggle (persisted in `remote_config`, never in remotely-writable settings),
+ *   a step-up ceremony that verifies a fresh password proof against the auth
+ *   failure budget, and an idle decay on the grant it arms.
+ *   `terminal:availability` is deliberately `config` (a client must be able to
+ *   ask "may I?" without holding the answer), so it is not here;
+ *   `terminal:kill-by-cwd` is deliberately not registered remotely (a cold-session
+ *   cleanup that belongs to the desktop).
+ * - passkeys (`enroll` / `admin`): a proven identity, or a one-time enrollment
+ *   link for the two registration verbs.
+ * - `authcfg:*` (`admin`): the remote-access settings; writes also need a
+ *   presence proof inside the mutation window on every tier. The `off` master
+ *   switch is absent by design: it stays in `remote:set-config`, which has no
+ *   remote registration.
+ * - `ide:mint-entry` (`ide`): the grant is armed by a step-up iff the
+ *   host-anchored `allow_ide` toggle is on, and revoked in place when it is off.
+ *   `ide:availability` is `config`, for the reason `terminal:availability` is.
+ * - harness writes and speech-pack writes (`admin`): putting a program or the
+ *   speech pack on the host. Their reads are `config` / `chat`.
  *
- * The FOURTH deliberate widening, and the widest one, so it gets the same
- * treatment as the other three: its own list, read as its own decision.
- *
- * Unlike the terminal / passkey / authcfg sets, every channel here declares
- * `config`, `git` or `chat` — all INSIDE {@link AUTH_OFF_GRANTS} — so this
- * genuinely widens what an ordinary authenticated connection reaches. That is
- * the ruling, not an accident, and what bounds it is the same rule as always:
- * host-physical verbs (`session:pick-folder`, `app:open-in-vscode`, `window:*`)
- * declare `host` and are not registered on this transport at all.
- *
- * They are also not SECOND registrations: `session.ipc.ts` (desktop) and
- * `remote-handlers.ts` (remote) spread the same declarations from
- * `ipc/config-commands.ts` / `ipc/automation-commands.ts`, so a capability can
- * no more drift between the two surfaces here than it can for `stream:watch`.
- *
- * `automation:*` is the port half: it was raw `ipcMain.handle` with no
- * capability, no audit and no remote twin. It declares `config` — host-side
- * configuration — and the seven mutating channels are therefore GONE from
- * `PINNED_CAPABILITIES`, which may only hold capabilities the base grant set
- * lacks. `log-viewer:*` stays pinned and unregistered: window chrome, forever
- * desktop.
+ * A new line here is a decision that needs its reason: it makes another
+ * capability reachable only to a stronger identity, and it must not declare
+ * `host` (checked below).
  */
-const S1B_SWEEP_CHANNELS = [
-  'automation:cancel',
-  'automation:delete',
-  'automation:dismiss-run',
-  'automation:list',
-  'automation:list-runs',
-  'automation:load-run-history',
-  'automation:run-now',
-  'automation:save',
-  'automation:send-message',
-  'automation:toggle',
-  'config:load-engine-config',
-  'config:load-opencode-settings',
-  'config:load-vendor-config',
-  'config:patch-opencode-native',
-  'config:patch-pi-models',
-  'config:patch-pi-native',
-  'config:read-opencode-native-raw',
-  'config:read-pi-models-raw',
-  'config:read-pi-native-raw',
-  'config:save-engine-config',
-  'config:save-opencode-settings',
-  'config:set-opencode-tool-disabled',
-  'config:save-slash-commands',
-  'config:save-vendor-config',
-  'config:write-pi-native-text',
-  'mcp:cli-add',
-  'mcp:cli-remove',
-  'mcp:reload',
-  'mcp:reconnect',
-  'mcp:remove-server',
-  'mcp:save-servers',
-  'mcp:set-servers',
-  'mcp:toggle',
-  'mcp:toggle-disabled',
-  'opencode-agents:delete',
-  'opencode-agents:generate',
-  'opencode-agents:list',
-  'opencode-agents:read',
-  'opencode-agents:save',
-  'opencode-agents:set-disabled',
-  'proxy:test-connection',
-  'usage:refresh-prices',
-  'worktree:create',
-  'worktree:inspect',
-  'worktree:inventory',
-  'worktree:measure',
-  'worktree:remove',
-  'worktree:remove-many',
-  'worktree:status'
-] as const
-
-/**
- * ADR-065 phase 4 — the engine-SHARED classifier trust lists.
- *
- * Their own pair rather than two more lines in {@link S1B_SWEEP_CHANNELS},
- * which is the record of one dated sweep. Same reachability decision as that
- * sweep's `config:*` half, for the same reason: this is engine configuration,
- * and the phone must be able to edit it. What is different is where the guard
- * sits — the path carries no id to traverse with, so the payload SHAPE is the
- * perimeter (`config-commands-shared-automode.test.ts`).
- */
-const TRUST_LIST_CHANNELS = ['config:load-shared-automode', 'config:save-shared-automode'] as const
-
-/**
- * ADR-074 §2 — one provider's model allowlist, for opencode or pi: the Manage
- * sheet's curation writer. `config`, like the settings saves it narrows, and
- * reachable remotely for the same reason — curation is engine configuration.
- */
-const MODEL_ALLOWLIST_CHANNELS = ['models:set-provider-allowlist'] as const
-
-/** ADR-094 — the agent types an engine can spawn (read-only, `config`). */
-const AGENT_TYPE_CHANNELS = ['config:list-agent-types'] as const
-
-/**
- * S4 — the vendor-OAuth / account-mutation / native-OAuth family (ADR-057).
- *
- * The FIFTH deliberate widening, and like the S1b sweep it declares `config`
- * throughout — all INSIDE {@link AUTH_OFF_GRANTS} — so an ordinary authenticated
- * connection reaches every one. That is the everything-remote ruling reaching
- * the LAST family S1b deferred: a vendor credential is engine configuration, not
- * the session-security surface (ADR-056), and consent + code-return now work
- * from any browser (ADR-057). What bounds it: token material never crosses the
- * wire (`probe`/`list-keys` return booleans/kind/labels), and the two flow verbs
- * that would open a host browser (`auth:sign-in`, `account:add`) derive
- * remote-vs-desktop from the connection and skip `openExternal` for a remote
- * caller — the exchange stays host-side either way.
- *
- * They are also not SECOND registrations: `session.ipc.ts` (desktop) and
- * `remote-handlers.ts` (remote) spread the same declarations from
- * `ipc/auth-commands.ts`, so a capability cannot drift between the two surfaces.
- */
-const S4_VENDOR_CREDENTIAL_CHANNELS = [
-  'account:add',
-  'account:delete',
-  'account:set-enabled',
-  'account:switch',
-  'auth:cancel',
-  'auth:sign-in',
-  'auth:submit-code',
-  // ADR-074 §6 — the key moves host-side; nothing about it comes back.
-  'shared-provider:adopt-native',
-  'shared-provider:disconnect',
-  // Detect: the host fetches a typed URL, so `config` like the save — never a
-  // view-only session's proxy. The stored key is read host-side; none comes back.
-  'shared-provider:probe',
-  'shared-provider:remove',
-  'shared-provider:save',
-  'shared-provider:set-curation',
-  'shared-provider:set-default',
-  // ADR-074 slice 10 — on/off moves delivery host-side; no key crosses.
-  'shared-provider:set-disabled',
-  'shared-provider:set-key',
-  'shared-provider:set-route',
-  'shared-provider:sync',
-  // ADR-082 §8 (S7d) — a kept own key replaced by the stored one, host-side.
-  'shared-provider:use-stored-key',
-  'vendor-auth:list-keys',
-  'vendor-auth:list-options',
-  'vendor-auth:oauth-authorize',
-  'vendor-auth:oauth-callback',
-  'vendor-auth:oauth-cancel',
-  'vendor-auth:probe',
-  'vendor-auth:remove',
-  'vendor-auth:set-key'
-] as const
-
-/**
- * ADR-065 phase 6 — the unified provider list.
- *
- * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS},
- * which is the record of one dated sweep: this is a NEW channel, declared in the
- * same shared module (`ipc/auth-commands.ts`) for the same reason that sweep
- * moved there — the phone's provider page must read the same list the desktop
- * does, and one declaration is what stops the two surfaces disagreeing.
- *
- * A `query` declaring `config`, so a base connection reaches it. It carries no
- * key material: the shared definitions, opencode's catalog and pi's vendor
- * entries reduce to names, counts, credential BADGES and per-engine chips.
- */
-const PROVIDER_REGISTRY_CHANNELS = [
-  'provider-registry:list',
-  // S7f — who holds an own key for a provider now, read from the harnesses'
-  // auth files host-side; harness ids only, no key material.
-  'shared-provider:own-key-holders'
-] as const
-
-/**
- * ADR-068 §2 — the ChatGPT vault's ACCOUNTS.
- *
- * Four channels, declared in the same shared module for the same reason as the
- * line above: the phone manages the subscription the desktop does, and one
- * declaration is what stops the two surfaces disagreeing. All `config`, so a
- * base connection reaches them — a vendor subscription is engine configuration
- * (ADR-056), and switching which account the host bills is exactly the kind of
- * thing the everything-remote ruling covers.
- *
- * Token-free by construction, pinned in
- * `core/ipc/__tests__/provider-account-commands.test.ts`: `list` returns ids,
- * emails, plan names and expiries, and the three mutations return nothing.
- * ADDING an account is not here — that is the existing `vendor-auth:oauth-*`
- * pair, which already completes remotely via paste-back.
- */
-const PROVIDER_ACCOUNT_CHANNELS = [
-  'provider-account:list',
-  'provider-account:remove',
-  'provider-account:switch'
-] as const
-
-/**
- * ADR-068 §2 — the per-account ChatGPT usage readout. `usage:chatgpt-limits` is
- * a `query` joining the four `usage:*` channels the phone already reaches.
- * Token-free by construction: percentages, reset times, the email the account
- * list already carries, and nothing else.
- */
-const CHATGPT_LIMITS_CHANNELS = ['usage:chatgpt-limits'] as const
-
-/**
- * ADR-068 §3 (Slice 7) — device-code sign-in for ChatGPT.
- *
- * Its own line rather than a 23rd entry in {@link S4_VENDOR_CREDENTIAL_CHANNELS}
- * for the same reason `provider-registry:list` got one: that const is the record
- * of one dated sweep, and this is a NEW channel declared in the same shared
- * module. It exists FOR the remote client — paste-back can complete a ChatGPT
- * sign-in from any browser, but copying a dead page's address bar on a phone is
- * the step device code removes.
- *
- * A `config` command plus a `config` query, so a base connection reaches both (a
- * vendor subscription is engine configuration — ADR-056). Token-free by
- * construction and pinned in
- * `core/ipc/__tests__/vendor-device-code-commands.test.ts`: the start carries
- * exactly `verificationUrl` / `userCode` / `expiresAt`, the status carries a
- * state and at most the host's own error message, and the `device_auth_id` the
- * host polls with never leaves the host.
- *
- * TWO channels because the WAIT cannot be one long invoke: `web/connection.ts`
- * rejects any invoke that outlives `INVOKE_TIMEOUT_MS` (30 s) and a device code
- * lives for fifteen minutes. The host owns the wait; the client polls the query.
- * That is also what makes a mid-wait reconnect free — the outcome is on the host,
- * not in a promise attached to a dead socket.
- */
-const CHATGPT_DEVICE_CODE_CHANNELS = [
-  'vendor-auth:device-code-start',
-  'vendor-auth:device-code-status'
-] as const
-
-/**
- * The redacted status READ (owner ruling, 2026-08-28) — the one `remote:*`
- * channel with a remote registration, and the SIXTH deliberate widening.
- *
- * The narrowest of the six by some distance: a `query`, declaring `config`, that
- * returns a field-PICKED subset of `RemoteStatus` (`RemoteStatusView`) with no
- * `lanUrl` / `tunnelUrl` and nothing derived from them — the fields that carry
- * the LAN and tunnel channel keys, and the reason the rest of this namespace has
- * no registry entry at all. What bounds it is the pin two blocks below: every
- * `remote:*` MUTATION is still absent from the remote surface, so a client
- * cannot stop, reconfigure or re-serve the listener it is talking through.
- * `ipc/__tests__/remote-view-commands.test.ts` owns the redaction itself.
- */
-const REMOTE_VIEW_CHANNELS = ['remote:status-view'] as const
-
-/**
- * The remote IDE (ADR-064) — the SEVENTH deliberate widening, and the second one
- * (after the terminal) that puts a capability outside every static grant set on
- * the remote surface.
- *
- * TWO channels and they are deliberately asymmetric, which is the whole design:
- * `ide:availability` declares `config` and is reachable on the base grant set,
- * because asking "may I?" must be answerable WITHOUT the grant (the
- * `terminal:availability` rule); `ide:mint-entry` declares `ide`, which no login
- * confers — the step-up ceremony arms it iff the host-anchored `allow_ide`
- * toggle is on, and toggle-off revokes it in place.
- */
-const IDE_CHANNELS = ['ide:availability', 'ide:mint-entry'] as const
-
-/**
- * ADR-081 §3 — which judge-picker values ClaudeUI can call for the auto-mode
- * judge. A `query` declaring `config`, the class of `session:get-engine-models`
- * beside it, so a base connection reaches it: the Settings judge picker is not
- * desktop-only. Token-free by construction — the resolver's describe path
- * checks a key for PRESENCE and reads ChatGPT's token-free status, so the
- * answer is a yes/no and the resolver's own copy per value.
- */
-const JUDGE_MODEL_SUPPORT_CHANNELS = ['automode:judge-model-support'] as const
-
-/**
- * The same class for the judge route's rate-limit cooldown: the Settings picker shows "resting
- * until …" next to a model or ChatGPT account, in the browser client too. Only a time leaves —
- * the route the resolver builds (token and all) is dropped by the handler.
- */
-const JUDGE_ROUTE_RESTING_CHANNELS = ['automode:judge-route-resting'] as const
-
-/** The half of {@link IDE_CHANNELS} that is gated by the `ide` capability. */
-const IDE_GATED_CHANNELS = ['ide:mint-entry'] as const
-
-/**
- * The usage hub's six channels (ADR-072 §7).
- *
- * Restated here rather than imported from `usage-hub-commands.ts`, like every
- * other family in this file: a pin that imported the list it is pinning would
- * pass whatever the source said.
- */
-const USAGE_HUB_CHANNELS = [
-  'usage-hub:status',
-  'usage-hub:configure',
-  'usage-hub:set-secret',
-  'usage-hub:sync-now',
-  'usage-hub:resync',
-  'usage-hub:forget'
-] as const
-
-/**
- * The OpenRouter tab's four reads. Restated rather than imported from
- * `openrouter-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. All
- * `config` queries: the key they are read with never appears in an answer.
- */
-const OPENROUTER_CHANNELS = [
-  'openrouter:status',
-  'openrouter:overview',
-  'openrouter:models',
-  'openrouter:model-endpoints'
-] as const
-
-/**
- * The harness manager (ADR-082 arc 2). Restated rather than imported from
- * `harness-commands.ts`, for the reason {@link USAGE_HUB_CHANNELS} is. The two
- * reads are `config`; the eight writes `admin` (§7), which a base connection
- * never holds: four for sources and installs, three for updates (§6), and the
- * upgrade sheet's answer (§8).
- */
-const HARNESS_CHANNELS = [
-  'harness:state',
-  'harness:versions',
-  'harness:set-selection',
-  'harness:install',
-  'harness:install-cancel',
-  'harness:detect',
-  'harness:set-update-mode',
-  'harness:update-all',
-  'harness:check-updates',
-  'harness:answer-upgrade-prompt'
-] as const
-
-/** The part of {@link HARNESS_CHANNELS} that is gated by `admin` (ADR-082 §7). */
-const HARNESS_ADMIN_CHANNELS = [
-  'harness:set-selection',
-  'harness:install',
-  'harness:install-cancel',
-  'harness:detect',
-  'harness:set-update-mode',
-  'harness:update-all',
-  'harness:check-updates',
-  'harness:answer-upgrade-prompt'
-] as const
-
-/**
- * The speech pack (ADR-101 §6). Restated rather than imported, for the reason
- * {@link USAGE_HUB_CHANNELS} is. The status read is `chat` (every connection that
- * can hold the mic can learn the model is missing); install, cancel and remove are
- * `admin`, which a base connection never holds.
- */
-const VOICE_PACK_CHANNELS = [
-  'voice:pack-status',
-  'voice:pack-install',
-  'voice:pack-install-cancel',
-  'voice:pack-remove'
-] as const
-
-/**
- * The web client's full-sync timing report (`SyncStats`, sync-core.md § Measuring
- * a full sync). REMOTE-only: the desktop renderer relays its own through
- * `log:relay`. `chat` / `query` / `withConnection` — see its registration.
- */
-const SYNC_TIMING_CHANNELS = ['sync:report-timing'] as const
-
-/** The part of {@link VOICE_PACK_CHANNELS} that is gated by `admin`. */
-const VOICE_PACK_ADMIN_CHANNELS = [
-  'voice:pack-install',
-  'voice:pack-install-cancel',
-  'voice:pack-remove'
-] as const
-
-/** channel → the capability it must declare (the reachability decision). */
-const PASSKEY_CAPABILITIES: Record<string, 'enroll' | 'admin'> = {
+const NOT_GRANTED_AT_CONNECT: Record<string, Capability> = {
+  'terminal:attach': 'shell',
+  'terminal:create': 'shell',
+  'terminal:detach': 'shell',
+  'terminal:kill': 'shell',
+  'terminal:pool': 'shell',
+  'terminal:resize': 'shell',
+  'terminal:write': 'shell',
   'webauthn:register-options': 'enroll',
   'webauthn:register-verify': 'enroll',
   'webauthn:credentials': 'admin',
   'webauthn:mint-enroll-token': 'admin',
   'webauthn:rename': 'admin',
-  'webauthn:revoke': 'admin'
+  'webauthn:revoke': 'admin',
+  'authcfg:apply': 'admin',
+  'authcfg:end': 'admin',
+  'authcfg:get': 'admin',
+  'authcfg:lan-link': 'admin',
+  'authcfg:rotate-lan-key': 'admin',
+  'authcfg:set-password': 'admin',
+  'ide:mint-entry': 'ide',
+  'harness:set-selection': 'admin',
+  'harness:install': 'admin',
+  'harness:install-cancel': 'admin',
+  'harness:detect': 'admin',
+  'harness:set-update-mode': 'admin',
+  'harness:update-all': 'admin',
+  'harness:check-updates': 'admin',
+  'harness:answer-upgrade-prompt': 'admin',
+  'voice:pack-install': 'admin',
+  'voice:pack-install-cancel': 'admin',
+  'voice:pack-remove': 'admin'
 }
+
+/** Table keys whose capability is `capability`, or that start with `prefix`. */
+const notGrantedChannels = (match: { capability?: Capability; prefix?: string }): string[] =>
+  Object.entries(NOT_GRANTED_AT_CONNECT)
+    .filter(
+      ([c, cap]) =>
+        (match.capability === undefined || cap === match.capability) &&
+        (match.prefix === undefined || c.startsWith(match.prefix))
+    )
+    .map(([c]) => c)
 
 describe('remote surface parity (phase 1 port)', () => {
   // The dispatcher the two S1b reachability cases below actually call through —
@@ -2733,58 +2181,6 @@ describe('remote surface parity (phase 1 port)', () => {
 
   afterEach(() => {
     gitWatchRegistry.releaseConnection(remoteConn.connectionId)
-  })
-
-  it('exposes exactly the pre-port channel set plus the phase-2 terminal and passkey channels', () => {
-    expect(commandRegistry.channels('remote')).toEqual(
-      [
-        ...PRE_PORT_REMOTE_CHANNELS,
-        ...PHASE2_TERMINAL_CHANNELS,
-        ...POST_PHASE2_TERMINAL_CHANNELS,
-        ...POST_PORT_CHANNELS,
-        ...PASSKEY_CHANNELS,
-        ...AUTHCFG_CHANNELS,
-        ...VOICE_CHANNELS,
-        ...S1B_SWEEP_CHANNELS,
-        ...TRUST_LIST_CHANNELS,
-        ...MODEL_ALLOWLIST_CHANNELS,
-        ...AGENT_TYPE_CHANNELS,
-        ...S4_VENDOR_CREDENTIAL_CHANNELS,
-        ...PROVIDER_REGISTRY_CHANNELS,
-        ...PROVIDER_ACCOUNT_CHANNELS,
-        ...CHATGPT_LIMITS_CHANNELS,
-        ...CHATGPT_DEVICE_CODE_CHANNELS,
-        ...REMOTE_VIEW_CHANNELS,
-        ...IDE_CHANNELS,
-        ...JUDGE_MODEL_SUPPORT_CHANNELS,
-        ...JUDGE_ROUTE_RESTING_CHANNELS,
-        // ADR-071 §6: every account's limits, for every vendor. `config` and a
-        // query, like the two usage reads beside it — and the remote client has
-        // to reach it, because the dashboard built on it is not desktop-only.
-        'usage:limits',
-        // ADR-071 §7: the window-value ledger, read-only, for the same dashboard.
-        'usage:windows',
-        // ADR-071 §8: the dashboard's own read over the ledger's buckets.
-        'usage:dashboard',
-        // ADR-072 §7: the usage hub's six channels, declared once in
-        // `usage-hub-commands.ts` and spread by both transports. Remote because
-        // the combined dashboard and the settings group that configures it are
-        // not desktop-only — and no shape among them can return the device
-        // secret, which is why a write-only `set-secret` command is safe here.
-        ...USAGE_HUB_CHANNELS,
-        // The OpenRouter tab (Usage Analytics): four `config` queries, declared
-        // once in `openrouter-commands.ts`. Remote because the dashboard is not
-        // desktop-only; the vault key is read per call and never returned.
-        ...OPENROUTER_CHANNELS,
-        // ADR-082 arc 2: the Installed page is on every device (reads are
-        // `config`); installing, re-sourcing and detecting are `admin`.
-        ...HARNESS_CHANNELS,
-        // ADR-101 §6: the speech pack. Its status is `chat`; install, cancel and
-        // remove are `admin`.
-        ...VOICE_PACK_CHANNELS,
-        ...SYNC_TIMING_CHANNELS
-      ].sort()
-    )
   })
 
   it('the remote surface equals the checked-in dump', () => {
@@ -2844,22 +2240,7 @@ describe('remote surface parity (phase 1 port)', () => {
     expect(AUTH_OFF_GRANTS.has(decl!.capability)).toBe(true)
   })
 
-  it('the S1b sweep is reachable with the base grant set, and audited where it mutates', async () => {
-    // The point of the sweep: a phone holding nothing but an ordinary
-    // authenticated connection reaches these. Asserted through the CAPABILITY
-    // (what dispatch actually checks) rather than by calling every handler —
-    // most of them would touch the real filesystem.
-    const caps = [
-      ...S1B_SWEEP_CHANNELS,
-      ...TRUST_LIST_CHANNELS,
-      ...MODEL_ALLOWLIST_CHANNELS,
-      ...AGENT_TYPE_CHANNELS
-    ].map((c) => [c, commandRegistry.declaration(c)?.capability] as const)
-    const ungranted = caps.filter(([, cap]) => !cap || !AUTH_OFF_GRANTS.has(cap))
-    expect(
-      ungranted,
-      `S1b channels a base connection cannot reach: ${ungranted.map(([c]) => c).join(', ')}`
-    ).toEqual([])
+  it('the S1b sweep keeps its deliberate capabilities, and automations are config', () => {
     // `opencode-agents:generate` spends model tokens, so it is `chat`, not
     // `config` — the one deliberate difference inside the sweep.
     expect(commandRegistry.declaration('opencode-agents:generate')?.capability).toBe('chat')
@@ -2881,7 +2262,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // authenticated connection that reaches the writes behind its rows —
     // otherwise the remote provider page renders nothing while every button on
     // it would have worked.
-    for (const channel of PROVIDER_REGISTRY_CHANNELS) {
+    for (const channel of ['provider-registry:list', 'shared-provider:own-key-holders']) {
       expect(commandRegistry.declaration(channel)).toMatchObject({
         capability: 'config',
         kind: 'query'
@@ -2987,28 +2368,18 @@ describe('remote surface parity (phase 1 port)', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 
-  it('every exposed channel outside the shell/passkey sets is reachable under the legacy grant set', () => {
+  it('every exposed channel outside NOT_GRANTED_AT_CONNECT is reachable under the legacy grant set', () => {
     const unreachable = commandRegistry
       .channels('remote')
       .map((c) => [c, commandRegistry.declaration(c)!.capability] as const)
       .filter(([, cap]) => !AUTH_OFF_GRANTS.has(cap))
-    // The complete list of channels a token/tailnet connection cannot reach:
-    // the shell-gated terminal set (step-up) and the passkey set (a proven
-    // human, or a one-time enrollment link). Anything else appearing here is a
-    // channel that silently stopped being reachable — or started being one.
-    const expected = [
-      ...SHELL_GATED_CHANNELS.map((c) => [c, 'shell'] as const),
-      ...PASSKEY_CHANNELS.map((c) => [c, PASSKEY_CAPABILITIES[c]] as const),
-      ...AUTHCFG_CHANNELS.map((c) => [c, 'admin'] as const),
-      // ADR-064: `ide:mint-entry` only. Its sibling `ide:availability` is
-      // deliberately absent — it declares `config` and IS reachable at connect,
-      // which is what makes the button able to explain itself.
-      ...IDE_GATED_CHANNELS.map((c) => [c, 'ide'] as const),
-      // ADR-082 §7: the harness manager's writes. The two reads are `config`.
-      ...HARNESS_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const),
-      // ADR-101 §6: the speech pack's writes. Its status read is `chat`.
-      ...VOICE_PACK_ADMIN_CHANNELS.map((c) => [c, 'admin'] as const)
-    ].sort(([a], [b]) => a.localeCompare(b))
+    // The complete list of channels a token/tailnet connection cannot reach, as
+    // the hand-kept table says (with the reason for each family). Anything else
+    // appearing here is a channel that silently stopped being reachable — or
+    // started being one.
+    const expected = [...Object.entries(NOT_GRANTED_AT_CONNECT)].sort(([a], [b]) =>
+      a.localeCompare(b)
+    )
     expect(
       [...unreachable].sort(([a], [b]) => a.localeCompare(b)),
       `these channels declare a capability remote connections do not hold: ${unreachable
@@ -3017,9 +2388,19 @@ describe('remote surface parity (phase 1 port)', () => {
     ).toEqual(expected)
   })
 
+  it('no NOT_GRANTED_AT_CONNECT entry declares `host`', () => {
+    // A host-physical verb must never be sanctioned for remote by one table line.
+    expect(
+      Object.entries(NOT_GRANTED_AT_CONNECT).filter(([, cap]) => cap === 'host'),
+      'host capability channels in the table'
+    ).toEqual([])
+  })
+
   it('the passkey channels are unreachable from a plain token connection', async () => {
     const conn = makeRemoteConnection('password', null)
-    for (const channel of PASSKEY_CHANNELS) {
+    const passkeyChannels = notGrantedChannels({ prefix: 'webauthn:' })
+    expect(passkeyChannels.length).toBe(6)
+    for (const channel of passkeyChannels) {
       await expect(
         commandRegistry.dispatch(channel, 'remote', ['x'], conn),
         `${channel} must require enroll/admin`
@@ -3112,7 +2493,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // discloses no key is a different thing from a mutation that could stop the
     // listener the caller is riding, and only the first is sanctioned.
     expect(commandRegistry.channels('remote').filter((c) => c.startsWith('remote:'))).toEqual([
-      ...REMOTE_VIEW_CHANNELS
+      'remote:status-view'
     ])
     // Named individually, because THIS is the self-kill protection: none of the
     // host-anchor verbs may acquire a remote handler.
@@ -3166,7 +2547,9 @@ describe('remote surface parity (phase 1 port)', () => {
     // The registration is not the gate — the grant set is. A connection holding
     // the standard remote grants is refused by the registry itself.
     const conn = makeRemoteConnection('password', null)
-    for (const channel of SHELL_GATED_CHANNELS) {
+    const shellChannels = notGrantedChannels({ capability: 'shell' })
+    expect(shellChannels.length).toBe(7)
+    for (const channel of shellChannels) {
       await expect(
         commandRegistry.dispatch(channel, 'remote', ['x'], conn),
         `${channel} must require the shell capability`
@@ -3192,18 +2575,7 @@ describe('remote surface parity (phase 1 port)', () => {
     // switch structurally unreachable from a remote client now that a passkey
     // connection holds `admin`.
     const exposed = new Set(commandRegistry.channels('remote'))
-    const sanctioned = new Set<string>([
-      ...SHELL_GATED_CHANNELS,
-      ...PASSKEY_CHANNELS,
-      ...AUTHCFG_CHANNELS,
-      // ADR-064's widening: `ide:mint-entry` is pinned to `ide`, registered for
-      // remote, and reachable only behind the toggle + a step-up. Same shape as
-      // the terminal set above.
-      ...IDE_GATED_CHANNELS,
-      ...HARNESS_ADMIN_CHANNELS,
-      // ADR-101 §6: the speech pack's writes, `admin` like the harness manager's.
-      ...VOICE_PACK_ADMIN_CHANNELS
-    ])
+    const sanctioned = new Set<string>(Object.keys(NOT_GRANTED_AT_CONNECT))
     for (const channel of Object.keys(PINNED_CAPABILITIES)) {
       if (sanctioned.has(channel)) continue
       expect(exposed.has(channel), `${channel} must not be on the remote surface`).toBe(false)
