@@ -14,19 +14,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import { MIGRATIONS, runMigrations, closeDb, type Db } from '../db'
+import { LATEST_SCHEMA_VERSION, openRawDb, userVersion } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
-
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
-
-function userVersion(db: Db): number {
-  return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
-}
 
 function tableExists(db: Db, name: string): boolean {
   return (
@@ -154,7 +146,7 @@ describe('migration v20 — usage_bucket replaces daily_usage', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(41)
+      expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
       expect(tableExists(db, 'usage_bucket')).toBe(true)
       expect(tableExists(db, 'daily_usage')).toBe(false)
       expect(tableExists(db, 'dispatched_usage')).toBe(false)
@@ -256,7 +248,7 @@ describe('migration v20 — usage_bucket replaces daily_usage', () => {
       expect(() => runMigrations(db)).not.toThrow()
 
       expect(db.prepare('SELECT * FROM usage_bucket ORDER BY hour_utc').all()).toEqual(before)
-      expect(userVersion(db)).toBe(41)
+      expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
     } finally {
       db.close()
     }
@@ -266,7 +258,7 @@ describe('migration v20 — usage_bucket replaces daily_usage', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      expect(userVersion(db)).toBe(41)
+      expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
       expect(buckets(db)).toEqual([])
     } finally {
       db.close()

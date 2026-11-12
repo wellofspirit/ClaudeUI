@@ -39,6 +39,7 @@ import {
 } from '../dispatch-target-ledger'
 import { currentInstanceOwner, type InstanceOwner } from '../instance-owner'
 import { isRef } from '../../../shared/session-links'
+import { LATEST_SCHEMA_VERSION } from '../../../test/helpers/migration-db'
 
 let db: Db
 
@@ -93,7 +94,7 @@ describe('dispatch_target (migration v35)', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(41)
+      expect(older.pragma('user_version', { simple: true })).toBe(LATEST_SCHEMA_VERSION)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -148,7 +149,7 @@ describe('migration v39 (the owner of a running target)', () => {
         )
         .run()
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(41)
+      expect(older.pragma('user_version', { simple: true })).toBe(LATEST_SCHEMA_VERSION)
       const [kept] = runningDispatchTargets(older)
       expect(kept).toMatchObject({
         id: 's-aaaaaa',
@@ -183,7 +184,7 @@ describe('migration v40 (the parent directory of a target)', () => {
         )
         .run()
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(41)
+      expect(older.pragma('user_version', { simple: true })).toBe(LATEST_SCHEMA_VERSION)
       const column = (
         older.prepare('PRAGMA table_info(dispatch_target)').all() as {
           name: string

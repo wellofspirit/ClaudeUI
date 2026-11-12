@@ -9,7 +9,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import {
   runMigrations,
   closeDb,
@@ -25,20 +24,12 @@ import {
   deleteSeedUsageBuckets,
   type UsageEventInsert,
   type WindowSampleRow,
-  type UsageBucketWrite,
-  type Db
+  type UsageBucketWrite
 } from '../db'
+import { LATEST_SCHEMA_VERSION, openRawDb, userVersion } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
-
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
-
-function userVersion(db: Db): number {
-  return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
-}
 
 // ---------------------------------------------------------------------------
 // Migration — v3 (usage_event) + v4 (usage_window_sample)
@@ -49,9 +40,7 @@ describe('DB migrations — v3 usage_event + v4 usage_window_sample', () => {
     const db = openRawDb()
     try {
       runMigrations(db)
-      // Bump alongside MIGRATIONS in db.ts — currently v31 (session refs
-      // and parent/child links).
-      expect(userVersion(db)).toBe(41)
+      expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
     } finally {
       db.close()
     }

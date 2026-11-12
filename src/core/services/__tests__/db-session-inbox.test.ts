@@ -19,6 +19,7 @@ import {
   runMigrations,
   type Db
 } from '../db'
+import { LATEST_SCHEMA_VERSION } from '../../../test/helpers/migration-db'
 
 let db: Db
 
@@ -57,7 +58,7 @@ describe('session_inbox', () => {
       expect(exists()).toBe(false)
       runMigrations(older)
       expect(exists()).toBe(true)
-      expect(older.pragma('user_version', { simple: true })).toBe(41)
+      expect(older.pragma('user_version', { simple: true })).toBe(LATEST_SCHEMA_VERSION)
     } finally {
       older.close()
     }

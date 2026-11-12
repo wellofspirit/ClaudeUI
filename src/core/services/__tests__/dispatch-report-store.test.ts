@@ -21,6 +21,7 @@ import {
   type DispatchReportStatus,
   type DispatchTargetRow
 } from '../db'
+import { LATEST_SCHEMA_VERSION } from '../../../test/helpers/migration-db'
 
 let db: Db
 
@@ -66,7 +67,7 @@ describe('migration v36', () => {
         .run()
       runMigrations(older)
       expect(table()).toBeDefined()
-      expect(older.pragma('user_version', { simple: true })).toBe(41)
+      expect(older.pragma('user_version', { simple: true })).toBe(LATEST_SCHEMA_VERSION)
       const columns = (
         older.prepare('PRAGMA table_info(dispatch_report)').all() as { name: string }[]
       ).map((c) => c.name)
@@ -88,7 +89,6 @@ describe('migration v36', () => {
 
   it('the version is the next free one: nothing else claims 36', () => {
     expect(MIGRATIONS.filter((m) => m.version === 36)).toHaveLength(1)
-    expect(Math.max(...MIGRATIONS.map((m) => m.version))).toBe(41)
   })
 })
 
@@ -138,7 +138,7 @@ describe('migration v38', () => {
         )
         .run()
       runMigrations(older)
-      expect(older.pragma('user_version', { simple: true })).toBe(41)
+      expect(older.pragma('user_version', { simple: true })).toBe(LATEST_SCHEMA_VERSION)
       expect(latestDispatchReport('s-v37', older)).toMatchObject({
         status: 'delivered',
         report: 'old report',

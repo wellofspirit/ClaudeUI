@@ -9,7 +9,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import {
   getSessionMeta,
   setSessionMeta,
@@ -26,10 +25,10 @@ import {
   setLastServeRecord,
   clearLastServeRecord,
   MIGRATIONS,
-  type Migration,
-  type Db
+  type Migration
 } from '../db'
 import { logger } from '../logger'
+import { LATEST_SCHEMA_VERSION, openRawDb, userVersion } from '../../../test/helpers/migration-db'
 
 // Each test gets a fresh in-memory DB (closeDb() resets the singleton).
 beforeEach(() => {
@@ -38,16 +37,6 @@ beforeEach(() => {
 afterEach(() => {
   closeDb()
 })
-
-/** Open a bare stub db (resolves to the node:sqlite-backed shim under vitest). */
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
-
-/** Read user_version off a db. */
-function userVersion(db: Db): number {
-  return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
-}
 
 // ---------------------------------------------------------------------------
 // Migration framework — version guard (tested directly against runMigrations)
@@ -177,7 +166,7 @@ describe('migration framework — user_version guard', () => {
       //      (slice 1a)
       // v31: session_ref / session_link — short session refs and parent/child links
       //      (slice 1b)
-      expect(userVersion(db)).toBe(41)
+      expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
       expect(db.prepare('SELECT * FROM session_inbox').all()).toEqual([])
       expect(db.prepare('SELECT * FROM session_ref').all()).toEqual([])
       expect(db.prepare('SELECT * FROM session_link').all()).toEqual([])
@@ -269,7 +258,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(41)
+      expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         port: 4568,
         bind_host: '10.0.0.5',
@@ -413,7 +402,7 @@ describe('migration framework — user_version guard', () => {
 
       runMigrations(db)
 
-      expect(userVersion(db)).toBe(41)
+      expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
       expect(db.prepare('SELECT * FROM remote_config WHERE id = 1').get()).toMatchObject({
         auth_policy: null,
         step_up_tier: 'medium',

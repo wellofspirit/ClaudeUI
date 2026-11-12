@@ -10,6 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
 import { MIGRATIONS, allSessionMeta, closeDb, runMigrations, type Db } from '../db'
+import { LATEST_SCHEMA_VERSION } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
@@ -102,7 +103,7 @@ describe('migration v41 — Codex engine removal', () => {
     const db = seedAtV40()
     try {
       runMigrations(db)
-      expect(db.pragma('user_version', { simple: true })).toBe(41)
+      expect(db.pragma('user_version', { simple: true })).toBe(LATEST_SCHEMA_VERSION)
 
       // session_meta: Codex rows gone, Claude intact.
       expect(rows(db, 'SELECT session_id FROM session_meta').map((r) => r.session_id)).toEqual([

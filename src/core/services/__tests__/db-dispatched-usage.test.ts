@@ -16,23 +16,18 @@
  * Delegated section it backed no longer exists.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import BetterSqlite3 from 'better-sqlite3'
 import {
   runMigrations,
   closeDb,
   insertUsageEvent,
   dispatchedCostsByRouting,
   renameUsageEventParent,
-  type UsageEventInsert,
-  type Db
+  type UsageEventInsert
 } from '../db'
+import { openRawDb } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
-
-function openRawDb(): Db {
-  return new BetterSqlite3(':memory:')
-}
 
 let nextId = 0
 

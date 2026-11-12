@@ -11,13 +11,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import BetterSqlite3 from 'better-sqlite3'
 import { MIGRATIONS, runMigrations, closeDb, type Db } from '../db'
+import { LATEST_SCHEMA_VERSION, userVersion } from '../../../test/helpers/migration-db'
 
 beforeEach(() => closeDb())
 afterEach(() => closeDb())
-
-function userVersion(db: Db): number {
-  return (db.pragma('user_version', { simple: true }) as number | null) ?? 0
-}
 
 function primaryKey(db: Db, table: string): string[] {
   return (db.pragma(`table_info(${table})`) as Array<{ name: string; pk: number }>)
@@ -30,8 +27,7 @@ describe('migration v29 — remote_credits', () => {
   it('is the latest migration', () => {
     const db = new BetterSqlite3(':memory:') as unknown as Db
     runMigrations(db)
-    // Bump alongside MIGRATIONS in db.ts — currently v31 (session refs and links).
-    expect(userVersion(db)).toBe(41)
+    expect(userVersion(db)).toBe(LATEST_SCHEMA_VERSION)
   })
 
   it('keys the cache by the account alone — credits are not per window', () => {
