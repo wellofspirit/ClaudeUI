@@ -7,7 +7,7 @@ source file, incremental typecheck) is in the root `CLAUDE.md`, "Fast loop".
 
 - `bun run dev` — development mode with hot reload (main-process changes need an app restart)
 - `bun run typecheck` / `bun run lint` / `bun run format:check` — `bun run format` rewrites the **whole repo**; format only the files you touched (`bunx prettier --write <files>`)
-- `scripts/gates.sh` — the commit gate: typecheck, lint and the whole default suite (about 40 s); works in a git worktree. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
+- `scripts/gates.sh` — the commit gate: typecheck (`src/server` included), lint, the format of the files the branch changed, and the whole default suite (about 45 s); works in a git worktree. A green run records the hash of the tree it ran on, and a later run on an identical tree says so and exits at once. The hash cannot see what git ignores: after `bun install`, `bun run update-cli` or anything else that changes `node_modules` or `vendor/`, pass `--force`. Never pipe a gate into `grep`/`tail` before `&& git commit`; the pipeline takes the filter's exit code
 
 ## Build and package
 

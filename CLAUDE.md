@@ -39,9 +39,10 @@ These directories carry their own `CLAUDE.md` (what lives there, the recipes for
 
 ## Fast loop
 
-- One spec: `bunx vitest run <spec file>` (`--project '!browser'` is harmless and skips the browser project's startup). One test: add `-t "<test name>"`. The specs that cover a source file: `bunx vitest related --run <source file>` (about ten seconds).
+- One spec: `bunx vitest run <spec file>` (naming spec files skips the browser project by itself). One test: add `-t "<test name>"`. The specs that cover a source file: `bunx vitest related --run <source file>` (about ten seconds; add `--project '!browser'` to it, and to a directory filter, to skip the browser project).
 - Types: `bun run typecheck:node` or `bun run typecheck:web` (incremental, a few seconds). Lint: `bunx eslint --cache <files>`; always pass `--cache`.
-- `scripts/gates.sh` is not the inner loop: run it once, on the commit-ready tree. Run `bun run format:check` before pushing (CI runs it).
+- `scripts/gates.sh` is not the inner loop: run it once, on the commit-ready tree. It checks the format of the files the branch changed, and a second run on an identical tree returns at once (`--force` after `node_modules` or `vendor/` changed).
+- Guards that a structural change can trip: the `layer/zones` lint rule (which directory may import which), `src/shared/__tests__/import-cycles.test.ts` (it also fails when a known cycle changes or disappears: delete its entry), `src/shared/__tests__/doc-paths.test.ts` and `src/shared/__tests__/adr-index.test.ts` (a path or an ADR part label a doc cites must exist), `src/shared/__tests__/vi-mock-targets.test.ts`.
 
 ## Critical areas (ADR-026)
 

@@ -61,10 +61,11 @@ A slice touching any of these is Critical:
 
 ### Gates
 
-- `scripts/gates.sh`, once per commit-ready tree: typecheck, lint and the whole default suite. Never pipe a gate
-  into a filter before acting on its result: the pipeline takes the filter's exit code.
+- `scripts/gates.sh`, once per commit-ready tree: typecheck, lint, the format of the files the branch changed and
+  the whole default suite. A run on a tree that already passed returns at once (changed 2026-11-12). Never pipe a
+  gate into a filter before acting on its result: the pipeline takes the filter's exit code.
 - Add `bun run test:ci` after touching git-service or worktree code, `bun run build` for anything the packaged app
-  runs, and `bun run format:check`.
+  runs, and `bun run format:check` when the Prettier config or version changed.
 - Engine work adds that engine's gated suite (`docs/testing-strategy.md`). A suite that only skipped has not passed.
 - Live verification starts from the `verifier-electron` skill, which holds the isolation recipe for this app.
 - A change to a seam the engines share is checked to preserve Claude's behaviour. Claude is the daily driver, and an
@@ -183,7 +184,8 @@ between files; Bun cannot host Vitest 5 workers or replace its API (`vi.hoisted`
    fails in `afterAll`); the context's `Error[Symbol.hasInstance]` also accepts `util.types.isNativeError`, so errors
    from Node's own modules are `instanceof Error` as in production. Not guarded: built-in module state and the
    filesystem outside the per-file home.
-5. **The gate never retries.** `scripts/gates.sh` runs typecheck, `eslint --cache .` and the default suite and does
+5. **The gate never retries.** `scripts/gates.sh` runs typecheck, `eslint --cache .`, a format check of the files
+   the branch changed and the default suite, and does
    not retry a failed test run: "failed run, zero failed tests" also matches an unhandled error, which is how a
    cross-file leak appears under `vmForks`.
 6. **CI** runs the tests on Linux, macOS and Windows in 3 shards each (every project except `browser`), and the
