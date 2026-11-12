@@ -346,7 +346,8 @@ vi.mock('../../services/logger', () => ({
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn()
+    error: vi.fn(),
+    applyFilter: vi.fn()
   }
 }))
 

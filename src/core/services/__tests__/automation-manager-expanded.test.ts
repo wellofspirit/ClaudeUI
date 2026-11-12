@@ -152,6 +152,10 @@ async function freshManager(): Promise<{
   // current TEMP_HOME.
   vi.resetModules()
   const { AutomationManager } = await import('../automation-manager')
+  // Core reads app settings from canonical state; the boot seed puts settings.json there.
+  const { syncCore } = await import('../sync-host')
+  const { loadSettings } = await import('../ui-config')
+  syncCore.setAppState({ settings: loadSettings() as Record<string, unknown> })
   const win = {
     isDestroyed: () => false,
     webContents: { send: vi.fn() }

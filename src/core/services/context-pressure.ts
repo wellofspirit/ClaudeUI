@@ -49,6 +49,7 @@ import type { SessionManager } from './session-manager'
 import { titleOf } from './session-links'
 import { logger } from './logger'
 import { addHostObserver, emitEvent, syncCore } from './sync-host'
+import { appSetting } from './app-settings'
 
 const LOG = 'ContextPressure'
 
@@ -145,7 +146,7 @@ let settingValue: ContextPressureSetting = normalizeContextPressure(undefined)
 
 /** The setting from canonical's replicated settings; normalised once per distinct value. */
 function setting(): ContextPressureSetting {
-  const raw = syncCore.getCanonicalState().settings.contextPressure
+  const raw = appSetting('contextPressure')
   if (raw !== settingRaw) {
     settingRaw = raw
     settingValue = normalizeContextPressure(raw)

@@ -26,9 +26,6 @@ import {
   loadVendorConfig
 } from '../services/ui-config'
 import type { UISessionConfig, UISettings } from '../services/ui-config'
-import { invalidateMockupSecuritySettings } from '../services/mockup-settings'
-import { usageFetcher } from '../services/usage-fetcher'
-import { blockUsageService } from '../services/block-usage'
 import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
 import { blobStore, internAttachments } from '../services/blob-store'
@@ -1002,20 +999,18 @@ export function saveSessions(config: UISessionConfig): void {
 }
 
 /**
- * Persist UI settings and replicate every desktop side effect, regardless of
- * which surface (desktop IPC or remote WebSocket) originated the save.
- * `settings.json` is a single shared store — the main process must honor
- * persisted settings the same way no matter who wrote them, so ALL of the
- * following run unconditionally: stripping the engine/vendor-owned fields
- * (sandbox/proxy/anthropicEndpoint/modelOverride — they live in
- * engines/claude.json / vendors/anthropic.json now), persisting, mockup CSP
- * cache invalidation, usage/analytics interval propagation, log filter
- * application, re-applying proxy/endpoint/model env from the engine/vendor
- * stores, and session idle timeout propagation. As of SyncCore phase 4c there is
- * no per-surface difference at all: the broadcast reaches every client including
- * the one that saved (see `saveSessions`).
+ * Persist UI settings, whichever surface (desktop IPC or remote WebSocket) saved
+ * them: strip the engine/vendor-owned fields (sandbox/proxy/anthropicEndpoint/
+ * modelOverride, which live in engines/claude.json / vendors/anthropic.json now),
+ * normalise, persist, re-apply the proxy/endpoint/model env, and emit
+ * `config:settings-changed`. The core side effects of the settings themselves
+ * (usage and analytics intervals, log filter, session idle timeout) run in
+ * `applySettings` (`services/app-settings-apply.ts`), driven by that event, so a
+ * save, the settings.json watcher and boot all behave the same. There is no
+ * per-surface difference: the broadcast reaches every client including the one
+ * that saved (see `saveSessions`).
  */
-export function saveUiSettings(manager: SessionManager, incomingSettings: UISettings): void {
+export function saveUiSettings(incomingSettings: UISettings): void {
   // Strip engine/vendor-owned fields (sandbox, proxy, anthropicEndpoint, modelOverride)
   // that have moved to engines/claude.json and vendors/anthropic.json
   const raw = incomingSettings as Record<string, unknown>
@@ -1031,28 +1026,8 @@ export function saveUiSettings(manager: SessionManager, incomingSettings: UISett
     settings.contextPressure = normalizeContextPressure(settings.contextPressure)
   }
   saveSettings(settings)
-  // Next mockup request re-reads settings to pick up CSP changes.
-  invalidateMockupSecuritySettings()
-  // Propagate usage refresh interval change
-  if (typeof (settings as Record<string, unknown>).usageRefreshSecs === 'number') {
-    usageFetcher.setIntervalSecs((settings as Record<string, unknown>).usageRefreshSecs as number)
-  }
-  // Propagate analytics refresh interval change
-  if (typeof (settings as Record<string, unknown>).analyticsRefreshSecs === 'number') {
-    blockUsageService.setDebounceSecs(
-      (settings as Record<string, unknown>).analyticsRefreshSecs as number
-    )
-  }
-  // Apply log level + filter changes immediately
-  {
-    const raw2 = settings as Record<string, unknown>
-    const level = typeof raw2.logLevel === 'string' ? raw2.logLevel : undefined
-    const filter = typeof raw2.logFilter === 'string' ? raw2.logFilter : undefined
-    if (level !== undefined || filter !== undefined) {
-      logger.applyFilter(filter ?? '', level as 'debug' | 'info' | 'warn' | 'error' | undefined)
-    }
-  }
-  // Apply proxy/endpoint/model from engine/vendor stores (source of truth is now there)
+  // Re-apply proxy/endpoint/model from the engine/vendor stores (source of truth is there). Not an
+  // app-settings effect, which is why it is not in `applySettings`.
   {
     const engCfg = loadEngineConfig('claude')
     const venCfg = loadVendorConfig('anthropic')
@@ -1061,11 +1036,6 @@ export function saveUiSettings(manager: SessionManager, incomingSettings: UISett
     )
     applyEndpointEnv(venCfg.endpoint)
     applyModelEnv(venCfg.modelOverride)
-  }
-  // Propagate session idle timeout change
-  const timeoutMins = (settings as Record<string, unknown>).sessionTimeoutMins
-  if (typeof timeoutMins === 'number') {
-    manager.setSessionTimeout(timeoutMins * 60 * 1000)
   }
   emitEvent('config:settings-changed', [settings])
 }

@@ -50,6 +50,7 @@ import { claudeRefreshGuard, credentialVersion } from './claude-refresh-guard'
 import { accountState, buildClaudeAccountRef } from '../host'
 import { getSecurestorageEnv, onSecurestorageEnvChange } from '../sdk/securestorage-env'
 import { apiKeyAccountKey } from './account-key-hash'
+import { DEFAULT_SETTINGS } from '../../shared/app-settings'
 import { apiKeyAccountLabel } from '../../shared/account-key'
 import {
   claudeDirAccountKey,
@@ -110,7 +111,8 @@ const CREDENTIALS_PATH = join(homedir(), '.claude', '.credentials.json')
 const KEYCHAIN_SERVICE = 'Claude Code-credentials'
 const IS_MACOS = platform() === 'darwin'
 
-const DEFAULT_POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes (supplementary data only)
+/** The poll interval for a refresh setting in seconds (floor 30 s). */
+const pollMsFor = (secs: number): number => Math.max(30, secs) * 1000
 const CACHE_STALE_MS = 10 * 60 * 1000 // 10 minutes — skip API call on startup if cache is fresher
 const CACHE_WRITE_DEBOUNCE_MS = 30_000 // 30s — match block-usage recalc cadence
 const CACHE_DIR = join(homedir(), '.claude', 'ui')
@@ -220,7 +222,7 @@ export type SessionUsageGetter = () => Promise<Record<string, unknown> | null>
 export class UsageFetcher {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private lastUsage: AccountUsage | null = null
-  private pollIntervalMs: number = DEFAULT_POLL_INTERVAL_MS
+  private pollIntervalMs: number = pollMsFor(DEFAULT_SETTINGS.usageRefreshSecs)
   private sessionGetter: SessionUsageGetter | null = null
   private cacheWriteTimer: ReturnType<typeof setTimeout> | null = null
   private activeAccount: ActiveAccount | null = null
@@ -326,7 +328,7 @@ export class UsageFetcher {
 
   /** Update the polling interval (in seconds). Restarts the timer if running. */
   setIntervalSecs(secs: number): void {
-    const ms = Math.max(30, secs) * 1000
+    const ms = pollMsFor(secs)
     if (ms === this.pollIntervalMs) return
     this.pollIntervalMs = ms
     if (this.pollTimer) {

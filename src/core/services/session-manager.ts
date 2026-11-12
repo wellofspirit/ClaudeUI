@@ -17,6 +17,7 @@ import {
 import { logger } from './logger'
 import { noteTurnStopped } from './context-pressure'
 import { syncCore } from './sync-host'
+import { DEFAULT_SETTINGS } from '../../shared/app-settings'
 import { moveCustomTitle } from './ui-config'
 
 /**
@@ -33,7 +34,7 @@ let activeRekeyUnsubscribe: (() => void) | null = null
 
 export class SessionManager {
   private sessions = new Map<string, ISession>()
-  private _sessionTimeoutMs = 15 * 60 * 1000 // default 15 min, 0 = disabled
+  private _sessionTimeoutMs = DEFAULT_SETTINGS.sessionTimeoutMins * 60 * 1000 // 0 = disabled
   /** Unsubscribes this manager from core's rekey notifications. */
   private readonly unsubscribeRekey: () => void
 

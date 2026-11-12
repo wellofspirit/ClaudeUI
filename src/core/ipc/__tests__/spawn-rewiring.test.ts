@@ -222,9 +222,6 @@ vi.mock('../../../main/services/account-manager', () => ({
     init: vi.fn()
   }
 }))
-vi.mock('../../services/mockup-settings', () => ({
-  invalidateMockupSecuritySettings: vi.fn()
-}))
 vi.mock('../../sdk/proxy', () => ({
   setProxyEnv: vi.fn(async () => {})
 }))

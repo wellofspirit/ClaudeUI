@@ -2166,6 +2166,21 @@ describe('applyExternalSettings', () => {
     seed.settings({ theme: 'light' })
     expect((window.api as any).saveSettings).not.toHaveBeenCalled()
   })
+
+  it('keeps a key this build does not know and writes it back on the next save', () => {
+    // settings.json is shared with other builds: a newer one may have written a key the
+    // schema (`shared/app-settings.ts`) lacks. The merge keeps it, so this client's next
+    // save does not drop it from the file.
+    seed.settings({ theme: 'light', someFutureKey: { nested: 1 } })
+    store().updateSettings({ expandThinking: true })
+    expect((window.api as any).saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        theme: 'light',
+        expandThinking: true,
+        someFutureKey: { nested: 1 }
+      })
+    )
+  })
 })
 
 describe('applyExternalSessionConfig', () => {

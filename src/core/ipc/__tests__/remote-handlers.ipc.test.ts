@@ -318,6 +318,8 @@ import { setModelEnv } from '../../sdk/model-env'
 import { usageFetcher } from '../../services/usage-fetcher'
 import { blockUsageService } from '../../services/block-usage'
 import { logger } from '../../services/logger'
+import { startApplyingSettings } from '../../services/app-settings-apply'
+import { getMockupSecuritySettings } from '../../services/mockup-settings'
 import { blobStore } from '../../services/blob-store'
 import { query } from '../../sdk'
 import {
@@ -450,6 +452,8 @@ describe('registerRemoteHandlers', () => {
     })
     sessionManagerStub.get.mockReturnValue(sessionStub)
     registerRemoteHandlers(dispatcher, sessionManagerStub)
+    // The core side effects of a save run in `applySettings`, driven by the event the save emits.
+    startApplyingSettings(sessionManagerStub)
   })
 
   afterEach(() => {
@@ -1932,6 +1936,26 @@ describe('registerRemoteHandlers', () => {
       expect(blockUsageService.setDebounceSecs).toHaveBeenCalledWith(88)
       expect(logger.applyFilter).toHaveBeenCalledWith('Proxy', 'debug')
       expect(sessionManagerStub.setSessionTimeout).toHaveBeenCalledWith(300000)
+    })
+
+    it('a save flips the mockup CSP settings, as a watcher change does', async () => {
+      await dispatcher.handle(
+        makeRequest('config:save-settings', { mockupAllowHttp: true }),
+        remoteConn
+      )
+      expect(getMockupSecuritySettings().allowHttp).toBe(true)
+
+      await dispatcher.handle(
+        makeRequest('config:save-settings', { mockupAllowHttp: false }),
+        remoteConn
+      )
+      expect(getMockupSecuritySettings().allowHttp).toBe(false)
+    })
+
+    it('persists a key this build does not know, unchanged (a newer build wrote it)', async () => {
+      const future = { fromANewerBuild: { nested: [1, 2] }, theme: 'dark' }
+      await dispatcher.handle(makeRequest('config:save-settings', future), remoteConn)
+      expect(uiConfigMocks.saveSettings).toHaveBeenCalledWith(future)
     })
 
     it('broadcasts the stripped settings to the main window (remote notifies desktop)', async () => {
