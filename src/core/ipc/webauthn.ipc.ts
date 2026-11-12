@@ -11,6 +11,13 @@
  * vite dev server, so it has no RP ID to bind to and `webauthnOrigin` is null on
  * its connection anyway). Desktop-side enrollment is the QR / one-time-link flow
  * — `webauthn:mint-enroll-token` — which IS here.
+ *
+ * The three management writes are session-gated on the REMOTE transport
+ * (ADR-054 decision 6, `PASSKEY_ADMIN_CHANNELS`). Here they are not: the desktop
+ * connection is the host anchor, exempt from the whole step-up table, so its
+ * pane renames, revokes and mints with no ceremony. They are `withConnection`
+ * because the declaration is channel-global and the bodies assert the session
+ * through that same table.
  */
 
 import { type CommandConnection } from './command-registry'
@@ -50,7 +57,9 @@ export function registerWebauthnIpc(host: RemoteAuthSurfaceHost | null): void {
     channel: 'webauthn:rename',
     capability: 'admin',
     kind: 'command',
-    handler: async (credId: string, nickname: string | null) => webauthnRename(credId, nickname)
+    withConnection: true,
+    handler: async (connection: CommandConnection, credId: string, nickname: string | null) =>
+      webauthnRename(connection, credId, nickname)
   })
 
   handleIpc({
@@ -68,6 +77,7 @@ export function registerWebauthnIpc(host: RemoteAuthSurfaceHost | null): void {
     channel: 'webauthn:mint-enroll-token',
     capability: 'admin',
     kind: 'command',
-    handler: async () => mintEnrollToken(host)
+    withConnection: true,
+    handler: async (connection: CommandConnection) => mintEnrollToken(connection, host)
   })
 }

@@ -495,8 +495,16 @@ export function registerRemoteHandlers(
   // `enroll` and `admin` are both OUTSIDE the base remote grant set, so these
   // are reachable only from a passkey-authenticated connection, a break-glass
   // password connection, or (for the two `enroll` verbs) a one-time enrollment
-  // link. Every one is `withConnection` because the challenge binding and the
-  // RP ID are per-connection facts the caller must not be able to supply.
+  // link. The ceremony verbs are `withConnection` because the challenge binding
+  // and the RP ID are per-connection facts the caller must not be able to
+  // supply.
+  //
+  // The three management WRITES (`rename`, `revoke`, `mint-enroll-token`) also
+  // require a live SETTINGS-EDITING SESSION on the calling connection (ADR-054
+  // decision 6): the transport classifies them `authcfg` (`PASSKEY_ADMIN_CHANNELS`
+  // in `step-up-tier.ts`) and refuses a locked editor with the typed
+  // `needs-settings-session`; they are `withConnection` so each body can assert
+  // the session again. The list is a free read, like `authcfg:get`.
 
   handleRemote({
     channel: 'webauthn:register-options',
@@ -529,7 +537,9 @@ export function registerRemoteHandlers(
     channel: 'webauthn:rename',
     capability: 'admin',
     kind: 'command',
-    handler: async (credId: string, nickname: string | null) => webauthnRename(credId, nickname)
+    withConnection: true,
+    handler: async (connection: CommandConnection, credId: string, nickname: string | null) =>
+      webauthnRename(connection, credId, nickname)
   })
 
   handleRemote({
@@ -551,7 +561,9 @@ export function registerRemoteHandlers(
     channel: 'webauthn:mint-enroll-token',
     capability: 'admin',
     kind: 'command',
-    handler: async () => mintEnrollToken(enrollTokens ?? null)
+    withConnection: true,
+    handler: async (connection: CommandConnection) =>
+      mintEnrollToken(connection, enrollTokens ?? null)
   })
 
   // -------------------------------------------------------------------------

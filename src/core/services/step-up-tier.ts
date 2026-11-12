@@ -22,6 +22,7 @@
  * live socket.
  */
 
+import { NEEDS_SETTINGS_SESSION_ERROR } from '../../shared/remote-protocol'
 import type { StepUpTier, RemoteAuthPolicy } from '../../shared/types'
 import type { Capability, CommandConnection, CommandKind } from '../ipc/command-registry'
 
@@ -108,6 +109,39 @@ export const AUTHCFG_CHANNELS: ReadonlySet<string> = new Set([
   // what it discloses, not by its kind.
   'authcfg:lan-link',
   'authcfg:rotate-lan-key'
+])
+
+/**
+ * Passkey MANAGEMENT (ADR-054 decision 6): the `webauthn:*` verbs that change
+ * who may sign in. Same class and same rule as {@link AUTHCFG_CHANNELS}: a live
+ * settings-editing session, on every tier.
+ *
+ * Renaming, revoking and minting an enrollment link administer the credential
+ * set, so they belong to the settings area: an `admin` connection that is
+ * merely signed in (or merely armed) must not be able to remove a passkey or
+ * mint a link for a new one without deliberately unlocking the editor.
+ *
+ * A SIBLING set rather than more members of `AUTHCFG_CHANNELS`, because that
+ * set is also the `authcfg:*` namespace's registration list: `authcfg.ipc.ts`
+ * unbinds every member from the desktop transport before re-registering its
+ * own handlers, which would remove the passkey handlers `webauthn.ipc.ts`
+ * registered just before it. Both sets map to the ONE `authcfg` class, so the
+ * rule itself is still written once ({@link evaluateStepUp}).
+ *
+ * What is NOT here, deliberately:
+ *
+ * - `webauthn:credentials` READS, and discloses no secret (ids, nicknames,
+ *   timestamps). It is the passkey pane's default state, free for the reason
+ *   `authcfg:get` is.
+ * - `webauthn:register-options` / `webauthn:register-verify` are the ENROLLMENT
+ *   ceremony (capability `enroll`). An enrollment-link socket holds no `admin`
+ *   and can never open a settings session, so gating them would make the first
+ *   device impossible to enrol.
+ */
+export const PASSKEY_ADMIN_CHANNELS: ReadonlySet<string> = new Set([
+  'webauthn:rename',
+  'webauthn:revoke',
+  'webauthn:mint-enroll-token'
 ])
 
 /**
@@ -209,6 +243,8 @@ export const BENIGN_CACHE_WRITE_CHANNELS: ReadonlySet<string> = new Set([
  *                 class keeps its name (there is one act window, not two).
  * - `authcfg`   — the settings area: a live settings-editing SESSION, on every
  *                 tier (§6 amendment — this used to be the mutation window).
+ *                 Fed by two sets: {@link AUTHCFG_CHANNELS} and
+ *                 {@link PASSKEY_ADMIN_CHANNELS}.
  * - `mutation`  — any other `command`: free below `strong`, the mutation window
  *                 at `strong`.
  */
@@ -240,7 +276,8 @@ export function classifyDispatch(args: {
   //  1. the free `authcfg` verbs FIRST, so a channel can never be both free and
   //     gated and so `authcfg:end` cannot be caught by a future widening of the
   //     gated set;
-  //  2. the gated `authcfg` namespace;
+  //  2. the gated `authcfg` namespace, and passkey management beside it (the
+  //     same class: both administer who may sign in);
   //  3. `ide` and `shell`, both of which fail CLOSED — checked BEFORE the named
   //     exemption below so that no future member of that set could ever buy an
   //     IDE or shell verb its way out by being named lower down;
@@ -251,6 +288,7 @@ export function classifyDispatch(args: {
   //  5. `kind`: a `query` reads, anything else mutates.
   if (AUTHCFG_FREE_CHANNELS.has(args.channel)) return 'read'
   if (AUTHCFG_CHANNELS.has(args.channel)) return 'authcfg'
+  if (PASSKEY_ADMIN_CHANNELS.has(args.channel)) return 'authcfg'
   // The remote IDE (ADR-064), directly above the `shell` arm and sharing its
   // fail-closed shape. An `ide` verb rides `shell-act`: minting an IDE entry is
   // the act of opening an editor + integrated terminal on the host, which is the
@@ -509,9 +547,10 @@ export function shellActAllowed(conn: CommandConnection, now = Date.now()): bool
 
 /**
  * Does this connection hold a live settings-editing session (or is it the exempt
- * host anchor)? The bodies in `authcfg-commands.ts` assert this themselves so a
- * future transport that forgets the gate still cannot write the auth surface
- * with the editor locked.
+ * host anchor)? The bodies of the settings class (`authcfg-commands.ts`, and the
+ * passkey management verbs in `webauthn-commands.ts`) assert this themselves
+ * through {@link assertSettingsSession}, so a future transport that forgets the
+ * gate still cannot write the auth surface with the editor locked.
  */
 export function authcfgAllowed(conn: CommandConnection, now = Date.now()): boolean {
   return evaluateStepUp({
@@ -520,6 +559,17 @@ export function authcfgAllowed(conn: CommandConnection, now = Date.now()): boole
     presence: presenceOf(conn),
     now
   }).allow
+}
+
+/**
+ * The session backstop for a command BODY. Throws
+ * {@link NEEDS_SETTINGS_SESSION_ERROR}, the same typed refusal the transport
+ * produces, so a caller that reached a body without passing the transport gate
+ * still gets the answer that means "unlock the settings editor" rather than the
+ * ambient `needs-step-up` the web client's generic gate would silently cure.
+ */
+export function assertSettingsSession(conn: CommandConnection): void {
+  if (!authcfgAllowed(conn)) throw new Error(NEEDS_SETTINGS_SESSION_ERROR)
 }
 
 /**

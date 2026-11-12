@@ -298,6 +298,7 @@ import { setAutomationManager } from '../automation-commands'
 import {
   AUTHCFG_CHANNELS as CLASSIFIED_AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS as CLASSIFIED_AUTHCFG_FREE_CHANNELS,
+  PASSKEY_ADMIN_CHANNELS as CLASSIFIED_PASSKEY_ADMIN_CHANNELS,
   SHELL_ACT_VERBS,
   classifyDispatch,
   SHELL_READ_VERBS
@@ -2500,6 +2501,32 @@ describe('remote surface parity (phase 1 port)', () => {
     // The one that must never be gated, stated on its own so the reason survives
     // a future edit to the lists above: Cancel has to work unconditionally.
     expect(CLASSIFIED_AUTHCFG_CHANNELS.has('authcfg:end')).toBe(false)
+  })
+
+  it('every registered webauthn channel is deliberately classified: gated OR free, never both', () => {
+    // ADR-054 decision 6: passkey MANAGEMENT writes join the settings-session
+    // class; the list and the enrollment ceremony stay free. A new `webauthn:*`
+    // verb added to neither list would classify by `kind` and be reachable with no
+    // unlocked editor, so it has to be argued for here. The literal lists are this
+    // file's own, so the pin does not import what it pins.
+    const gatedLiteral = ['webauthn:mint-enroll-token', 'webauthn:rename', 'webauthn:revoke']
+    const freeLiteral = [
+      'webauthn:credentials',
+      'webauthn:register-options',
+      'webauthn:register-verify'
+    ]
+    const registered = commandRegistry.channels('remote').filter((c) => c.startsWith('webauthn:'))
+    const gated = registered.filter((c) => CLASSIFIED_PASSKEY_ADMIN_CHANNELS.has(c))
+    expect(gated.sort()).toEqual(gatedLiteral)
+    expect(registered.filter((c) => !gated.includes(c)).sort()).toEqual(freeLiteral)
+    for (const channel of freeLiteral) expect(gatedLiteral).not.toContain(channel)
+
+    for (const channel of registered) {
+      const decl = commandRegistry.declaration(channel)!
+      const cls = classifyDispatch({ channel, capability: decl.capability, kind: decl.kind })
+      if (gatedLiteral.includes(channel)) expect(cls, channel).toBe('authcfg')
+      else expect(cls, channel).not.toBe('authcfg')
+    }
   })
 
   it('no remotely-registered channel can write the auth-DISABLING switch', () => {

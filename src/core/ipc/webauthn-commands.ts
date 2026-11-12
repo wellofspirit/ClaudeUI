@@ -15,6 +15,18 @@
  * to, and the RP ID / origin derived from the request `Host`. Reading either
  * from the argument list would let a remote client mint a challenge for someone
  * else's socket or bind a credential to a domain it chose.
+ *
+ * ## The settings-editing session (ADR-054 decision 6)
+ *
+ * The three MANAGEMENT writes ({@link webauthnRename}, {@link webauthnRevoke},
+ * {@link mintEnrollToken}) change who may sign in, so from a remote connection
+ * they demand a live settings-editing session, like the `authcfg:*` writes. The
+ * transport refuses first (`classifyDispatch` puts them in the `authcfg` class,
+ * `PASSKEY_ADMIN_CHANNELS` in `step-up-tier.ts`); each body asserts it again
+ * through the same table, so a transport that forgot the gate still could not
+ * reach them with the editor locked. The host connection is exempt, as
+ * everywhere. The list ({@link webauthnCredentials}) and the two enrollment
+ * ceremony verbs are not gated: see `PASSKEY_ADMIN_CHANNELS` for why.
  */
 
 import {
@@ -29,6 +41,7 @@ import type {
 import { readAuthPolicyContext, withAuthSurfaceReaction } from '../services/auth-policy'
 import { getRemoteConfig } from '../services/db'
 import { logger } from '../services/logger'
+import { assertSettingsSession } from '../services/step-up-tier'
 import {
   normalizeNickname,
   webauthnService,
@@ -137,10 +150,12 @@ export function webauthnCredentials(
 }
 
 export function webauthnRename(
+  connection: CommandConnection,
   credId: string,
   nickname: string | null,
   service: WebauthnService = webauthnService
 ): { ok: boolean } {
+  assertSettingsSession(connection)
   if (typeof credId !== 'string' || credId === '') return { ok: false }
   return { ok: service.rename(credId, normalizeNickname(nickname)) }
 }
@@ -162,6 +177,9 @@ export async function webauthnRevoke(
   host: RemoteAuthSurfaceHost | null = null,
   service: WebauthnService = webauthnService
 ): Promise<{ ok: boolean }> {
+  // Before the lockout guard, so a locked editor learns nothing about whether
+  // this would have been the last credential.
+  assertSettingsSession(connection)
   if (typeof credId !== 'string' || credId === '') return { ok: false }
   const ctx = readAuthPolicyContext()
   const passwordSet = safePasswordSet()
@@ -177,11 +195,24 @@ export async function webauthnRevoke(
   }))
 }
 
-export function mintEnrollToken(host: RemoteAuthSurfaceHost | null): {
+/**
+ * Mint a one-time enrollment link for ANOTHER device.
+ *
+ * Session-gated like the other two management writes, and for the strongest
+ * reason of the three: the link is a credential that lets its holder register a
+ * permanent passkey. The server console's first-boot mint does not come through
+ * here (`src/server/first-boot.ts` asks the server directly), and the desktop
+ * connection is exempt, so neither host-anchor path is affected.
+ */
+export function mintEnrollToken(
+  connection: CommandConnection,
+  host: RemoteAuthSurfaceHost | null
+): {
   token: string
   expiresAt: number
   url: string
 } {
+  assertSettingsSession(connection)
   if (!host) throw new Error(ENROLL_UNAVAILABLE_ERROR)
   return host.mintEnrollToken()
 }

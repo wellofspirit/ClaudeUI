@@ -29,6 +29,11 @@ vi.mock('../../services/db', () => ({
   getRemoteConfig: () => configRef.current,
   countWebauthnCredentials: () =>
     countImpl.current ? countImpl.current() : credentialCountRef.current,
+  // The default `webauthnService` store, reached by the dispatch-level cases.
+  listWebauthnCredentials: () => [],
+  getWebauthnCredential: () => null,
+  renameWebauthnCredential: () => false,
+  deleteWebauthnCredential: () => false,
   // ADR-054 defaults — `auth-policy.ts` reads them for its fail-closed context.
   DEFAULT_STEP_UP_TIER: 'medium',
   DEFAULT_SHELL_GRANT_IDLE_MINUTES: 10,
@@ -41,6 +46,7 @@ vi.mock('../../services/logger', () => ({
 
 import {
   CommandRegistry,
+  commandRegistry,
   AUTH_OFF_GRANTS,
   FULL_REMOTE_GRANTS,
   ENROLL_ONLY_GRANTS,
@@ -56,6 +62,7 @@ import {
   webauthnRename,
   webauthnRevoke
 } from '../webauthn-commands'
+import { registerWebauthnIpc } from '../webauthn.ipc'
 import { WebauthnService, type WebauthnCredentialStore } from '../../services/webauthn-service'
 import { VirtualAuthenticator } from '../../../test/helpers/webauthn-authenticator'
 
@@ -124,6 +131,11 @@ function conn(over: Partial<CommandConnection> = {}): CommandConnection {
     }),
     ...over
   }
+}
+
+/** A remote connection holding a live settings-editing session. */
+function sessionConn(): CommandConnection {
+  return conn({ settingsSessionExpiresAt: Date.now() + 60_000 })
 }
 
 // ---------------------------------------------------------------------------
@@ -290,10 +302,10 @@ describe('webauthn:rename', () => {
     const store = memoryStore()
     store.insert({ credId: 'cred-a', publicKey: new Uint8Array([1, 2, 3]) })
     const service = new WebauthnService(store)
-    expect(webauthnRename('cred-a', '  Desk  ', service)).toEqual({ ok: true })
+    expect(webauthnRename(sessionConn(), 'cred-a', '  Desk  ', service)).toEqual({ ok: true })
     expect(service.credentials()[0].nickname).toBe('Desk')
-    expect(webauthnRename('ghost', 'x', service)).toEqual({ ok: false })
-    expect(webauthnRename('' as any, 'x', service)).toEqual({ ok: false })
+    expect(webauthnRename(sessionConn(), 'ghost', 'x', service)).toEqual({ ok: false })
+    expect(webauthnRename(sessionConn(), '' as any, 'x', service)).toEqual({ ok: false })
   })
 })
 
@@ -309,14 +321,16 @@ describe('webauthn:revoke — the lockout guard', () => {
   it('revoking the last credential under AUTO is fine — it reverts to legacy', async () => {
     setPolicy({ authPolicy: null, credentialCount: 1 })
     const service = serviceWith(1)
-    await expect(webauthnRevoke(conn(), 'cred-0', null, service)).resolves.toEqual({ ok: true })
+    await expect(webauthnRevoke(sessionConn(), 'cred-0', null, service)).resolves.toEqual({
+      ok: true
+    })
     expect(service.count()).toBe(0)
   })
 
   it('REFUSES the last credential under pinned passkey-always with no break-glass', async () => {
     setPolicy({ authPolicy: 'passkey-always', credentialCount: 1, passwordBreakGlass: false })
     const service = serviceWith(1)
-    await expect(webauthnRevoke(conn(), 'cred-0', null, service)).rejects.toThrow(
+    await expect(webauthnRevoke(sessionConn(), 'cred-0', null, service)).rejects.toThrow(
       'last-credential-lockout'
     )
     expect(service.count()).toBe(1)
@@ -330,7 +344,7 @@ describe('webauthn:revoke — the lockout guard', () => {
       passwordBreakGlass: true,
       passwordHash: null
     })
-    await expect(webauthnRevoke(conn(), 'cred-0', null, serviceWith(1))).rejects.toThrow(
+    await expect(webauthnRevoke(sessionConn(), 'cred-0', null, serviceWith(1))).rejects.toThrow(
       'last-credential-lockout'
     )
   })
@@ -342,7 +356,7 @@ describe('webauthn:revoke — the lockout guard', () => {
       passwordBreakGlass: true,
       passwordHash: 'bb'.repeat(32)
     })
-    await expect(webauthnRevoke(conn(), 'cred-0', null, serviceWith(1))).resolves.toEqual({
+    await expect(webauthnRevoke(sessionConn(), 'cred-0', null, serviceWith(1))).resolves.toEqual({
       ok: true
     })
   })
@@ -350,7 +364,9 @@ describe('webauthn:revoke — the lockout guard', () => {
   it('ALLOWS revoking a NON-last credential under pinned passkey-always', async () => {
     setPolicy({ authPolicy: 'passkey-always', credentialCount: 2, passwordBreakGlass: false })
     const service = serviceWith(2)
-    await expect(webauthnRevoke(conn(), 'cred-0', null, service)).resolves.toEqual({ ok: true })
+    await expect(webauthnRevoke(sessionConn(), 'cred-0', null, service)).resolves.toEqual({
+      ok: true
+    })
     expect(service.count()).toBe(1)
   })
 
@@ -362,13 +378,13 @@ describe('webauthn:revoke — the lockout guard', () => {
     // fire", and it is the one that matters — the lockout guard exists only for
     // an EXPLICITLY pinned `passkey-always`.
     setPolicy({ authPolicy: null, credentialCount: 1, passwordBreakGlass: false })
-    await expect(webauthnRevoke(conn(), 'cred-0', null, serviceWith(1))).resolves.toEqual({
+    await expect(webauthnRevoke(sessionConn(), 'cred-0', null, serviceWith(1))).resolves.toEqual({
       ok: true
     })
   })
 
   it('rejects an empty credential id without consulting policy', async () => {
-    await expect(webauthnRevoke(conn(), '' as any, null, serviceWith(1))).resolves.toEqual({
+    await expect(webauthnRevoke(sessionConn(), '' as any, null, serviceWith(1))).resolves.toEqual({
       ok: false
     })
   })
@@ -501,11 +517,83 @@ describe('webauthn:mint-enroll-token', () => {
   it('delegates to the running server', () => {
     const minted = { token: 'aa', expiresAt: 1, url: 'https://x/remote#enroll=aa' }
     expect(
-      mintEnrollToken({ mintEnrollToken: () => minted, disconnectAuthSurfaceClients: () => {} })
+      mintEnrollToken(sessionConn(), {
+        mintEnrollToken: () => minted,
+        disconnectAuthSurfaceClients: () => {}
+      })
     ).toBe(minted)
   })
 
   it('reports enroll-unavailable when there is no server (remote access disabled)', () => {
-    expect(() => mintEnrollToken(null)).toThrow('enroll-unavailable')
+    expect(() => mintEnrollToken(sessionConn(), null)).toThrow('enroll-unavailable')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The settings-session backstop (ADR-054 decision 6)
+// ---------------------------------------------------------------------------
+
+describe('management writes — the session backstop', () => {
+  const minted = { token: 'aa', expiresAt: 1, url: 'https://x/remote#enroll=aa' }
+  const host = { mintEnrollToken: () => minted, disconnectAuthSurfaceClients: () => {} }
+
+  function seeded(): WebauthnService {
+    const store = memoryStore()
+    store.insert({ credId: 'cred-a', publicKey: new Uint8Array([1, 2, 3]) })
+    store.insert({ credId: 'cred-b', publicKey: new Uint8Array([1, 2, 3]) })
+    return new WebauthnService(store)
+  }
+
+  const verbs: Array<
+    [string, (c: CommandConnection, service: WebauthnService) => unknown | Promise<unknown>]
+  > = [
+    ['rename', (c, service) => webauthnRename(c, 'cred-a', 'Desk', service)],
+    ['revoke', (c, service) => webauthnRevoke(c, 'cred-a', null, service)],
+    ['mint-enroll-token', (c) => mintEnrollToken(c, host)]
+  ]
+
+  describe.each(verbs)('%s', (_name, run) => {
+    it('throws needs-settings-session for a remote connection with no session', async () => {
+      const service = seeded()
+      await expect(Promise.resolve().then(() => run(conn(), service))).rejects.toThrow(
+        'needs-settings-session'
+      )
+      // Nothing moved.
+      expect(service.count()).toBe(2)
+      expect(service.credentials().find((c) => c.credId === 'cred-a')?.nickname).toBeNull()
+    })
+
+    it('throws for an EXPIRED session', async () => {
+      await expect(
+        Promise.resolve().then(() =>
+          run(conn({ settingsSessionExpiresAt: Date.now() - 1 }), seeded())
+        )
+      ).rejects.toThrow('needs-settings-session')
+    })
+
+    it('runs for a connection with a live session', async () => {
+      await expect(Promise.resolve().then(() => run(sessionConn(), seeded()))).resolves.toBeTruthy()
+    })
+
+    it('runs for the host connection with no session (the desktop is exempt)', async () => {
+      await expect(
+        Promise.resolve().then(() => run(hostConnection(), seeded()))
+      ).resolves.toBeTruthy()
+    })
+  })
+
+  it('dispatches all three on the desktop transport with the host connection and no session', async () => {
+    commandRegistry.reset()
+    registerWebauthnIpc(host)
+    const desktop = hostConnection()
+    await expect(
+      commandRegistry.dispatch('webauthn:rename', 'desktop', ['ghost', 'x'], desktop)
+    ).resolves.toEqual({ ok: false })
+    await expect(
+      commandRegistry.dispatch('webauthn:revoke', 'desktop', ['ghost'], desktop)
+    ).resolves.toMatchObject({ ok: false })
+    await expect(
+      commandRegistry.dispatch('webauthn:mint-enroll-token', 'desktop', [], desktop)
+    ).resolves.toBe(minted)
   })
 })
