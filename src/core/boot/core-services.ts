@@ -80,6 +80,9 @@ import { startCatalogInvalidation } from '../harness/catalog-invalidation'
 import { invalidatePiModelCache, onPiCatalogRecovered } from '../pi/model-discovery'
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
+import { createCoreStop, type CoreStop } from './core-stop'
+import { serviceSession } from '../services/service-session'
+import { localVoiceServer } from '../voice/local-voice-server'
 import type { CommandConnection } from '../ipc/command-registry'
 import type { HostNotifier } from '../host'
 import type { AuthCommandDeps } from '../ipc/auth-commands'
@@ -102,14 +105,11 @@ export interface CoreServices {
   vscodeWebService: VscodeWebService
   /** Remote-server administration (start/stop/config/password/tailscale). */
   hostAnchor: HostAnchor
-  /**
-   * The usage hub client (ADR-072 §7). Handed back so each host can stop it on
-   * the way out: it holds a ten-minute interval and a retry timer, and a
-   * half-finished push at exit is a push the cursor never advanced over.
-   */
-  usageHubClient: typeof usageHubClient
-  /** Drop the dispatcher's rekey subscription (a host's teardown). Idempotent. */
+  /** Drop the dispatcher's rekey subscription. Idempotent; `stop` already calls it. */
   releaseDispatchParents: () => void
+  /** The host-neutral shutdown: `prepareStop` while services live, then the sync `stop`. */
+  prepareStop: CoreStop['prepareStop']
+  stop: CoreStop['stop']
 }
 
 export interface CoreServicesOptions {
@@ -545,6 +545,19 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     })()
   }
 
+  const coreStop = createCoreStop({
+    credentialSync,
+    automationManager,
+    hostAnchor,
+    usageHubClient,
+    releaseDispatchParents,
+    serviceSession,
+    opencodeServerManager,
+    localVoiceServer,
+    onPrepareError: (err) =>
+      logger.warn('main', `prepareQuit failed: ${err instanceof Error ? err.message : String(err)}`)
+  })
+
   return {
     sessionManager,
     remoteServer,
@@ -553,7 +566,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     automationManager,
     vscodeWebService,
     hostAnchor,
-    usageHubClient,
-    releaseDispatchParents
+    releaseDispatchParents,
+    ...coreStop
   }
 }
