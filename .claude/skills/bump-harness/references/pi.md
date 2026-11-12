@@ -20,14 +20,14 @@ handshake: the pin is the contract.
   otherwise) and each platform's `asset` + `archiveSha256` from the release's `SHA256SUMS`, checked
   against the downloaded archive.
 - `vendor/pi-src` at the new tag.
-- Version stamps in `docs/protocol-pi/README.md`.
+- Version stamps in `docs/protocol-pi/README.md`, and the bump's compatibility assessment as a new section at the top of `docs/protocol-pi/bumps.md`.
 
 ## Gates
 
 - `bun run update-pi`.
 - `PI_INTEGRATION_TESTS=1 bun run test:integration src/integration/pi`. The vitest setup moves
   HOME, so the model-call tests skip unless `PI_CODING_AGENT_DIR` points at an isolated agent
-  directory whose credential is a `!command` (recipe at the top of `docs/protocol-pi/README.md`).
+  directory whose credential is a `!command` (recipe in the latest assessments of `docs/protocol-pi/bumps.md`).
   Count the skips; 8 skipped means the model calls did not run.
 - Never copy a real `auth.json` into another tool's store or refresh its token; compare the real
   `~/.pi/agent/auth.json` sha256 and mtime before and after the run.
