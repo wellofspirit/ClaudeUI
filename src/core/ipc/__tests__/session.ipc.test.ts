@@ -231,7 +231,7 @@ vi.mock('../../services/usage-fetcher', () => ({
   }
 }))
 
-vi.mock('../../../main/services/service-session', () => ({
+vi.mock('../../services/service-session', () => ({
   serviceSession: {
     getUsage: vi.fn(async () => ({}))
   }

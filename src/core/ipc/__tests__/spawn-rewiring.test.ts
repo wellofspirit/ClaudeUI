@@ -149,7 +149,7 @@ vi.mock('../../services/usage-fetcher', () => ({
     fetch: vi.fn(async () => ({}))
   }
 }))
-vi.mock('../../../main/services/service-session', () => ({
+vi.mock('../../services/service-session', () => ({
   serviceSession: { getUsage: vi.fn(async () => ({})) }
 }))
 vi.mock('../../services/block-usage', () => ({

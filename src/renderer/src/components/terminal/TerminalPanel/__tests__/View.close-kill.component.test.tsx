@@ -21,7 +21,7 @@ import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import type { TerminalTab } from '../../../../../../shared/types'
 import { TerminalPanelView, type TerminalPanelViewProps } from '../View'
 
-vi.mock('../XTermInstance', () => ({
+vi.mock('../../XTermInstance', () => ({
   XTermInstance: () => null
 }))
 
