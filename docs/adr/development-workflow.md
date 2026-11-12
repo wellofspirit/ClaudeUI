@@ -27,18 +27,21 @@ either way. Trivial edits and conversational answers are exempt.
 
 | Role                                          | Owns                                                                                                    | Never                                           |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Orchestrator (the session leading the change) | Scope, tiers, design, every ruling, slice review, commits, the pull request                             | Hands a product decision to anyone but the user |
+| Orchestrator (the session leading the change) | Scope, tiers, design, every ruling, building small slices, slice review, commits, the pull request      | Hands a product decision to anyone but the user |
 | Implementer                                   | Code and tests against the spec                                                                         | Commits, or certifies its own work              |
 | Reviewer                                      | Design review of Critical slices, review of diffs too big for the orchestrator to hold, the exit review | Edits the change it reviews                     |
 | Verifier                                      | Live verification of the running app, when the tier calls for it                                        | Is the agent that built the change              |
 
-Each review and verification comes from a fresh context, never the one that wrote the code.
+Each review and verification comes from a fresh context, never the one that wrote the code. The orchestrator builds
+a small slice itself at any tier (as a starting rule, up to about 100 changed lines in up to 3 files) and hands
+larger ones to implementers; the size is tuned from experience (changed 2026-11-12).
 
 ### Tiers, findings and stopping
 
 Each slice gets a tier from its risk, not its size, stated to the user up front:
 
-- **Light** (a contained change, no contract change): one fresh review of the diff.
+- **Light** (a contained change, no contract change): one fresh review of the diff. A test-only or docs-only change
+  that running it proves needs no reviewer (changed 2026-11-12).
 - **Standard** (a feature across files, or a changed contract such as an API, IPC, wire format, schema or config):
   the orchestrator reviews each slice, and the branch gets one exit review. Live verification only when tests can't
   show the behaviour.
@@ -106,10 +109,11 @@ Design detail, probe facts, wire shapes and as-built notes belong in `docs/archi
 
 ### Work notes
 
-An arc's handoff, specs and reports live in `.work/<arc>/` in the main checkout (gitignored; worktrees are deleted
-at merge). Open items are GitHub issues labelled `backlog` or `housekeeping`. Research that cannot be public follows
-the `claudeui-notes` skill where it is installed, otherwise `.work/<arc>/`. Retiring an arc is part of its merge:
-lasting facts move, scrubbed, into ADRs and `docs/`; what is still open becomes issues; `.work/<arc>/` is deleted.
+An arc's handoff, specs and reports live in `.work/<arc>/` in the arc's own worktree (gitignored; changed
+2026-11-12 from the main checkout, which a session working inside a worktree cannot write). Open items are GitHub
+issues labelled `backlog` or `housekeeping`. Research that cannot be public follows the `claudeui-notes` skill where
+it is installed, otherwise `.work/<arc>/`. Retiring an arc is part of its merge: lasting facts move, scrubbed, into
+ADRs and `docs/`; what is still open becomes issues; `.work/<arc>/` goes with the worktree.
 
 ### Rules for all work in this repository
 
