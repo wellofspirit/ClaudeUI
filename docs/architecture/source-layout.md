@@ -15,6 +15,8 @@ src/
                          types/<domain>.ts; types/api/<domain>.ts holds the interfaces
                          ClaudeAPI is composed of, not re-exported), capability model
                          (model-capabilities.ts), tool-kind taxonomy (tool-kinds.ts),
+                         ClaudeUI's hosted tools (hosted-tools.ts), pi's tool kinds
+                         (pi-tool-kinds.ts, read by the permission ladder),
                          pricing, project-key, engine-meta, permission-modes,
                          remote protocol, E2E crypto, audio/ (PCM16 helpers),
                          api-invoke-table.ts (every pass-through ClaudeAPI member,
@@ -34,7 +36,8 @@ src/
                          event-mapper / history / reconnect, permission-v2,
                          child-rulesets, session-support, credential-store,
                          model-discovery, config writers, hosted-tools MCP host
-    pi/                — pi backend: PiRpcClient (stdio JSONL), PiSession, event-mapper,
+    pi/                — pi backend: PiRpcClient (stdio JSONL), PiSession, event-mapper /
+                         history (live and stored blocks, both through pi-blocks),
                          model-discovery, PiBridgeHost (loopback approval + hosted-tool
                          host), pi-bridge-source (the -e extension), permission-engine,
                          pi-locate, pi-protocol (ADR-035)
@@ -163,6 +166,7 @@ A partial catalog of `src/core/services/`; `src/core/services/CLAUDE.md` holds t
 | `session-delete.ts`                                                                                             | Engine-neutral session/project delete dispatcher (ADR-025)                                                                                                                                           |
 | `subagent-watcher.ts`                                                                                           | Watches subagent task files, parses messages                                                                                                                                                         |
 | `assistant-message.ts`                                                                                          | Shared assistant-message transform (used by ClaudeSession + the dispatcher)                                                                                                                          |
+| `claude-transcript.ts`                                                                                          | The one decoder of Claude content blocks, tool results and usage fields: live frames, the item stream, transcript replay and the subagent tail all build through it                                  |
 | `cross-engine-dispatcher.ts`                                                                                    | Cross-engine dispatch core (ADR-033/105): runs, the ledger, X-Agent messaging, hand-back review, approval forwarding, the public API                                                                 |
 | `dispatch-{opencode,claude,pi}-targets.ts`                                                                      | One class per engine's dispatch targets: create/resume, drive the turn, its permission ladder and asks. They never call each other                                                                   |
 | `dispatch-target-{host,types,shared}.ts`                                                                        | `DispatchTargetHost` (the one seam from those classes to the core, late-bound), the target entry types, functions several of them use                                                                |

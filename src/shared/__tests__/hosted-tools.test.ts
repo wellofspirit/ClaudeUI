@@ -6,8 +6,11 @@ import { describe, expect, it } from 'vitest'
 import {
   DISPATCH_LABEL,
   firstPartyDisplayName,
-  firstPartyToolLabel
-} from '../first-party-tool-names'
+  firstPartyToolLabel,
+  hostedToolKind,
+  hostedToolName,
+  hostedToolView
+} from '../hosted-tools'
 import { SESSION_TOOL_NAMES } from '../session-tools-description'
 import { dispatchPlaceholderDescription, dispatchTaskView, taskHeaderLabel } from '../tool-kinds'
 
@@ -106,5 +109,36 @@ describe('taskHeaderLabel', () => {
   it('a dispatch reads X-Agent, a native subagent Task', () => {
     expect(taskHeaderLabel(dispatchTaskView({ engine: 'pi' }))).toBe(DISPATCH_LABEL)
     expect(taskHeaderLabel({})).toBe('Task')
+  })
+})
+
+describe('hostedToolKind / hostedToolName / hostedToolView', () => {
+  it('kinds, per spelling; hand_back and foreign names have none', () => {
+    expect(hostedToolKind('mcp__claude-ui__render_mermaid', 'mcp')).toBe('diagram')
+    expect(hostedToolKind('claudeui_show_mockup', 'claudeui_')).toBe('mockup')
+    expect(hostedToolKind('dispatch_agent', 'bare')).toBe('task')
+    expect(hostedToolKind('session_list', 'bare')).toBe('mcp')
+    expect(hostedToolKind('hand_back', 'bare')).toBeNull()
+    expect(hostedToolKind('mcp__claude-ui__dispatch_agent', 'mcp')).toBeNull()
+    for (const name of ['constructor', 'toString', '__proto__']) {
+      expect(hostedToolKind(name, 'bare'), name).toBeNull()
+      expect(hostedToolName(`claudeui_${name}`, 'claudeui_'), name).toBeNull()
+    }
+  })
+
+  it('the diagram and mockup views, null for another kind', () => {
+    expect(hostedToolView('diagram', { source: 'a-->b' })).toEqual({
+      kind: 'diagram',
+      source: 'a-->b',
+      title: undefined
+    })
+    expect(
+      hostedToolView('mockup', {}, {
+        type: 'tool_result',
+        toolUseId: 't',
+        toolResult: 'Directory: m1'
+      } as never)
+    ).toMatchObject({ kind: 'mockup', directory: 'm1' })
+    expect(hostedToolView('command', {})).toBeNull()
   })
 })

@@ -355,5 +355,5 @@ export const CLAUDE_TOOL_SPECS: Record<string, ClaudeToolSpec> = {
 
 /** The spec for a tool name, or null when the name has none. */
 export function claudeToolSpec(toolName: string): ClaudeToolSpec | null {
-  return CLAUDE_TOOL_SPECS[toolName] ?? null
+  return Object.hasOwn(CLAUDE_TOOL_SPECS, toolName) ? CLAUDE_TOOL_SPECS[toolName] : null
 }

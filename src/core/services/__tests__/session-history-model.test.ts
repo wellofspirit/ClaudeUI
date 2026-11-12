@@ -82,6 +82,18 @@ describe('loadSubagentHistory — model', () => {
   })
 })
 
+describe('loadSubagentHistory — fallback block', () => {
+  it('renders the model-switch note, not the raw block JSON', async () => {
+    writeSubagentTranscript([
+      assistantLine('msg_a', 'claude-opus-5-5', [
+        { type: 'fallback', from: { model: 'a' }, to: { model: 'b' } }
+      ])
+    ])
+    const [message] = await loadSubagentHistory(SESSION_ID, PROJECT_KEY, AGENT_ID)
+    expect(message.content).toEqual([{ type: 'text', text: 'Switched models from a to b.' }])
+  })
+})
+
 describe('loadSessionHistory — model', () => {
   function writeMainTranscript(lines: object[]): void {
     const dir = path.join(TMP_HOME, '.claude', 'projects', PROJECT_KEY)

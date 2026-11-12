@@ -28,6 +28,14 @@ import { isDispatchTargetSession } from './dispatch-target-ledger'
 import { cwdToProjectKey } from '../../shared/project-key'
 import { locateClaudeTranscript } from './claude-transcript-locator'
 import { extractToolResultContent } from './tool-result-content'
+import {
+  claudeAssistantMessage,
+  claudeContextLength,
+  claudeToolResultBlock,
+  claudeToolResults,
+  claudeUsageTokens,
+  mergeAssistantSnapshot
+} from './claude-transcript'
 import { blobStore } from './blob-store'
 import {
   agentIdOf,
@@ -254,12 +262,12 @@ function foldAssistantCostLine(
     cacheCreation1h: 0,
     cacheRead: 0
   }
-  agg.input += (usage.input_tokens as number) || 0
-  agg.output += (usage.output_tokens as number) || 0
-  agg.cacheCreation += (usage.cache_creation_input_tokens as number) ?? 0
-  const cacheCreation = usage.cache_creation as Record<string, unknown> | undefined
-  agg.cacheCreation1h += (cacheCreation?.ephemeral_1h_input_tokens as number) ?? 0
-  agg.cacheRead += (usage.cache_read_input_tokens as number) ?? 0
+  const tokens = claudeUsageTokens(usage)
+  agg.input += tokens.input
+  agg.output += tokens.output
+  agg.cacheCreation += tokens.cacheWrite
+  agg.cacheCreation1h += tokens.cacheWrite1h
+  agg.cacheRead += tokens.cacheRead
   modelTokens.set(normalizedModel, agg)
 }
 
@@ -633,10 +641,10 @@ function foldTranscriptTokens(
 
         if (data.type === 'assistant' && data.message?.usage) {
           const usage = data.message.usage
-          inputTokens += usage.input_tokens || 0
-          outputTokens += usage.output_tokens || 0
-          cachedTokens +=
-            (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
+          const tokens = claudeUsageTokens(usage)
+          inputTokens += tokens.input
+          outputTokens += tokens.output
+          cachedTokens += tokens.cacheRead + tokens.cacheWrite
 
           // Synthetic lines ("No response requested." after a resume) are not
           // API calls: their zero usage and `<synthetic>` model would size the
@@ -675,10 +683,7 @@ function foldTranscriptTokens(
 
     rl.on('close', async () => {
       if (mostRecentMainChainUsage) {
-        contextLength =
-          (mostRecentMainChainUsage.input_tokens || 0) +
-          (mostRecentMainChainUsage.cache_read_input_tokens ?? 0) +
-          (mostRecentMainChainUsage.cache_creation_input_tokens ?? 0)
+        contextLength = claudeContextLength(claudeUsageTokens(mostRecentMainChainUsage))
       }
 
       // Task-tool subagent spend lives in separate transcript files (see
@@ -1063,19 +1068,6 @@ export interface SessionHistoryResult {
    * `readSessionHistory`, never by an engine's reader; keyed by the launching tool_use id.
    */
   activeTasks?: Record<string, ActiveTask>
-}
-
-/**
- * Render text for a `fallback` content block — the canonical-replacement frame
- * cli.js emits when a refused partial is retracted and the turn retried on a
- * fallback model (docs/protocol-cc/04-system-subtypes.md §4.20). Live sessions
- * normally evict the whole message via retracted_message_uuids; this text is
- * the fallback rendering when the frame survives (history, older CLIs).
- */
-export function fallbackBlockText(block: Record<string, unknown>): string {
-  const from = (block.from as Record<string, unknown> | undefined)?.model
-  const to = (block.to as Record<string, unknown> | undefined)?.model
-  return `Switched models${from ? ` from ${from}` : ''}${to ? ` to ${to}` : ''}.`
 }
 
 /** Parse CLI command XML into structured data */
@@ -1757,50 +1749,34 @@ export async function loadSessionHistory(
 
           // Tool results — attach to preceding assistant message
           if (hasToolResult) {
-            for (const block of content) {
-              if (block.type === 'tool_result' && block.tool_use_id) {
-                const { text: resultText, images } = extractToolResultContent(block.content)
+            for (const result of claudeToolResults(content)) {
+              // Extract agentId from Task tool results for mapping
+              const agentId = agentIdOf(result.text)
+              if (agentId) {
+                agentIdToToolUseId[agentId] = result.toolUseId
+              }
+              agentEvents.push({
+                kind: 'result',
+                toolUseId: result.toolUseId,
+                text: result.text,
+                structured:
+                  obj.toolUseResult &&
+                  typeof obj.toolUseResult === 'object' &&
+                  !Array.isArray(obj.toolUseResult)
+                    ? obj.toolUseResult
+                    : undefined
+              })
 
-                // Extract agentId from Task tool results for mapping
-                const agentId = agentIdOf(resultText)
-                if (agentId) {
-                  agentIdToToolUseId[agentId] = block.tool_use_id
-                }
-                agentEvents.push({
-                  kind: 'result',
-                  toolUseId: block.tool_use_id,
-                  text: resultText,
-                  structured:
-                    obj.toolUseResult &&
-                    typeof obj.toolUseResult === 'object' &&
-                    !Array.isArray(obj.toolUseResult)
-                      ? obj.toolUseResult
-                      : undefined
-                })
-
-                // Find last assistant message with matching tool_use
-                for (let i = messages.length - 1; i >= 0; i--) {
-                  const msg = messages[i]
-                  if (msg.role !== 'assistant') continue
-                  const hasToolUse = msg.content.some(
-                    (b) => b.type === 'tool_use' && b.toolUseId === block.tool_use_id
-                  )
-                  if (hasToolUse) {
-                    messages[i] = {
-                      ...msg,
-                      content: [
-                        ...msg.content,
-                        {
-                          type: 'tool_result',
-                          toolUseId: block.tool_use_id,
-                          toolResult: resultText,
-                          isError: !!block.is_error,
-                          ...(images ? { images } : {})
-                        }
-                      ]
-                    }
-                    break
-                  }
+              // Find last assistant message with matching tool_use
+              for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i]
+                if (msg.role !== 'assistant') continue
+                const hasToolUse = msg.content.some(
+                  (b) => b.type === 'tool_use' && b.toolUseId === result.toolUseId
+                )
+                if (hasToolUse) {
+                  messages[i] = { ...msg, content: [...msg.content, claudeToolResultBlock(result)] }
+                  break
                 }
               }
             }
@@ -1827,84 +1803,19 @@ export async function loadSessionHistory(
             return
           }
 
-          const betaMessage = obj.message as Record<string, unknown> | undefined
-          if (!betaMessage?.content || !Array.isArray(betaMessage.content)) return
-
-          const blocks: ContentBlock[] = (
-            betaMessage.content as Array<Record<string, unknown>>
-          ).map((block) => {
-            const blockType = block.type as string
-            if (blockType === 'text') {
-              return { type: 'text' as const, text: block.text as string }
-            } else if (blockType === 'tool_use') {
-              return {
-                type: 'tool_use' as const,
-                toolName: block.name as string,
-                toolInput: block.input as Record<string, unknown>,
-                toolUseId: block.id as string
-              }
-            } else if (blockType === 'tool_result') {
-              const { text, images } = extractToolResultContent(block.content)
-              return {
-                type: 'tool_result' as const,
-                toolUseId: block.tool_use_id as string,
-                toolResult: text,
-                isError: block.is_error as boolean,
-                ...(images ? { images } : {})
-              }
-            } else if (blockType === 'thinking') {
-              return { type: 'thinking' as const, text: block.thinking as string }
-            } else if (blockType === 'fallback') {
-              return { type: 'text' as const, text: fallbackBlockText(block) }
-            }
-            return { type: 'text' as const, text: JSON.stringify(block) }
+          const chatMsg = claudeAssistantMessage(obj, {
+            fallbackId: () => `assistant-${messages.length}`,
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
           })
-
-          const messageId =
-            (betaMessage.id as string) || (obj.uuid as string) || `assistant-${messages.length}`
+          if (!chatMsg) return
 
           // Upsert by ID (partial messages share the same betaMessage.id)
-          const existingIdx = messages.findIndex((m) => m.id === messageId)
-          const chatMsg: ChatMessage = {
-            id: messageId,
-            role: 'assistant',
-            content: blocks,
-            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
-            ...(typeof betaMessage.model === 'string' && betaMessage.model
-              ? { model: betaMessage.model }
-              : {})
-          }
-
+          const existingIdx = messages.findIndex((m) => m.id === chatMsg.id)
           if (existingIdx >= 0) {
-            // Merge: preserve old blocks not present in the new update
-            const oldBlocks = messages[existingIdx].content
-            const newToolUseIds = new Set(
-              blocks
-                .filter(
-                  (b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use'
-                )
-                .map((b) => b.toolUseId)
-            )
-            const newToolResultIds = new Set(
-              blocks
-                .filter(
-                  (b): b is Extract<ContentBlock, { type: 'tool_result' }> =>
-                    b.type === 'tool_result'
-                )
-                .map((b) => b.toolUseId)
-            )
-            const newHasText = blocks.some((b) => b.type === 'text')
-            const newHasThinking = blocks.some((b) => b.type === 'thinking')
-            const preserved = oldBlocks.filter((b) => {
-              if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId))
-                return true
-              if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId))
-                return true
-              if (b.type === 'text' && !newHasText) return true
-              if (b.type === 'thinking' && !newHasThinking) return true
-              return false
-            })
-            messages[existingIdx] = { ...chatMsg, content: [...preserved, ...blocks] }
+            messages[existingIdx] = {
+              ...chatMsg,
+              content: mergeAssistantSnapshot(messages[existingIdx].content, chatMsg.content)
+            }
           } else {
             messages.push(chatMsg)
           }
@@ -2298,108 +2209,31 @@ async function parseJsonlFile(filePath: string): Promise<ChatMessage[]> {
           }
 
           if (hasToolResult && isArray) {
-            for (const block of content) {
-              if (block.type === 'tool_result' && block.tool_use_id) {
-                const { text: resultText, images } = extractToolResultContent(block.content)
-                for (let i = messages.length - 1; i >= 0; i--) {
-                  const msg = messages[i]
-                  if (msg.role !== 'assistant') continue
-                  if (
-                    msg.content.some(
-                      (b) => b.type === 'tool_use' && b.toolUseId === block.tool_use_id
-                    )
-                  ) {
-                    messages[i] = {
-                      ...msg,
-                      content: [
-                        ...msg.content,
-                        {
-                          type: 'tool_result',
-                          toolUseId: block.tool_use_id,
-                          toolResult: resultText,
-                          isError: !!block.is_error,
-                          ...(images ? { images } : {})
-                        }
-                      ]
-                    }
-                    break
-                  }
+            for (const result of claudeToolResults(content)) {
+              for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i]
+                if (msg.role !== 'assistant') continue
+                if (
+                  msg.content.some((b) => b.type === 'tool_use' && b.toolUseId === result.toolUseId)
+                ) {
+                  messages[i] = { ...msg, content: [...msg.content, claudeToolResultBlock(result)] }
+                  break
                 }
               }
             }
           }
         } else if (type === 'assistant') {
-          const betaMessage = obj.message as Record<string, unknown> | undefined
-          if (!betaMessage?.content || !Array.isArray(betaMessage.content)) return
-
-          const blocks: ContentBlock[] = (
-            betaMessage.content as Array<Record<string, unknown>>
-          ).map((block) => {
-            const blockType = block.type as string
-            if (blockType === 'text') return { type: 'text' as const, text: block.text as string }
-            if (blockType === 'tool_use')
-              return {
-                type: 'tool_use' as const,
-                toolName: block.name as string,
-                toolInput: block.input as Record<string, unknown>,
-                toolUseId: block.id as string
-              }
-            if (blockType === 'tool_result') {
-              const { text, images } = extractToolResultContent(block.content)
-              return {
-                type: 'tool_result' as const,
-                toolUseId: block.tool_use_id as string,
-                toolResult: text,
-                isError: block.is_error as boolean,
-                ...(images ? { images } : {})
-              }
-            }
-            if (blockType === 'thinking')
-              return { type: 'thinking' as const, text: block.thinking as string }
-            return { type: 'text' as const, text: JSON.stringify(block) }
+          const chatMsg = claudeAssistantMessage(obj, {
+            fallbackId: () => `assistant-${messages.length}`,
+            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now()
           })
-
-          const messageId =
-            (betaMessage.id as string) || (obj.uuid as string) || `assistant-${messages.length}`
-          const existingIdx = messages.findIndex((m) => m.id === messageId)
-          const chatMsg: ChatMessage = {
-            id: messageId,
-            role: 'assistant',
-            content: blocks,
-            timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : Date.now(),
-            ...(typeof betaMessage.model === 'string' && betaMessage.model
-              ? { model: betaMessage.model }
-              : {})
-          }
+          if (!chatMsg) return
+          const existingIdx = messages.findIndex((m) => m.id === chatMsg.id)
           if (existingIdx >= 0) {
-            const oldBlocks = messages[existingIdx].content
-            const newToolUseIds = new Set(
-              blocks
-                .filter(
-                  (b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use'
-                )
-                .map((b) => b.toolUseId)
-            )
-            const newToolResultIds = new Set(
-              blocks
-                .filter(
-                  (b): b is Extract<ContentBlock, { type: 'tool_result' }> =>
-                    b.type === 'tool_result'
-                )
-                .map((b) => b.toolUseId)
-            )
-            const newHasText = blocks.some((b) => b.type === 'text')
-            const newHasThinking = blocks.some((b) => b.type === 'thinking')
-            const preserved = oldBlocks.filter((b) => {
-              if (b.type === 'tool_use' && b.toolUseId && !newToolUseIds.has(b.toolUseId))
-                return true
-              if (b.type === 'tool_result' && b.toolUseId && !newToolResultIds.has(b.toolUseId))
-                return true
-              if (b.type === 'text' && !newHasText) return true
-              if (b.type === 'thinking' && !newHasThinking) return true
-              return false
-            })
-            messages[existingIdx] = { ...chatMsg, content: [...preserved, ...blocks] }
+            messages[existingIdx] = {
+              ...chatMsg,
+              content: mergeAssistantSnapshot(messages[existingIdx].content, chatMsg.content)
+            }
           } else {
             messages.push(chatMsg)
           }

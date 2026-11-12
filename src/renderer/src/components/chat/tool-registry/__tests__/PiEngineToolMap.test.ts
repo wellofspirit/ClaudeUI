@@ -9,12 +9,6 @@ import { PiEngineToolMap } from '../PiEngineToolMap'
 import { ClaudeEngineToolMap } from '../ClaudeEngineToolMap'
 import { deriveTaskState } from '../../task-state'
 import type { ToolKind } from '../../../../../../shared/tool-kinds'
-// Main can't import renderer code (separate Electron processes/bundles), so
-// permission-engine.ts (src/main/pi/) keeps its OWN small copy of this exact
-// kindOf switch for its mode-base gating decisions (see that file's doc
-// comment). This is the single-source guard: it fails if the two tables ever
-// disagree for a known pi tool name.
-import { piToolKind } from '../../../../../../core/pi/permission-engine'
 
 describe('PiEngineToolMap.kindOf', () => {
   const cases: [string, ToolKind][] = [
@@ -55,14 +49,6 @@ describe('PiEngineToolMap.kindOf', () => {
 
   it('has an empty hidden set', () => {
     expect(PiEngineToolMap.hidden.size).toBe(0)
-  })
-
-  it("single-source guard: main's piToolKind agrees with the table for every row", () => {
-    // The `kindOf` rows above pin the renderer to `cases`, so one equality over
-    // the table pins main's copy to the renderer's.
-    expect(Object.fromEntries(cases.map(([name]) => [name, piToolKind(name)]))).toEqual(
-      Object.fromEntries(cases)
-    )
   })
 })
 
@@ -539,11 +525,9 @@ describe('PiEngineToolMap — list_models row (ADR-089 S3)', () => {
 })
 
 describe('PiEngineToolMap — send_message / task_stop rows (ADR-089 S3b)', () => {
-  it('kinds mirror permission-engine (detail / note)', () => {
+  it('kinds (detail / note)', () => {
     expect(PiEngineToolMap.kindOf('send_message')).toBe('detail')
     expect(PiEngineToolMap.kindOf('task_stop')).toBe('note')
-    expect(piToolKind('send_message')).toBe('detail')
-    expect(piToolKind('task_stop')).toBe('note')
   })
 
   it('send_message: to + summary as fields, the message as the text; task_stop: a stop note', () => {

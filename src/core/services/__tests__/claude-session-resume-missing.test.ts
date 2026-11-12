@@ -77,8 +77,7 @@ const { mockComputeTokenMetrics } = vi.hoisted(() => ({
   }))
 }))
 vi.mock('../session-history', () => ({
-  computeTokenMetrics: mockComputeTokenMetrics,
-  fallbackBlockText: vi.fn(() => '')
+  computeTokenMetrics: mockComputeTokenMetrics
 }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../context-window', () => ({ getContextWindowSize: vi.fn(() => 200000) }))

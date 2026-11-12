@@ -6,12 +6,12 @@ The pi engine (`pi --mode rpc`, LF-framed JSONL over stdio): the session, its RP
 
 - `src/core/pi/PiSession.ts`: the session (very large: grep the regions listed below); `src/core/pi/PiRpcClient.ts` the RPC client; `src/core/pi/pi-protocol.ts` hand-written wire types; `src/core/pi/pi-locate.ts` the binary.
 - `src/core/pi/PiBridgeHost.ts`: per-session loopback HTTP host (`/tool-call`, `/hosted-tool`, `/skills`, `/mcp-servers`); `src/core/pi/pi-bridge-source.ts`: the extension source as one string.
-- `src/core/pi/event-mapper.ts` (live events), `src/core/pi/pi-custom-message.ts`, `src/core/pi/message-cost.ts`, `src/core/pi/usage-row.ts`, `src/core/pi/history-status-line.ts`.
+- `src/core/pi/event-mapper.ts` (live events), `src/core/pi/history.ts` (stored entries to messages), `src/core/pi/pi-blocks.ts` (the content-block factory both build through; `src/core/pi/__tests__/history-parity.test.ts` holds them equal), `src/core/pi/pi-custom-message.ts`, `src/core/pi/message-cost.ts`, `src/core/pi/usage-row.ts`, `src/core/pi/history-status-line.ts`.
 - `src/core/pi/permission-engine.ts`: name trap, the rule ladder every engine shares, not pi-only. Outside importers: `src/core/opencode/` (`OpencodeSession.ts`; `host-precheck.ts` takes the plan-mode shell oracle), the dispatcher and the pi and opencode dispatch targets in `src/core/services/`, `src/core/shared/tool-review.ts`.
 - `src/core/pi/pi-path-scope.ts` (path containment), `src/core/pi/pi-scratchpad.ts`, `src/core/pi/hosted-grants.ts` (one-shot `/hosted-tool` grants).
 - `src/core/pi/pi-child-runner.ts` (one headless child, shared with dispatch targets), `src/core/pi/pi-subagents.ts`, `src/core/pi/pi-agent-*.ts`, `src/core/pi/pi-subagent-store.ts`.
 - `src/core/pi/pi-native-raw.ts`, `src/core/pi/pi-models-raw.ts`, `src/core/pi/pi-json-raw.ts`: raw readers of pi's own `settings.json` and `models.json`; `src/core/pi/model-discovery.ts` lists models.
-- Cold history, fork anchor and session delete are `src/core/services/pi-session-list.ts`, not here. `src/core/pi/pi-spawn-prep.ts` is the pi twin of `src/core/providers/claude-spawn-prep.ts`.
+- The session list, cold load, fork anchor and session delete are `src/core/services/pi-session-list.ts`, not here; it converts through `src/core/pi/history.ts`. `src/core/pi/pi-spawn-prep.ts` is the pi twin of `src/core/providers/claude-spawn-prep.ts`.
 - Wire reference: `docs/protocol-pi/README.md` from its "Transport" section; version-exact upstream docs in `vendor/pi-src/packages/coding-agent/docs/` (main checkout only).
 - Regions of `PiSession.ts` (grep the method) with the `-t` block of `src/core/pi/__tests__/PiSession.test.ts`:
   - Spawn and init: `ensureStarted`, `doStart`, `replayStoredHistory`; `-t "PiSession resume"`, `-t "PiSession fork"`, `-t "doStart"`.
@@ -39,7 +39,7 @@ The pi engine (`pi --mode rpc`, LF-framed JSONL over stdio): the session, its RP
 
 - The bridge extension source has no imports and fails closed (the rules are in the header of `src/core/pi/pi-bridge-source.ts`).
 - `PiSession.run` reads `isProcessing` only after `await ensureStarted()`: two runs during spawn would otherwise both send a bare `prompt` that pi rejects while streaming.
-- `piToolKind` in `src/core/pi/permission-engine.ts` mirrors `src/renderer/src/components/chat/tool-registry/PiEngineToolMap.ts`; `PiEngineToolMap.test.ts` and `session-tools-maps.test.ts` fail on drift.
+- The ladder reads a tool's kind from `piToolKind` in `src/shared/pi-tool-kinds.ts` (re-exported by `src/core/pi/permission-engine.ts`), the same function the renderer's `PiEngineToolMap.ts` uses; a hosted tool's kind is its row in `src/shared/hosted-tools.ts`. A kind that moves is a permission change: `tool-kind-matrix.test.ts` pins every known name.
 - Path containment (`pi-path-scope.ts`), scratchpads (`pi-scratchpad.ts`) and the judge path are Critical areas (ADR-026): run their specs and ask for the exit review.
 
 ## Fast test

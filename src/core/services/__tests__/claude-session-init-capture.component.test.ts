@@ -79,8 +79,7 @@ vi.mock('../claude-mcp', () => ({
   readDisabledMcpServers: vi.fn(() => [])
 }))
 vi.mock('../session-history', () => ({
-  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
-  fallbackBlockText: vi.fn(() => '')
+  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 }))
 }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 // NOTE: `context-window` is deliberately NOT mocked (the queue test stubs it to

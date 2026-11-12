@@ -10,7 +10,7 @@ The engine-session seam: the interface and shared base every engine session impl
 - `src/core/providers/EngineRegistry.ts`, `src/core/providers/SpawnPrepRegistry.ts`, `src/core/providers/register-engines.ts`: engine id to session factory and to spawn prep.
 - `src/core/providers/claude-spawn-prep.ts` (spawn prep resolves the model only; siblings `src/core/pi/pi-spawn-prep.ts`, `src/core/opencode/opencode-spawn-prep.ts`), `src/core/providers/session-queue.ts`, `src/core/providers/turn-origin-ledger.ts`, `src/core/providers/client-prompt-observer.ts`.
 - Each engine keeps its session code in a different shape. Claude: `src/core/services/claude-session.ts`, the other `src/core/services/claude-*.ts`, harness `src/core/sdk/`. opencode: `src/core/opencode/` (`OpencodeSession.ts`, `event-mapper.ts` live, `history.ts` cold).
-- pi: `src/core/pi/` (`PiSession.ts`, `event-mapper.ts` live), cold history in `src/core/services/pi-session-list.ts`; see `src/core/pi/CLAUDE.md`.
+- pi: `src/core/pi/` (`PiSession.ts`, `event-mapper.ts` live, `history.ts` cold; the session list and cold load are `src/core/services/pi-session-list.ts`); see `src/core/pi/CLAUDE.md`.
 
 ## Recipes
 
@@ -32,8 +32,9 @@ The engine-session seam: the interface and shared base every engine session impl
 **A field on a content block** (exemplar: `tool_result.images`)
 
 1. `src/shared/types/content.ts`: `ContentBlock` variant [compiler only if the field is required].
-2. Claude, each a separate copy [nothing]: `transformAssistantMessage` in `src/core/services/assistant-message.ts` (live), `loadSessionHistory` and `parseJsonlFile` in `src/core/services/session-history.ts` (cold), `parseJsonlLine` in `src/core/services/subagent-watcher.ts`, and `transformAssistantMessage` in `src/core/services/automation-manager.ts`. No live/cold parity test.
-3. pi [nothing]: `buildPiChatMessage` in `src/core/pi/event-mapper.ts` (live) and `convertPiEntryMessage` in `src/core/services/pi-session-list.ts` (cold); shared helpers (`piToolResultText`, `piToolResultImages`) live in the mapper. opencode: `src/core/opencode/event-mapper.ts` and `src/core/opencode/history.ts`; `src/core/opencode/__tests__/history-parity.test.ts` fails when they differ.
+2. Claude: `src/core/services/claude-transcript.ts` (`claudeContentBlock`; a tool result is `claudeToolResults` plus `claudeToolResultBlock`). Live frames, the item stream, transcript replay and the subagent tail all build through it [test: claude-history-parity.test.ts]. `transformAssistantMessage` in `src/core/services/automation-manager.ts` is a separate mapper that drops unknown and empty blocks [nothing].
+3. pi: `src/core/pi/pi-blocks.ts` (`piAssistantBlock`, `piToolResultBlock`), used by `src/core/pi/event-mapper.ts` (live) and `src/core/pi/history.ts` (cold) [test: `src/core/pi/__tests__/history-parity.test.ts`]. opencode: `src/core/opencode/event-mapper.ts` and `src/core/opencode/history.ts` [test: `src/core/opencode/__tests__/history-parity.test.ts`].
+4. A live tool result is not a block until the reducer folds it: a field on `tool_result` also rides the `session:tool-result` payload (Claude: `extractToolResultsFromContent` in `src/core/services/claude-session.ts` and `src/core/services/dispatch-claude-targets.ts`; pi: the `tool_result` mapper output that `PiSession.ts` sends) and the reducer (`src/core/shared/sync/CLAUDE.md`) [nothing forces the senders; each parity spec folds the payload itself, so it fails until its fold carries the field].
 
 ## Invariants
 
@@ -47,4 +48,5 @@ The engine-session seam: the interface and shared base every engine session impl
 
 ## Fast test
 
-- `bunx vitest run src/core/providers src/shared/__tests__/model-capabilities.test.ts src/core/opencode/__tests__/history-parity.test.ts src/core/services/__tests__/pi-session-list.test.ts`
+- `bunx vitest run src/core/providers src/shared/__tests__/model-capabilities.test.ts src/core/services/__tests__/pi-session-list.test.ts`
+- Blocks: `bunx vitest run src/core/services/__tests__/claude-history-parity.test.ts src/core/services/__tests__/claude-transcript.test.ts src/core/pi/__tests__/history-parity.test.ts src/core/opencode/__tests__/history-parity.test.ts`

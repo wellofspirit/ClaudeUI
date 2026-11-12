@@ -11,7 +11,6 @@
 import { describe, expect, it } from 'vitest'
 import { OpencodeEngineToolMap } from '../OpencodeEngineToolMap'
 import { PiEngineToolMap } from '../PiEngineToolMap'
-import { piToolKind } from '../../../../../../core/pi/permission-engine'
 import { SESSION_TOOL_NAMES } from '../../../../../../shared/session-tools-description'
 import type { EngineToolMap } from '../../../../../../shared/tool-kinds'
 
@@ -64,9 +63,8 @@ describe('opencode: only its own spelling', () => {
   })
 })
 
-describe('pi: the engine and the renderer agree (single-source guard)', () => {
-  it.each([...SESSION_TOOL_NAMES])("piToolKind(%s) === the map's kindOf", (name) => {
-    expect(piToolKind(name)).toBe(PiEngineToolMap.kindOf(name))
-    expect(piToolKind(name)).toBe('mcp')
+describe('pi: the session tools are the generic MCP row', () => {
+  it.each([...SESSION_TOOL_NAMES])('%s', (name) => {
+    expect(PiEngineToolMap.kindOf(name)).toBe('mcp')
   })
 })
