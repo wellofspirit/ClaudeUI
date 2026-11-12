@@ -7,7 +7,7 @@
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
 import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
-import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
+import { firstPartyDisplayName, hostedToolView } from '../../../../../shared/hosted-tools'
 import { isAgentTool } from '../../../../../shared/types'
 import { sessionToolMcpFields } from '../../../../../shared/session-tools-description'
 import { claudeToolSpec } from './claude-tool-specs'
@@ -110,6 +110,10 @@ function claudeNormalize(
   toolName?: string
 ): ToolView {
   const inp = input ?? {}
+
+  // ClaudeUI's own card kinds (diagram, mockup) read the same on every engine.
+  const hosted = hostedToolView(kind, inp, result)
+  if (hosted) return hosted
 
   switch (kind) {
     case 'command':
@@ -251,20 +255,6 @@ function claudeNormalize(
       return { kind: 'question', questions }
     }
 
-    case 'diagram':
-      return {
-        kind: 'diagram',
-        source: inp.source != null ? String(inp.source) : '',
-        title: inp.title != null ? String(inp.title) : undefined
-      }
-
-    case 'mockup':
-      return {
-        kind: 'mockup',
-        directory: inp.directory != null ? String(inp.directory) : extractMockupDirectory(result),
-        title: inp.title != null ? String(inp.title) : undefined
-      }
-
     case 'mcp':
       // The session tools' calls carry their server and tool in the name; McpBody reads them off
       // the view (the "To X-Agent <name>" line of a session_message), as the other engines' maps give.
@@ -284,12 +274,6 @@ function claudeNormalize(
     default:
       return { kind: 'unknown', input: inp }
   }
-}
-
-function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
-  if (!result?.toolResult) return undefined
-  const match = result.toolResult.match(/Directory:\s*(\S+)/)
-  return match ? match[1] : undefined
 }
 
 /**

@@ -11,8 +11,8 @@ Flat directory of the Electron-free service layer; `src/core/boot/core-services.
 - `src/core/services/worktree*.ts`, `git-service.ts`: worktree and git operations. `sync-*.ts`: host side of the sync core.
 - `src/core/services/remote-*.ts`, `tailscale-manager.ts`, `tunnel-manager.ts`, `vscode-web-service.ts`: remote access. `pty-manager.ts`, `terminal-service.ts`: shells.
 - Hosted tools: `src/core/services/mermaid-tool.ts`, `mockup-tool.ts`, `session-tools-server.ts`. Persistence: `db.ts` (schema, migrations, typed repositories), `sqlite-driver.ts`, `ui-config.ts` (JSON config plane).
-- Claude-only despite neutral names: `session-history.ts` and `session-watcher.ts` (`~/.claude/projects` JSONL), `subagent-watcher.ts`, `service-session.ts` (usage-poll CLI fallback), `block-usage.ts`, `context-window.ts` (cli.js rules), `assistant-message.ts` (also used by `dispatch-claude-targets.ts`).
-- Traps: `src/core/services/pi-session-list.ts` is pi's cold history (JSONL under `~/.pi`), `opencode-session-list.ts` is opencode's; two host-token files, `src/core/sdk/host-token.ts` (spawn seam) and `claude-host-token.ts` (the keeper); `src/main/services/` is Electron-only, a different directory.
+- Claude-only despite neutral names: `session-history.ts` and `session-watcher.ts` (`~/.claude/projects` JSONL), `subagent-watcher.ts`, `service-session.ts` (usage-poll CLI fallback), `block-usage.ts`, `context-window.ts` (cli.js rules), `assistant-message.ts` (also used by `dispatch-claude-targets.ts`). All of them decode content blocks, tool results and usage fields through `claude-transcript.ts`, a leaf that imports no service but `tool-result-content.ts`.
+- Traps: `src/core/services/pi-session-list.ts` is pi's session list, cold load, fork anchor and delete (JSONL under `~/.pi`; the converters are `src/core/pi/history.ts`), `opencode-session-list.ts` is opencode's; two host-token files, `src/core/sdk/host-token.ts` (spawn seam) and `claude-host-token.ts` (the keeper); `src/main/services/` is Electron-only, a different directory.
 
 ## Recipes
 
@@ -35,8 +35,8 @@ Flat directory of the Electron-free service layer; `src/core/boot/core-services.
 2. Claude: `src/core/services/claude-session.ts` creates the server and passes it in `mcpServers`; `canUseTool` auto-allows the `mcp__claude-ui__` prefix: put a tool on that server only when it has no side effects; one that needs normal gating goes on its own server, as `dispatch_agent` does (`collab-tool.ts`). [nothing]
 3. opencode: `src/core/opencode/opencode-hosted-tools.ts` registers a server's tools in a loop (a tool added to `createMermaidServer` rides along; a new module is registered by hand). [test: opencode-hosted-tools.test.ts]
 4. pi: `src/core/pi/pi-bridge-source.ts` (a `pi.registerTool` entry, and bump `PI_BRIDGE_VERSION`). [test: pi-bridge-source.test.ts]
-5. pi: `src/core/pi/PiSession.ts` `handleHostedTool` case, `src/core/pi/permission-engine.ts`: `PI_HOSTED_TOOL_NAMES` always, the bare-name case in `piToolKind`, and `PI_AUTO_ALLOW_HOSTED_TOOLS` only for a tool with no side effects (a deliberate strict subset). [test: permission-engine.test.ts]
-6. `src/shared/first-party-tool-names.ts` (`FIRST_PARTY_MCP_SERVERS`, `FIXED_LABELS`) [test: first-party-tool-names.test.ts]; `src/shared/tool-kinds.ts` (`hostedMcpKind`) [nothing]; dispatch targets get no hosted tools (`dispatch-pi-targets.ts`). Renderer half: `src/renderer/src/components/chat/tool-registry/CLAUDE.md`.
+5. pi: `src/core/pi/PiSession.ts` `handleHostedTool` case, `src/core/pi/permission-engine.ts`: `PI_HOSTED_TOOL_NAMES` always, and `PI_AUTO_ALLOW_HOSTED_TOOLS` only for a tool with no side effects (a deliberate strict subset). [test: permission-engine.test.ts]
+6. `src/shared/hosted-tools.ts`: one `HOSTED_TOOLS` row (`claudeServer`, `kind`, `label`). It gives the tool its kind and header label in all three spellings, in the renderer and in the permission ladder (`piToolKind`), so the kind is a permission input (Critical area) [test: tool-kind-matrix.test.ts fails until the name is in its list]. Dispatch targets get no hosted tools (`dispatch-pi-targets.ts`). Renderer half: `src/renderer/src/components/chat/tool-registry/CLAUDE.md`.
 
 ## Invariants
 
@@ -47,4 +47,4 @@ Flat directory of the Electron-free service layer; `src/core/boot/core-services.
 
 - DB: `bunx vitest run src/core/services/__tests__/db.test.ts src/core/services/__tests__/dispatch-target-ledger.test.ts`.
 - Boot: `bunx vitest run src/core/boot/__tests__ src/e2e/flows/windowless-boot.e2e.test.ts`; unknown specs: `bunx vitest related --run <source file>`.
-- Hosted tool: `bunx vitest run src/core/pi/__tests__/pi-bridge-source.test.ts src/core/opencode/__tests__/opencode-hosted-tools.test.ts src/shared/__tests__/first-party-tool-names.test.ts`.
+- Hosted tool: `bunx vitest run src/core/pi/__tests__/pi-bridge-source.test.ts src/core/opencode/__tests__/opencode-hosted-tools.test.ts src/shared/__tests__/hosted-tools.test.ts src/renderer/src/components/chat/tool-registry/__tests__/tool-kind-matrix.test.ts`.

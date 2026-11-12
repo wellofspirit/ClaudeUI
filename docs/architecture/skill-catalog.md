@@ -140,7 +140,7 @@ the cwd) fills it. The served skill `content` has `${CLAUDE_SKILL_DIR}` and `${C
 credentials. Its `before_agent_start` handler appends the catalog's model-invocable skills to
 `systemPromptOptions.skills` (pi's own names win); a failed fetch raises one notify. A typed `/name` is expanded in
 `PiSession.run` for prompt, steer and follow-up (a pi command of that name wins). Host-run subagents get the parent's
-snapshot; the dispatcher's pi target gets the dispatch cwd's catalog. Cold history maps through `pi-session-list.ts`.
+snapshot; the dispatcher's pi target gets the dispatch cwd's catalog. Cold history maps through `src/core/pi/history.ts`.
 
 **UI.** The slash menu is per session (`session:slash-commands`, carrying the engine list plus the catalog). The Skills
 dialog asks the session (`discoverSkills`) and falls back to the catalog when there is no session. There is no separate

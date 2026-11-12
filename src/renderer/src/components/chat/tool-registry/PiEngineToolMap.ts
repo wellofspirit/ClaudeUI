@@ -3,8 +3,9 @@
  * normalizes their input/result shapes into the SAME engine-neutral ToolView
  * the kind bodies consume.
  *
- * The kindOf switch below IS the canonical pi→kind table. Tool names + input
- * schemas verified from the pinned pi source
+ * `kindOf` is `piToolKind` (src/shared/pi-tool-kinds.ts), the canonical pi→kind
+ * table, which the permission ladder reads too. Tool names + input schemas
+ * verified from the pinned pi source
  * (`packages/coding-agent/src/core/tools/*.ts`) and the M1 kickoff spec's wire
  * facts: `bash {command, timeout?}`, `read {path, offset?, limit?}`,
  * `write {path, content}`, `edit {path, edits: [{oldText, newText}]}`,
@@ -22,20 +23,18 @@
  * ready-made patch). The single-pair before/after view (below) is only the
  * INPUT-side fallback: it still renders while the result (and its fileDiffs)
  * hasn't arrived yet, or for a call whose result never carries a usable
- * patch. The stored-history converter (src/core/services/pi-session-list.ts)
+ * patch. The stored-history converter (src/core/pi/history.ts)
  * does NOT yet get the same treatment — replayed/resumed sessions still show
  * the before/after fallback for edits; out of scope for this fix (see its own
  * M2 note).
  *
  * M4a+b: hosted tools (render_mermaid/create_mockup/show_mockup) + cross-engine
  * dispatch (dispatch_agent) are registered by the bridge extension via
- * `pi.registerTool()` with BARE names (no `mcp__` prefix) — hostedMcpKind
- * below only matches `mcp__*`-prefixed names, so these four need explicit
- * `kindOf` cases, mirroring src/core/pi/permission-engine.ts's `piToolKind`
- * IDENTICAL cases (the single-source guard test asserts the two tables
- * agree). `dispatch_agent`'s input shape/normalize output mirrors
- * OpencodeEngineToolMap's `claudeui_dispatch_agent` case (same field names —
- * only the bare-vs-prefixed tool name differs across engines).
+ * `pi.registerTool()` with BARE names (no `mcp__` prefix); `piToolKind` finds
+ * them through the hosted-tools table (src/shared/hosted-tools.ts).
+ * `dispatch_agent`'s input shape/normalize output mirrors OpencodeEngineToolMap's
+ * `claudeui_dispatch_agent` case (same field names — only the bare-vs-prefixed
+ * tool name differs across engines).
  *
  * M5a: plan mode's `exit_plan` (also a bare-name `pi.registerTool()`
  * registration, gated on CLAUDEUI_PI_PLAN_TOOLS) maps to the SAME 'plan' kind
@@ -54,86 +53,18 @@
  */
 
 import type { EngineToolMap, ToolKind, ToolView } from '../../../../../shared/tool-kinds'
-import { dispatchTaskView, hostedMcpKind } from '../../../../../shared/tool-kinds'
-import { firstPartyDisplayName } from '../../../../../shared/first-party-tool-names'
+import { dispatchTaskView } from '../../../../../shared/tool-kinds'
+import { firstPartyDisplayName, hostedToolView } from '../../../../../shared/hosted-tools'
+import { piToolKind } from '../../../../../shared/pi-tool-kinds'
 import type { ContentBlock } from '../../../../../shared/types'
 import { isPiAsyncLaunchResult, piAgentResultModel } from '../../../../../shared/pi-agent-result'
 import { DEFAULT_SUBAGENT_TYPE } from '../../../../../shared/agent-type-colors'
-import {
-  isSessionToolName,
-  sessionToolMcpFields
-} from '../../../../../shared/session-tools-description'
+import { sessionToolMcpFields } from '../../../../../shared/session-tools-description'
 
 type ToolResultBlock = Extract<ContentBlock, { type: 'tool_result' }>
 
 /** pi has no internal tools to suppress in M1 (mirrors opencode's empty set). */
 const HIDDEN_TOOLS: ReadonlySet<string> = new Set()
-
-function piKindOf(toolName: string): ToolKind {
-  // Hosted-tools MCP names resolve engine-independently first (harmless
-  // no-op for pi today — covers any real mcp__ tools a future pi MCP bridge
-  // adds; pi's OWN hosted tools use bare names, handled by the explicit
-  // cases below instead).
-  const mcpKind = hostedMcpKind(toolName)
-  if (mcpKind !== null) return mcpKind
-
-  switch (toolName) {
-    case 'bash':
-      return 'command'
-    case 'edit':
-      return 'fileEdit'
-    case 'write':
-      return 'fileWrite'
-    case 'read':
-      return 'fileRead'
-    case 'grep':
-    case 'find':
-    case 'ls':
-      return 'search'
-    // Plan mode (M5a) — the bridge extension's locally-executed exit_plan
-    // tool (registered via pi.registerTool(), gated on
-    // CLAUDEUI_PI_PLAN_TOOLS). Reuses the SAME 'plan' kind Claude's
-    // ExitPlanMode maps to — MessageBubble's renderToolBlock lifts it to
-    // ExitPlanModeCard regardless of engine. Mirrors permission-engine.ts's
-    // piToolKind IDENTICAL case (single-source guard test).
-    case 'exit_plan':
-      return 'plan'
-    // Hosted tools (M4a+b) — pi.registerTool() uses BARE names (see file
-    // header). Mirrors permission-engine.ts's piToolKind IDENTICAL cases.
-    case 'render_mermaid':
-      return 'diagram'
-    case 'create_mockup':
-    case 'show_mockup':
-      return 'mockup'
-    case 'dispatch_agent':
-      return 'task'
-    // Host-run pi subagents (ADR-089) — the bridge's own `agent` tool. Reuses
-    // the SAME 'task' kind dispatch_agent does — TaskCard is engine-neutral
-    // and disambiguates by input shape (see piNormalize's 'task' case below).
-    // Mirrors permission-engine.ts's piToolKind IDENTICAL case (single-source
-    // guard test).
-    case 'agent':
-      return 'task'
-    // `subagent`: legacy M5b transcripts and pi's upstream example subagent
-    // extension. Mirrors permission-engine.ts's piToolKind IDENTICAL case.
-    case 'subagent':
-      return 'task'
-    // ADR-089 S3b: the bridge's `send_message` / `task_stop` (Claude's
-    // SendMessage / TaskStop rows). Mirrors permission-engine.ts's piToolKind.
-    case 'send_message':
-      return 'detail'
-    case 'task_stop':
-      return 'note'
-    // The bridge's read-only `list_models`: a one-line note. Mirrors
-    // permission-engine.ts's piToolKind.
-    case 'list_models':
-      return 'note'
-    default:
-      // The bridge's session tools (v15): the generic MCP row. Mirrors
-      // permission-engine.ts's piToolKind.
-      return isSessionToolName(toolName) ? 'mcp' : 'unknown'
-  }
-}
 
 interface PiEditEntry {
   oldText?: unknown
@@ -147,6 +78,10 @@ function piNormalize(
   toolName?: string
 ): ToolView {
   const inp = input ?? {}
+
+  // ClaudeUI's own card kinds (diagram, mockup) read the same on every engine.
+  const hosted = hostedToolView(kind, inp, result)
+  if (hosted) return hosted
 
   switch (kind) {
     case 'command':
@@ -207,23 +142,6 @@ function piNormalize(
       return {
         kind: 'plan',
         plan: inp.plan != null ? String(inp.plan) : ''
-      }
-
-    case 'diagram':
-      // render_mermaid args: { source, title? } — same field names as Claude/opencode.
-      return {
-        kind: 'diagram',
-        source: inp.source != null ? String(inp.source) : '',
-        title: inp.title != null ? String(inp.title) : undefined
-      }
-
-    case 'mockup':
-      // create_mockup args: { html, title? } (no `directory` on input — extracted
-      // from the tool RESULT text below). show_mockup args: { directory }.
-      return {
-        kind: 'mockup',
-        directory: inp.directory != null ? String(inp.directory) : extractMockupDirectory(result),
-        title: inp.title != null ? String(inp.title) : undefined
       }
 
     case 'task': {
@@ -373,13 +291,6 @@ function piNormalize(
   }
 }
 
-/** create_mockup's INPUT carries no `directory` field — extract it from the tool RESULT text ("Directory: <id>"), mirroring OpencodeEngineToolMap's identical helper (each EngineToolMap file is self-contained, no cross-imports between them, per the existing convention). */
-function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
-  if (!result?.toolResult) return undefined
-  const match = result.toolResult.match(/Directory:\s*(\S+)/)
-  return match ? match[1] : undefined
-}
-
 /** Prettify pi's lowercase built-in tool names for the card header. */
 const PI_DISPLAY_NAMES: Record<string, string> = {
   bash: 'Bash',
@@ -395,13 +306,13 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
 }
 
 function piDisplayName(toolName: string): string {
-  // ClaudeUI's own tools are registered under their bare names (first-party-tool-names.ts).
+  // ClaudeUI's own tools are registered under their bare names (hosted-tools.ts).
   const own = Object.hasOwn(PI_DISPLAY_NAMES, toolName) ? PI_DISPLAY_NAMES[toolName] : undefined
   return firstPartyDisplayName(toolName, 'bare') ?? own ?? toolName
 }
 
 export const PiEngineToolMap: EngineToolMap = {
-  kindOf: piKindOf,
+  kindOf: piToolKind,
   normalize: piNormalize,
   displayName: piDisplayName,
   hidden: HIDDEN_TOOLS

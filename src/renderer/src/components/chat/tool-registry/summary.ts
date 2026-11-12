@@ -115,8 +115,12 @@ export function summarizeTool(kind: ToolKind, view: ToolView, toolName?: string)
         return view.tool ? `${view.server} / ${view.tool}` : view.server
       return view.kind === 'mcp' ? JSON.stringify(view.input) : ''
 
+    case 'image':
     case 'unknown':
-    default:
       return view.kind === 'unknown' ? JSON.stringify(view.input) : ''
+
+    default:
+      kind satisfies never
+      return ''
   }
 }
