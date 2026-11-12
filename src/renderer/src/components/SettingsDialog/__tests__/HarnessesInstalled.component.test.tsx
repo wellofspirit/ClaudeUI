@@ -23,7 +23,8 @@ vi.mock('../../../../../core/shared/sync/client-registry', () => ({
     set.add(cb)
     syncHandlers.set(channel, set)
     return () => set.delete(cb)
-  }
+  },
+  onSyncAnswered: () => () => {}
 }))
 
 import { HarnessesInstalled, HarnessesPageActions } from '../HarnessesInstalled'

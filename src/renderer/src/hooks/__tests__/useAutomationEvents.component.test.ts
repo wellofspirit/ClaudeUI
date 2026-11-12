@@ -7,7 +7,14 @@
  * update the Zustand automation store.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { renderHook } from '@testing-library/react'
+import { SyncClient } from '../../../../core/shared/sync/sync-client'
+import {
+  resetSyncClientForTests,
+  setSyncClient
+} from '../../../../core/shared/sync/client-registry'
+import { useAutomationEvents } from '../useAutomationEvents'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useAutomationStore } from '../../stores/automation-store'
 import { useSessionStore } from '../../stores/session-store'
@@ -589,5 +596,32 @@ describe('useAutomationEvents component tests', () => {
 
       expect(useAutomationStore.getState().notificationBadge).toBe(1)
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The real hook on a real SyncClient: a full sync replays no event
+// ---------------------------------------------------------------------------
+describe('useAutomationEvents after an answered sync', () => {
+  afterEach(() => resetSyncClientForTests())
+
+  it('reads listAutomations again, with no automation:changed event', async () => {
+    resetSyncClientForTests()
+    const client = new SyncClient({ requestResync: () => {} })
+    client.markReady()
+    setSyncClient(client)
+    const listAutomations = vi.fn(async () => [makeAutomation({ id: 'first' })])
+    ;(window as unknown as { api: Record<string, unknown> }).api = { listAutomations }
+    useAutomationStore.setState({ automations: [] })
+
+    const { unmount } = renderHook(() => useAutomationEvents())
+    await vi.waitFor(() => expect(useAutomationStore.getState().automations[0]?.id).toBe('first'))
+
+    listAutomations.mockResolvedValue([makeAutomation({ id: 'second' })])
+    client.applyFullState({ seq: 5 } as never, 'epoch-A', 5)
+
+    await vi.waitFor(() => expect(useAutomationStore.getState().automations[0]?.id).toBe('second'))
+    expect(listAutomations).toHaveBeenCalledTimes(2)
+    unmount()
   })
 })

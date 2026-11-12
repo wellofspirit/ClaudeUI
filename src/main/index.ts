@@ -49,13 +49,11 @@ import { attachSyncPort } from './services/sync-port'
 import { installDesktopVoiceFeed } from './ipc/voice-feed'
 import { terminalService } from '../core/services/terminal-service'
 import { registerRemoteVersionInfo } from '../core/ipc/remote-handlers'
-import { serviceSession } from '../core/services/service-session'
 import { authManager } from './services/auth-manager'
 import { accountManager } from './services/account-manager'
 import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { credentialSync } from '../core/auth/vault/CredentialSync'
-import { opencodeServerManager } from '../core/opencode/OpencodeServerManager'
-import { localVoiceServer, setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
+import { setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
 import { desktopVoiceWorkerLauncher } from './voice-worker-launcher'
 import { PluginManager } from './services/plugin-manager'
 import { LogViewer } from './services/log-viewer'
@@ -761,22 +759,7 @@ app.whenReady().then(() => {
     teardownServices: () => {
       logViewer?.destroy()
       currentPluginManager?.stopAll()
-      core?.automationManager.stopAll()
-      credentialSync.stop()
-      void core?.remoteServer.stop()
-      // The usage hub's timers (ADR-072 §7). Nothing waits on the client: a
-      // push in flight is idempotent on the hub, so the worst a killed one
-      // costs is a batch re-sent as duplicates on the next launch.
-      core?.usageHubClient.stop()
-      core?.releaseDispatchParents()
-      // Stop the service session (lightweight CLI subprocess for usage polling)
-      serviceSession.stop()
-      // Reap any shared opencode servers (Windows tree-kill) so opencode.exe
-      // children don't orphan on quit. Idempotent — safe to run on every invocation.
-      opencodeServerManager.dispose()
-      // The on-device speech worker. Fire-and-forget: stdin EOF ends it anyway
-      // once this process is gone, which is the same outcome.
-      void localVoiceServer.stop()
+      core?.stop()
     },
     quit: () => app.quit(),
     // The quit modal's "Remove all" (ADR-112 C-S1): the worktrees are deleted HERE, after the
@@ -801,7 +784,7 @@ app.whenReady().then(() => {
     // opencode 2.x shares its credential table with the user's own opencode:
     // hand the ChatGPT slot back to their credential while a server can still
     // run (ADR-097 §5). Bounded; a crash skips it and the next start re-asserts.
-    prepareQuit: () => credentialSync.prepareQuit(),
+    prepareQuit: () => core?.prepareStop() ?? Promise.resolve(),
     // The first before-quit pass asks the renderer about active worktrees and waits.
     // Windowless there is nobody to ask — and no UI decision to make — so collapse
     // the wait instead of stalling a headless shutdown for the full fallback.

@@ -60,10 +60,11 @@ import {
   setHostPicker
 } from '../core/host'
 import { logger } from '../core/services/logger'
-import { localVoiceServer, setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
+import { setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
 import { serverVoiceWorkerLauncher } from './voice-worker-launcher'
 import { CliError, HELP_TEXT, parseServerArgs, type ServerOptions } from './cli'
 import { runFirstBootChain } from './first-boot'
+import { createShutdown } from './shutdown'
 import { PASSWORD_SET_CONFIRMATION, readNewPassword, stdinSecretIo } from './set-password'
 
 /** stdout, one line at a time — the console chain's only side effect. */
@@ -392,26 +393,14 @@ async function main(): Promise<void> {
     `claudeui-server listening on port ${status.port} (sqlite: ${isBun() ? 'bun:sqlite' : 'node:sqlite'})`
   )
 
-  // Graceful shutdown. `stop()` is fire-and-forget by design (see host-anchor),
-  // so the exit is not gated on peers that may never close their sockets.
-  let stopping = false
-  const shutdown = (signal: string): void => {
-    if (stopping) return
-    stopping = true
-    // The speech worker (~0.8 GB while loaded): it exits on its own when this
-    // process's pipe closes, but a signalled shutdown should not leave it to the
-    // OS. Fire-and-forget like `anchor.stop()`; the exit below is bounded.
-    void localVoiceServer.stop()
-    // The usage hub's timers (ADR-072 §7) before anything slower: a push in
-    // flight is idempotent on the hub, so nothing waits on it.
-    core.usageHubClient.stop()
-    core.releaseDispatchParents()
-    logger.info('server', `${signal} received — shutting down`)
-    anchor.stop()
-    // Give the listener a moment to close before the process goes, but never
-    // hang on it.
-    setTimeout(() => process.exit(0), 500).unref()
-  }
+  // Graceful shutdown: the host-neutral stop is core's; the exit is not
+  // gated on peers that may never close their sockets (see host-anchor).
+  const shutdown = createShutdown({
+    prepareStop: core.prepareStop,
+    stop: core.stop,
+    exit: () => process.exit(0),
+    log: (message) => logger.info('server', message)
+  })
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))
 }

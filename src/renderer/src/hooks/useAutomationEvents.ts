@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { onSyncEvent } from '../../../core/shared/sync/client-registry'
+import { onSyncAnswered, onSyncEvent } from '../../../core/shared/sync/client-registry'
 import { useAutomationStore } from '../stores/automation-store'
 
 /**
@@ -26,12 +26,18 @@ function viewingLiveStream(
  */
 export function useAutomationEvents(): void {
   useEffect(() => {
-    // Load automations on mount
-    window.api.listAutomations().then((automations) => {
-      useAutomationStore.getState().setAutomations(automations)
-    })
+    const load = (): void => {
+      void window.api.listAutomations().then((automations) => {
+        useAutomationStore.getState().setAutomations(automations)
+      })
+    }
+    load()
 
     const cleanups = [
+      // `automation:changed` below carries its payload; a full sync replays no
+      // event, so every answered sync re-reads the list.
+      onSyncAnswered(load),
+
       onSyncEvent('automation:run-update', ({ automationId, run }) => {
         const store = useAutomationStore.getState()
         store.updateRun(automationId, run)

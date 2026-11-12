@@ -2898,13 +2898,14 @@ export const useSessionStore = create<SessionState>((set) => ({
   // -----------------------------------------------------------------------
   // Registry config (recents / pins / titles / hidden / engine map)
   //
-  // Two steps, in this order, at every site below: apply to the REPLICA (so the
-  // sealed field has exactly one writer and the sidebar does not lag a round trip
-  // behind the click), then persist through `config:save-sessions`, whose
-  // `config:sessions-changed` echo reaches this client too since 4c and re-applies
-  // the same whole-config replace. Applying locally first is not just latency:
-  // `saveSessionConfig` merges from CURRENT state, so two rapid mutations would
-  // otherwise both merge from a stale base and the second would revert the first.
+  // Each action applies to the REPLICA first (the sealed field has one writer, and the
+  // sidebar does not lag a round trip behind the click), then saves through
+  // `config:save-sessions` with ONLY the wire keys it changed. The host merges per key,
+  // so a save carrying keys this client did not touch would overwrite what the host or
+  // another client wrote since this client's snapshot (a generated title, worktree
+  // info). An action that changes nothing returns before the replica write and sends
+  // nothing. Applying locally first also keeps two rapid actions on one key deriving
+  // from current state.
   // -----------------------------------------------------------------------
   addRecentSession: (routingId) => {
     const state = useSessionStore.getState()
@@ -2914,19 +2915,26 @@ export const useSessionStore = create<SessionState>((set) => ({
       routingId,
       ...state.recentSessionIds.filter((id) => id !== routingId)
     ].slice(0, state.settings.maxRecentSessions)
+    if (
+      recentSessionIds.length === state.recentSessionIds.length &&
+      recentSessionIds.every((id, i) => id === state.recentSessionIds[i])
+    )
+      return
     patchLocalApp({ recentSessionIds })
-    saveSessionConfig(state, { recentSessionIds })
+    window.api.saveSessionConfig({ recentSessions: recentSessionIds })
   },
 
   removeRecentSession: (routingId) => {
     const state = useSessionStore.getState()
+    if (!state.recentSessionIds.includes(routingId)) return
     const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
     patchLocalApp({ recentSessionIds })
-    saveSessionConfig(state, { recentSessionIds })
+    window.api.saveSessionConfig({ recentSessions: recentSessionIds })
   },
 
   setCustomTitle: (sessionId, title) => {
     const state = useSessionStore.getState()
+    if (title ? state.customTitles[sessionId] === title : !(sessionId in state.customTitles)) return
     const customTitles = { ...state.customTitles }
     if (title) {
       customTitles[sessionId] = title
@@ -2934,33 +2942,50 @@ export const useSessionStore = create<SessionState>((set) => ({
       delete customTitles[sessionId]
     }
     patchLocalApp({ customTitles })
-    saveSessionConfig(state, { customTitles })
+    window.api.saveSessionConfig({ customTitles })
   },
 
   pinSession: (routingId) => {
     const state = useSessionStore.getState()
     if (state.pinnedSessionIds.includes(routingId)) return
     const pinnedSessionIds = [...state.pinnedSessionIds, routingId]
+    const wasRecent = state.recentSessionIds.includes(routingId)
     const recentSessionIds = state.recentSessionIds.filter((id) => id !== routingId)
     patchLocalApp({ pinnedSessionIds, recentSessionIds })
-    saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
+    window.api.saveSessionConfig({
+      pinnedSessions: pinnedSessionIds,
+      ...(wasRecent && { recentSessions: recentSessionIds })
+    })
   },
 
   unpinSession: (routingId) => {
     const state = useSessionStore.getState()
+    const wasPinned = state.pinnedSessionIds.includes(routingId)
     const pinnedSessionIds = state.pinnedSessionIds.filter((id) => id !== routingId)
     const recentSessionIds = [
       routingId,
       ...state.recentSessionIds.filter((id) => id !== routingId)
     ].slice(0, state.settings.maxRecentSessions)
+    const recentsChanged =
+      recentSessionIds.length !== state.recentSessionIds.length ||
+      recentSessionIds.some((id, i) => id !== state.recentSessionIds[i])
+    if (!wasPinned && !recentsChanged) return
     patchLocalApp({ pinnedSessionIds, recentSessionIds })
-    saveSessionConfig(state, { pinnedSessionIds, recentSessionIds })
+    window.api.saveSessionConfig({
+      ...(wasPinned && { pinnedSessions: pinnedSessionIds }),
+      ...(recentsChanged && { recentSessions: recentSessionIds })
+    })
   },
 
   reorderPinnedSessions: (ids) => {
     const state = useSessionStore.getState()
+    if (
+      ids.length === state.pinnedSessionIds.length &&
+      ids.every((id, i) => id === state.pinnedSessionIds[i])
+    )
+      return
     patchLocalApp({ pinnedSessionIds: ids })
-    saveSessionConfig(state, { pinnedSessionIds: ids })
+    window.api.saveSessionConfig({ pinnedSessions: ids })
   },
 
   hideSession: (sessionId) => {
@@ -2968,7 +2993,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (state.hiddenSessionIds.includes(sessionId)) return
     const hiddenSessions = [...state.hiddenSessionIds, sessionId]
     patchLocalApp({ hiddenSessions })
-    saveSessionConfig(state, { hiddenSessionIds: hiddenSessions })
+    window.api.saveSessionConfig({ hiddenSessions })
   },
 
   unhideSession: (sessionId) => {
@@ -2976,7 +3001,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (!state.hiddenSessionIds.includes(sessionId)) return
     const hiddenSessions = state.hiddenSessionIds.filter((id) => id !== sessionId)
     patchLocalApp({ hiddenSessions })
-    saveSessionConfig(state, { hiddenSessionIds: hiddenSessions })
+    window.api.saveSessionConfig({ hiddenSessions })
   },
 
   hideProject: (projectKey) => {
@@ -2984,7 +3009,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (!projectKey || state.hiddenProjectKeys.includes(projectKey)) return
     const hiddenProjects = [...state.hiddenProjectKeys, projectKey]
     patchLocalApp({ hiddenProjects })
-    saveSessionConfig(state, { hiddenProjectKeys: hiddenProjects })
+    window.api.saveSessionConfig({ hiddenProjects })
   },
 
   unhideProject: (projectKey) => {
@@ -2992,7 +3017,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (!state.hiddenProjectKeys.includes(projectKey)) return
     const hiddenProjects = state.hiddenProjectKeys.filter((k) => k !== projectKey)
     patchLocalApp({ hiddenProjects })
-    saveSessionConfig(state, { hiddenProjectKeys: hiddenProjects })
+    window.api.saveSessionConfig({ hiddenProjects })
   },
 
   deleteSession: async (sessionId, projectKey, engineId) => {

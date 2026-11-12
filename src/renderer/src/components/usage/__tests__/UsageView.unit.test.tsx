@@ -47,12 +47,18 @@ import {
 // The shell's two push subscriptions, captured so a test can fire them. The
 // real registry defers a listener when no transport client exists, which would
 // swallow the emit.
-const syncHandlers = new Map<string, (...args: unknown[]) => void>()
+const syncHandlers = new Map<string, Set<(...args: unknown[]) => void>>()
+const fire = (channel: string, ...args: unknown[]): void => {
+  for (const cb of syncHandlers.get(channel) ?? []) cb(...args)
+}
 vi.mock('../../../../../core/shared/sync/client-registry', () => ({
   onSyncEvent: (channel: string, cb: (...args: unknown[]) => void) => {
-    syncHandlers.set(channel, cb)
-    return () => syncHandlers.delete(channel)
-  }
+    const set = syncHandlers.get(channel) ?? new Set()
+    set.add(cb)
+    syncHandlers.set(channel, set)
+    return () => set.delete(cb)
+  },
+  onSyncAnswered: () => () => {}
 }))
 
 // The summary's variant fork is the only thing in the shell that reads the
@@ -242,10 +248,9 @@ describe('UsageView — live nudges', () => {
       render(<UsageView onClose={vi.fn()} />)
       await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledTimes(1))
 
-      const onBlockData = syncHandlers.get('usage:block-data')
-      expect(onBlockData).toBeDefined()
-      onBlockData!({})
-      onBlockData!({})
+      expect(syncHandlers.get('usage:block-data')?.size).toBeGreaterThan(0)
+      fire('usage:block-data', {})
+      fire('usage:block-data', {})
       // Still the mount read: a nudge is not a query.
       expect(mockFetchDashboard).toHaveBeenCalledTimes(1)
 
@@ -264,7 +269,7 @@ describe('UsageView — live nudges', () => {
       render(<UsageView onClose={vi.fn()} />)
       await waitFor(() => expect(mockFetchLimits).toHaveBeenCalledTimes(1))
 
-      syncHandlers.get('usage:limits-changed')!()
+      fire('usage:limits-changed')
       await vi.advanceTimersByTimeAsync(2_000)
       await waitFor(() => expect(mockFetchLimits).toHaveBeenCalledTimes(2))
       expect(mockFetchDashboard).toHaveBeenCalledTimes(2)
@@ -680,7 +685,7 @@ describe('UsageView — the scope', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       mockHubStatus.mockResolvedValue(makeHubStatus({ enabled: false, deviceId: null }))
-      syncHandlers.get('usage-hub:changed')!()
+      fire('usage-hub:changed')
       await vi.advanceTimersByTimeAsync(2_000)
 
       // Waited for on the GROUP-BY, not on the pill. The pill unmounts in the
@@ -859,10 +864,9 @@ describe('UsageView — the hub chip', () => {
       await waitFor(() => expect(mockHubStatus).toHaveBeenCalledTimes(1))
       await waitFor(() => expect(mockFetchDashboard).toHaveBeenCalledTimes(1))
 
-      const onHub = syncHandlers.get('usage-hub:changed')
-      expect(onHub).toBeDefined()
-      onHub!()
-      onHub!()
+      expect(syncHandlers.get('usage-hub:changed')?.size).toBeGreaterThan(0)
+      fire('usage-hub:changed')
+      fire('usage-hub:changed')
       // A nudge is not a read.
       expect(mockHubStatus).toHaveBeenCalledTimes(1)
 

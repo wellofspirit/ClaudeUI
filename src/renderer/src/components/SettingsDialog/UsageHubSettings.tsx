@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { UsageHubState, UsageHubStatus } from '../../../../shared/types'
-import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
+import { onNudge } from '../../lib/on-nudge'
 import { ActionRow, Button, SettingRow, SettingsToggle, TextField } from './settings-controls'
 import { ipcErrorMessage } from '../../utils/ipc-error'
 import {
@@ -176,13 +176,8 @@ export function UsageHubSettings(): React.JSX.Element {
     void reload()
   }, [reload])
 
-  useEffect(
-    () =>
-      onSyncEvent('usage-hub:changed', () => {
-        void reload()
-      }),
-    [reload]
-  )
+  // Immediate: the status is one cheap local read. Also re-reads after a full sync.
+  useEffect(() => onNudge('usage-hub:changed', () => void reload(), 0), [reload])
 
   const baseline = status === null ? null : draftOf(status)
   const dirty = draft !== null && baseline !== null && !sameDraft(draft, baseline)

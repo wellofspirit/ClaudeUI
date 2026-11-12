@@ -52,7 +52,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
-import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
+import { onNudge } from '../../lib/on-nudge'
 import type {
   AccountLimits,
   DashboardRange,
@@ -364,49 +364,30 @@ export function UsageView({ onClose }: UsageViewProps): React.JSX.Element {
   // here rather than in `useClaudeEvents` because the answer is this view's
   // local state: there is no store field to fold a nudge into.
   useEffect(() => {
-    let ledgerTimer: ReturnType<typeof setTimeout> | undefined
-    let limitsTimer: ReturnType<typeof setTimeout> | undefined
-    let hubTimer: ReturnType<typeof setTimeout> | undefined
-    const scheduleLedger = (): void => {
-      clearTimeout(ledgerTimer)
-      ledgerTimer = setTimeout(() => setLedgerNudge((n) => n + 1), NUDGE_DEBOUNCE_MS)
-    }
-    const scheduleLimits = (): void => {
-      clearTimeout(limitsTimer)
-      limitsTimer = setTimeout(() => setLimitsNudge((n) => n + 1), NUDGE_DEBOUNCE_MS)
-    }
-    const scheduleHub = (): void => {
-      clearTimeout(hubTimer)
-      hubTimer = setTimeout(() => setHubNudge((n) => n + 1), NUDGE_DEBOUNCE_MS)
-    }
-    const offBlock = onSyncEvent('usage:block-data', scheduleLedger)
-    const offLimits = onSyncEvent('usage:limits-changed', () => {
-      // A moved reading can also mean a turn just finished, so both reads go.
-      scheduleLedger()
-      scheduleLimits()
-    })
+    // One timer per refetch: a burst over several channels is one read, and an
+    // answered sync (a full one replays no event) re-reads all of them.
+    // A moved reading can also mean a turn just finished, so the ledger rides it.
     // The hub changes state several times a pass (`syncing` → `idle`), and a
     // finished pull is new rows in all THREE of the things this screen reads:
     // the machine list, the ledger's remote buckets, and `remote_limits` — which
-    // is where a relayed reading comes from (ADR-072 §4). Leaving the limits out
-    // meant a peer's meters only appeared on the next open of this screen. The
-    // read is local and spends no refresh grant, so it rides the same debounce.
-    const offHub = onSyncEvent('usage-hub:changed', () => {
-      scheduleHub()
-      scheduleLedger()
-      scheduleLimits()
-    })
-    const offCredentials = onSyncEvent('provider:credentials-changed', () =>
-      setCredentialsNudge((n) => n + 1)
-    )
+    // is where a relayed reading comes from (ADR-072 §4). The read is local and
+    // spends no refresh grant, so it rides the same debounce.
+    const offs = [
+      onNudge(
+        ['usage:block-data', 'usage:limits-changed', 'usage-hub:changed'],
+        () => setLedgerNudge((n) => n + 1),
+        NUDGE_DEBOUNCE_MS
+      ),
+      onNudge(
+        ['usage:limits-changed', 'usage-hub:changed'],
+        () => setLimitsNudge((n) => n + 1),
+        NUDGE_DEBOUNCE_MS
+      ),
+      onNudge('usage-hub:changed', () => setHubNudge((n) => n + 1), NUDGE_DEBOUNCE_MS),
+      onNudge('provider:credentials-changed', () => setCredentialsNudge((n) => n + 1), 0)
+    ]
     return () => {
-      clearTimeout(ledgerTimer)
-      clearTimeout(limitsTimer)
-      clearTimeout(hubTimer)
-      offBlock()
-      offLimits()
-      offHub()
-      offCredentials()
+      for (const off of offs) off()
     }
   }, [])
 
