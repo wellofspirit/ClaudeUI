@@ -8,9 +8,13 @@ import { ESLint } from 'eslint'
 const ROOT = resolve(__dirname, '../../..')
 let eslint: ESLint
 
-beforeAll(() => {
+beforeAll(async () => {
   eslint = new ESLint({ cwd: ROOT })
-})
+  // The first lint loads the config and the TypeScript parser, which takes several
+  // seconds on a slow runner (7.9 s seen on macOS CI): pay it here, under its own
+  // budget, so it is not charged to the first case's default timeout.
+  await eslint.lintText('', { filePath: resolve(ROOT, 'src/shared/x.ts') })
+}, 60_000)
 
 async function layerMessages(filePath: string, code: string): Promise<string[]> {
   const [res] = await eslint.lintText(code, { filePath: resolve(ROOT, filePath) })
