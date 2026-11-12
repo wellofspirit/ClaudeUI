@@ -197,3 +197,15 @@ one host-local thing the server still does with a window, when there is one, is 
 `claudeui-server` (`src/server`) boots the same `src/core` service graph with no Electron
 present at all and starts this listener from its own arguments — see
 [sync-core.md](sync-core.md) §Topology.
+
+## Remote IDE: probed facts about `code serve-web` (ADR-064)
+
+Probed against VS Code 1.135.0 (2026-08-31); the remote IDE design leans on these.
+
+- The workbench bits cache under `~/.vscode/cli/serve-web/` (per commit, downloaded from Microsoft's update server on
+  first run: a one-time outbound need per CLI version; air-gapped hosts must pre-seed it).
+- `--server-data-dir` controls only the served profile (settings/extensions); we do not pass it, so the profile is
+  shared with any manual `serve-web` use.
+- Token behavior: HTTP requests without the token get 403; `?tkn=` answers 302 and exchanges into a `vscode-tkn`
+  cookie (7 days, SameSite=Lax, deliberately not HttpOnly: the workbench JS reads it for its inner protocol
+  handshake); cookie-only requests then succeed.

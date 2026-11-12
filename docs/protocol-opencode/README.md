@@ -1,6 +1,6 @@
 # opencode 2.x wire protocol
 
-How ClaudeUI talks to opencode 2.x ([ADR-097](../adr/adr-097_opencode-v2-only.md)): the pin, the
+How ClaudeUI talks to opencode 2.x ([ADR-097](../adr/opencode.md)): the pin, the
 server lifecycle, the routes and events it uses, permissions, credentials, the inbox, the
 `claudeui-xeng` plugin, the config it injects, and the contract suite that gates every pin bump.
 Facts are for the pinned version and cite `vendor/opencode-src/...` at that tag. The spike's

@@ -1,6 +1,6 @@
 # On-device voice
 
-Speech-to-text for opencode and pi sessions, **as built** (ADR-101). Claude sessions keep cli.js's own voice server and are not covered here. The decisions, the model bake-off and the measurements live in [ADR-101](../adr/adr-101_on-device-speech-to-text.md); the security posture (the loopback token, what is audited, why the pack install is `admin`) is [security.md](security.md) §Audit "On-device voice". This page is the contract each piece codes against; the sections keep the labels C1–C6 that source comments cite (`docs/architecture/local-voice.md Cn`).
+Speech-to-text for opencode and pi sessions, **as built** (ADR-101). Claude sessions keep cli.js's own voice server and are not covered here. The decisions are [ADR-101](../adr/voice.md); the model comparison and the measurements are the last section of this page; the security posture (the loopback token, what is audited, why the pack install is `admin`) is [security.md](security.md) §Audit "On-device voice". This page is the contract each piece codes against; the sections keep the labels C1–C6 that source comments cite (`docs/architecture/local-voice.md Cn`).
 
 ## Overview
 
@@ -214,3 +214,32 @@ Renderer consumers (outside this contract, listed for orientation): `lib/voice/v
 ## Verification status
 
 Everything above was read from the code. Not exercised while writing it: a packaged desktop build running the worker from inside `app.asar`; the real-model path on each supported platform (the measurements quoted are ADR-101's).
+
+## Model choice and runtime spike (ADR-101)
+
+The model was chosen by measurement on a recorded set, not from leaderboards: 20 coding prompts (13.7 min; 15
+scripted, 5 taken from real session history), one speaker with a non-native accent, 18 configurations. Word error
+rate (WER) uses the Open ASR Leaderboard normalization with identifiers split into words. "Terms right" is the share
+of a prompt's key identifiers written verbatim (`useStickToBottom`, not `use stick to bottom`). "Dropped" is a run
+of 4 or more reference words missing from the transcript; a silently lost sentence of an instruction is worse than
+any misspelling, so it disqualifies a model whatever its WER.
+
+- Qwen3-ASR 1.7B (GPU, biased): WER 3.9%, terms right 76%, median/max latency 1.3 s / 5.1 s.
+- Whisper large-v3 (GPU, biased): WER 4.4%, 72%, 0.5 s / 2.2 s.
+- **Parakeet TDT 0.6B v2 int8 (CPU)**: WER 5.1%, 52% (69% with biasing, WER 4.6%), 0.4 s / 2.0 s, nothing dropped,
+  660 MB. int8 costs nothing against fp32 (5.2%). Within 0.7 points of the best GPU model and needs no GPU.
+- Whisper large-v3-turbo (CPU): WER 5.8%, 6.1 s / 18 s median/max: too slow.
+- Parakeet TDT 0.6B v3 int8 (CPU): WER 16.1%, 4 dropped sentences; its int8 export is broken for this use (fp32 6.9%,
+  still one dropped sentence). Canary 180M flash int8: WER 20.1%, 4 dropped.
+
+Keyword biasing from session context measured +17 points of correctly written terms and needs a term-selection
+design (not built). Consistent accent errors (for example "Claude" heard as "cloud") are not fixed by biasing.
+
+Runtime spike (sherpa-onnx-node 1.13.8): identical text under Node, Electron run as Node, bun, and a
+`bun build --compile` executable run with `BUN_BE_BUN=1`; `decodeAsync` keeps the event loop live. Loaded the worker
+holds about 760 MB RSS and peaks about 1.3 GB decoding 55 s. On Windows Node loads the addon's sibling
+`onnxruntime.dll`, so the older `System32\onnxruntime.dll` (which segfaults the Python wheel) does not win. macOS
+(`@loader_path`) and Linux (`$ORIGIN`) resolve libraries beside the addon, so no `DYLD_LIBRARY_PATH` is needed
+(a hardened-runtime app would strip it anyway). Preview measured on 17 to 65 s takes: an update every 1 s, about 25%
+CPU while held, preview words wrong 10.5% of the time (18.1% without the lead-in); final 0.5 s after a 17 s take and
+about 2 s after a minute.
