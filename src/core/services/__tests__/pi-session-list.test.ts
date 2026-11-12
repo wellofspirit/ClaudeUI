@@ -51,8 +51,8 @@ vi.mock('../claude-skill-invoke', () => ({
   parseSkillInvocationEnvelope: mockEnvelope
 }))
 
+import { convertPiEntryMessage } from '../../pi/history'
 import {
-  convertPiEntryMessage,
   listPiSessionsGlobal,
   loadPiSessionHistory,
   findPiSessionFile,
