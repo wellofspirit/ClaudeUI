@@ -44,7 +44,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { SyncCore, type Delivery } from '../sync-core'
 import { applyEvent, checkDerivedFields } from '../../shared/sync/reducer'
-import { isVolatileStream } from '../../shared/sync/channels'
+import { canonicalChannels, isVolatileStream } from '../../shared/sync/channels'
 import {
   applyItemStreamFrame,
   itemStreamKey,
@@ -165,6 +165,48 @@ const EXTRA_EVENTS: PoolEvent[] = [
     }
   ],
   ['session:slash-commands', 'rid', [{ name: '/compact' }, { name: '/review' }]],
+  ['session:plan', 'rid', [{ content: 'step', status: 'pending', activeForm: 'stepping' }]],
+  ['session:held-changed', 'rid', { count: 2 }],
+  ['session:context-pressure', 'rid', { kind: 'ask', percent: 90 }],
+  ['session:context-pressure', 'rid', null],
+  ['session:auth-required', 'rid', { providerId: 'anthropic', message: 'expired' }],
+  ['provider:auth-resolved', { providerId: 'anthropic' }],
+  ['session:directories-changed', [{ path: '/repo', sessions: [] }]],
+  ['session:link-changed', { links: {}, refs: { rid: 'ref-rid' } }],
+  ['session:messages-retracted', 'rid', { messageIds: ['w1'] }],
+  ['session:tool-uses-retracted', 'rid', { messageId: 'sealer-1', toolUseIds: ['tu-1'] }],
+  [
+    'session:tool-review',
+    'rid',
+    { toolUseId: 'tu-1', review: { type: 'tool_review', reviewId: 'rv-1' } }
+  ],
+  [
+    'session:permission-denial',
+    'rid',
+    { toolUseId: 'tu-1', denial: { type: 'permission_denial', denialId: 'd-1' } }
+  ],
+  [
+    'session:subagent-message-batch',
+    'rid',
+    {
+      toolUseId: 'tu-task',
+      messages: [
+        {
+          id: 'sa-2',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'batched' }],
+          timestamp: 0
+        }
+      ]
+    }
+  ],
+  [
+    'session:subagent-tool-result',
+    'rid',
+    { toolUseId: 'tu-task', toolResultToolUseId: 'sa-tu-1', result: 'ok', isError: false }
+  ],
+  ['session:conversation-cleared', 'uuid-9', { permissionMode: 'default' }],
+  ['session:removed', 'temp-1'],
   // The 4b payload additions: an event-carried user identity and an
   // emitter-timed thinking span. Both must survive a snapshot + catchup fold
   // exactly like everything else.
@@ -359,9 +401,14 @@ function expectFoldsToHead(
   // The derived-field tripwire must agree on both sides too: a restore that
   // silently dropped `todos`/`sentFiles` would still compare equal if the fold
   // happened to re-derive them, and this catches the reverse (a restore that
-  // kept a value the transcript no longer supports).
-  expect(stableJson(checkDerivedFields(folded)), `seed ${seed}: derived drift after restore`).toBe(
-    stableJson(checkDerivedFields(live))
+  // kept a value the transcript no longer supports). A masked session is left out: live
+  // dropped its transcript (`checkDerivedFields` skips it as unseeded) while the replica
+  // still holds the one it was restored with, so an explicit `session:plan` after the drop
+  // reads as drift on one side only.
+  const derivedDrift = (state: CanonicalState): unknown =>
+    checkDerivedFields(state).filter((d) => !masked.has(d.routingId))
+  expect(stableJson(derivedDrift(folded)), `seed ${seed}: derived drift after restore`).toBe(
+    stableJson(derivedDrift(live))
   )
 }
 
@@ -423,6 +470,14 @@ describe('snapshot invariant — restore(N) + fold(N+1..head) === canonical@head
     ]) {
       expect(channels.has(required), `pool is missing ${required}`).toBe(true)
     }
+  })
+
+  it('the pool has an event for every channel the reducer folds', () => {
+    const inPool = new Set(POOL.map((e) => e.channel))
+    const missing = canonicalChannels().filter(
+      (channel) => !isVolatileStream(channel) && !inPool.has(channel)
+    )
+    expect(missing, `add an event for each to EXTRA_EVENTS: ${missing.join(', ')}`).toEqual([])
   })
 
   it('holds across 40 seeded interleavings', () => {

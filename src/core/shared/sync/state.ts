@@ -174,6 +174,40 @@ export function emptySession(routingId: string, cwd = ''): CanonicalSessionState
   }
 }
 
+/**
+ * Every per-session synced field, in wire key order. Derived from {@link emptySession}, so a
+ * field added to `CanonicalSessionState` is listed here as soon as the compiler makes
+ * `emptySession` carry it. {@link toSnapshot}, {@link fromSnapshot} and the replica projection
+ * all copy by this list.
+ */
+export const SESSION_FIELDS = Object.keys(
+  emptySession('')
+) as readonly (keyof CanonicalSessionState)[]
+
+/** The fields `toSnapshot` copies as they are: `seeded` has its own wire rule. */
+const WIRE_COPIED_FIELDS = SESSION_FIELDS.filter((key) => key !== 'seeded') as readonly Exclude<
+  keyof CanonicalSessionState,
+  'seeded'
+>[]
+
+function pickFields<T extends object, K extends keyof T>(
+  source: T,
+  keys: readonly K[]
+): Pick<T, K> {
+  const picked: Partial<T> = {}
+  for (const key of keys) picked[key] = source[key]
+  return picked as Pick<T, K>
+}
+
+/**
+ * A copy of an entry holding its synced fields and nothing else, in `SESSION_FIELDS` order.
+ * An entry built with `{ ...base, ...seed }` can carry a key that is not a synced field; a
+ * consumer that spreads this copy cannot pass one on.
+ */
+export function sessionFields(s: CanonicalSessionState): CanonicalSessionState {
+  return pickFields(s, SESSION_FIELDS)
+}
+
 export function emptyCanonicalState(): CanonicalState {
   return {
     sessions: {},
@@ -190,6 +224,40 @@ export function emptyCanonicalState(): CanonicalState {
     hiddenProjects: [],
     sessionLinks: {},
     sessionRefs: {}
+  }
+}
+
+/** What a wire session carries for each canonical field: its value, when there is one. */
+type CarriedFields = {
+  [K in keyof CanonicalSessionState]?: NonNullable<PerSessionSnapshot[K]>
+}
+
+/**
+ * The synced fields a wire session carries a value for (not `undefined`, not `null`). Reading
+ * `wire[key]` for every canonical key is what makes `PerSessionSnapshot` declare each of them.
+ * Keys the wire carries beyond `SESSION_FIELDS` are dropped.
+ */
+function carriedFields(wire: PerSessionSnapshot): CarriedFields {
+  const carried: Partial<Record<keyof CanonicalSessionState, unknown>> = {}
+  for (const key of SESSION_FIELDS) {
+    const value = wire[key]
+    if (value !== undefined && value !== null) carried[key] = value
+  }
+  return carried as CarriedFields
+}
+
+/**
+ * One wire session onto an empty entry: a field the wire does not carry keeps its empty
+ * value, so an older host's missing field restores as its default. The assignment to
+ * `CanonicalSessionState` is what checks every wire field type against its canonical one.
+ */
+function sessionFromWire(id: string, wire: PerSessionSnapshot): CanonicalSessionState {
+  return {
+    ...emptySession(id),
+    ...carriedFields(wire),
+    routingId: id,
+    // Absent means an older host, whose snapshots are all complete.
+    seeded: wire.seeded ?? true
   }
 }
 
@@ -213,39 +281,7 @@ export function emptyCanonicalState(): CanonicalState {
 export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
   const sessions: Record<string, CanonicalSessionState> = {}
   for (const [id, s] of Object.entries(snapshot.sessions ?? {})) {
-    sessions[id] = {
-      routingId: id,
-      cwd: s.cwd,
-      messages: s.messages,
-      itemStreams: s.itemStreams ?? {},
-      itemStreamRevision: s.itemStreamRevision ?? 0,
-      status: s.status,
-      pendingApprovals: s.pendingApprovals,
-      todos: s.todos,
-      sentFiles: s.sentFiles ?? [],
-      queue: s.queue ?? [],
-      heldCount: s.heldCount ?? 0,
-      contextPressure: s.contextPressure ?? null,
-      taskNotifications: s.taskNotifications,
-      activeTasks: s.activeTasks ?? {},
-      taskProgressMap: s.taskProgressMap,
-      subagentMessages: s.subagentMessages,
-      permissionMode: s.permissionMode,
-      effort: s.effort ?? null,
-      thinkingMode: s.thinkingMode ?? null,
-      reasoningVariant: s.reasoningVariant ?? null,
-      statusLine: s.statusLine,
-      metering: s.metering ?? null,
-      slashCommands: s.slashCommands ?? [],
-      sdkActive: s.sdkActive ?? false,
-      selectedEngineId: s.selectedEngineId ?? 'claude',
-      selectedModel: s.selectedModel ?? 'default',
-      // The WHOLE object, never a field-by-field rebuild: `AuthRequiredState`
-      // grew from two fields to five (ADR-070 §2) and a rebuild is the shape of
-      // edit that silently drops the new ones on every resync.
-      authRequired: s.authRequired ?? null,
-      seeded: s.seeded ?? true
-    }
+    sessions[id] = sessionFromWire(id, s)
   }
   return {
     sessions,
@@ -275,33 +311,15 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
   const sessions: Record<string, PerSessionSnapshot> = {}
   for (const [id, s] of Object.entries(state.sessions)) {
     sessions[id] = {
+      // A keyed copy, not a spread: a stray key on a canonical entry must not reach the wire,
+      // and the wire's key order is `SESSION_FIELDS`, whatever order the entry was built in.
+      // Assigning it to `PerSessionSnapshot` is what checks every canonical field type.
+      ...pickFields(s, WIRE_COPIED_FIELDS),
       routingId: id,
-      cwd: s.cwd,
-      messages: s.messages,
+      // A hand-built entry may lack these two.
       itemStreams: s.itemStreams ?? {},
       itemStreamRevision: s.itemStreamRevision ?? 0,
-      status: s.status,
-      pendingApprovals: s.pendingApprovals,
-      todos: s.todos,
-      sentFiles: s.sentFiles,
-      queue: s.queue,
-      heldCount: s.heldCount,
-      contextPressure: s.contextPressure,
-      taskNotifications: s.taskNotifications,
-      activeTasks: s.activeTasks,
-      taskProgressMap: s.taskProgressMap,
-      subagentMessages: s.subagentMessages,
-      permissionMode: s.permissionMode,
-      effort: s.effort,
-      thinkingMode: s.thinkingMode,
-      reasoningVariant: s.reasoningVariant,
-      statusLine: s.statusLine,
       metering: s.metering ?? undefined,
-      slashCommands: s.slashCommands,
-      sdkActive: s.sdkActive,
-      selectedEngineId: s.selectedEngineId,
-      selectedModel: s.selectedModel,
-      authRequired: s.authRequired,
       // One rule: canonical does not hold this transcript. That covers a dropped
       // one AND a resume whose history read is still in flight; omitting the
       // second would hand a client that syncs inside that window an empty

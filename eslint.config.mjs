@@ -1,4 +1,6 @@
 import path from 'node:path'
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 import { defineConfig } from 'eslint/config'
 import tseslint from '@electron-toolkit/eslint-config-ts'
 import eslintConfigPrettier from 'eslint-config-prettier'
@@ -25,6 +27,45 @@ const TEST_AND_SCRIPT_FILES = [
   'patch/**',
   '**/*.config.{ts,mts,cts,js,mjs,cjs}'
 ]
+
+// The sealed per-session store fields (see the sealed-field block below): the member names of
+// `CanonicalSessionState`, read from its declaration, minus the two with no store field, with
+// `queue` under its store name, plus the derived `worktreeInfo`. This config cannot import
+// TypeScript, so those three exceptions are restated here; `sealed-fields.unit.test.ts` pins them
+// against `sealed-fields.ts`. An interface that is missing or empty throws: an empty alternation
+// would switch the seal off without a sound.
+function sealedSessionFieldNames() {
+  const file = path.resolve('src/core/shared/sync/state.ts')
+  const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest)
+  const declaration = source.statements.find(
+    (node) => ts.isInterfaceDeclaration(node) && node.name.text === 'CanonicalSessionState'
+  )
+  const members = declaration
+    ? declaration.members
+        .filter(ts.isPropertySignature)
+        .map((member) => member.name.getText(source))
+    : []
+  if (members.length === 0) {
+    throw new Error(
+      `eslint.config.mjs: no members found for interface CanonicalSessionState in ${file}; ` +
+        'the sealed per-session lint selectors would match nothing'
+    )
+  }
+  const withoutStoreField = new Set(['routingId', 'seeded'])
+  return [
+    ...members
+      .filter((name) => !withoutStoreField.has(name))
+      .map((n) => (n === 'queue' ? 'queuedItems' : n)),
+    'worktreeInfo'
+  ]
+}
+const SEALED_SESSION_FIELD_NAMES = sealedSessionFieldNames()
+const SEALED_SESSION_KEY_SELECTOR = `Property[key.name=/^(${SEALED_SESSION_FIELD_NAMES.join('|')})$/]`
+const SEALED_SESSION_MESSAGE =
+  'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
+  'only writer. Route the change through stores/replica.ts — the reducer branch for ' +
+  'its channel, or a sanctioned local write (patchLocalSession / seedColdSession). ' +
+  'See stores/sealed-fields.ts.'
 
 // THE ZOOM TRAP (ADR-093). SessionView renders the whole app under CSS
 // `zoom: uiFontScale`, and inside that subtree every vw/vh/dvh/svh/lvh length is
@@ -394,8 +435,9 @@ export default defineConfig(
   // §"Clients never compute state").
   //
   // A SEALED field is one the replica fold owns: its only writer is
-  // `renderer/src/stores/replica.ts`, projecting `applyEvent`'s output. The list
-  // below is the snapshot-carried state — per-session `PerSessionSnapshot` fields
+  // `renderer/src/stores/replica.ts`, projecting `applyEvent`'s output. The lists
+  // below are the snapshot-carried state — per-session `CanonicalSessionState` fields (read from
+  // its declaration by `sealedSessionFieldNames`)
   // plus the app-level `FullStateSnapshot` ones, plus the derived mirror the
   // projection also owns (`worktreeInfo`). Its prose twin,
   // with the reason each `canonical: false` channel is deliberately NOT here, is
@@ -431,22 +473,12 @@ export default defineConfig(
       'no-restricted-syntax': [
         'error',
         {
-          selector:
-            "CallExpression[callee.name='updateSession'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|heldCount|contextPressure|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|slashCommands|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
-          message:
-            'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
-            'only writer. Route the change through stores/replica.ts — the reducer branch for ' +
-            'its channel, or a sanctioned local write (patchLocalSession / seedColdSession). ' +
-            'See stores/sealed-fields.ts.'
+          selector: `CallExpression[callee.name='updateSession'] ${SEALED_SESSION_KEY_SELECTOR}`,
+          message: SEALED_SESSION_MESSAGE
         },
         {
-          selector:
-            "Property[key.name='sessions'] Property[key.name=/^(cwd|messages|itemStreams|itemStreamRevision|status|pendingApprovals|todos|sentFiles|queuedItems|heldCount|contextPressure|taskNotifications|activeTasks|taskProgressMap|subagentMessages|permissionMode|effort|thinkingMode|reasoningVariant|statusLine|metering|slashCommands|sdkActive|selectedEngineId|selectedModel|authRequired|worktreeInfo)$/]",
-          message:
-            'This per-session field is SEALED (SyncCore phase 4c): the replica fold is its ' +
-            'only writer. Route the change through stores/replica.ts — the reducer branch for ' +
-            'its channel, or a sanctioned local write (patchLocalSession / seedColdSession). ' +
-            'See stores/sealed-fields.ts.'
+          selector: `Property[key.name='sessions'] ${SEALED_SESSION_KEY_SELECTOR}`,
+          message: SEALED_SESSION_MESSAGE
         },
         {
           selector:
