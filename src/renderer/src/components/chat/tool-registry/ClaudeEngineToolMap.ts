@@ -63,7 +63,7 @@ function claudeKindOf(toolName: string): ToolKind {
     default: {
       if (isAgentTool(toolName)) return 'task'
       // The twenty tools that used to fall through to `unknown` — each one's
-      // shape is declared in claude-tool-specs.ts (docs/tool-survey.md § 7).
+      // shape is declared in claude-tool-specs.ts (docs/protocol-cc/04-system-subtypes.md § 4.2).
       const spec = claudeToolSpec(toolName)
       if (spec) return spec.kind
       return 'unknown'

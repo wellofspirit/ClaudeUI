@@ -508,7 +508,7 @@ These events fire for every active Claude session. All handlers receive a single
 #### Streaming: the item lane and its legacy compatibility
 
 Assistant text, reasoning and plans travel on the per-item lane as of 2026-09-17
-([design](per-item-streaming-design.md)). `session:item-open` and `session:item-seal`
+([lifecycle and producers](architecture/sync-core.md#item-stream-lifecycle-and-producers)). `session:item-open` and `session:item-seal`
 are ordinary events; `session:item-delta` is volatile and reaches a plugin through an
 in-process observer, because the lane is keyed by client connection and a plugin
 surface is not one (`src/main/services/plugin-manager.ts`).

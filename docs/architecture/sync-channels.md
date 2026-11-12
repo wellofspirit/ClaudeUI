@@ -69,7 +69,7 @@ generation, offset, chunk}` for ONE addressed block; `op: 'replace'` carries
     receiver's own cursor. Canonical `itemStreams` / `itemStreamRevision` are
     snapshot fields, and the two reliable channels
     `session:item-open` / `session:item-seal` establish and retire the entries.
-    Core and replicas share `item-stream.ts`. [Design](../per-item-streaming-design.md).
+    Core and replicas share `item-stream.ts`. [Lifecycle and producers](sync-core.md#item-stream-lifecycle-and-producers).
     This flavor replaced `text-stream` (`session:stream`,
     `session:subagent-stream`, an accumulating `{streamId, turnId, offset, chunk}`
     frame folded by `applyStreamFrame`), which was retired with its channels on

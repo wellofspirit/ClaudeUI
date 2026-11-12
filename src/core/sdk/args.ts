@@ -370,7 +370,7 @@ export function buildSpawnEnv(base: NodeJS.ProcessEnv = process.env): SpawnEnv {
   // (TaskCreate/TaskGet/TaskList/TaskUpdate, gated on `z_() && mL()`) needs this
   // variable. With neither set, a Claude session has NO checklist tool at all and
   // the todo widget never fires — probed against the real binary's `system/init`
-  // on 2026-09-18 (docs/tool-survey.md § 7). The renderer already handles the
+  // on 2026-09-18 (docs/protocol-cc/04-system-subtypes.md § 4.2, "Tool availability gates"). The renderer already handles the
   // family: `HIDDEN_TOOLS` suppresses the four cards and `derive-session.ts`
   // folds them into the widget. Set only when the user has not chosen otherwise,
   // so an explicit opt-out in the environment still wins.

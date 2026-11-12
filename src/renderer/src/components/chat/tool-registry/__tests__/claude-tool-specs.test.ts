@@ -2,7 +2,7 @@
  * The per-tool specs for Claude's twenty previously-unmapped tools.
  *
  * Two guards matter here. First, that every tool cli.js 2.1.268 can hand us has
- * a shape (docs/tool-survey.md § 7 is the census this list mirrors) — a
+ * a shape (docs/protocol-cc/04-system-subtypes.md § 4.2 describes the tool set this list mirrors) — a
  * regression here means a tool silently went back to dumping its own JSON.
  * Second, that a spec never invents a field: the input is whatever the model
  * sent, so a missing or wrongly-typed value must drop out rather than render as
