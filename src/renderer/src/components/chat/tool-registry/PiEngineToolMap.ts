@@ -396,7 +396,8 @@ const PI_DISPLAY_NAMES: Record<string, string> = {
 
 function piDisplayName(toolName: string): string {
   // ClaudeUI's own tools are registered under their bare names (first-party-tool-names.ts).
-  return firstPartyDisplayName(toolName, 'bare') ?? PI_DISPLAY_NAMES[toolName] ?? toolName
+  const own = Object.hasOwn(PI_DISPLAY_NAMES, toolName) ? PI_DISPLAY_NAMES[toolName] : undefined
+  return firstPartyDisplayName(toolName, 'bare') ?? own ?? toolName
 }
 
 export const PiEngineToolMap: EngineToolMap = {

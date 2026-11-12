@@ -314,10 +314,10 @@ describe('tool kinds and labels, every known name on every engine', () => {
       "render_mermaid ": - | unknown | unknown | unknown | unknown
       "mystery": - | unknown | unknown | unknown | unknown
       "": - | unknown | unknown | unknown | unknown
-      "constructor": - |  | unknown | unknown | unknown
-      "toString": - |  | unknown | unknown | unknown
-      "hasOwnProperty": - |  | unknown | unknown | unknown
-      "__proto__": - |  | unknown | unknown | unknown
+      "constructor": - | unknown | unknown | unknown | unknown
+      "toString": - | unknown | unknown | unknown | unknown
+      "hasOwnProperty": - | unknown | unknown | unknown | unknown
+      "__proto__": - | unknown | unknown | unknown | unknown
       "claudeui_constructor": - | unknown | unknown | unknown | unknown
       "claudeui___proto__": - | unknown | unknown | unknown | unknown
       "mcp__claude-ui__constructor": mcp | mcp | mcp | mcp | mcp
@@ -471,10 +471,10 @@ describe('tool kinds and labels, every known name on every engine', () => {
       "render_mermaid ": render_mermaid  | render_mermaid  | render_mermaid 
       "mystery": mystery | mystery | mystery
       "":  |  | 
-      "constructor": constructor | function Object() { [native code] } | function Object() { [native code] }
-      "toString": toString | function toString() { [native code] } | function toString() { [native code] }
-      "hasOwnProperty": hasOwnProperty | function hasOwnProperty() { [native code] } | function hasOwnProperty() { [native code] }
-      "__proto__": __proto__ | [object Object] | [object Object]
+      "constructor": constructor | constructor | constructor
+      "toString": toString | toString | toString
+      "hasOwnProperty": hasOwnProperty | hasOwnProperty | hasOwnProperty
+      "__proto__": __proto__ | __proto__ | __proto__
       "claudeui_constructor": claudeui_constructor | claudeui_constructor | claudeui_constructor
       "claudeui___proto__": claudeui___proto__ | claudeui___proto__ | claudeui___proto__
       "mcp__claude-ui__constructor": mcp__claude-ui__constructor | mcp__claude-ui__constructor | mcp__claude-ui__constructor

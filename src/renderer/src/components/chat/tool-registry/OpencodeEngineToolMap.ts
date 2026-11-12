@@ -281,9 +281,10 @@ const OPENCODE_DISPLAY_NAMES: Record<string, string> = {
 
 function opencodeDisplayName(toolName: string): string {
   // ClaudeUI's own hosted tools are `claudeui_<tool>` (first-party-tool-names.ts).
-  return (
-    firstPartyDisplayName(toolName, 'claudeui_') ?? OPENCODE_DISPLAY_NAMES[toolName] ?? toolName
-  )
+  const own = Object.hasOwn(OPENCODE_DISPLAY_NAMES, toolName)
+    ? OPENCODE_DISPLAY_NAMES[toolName]
+    : undefined
+  return firstPartyDisplayName(toolName, 'claudeui_') ?? own ?? toolName
 }
 
 export const OpencodeEngineToolMap: EngineToolMap = {
