@@ -14,12 +14,18 @@ import { makeOverview } from './openrouter-fixtures'
 
 // Captured so a test can fire them; the real registry defers a listener when no
 // transport client exists, which would swallow the emit.
-const syncHandlers = new Map<string, (...args: unknown[]) => void>()
+const syncHandlers = new Map<string, Set<(...args: unknown[]) => void>>()
+const fire = (channel: string, ...args: unknown[]): void => {
+  for (const cb of syncHandlers.get(channel) ?? []) cb(...args)
+}
 vi.mock('../../../../../core/shared/sync/client-registry', () => ({
   onSyncEvent: (channel: string, cb: (...args: unknown[]) => void) => {
-    syncHandlers.set(channel, cb)
-    return () => syncHandlers.delete(channel)
-  }
+    const set = syncHandlers.get(channel) ?? new Set()
+    set.add(cb)
+    syncHandlers.set(channel, set)
+    return () => set.delete(cb)
+  },
+  onSyncAnswered: () => () => {}
 }))
 
 vi.mock('../../../hooks/useIsMobile', () => ({
@@ -92,7 +98,7 @@ describe('UsageView — OpenRouter tab', () => {
     expect(screen.queryByTestId('UsageView.tab.openrouter')).toBeNull()
 
     statusFn.mockResolvedValue({ configured: true })
-    act(() => syncHandlers.get('provider:credentials-changed')?.())
+    act(() => fire('provider:credentials-changed'))
     await screen.findByTestId('UsageView.tab.openrouter')
   })
 
@@ -102,7 +108,7 @@ describe('UsageView — OpenRouter tab', () => {
     await screen.findByTestId('OpenRouterPanel.budget')
 
     statusFn.mockResolvedValue({ configured: false })
-    act(() => syncHandlers.get('provider:credentials-changed')?.())
+    act(() => fire('provider:credentials-changed'))
     await waitFor(() => expect(panelTab()).toBe('spend'))
     expect(screen.queryByTestId('UsageView.tab.openrouter')).toBeNull()
   })

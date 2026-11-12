@@ -20,12 +20,18 @@ import type { UsageHubDevice, UsageHubState, UsageHubStatus } from '../../../../
 // The pane's one push subscription, captured so a test can fire it. The real
 // registry DEFERS a listener while no transport client exists, which would
 // swallow the emit in jsdom.
-const syncHandlers = new Map<string, (...args: unknown[]) => void>()
+const syncHandlers = new Map<string, Set<(...args: unknown[]) => void>>()
+const fire = (channel: string, ...args: unknown[]): void => {
+  for (const cb of syncHandlers.get(channel) ?? []) cb(...args)
+}
 vi.mock('../../../../../core/shared/sync/client-registry', () => ({
   onSyncEvent: (channel: string, cb: (...args: unknown[]) => void) => {
-    syncHandlers.set(channel, cb)
-    return () => syncHandlers.delete(channel)
-  }
+    const set = syncHandlers.get(channel) ?? new Set()
+    set.add(cb)
+    syncHandlers.set(channel, set)
+    return () => set.delete(cb)
+  },
+  onSyncAnswered: () => () => {}
 }))
 
 const THIS_DEVICE = '11111111-1111-4111-8111-111111111111'
@@ -332,7 +338,7 @@ describe('UsageHubSettings', () => {
     await mount()
     expect(api.usageHubStatus).toHaveBeenCalledTimes(1)
     api.usageHubStatus.mockResolvedValue(makeStatus({ state: 'syncing' }))
-    syncHandlers.get('usage-hub:changed')!()
+    fire('usage-hub:changed')
     await waitFor(() =>
       expect(screen.getByTestId('UsageHubSettings.status')).toHaveAttribute('data-state', 'syncing')
     )
@@ -345,7 +351,7 @@ describe('UsageHubSettings', () => {
       target: { value: 'workshop' }
     })
     api.usageHubStatus.mockResolvedValue(makeStatus({ state: 'syncing' }))
-    syncHandlers.get('usage-hub:changed')!()
+    fire('usage-hub:changed')
     await waitFor(() =>
       expect(screen.getByTestId('UsageHubSettings.status')).toHaveAttribute('data-state', 'syncing')
     )

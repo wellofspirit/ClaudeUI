@@ -19,7 +19,8 @@ vi.mock('../../../../../core/shared/sync/client-registry', () => ({
     set.add(cb)
     syncHandlers.set(channel, set)
     return () => set.delete(cb)
-  }
+  },
+  onSyncAnswered: () => () => {}
 }))
 // The footer test mounts SettingsPanel; keep its heavy neighbours out.
 vi.mock('../../SettingsDialog', () => ({

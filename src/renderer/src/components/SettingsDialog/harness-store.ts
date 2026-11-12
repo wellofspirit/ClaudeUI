@@ -31,6 +31,7 @@
  */
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import { onSyncEvent } from '../../../../core/shared/sync/client-registry'
+import { onNudge } from '../../lib/on-nudge'
 import type {
   HarnessId,
   HarnessInstallProgress,
@@ -200,7 +201,8 @@ class HarnessStore {
   private retain(): void {
     this.retained++
     if (this.retained > 1) return
-    const offChanged = onSyncEvent('harness:changed', () => this.scheduleRefresh())
+    // One timer (`scheduleRefresh`); an answered sync re-reads too, a full one replays no event.
+    const offChanged = onNudge('harness:changed', () => this.scheduleRefresh(), 0)
     const offProgress = onSyncEvent('harness:install-progress', (p) => this.onProgress(p))
     this.offEvents = () => {
       offChanged()

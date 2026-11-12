@@ -12,7 +12,12 @@ import type {
   HarnessStateEntry,
   HarnessStateSnapshot
 } from '../../../../../shared/harness-types'
-import { harnessStore } from '../harness-store'
+import { SyncClient } from '../../../../../core/shared/sync/sync-client'
+import {
+  resetSyncClientForTests,
+  setSyncClient
+} from '../../../../../core/shared/sync/client-registry'
+import { CHANGED_DEBOUNCE_MS, harnessStore } from '../harness-store'
 
 function entry(id: HarnessId, revision: string, available = true): HarnessStateEntry {
   return {
@@ -113,5 +118,31 @@ describe('harnessStore.followRunChanges', () => {
     off()
     await read(snapshot({ pi: 'pi-r2' }))
     expect(follower).toHaveBeenCalledWith(['pi'])
+  })
+})
+
+describe('harnessStore after a full sync', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    resetSyncClientForTests()
+  })
+
+  it('re-reads harness:state although a full sync replayed no harness:changed', async () => {
+    vi.useFakeTimers()
+    resetSyncClientForTests()
+    const client = new SyncClient({ requestResync: () => {} })
+    client.markReady()
+    setSyncClient(client)
+    const reads = vi.fn(async () => state)
+    ;(window as unknown as { api: Record<string, unknown> }).api = { harnessState: reads }
+
+    const unsubscribe = harnessStore.subscribe(() => {})
+    await vi.advanceTimersByTimeAsync(0)
+    expect(reads).toHaveBeenCalledTimes(1)
+
+    client.applyFullState({ seq: 5 } as never, 'epoch-A', 5)
+    await vi.advanceTimersByTimeAsync(CHANGED_DEBOUNCE_MS)
+    expect(reads).toHaveBeenCalledTimes(2)
+    unsubscribe()
   })
 })

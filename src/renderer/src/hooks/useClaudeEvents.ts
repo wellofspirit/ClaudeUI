@@ -33,6 +33,7 @@ import {
   onSyncEvent,
   markSyncReady
 } from '../../../core/shared/sync/client-registry'
+import { onNudge } from '../lib/on-nudge'
 import { useSessionStore } from '../stores/session-store'
 import { onReplicaApplied, seedWatchedSession, getReplicaState } from '../stores/replica'
 import { loadResumedTranscript } from '../lib/session-history-load'
@@ -350,9 +351,12 @@ export function useClaudeEvents(): void {
       // panel-driven read finished. The map itself is read back
       // through `usage:chatgpt-limits`, so there is one shape and one owner.
       // `false`: re-read what the host already holds, never provoke a fetch.
-      onSyncEvent('usage:chatgpt-limits-changed', () => {
-        void useSessionStore.getState().loadChatgptLimits(false)
-      }),
+      // Also re-read on every answered sync: a full one replays no nudge.
+      onNudge(
+        'usage:chatgpt-limits-changed',
+        () => void useSessionStore.getState().loadChatgptLimits(false),
+        0
+      ),
       // A bare nudge: an engine's catalog filled after main had answered us a
       // degraded empty one (pi's probe failing at boot). The composer re-fetches
       // THAT engine's slice only (no other engine is re-probed) and the Settings
@@ -363,6 +367,12 @@ export function useClaudeEvents(): void {
       onSyncEvent('engine:models-changed', ({ engineId }) => {
         const store = useSessionStore.getState()
         store.reloadEngineModels(engineId)
+        void store.refreshProviderAuth().catch(() => undefined)
+      }),
+      // The nudge above can be lost to a full resync: re-read every engine then.
+      onSyncAnswered(() => {
+        const store = useSessionStore.getState()
+        store.reloadModels()
         void store.refreshProviderAuth().catch(() => undefined)
       }),
       // Auth source from session init ('none' = logged out) — drives the banner

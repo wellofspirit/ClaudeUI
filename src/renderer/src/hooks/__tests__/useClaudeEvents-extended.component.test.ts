@@ -1104,6 +1104,18 @@ describe('useClaudeEvents extended component tests', () => {
       })
       await vi.waitFor(() => expect(listProviderRegistry).toHaveBeenCalledTimes(1))
     })
+
+    it('reloads every engine after an answered sync that replayed no nudge', () => {
+      Object.assign(window.api, {
+        listProviderRegistry: vi.fn(async () => ({ entries: [], opencodeInstalled: false }))
+      })
+      const before = useSessionStore.getState().engineModelReloadNonces
+
+      app.syncClient.applyFullState({ seq: 1000 } as never, 'epoch-A', 1000)
+
+      const after = useSessionStore.getState().engineModelReloadNonces
+      for (const id of Object.keys(before) as EngineId[]) expect(after[id]).toBe(before[id] + 1)
+    })
   })
 
   describe('usage:block-data', () => {
