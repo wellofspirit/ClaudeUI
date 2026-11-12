@@ -21,7 +21,7 @@ User prompt → InputBox → window.api.sendPrompt (IPC)
 ```
 
 The three item channels are the per-item volatile lane that replaced the session
-text/thinking buffers on 2026-09-17 ([design](../per-item-streaming-design.md)).
+text/thinking buffers on 2026-09-17 ([lifecycle and producers](sync-core.md#item-stream-lifecycle-and-producers)).
 `session:item-open` and `session:item-seal` are ordinary ringed events; only
 `session:item-delta` leaves the event system, and it carries one chunk rather than
 a growing body. All three folds live in `src/core/shared/sync/item-stream.ts` and run

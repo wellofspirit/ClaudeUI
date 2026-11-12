@@ -124,6 +124,14 @@ Consumer uses this to resolve temp routingId → real session UUID.
 - **`uuid`** — new randomUUID per init message; unrelated to `session_id`.
 - **`fast_mode_state`** — only emitted when eligible account (see `09-initialize.md`).
 
+### Tool availability gates
+
+`tools` is the ENABLED set, not the set of loaded schemas: tools marked deferred (WebFetch, WebSearch, NotebookEdit, Monitor, the Cron and Task families, ...) are listed and reach the model later through `ToolSearch`. A tool missing from the array is disabled, which is how the gates below show up: probe by spawning in ClaudeUI's shape and killing the process at `init`, so no request is made. cli.js defines many more tool objects than any CLI spawn enables (most are claude.ai or Desktop surfaces); what a ClaudeUI session receives is what `init.tools` lists for its spawn shape (`--permission-prompt-tool stdio`, `CLAUDE_CODE_ENTRYPOINT=claude-desktop`), plus per-install `mcp__*` names. The renderer's per-tool cards are `tool-registry/claude-tool-specs.ts` and `ClaudeEngineToolMap.ts`.
+
+- **Checklist tools.** The Tasks system is on unless `CLAUDE_CODE_ENABLE_TASKS=false`. `TodoWrite` is enabled only when it is off; the replacement family (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`) needs the Tasks system on AND `CLAUDE_CODE_ENABLE_TODO_TOOLS=true`. With neither set a session has no checklist tool at all. `buildEnv` (`src/core/sdk/args.ts`) sets `CLAUDE_CODE_ENABLE_TODO_TOOLS` unless the environment already chose a value; `src/core/sdk/__tests__/tool-gates.test.ts` pins it.
+- **`AskUserQuestion` and `ExitPlanMode`** are disabled in a non-interactive session unless a permission-prompt tool other than `none` is set. ClaudeUI passes `--permission-prompt-tool stdio` whenever it supplies `canUseTool`; a spawn without it silently loses plan mode's exit tool and the question card (same test file).
+- **Aliases.** `BashOutput` and `AgentOutput` are `TaskOutput`; `KillShell` and `KillBash` are `TaskStop`. `MultiEdit` no longer exists.
+
 This is the authoritative source for session_id, current model, active permissionMode, available tools / commands / skills / agents / plugins / MCP servers. The `initialize` control_response has complementary data (models/commands/agents arrays with more detail). Our harness reads both — init for runtime state, control_response for catalog data.
 
 ---

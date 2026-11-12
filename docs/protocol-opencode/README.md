@@ -3,8 +3,7 @@
 How ClaudeUI talks to opencode 2.x ([ADR-097](../adr/opencode.md)): the pin, the
 server lifecycle, the routes and events it uses, permissions, credentials, the inbox, the
 `claudeui-xeng` plugin, the config it injects, and the contract suite that gates every pin bump.
-Facts are for the pinned version and cite `vendor/opencode-src/...` at that tag. The spike's
-evidence and live transcripts are in [`docs/opencode-v2-spike.md`](../opencode-v2-spike.md); the
+Facts are for the pinned version and cite `vendor/opencode-src/...` at that tag. The
 as-built decisions per slice are ADR-097's "As built" sections.
 
 opencode 1.x is not supported: its adapter was deleted at slice S10a (ADR-097 "As built (S10a)").

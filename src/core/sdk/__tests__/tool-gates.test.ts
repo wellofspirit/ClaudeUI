@@ -3,7 +3,7 @@
  *
  * Two gates in 2.1.268 are invisible until a card stops appearing, so both are
  * pinned here (probed against the real binary's `system/init` on 2026-09-18,
- * recorded in docs/tool-survey.md § 7):
+ * recorded in docs/protocol-cc/04-system-subtypes.md § 4.2):
  *
  *  1. `TodoWrite.isEnabled` is `!z_() && mL()` and the TaskCreate family is
  *     `z_() && mL()`, where `z_()` is "the Tasks system is on" (default true).
