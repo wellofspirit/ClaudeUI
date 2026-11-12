@@ -28,9 +28,15 @@ describe('app-settings readers', () => {
   })
 
   it('only appSetting reads the settings out of canonical state', () => {
-    expect(filesMatching(hostSide, /getCanonicalState\(\)\.settings\b/), FIX).toEqual([
-      'src/core/services/app-settings.ts'
-    ])
+    // The chained read (wrapped or not) and the destructured one. A read through a local
+    // (`const state = getCanonicalState()`, then `state.settings`) is not caught here.
+    const chained = /getCanonicalState\(\)\s*\.settings\b/
+    const destructured = /\{[^{}]*\bsettings\b[^{}]*\}\s*=\s*[\w.]*getCanonicalState\(\)/
+    const readers = hostSide.filter((f) => {
+      const text = readSource(f)
+      return chained.test(text) || destructured.test(text)
+    })
+    expect(readers, FIX).toEqual(['src/core/services/app-settings.ts'])
   })
 
   it('the schema and its defaults are declared once', () => {

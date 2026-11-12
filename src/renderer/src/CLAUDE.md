@@ -13,7 +13,7 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 
 ## Recipes
 
-**A persisted app setting with its Settings control** (exemplar: `START_IN_WORKTREE` in `src/renderer/src/components/SettingsDialog/settings-pages.tsx`)
+**A persisted app setting with its Settings control** (row exemplar: `START_IN_WORKTREE` in `src/renderer/src/components/SettingsDialog/settings-pages.tsx`; its key `startInWorktree` is the step 2 kind, `agentModelTierColors` the step 1 kind)
 
 1. `src/shared/app-settings.ts`, `AppSettings`: add the key, required, and its default in `DEFAULT_SETTINGS` [compiler: a required key forces the default]. That default is the only one: the store merges it and core resolves through it.
 2. Optional with no default only when unset is its own state (Reset then deletes the key); a resolver in `src/shared/` then owns what unset means, as `sessionToolsEnabled` does [nothing].
