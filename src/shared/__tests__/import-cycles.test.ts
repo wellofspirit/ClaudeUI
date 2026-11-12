@@ -177,7 +177,7 @@ describe('static value-import cycles', () => {
           `\n  one chain: ${chainAround(graph, members)}\n` +
           (overlap
             ? `  it overlaps the known cycle "${overlap.reason}"; break the new edge, or update the KNOWN_CYCLES entry if the change is deliberate.`
-            : '  break it: move the shared symbol to a leaf module, or make the back edge a type-only or lazy import.')
+            : '  break it: if an import on the chain is used only as a type, write `import type` (the scan counts every other import as a value edge); otherwise move the shared symbol to a leaf module, or make the back edge a lazy import().')
       )
     }
     for (const c of KNOWN_CYCLES) {
