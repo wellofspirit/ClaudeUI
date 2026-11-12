@@ -903,8 +903,40 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
       'step 3c: Settings → Remote access (railItem remote) mounts RemotePasskeySettings with the Walk Edge row'
     )
 
+    /**
+     * Pixels between the prompt's last line ("Not now") and the bottom edge of
+     * the card around it. Geometry only a real browser has: the card was a
+     * stretched flex item, which made the prompt's full-height root overflow it
+     * and put that line on the card's border (a negative number here).
+     */
+    const promptBottomGap = (promptId: string): Promise<number> =>
+      page.evaluate((id) => {
+        const prompt = document.querySelector(`[data-testid="${id}"]`)
+        const cancel = document.querySelector(`[data-testid="${id}.cancel"]`)
+        const card = prompt?.parentElement
+        if (!cancel || !card) return Number.NaN
+        return card.getBoundingClientRect().bottom - cancel.getBoundingClientRect().bottom
+      }, promptId)
+
     const sessionsBefore = sessionRows().length
     const assertsBefore = auditRows('auth:webauthn-assert').filter((r) => r.outcome === 'ok').length
+
+    // The security editor's unlock card, opened and dismissed: "Not now" proves
+    // nothing and opens no session, so the passkey pane below still starts locked.
+    await byId('SessionSecuritySettings.edit').click()
+    await waitForTestId(page, 'SessionSecuritySettings.prompt')
+    // Into view first, so the screenshot shows the line the number is about.
+    await byId('SessionSecuritySettings.prompt.cancel').scrollIntoViewIfNeeded()
+    const securityGap = await promptBottomGap('SessionSecuritySettings.prompt')
+    expect(securityGap, 'the security unlock card contains its prompt').toBeGreaterThanOrEqual(8)
+    const shotSecurityPrompt = await shot(page, '20-security-pane-prompt')
+    await byId('SessionSecuritySettings.prompt.cancel').click()
+    await byId('SessionSecuritySettings.prompt').waitFor({ state: 'detached' })
+    expect(sessionRows().length, 'a dismissed unlock opens no session').toBe(sessionsBefore)
+    note(
+      `step 3c: security editor unlock card: "Not now" sits ${Math.round(securityGap)}px inside the card; dismissed, no session opened → ${shotSecurityPrompt}`
+    )
+
     await row.locator('[data-testid="RemotePasskeySettings.credentialName"]').click()
     const input = row.locator('[data-testid="RemotePasskeySettings.credentialNameInput"]')
     await input.fill('Walk Edge renamed')
@@ -912,8 +944,11 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     await waitForTestId(page, 'RemotePasskeySettings.prompt')
     expect((await listCredentials())[0].nickname, 'held until the unlock').toBe('Walk Edge')
     expect(sessionRows().length).toBe(sessionsBefore)
+    await byId('RemotePasskeySettings.prompt.cancel').scrollIntoViewIfNeeded()
+    const passkeyGap = await promptBottomGap('RemotePasskeySettings.prompt')
+    expect(passkeyGap, 'the passkey unlock card contains its prompt').toBeGreaterThanOrEqual(8)
     note(
-      `step 3c: rename + Enter → unlock prompt shown, nickname unchanged server-side → ${await shot(page, '16-passkey-pane-prompt')}`
+      `step 3c: rename + Enter → unlock prompt shown ("Not now" ${Math.round(passkeyGap)}px inside its card), nickname unchanged server-side → ${await shot(page, '16-passkey-pane-prompt')}`
     )
 
     await byId('RemotePasskeySettings.prompt.passkey').click()
@@ -979,6 +1014,8 @@ describe.skipIf(SKIP)('E2E (gated): passkeys browser walk over tailscale serve',
     await secondRow.locator('[data-testid="RemotePasskeySettings.credentialRevoke"]').click()
     await secondRow.locator('[data-testid="RemotePasskeySettings.credentialRevoke"]').click()
     expect(await untilAsync(async () => (await listCredentials()).length === 1)).toBe(true)
+    // The pane re-reads after the revoke: wait for ITS row to go, not only the server's.
+    await secondRow.waitFor({ state: 'detached', timeout: 15_000 })
     expect(await hasTestId(page, 'RemotePasskeySettings.prompt')).toBe(false)
     expect(auditRows('auth:policy-change').length, '2→1 moves no policy').toBe(policyRowsBefore)
     expect(sessionRows().length).toBe(sessionsBefore + 1)
