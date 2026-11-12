@@ -180,6 +180,26 @@ describe('subagent-watcher', () => {
     )
   })
 
+  it('renders a fallback block as the model-switch note, not raw JSON', async () => {
+    const filePath = path.join(ctx.subagentDir, 'agent-fallback--team.jsonl')
+    const prompt = 'Fallback rendering prompt'
+    await fsp.writeFile(
+      filePath,
+      teammateLine('user', prompt) +
+        teammateLine('assistant', [{ type: 'fallback', from: { model: 'a' }, to: { model: 'b' } }])
+    )
+
+    const sendFn = vi.fn()
+    watchSubagent('tool-use-fallback', ctx.sessionId, ctx.projectKey, prompt, sendFn)
+
+    await vi.waitFor(() => expect(sendFn).toHaveBeenCalled(), { timeout: 2000 })
+    const payload = sendFn.mock.calls[0][1] as {
+      messages: Array<{ role: string; content: unknown[] }>
+    }
+    const assistant = payload.messages.find((m) => m.role === 'assistant')
+    expect(assistant!.content).toEqual([{ type: 'text', text: 'Switched models from a to b.' }])
+  })
+
   it('skips malformed JSONL lines without crashing', async () => {
     const teammateName = 'bug-tester'
     const teamName = 'qa-team'

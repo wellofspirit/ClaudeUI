@@ -63,8 +63,7 @@ vi.mock('../claude-mcp', () => ({
   readDisabledMcpServers: vi.fn(() => [])
 }))
 vi.mock('../session-history', () => ({
-  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 })),
-  fallbackBlockText: vi.fn(() => '')
+  computeTokenMetrics: vi.fn(async () => ({ totalTokens: 0, totalCostUsd: 0 }))
 }))
 vi.mock('../subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../context-window', () => ({

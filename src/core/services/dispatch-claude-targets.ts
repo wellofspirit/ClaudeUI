@@ -11,7 +11,7 @@ import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
 import { claudeBehaviorSettings } from '../sdk/args'
 import { loadEngineConfig } from './ui-config'
 import { transformAssistantMessage } from './assistant-message'
-import { extractToolResultContent } from './tool-result-content'
+import { claudeToolResults, claudeUsageTokens } from './claude-transcript'
 import { ClaudeItemStreamLifecycle, streamEventParent } from './claude-item-stream'
 import { modelFallbackText, retractedMessageIds, retractionKey } from './claude-model-fallback'
 import { claudeThinkingRequest } from '../../shared/model-capabilities'
@@ -555,21 +555,10 @@ export class ClaudeTargets {
         // result is received — the failed-subtype capture, cap accumulation,
         // DB record, and Slice C fold-in below all consume the same delta.
         // Math.max(0, …) guards against a pathological backwards total.
-        const usageFields = result.usage as
-          | {
-              input_tokens?: number
-              output_tokens?: number
-              cache_creation_input_tokens?: number
-              cache_read_input_tokens?: number
-              cache_creation?: { ephemeral_1h_input_tokens?: number }
-            }
-          | undefined
-        const totalTokens = usageFields
-          ? (usageFields.input_tokens ?? 0) + (usageFields.output_tokens ?? 0)
-          : 0
+        //
         // The LEDGER's split (ADR-071 §1). Anthropic's `usage` is disjoint —
         // `input_tokens` already excludes both cache figures — so the fields map
-        // straight onto the ledger's shape. `totalTokens` above deliberately
+        // straight onto the ledger's shape. `totalTokens` below deliberately
         // stays input+output: it is what the task notification shows.
         //
         // `cache_creation.ephemeral_1h_input_tokens` is the 1h-TTL SUBSET of
@@ -578,13 +567,8 @@ export class ClaudeTargets {
         // dropping it here would underprice every dispatched Claude turn that
         // used the 1h cache. An older cli.js omits the breakdown, which the
         // recorder reads as all-5m — the same fallback block-usage makes.
-        const turnTokens: UsageTurnTokens = {
-          input: usageFields?.input_tokens ?? 0,
-          output: usageFields?.output_tokens ?? 0,
-          cacheWrite: usageFields?.cache_creation_input_tokens ?? 0,
-          cacheWrite1h: usageFields?.cache_creation?.ephemeral_1h_input_tokens ?? 0,
-          cacheRead: usageFields?.cache_read_input_tokens ?? 0
-        }
+        const turnTokens: UsageTurnTokens = claudeUsageTokens(result.usage)
+        const totalTokens = turnTokens.input + turnTokens.output
         const reportedTotalCostUsd = result.total_cost_usd ?? entry.lastReportedTotalCostUsd
         const turnCostUsd = Math.max(0, reportedTotalCostUsd - entry.lastReportedTotalCostUsd)
         entry.lastReportedTotalCostUsd = reportedTotalCostUsd
@@ -984,17 +968,13 @@ export class ClaudeTargets {
       const messageParam = (msg as { message?: { content?: unknown } }).message
       const content = messageParam?.content
       if (!Array.isArray(content)) return
-      for (const block of content as Array<Record<string, unknown>>) {
-        if (!block || block.type !== 'tool_result') continue
-        const toolResultToolUseId = block.tool_use_id as string | undefined
-        if (!toolResultToolUseId) continue
-        const { text: resultText, images } = extractToolResultContent(block.content)
+      for (const r of claudeToolResults(content)) {
         entry.ctx.emit('session:subagent-tool-result', {
           toolUseId,
-          toolResultToolUseId,
-          result: resultText,
-          isError: !!block.is_error,
-          ...(images ? { images } : {})
+          toolResultToolUseId: r.toolUseId,
+          result: r.text,
+          isError: r.isError,
+          ...(r.images ? { images: r.images } : {})
         })
       }
     }

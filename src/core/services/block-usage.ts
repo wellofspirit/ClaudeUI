@@ -22,6 +22,7 @@ import type {
 } from '../../shared/types'
 import { usageFetcher } from './usage-fetcher'
 import { logger } from './logger'
+import { claudeUsageTokens } from './claude-transcript'
 import { writeJsonAtomic } from './write-json-atomic'
 import {
   canonicalizeWindowEnd,
@@ -1534,16 +1535,16 @@ export class BlockUsageService {
           if (!model) return // Skip synthetic / invalid models
 
           const messageId = (data.message.id as string) || ''
-          const inTok = (usage.input_tokens as number) || 0
-          const outTok = (usage.output_tokens as number) || 0
-          const cacheCreate = (usage.cache_creation_input_tokens as number) || 0
-          const cacheRead = (usage.cache_read_input_tokens as number) || 0
-          // TTL breakdown of cache writes (cli.js sessions use the 1h cache,
-          // billed at 2× input). Older transcripts may lack the breakdown —
-          // treated as all-5m, matching the pre-split behavior.
-          const cacheBreakdown = usage.cache_creation as
-            { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } | undefined
-          const cache1h = (cacheBreakdown?.ephemeral_1h_input_tokens as number) || 0
+          // `cacheWrite1h` is the 1h-TTL subset of cache writes (cli.js sessions
+          // use the 1h cache, billed at 2× input). Older transcripts may lack
+          // the breakdown — treated as all-5m, matching the pre-split behavior.
+          const {
+            input: inTok,
+            output: outTok,
+            cacheWrite: cacheCreate,
+            cacheWrite1h: cache1h,
+            cacheRead
+          } = claudeUsageTokens(usage)
 
           // Calculate cost from tokens using model pricing (not from JSONL costUSD)
           const costUsd = calculateCostFromTokens(
