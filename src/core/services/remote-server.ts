@@ -659,6 +659,8 @@ interface AuthenticatedClient {
    * it — a waiver must not survive as evidence of a human who never appeared.
    */
   armedByWaiver?: boolean
+  /** A refused `sync` has been logged for this connection; later ones are silent. */
+  syncRefusalLogged?: boolean
   /** Shared with the pre-auth handshake — see {@link SocketChannel}. */
   channel: SocketChannel
   /**
@@ -5060,6 +5062,22 @@ export class RemoteServer {
    * as a broken sequence and reconnect.
    */
   private handleSync(ws: WebSocket, lastSeq: number, epoch?: string, chunked = false): void {
+    // A snapshot is not a command, so the registry never judges it: the grant
+    // test happens here. No frame goes back: the shipped client never asks in
+    // this state, and an unanswered request tells a prober nothing.
+    const client = this.clients.get(ws)
+    if (!client) return
+    if (!this.servedBySyncLane(client)) {
+      // Once per connection: the peer chooses how often it asks.
+      if (!client.syncRefusalLogged) {
+        client.syncRefusalLogged = true
+        logger.warn(
+          'remote-server',
+          `sync refused for ${client.ip}: the connection does not hold the base grants`
+        )
+      }
+      return
+    }
     // The full/catchup branching (fresh client, stale epoch, ring-evicted cursor)
     // lives in `shared/sync/sync-decision.ts` as of phase 4c, so this transport
     // and the desktop renderer's MessagePort (`services/sync-port.ts`) cannot
@@ -5280,13 +5298,32 @@ export class RemoteServer {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
   }
 
-  /** Broadcast a message to all authenticated clients. */
+  /**
+   * Is this client served by the sync lane: snapshots, catch-ups and the event
+   * fan-out? A command is refused by the registry when its capability is not
+   * granted; synced state does not travel through a command, so this lane asks
+   * the same question itself. Read from the LIVE grant set, so an enrollment
+   * connection is served from the moment its upgrade gives it the full set, on
+   * the same socket (ADR-052: an enrollment link reaches nothing else).
+   *
+   * Nothing removes a base grant from a live connection today. If that changes,
+   * the connection stops receiving events while it lacks one; the first event
+   * after it regains the set shows a sequence gap and the client resyncs. A
+   * `sync` it sends in between is not answered, so such a path must close the
+   * socket or answer the request once the set is back.
+   */
+  private servedBySyncLane(client: AuthenticatedClient): boolean {
+    return holdsBaseRemoteSurface(client.connection.grants)
+  }
+
+  /** Broadcast a message to every client the sync lane serves. */
   private broadcast(msg: WsServerMessage): void {
     // Serialized ONCE for every plaintext client — the event fan-out is a hot
     // path, and an encrypted client pays for its own ciphertext anyway.
     const plainPayload = JSON.stringify(msg)
     for (const [ws, client] of this.clients) {
       if (ws.readyState !== WebSocket.OPEN) continue
+      if (!this.servedBySyncLane(client)) continue
       if (client.channel.e2e?.isReady) {
         void this.sendOn(ws, client.channel, msg)
       } else {
