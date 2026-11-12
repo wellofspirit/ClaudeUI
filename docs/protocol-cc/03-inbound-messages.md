@@ -429,6 +429,8 @@ webSearchRequests, costUSD, contextWindow, maxOutputTokens }` — `costUSD` is
 | `error_max_turns`                                     | `--max-turns` limit hit                                    | `errors: ["Reached maximum number of turns (N)"]`, `num_turns` = exact count              |
 | `error_during_execution`                              | Stop-reason / content mismatch, or sandbox startup failure | `errors: ["[ede_diagnostic] result_type=... last_content_type=... stop_reason=...", ...]` |
 
+A startup failure reaches ClaudeUI as stderr text and exit code 1, not as a `result`. cli.js 2.1.321 writes a zeroed `error_during_execution` result carrying `startup_failure_reason` (and the message in `errors`) before it exits on a startup failure it recognises, such as a required sandbox that cannot run (`sandbox_required_unavailable`), but for most reasons only when the host sets `CLAUDE_CODE_STARTUP_FAILURE_RESULTS`, which ClaudeUI does not. The exceptions, written on every stream-json run, are `org_config_required_unavailable`, `org_config_refused` and `config_file_invalid` (from the result schema's own text; the sandbox case probed 2026-11-12: two stderr lines, no result). A session shows the stderr tail in its error; a dispatch target quotes it in the failure its run reports (ADR-116).
+
 ### Ordering
 
 The `result` is the LAST message of a turn. All other messages (stream_events, assistant, user, system) arrive before it. Consumer can treat `result` arrival as the turn-complete signal — but **turn-complete ≠ conversation-idle**, see below.
