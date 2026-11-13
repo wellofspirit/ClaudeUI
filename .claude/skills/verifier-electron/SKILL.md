@@ -555,6 +555,46 @@ baseUrl, authToken}})`.
   - Theme for screenshots: `document.documentElement.dataset.theme = 'light'` (delete
     it for dark).
 
+## Driver kit: a multi-step drive without hand-written launch code
+
+`scripts/verify-driver.mjs` launches a built checkout under Playwright in an isolated home (proxies on a dead
+port, credential-shaped variables stripped, its own harness store, temp dir and logs, all under the folder you
+give it) and serves a loopback endpoint that runs a posted async function body with `app` and `win` in scope:
+
+```
+node scripts/verify-driver.mjs <verify folder> <port> [--app <checkout with a build in out/>]
+curl -s --data-binary @step.js http://127.0.0.1:<port>/     # run a step; prints its JSON result, 500 + stack on a throw
+curl -s -X POST http://127.0.0.1:<port>/quit                 # close the app and exit
+```
+
+- It prints `driver ready pid=<n>` and writes `electron.pid`. Electron and `bun-claude` come from the nearest
+  checkout above the app dir, so a worktree needs no `node_modules` or `vendor/`. A worktree has no `out/` either:
+  build with the main checkout's `node_modules/.bin/electron-vite build --logLevel warn`, run from the worktree.
+- A verifier agent has no Write tool, and a worktree-isolated shell refuses heredocs that hold JS. Short step
+  bodies go inline (`--data-binary '<body>'`, single quotes outside, double inside); the orchestrator writes
+  longer ones into the verify folder. Do not add `--retry` to a step: a step that throws answers 500 and is retried.
+- `window.api` is frozen by the context bridge: wrapping one of its methods in the page records nothing. Record a
+  call where the host receives it: `app.evaluate(({ ipcMain }) => { const m = ipcMain._invokeHandlers; const h =
+m.get('session:create'); globalThis.__rec = []; m.set('session:create', (ev, ...a) => {
+globalThis.__rec.push(JSON.parse(JSON.stringify(a))); return h(ev, ...a) }) })`, read back with
+  `app.evaluate(() => globalThis.__rec)`. `app.evaluate` runs in the main process without `require`: use its
+  argument (the `electron` module), not `require(...)`.
+- A stand-in endpoint set with `saveVendorConfig('anthropic', { endpoint })` reaches a spawn only after a settings
+  save: follow it with `window.api.saveSettings(await window.api.loadSettings())`, or the engine answers
+  "Authentication required" and the stand-in sees nothing.
+- Claude rekeys a session's routing id to the engine's id after its first spawn: read `activeSessionId` again
+  before each step. `window.api.cancelSession(id)` ends the process and leaves the session inactive; the next send
+  spawns again.
+- A cli.js process that lives a second (a refused start) is caught by polling
+  `Get-CimInstance Win32_Process -Filter "Name='bun-claude.exe'"` filtered to the `vendor\claude-cli` path BEFORE
+  anything is written to disk: the unfiltered list holds the user's own sessions. cli.js leaves no
+  `claude-settings-*.json` for an inline `--settings`.
+- Fixture repositories in a worktree-isolated shell: plain separate commands with relative `-C` paths
+  (`git -C .work/<arc>/verify/fx init`); chains, `$VAR` paths and `cd` are refused. "Start in worktree" branches
+  from the remote's default branch, so the fixture needs a remote with `origin/HEAD` set (a bare clone beside it).
+- Stopping: `POST /quit`. If the driver died first, the app keeps running: find its listener or its children by
+  port (`netstat -ano | grep :<port>`) and stop by PID (`taskkill //PID <n> //T //F` in Git Bash), never by name.
+
 ## Caveats — what you can't (safely) drive
 
 - **New session** through the UI needs the native OS folder picker
