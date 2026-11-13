@@ -55,8 +55,9 @@ nothing has to be reconciled; a UISettings copy would be a file the feature neve
   on the Claude page): the whole `sandbox` block of the user settings file (`$CLAUDE_CONFIG_DIR` or `~/.claude`,
   as cli.js resolves it), so the terminal `claude` and ClaudeUI share one switch and one set of lists. Until then
   it was a private copy in ClaudeUI's Claude engine config, sent with every spawn; a one-time migration at boot
-  moves that copy into the file, and never turns off or loosens a sandbox that was on (an enabled copy is merged
-  into the file's block: lists united, the stricter of each switch where both were enabled). The value is replicated state
+  moves that copy into the file, and never turns off or loosens what a ClaudeUI process was bound by (an enabled
+  copy is merged into the file's block: lists united, the stricter of each switch where both were enabled; the
+  terminal gains the copy's lists). The value is replicated state
   (`config:claude-sandbox-changed`), and a poll of the file brings a change made outside ClaudeUI to every client.
   A save is a patch applied to a fresh read of the file: keys the page does not know are kept, and a file that
   cannot be parsed is refused. What a ClaudeUI process carries on top of the file when it is spawned is ADR-116
