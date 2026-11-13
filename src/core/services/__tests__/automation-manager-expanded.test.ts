@@ -49,7 +49,8 @@ vi.mock('electron', async () => {
 
 type SdkMode =
   | { kind: 'events'; events: Record<string, unknown>[] }
-  | { kind: 'waitForAbort' }
+  /** Wait for the run's abort, then yield `thenEvents` (what a torn-down turn still writes). */
+  | { kind: 'waitForAbort'; thenEvents?: Record<string, unknown>[] }
   /** Yield events, then idle — mirrors cli.js staying alive after a turn. */
   | { kind: 'eventsThenWait'; events: Record<string, unknown>[] }
   /** Write `stderr` to the `stderr` option, then die with `error` (after the run's abort, if `afterAbort`). */
@@ -86,6 +87,7 @@ vi.mock('../../sdk', () => ({
               resolve()
             })
           })
+          for (const event of mode.thenEvents ?? []) yield event
           return
         }
         if (mode.kind === 'stderrThenThrow') {
@@ -908,6 +910,75 @@ describe('AutomationManager — scheduling & runtime', () => {
 
     const [recorded] = mgr.listRuns('stderr-abort')
     expect(recorded.error ?? '').not.toContain('something on stderr')
+
+    mgr.stopAll()
+  })
+
+  // What cli.js 2.1.321 writes before it exits 1 on a start it refuses, here a required sandbox
+  // that cannot run (probed 2026-11-13). Read as the end of a turn, it recorded a success.
+  const refusedStart = {
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    num_turns: 0,
+    total_cost_usd: 0,
+    errors: ['Sandbox required but unavailable: no sandbox can run on this machine.'],
+    startup_failure_reason: 'sandbox_required_unavailable'
+  }
+
+  it('fails the run on an error result, with the reason cli.js gives', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = { kind: 'events', events: [refusedStart] }
+    mgr.upsert(makeAutomation({ id: 'refused-1' }))
+    await mgr.runNow('refused-1')
+
+    const [run] = mgr.listRuns('refused-1')
+    expect(run.status).toBe('error')
+    expect(run.error).toBe('Sandbox required but unavailable: no sandbox can run on this machine.')
+    // The process is not left waiting for a prompt: the loop's exit still closes the query.
+    expect(lastGeneratorReturned).toBe(true)
+
+    mgr.stopAll()
+  })
+
+  it('names the status of an error result that carries no message', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = {
+      kind: 'events',
+      events: [{ type: 'result', subtype: 'error_max_turns', total_cost_usd: 0.01 }]
+    }
+    mgr.upsert(makeAutomation({ id: 'refused-2' }))
+    await mgr.runNow('refused-2')
+
+    const [run] = mgr.listRuns('refused-2')
+    expect(run.status).toBe('error')
+    expect(run.error).toBe('Run ended with status: error_max_turns')
+    // A failed turn still cost what it cost.
+    expect(run.totalCostUsd).toBeCloseTo(0.01)
+
+    mgr.stopAll()
+  })
+
+  it('a success result finishes the run, and so does the error result of a cancelled one', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = {
+      kind: 'events',
+      events: [{ type: 'result', subtype: 'success', total_cost_usd: 0 }]
+    }
+    mgr.upsert(makeAutomation({ id: 'ok-1' }))
+    await mgr.runNow('ok-1')
+    expect(mgr.listRuns('ok-1')[0].status).toBe('success')
+
+    sdkMode = { kind: 'waitForAbort', thenEvents: [refusedStart] }
+    mgr.upsert(makeAutomation({ id: 'cancel-1' }))
+    const run = mgr.runNow('cancel-1')
+    await new Promise((r) => setTimeout(r, 20))
+    mgr.cancelRun('cancel-1')
+    await run
+    expect(mgr.listRuns('cancel-1')[0].error).toBeUndefined()
 
     mgr.stopAll()
   })

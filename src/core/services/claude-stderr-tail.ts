@@ -1,7 +1,7 @@
 /**
  * The last lines a headless Claude Code process wrote to stderr, for the failure its run
- * reports. cli.js says why it refused to start only there (a required sandbox that cannot run
- * on this machine, ADR-116), and without it a run reports a bare exit code. Shared by a
+ * reports. cli.js explains a death at startup there (a required sandbox that cannot run on
+ * this machine, ADR-116), and without it a run that got no result reports a bare exit code. Shared by a
  * dispatched Claude agent (`dispatch-claude-targets.ts`) and an automation run
  * (`automation-manager.ts`); a session keeps its own stderr handling.
  */

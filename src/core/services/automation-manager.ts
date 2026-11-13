@@ -615,6 +615,9 @@ export class AutomationManager {
         const updatedRuns = this.loadRuns(automation.id)
         const idx = updatedRuns.findIndex((r) => r.id === runId)
         if (idx >= 0) {
+          // A run that failed after a result frame has its cost on disk only (the result
+          // handler wrote it there); `run` carries it only on success.
+          run.totalCostUsd = Math.max(run.totalCostUsd ?? 0, updatedRuns[idx].totalCostUsd ?? 0)
           updatedRuns[idx] = { ...updatedRuns[idx], ...run }
         }
         this.saveRuns(automation.id, updatedRuns)
@@ -649,7 +652,7 @@ export class AutomationManager {
     let lastAssistantText = ''
     let lastAssistantMsg: ChatMessage | null = null
     const useAutoMode = (automation.permissionMode ?? 'auto') === 'auto'
-    // What the process writes to stderr: cli.js explains a refusal to start there only.
+    // What the process writes to stderr, for the error of a run whose process dies.
     const stderrTail = claudeStderrTail((line) =>
       logger.warn('AutomationManager', `automation "${automation.name}" stderr: ${line}`)
     )
@@ -843,6 +846,23 @@ export class AutomationManager {
               this.saveRuns(automation.id, updatedRuns)
               this.notifyRunUpdate(automation.id, updatedRuns[idx])
             }
+          }
+
+          // A result that is not a success fails the run, as it fails a session's turn and a
+          // dispatched one. cli.js also writes one (zeroed, the reason in `errors`) before it
+          // exits on a start it refuses, such as a required sandbox that cannot run: read as
+          // the end of a turn, it recorded a success for a run that never started. Not after
+          // a cancel: tearing down an interrupted turn ends in an error result too.
+          const subtype = msg.subtype
+          if (
+            typeof subtype === 'string' &&
+            subtype !== 'success' &&
+            !abortController.signal.aborted
+          ) {
+            const errors = Array.isArray(msg.errors) ? msg.errors.map(String) : []
+            throw new Error(
+              errors.length > 0 ? errors.join('; ') : `Run ended with status: ${subtype}`
+            )
           }
 
           // Automation is non-interactive — the turn ends at `result`. Break the
