@@ -126,12 +126,17 @@ export async function spawnSession(
   // The host seeds its own transcript the moment the engine spawns; a client read still in
   // flight would then lose the race and show only this turn.
   await awaitReloadBeforeSpawn(routingId)
-  assertModelResolved(opts.from ?? useSessionStore.getState().sessions[routingId])
+  const asSent = opts.from ?? useSessionStore.getState().sessions[routingId]
+  assertModelResolved(asSent)
+  // Resolved BEFORE the worktree step, from what the composer showed when the user sent: that
+  // step moves the session's cwd, and the composer empties the model catalogue on a cwd change
+  // until its refetch lands. Resolved after it, a first message in a new worktree found no row
+  // for its model and spawned on the fallback effort and thinking mode, announcing no effort.
+  const resolved = resolveSessionSdkOptions(asSent)
+  const announce = spawnAnnouncement(useSessionStore.getState(), asSent, resolved.effort)
   await createPendingWorktree(routingId)
-  // After the worktree: it moves the session's cwd.
-  const state = useSessionStore.getState()
-  const session = opts.from ?? state.sessions[routingId]
-  const resolved = resolveSessionSdkOptions(session)
+  // Read again after the worktree: it moves the session's cwd.
+  const session = opts.from ?? useSessionStore.getState().sessions[routingId]
   const config: SessionConfig = {
     effort: resolved.effort,
     permissionMode: opts.permissionMode ?? session?.permissionMode,
@@ -146,7 +151,7 @@ export async function spawnSession(
     engineId: session?.selectedEngineId,
     config,
     ...(resume ? { resume } : {}),
-    announce: spawnAnnouncement(state, session, resolved.effort)
+    announce
   })
   useSessionStore.getState().markSdkActive(routingId)
 }
