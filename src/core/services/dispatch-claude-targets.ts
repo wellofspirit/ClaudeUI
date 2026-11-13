@@ -1100,7 +1100,7 @@ export class ClaudeTargets {
       cwd,
       model,
       thinking: claudeThinkingRequest(model, 'adaptive'),
-      sandbox,
+      ...(sandbox ? { sandbox } : {}),
       ...(effort ? { effort } : {}),
       stderr: entry.stderrTail.note,
       permissionMode: mode.permissionMode,

@@ -825,24 +825,18 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.stopAll()
   })
 
-  it('says the sandbox is off when it is off or the engine has no settings file (A2)', async () => {
+  it('sends no sandbox key when the sandbox is off or the engine has no settings file (A2)', async () => {
     const { mgr } = await freshManager()
     mgr.load()
     mgr.upsert(makeAutomation({ id: 'sandbox-off' }))
     sdkMode = done
 
     await mgr.runNow('sandbox-off')
-    expect(lastSdkParams.options.sandbox).toStrictEqual({
-      enabled: false,
-      autoAllowBashIfSandboxed: false
-    })
+    expect('sandbox' in lastSdkParams.options).toBe(false)
 
     writeClaudeEngine({ sandbox: sandboxConfig(false) })
     await mgr.runNow('sandbox-off')
-    expect(lastSdkParams.options.sandbox).toStrictEqual({
-      enabled: false,
-      autoAllowBashIfSandboxed: false
-    })
+    expect('sandbox' in lastSdkParams.options).toBe(false)
 
     mgr.stopAll()
   })
@@ -860,10 +854,7 @@ describe('AutomationManager — scheduling & runtime', () => {
     }
 
     await mgr.runNow('sandbox-3')
-    expect(lastSdkParams.options.sandbox).toStrictEqual({
-      enabled: false,
-      autoAllowBashIfSandboxed: false
-    })
+    expect('sandbox' in lastSdkParams.options).toBe(false)
 
     writeClaudeEngine({ sandbox: sandboxConfig(true) })
     await mgr.runNow('sandbox-3')

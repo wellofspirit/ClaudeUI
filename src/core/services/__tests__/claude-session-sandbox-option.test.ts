@@ -142,14 +142,13 @@ function flagSettings(options: QueryOptions): Record<string, unknown> {
 }
 
 describe('ClaudeSession — the `sandbox` spawn option', () => {
-  // Off means off: with no key, a sandbox enabled in Claude Code's own settings files applied.
-  it('says the sandbox is off when the engine has no sandbox settings', async () => {
+  it('sends no sandbox when the engine has no sandbox settings', async () => {
     const options = await spawnOptions()
-    expect(options.sandbox).toStrictEqual({ enabled: false })
-    expect(flagSettings(options).sandbox).toStrictEqual({ enabled: false })
+    expect(options).not.toHaveProperty('sandbox')
+    expect(flagSettings(options)).not.toHaveProperty('sandbox')
   })
 
-  it('says only that it is off when it is switched off, whatever else is set', async () => {
+  it('sends no sandbox when it is switched off, whatever else is set', async () => {
     const options = await spawnOptions(
       sandboxSettings({
         enabled: false,
@@ -159,8 +158,8 @@ describe('ClaudeSession — the `sandbox` spawn option', () => {
         filesystem: { allowWrite: ['/data'] }
       })
     )
-    expect(options.sandbox).toStrictEqual({ enabled: false })
-    expect(flagSettings(options).sandbox).toStrictEqual({ enabled: false })
+    expect(options).not.toHaveProperty('sandbox')
+    expect(flagSettings(options)).not.toHaveProperty('sandbox')
   })
 
   it('an untouched sandbox switched on: the three switches, no network block, an empty filesystem block', async () => {

@@ -292,7 +292,7 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
     expect(flagValue(spawnOf(1).args, '--permission-mode')).toBe('default')
   })
 
-  it('sandbox off or never configured: cli.js is told it is off', async () => {
+  it('sandbox off or never configured: no sandbox reaches cli.js', async () => {
     mocks.query.mockReset()
     mocks.query.mockImplementation(() => oneTurnProcess('claude-sbx-3'))
 
@@ -301,9 +301,8 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
       const dispatcher = makeDispatcher(makeFakeDispatchLedger(), deps())
       await dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx())
       const { args, options } = spawnOf(mocks.query.mock.calls.length - 1)
-      const off = { enabled: false, autoAllowBashIfSandboxed: false }
-      expect(options.sandbox).toStrictEqual(off)
-      expect(flagSettings(args).sandbox).toStrictEqual(off)
+      expect(options).not.toHaveProperty('sandbox')
+      expect(flagSettings(args)).not.toHaveProperty('sandbox')
     }
   })
 
@@ -322,7 +321,7 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
     // Created with the sandbox off…
     claudeConfig = { dispatch: { defaultModel: 'haiku' } }
     const first = await dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx())
-    expect(flagSettings(spawnOf(0).args).sandbox).toMatchObject({ enabled: false })
+    expect(flagSettings(spawnOf(0).args)).not.toHaveProperty('sandbox')
 
     // …switched on before its next run: the resumed process is sandboxed…
     claudeConfig = { dispatch: { defaultModel: 'haiku' }, sandbox: sandboxOn() }
@@ -333,7 +332,7 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
 
     // …and switched off again: the next one is not.
     claudeConfig = { dispatch: { defaultModel: 'haiku' }, sandbox: sandboxOn({ enabled: false }) }
-    expect((await resume(first.sessionId)).sandbox).toMatchObject({ enabled: false })
+    expect(await resume(first.sessionId)).not.toHaveProperty('sandbox')
   })
 
   it("starts at the user's saved starting effort for the model, re-read at a resume", async () => {

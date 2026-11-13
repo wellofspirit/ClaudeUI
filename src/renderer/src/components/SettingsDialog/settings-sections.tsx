@@ -2726,7 +2726,7 @@ export const SECTIONS: Section[] = [
             <SettingsToggle
               testid="ClaudeSandbox.enabled"
               label="Command sandbox"
-              description="Runs shell commands in an isolated environment — macOS sandbox-exec or Linux bubblewrap, deny-by-default. Not available on Windows. When off, ClaudeUI's sessions, agents and automations run unsandboxed, even if your Claude Code settings files enable a sandbox."
+              description="Runs shell commands in an isolated environment — macOS sandbox-exec or Linux bubblewrap, deny-by-default. Not available on Windows."
               checked={sb.enabled}
               onChange={(v) => ue({ sandbox: { ...sb, enabled: v } })}
             />

@@ -270,8 +270,8 @@ export interface ClaudeQuerySpawnOpts {
   /**
    * The Claude engine's sandbox settings as the `sandbox` query option (ADR-116):
    * `claudeSandboxOption(engines/claude.json#sandbox)`, the mapping a session spawns with, read
-   * when THIS process is spawned, with `autoAllowBashIfSandboxed` forced to false. An explicit
-   * `enabled: false` when the sandbox is off. It rides the same `--settings` JSON as {@link settings}; the process
+   * when THIS process is spawned, with `autoAllowBashIfSandboxed` forced to false. Absent when
+   * the sandbox is off. It rides the same `--settings` JSON as {@link settings}; the process
    * loads no settings source, so this is the only way a target's Bash is sandboxed.
    */
   sandbox?: Record<string, unknown>

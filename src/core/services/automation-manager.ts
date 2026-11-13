@@ -732,7 +732,7 @@ export class AutomationManager {
           permissionMode: useAutoMode ? ('acceptEdits' as const) : ('default' as const),
           settingSources: ['user', 'project', 'local'],
           settings: claudeBehaviorSettings(claudeConfig.claudeConfig),
-          sandbox,
+          ...(sandbox ? { sandbox } : {}),
           stderr: stderrTail.note,
           abortController,
           includePartialMessages: true,

@@ -140,12 +140,10 @@ describe('claudeSandboxOption — the engine sandbox settings as a spawn option'
     filesystem: { allowWrite: ['/data'], denyWrite: [], denyRead: [] }
   })
 
-  // Off means off: stated, so a sandbox enabled in Claude Code's own settings files does not
-  // apply to a ClaudeUI process (with no key at all it did: probed on cli.js 2.1.321).
-  it('is an explicit off when the engine has no sandbox settings or the sandbox is off', () => {
-    expect(claudeSandboxOption(undefined)).toStrictEqual({ enabled: false })
-    expect(claudeSandboxOption(null)).toStrictEqual({ enabled: false })
-    expect(claudeSandboxOption(settings(false))).toStrictEqual({ enabled: false })
+  it('is nothing when the engine has no sandbox settings or the sandbox is off', () => {
+    expect(claudeSandboxOption(undefined)).toBeUndefined()
+    expect(claudeSandboxOption(null)).toBeUndefined()
+    expect(claudeSandboxOption(settings(false))).toBeUndefined()
   })
 
   it('is the whole configuration when the sandbox is on', () => {
@@ -159,12 +157,13 @@ describe('claudeSandboxOption — the engine sandbox settings as a spawn option'
     })
   })
 
-  it('switched off, cli.js is told so and is not asked to require a sandbox', () => {
+  it('with nothing produced, no sandbox reaches cli.js', () => {
+    const sandbox = claudeSandboxOption(settings(false))
     const args = buildArgs({
       settings: claudeBehaviorSettings(undefined),
-      sandbox: claudeSandboxOption(settings(false))
+      ...(sandbox ? { sandbox } : {})
     } as QueryOptions)
-    expect(emittedSettings(args).sandbox).toStrictEqual({ enabled: false })
+    expect(emittedSettings(args)).not.toHaveProperty('sandbox')
   })
 })
 
@@ -185,11 +184,10 @@ describe('claudeGatedSandboxOption — the sandbox of a process whose commands s
     filesystem: { allowWrite: ['/data'], denyWrite: [], denyRead: [] }
   })
 
-  it('is an explicit off, still never auto-approved, when the sandbox is off, unset or null', () => {
-    const off = { enabled: false, autoAllowBashIfSandboxed: false }
-    expect(claudeGatedSandboxOption(undefined)).toStrictEqual(off)
-    expect(claudeGatedSandboxOption(null)).toStrictEqual(off)
-    expect(claudeGatedSandboxOption(settings(false))).toStrictEqual(off)
+  it('is nothing when the sandbox is off, unset or null', () => {
+    expect(claudeGatedSandboxOption(undefined)).toBeUndefined()
+    expect(claudeGatedSandboxOption(null)).toBeUndefined()
+    expect(claudeGatedSandboxOption(settings(false))).toBeUndefined()
   })
 
   it('is the session mapping with an explicit false auto-approve, whatever the config says', () => {
