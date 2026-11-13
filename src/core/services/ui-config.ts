@@ -346,9 +346,18 @@ export function normalizeBlockHoldSeconds(value: unknown): number {
   return Math.min(BLOCK_HOLD_MAX_SECONDS, Math.max(0, Math.round(value)))
 }
 
-export function loadSettings(): UISettings {
+/**
+ * The migrations that move legacy app-settings keys into the engine and vendor files, for a
+ * caller that reads an engine config before anything has read the app settings (the sandbox
+ * migration at boot). Idempotent.
+ */
+export function ensureConfigPlaneMigrated(): void {
   ensureMigrated()
   migrateConfigPlane()
+}
+
+export function loadSettings(): UISettings {
+  ensureConfigPlaneMigrated()
   migrateSharedTrustLists()
   return readJson<UISettings>(SETTINGS_FILE) ?? {}
 }

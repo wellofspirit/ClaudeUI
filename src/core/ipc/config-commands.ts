@@ -633,6 +633,14 @@ export function configCommands(
       kind: 'command',
       handler: (engineId: string, cfg: EngineConfig) => {
         assertSafeIdSegment(engineId, 'engineId')
+        // The Claude sandbox lives in Claude Code's settings file now (ADR-009): a client that
+        // still holds the old object cannot write the private copy back. A copy still waiting
+        // for its migration (the file could not be parsed) stays as the disk has it.
+        if (engineId === 'claude' && cfg) {
+          const { sandbox: _dropped, ...rest } = cfg as EngineConfig & { sandbox?: unknown }
+          const waiting = (loadEngineConfig('claude') as { sandbox?: unknown }).sandbox
+          cfg = waiting === undefined ? rest : ({ ...rest, sandbox: waiting } as EngineConfig)
+        }
         saveEngineConfig(engineId, cfg)
         // Provider enable/disable + custom-provider edits change which models the
         // discovery server returns. Drop the cache so the next getEngineModels()

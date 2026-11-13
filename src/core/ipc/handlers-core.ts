@@ -11,6 +11,11 @@ import {
   saveCleanupPeriodDays,
   saveClaudePermissions
 } from '../services/claude-settings'
+import {
+  parseSandboxPatch,
+  readClaudeSandboxState,
+  saveClaudeSandbox
+} from '../services/claude-sandbox-settings'
 import { claudeAutoModeDisabled } from '../../shared/permission-modes'
 import { setWorkspaceTrust } from '../services/claude-workspace-trust'
 import { claudeProjectKey } from '../services/claude-config-paths'
@@ -1268,4 +1273,18 @@ export async function listPlaces(): Promise<ListPlacesResult> {
     drives = []
   }
   return { home, hostname, drives }
+}
+
+/**
+ * Save the fields the user changed into the `sandbox` block of Claude Code's user settings file
+ * (ADR-009). The argument is remote-reachable, so the module's patch parser vets it. The event
+ * carries what the file holds afterwards, not the patch; a read that fails emits nothing, and so
+ * does a refused write (it propagates as the rejection). No running session is nudged: Claude
+ * Code's own file watcher does whatever it does with the change, as in the terminal.
+ */
+export function setClaudeSandbox(value: unknown): void {
+  const patch = parseSandboxPatch(value)
+  saveClaudeSandbox(patch)
+  const state = readClaudeSandboxState()
+  if (state) emitEvent('config:claude-sandbox-changed', [state])
 }

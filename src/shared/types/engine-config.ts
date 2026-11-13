@@ -70,8 +70,48 @@ export interface SandboxSettings {
   excludedCommands: string[]
 }
 
+/**
+ * What the Claude page shows before anything is set: the sandbox off, and the two switches at
+ * ClaudeUI's stricter defaults (Claude Code reads an ABSENT `autoAllowBashIfSandboxed` or
+ * `allowUnsandboxedCommands` as true; turning the sandbox on from the page writes both).
+ */
+export const DEFAULT_SANDBOX: SandboxSettings = {
+  enabled: false,
+  autoAllowBashIfSandboxed: false,
+  allowUnsandboxedCommands: false,
+  network: {
+    restrictNetwork: false,
+    allowLocalBinding: false,
+    allowedDomains: [],
+    allowManagedDomainsOnly: false,
+    allowAllUnixSockets: false,
+    allowUnixSockets: []
+  },
+  filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
+  excludedCommands: []
+}
+
+/**
+ * The command sandbox as ClaudeUI replicates it (ADR-009): the `sandbox` block of Claude Code's
+ * own user settings file, which the terminal `claude` shares, plus what only the host knows.
+ */
+export interface ClaudeSandboxState {
+  /** The user-scope `sandbox` block, as the Claude page edits it. */
+  settings: SandboxSettings
+  /** Whether the HOST can run the sandbox; the switch cannot be turned on where it cannot. */
+  supported: boolean
+}
+
+/** A settings file other than the user's that turns the sandbox on for one directory. */
+export type ClaudeSandboxScope = 'project' | 'local' | 'managed'
+
+/** The fields of a sandbox save: only what the user changed. */
+export type SandboxSettingsPatch = Partial<Omit<SandboxSettings, 'network' | 'filesystem'>> & {
+  network?: Partial<SandboxSettings['network']>
+  filesystem?: Partial<SandboxSettings['filesystem']>
+}
+
 export interface EngineConfig {
-  sandbox?: SandboxSettings
   proxy?: ProxySettings
   /** Auto-mode (LLM permission gatekeeper) settings — opencode and pi. See ADR-023. */
   autoMode?: AutoModeConfig
@@ -123,6 +163,13 @@ export interface ClaudeEngineConfig {
    * settings, so it is passed per spawn as `--settings` flag settings.
    */
   privacyEmailCheck?: boolean
+  /**
+   * UI memory, not a setting: the sandbox's allowed-domain list as it was when "restrict network"
+   * was last turned off. The shared settings file holds no list while the restriction is off;
+   * the Claude page shows this one dimmed and sends it when the restriction is turned on again.
+   * The host never reads it.
+   */
+  sandboxRememberedDomains?: string[]
 }
 
 /**

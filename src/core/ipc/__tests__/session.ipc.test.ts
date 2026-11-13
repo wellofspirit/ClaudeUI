@@ -166,6 +166,10 @@ vi.mock('../../services/session-watcher', () => ({
   unwatchSession: vi.fn()
 }))
 
+vi.mock('../../services/claude-sandbox-watch', () => ({
+  startClaudeSandboxWatcher: vi.fn(() => () => {})
+}))
+
 vi.mock('../../services/ui-config', () => ({
   loadSettings: vi.fn(() => ({})),
   saveSettings: vi.fn(),

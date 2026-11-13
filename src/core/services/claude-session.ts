@@ -58,7 +58,8 @@ import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-p
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { loadEngineConfig, saveSlashCommands } from './ui-config'
-import { claudeBehaviorSettings, claudeSandboxOption } from '../sdk/args'
+import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeSandboxFlags } from './claude-sandbox-settings'
 import { readDisabledMcpServers } from './claude-mcp'
 import { loadClaudeUiLegacyMcpServers } from './claude-mcp-files'
 import { resolveClaudeSkillCatalog } from './claude-skill-catalog'
@@ -141,7 +142,6 @@ import type {
   SessionStatus,
   ApprovalDecision,
   PendingApproval,
-  SandboxSettings,
   PermissionSuggestion,
   AccountRef,
   ModelCostEntry,
@@ -484,7 +484,6 @@ export class ClaudeSession extends BaseSession {
   private resumeSessionAt: string | undefined
   private forkSession = false
   private statusLineTimer: ReturnType<typeof setTimeout> | null = null
-  private sandboxConfig: SandboxSettings | null = null
   /**
    * The voice server's TCP port inside cli.js, once started. Captures themselves
    * are not the session's: they belong to the client holding the microphone and
@@ -515,7 +514,6 @@ export class ClaudeSession extends BaseSession {
       resumeSessionId,
       permissionMode,
       model,
-      sandboxConfig,
       thinkingMode,
       resumeSessionAt,
       forkSession
@@ -559,7 +557,6 @@ export class ClaudeSession extends BaseSession {
 
     if (permissionMode) this.permissionMode = permissionMode
     if (model) this.model = model
-    if (sandboxConfig) this.sandboxConfig = sandboxConfig
     this.sendStatus()
 
     // Slice C (ADR-033 cross-engine dispatch): seed durable dispatched-cost
@@ -954,7 +951,8 @@ export class ClaudeSession extends BaseSession {
         if (myAbort.signal.aborted) return
       }
 
-      const sandbox = claudeSandboxOption(this.sandboxConfig)
+      // The shared sandbox setting, read per spawn (a resume or respawn binds the file's value now).
+      const sandbox = claudeSandboxFlags('session')
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -1003,8 +1001,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
                 : ''
             }`
           },
-          // The engine's sandbox settings; a dispatched Claude agent is confined by the same
-          // mapping (ADR-116).
+          // The user block of Claude Code's own settings file, bound at flag priority while the
+          // shared switch is on; nothing while it is off.
           ...(sandbox ? { sandbox } : {}),
           settingSources: ['user', 'project', 'local'],
           // `--settings` flag settings: the two cli.js behaviour switches the

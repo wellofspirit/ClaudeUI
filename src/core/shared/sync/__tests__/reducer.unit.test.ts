@@ -13,6 +13,7 @@ import { applyEvent, checkDerivedFields, rekeyTargetFor } from '../reducer'
 import { channelSpec } from '../channels'
 import { emptyCanonicalState, fromSnapshot, toSnapshot, type CanonicalState } from '../state'
 import type { ChatMessage, SessionStatus, StatusLineData } from '../../../../shared/types'
+import { DEFAULT_SANDBOX } from '../../../../shared/types/engine-config'
 
 function status(overrides: Partial<SessionStatus> = {}): SessionStatus {
   return {
@@ -1726,6 +1727,35 @@ describe('reducer — app-level config', () => {
     expect(applyEvent(s, { channel: 'config:claude-auto-mode-changed', args: [true] })).toBe(s)
   })
 
+  it('config:claude-sandbox-changed replaces claudeSandbox', () => {
+    const next = { settings: { ...DEFAULT_SANDBOX, enabled: true }, supported: false }
+    const s = applyEvent(emptyCanonicalState(), {
+      channel: 'config:claude-sandbox-changed',
+      args: [next]
+    })
+    expect(s.claudeSandbox).toEqual(next)
+    const back = applyEvent(s, {
+      channel: 'config:claude-sandbox-changed',
+      args: [{ settings: DEFAULT_SANDBOX, supported: true }]
+    })
+    expect(back.claudeSandbox).toEqual({ settings: DEFAULT_SANDBOX, supported: true })
+  })
+
+  it('config:claude-sandbox-changed ignores a malformed payload and returns the same object when deeply equal', () => {
+    const s = applyEvent(emptyCanonicalState(), {
+      channel: 'config:claude-sandbox-changed',
+      args: [{ settings: { ...DEFAULT_SANDBOX, enabled: true }, supported: true }]
+    })
+    for (const bad of [null, undefined, 'x', {}, { settings: {} }, { supported: true }]) {
+      expect(
+        applyEvent(s, { channel: 'config:claude-sandbox-changed', args: [bad as never] })
+      ).toBe(s)
+    }
+    // A fresh object with the same content: no change for the replica's identity diff.
+    const copy = JSON.parse(JSON.stringify(s.claudeSandbox))
+    expect(applyEvent(s, { channel: 'config:claude-sandbox-changed', args: [copy] })).toBe(s)
+  })
+
   it('config:sessions-changed honours per-key PRESENCE (H15)', () => {
     // The on-disk sessions.json strips sessionEngines (it lives in the DB), so a
     // missing key must mean "leave it alone" — `?? {}` would zero the map on every
@@ -1845,6 +1875,7 @@ describe('snapshot restore — fromSnapshot (phase 4b)', () => {
     expect(s.sdkActive).toBe(false)
     expect(s.selectedEngineId).toBe('claude')
     expect(restored.autoModeDisabledBySettings).toBe(false)
+    expect(restored.claudeSandbox).toEqual({ settings: DEFAULT_SANDBOX, supported: true })
   })
 })
 

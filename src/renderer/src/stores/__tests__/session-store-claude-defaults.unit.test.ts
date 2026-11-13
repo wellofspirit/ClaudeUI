@@ -212,7 +212,7 @@ describe('setEngineModels — saved Claude picks move to their aliases (ADR-100)
       claudeDefaultModel: 'claude-haiku-4-5',
       claudeDefaultModelConfigured: true,
       engineConfig: {
-        sandbox: { enabled: true } as never,
+        proxy: { enabled: true } as never,
         claudeConfig: { defaultModel: 'claude-haiku-4-5' }
       }
     })
@@ -222,7 +222,7 @@ describe('setEngineModels — saved Claude picks move to their aliases (ADR-100)
     expect(store().claudeDefaultModel).toBe('haiku')
     expect(store().claudeDefaultModelConfigured).toBe(true)
     expect(store().engineConfig).toEqual({
-      sandbox: { enabled: true },
+      proxy: { enabled: true },
       claudeConfig: { defaultModel: 'haiku' }
     })
   })

@@ -58,6 +58,7 @@ import type {
   VoiceNoticeTone,
   WatchUpdate
 } from '../../../shared/types'
+import type { ClaudeSandboxState } from '../../../shared/types/engine-config'
 import type { HarnessId, HarnessInstallProgress } from '../../../shared/harness-types'
 import type { VoicePackStatus } from '../../../shared/voice-pack'
 import type { SessionLinksPayload } from '../../../shared/session-links'
@@ -362,6 +363,12 @@ export interface SyncEventMap {
    * `~/.claude/settings.json` now says `"disable"`. Carries the value the FILE holds.
    */
   'config:claude-auto-mode-changed': (disabled: boolean) => void
+  /**
+   * The command sandbox changed: the user-scope `sandbox` block of Claude Code's settings file
+   * as the Claude page edits it, plus whether this host can run it. Carries what the FILE holds
+   * after a ClaudeUI save or an outside edit.
+   */
+  'config:claude-sandbox-changed': (state: ClaudeSandboxState) => void
   'config:sessions-changed': (config: UISessionConfig) => void
   'git:status-update': (data: { cwd: string; status: GitStatusData }) => void
   'mockup:file-changed': (directory: string) => void

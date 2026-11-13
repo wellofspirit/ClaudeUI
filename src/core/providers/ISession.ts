@@ -7,8 +7,7 @@ import type {
   PermissionSuggestion,
   QueuedItem,
   SkillInfo,
-  SessionConfig,
-  SandboxSettings
+  SessionConfig
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { HostWindowHandle } from '../host'
@@ -329,8 +328,6 @@ export interface ISession {
 export interface EngineSpawnOptions extends SessionConfig {
   /** Engine session id to resume. Consumed by all three engines. */
   resumeSessionId?: string
-  /** Sandbox settings. Claude-only — opencode and pi never read it (ADR-022, ADR-030). */
-  sandboxConfig?: SandboxSettings
   /** Fork ("branch off") anchor, in the engine's own convention: a JSONL line
    *  uuid for Claude (ADR-010), or a pi entryId / the clone-latest sentinel
    *  for pi — see PiSession.doStart's fork block. opencode fork is

@@ -45,6 +45,8 @@ import {
   TODO_TRIGGER_TOOLS,
   SEND_USER_FILE_TOOL
 } from '../../../shared/derive-session'
+import { deepEqual } from '../../../shared/opencode-config-diff'
+import type { ClaudeSandboxState } from '../../../shared/types/engine-config'
 import type { FoldedChannel } from './channels'
 import type { EmitArgs, WireArgs } from './events'
 import { parseContextPressureBanner } from '../../../shared/context-pressure'
@@ -1435,6 +1437,15 @@ const FOLDS: FoldHandlers = {
     if (typeof disabled !== 'boolean') return state
     if (state.autoModeDisabledBySettings === disabled) return state
     return { ...state, autoModeDisabledBySettings: disabled }
+  },
+
+  'config:claude-sandbox-changed': (state, event) => {
+    const next = event.args[0]
+    if (!isRecord(next) || !isRecord(next.settings) || typeof next.supported !== 'boolean') {
+      return state
+    }
+    if (deepEqual(state.claudeSandbox, next)) return state
+    return { ...state, claudeSandbox: next as unknown as ClaudeSandboxState }
   },
 
   'config:sessions-changed': (state, event) => {

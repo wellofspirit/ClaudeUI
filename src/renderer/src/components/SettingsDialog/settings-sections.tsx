@@ -3,6 +3,13 @@ import { DEFAULT_SETTINGS, useActiveSession, useSessionStore } from '../../store
 import { DEFAULT_MAX_CONCURRENT_DISPATCHES } from '../../../../shared/dispatch-concurrency'
 import type { AppSettings } from '../../stores/session-store'
 import { PermissionsDialog } from '../PermissionsDialog'
+import {
+  SandboxAllowedDomainsRow,
+  SandboxListRow,
+  SandboxMainRow,
+  SandboxRestrictNetworkRow,
+  SandboxToggleRow
+} from './claude-sandbox'
 import type {
   ClaudePermissions,
   ProxySettings,
@@ -10,7 +17,6 @@ import type {
   EngineId,
   EngineConfig,
   VendorConfig,
-  SandboxSettings,
   AutoModeConfig,
   JudgeModelSupport,
   ModelInfo,
@@ -27,7 +33,6 @@ import {
   SettingsSlider,
   SettingsSelect,
   SettingsTextarea,
-  SandboxListSetting,
   ChatRetentionSetting,
   ChipSet,
   SettingRow,
@@ -154,22 +159,6 @@ function appDefault<K extends keyof AppSettings>(
 }
 
 // ── Default engine/vendor config values ─────────────────────────────
-
-const DEFAULT_SANDBOX: SandboxSettings = {
-  enabled: false,
-  autoAllowBashIfSandboxed: false,
-  allowUnsandboxedCommands: false,
-  network: {
-    restrictNetwork: false,
-    allowLocalBinding: false,
-    allowedDomains: [],
-    allowManagedDomainsOnly: false,
-    allowAllUnixSockets: false,
-    allowUnixSockets: []
-  },
-  filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-  excludedCommands: []
-}
 
 const DEFAULT_PROXY: ProxySettings = {
   enabled: false,
@@ -2720,274 +2709,153 @@ export const SECTIONS: Section[] = [
         key: 'sandboxEnabled',
         label: 'Command sandbox',
         keywords: 'sandbox isolate secure bash commands safety',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SettingsToggle
-              testid="ClaudeSandbox.enabled"
-              label="Command sandbox"
-              description="Runs shell commands in an isolated environment — macOS sandbox-exec or Linux bubblewrap, deny-by-default. Not available on Windows."
-              checked={sb.enabled}
-              onChange={(v) => ue({ sandbox: { ...sb, enabled: v } })}
-            />
-          )
-        }
+        render: () => <SandboxMainRow />
       },
       {
         key: 'sandboxAutoAllow',
         label: 'Auto-approve sandboxed commands',
         keywords: 'auto allow approve bash',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SettingsToggle
-              testid="ClaudeSandbox.autoAllow"
-              label="Auto-approve sandboxed commands"
-              description="Skips the permission prompt for bash that runs inside the sandbox in a session, though deny and ask rules still block it. Dispatched agents and automations never skip it."
-              checked={sb.autoAllowBashIfSandboxed}
-              onChange={(v) => ue({ sandbox: { ...sb, autoAllowBashIfSandboxed: v } })}
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: () => (
+          <SandboxToggleRow
+            testid="ClaudeSandbox.autoAllow"
+            label="Auto-approve sandboxed commands"
+            description="Skips the permission prompt for bash that runs inside the sandbox in a session, though deny and ask rules still block it. Dispatched agents and automations never skip it."
+            read={(s) => s.autoAllowBashIfSandboxed}
+            patch={(v) => ({ autoAllowBashIfSandboxed: v })}
+          />
+        )
       },
       {
         key: 'sandboxAllowUnsandboxed',
         label: 'Allow unsandboxed escape',
         keywords: 'unsandboxed escape bypass',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SettingsToggle
-              testid="ClaudeSandbox.allowUnsandboxed"
-              label="Allow unsandboxed escape"
-              description="Lets the model retry a command outside the sandbox when the restrictions make it fail, with a permission prompt each time."
-              checked={sb.allowUnsandboxedCommands}
-              onChange={(v) => ue({ sandbox: { ...sb, allowUnsandboxedCommands: v } })}
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: () => (
+          <SandboxToggleRow
+            testid="ClaudeSandbox.allowUnsandboxed"
+            label="Allow unsandboxed escape"
+            description="Lets the model retry a command outside the sandbox when the restrictions make it fail, with a permission prompt each time."
+            read={(s) => s.allowUnsandboxedCommands}
+            patch={(v) => ({ allowUnsandboxedCommands: v })}
+          />
+        )
       },
       {
         key: 'sandboxLocalBinding',
         label: 'Allow local port binding',
         keywords: 'network port listen bind',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SettingsToggle
-              testid="ClaudeSandbox.localBinding"
-              label="Allow local port binding"
-              description="Lets sandboxed processes listen on localhost ports, which dev servers like vite and flask need to start."
-              checked={sb.network.allowLocalBinding}
-              onChange={(v) =>
-                ue({ sandbox: { ...sb, network: { ...sb.network, allowLocalBinding: v } } })
-              }
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: () => (
+          <SandboxToggleRow
+            testid="ClaudeSandbox.localBinding"
+            label="Allow local port binding"
+            description="Lets sandboxed processes listen on localhost ports, which dev servers like vite and flask need to start."
+            read={(s) => s.network.allowLocalBinding}
+            patch={(v) => ({ network: { allowLocalBinding: v } })}
+          />
+        )
       },
       {
         key: 'sandboxRestrictNetwork',
         label: 'Restrict network access',
         keywords: 'network restrict domain whitelist proxy',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SettingsToggle
-              testid="ClaudeSandbox.restrictNetwork"
-              label="Restrict network access"
-              description="Blocks every outbound connection except the domains listed below; off leaves the sandbox's network open."
-              checked={sb.network.restrictNetwork}
-              onChange={(v) =>
-                ue({ sandbox: { ...sb, network: { ...sb.network, restrictNetwork: v } } })
-              }
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: (_s, _u, e, ue) => (
+          <SandboxRestrictNetworkRow engineConfig={e} updateEngineConfig={ue} />
+        )
       },
       {
         key: 'sandboxAllowedDomains',
         label: 'Allowed domains',
         keywords: 'network domain whitelist url',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SandboxListSetting
-              testid="ClaudeSandbox.allowedDomains"
-              label="Allowed domains"
-              labelColor="text-text-primary"
-              description="Domains sandboxed commands may reach, wildcards like *.npmjs.org included; empty blocks all outbound traffic."
-              items={sb.network.allowedDomains}
-              placeholder="e.g. registry.npmjs.org"
-              onUpdate={(items) =>
-                ue({ sandbox: { ...sb, network: { ...sb.network, allowedDomains: items } } })
-              }
-              indent
-              dimmed={!(sb.enabled && sb.network.restrictNetwork)}
-              disabled={!(sb.enabled && sb.network.restrictNetwork)}
-            />
-          )
-        }
+        render: (_s, _u, e) => <SandboxAllowedDomainsRow engineConfig={e} />
       },
       {
         key: 'sandboxManagedDomainsOnly',
         label: 'Managed domains only',
         keywords: 'enterprise managed policy domains',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SettingsToggle
-              testid="ClaudeSandbox.managedDomainsOnly"
-              label="Managed domains only"
-              description="An enterprise policy that honours only the domains from managed settings and ignores the user, project and local ones."
-              checked={sb.network.allowManagedDomainsOnly}
-              onChange={(v) =>
-                ue({
-                  sandbox: { ...sb, network: { ...sb.network, allowManagedDomainsOnly: v } }
-                })
-              }
-              indent
-              dimmed={!(sb.enabled && sb.network.restrictNetwork)}
-              disabled={!(sb.enabled && sb.network.restrictNetwork)}
-            />
-          )
-        }
+        render: () => (
+          <SandboxToggleRow
+            testid="ClaudeSandbox.managedDomainsOnly"
+            label="Managed domains only"
+            description="An enterprise policy that honours only the domains from managed settings and ignores the user, project and local ones."
+            read={(s) => s.network.allowManagedDomainsOnly}
+            patch={(v) => ({ network: { allowManagedDomainsOnly: v } })}
+            live={(s) => s.enabled && s.network.restrictNetwork}
+          />
+        )
       },
       {
         key: 'sandboxAllowAllUnixSockets',
         label: 'Allow all Unix sockets',
         keywords: 'unix socket docker ipc',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SettingsToggle
-              testid="ClaudeSandbox.allowAllUnixSockets"
-              label="Allow all Unix sockets"
-              description="Unblocks every Unix socket including Docker's, which hands sandboxed commands full host access."
-              checked={sb.network.allowAllUnixSockets}
-              onChange={(v) =>
-                ue({ sandbox: { ...sb, network: { ...sb.network, allowAllUnixSockets: v } } })
-              }
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: () => (
+          <SandboxToggleRow
+            testid="ClaudeSandbox.allowAllUnixSockets"
+            label="Allow all Unix sockets"
+            description="Unblocks every Unix socket including Docker's, which hands sandboxed commands full host access."
+            read={(s) => s.network.allowAllUnixSockets}
+            patch={(v) => ({ network: { allowAllUnixSockets: v } })}
+          />
+        )
       },
       {
         key: 'sandboxUnixSockets',
         label: 'Unix socket paths',
         keywords: 'unix socket path docker',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SandboxListSetting
-              testid="ClaudeSandbox.unixSockets"
-              label="Unix socket paths"
-              labelColor="text-text-primary"
-              description="The socket paths sandboxed commands may open on macOS; Linux filters with seccomp, which cannot match a path."
-              items={sb.network.allowUnixSockets}
-              placeholder="e.g. /var/run/docker.sock"
-              onUpdate={(items) =>
-                ue({ sandbox: { ...sb, network: { ...sb.network, allowUnixSockets: items } } })
-              }
-              indent
-              dimmed={!(sb.enabled && !sb.network.allowAllUnixSockets)}
-              disabled={!(sb.enabled && !sb.network.allowAllUnixSockets)}
-            />
-          )
-        }
+        render: () => (
+          <SandboxListRow
+            testid="ClaudeSandbox.unixSockets"
+            label="Unix socket paths"
+            description="The socket paths sandboxed commands may open on macOS; Linux filters with seccomp, which cannot match a path."
+            placeholder="e.g. /var/run/docker.sock"
+            read={(s) => s.network.allowUnixSockets}
+            patch={(items) => ({ network: { allowUnixSockets: items } })}
+            live={(s) => s.enabled && !s.network.allowAllUnixSockets}
+          />
+        )
       },
       {
         key: 'sandboxAllowWrite',
         label: 'Additional write paths',
         keywords: 'filesystem write allow path writable',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SandboxListSetting
-              testid="ClaudeSandbox.allowWrite"
-              label="Additional write paths"
-              labelColor="text-text-primary"
-              description="Paths outside the project directory that sandboxed commands may write to."
-              items={sb.filesystem.allowWrite}
-              placeholder="e.g. /usr/local/bin"
-              onUpdate={(items) =>
-                ue({
-                  sandbox: { ...sb, filesystem: { ...sb.filesystem, allowWrite: items } }
-                })
-              }
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: () => (
+          <SandboxListRow
+            testid="ClaudeSandbox.allowWrite"
+            label="Additional write paths"
+            description="Paths outside the project directory that sandboxed commands may write to."
+            placeholder="e.g. /usr/local/bin"
+            read={(s) => s.filesystem.allowWrite}
+            patch={(items) => ({ filesystem: { allowWrite: items } })}
+          />
+        )
       },
       {
         key: 'sandboxDenyWrite',
         label: 'Read-only paths',
         keywords: 'filesystem deny write readonly protect',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SandboxListSetting
-              testid="ClaudeSandbox.denyWrite"
-              label="Read-only paths"
-              labelColor="text-text-primary"
-              description="Paths that stay read-only even when they sit inside a writable area."
-              items={sb.filesystem.denyWrite}
-              placeholder="e.g. /etc"
-              onUpdate={(items) =>
-                ue({
-                  sandbox: { ...sb, filesystem: { ...sb.filesystem, denyWrite: items } }
-                })
-              }
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: () => (
+          <SandboxListRow
+            testid="ClaudeSandbox.denyWrite"
+            label="Read-only paths"
+            description="Paths that stay read-only even when they sit inside a writable area."
+            placeholder="e.g. /etc"
+            read={(s) => s.filesystem.denyWrite}
+            patch={(items) => ({ filesystem: { denyWrite: items } })}
+          />
+        )
       },
       {
         key: 'sandboxDenyRead',
         label: 'Hidden paths',
         keywords: 'filesystem deny block read path hidden',
-        render: (_s, _u, e, ue) => {
-          const sb = e.sandbox ?? DEFAULT_SANDBOX
-          return (
-            <SandboxListSetting
-              testid="ClaudeSandbox.denyRead"
-              label="Hidden paths"
-              labelColor="text-text-primary"
-              description="Paths the sandbox cannot read at all, such as ~/.ssh."
-              items={sb.filesystem.denyRead}
-              placeholder="e.g. ~/.ssh"
-              onUpdate={(items) =>
-                ue({
-                  sandbox: { ...sb, filesystem: { ...sb.filesystem, denyRead: items } }
-                })
-              }
-              indent
-              dimmed={!sb.enabled}
-              disabled={!sb.enabled}
-            />
-          )
-        }
+        render: () => (
+          <SandboxListRow
+            testid="ClaudeSandbox.denyRead"
+            label="Hidden paths"
+            description="Paths the sandbox cannot read at all, such as ~/.ssh."
+            placeholder="e.g. ~/.ssh"
+            read={(s) => s.filesystem.denyRead}
+            patch={(items) => ({ filesystem: { denyRead: items } })}
+          />
+        )
       },
       {
         key: 'sandboxFooter',

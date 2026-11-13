@@ -9,16 +9,19 @@
  * The component suite injects `spawnClaudeQuery`, so the flags themselves are only
  * visible here, with the SDK's `query` replaced.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import type { QueryHandle, QueryOptions, SDKMessage } from '../../sdk'
-import { buildArgs, claudeSandboxOption } from '../../sdk/args'
+import { buildArgs } from '../../sdk/args'
 import { CrossEngineDispatcher } from '../cross-engine-dispatcher'
 import type { DispatchContext } from '../cross-engine-dispatcher'
 import type { DispatcherDeps } from '../dispatch-target-types'
 import { defaultClaudeTargetEffort } from '../dispatch-claude-targets'
 import { resetCachedClaudeModels, setCachedClaudeModels } from '../claude-model-catalog'
 import { emitEvent } from '../sync-host'
-import type { EngineConfig, ModelInfo, SandboxSettings } from '../../../shared/types'
+import type { EngineConfig, ModelInfo } from '../../../shared/types'
 import { makeFakeDispatchLedger } from '../../../test/helpers/fake-dispatch-ledger'
 import { withDefaultDescription } from '../../../test/helpers/default-dispatch-description'
 
@@ -121,22 +124,15 @@ function flagValue(args: string[], flag: string): string | undefined {
   return at === -1 ? undefined : args[at + 1]
 }
 
-/** A Claude sandbox switched on, with every part of it set to something recognisable. */
-function sandboxOn(over: Partial<SandboxSettings> = {}): SandboxSettings {
+/** The shared setting: a `sandbox` block as Claude Code's user settings file holds it. */
+function sandboxOn(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     enabled: true,
-    autoAllowBashIfSandboxed: false,
-    allowUnsandboxedCommands: true,
+    autoAllowBashIfSandboxed: true,
     excludedCommands: ['docker'],
-    network: {
-      restrictNetwork: true,
-      allowLocalBinding: false,
-      allowedDomains: ['example.com'],
-      allowManagedDomainsOnly: false,
-      allowAllUnixSockets: false,
-      allowUnixSockets: []
-    },
-    filesystem: { allowWrite: ['/data'], denyWrite: [], denyRead: ['~/.ssh'] },
+    enableWeakerNestedSandbox: true,
+    network: { allowedDomains: ['example.com'], allowLocalBinding: false },
+    filesystem: { allowWrite: ['/data'], denyRead: ['~/.ssh'] },
     ...over
   }
 }
@@ -211,9 +207,21 @@ describe('the real Claude dispatch spawn (ADR-105)', () => {
  * Seen on the argv the REAL spawn builds, since that is all cli.js gets: the process loads no
  * settings source, so a sandbox that is not in `--settings` does not exist for it.
  */
-describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-116)', () => {
+describe('the shared sandbox and effort on the real Claude dispatch spawn (ADR-116)', () => {
   /** `engines/claude.json`, as the dispatcher reads it at each spawn. */
   let claudeConfig: EngineConfig
+  /** CLAUDE_CONFIG_DIR: the user settings file the sandbox flags are read from at each spawn. */
+  let configDir: string
+  const prevConfigDir = process.env.CLAUDE_CONFIG_DIR
+  const writeSandbox = (sandbox: Record<string, unknown> | undefined): void => {
+    const file = path.join(configDir, 'settings.json')
+    if (sandbox) fs.writeFileSync(file, JSON.stringify({ sandbox }))
+    else fs.rmSync(file, { force: true })
+  }
+  beforeEach(() => {
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-sandbox-'))
+    process.env.CLAUDE_CONFIG_DIR = configDir
+  })
   const deps = (over: Partial<DispatcherDeps> = {}): Partial<DispatcherDeps> => ({
     loadEngineConfig: (engine) => (engine === 'claude' ? claudeConfig : {}),
     ...over
@@ -222,12 +230,16 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
   afterEach(() => {
     saveSettings({})
     resetCachedClaudeModels()
+    if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = prevConfigDir
+    fs.rmSync(configDir, { recursive: true, force: true })
   })
 
   it('sandbox on: one --settings JSON carries it, required to start, beside the switches and the rules', async () => {
     mocks.query.mockReset()
     mocks.query.mockImplementation(() => oneTurnProcess('claude-sbx-1'))
-    claudeConfig = { dispatch: { defaultModel: 'haiku' }, sandbox: sandboxOn() }
+    claudeConfig = { dispatch: { defaultModel: 'haiku' } }
+    writeSandbox(sandboxOn())
     const dispatcher = makeDispatcher(
       makeFakeDispatchLedger(),
       deps({
@@ -246,18 +258,19 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
     const { args, options } = spawnOf(0)
     const settings = flagSettings(args)
     expect(settings.sandbox).toStrictEqual({
+      // The validated user block at flag priority (a key the page does not know is not carried;
+      // a switch the block does not state stays absent)...
       enabled: true,
-      // Added by the flag builder for every sandboxed spawn: cli.js then refuses to start
-      // where the sandbox cannot run, instead of running the agent's commands unsandboxed.
-      failIfUnavailable: true,
-      autoAllowBashIfSandboxed: false,
-      allowUnsandboxedCommands: true,
       excludedCommands: ['docker'],
-      network: { allowLocalBinding: false, allowedDomains: ['example.com'] },
-      filesystem: { allowWrite: ['/data'], denyRead: ['~/.ssh'] }
+      network: { allowedDomains: ['example.com'], allowLocalBinding: false },
+      filesystem: { allowWrite: ['/data'], denyRead: ['~/.ssh'] },
+      // ...required to start where the sandbox cannot run, instead of running the agent's
+      // commands unsandboxed, and never auto-approved.
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: false
     })
-    // The session's mapping, not a second copy of it.
-    expect(options.sandbox).toStrictEqual(claudeSandboxOption(sandboxOn()))
+    // The same flag block the spawn option carries, not a second copy of it.
+    expect(options.sandbox).toStrictEqual(settings.sandbox)
     // Nothing else moved: the switches, the deny and ask rules (never the allow rules), no
     // settings source, and no server of the host's tools.
     expect(settings.idleCompaction).toBe(false)
@@ -275,10 +288,8 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
   it('never auto-approves sandboxed commands, whatever the engine setting and the parent mode', async () => {
     mocks.query.mockReset()
     mocks.query.mockImplementation(() => oneTurnProcess('claude-sbx-2'))
-    claudeConfig = {
-      dispatch: { defaultModel: 'haiku' },
-      sandbox: sandboxOn({ autoAllowBashIfSandboxed: true })
-    }
+    claudeConfig = { dispatch: { defaultModel: 'haiku' } }
+    writeSandbox(sandboxOn({ autoAllowBashIfSandboxed: true }))
 
     for (const mode of ['default', 'plan', 'acceptEdits', 'auto', 'bypassPermissions']) {
       const dispatcher = makeDispatcher(makeFakeDispatchLedger(), deps())
@@ -292,12 +303,13 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
     expect(flagValue(spawnOf(1).args, '--permission-mode')).toBe('default')
   })
 
-  it('sandbox off or never configured: no sandbox reaches cli.js', async () => {
+  it('switch off or never set: no sandbox reaches cli.js, and never an explicit enabled false', async () => {
     mocks.query.mockReset()
     mocks.query.mockImplementation(() => oneTurnProcess('claude-sbx-3'))
 
     for (const sandbox of [undefined, sandboxOn({ enabled: false })]) {
-      claudeConfig = { dispatch: { defaultModel: 'haiku' }, ...(sandbox ? { sandbox } : {}) }
+      claudeConfig = { dispatch: { defaultModel: 'haiku' } }
+      writeSandbox(sandbox)
       const dispatcher = makeDispatcher(makeFakeDispatchLedger(), deps())
       await dispatcher.dispatch({ engine: 'claude', prompt: 'one' }, ctx())
       const { args, options } = spawnOf(mocks.query.mock.calls.length - 1)
@@ -324,14 +336,14 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
     expect(flagSettings(spawnOf(0).args)).not.toHaveProperty('sandbox')
 
     // …switched on before its next run: the resumed process is sandboxed…
-    claudeConfig = { dispatch: { defaultModel: 'haiku' }, sandbox: sandboxOn() }
+    writeSandbox(sandboxOn())
     expect((await resume(first.sessionId)).sandbox).toMatchObject({
       enabled: true,
       failIfUnavailable: true
     })
 
     // …and switched off again: the next one is not.
-    claudeConfig = { dispatch: { defaultModel: 'haiku' }, sandbox: sandboxOn({ enabled: false }) }
+    writeSandbox(sandboxOn({ enabled: false }))
     expect(await resume(first.sessionId)).not.toHaveProperty('sandbox')
   })
 
@@ -375,7 +387,8 @@ describe('the engine sandbox and effort on the real Claude dispatch spawn (ADR-1
   // run must report that reason: "exited with code=1" alone reads as a crash to retry.
   it('a process that refuses to start fails the dispatch with what it wrote to stderr', async () => {
     mocks.query.mockReset()
-    claudeConfig = { dispatch: { defaultModel: 'haiku' }, sandbox: sandboxOn() }
+    claudeConfig = { dispatch: { defaultModel: 'haiku' } }
+    writeSandbox(sandboxOn())
     mocks.query.mockImplementation((input: { options: QueryOptions }) => {
       input.options.stderr?.(
         Buffer.from('[Voice:Patch] ready\nError: sandbox required but unavailable: bubblewrap\n')

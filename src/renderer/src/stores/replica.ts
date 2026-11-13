@@ -815,6 +815,9 @@ function buildPatch(
   if (force || prev.autoModeDisabledBySettings !== next.autoModeDisabledBySettings) {
     patch.autoModeDisabledBySettings = next.autoModeDisabledBySettings
   }
+  if (force || prev.claudeSandbox !== next.claudeSandbox) {
+    patch.claudeSandbox = next.claudeSandbox
+  }
   if (force || prev.settings !== next.settings) {
     const settings: AppSettings = {
       ...DEFAULT_SETTINGS,

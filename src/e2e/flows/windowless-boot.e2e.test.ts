@@ -110,6 +110,11 @@ const CONFIG_FIXTURE = {
   }
 }
 
+// A no-op watcher: a real one would poll the developer's own Claude settings file.
+vi.mock('../../core/services/claude-sandbox-watch', () => ({
+  startClaudeSandboxWatcher: vi.fn()
+}))
+
 vi.mock('../../core/services/ui-config', () => ({
   loadSettings: vi.fn(() => CONFIG_FIXTURE.settings),
   saveSettings: vi.fn(),

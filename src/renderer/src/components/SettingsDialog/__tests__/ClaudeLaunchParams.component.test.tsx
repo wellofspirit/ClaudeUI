@@ -5,8 +5,8 @@
  * are dependency trees: a master toggle, then rows that must nest, dim and go
  * inert underneath it. What is worth guarding is exactly that — which rows the
  * master disables, and that a presentation pass left every WRITE untouched
- * (each row still hands `updateEngineConfig` the whole `sandbox`/`proxy`
- * object with one field changed).
+ * (a proxy row still hands `updateEngineConfig` the whole `proxy` object with one
+ * field changed; a sandbox row sends `setClaudeSandbox` a patch with only its field).
  *
  * Driven through `SettingsDialogView` with `activePage: 'claude'` so the rows
  * render inside the real shell, the same way `SettingsDialogView.component`
@@ -16,28 +16,16 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
 import { SettingsDialogView, type SettingsDialogViewProps } from '../View'
-import { DEFAULT_SETTINGS } from '../../../stores/session-store'
-import type { EngineConfig, ProxySettings, SandboxSettings } from '../../../../../shared/types'
-
-/** Mirrors `DEFAULT_SANDBOX` in settings-sections.tsx — the shape a row that
- *  changes ONE field has to hand back untouched. Duplicated on purpose: the
- *  constant is module-private, and a copy here is what makes "the rest of the
- *  object unchanged" an assertion rather than a tautology. */
-const SANDBOX_OFF: SandboxSettings = {
-  enabled: false,
-  autoAllowBashIfSandboxed: false,
-  allowUnsandboxedCommands: false,
-  network: {
-    restrictNetwork: false,
-    allowLocalBinding: false,
-    allowedDomains: [],
-    allowManagedDomainsOnly: false,
-    allowAllUnixSockets: false,
-    allowUnixSockets: []
-  },
-  filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-  excludedCommands: []
-}
+import { DEFAULT_SETTINGS, useSessionStore } from '../../../stores/session-store'
+import { DEFAULT_SANDBOX } from '../../../../../shared/types'
+import type {
+  ClaudeSandboxState,
+  EngineConfig,
+  ProxySettings,
+  SandboxSettings
+} from '../../../../../shared/types'
+import { act } from '@testing-library/react'
+import { seedLocalApp } from '../../../stores/replica'
 
 /** Mirrors `DEFAULT_PROXY`, for the same reason. */
 const PROXY_OFF: ProxySettings = {
@@ -77,9 +65,24 @@ function renderClaudePage(engineConfig: EngineConfig = {}): {
 }
 
 let app: TestApp
+const setClaudeSandbox = vi.fn<(patch: unknown) => Promise<void>>()
+
+/** Stage the replicated sandbox state the group reads. */
+function seedSandbox(settings: Partial<SandboxSettings>, supported = true): SandboxSettings {
+  const merged = { ...DEFAULT_SANDBOX, ...settings }
+  const claudeSandbox: ClaudeSandboxState = { settings: merged, supported }
+  act(() => seedLocalApp({ claudeSandbox }))
+  return merged
+}
 
 beforeEach(async () => {
   app = await bootTestApp()
+  useSessionStore.setState({ claudeSandbox: { settings: DEFAULT_SANDBOX, supported: true } })
+  setClaudeSandbox.mockReset().mockResolvedValue(undefined)
+  Object.assign((globalThis as any).window.api, {
+    setClaudeSandbox,
+    claudeSandboxScopes: vi.fn().mockResolvedValue([])
+  })
   app.bridge.ipcMain.handle('config:load-engine-config', async () => ({}))
   app.bridge.ipcMain.handle('config:load-vendor-config', async () => ({}))
   app.bridge.ipcMain.handle('engine:is-installed', async () => true)
@@ -109,7 +112,8 @@ describe('the sandbox group', () => {
   })
 
   it('enables the dependents once the master toggle is on', () => {
-    renderClaudePage({ sandbox: { ...SANDBOX_OFF, enabled: true } })
+    seedSandbox({ enabled: true })
+    renderClaudePage()
 
     expect(screen.getByTestId('ClaudeSandbox.autoAllow')).not.toBeDisabled()
     expect(screen.getByTestId('ClaudeSandbox.allowWrite.input')).not.toBeDisabled()
@@ -118,39 +122,37 @@ describe('the sandbox group', () => {
     expect(screen.getByTestId('ClaudeSandbox.managedDomainsOnly')).toBeDisabled()
   })
 
-  it('turning the master on writes enabled: true and nothing else', () => {
-    const { updateEngineConfig } = renderClaudePage()
+  it('turning the master on sends a patch with enabled and nothing else', () => {
+    renderClaudePage()
     fireEvent.click(screen.getByTestId('ClaudeSandbox.enabled'))
-    expect(updateEngineConfig).toHaveBeenCalledWith({
-      sandbox: { ...SANDBOX_OFF, enabled: true }
-    })
+    expect(setClaudeSandbox).toHaveBeenCalledWith({ enabled: true })
   })
 
-  it('adding an allowed domain appends it to the existing list', () => {
-    const sandbox: SandboxSettings = {
-      ...SANDBOX_OFF,
+  it('a row sends only its own field', () => {
+    seedSandbox({ enabled: true })
+    renderClaudePage()
+    fireEvent.click(screen.getByTestId('ClaudeSandbox.localBinding'))
+    expect(setClaudeSandbox).toHaveBeenCalledWith({ network: { allowLocalBinding: true } })
+  })
+
+  it('adding an allowed domain sends the whole list in a network patch', () => {
+    seedSandbox({
       enabled: true,
       network: {
-        ...SANDBOX_OFF.network,
+        ...DEFAULT_SANDBOX.network,
         restrictNetwork: true,
         allowedDomains: ['files.example.com']
       }
-    }
-    const { updateEngineConfig } = renderClaudePage({ sandbox })
+    })
+    renderClaudePage()
 
     fireEvent.change(screen.getByTestId('ClaudeSandbox.allowedDomains.input'), {
       target: { value: 'registry.npmjs.org' }
     })
     fireEvent.click(screen.getByTestId('ClaudeSandbox.allowedDomains.add'))
 
-    expect(updateEngineConfig).toHaveBeenCalledWith({
-      sandbox: {
-        ...sandbox,
-        network: {
-          ...sandbox.network,
-          allowedDomains: ['files.example.com', 'registry.npmjs.org']
-        }
-      }
+    expect(setClaudeSandbox).toHaveBeenCalledWith({
+      network: { allowedDomains: ['files.example.com', 'registry.npmjs.org'] }
     })
   })
 

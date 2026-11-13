@@ -111,8 +111,7 @@ export async function prepareAndCreateSession(
     model: resolvedModel,
     resumeSessionId,
     resumeSessionAt,
-    forkSession,
-    sandboxConfig: engineCfg.sandbox
+    forkSession
   }
   // engineId (not resolvedEngineId) — SessionManager.create()'s own `= 'claude'`
   // default preserves the legacy claude-default boundary at that layer.

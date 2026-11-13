@@ -108,7 +108,8 @@ const VIEW_OR_CLIENT_ORIGINATED = new Set<string>([
   'worktreeInfoMap',
   'directories',
   'settings',
-  'autoModeDisabledBySettings'
+  'autoModeDisabledBySettings',
+  'claudeSandbox'
 ])
 
 /**

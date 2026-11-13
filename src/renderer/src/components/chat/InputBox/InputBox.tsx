@@ -412,7 +412,7 @@ export function InputBox(): React.JSX.Element {
   const setThinkingMode = useSessionStore((s) => s.setThinkingMode)
   const reasoningVariant = useActiveSession((s) => s.reasoningVariant)
   const setReasoningVariant = useSessionStore((s) => s.setReasoningVariant)
-  const sandboxEnabled = useSessionStore((s) => s.engineConfig.sandbox?.enabled ?? false)
+  const sandboxEnabled = useSessionStore((s) => s.claudeSandbox.settings.enabled)
 
   // Voice input: the user's setting AND the session's capability. The session
   // value is false on engines without voice and on a Claude Code binary that

@@ -23,6 +23,8 @@ import { listMcpCatalog, loadMcpServers, readDisabledMcpServers } from '../servi
 import { loadSettings, loadSessionConfig, loadSlashCommands } from '../services/ui-config'
 import type { UISettings, UISessionConfig } from '../services/ui-config'
 import type { SessionManager } from '../services/session-manager'
+import { claudeSandboxScopes } from '../services/claude-sandbox-settings'
+import type { SandboxSettingsPatch } from '../../shared/types/engine-config'
 import type { EngineId, PermissionScope, ClaudePermissions } from '../../shared/types'
 import type { CommandRegistration, Transport } from './command-registry'
 import { envelopeFor } from './safe-handler'
@@ -34,6 +36,7 @@ import {
   mcpStatus,
   setCleanupPeriod,
   setClaudeAutoModeDisabled,
+  setClaudeSandbox,
   savePermissionsAndNotify,
   setWorkspaceTrustAndNotify
 } from './handlers-core'
@@ -182,6 +185,19 @@ export function appStateCommands(
       capability: 'config',
       kind: 'command',
       handler: async (disabled: boolean) => setClaudeAutoModeDisabled(manager, disabled)
+    },
+    // The command sandbox: the `sandbox` block of Claude Code's user settings file (ADR-009)
+    {
+      channel: 'claude:set-sandbox',
+      capability: 'config',
+      kind: 'command',
+      handler: async (patch: SandboxSettingsPatch) => setClaudeSandbox(patch)
+    },
+    {
+      channel: 'claude:sandbox-scopes',
+      capability: 'config',
+      kind: 'query',
+      handler: async (cwd: string) => claudeSandboxScopes(String(cwd ?? ''))
     },
     // MCP runtime status (Claude-only: capabilities.hostedMcp AND method presence —
     // opencode advertises hostedMcp:true but does not implement the MCP methods)

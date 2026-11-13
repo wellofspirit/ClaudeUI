@@ -1,5 +1,6 @@
 import { query as sdkQuery } from '../sdk'
-import { claudeBehaviorSettings, claudeGatedSandboxOption } from '../sdk/args'
+import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeSandboxFlags } from './claude-sandbox-settings'
 import { claudeStderrTail } from './claude-stderr-tail'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { v4 as uuid } from 'uuid'
@@ -718,10 +719,10 @@ export class AutomationManager {
       // `settings` carries the two cli.js behaviour switches the Claude engine's
       // settings own (`claudeBehaviorSettings`, read fresh per run like a session's
       // spawn), so an automation honours the toggles too. The run also carries the
-      // engine's sandbox, never auto-approved (ADR-116): nobody is present, so the
+      // shared sandbox setting, never auto-approved (ADR-116): nobody is present, so the
       // classifier or the deny-everything callback must still see every sandboxed command.
       const claudeConfig = loadEngineConfig('claude')
-      const sandbox = claudeGatedSandboxOption(claudeConfig.sandbox)
+      const sandbox = claudeSandboxFlags('run')
       const q = sdkQuery({
         prompt,
         options: {

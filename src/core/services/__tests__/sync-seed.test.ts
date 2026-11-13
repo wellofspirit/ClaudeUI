@@ -29,6 +29,8 @@ const {
   loadSettings,
   loadSessionConfig,
   loadClaudePermissions,
+  readClaudeSandboxState,
+  claudeSandboxSupported,
   listDirectories,
   listOpencodeSessionsGlobal,
   listPiSessionsGlobal
@@ -38,6 +40,8 @@ const {
   loadSettings: vi.fn(),
   loadSessionConfig: vi.fn(),
   loadClaudePermissions: vi.fn(),
+  readClaudeSandboxState: vi.fn(),
+  claudeSandboxSupported: vi.fn(() => true),
   listDirectories: vi.fn(),
   listOpencodeSessionsGlobal: vi.fn(),
   listPiSessionsGlobal: vi.fn()
@@ -52,6 +56,10 @@ vi.mock('../session-meta-prune', () => ({
   claudeSessionsWithNoRecord
 }))
 vi.mock('../claude-settings', () => ({ loadClaudePermissions }))
+vi.mock('../claude-sandbox-settings', () => ({
+  readClaudeSandboxState,
+  claudeSandboxSupported
+}))
 vi.mock('../session-history', () => ({ listDirectories }))
 // F6 moved the per-client three-query merge into this module, so both other
 // engines' list sources are mocked here too — unmocked they read the real
@@ -69,6 +77,7 @@ import {
   resetDirectoryRefreshStateForTests
 } from '../sync-seed'
 import { syncCore } from '../sync-host'
+import { DEFAULT_SANDBOX } from '../../../shared/types/engine-config'
 import { forgetLinkedWorktrees } from '../worktree-root'
 import { dispatchLedger } from '../dispatch-target-ledger'
 import { updateDispatchTarget } from '../db'
@@ -137,8 +146,11 @@ beforeEach(() => {
     sessionEngines: { 'rid-b': { engineId: 'pi' } }
   })
   loadClaudePermissions.mockReturnValue({ disableAutoMode: 'disable' })
+  readClaudeSandboxState.mockReturnValue(SANDBOX_STATE)
   listDirectories.mockResolvedValue(DIRS)
 })
+
+const SANDBOX_STATE = { settings: { ...DEFAULT_SANDBOX, enabled: true }, supported: true }
 
 describe('seedCanonicalAppState', () => {
   it('seeds every app-level snapshot field from the same readers the renderer uses', async () => {
@@ -160,11 +172,23 @@ describe('seedCanonicalAppState', () => {
     expect(snap.sessionEngines).toEqual({ 'rid-b': { engineId: 'pi' } })
     // ADR-050: the remote client cannot read ~/.claude/settings.json itself.
     expect(snap.autoModeDisabledBySettings).toBe(true)
+    // The shared sandbox block of Claude Code's settings file, read through its module.
+    expect(snap.claudeSandbox).toEqual(SANDBOX_STATE)
     expect(snap.directories).toEqual(DIRS)
     // The directory listing IS an emission now (F6) — it is the only app-level
     // seed that is also replicated state clients must see change live. Every
     // other field here is still a plain `setAppState`, so exactly ONE event.
     expect(ringedSince().map((e) => e.channel)).toEqual(['session:directories-changed'])
+  })
+
+  it('seeds the default sandbox settings when the file cannot be read, and still says whether the host can run one', async () => {
+    readClaudeSandboxState.mockReturnValue(null)
+    claudeSandboxSupported.mockReturnValueOnce(false)
+    await seedCanonicalAppState()
+    expect(syncCore.getSnapshot().claudeSandbox).toEqual({
+      settings: DEFAULT_SANDBOX,
+      supported: false
+    })
   })
 
   // ADR-105 §5: App quit ends the processes, so a row still `running` at the next start

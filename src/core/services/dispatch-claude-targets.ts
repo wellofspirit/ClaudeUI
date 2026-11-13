@@ -8,7 +8,8 @@ import { isShellToolName } from '../automode/shell-lexical'
 import { existingDirectories } from './additional-directories'
 import { collectToolUseIds } from '../automode/trajectory'
 import { claudeSpawnPrep } from '../providers/claude-spawn-prep'
-import { claudeBehaviorSettings, claudeGatedSandboxOption } from '../sdk/args'
+import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeSandboxFlags } from './claude-sandbox-settings'
 import { claudeStderrTail } from './claude-stderr-tail'
 import { loadEngineConfig } from './ui-config'
 import { appSetting } from './app-settings'
@@ -1091,10 +1092,10 @@ export class ClaudeTargets {
     // them.
     const claudeConfig = this.host.deps.loadEngineConfig('claude')
     const behavior = claudeBehaviorSettings(claudeConfig.claudeConfig)
-    // And the engine's sandbox and a new session's starting effort for the model (ADR-116),
+    // And the shared sandbox setting and a new session's starting effort for the model (ADR-116),
     // both read here, per spawn: a target resumed after a setting changed runs under the
     // setting of the moment, as its `--settings` rules and `--add-dir` scope do.
-    const sandbox = claudeGatedSandboxOption(claudeConfig.sandbox)
+    const sandbox = claudeSandboxFlags('target')
     const effort = this.claudeTargetEffort(model)
     entry.query = await this.spawnClaudeQuery({
       cwd,

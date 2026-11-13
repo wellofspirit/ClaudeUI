@@ -1712,29 +1712,16 @@ describe('registerRemoteHandlers', () => {
       expect(sessionManagerStub.create.mock.calls[0][4]).toBe('opencode')
     })
 
-    it('sources sandbox from loadEngineConfig, not loadSettings', async () => {
-      const SENTINEL = { enabled: true, marker: 'sentinel' }
-      uiConfigMocks.loadEngineConfig.mockReturnValueOnce({ sandbox: SENTINEL })
-      uiConfigMocks.loadSettings.mockReturnValueOnce({
-        sandbox: { enabled: true, DIFFERENT: true }
-      } as unknown as ReturnType<typeof uiConfigMocks.loadSettings>)
+    it('carries no sandbox into the spawn options, whatever the configs hold', async () => {
+      uiConfigMocks.loadEngineConfig.mockReturnValueOnce({ sandbox: { enabled: true } })
+      await dispatcher.handle(
+        makeRequest('session:create', 'rid-sandbox', { cwd: '/tmp/proj' }),
+        remoteConn
+      )
 
-      try {
-        await dispatcher.handle(
-          makeRequest('session:create', 'rid-sandbox', { cwd: '/tmp/proj' }),
-          remoteConn
-        )
-
-        expect(sessionManagerStub.create).toHaveBeenCalled()
-        // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
-        expect(sessionManagerStub.create.mock.calls[0][3].sandboxConfig).toEqual(SENTINEL)
-      } finally {
-        // The decoy is never consumed when the code sources sandbox correctly, and
-        // vi.clearAllMocks() leaves queued once-values alone — so it would answer the
-        // next test that calls loadSettings (config:load-settings). Reset restores
-        // the vi.fn(impl) default.
-        uiConfigMocks.loadSettings.mockReset()
-      }
+      expect(sessionManagerStub.create).toHaveBeenCalled()
+      // manager.create's 4th positional arg (index 3) is the EngineSpawnOptions object.
+      expect(sessionManagerStub.create.mock.calls[0][3]).not.toHaveProperty('sandboxConfig')
     })
 
     it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
