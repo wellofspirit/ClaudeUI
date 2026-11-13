@@ -22,8 +22,9 @@ ClaudeUI keeps two stores, split by who edits the data:
 
 **Config-plane principle.** ClaudeUI keeps no private copy of config an engine consumes natively: it reads and writes
 the engine's own files (`settings.json`, `.mcp.json`, `opencode.json`). The one exception is **launch params**
-(proxy, custom endpoint, sandbox, hosted-MCP injection) that ClaudeUI applies at spawn through env or flags and that
-the standalone CLI does not share (see ADR-009 below for the Claude-side rule).
+(proxy, custom endpoint, hosted-MCP injection) that ClaudeUI applies at spawn through env or flags and that
+the standalone CLI does not share (see ADR-009 below for the Claude-side rule). The command sandbox was on that
+list until 2026-11-13; it is now Claude Code's own setting (ADR-009).
 
 **Settings tiers**: app, engine, vendor, session. Logging and refresh intervals are app settings; a custom endpoint or
 model override is a vendor setting.
@@ -50,13 +51,22 @@ nothing has to be reconciled; a UISettings copy would be a file the feature neve
   command: the value is replicated state, and a save reaches every client as `config:claude-auto-mode-changed`.
   Its writer, `saveClaudeDisableAutoMode`, refuses to write over a settings file it cannot parse (an empty file or
   one with a byte-order mark is fine), where the two older writers replace such a file.
+- The command sandbox is the third case (2026-11-13; `claude:set-sandbox`, desktop and remote, the Sandbox group
+  on the Claude page): the whole `sandbox` block of the user settings file (`$CLAUDE_CONFIG_DIR` or `~/.claude`,
+  as cli.js resolves it), so the terminal `claude` and ClaudeUI share one switch and one set of lists. Until then
+  it was a private copy in ClaudeUI's Claude engine config, sent with every spawn; a one-time migration at boot
+  moves that copy into the file, and never turns off a sandbox that was on. The value is replicated state
+  (`config:claude-sandbox-changed`), and a poll of the file brings a change made outside ClaudeUI to every client.
+  A save is a patch applied to a fresh read of the file: keys the page does not know are kept, and a file that
+  cannot be parsed is refused. What a ClaudeUI process carries on top of the file when it is spawned is ADR-116
+  (`dispatch.md`); the wire facts are in `docs/protocol-cc/02-cli-flags.md`, `--settings`.
 - **Auto-delete OFF writes `3650`, not `0`.** Upstream treats `0` as schema-invalid; writing it makes settings.json
   invalid and warns on every launch. The control reads `0` and any value of 3650 or more as OFF, so a hand-edited
   `0` still renders correctly.
 - **Self-contained controls are sanctioned.** A settings item may own its IPC state and ignore
   `(settings, updateSettings)` when the value is not in `AppSettings` (`ProxyTestButton`, `ChatRetentionSetting`).
 - **Per-spawn overlay exception.** A cli.js setting whose ClaudeUI default differs from the terminal's is stored in
-  ClaudeUI's Claude engine config and passed per spawn as flag settings (`--settings`), like `sandbox`. Today:
+  ClaudeUI's Claude engine config and passed per spawn as flag settings (`--settings`). Today:
   `idleCompaction` (ClaudeUI default off) and `enabledPlugins["cc-plugin-privacy@builtin"]`. A new cli.js setting
   follows the settings.json rule unless it genuinely needs this overlay.
 - **Workspace trust** (`<globalConfig>#projects[K].hasTrustDialogAccepted`) is read and written by ClaudeUI

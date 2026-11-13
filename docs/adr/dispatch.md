@@ -425,16 +425,25 @@ Consequence, accepted: a broad additional directory widens every target as much 
 ## A Claude target runs under the Claude engine's sandbox and at a new session's effort (ADR-116)
 
 A Claude dispatch target is a Claude Code process of ClaudeUI's, so the two Claude engine settings that decide how
-its commands run apply to it as they do to a session: the command sandbox (`engines/claude.json#sandbox`) and the
-starting effort for its model. A target loads no settings source, so without this its Bash ran unsandboxed while
-the sandbox was enabled, and it ran at Claude Code's own default effort.
+its commands run apply to it as they do to a session: the command sandbox (the `sandbox` block of Claude Code's
+user settings file, shared with the terminal: ADR-009 in `persistence-and-settings.md`) and the starting effort
+for its model. A target loads no settings source, so without this its Bash ran unsandboxed while the sandbox was
+enabled, and it ran at Claude Code's own default effort.
 
-- **Sandbox.** The engine's sandbox settings reach a target through the mapping a session uses
-  (`claudeSandboxOption`, `src/core/sdk/args.ts`; one function, so the two are never confined by different rules)
-  and in the same `--settings` JSON as its behaviour switches and its deny and ask rules. As for a session, the
-  sandbox is required to start: where it cannot run (Windows as Claude Code ships, Linux without bubblewrap)
-  Claude Code refuses to start and the dispatch fails; a target never falls back to running unsandboxed. The
-  filesystem and network lists, the excluded commands and `allowUnsandboxedCommands` are the engine's.
+- **Sandbox.** While the user's sandbox block is enabled, every Claude Code process ClaudeUI starts that runs
+  commands carries that block's settings as flag settings (the keys the Claude page knows, with checked types: a
+  malformed flag block is dropped by Claude Code whole), read from the file when the process is spawned
+  (`claudeSandboxFlags`, `src/core/services/claude-sandbox-settings.ts`; one function for a session, a target and
+  an automation run, so they are never confined by different rules), in the same `--settings` JSON as its
+  behaviour switches and its deny and ask rules. Flag settings rank above a project's own settings, which could
+  otherwise turn the user's sandbox off or flip its switches; a project can still add to the lists, which merge
+  across sources. The sandbox is required to start (`failIfUnavailable`, added to the flag block and never written
+  to the shared file): where it cannot run (Windows as Claude Code ships, Linux without bubblewrap) Claude Code
+  refuses to start and the dispatch fails; a target never falls back to running unsandboxed. The filesystem and
+  network lists, the excluded commands and `allowUnsandboxedCommands` are the user's. With the block not enabled
+  ClaudeUI adds nothing to a session or a target: a sandbox that a project's own settings turn on applies to a
+  session as it does in the terminal, and never to a target. (2026-11-13: the settings moved from ClaudeUI's
+  engine config to the shared file; what a process is bound by while the switch is on did not change.)
 - **Never auto-approved.** `autoAllowBashIfSandboxed` is the one setting a target does not take: it is always sent
   as `false`. A sandboxed command of a target is gated by everything that gates its Bash without a sandbox: the
   forwarded approval card, Claude Code's classifier in auto mode, the user's deny and ask rules, and the host's
@@ -443,8 +452,8 @@ the sandbox was enabled, and it ran at Claude Code's own default effort.
   a plan-mode session asks about. And an auto-approved command never reaches the host, so a target's deny and ask
   rules would be matched by Claude Code's text prefix alone. The key is sent explicitly because Claude Code reads
   an absent one as true. The sandbox therefore only ever tightens a target.
-- **Outside the sandbox.** An excluded command, and a command the agent asks to run unsandboxed where the engine
-  allows it (`dangerouslyDisableSandbox`), go through the target's normal gate. A connection the sandbox refuses is
+- **Outside the sandbox.** An excluded command, and a command the agent asks to run unsandboxed where the user's
+  block allows it (`dangerouslyDisableSandbox`), go through the target's normal gate. A connection the sandbox refuses is
   asked about as `SandboxNetworkAccess` and forwarded to the dispatching session's user like any other ask.
 - **Effort.** A target starts at the effort a new Claude session gets for its model with no pick of its own: the
   user's saved starting effort for the model, else the model's default, clamped to the levels the model accepts
@@ -461,15 +470,16 @@ the sandbox was enabled, and it ran at Claude Code's own default effort.
 - **A dead process says why.** Claude Code explains a refusal to start on stderr, so the failure a target's
   run reports quotes the last lines its process wrote there.
 - **An automation run is bound the same way** (added 2026-11-13). It is the other Claude Code process of ClaudeUI's
-  that runs commands without being a session. It carries the engine's sandbox through the same mapping, required
-  to start, read at each run and at each follow-up message, and never auto-approved (`claudeGatedSandboxOption`,
-  one function for a run and a target). Nobody is present at a run: its gate is Claude Code's classifier in auto
+  that runs commands without being a session. It carries the user's sandbox block through the same function,
+  required to start, read at each run and at each follow-up message, and never auto-approved. Nobody is present
+  at a run: its gate is Claude Code's classifier in auto
   mode and otherwise a callback that denies every ask, and auto-approval would take every sandboxed command past
   both. A run fails on an error result, as a session's turn does, and on a process that dies, so a run that Claude
   Code refuses to start records the reason; its notification shows the first line. Unlike a
-  target, a run loads the user's settings sources as a session does: their sandbox lists merge with the engine's,
-  and while the engine's sandbox is off a sandbox set in the user's own settings file applies to a run as it does to
-  a session.
+  target, a run loads the user's settings sources as a session does, so a sandbox that only a project's settings
+  turn on applies to it too. A run therefore always carries `autoAllowBashIfSandboxed: false`, alone when the
+  user's block is not enabled (the key does nothing without a sandbox), so no source can auto-approve a run
+  (2026-11-13).
 
 Rejected: taking `autoAllowBashIfSandboxed` as a session does (wider than a session in plan mode, and it removes
 the host-side deny and ask matching from a target's Bash); recording on the ledger row that a target was created
