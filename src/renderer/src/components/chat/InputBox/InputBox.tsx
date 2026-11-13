@@ -579,19 +579,18 @@ export function InputBox(): React.JSX.Element {
         if (fork) {
           // Branch: resume the SOURCE session, truncated to the anchor, forked into
           // a fresh UUID. cli.js mints the new id and we rekey to it on first init.
-          await window.api.createSession(
-            activeSessionId,
-            session?.cwd || '',
-            opts.effort,
-            fork.sourceSessionId,
-            session?.permissionMode,
-            opts.model,
-            opts.thinkingMode,
-            fork.anchorUuid,
-            true,
-            session?.selectedEngineId,
-            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-          )
+          await window.api.createSession(activeSessionId, {
+            cwd: session?.cwd || '',
+            engineId: session?.selectedEngineId,
+            config: {
+              effort: opts.effort,
+              permissionMode: session?.permissionMode,
+              model: opts.model,
+              thinkingMode: opts.thinkingMode
+            },
+            resume: { sessionId: fork.sourceSessionId, at: fork.anchorUuid, fork: true },
+            announce: spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
+          })
         } else {
           const isHistorical = session && hasResumableTranscript(session)
           // For opencode sessions, always pass the routingId as resumeSessionId so
@@ -601,19 +600,18 @@ export function InputBox(): React.JSX.Element {
           // createSession if it doesn't exist (e.g. first-ever prompt on that slot).
           const isOpencode = session?.selectedEngineId === 'opencode'
           const resumeId = isHistorical || isOpencode ? activeSessionId : undefined
-          await window.api.createSession(
-            activeSessionId,
-            session?.cwd || '',
-            opts.effort,
-            resumeId,
-            session?.permissionMode,
-            opts.model,
-            opts.thinkingMode,
-            undefined,
-            undefined,
-            session?.selectedEngineId,
-            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-          )
+          await window.api.createSession(activeSessionId, {
+            cwd: session?.cwd || '',
+            engineId: session?.selectedEngineId,
+            config: {
+              effort: opts.effort,
+              permissionMode: session?.permissionMode,
+              model: opts.model,
+              thinkingMode: opts.thinkingMode
+            },
+            ...(resumeId !== undefined ? { resume: { sessionId: resumeId } } : {}),
+            announce: spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
+          })
         }
         markSdkActive(activeSessionId)
       }
@@ -633,35 +631,33 @@ export function InputBox(): React.JSX.Element {
       const opts = resolveSessionSdkOptions(activeSessionId)
       const fork = session?.forkOrigin
       if (fork) {
-        await window.api.createSession(
-          activeSessionId,
-          session?.cwd || '',
-          opts.effort,
-          fork.sourceSessionId,
-          session?.permissionMode,
-          opts.model,
-          opts.thinkingMode,
-          fork.anchorUuid,
-          true,
-          session?.selectedEngineId,
-          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-        )
+        await window.api.createSession(activeSessionId, {
+          cwd: session?.cwd || '',
+          engineId: session?.selectedEngineId,
+          config: {
+            effort: opts.effort,
+            permissionMode: session?.permissionMode,
+            model: opts.model,
+            thinkingMode: opts.thinkingMode
+          },
+          resume: { sessionId: fork.sourceSessionId, at: fork.anchorUuid, fork: true },
+          announce: spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
+        })
       } else {
         const isHistorical = session && hasResumableTranscript(session) && !session.sdkActive
         const resumeId = isHistorical ? activeSessionId : undefined
-        await window.api.createSession(
-          activeSessionId,
-          session?.cwd || '',
-          opts.effort,
-          resumeId,
-          session?.permissionMode,
-          opts.model,
-          opts.thinkingMode,
-          undefined,
-          undefined,
-          session?.selectedEngineId,
-          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-        )
+        await window.api.createSession(activeSessionId, {
+          cwd: session?.cwd || '',
+          engineId: session?.selectedEngineId,
+          config: {
+            effort: opts.effort,
+            permissionMode: session?.permissionMode,
+            model: opts.model,
+            thinkingMode: opts.thinkingMode
+          },
+          ...(resumeId !== undefined ? { resume: { sessionId: resumeId } } : {}),
+          announce: spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
+        })
       }
       markSdkActive(activeSessionId)
     }
@@ -1152,19 +1148,18 @@ export function InputBox(): React.JSX.Element {
     const { sessions } = useSessionStore.getState()
     const session = sessions[activeSessionId]
     const opts = resolveSessionSdkOptions(activeSessionId)
-    await window.api.createSession(
-      activeSessionId,
-      session?.cwd || '',
-      opts.effort,
-      activeSessionId,
-      session?.permissionMode,
-      opts.model,
-      opts.thinkingMode,
-      undefined,
-      undefined,
-      session?.selectedEngineId,
-      spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-    )
+    await window.api.createSession(activeSessionId, {
+      cwd: session?.cwd || '',
+      engineId: session?.selectedEngineId,
+      config: {
+        effort: opts.effort,
+        permissionMode: session?.permissionMode,
+        model: opts.model,
+        thinkingMode: opts.thinkingMode
+      },
+      resume: { sessionId: activeSessionId },
+      announce: spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
+    })
     markSdkActive(activeSessionId)
   }, [activeSessionId, sdkActive, markSdkActive])
 

@@ -48,8 +48,13 @@ class ProbeSession extends BaseSession {
   async interrupt(): Promise<void> {}
   cancel(): void {}
   resolveApproval(): void {}
-  async setModel(): Promise<void> {}
-  async setPermissionMode(): Promise<void> {}
+  protected readonly liveConfig = {
+    model: null,
+    permissionMode: null,
+    effort: null,
+    thinkingMode: null,
+    reasoningVariant: null
+  }
   dispose(): void {}
 }
 

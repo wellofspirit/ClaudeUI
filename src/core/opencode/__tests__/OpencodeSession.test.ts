@@ -646,6 +646,38 @@ describe('lifecycle', () => {
     expect(payloads('session:status').at(-1)).toMatchObject({ state: 'running', sessionId: SID })
   })
 
+  it('a session spawned with a reasoning variant carries it from the first turn; one without sends none', async () => {
+    session = makeSession({ reasoningVariant: 'high' })
+    await startTurn('first')
+    expect(h.client.createSession.mock.calls[0][0].model).toEqual({
+      providerID: 'openai',
+      id: 'gpt-x',
+      variant: 'high'
+    })
+    session.cancel()
+
+    h.client.createSession.mockClear()
+    session = makeSession()
+    await startTurn('first')
+    expect(h.client.createSession.mock.calls[0][0].model).toEqual({
+      providerID: 'openai',
+      id: 'gpt-x'
+    })
+  })
+
+  it('applyConfig reaches the variant and model setters and ignores effort', async () => {
+    session = makeSession({ reasoningVariant: 'high' })
+    await session.applyConfig({ effort: 'low', thinkingMode: 'enabled', model: 'openai/gpt-y' })
+    // the model change cleared the variant; a later patch sets it again
+    await session.applyConfig({ reasoningVariant: 'low', model: 'openai/gpt-z' })
+    await startTurn('x')
+    expect(h.client.createSession.mock.calls[0][0].model).toEqual({
+      providerID: 'openai',
+      id: 'gpt-z',
+      variant: 'low'
+    })
+  })
+
   it('a missing permission guard fails the turn with its explanation and creates nothing', async () => {
     h.acquire.mockRejectedValue(new OpencodePermissionGuardError(CWD, 'no guard RPC'))
     session = makeSession()

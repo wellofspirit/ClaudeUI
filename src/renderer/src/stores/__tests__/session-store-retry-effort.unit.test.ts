@@ -10,6 +10,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
 import type { ModelInfo } from '../../../../shared/types'
 import { emitSync, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import type { SessionSpawnRequest } from '../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 const OPUS: ModelInfo = {
   value: 'opus',
@@ -56,27 +61,33 @@ describe('retrySend — Claude effort', () => {
   it("respawns at the model's saved starting effort when the session has no pick", async () => {
     patchSession({ effort: null })
     await useSessionStore.getState().retrySend('rt-1', 'again')
-    expect(createSession.mock.calls[0]?.[2]).toBe('high')
+    expect(spawnReq(createSession.mock.calls[0]).config?.effort).toBe('high')
     // The starting effort freezes into the session: announced with the spawn, so
     // a later change to the per-model value cannot re-label it.
-    expect(createSession.mock.calls[0]?.[10]).toEqual({ effort: 'high', thinkingMode: null })
+    expect(spawnReq(createSession.mock.calls[0]).announce).toEqual({
+      effort: 'high',
+      thinkingMode: null
+    })
   })
 
   it("a session's own pick still wins, and is announced", async () => {
     patchSession({ effort: 'low' })
     await useSessionStore.getState().retrySend('rt-1', 'again')
-    expect(createSession.mock.calls[0]?.[2]).toBe('low')
-    expect(createSession.mock.calls[0]?.[10]).toEqual({ effort: 'low', thinkingMode: null })
+    expect(spawnReq(createSession.mock.calls[0]).config?.effort).toBe('low')
+    expect(spawnReq(createSession.mock.calls[0]).announce).toEqual({
+      effort: 'low',
+      thinkingMode: null
+    })
   })
 
   it('an UNKNOWN model (empty catalog) announces no effort, so the pick survives the fold (GUARD)', async () => {
     useSessionStore.setState({ availableModels: [] })
     patchSession({ effort: 'low' })
     await useSessionStore.getState().retrySend('rt-1', 'again')
-    const announce = createSession.mock.calls[0]?.[10] as Record<string, unknown>
+    const announce = spawnReq(createSession.mock.calls[0]).announce as Record<string, unknown>
     // Spawned at the session's own pick, announcing nothing about it: a `null`
     // here would clear it on every replica, this one included.
-    expect(createSession.mock.calls[0]?.[2]).toBe('low')
+    expect(spawnReq(createSession.mock.calls[0]).config?.effort).toBe('low')
     expect('effort' in announce).toBe(false)
     emitSync('session:created', ['rt-1', { cwd: '/tmp/x', ...announce }])
     expect(useSessionStore.getState().sessions['rt-1'].effort).toBe('low')

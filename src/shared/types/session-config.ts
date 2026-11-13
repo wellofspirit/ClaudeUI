@@ -22,11 +22,10 @@ export interface SessionConfig {
 }
 
 /**
- * What a client asks for when it starts a session (`window.api.createSession`): where, on which
+ * What a client asks for when it starts a session (`window.api.createSession(routingId, request)`): where, on which
  * engine, with which config, and what it continues from.
  */
 export interface SessionSpawnRequest {
-  routingId: string
   cwd: string
   /** Absent means Claude: the default at the wire boundary for a client that predates engines. */
   engineId?: EngineId

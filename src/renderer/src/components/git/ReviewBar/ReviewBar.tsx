@@ -37,23 +37,21 @@ export function ReviewBar({ comments }: Props): React.JSX.Element | null {
       // The spawn's own resolver, so the review respawn runs what the composer
       // shows (per-model starting effort, not a hardcoded 'medium').
       const effort = session ? sessionSpawnEffort(state, session) : 'medium'
-      await window.api.createSession(
-        activeSessionId,
-        session?.cwd || '',
-        effort,
-        resumeId,
-        session?.permissionMode,
-        // The session's own pick, NOT undefined: an absent model makes the
-        // opencode resolver substitute a catalog fallback, and since 0065eef the
-        // birth event announces the resolved model to every replica — an
-        // undefined here would overwrite the user's picker with that fallback.
-        session?.selectedModel,
-        undefined,
-        undefined,
-        undefined,
-        selectedEngineId,
-        spawnAnnouncement(state, session, effort)
-      )
+      await window.api.createSession(activeSessionId, {
+        cwd: session?.cwd || '',
+        engineId: selectedEngineId,
+        config: {
+          effort,
+          permissionMode: session?.permissionMode,
+          // The session's own pick, NOT undefined: an absent model makes the
+          // opencode resolver substitute a catalog fallback, and since 0065eef the
+          // birth event announces the resolved model to every replica — an
+          // undefined here would overwrite the user's picker with that fallback.
+          model: session?.selectedModel
+        },
+        ...(resumeId !== undefined ? { resume: { sessionId: resumeId } } : {}),
+        announce: spawnAnnouncement(state, session, effort)
+      })
       markSdkActive(activeSessionId)
     }
 

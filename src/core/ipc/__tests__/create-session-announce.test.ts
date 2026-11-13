@@ -62,9 +62,14 @@ vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
+vi.mock('../../services/sync-host', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/sync-host')>()
+  return { ...actual, emitEvent: vi.fn(actual.emitEvent) }
+})
+
 // Import AFTER mocks.
 import { prepareAndCreateSession, type CreateSessionArgs } from '../create-session'
-import { syncCore } from '../../services/sync-host'
+import { emitEvent, syncCore } from '../../services/sync-host'
 import type { SessionManager } from '../../services/session-manager'
 
 const RID = 'rid-announce'
@@ -80,10 +85,9 @@ function create(extra: Partial<CreateSessionArgs>): {
     done: prepareAndCreateSession(manager, null, {
       routingId: RID,
       cwd: '/r/repo',
-      effort: 'medium',
-      thinkingMode: 'adaptive',
       engineId: 'claude',
-      ...extra
+      ...extra,
+      config: { effort: 'medium', thinkingMode: 'adaptive', ...extra.config }
     })
   }
 }
@@ -111,7 +115,8 @@ describe('session:created announce', () => {
   })
 
   it('announces the positional effort even when announce names a different rung (GUARD)', async () => {
-    await create({ effort: 'high', announce: { effort: 'low', thinkingMode: null } }).done
+    await create({ config: { effort: 'high' }, announce: { effort: 'low', thinkingMode: null } })
+      .done
     expect(canonical().effort).toBe('high')
   })
 
@@ -121,7 +126,10 @@ describe('session:created announce', () => {
   })
 
   it('announces null when the host has no positional effort to stand behind', async () => {
-    await create({ effort: undefined, announce: { effort: 'high', thinkingMode: null } }).done
+    await create({
+      config: { effort: undefined },
+      announce: { effort: 'high', thinkingMode: null }
+    }).done
     expect(canonical().effort).toBeNull()
   })
 
@@ -135,19 +143,23 @@ describe('session:created announce', () => {
     // The client's catalog is empty / failed / curated: it knows nothing about the
     // model, and a `null` here would CLEAR a pick the process is still running at.
     const held = async (): Promise<void> => {
-      await create({ effort: 'high', announce: { effort: 'high', thinkingMode: null } }).done
+      await create({ config: { effort: 'high' }, announce: { effort: 'high', thinkingMode: null } })
+        .done
       expect(canonical().effort).toBe('high')
     }
 
     it('announce.effort undefined leaves canonical effort alone (GUARD)', async () => {
       await held()
-      await create({ effort: 'low', announce: { effort: undefined, thinkingMode: null } }).done
+      await create({
+        config: { effort: 'low' },
+        announce: { effort: undefined, thinkingMode: null }
+      }).done
       expect(canonical().effort).toBe('high')
     })
 
     it('an announce object lacking the key leaves it alone (GUARD)', async () => {
       await held()
-      await create({ effort: 'low', announce: { thinkingMode: 'disabled' } }).done
+      await create({ config: { effort: 'low' }, announce: { thinkingMode: 'disabled' } }).done
       expect(canonical()).toEqual({ effort: 'high', thinkingMode: 'disabled' })
     })
 
@@ -155,7 +167,7 @@ describe('session:created announce', () => {
       await held()
       const wire = JSON.parse(JSON.stringify({ effort: undefined, thinkingMode: null }))
       expect('effort' in wire).toBe(false)
-      await create({ effort: 'low', announce: wire }).done
+      await create({ config: { effort: 'low' }, announce: wire }).done
       expect(canonical().effort).toBe('high')
     })
 
@@ -186,5 +198,23 @@ describe('session:created announce', () => {
     await done
     const spawn = (manager.create as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(spawn[3]).toMatchObject({ effort: 'medium', thinkingMode: 'adaptive' })
+  })
+})
+
+describe('a spawn config that carries a reasoning variant', () => {
+  const configChanged = (): unknown[] =>
+    vi
+      .mocked(emitEvent)
+      .mock.calls.filter(([channel]) => channel === 'session:config-changed')
+      .map(([, args]) => args)
+
+  it('tells every client the way a live change does', async () => {
+    await create({ config: { reasoningVariant: 'high' } }).done
+    expect(configChanged()).toEqual([[RID, { reasoningVariant: 'high' }]])
+  })
+
+  it('emits nothing when the config has none', async () => {
+    await create({}).done
+    expect(configChanged()).toEqual([])
   })
 })

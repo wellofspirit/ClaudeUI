@@ -90,7 +90,7 @@ async function resume(sessionId: string, engineId?: 'claude' | 'opencode'): Prom
   await prepareAndCreateSession(manager, null, {
     routingId: `rid-${sessionId}`,
     cwd: REPO,
-    resumeSessionId: sessionId,
+    resume: { sessionId },
     engineId
   })
 }

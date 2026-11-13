@@ -61,8 +61,13 @@ describe('TurnOriginLedger', () => {
       interrupt = async (): Promise<void> => {}
       cancel = (): void => {}
       resolveApproval = (): void => {}
-      setModel = async (): Promise<void> => {}
-      setPermissionMode = async (): Promise<void> => {}
+      protected readonly liveConfig = {
+        model: null,
+        permissionMode: null,
+        effort: null,
+        thinkingMode: null,
+        reasoningVariant: null
+      }
       dispose = (): void => {}
     }
     const a = new Probe('a', null, '/x')
@@ -84,8 +89,13 @@ describe('the user speaking resets the ledger when the prompt is TAKEN, not when
     interrupt = async (): Promise<void> => {}
     cancel = (): void => {}
     resolveApproval = (): void => {}
-    setModel = async (): Promise<void> => {}
-    setPermissionMode = async (): Promise<void> => {}
+    protected readonly liveConfig = {
+      model: null,
+      permissionMode: null,
+      effort: null,
+      thinkingMode: null,
+      reasoningVariant: null
+    }
     dispose = (): void => {}
     /** What an engine does when it takes the oldest queued item. */
     take(): void {
@@ -169,8 +179,13 @@ describe('what the session tools’ start gate reads (slice 1c)', () => {
       interrupt = async (): Promise<void> => {}
       cancel = (): void => {}
       resolveApproval = (): void => {}
-      setModel = async (): Promise<void> => {}
-      setPermissionMode = async (): Promise<void> => {}
+      protected readonly liveConfig = {
+        model: null,
+        permissionMode: null,
+        effort: null,
+        thinkingMode: null,
+        reasoningVariant: null
+      }
       dispose = (): void => {}
       take(): void {
         this.queue.consumeById(this.queue.pending()[0].itemId)
@@ -198,8 +213,13 @@ describe('what the session tools’ start gate reads (slice 1c)', () => {
       interrupt = async (): Promise<void> => {}
       cancel = (): void => {}
       resolveApproval = (): void => {}
-      setModel = async (): Promise<void> => {}
-      setPermissionMode = async (): Promise<void> => {}
+      protected readonly liveConfig = {
+        model: null,
+        permissionMode: null,
+        effort: null,
+        thinkingMode: null,
+        reasoningVariant: null
+      }
       dispose = (): void => {}
       take(): void {
         this.queue.consumeById(this.queue.pending()[0].itemId)
@@ -240,8 +260,13 @@ describe('what the session tools’ start gate reads (slice 1c)', () => {
       interrupt = async (): Promise<void> => {}
       cancel = (): void => {}
       resolveApproval = (): void => {}
-      setModel = async (): Promise<void> => {}
-      setPermissionMode = async (): Promise<void> => {}
+      protected readonly liveConfig = {
+        model: null,
+        permissionMode: null,
+        effort: null,
+        thinkingMode: null,
+        reasoningVariant: null
+      }
       dispose = (): void => {}
       take(): void {
         this.queue.consumeById(this.queue.pending()[0].itemId)

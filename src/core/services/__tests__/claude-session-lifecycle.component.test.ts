@@ -273,6 +273,25 @@ describe('ClaudeSession — setModel reverts on control-request failure', () => 
   })
 })
 
+describe('ClaudeSession — applyConfig', () => {
+  it('reaches the thinking-mode and permission setters and ignores reasoningVariant', async () => {
+    const { win } = makeWin()
+    const session = new ClaudeSession('routing-apply-config', win, '/tmp/proj')
+    liveSessions.push(session)
+    const thinking = vi.spyOn(session, 'setThinkingMode')
+    const mode = vi.spyOn(session, 'setPermissionMode')
+
+    await session.applyConfig({
+      thinkingMode: 'disabled',
+      permissionMode: 'plan',
+      reasoningVariant: 'high'
+    })
+
+    expect(thinking).toHaveBeenCalledWith('disabled')
+    expect(mode).toHaveBeenCalledWith('plan')
+  })
+})
+
 describe('ClaudeSession — hardening-6: spawn-only run() re-arms the idle timer', () => {
   it('run(null) on a LIVE channel leaves the inactivity timer armed (GUARD — fails pre-fix)', async () => {
     vi.useFakeTimers()

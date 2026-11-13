@@ -165,6 +165,11 @@ import { markViewEvicted, useSessionStore } from '../../../../stores/session-sto
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { ReviewBarViewProps } from '../View'
 import { ReviewBar } from '../ReviewBar'
+import type { SessionSpawnRequest } from '../../../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 let viewProps: ReviewBarViewProps
 
@@ -266,7 +271,7 @@ describe('ReviewBar FC — rendered', () => {
 
     expect(createCalls).toHaveLength(1)
     // createSession args: routingId, cwd, effort, resumeId, ...
-    expect(createCalls[0][3]).toBe(FC_ROUTE)
+    expect(spawnReq(createCalls[0]).resume?.sessionId).toBe(FC_ROUTE)
   })
 
   it("onSend spawns at the model's saved starting effort, not a hardcoded 'medium'", async () => {
@@ -295,8 +300,8 @@ describe('ReviewBar FC — rendered', () => {
     })
 
     // createSession args: routingId, cwd, effort, ..., engineId, announce
-    expect(createCalls[0][2]).toBe('high')
-    expect(createCalls[0][10]).toEqual({ effort: 'high', thinkingMode: null })
+    expect(spawnReq(createCalls[0]).config?.effort).toBe('high')
+    expect(spawnReq(createCalls[0]).announce).toEqual({ effort: 'high', thinkingMode: null })
   })
 
   it('onSend skips session creation when already active', async () => {

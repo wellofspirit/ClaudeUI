@@ -3614,19 +3614,18 @@ export const useSessionStore = create<SessionState>((set) => ({
     // The composer's own resolver: a null pick falls to the per-model
     // starting effort, not to cli.js's heuristic by way of `undefined`.
     const effort = sessionSpawnEffort(useSessionStore.getState(), session)
-    await window.api.createSession(
-      routingId,
-      session.cwd || '',
-      effort,
-      resumeId,
-      session.permissionMode,
-      session.selectedModel,
-      session.thinkingMode ?? undefined,
-      undefined,
-      undefined,
-      session.selectedEngineId,
-      spawnAnnouncement(useSessionStore.getState(), session, effort)
-    )
+    await window.api.createSession(routingId, {
+      cwd: session.cwd || '',
+      engineId: session.selectedEngineId,
+      config: {
+        effort,
+        permissionMode: session.permissionMode,
+        model: session.selectedModel,
+        thinkingMode: session.thinkingMode ?? undefined
+      },
+      ...(resumeId !== undefined ? { resume: { sessionId: resumeId } } : {}),
+      announce: spawnAnnouncement(useSessionStore.getState(), session, effort)
+    })
     patchLocalSession(routingId, { sdkActive: true })
     await window.api.sendPrompt(routingId, prompt)
   },

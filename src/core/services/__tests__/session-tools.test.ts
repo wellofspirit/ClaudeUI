@@ -192,8 +192,10 @@ const createSession = vi.fn(async (args: CreateSessionArgs) => {
     {
       cwd: args.cwd,
       ...(args.engineId ? { engineId: args.engineId } : {}),
-      ...(args.permissionMode ? { permissionMode: args.permissionMode as PermissionMode } : {}),
-      ...(args.model ? { model: args.model } : {}),
+      ...(args.config?.permissionMode
+        ? { permissionMode: args.config.permissionMode as PermissionMode }
+        : {}),
+      ...(args.config?.model ? { model: args.config.model } : {}),
       ...(args.createdBy ? { createdBy: args.createdBy } : {})
     }
   ])
@@ -841,14 +843,18 @@ describe('sessionStart', () => {
   it('overrides the engine, mode and effort within the caps — and a model never crosses engines', async () => {
     const p = born('start-over', { mode: 'acceptEdits', model: 'sonnet', effort: 'high' })
     await sessionStart(p.caller, start({ permission_mode: 'plan', effort: 'low' }))
-    expect(created[0]).toMatchObject({ permissionMode: 'plan', effort: 'low', model: 'sonnet' })
+    expect(created[0].config).toMatchObject({
+      permissionMode: 'plan',
+      effort: 'low',
+      model: 'sonnet'
+    })
     await sessionStart(p.caller, start({ engine: 'opencode' }))
     expect(created[1].engineId).toBe('opencode')
-    expect(created[1].model).toBeUndefined()
-    expect(created[1].effort).toBeUndefined()
-    expect(created[1].permissionMode).toBe('acceptEdits')
+    expect(created[1].config?.model).toBeUndefined()
+    expect(created[1].config?.effort).toBeUndefined()
+    expect(created[1].config?.permissionMode).toBe('acceptEdits')
     await sessionStart(p.caller, start({ engine: 'pi', model: 'pi/model-1' }))
-    expect(created[2]).toMatchObject({ engineId: 'pi', model: 'pi/model-1' })
+    expect(created[2]).toMatchObject({ engineId: 'pi', config: { model: 'pi/model-1' } })
     const bad = await sessionStart(p.caller, start({ engine: 'vim' as EngineId }))
     expect(bad.isError).toBe(true)
     expect(bad.text).toMatch(/engine "vim" is not one of/)

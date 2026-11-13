@@ -207,25 +207,18 @@ export interface ISession {
     updatedPermissions?: PermissionSuggestion[]
   ): void
 
-  /** Set the model for future turns. */
-  setModel(model: string): Promise<void>
-
-  /** Set the permission mode. */
-  setPermissionMode(mode: string): Promise<void>
-
   /**
-   * Set the reasoning effort variant for opencode models (e.g. 'none', 'thinking', 'low').
-   * Optional — Claude and other engines that do not support per-model variants ignore it.
-   * Pass null to revert to opencode's default (variant omitted from the prompt body).
+   * Change the running session's config: the one live entry, for every `SessionConfig` field.
+   * Applies the fields present in the patch in a fixed order; a field the engine takes no live
+   * change of is ignored. `BaseSession` implements it over the engine's `liveConfig` table.
    */
-  setReasoningVariant?(variant: string | null): void
+  applyConfig(patch: SessionConfig): Promise<void>
 
   // ---------------------------------------------------------------------------
   // Optional capability-gated members. Implemented by engines that advertise the
   // named capability flag (or, where noted, are Claude-only with no flag —
   // absence of the method is the gate). Callers MUST check the flag and/or use
-  // optional-call (`?.`) before invoking. Mirrors the setReasoningVariant?
-  // precedent above.
+  // optional-call (`?.`) before invoking.
   // ---------------------------------------------------------------------------
 
   /** Background tasks (gated by capabilities.backgroundTasks). */
@@ -251,11 +244,6 @@ export interface ISession {
    */
   voiceStartServer?(): Promise<{ port: number; startFields?: Record<string, unknown> }>
   voiceStopServer?(): Promise<void>
-
-  /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
-  setEffort?(effort: string): void | Promise<void>
-  /** Thinking mode (gated by capabilities.reasoning.thinking != null). */
-  setThinkingMode?(mode: string): void
 
   /** Current ExitPlanMode plan content (gated by capabilities.plan). */
   getPlanContent?(): string | null

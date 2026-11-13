@@ -13,6 +13,11 @@ import type { WorktreeInfo } from '../../../../../../shared/types'
 import type { InputBoxViewProps } from '../View'
 import { InputBox } from '../InputBox'
 import { WelcomeState } from '../../ChatPanel/WelcomeState'
+import type { SessionSpawnRequest } from '../../../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 let viewProps: InputBoxViewProps
 
@@ -137,7 +142,7 @@ describe('InputBox — start in a worktree at the first send', () => {
     expect(worktreeCalls[0][2]).toEqual({ base: 'default' })
     const info = infoFor(pending!.name)
     expect(createCalls).toHaveLength(1)
-    expect(createCalls[0][1]).toBe(info.worktreePath)
+    expect(spawnReq(createCalls[0]).cwd).toBe(info.worktreePath)
     const state = useSessionStore.getState()
     expect(state.worktreeInfoMap[ROUTE]).toMatchObject({ worktreePath: info.worktreePath })
     expect(state.sessions[ROUTE].pendingWorktree).toBeNull()
@@ -194,7 +199,7 @@ describe('InputBox — start in a worktree at the first send', () => {
     expect(worktreeCalls).toHaveLength(2)
     expect(worktreeCalls[1][1]).not.toBe(original)
     expect(createCalls).toHaveLength(1)
-    expect(String(createCalls[0][1])).toContain(worktreeCalls[1][1] as string)
+    expect(String(spawnReq(createCalls[0]).cwd)).toContain(worktreeCalls[1][1] as string)
   })
 
   it('gives up on a taken auto-generated name after three attempts', async () => {
@@ -239,7 +244,7 @@ describe('InputBox — start in a worktree at the first send', () => {
 
     expect(worktreeCalls).toEqual([])
     expect(createCalls).toHaveLength(1)
-    expect(createCalls[0][1]).toBe(CWD)
+    expect(spawnReq(createCalls[0]).cwd).toBe(CWD)
   })
 
   it('treats a directory that is not a git repository as no worktree, not a failure', async () => {
@@ -252,7 +257,7 @@ describe('InputBox — start in a worktree at the first send', () => {
     })
 
     expect(createCalls).toHaveLength(1)
-    expect(createCalls[0][1]).toBe(CWD)
+    expect(spawnReq(createCalls[0]).cwd).toBe(CWD)
     expect(useSessionStore.getState().sessions[ROUTE].pendingWorktree).toBeNull()
   })
 
@@ -296,7 +301,7 @@ describe('InputBox — start in a worktree at the first send', () => {
 
       expect(worktreeCalls).toHaveLength(2)
       expect(createCalls).toHaveLength(1)
-      expect(String(createCalls[0][1])).toContain('.claude/worktrees/')
+      expect(String(spawnReq(createCalls[0]).cwd)).toContain('.claude/worktrees/')
     })
 
     it('Send without a worktree clears the intent and spawns in the chosen directory', async () => {
@@ -308,7 +313,7 @@ describe('InputBox — start in a worktree at the first send', () => {
 
       expect(worktreeCalls).toHaveLength(1)
       expect(createCalls).toHaveLength(1)
-      expect(createCalls[0][1]).toBe(CWD)
+      expect(spawnReq(createCalls[0]).cwd).toBe(CWD)
       expect(useSessionStore.getState().sessions[ROUTE].pendingWorktree).toBeNull()
     })
   })

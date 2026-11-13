@@ -73,19 +73,12 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     await clearConversation(activeSessionId)
 
     // Create a fresh SDK session for the same routingId.
-    await window.api.createSession(
-      activeSessionId,
+    await window.api.createSession(activeSessionId, {
       cwd,
-      effort,
-      undefined,
-      'acceptEdits',
-      model,
-      thinkingMode,
-      undefined,
-      undefined,
-      selectedEngineId,
+      engineId: selectedEngineId,
+      config: { effort, permissionMode: 'acceptEdits', model, thinkingMode },
       announce
-    )
+    })
     markSdkActive(activeSessionId)
     // No local mode write: the fresh spawn's own init emits
     // `session:permission-mode` with the mode it was created in (SyncCore 4c).
