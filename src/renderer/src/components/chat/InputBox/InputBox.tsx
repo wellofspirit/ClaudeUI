@@ -10,7 +10,7 @@ import {
   carriesPicksIntoNewSessions
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
-import { spawnSession } from '../../../lib/session-spawn'
+import { reportSpawnFailure, spawnSession } from '../../../lib/session-spawn'
 import { onDraftSendRequest, WorktreeCreateError } from '../../../lib/worktree-start'
 import { voiceController } from '../../../lib/voice/voice-controller'
 import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
@@ -990,8 +990,12 @@ export function InputBox(): React.JSX.Element {
   // session (with resume) to apply changes mid-conversation.
   const restartSdkSession = useCallback(async () => {
     if (!activeSessionId || !sdkActive) return
-    await window.api.cancelSession(activeSessionId)
-    await spawnSession(activeSessionId, { resume: 'self' })
+    try {
+      await window.api.cancelSession(activeSessionId)
+      await spawnSession(activeSessionId, { resume: 'self' })
+    } catch (err) {
+      reportSpawnFailure(activeSessionId, 'Failed to restart the session', err)
+    }
   }, [activeSessionId, sdkActive])
 
   const handleSelectEffort = useCallback(

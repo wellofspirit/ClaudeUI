@@ -48,10 +48,6 @@ import { localVoiceServer } from '../voice/local-voice-server'
  *  - All remaining ISession methods (run, interrupt, cancel, resolveApproval, etc.)
  *  - dispose() — resource teardown
  */
-/** Compile-time: the apply order names every `SessionConfig` field. */
-type OrderCoversConfig<K extends keyof SessionConfig> =
-  Exclude<keyof SessionConfig, K> extends never ? K : never
-
 export abstract class BaseSession implements ISession {
   // ---------------------------------------------------------------------------
   // Instance fields
@@ -187,16 +183,21 @@ export abstract class BaseSession implements ISession {
   // Concrete shared implementations
   // ---------------------------------------------------------------------------
 
-  /** Fixed order: a model change clears opencode's variant, so the variant comes after it. */
-  private static readonly CONFIG_ORDER = [
-    'model',
-    'permissionMode',
-    'effort',
-    'thinkingMode',
-    'reasoningVariant'
-  ] as const satisfies readonly OrderCoversConfig<
-    'model' | 'permissionMode' | 'effort' | 'thinkingMode' | 'reasoningVariant'
-  >[]
+  /**
+   * Apply order, a rank per `SessionConfig` field (the compiler wants every key): a model
+   * change clears opencode's variant, so the variant comes after it.
+   */
+  private static readonly CONFIG_RANK: Record<keyof Required<SessionConfig>, number> = {
+    model: 0,
+    permissionMode: 1,
+    effort: 2,
+    thinkingMode: 3,
+    reasoningVariant: 4
+  }
+
+  private static readonly CONFIG_ORDER = (
+    Object.keys(BaseSession.CONFIG_RANK) as (keyof SessionConfig)[]
+  ).sort((a, b) => BaseSession.CONFIG_RANK[a] - BaseSession.CONFIG_RANK[b])
 
   async applyConfig(patch: SessionConfig): Promise<void> {
     for (const key of BaseSession.CONFIG_ORDER) {

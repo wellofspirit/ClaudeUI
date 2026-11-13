@@ -213,6 +213,12 @@ describe('a spawn config that carries a reasoning variant', () => {
     expect(configChanged()).toEqual([[RID, { reasoningVariant: 'high' }]])
   })
 
+  it('canonical state holds the variant for a session it had never seen', async () => {
+    // The announce must follow the birth event: before it, the reducer finds no entry and drops it.
+    await create({ config: { reasoningVariant: 'high' } }).done
+    expect(syncCore.getCanonicalState().sessions[RID].reasoningVariant).toBe('high')
+  })
+
   it('emits nothing when the config has none', async () => {
     await create({}).done
     expect(configChanged()).toEqual([])

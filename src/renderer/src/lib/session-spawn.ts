@@ -6,7 +6,8 @@
  */
 import { catalogFor, sessionSpawnEffort, spawnAnnouncement } from './session-effort'
 import { awaitReloadBeforeSpawn } from './session-history-load'
-import { createPendingWorktree } from './worktree-start'
+import { createPendingWorktree, WorktreeCreateError } from './worktree-start'
+import { resolveRekeyed } from '../stores/replica'
 import {
   hasResumableTranscript,
   useSessionStore,
@@ -151,6 +152,15 @@ export async function spawnSession(
 }
 
 /**
+ * Show a refused or failed spawn on the session, for a caller with no UI of its own for it. A
+ * `WorktreeCreateError` is quiet: the welcome screen already shows why, with its own buttons.
+ */
+export function reportSpawnFailure(routingId: string, what: string, err: unknown): void {
+  if (err instanceof WorktreeCreateError) return
+  useSessionStore.getState().addError(resolveRekeyed(routingId), `${what}: ${err}`)
+}
+
+/**
  * Respawn the session's engine (so it re-reads freshly-stored credentials) and resend a prompt.
  * Used by the post-login Retry.
  */
@@ -169,6 +179,10 @@ export async function retrySend(routingId: string, prompt: string): Promise<void
   //     last ref the process is killed, so the recreate spawns a fresh server
   //     that re-reads auth.json. Plain sendPrompt would re-hit the stale,
   //     still-401ing backend.
-  await spawnSession(routingId)
-  await window.api.sendPrompt(routingId, prompt)
+  try {
+    await spawnSession(routingId)
+    await window.api.sendPrompt(routingId, prompt)
+  } catch (err) {
+    reportSpawnFailure(routingId, 'Failed to retry', err)
+  }
 }

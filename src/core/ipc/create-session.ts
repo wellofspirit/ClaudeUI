@@ -117,7 +117,6 @@ export async function prepareAndCreateSession(
   // engineId (not resolvedEngineId) — SessionManager.create()'s own `= 'claude'`
   // default preserves the legacy claude-default boundary at that layer.
   manager.create(routingId, win, cwd, spawnOpts, engineId)
-  announceSpawnConfig(routingId, config)
   recordBirthIdentity(routingId, resolvedEngineId, resolvedModel)
   // ONE emit, every subscriber (SyncCore phase 4c). The `notifyMainWindow`
   // asymmetry that lived here — desktop-originated creates skipped the initiating
@@ -219,6 +218,9 @@ export async function prepareAndCreateSession(
       ...(createdBy ? { createdBy } : {})
     }
   ])
+  // After the birth event: for a session canonical has not seen, an earlier `config-changed` finds
+  // no entry and is dropped, and `session:created` then builds the entry without the variant.
+  announceSpawnConfig(routingId, config)
   // A Claude session reports its commands only when cli.js starts (first prompt), so
   // until then its menu is the last list a Claude session reported (the cache
   // `ClaudeSession` writes: built-ins, bundled skills, MCP prompts) plus this folder's

@@ -41,7 +41,7 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 - View-only per-session fields live on `PerSessionState` in the one `sessions` record; they survive projection and rekey in `src/renderer/src/stores/replica.ts`. Never a second store.
 - A new per-session field must be considered for the hand-written reset list in `clearConversation` (`src/renderer/src/stores/session-store.ts`) [nothing forces it].
 - A session's engine is started only through `spawnSession` (`src/renderer/src/lib/session-spawn.ts`): it owns the reload wait, the model check, the pending worktree, fork or resume, the config and the announce, so a first send, the voice path, review comments, a retry, a restart and an accepted plan cannot drift apart. `src/renderer/src/lib/__tests__/session-spawn-guard.unit.test.ts` fails on any other `window.api.createSession` call. A new per-session option: `src/core/providers/CLAUDE.md`.
-- `forkOrigin` means "this fork has not started yet": the rekey in `src/renderer/src/stores/replica.ts` clears it when the engine reports the fork's own id, and a later spawn then resumes the fork itself.
+- `forkOrigin` means "this fork has not started yet": the rekey in `src/renderer/src/stores/replica.ts` clears it when the engine reports the fork's own id (not the source's), and a later spawn then resumes the fork itself.
 - No viewport units (`vh`, `vw`, `dvh`, `h-screen`, ...) in components: the app renders under CSS `zoom`; `ZOOM_TRAP` in `eslint.config.mjs` (ADR-093).
 - Nothing here imports Electron; host access is `window.api` only, and every feature must work in `src/web`. No lint rule enforces the import ban in this directory.
 

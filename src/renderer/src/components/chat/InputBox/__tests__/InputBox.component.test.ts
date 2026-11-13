@@ -2418,6 +2418,27 @@ describe('InputBox FC — rendered', () => {
     expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('low')
   })
 
+  it('a restart refused for an empty model shows a session error and spawns nothing', async () => {
+    useSessionStore.setState((state) => ({
+      claudeDefaultModelConfigured: true,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: '' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectThinking('disabled')
+    })
+    expect(ipcCalls['session:create'] ?? []).toEqual([])
+    expect(useSessionStore.getState().sessions[FC_ROUTE].errors.join()).toMatch(
+      /Failed to restart the session: .*No model selected/
+    )
+  })
+
   it('onSelectModel (spawned, thread id not reported yet): keeps the frozen effort, coerced', () => {
     opusSession('xhigh', {})
     fcClaudeModels = [

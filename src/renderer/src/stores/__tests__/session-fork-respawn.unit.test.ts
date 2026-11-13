@@ -84,6 +84,25 @@ describe('a branch across its first spawn and the next', () => {
     expect(reqOf(1).resume).toEqual({ sessionId: 'src-1', at: 'anchor-1', fork: true })
   })
 
+  it('a fork the engine rejected (it reports the SOURCE id) still forks on the next send', async () => {
+    const routingId = await forkOf('pi')
+    await spawnSession(routingId)
+    seed.status(
+      routingId,
+      makeSessionStatus({
+        engineId: 'pi',
+        capabilities: resolvePiCapabilities(),
+        state: 'idle',
+        sessionId: 'src-1'
+      })
+    )
+    seed.status('src-1', makeSessionStatus({ state: 'disconnected', sessionId: 'src-1' }))
+    expect(useSessionStore.getState().sessions['src-1'].sdkActive).toBe(false)
+
+    await spawnSession('src-1')
+    expect(reqOf(1).resume).toEqual({ sessionId: 'src-1', at: 'anchor-1', fork: true })
+  })
+
   it('a pi fork clears the pointer on the same rekey', async () => {
     const routingId = await forkOf('pi')
     expect(useSessionStore.getState().sessions[routingId].forkOrigin).not.toBeNull()

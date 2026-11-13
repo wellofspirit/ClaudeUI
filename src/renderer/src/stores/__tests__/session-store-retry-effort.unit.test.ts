@@ -93,4 +93,15 @@ describe('retrySend — Claude effort', () => {
     emitSync('session:created', ['rt-1', { cwd: '/tmp/x', ...announce }])
     expect(useSessionStore.getState().sessions['rt-1'].effort).toBe('low')
   })
+
+  it('a retry refused for an empty model shows a session error and spawns nothing', async () => {
+    useSessionStore.setState({ claudeDefaultModelConfigured: true })
+    patchSession({ selectedModel: '' })
+    await retrySend('rt-1', 'again')
+    expect(createSession).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().sessions['rt-1'].sdkActive).toBe(false)
+    expect(useSessionStore.getState().sessions['rt-1'].errors.join()).toMatch(
+      /Failed to retry: .*No model selected/
+    )
+  })
 })
