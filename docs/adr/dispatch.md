@@ -467,9 +467,9 @@ the sandbox was enabled, and it ran at Claude Code's own default effort.
   mode and otherwise a callback that denies every ask, and auto-approval would take every sandboxed command past
   both. A run fails on an error result, as a session's turn does, and on a process that dies, so a run that Claude
   Code refuses to start records the reason; its notification shows the first line. Unlike a
-  target, a run loads the user's settings sources as a session does: their sandbox lists merge with the engine's,
-  and while the engine's sandbox is off a sandbox set in the user's own settings file applies to a run as it does to
-  a session.
+  target, a run loads the user's settings sources as a session does: their sandbox lists merge with the engine's. While the engine's sandbox is off, no
+  sandbox applies to a run, a target or a session, short of an organisation's managed settings: the spawn says so
+  (ADR-009, the per-spawn overlay).
 
 Rejected: taking `autoAllowBashIfSandboxed` as a session does (wider than a session in plan mode, and it removes
 the host-side deny and ask matching from a target's Bash); recording on the ledger row that a target was created

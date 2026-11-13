@@ -53,6 +53,13 @@ nothing has to be reconciled; a UISettings copy would be a file the feature neve
   ClaudeUI's Claude engine config and passed per spawn as flag settings (`--settings`), like `sandbox`. Today:
   `idleCompaction` (ClaudeUI default off) and `enabledPlugins["cc-plugin-privacy@builtin"]`. A new cli.js setting
   follows the settings.json rule unless it genuinely needs this overlay.
+  For the sandbox the overlay is the whole answer (changed 2026-11-13): with ClaudeUI's switch off or never set, a
+  spawn states `sandbox: { enabled: false }`, so a sandbox enabled in Claude Code's own settings files (the user's,
+  a repository's) does not apply to a session, a dispatch target or an automation run. Before, no key was sent and
+  it did. Consequence, accepted: whoever wants a sandbox in ClaudeUI turns ClaudeUI's switch on. That includes
+  someone who enabled it for the terminal only, and a repository whose settings file enables it: ClaudeUI's off
+  overrides the confinement that repository chose. Only an organisation's managed settings rank above flag
+  settings in Claude Code's precedence (not probed).
 - **Workspace trust** (`<globalConfig>#projects[K].hasTrustDialogAccepted`) is read and written by ClaudeUI
   (`claude-workspace-trust.ts`, the Permissions dialog toggle) the way cli.js's own dialog writes it: the same key,
   under cli.js's config lock, `false` to untrust. It is never mirrored into UISettings and never recorded for the

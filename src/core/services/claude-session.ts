@@ -1005,7 +1005,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
           },
           // The engine's sandbox settings; a dispatched Claude agent is confined by the same
           // mapping (ADR-116).
-          ...(sandbox ? { sandbox } : {}),
+          sandbox,
           settingSources: ['user', 'project', 'local'],
           // `--settings` flag settings: the two cli.js behaviour switches the
           // Claude engine's settings own (read fresh per spawn, so a change

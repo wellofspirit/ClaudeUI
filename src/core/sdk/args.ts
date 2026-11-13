@@ -255,8 +255,10 @@ export function claudeBehaviorSettings(config: ClaudeEngineConfig | undefined): 
 /**
  * The Claude engine's sandbox settings (`engines/claude.json#sandbox`) as the
  * `sandbox` query option, which `mergeSettingsAndSandbox` below folds into the
- * spawn's `--settings`. `undefined` when the sandbox is off or unset: the spawn
- * then carries no `sandbox` key at all.
+ * spawn's `--settings`. Off or never set, it is `{ enabled: false }`, stated: ClaudeUI's
+ * switch is the whole answer for a ClaudeUI process. With no key at all, a sandbox enabled in
+ * Claude Code's own settings files (the user's, a repository's) applied to a spawn that loads
+ * them; the stated off changes nothing else (`docs/protocol-cc/02-cli-flags.md` §2.6).
  *
  * ONE mapping for every cli.js process that runs commands under the engine's
  * settings: a session (`claude-session.ts`), a dispatched Claude agent
@@ -273,8 +275,8 @@ export function claudeBehaviorSettings(config: ClaudeEngineConfig | undefined): 
  */
 export function claudeSandboxOption(
   config: SandboxSettings | null | undefined
-): Record<string, unknown> | undefined {
-  if (!config?.enabled) return undefined
+): Record<string, unknown> {
+  if (!config?.enabled) return { enabled: false }
   const { network, filesystem } = config
   const sockets = {
     ...(network.allowAllUnixSockets ? { allowAllUnixSockets: true } : {}),
@@ -312,14 +314,13 @@ export function claudeSandboxOption(
  * gate: a dispatch target (ADR-116) and an automation run. A session's auto-approve would take
  * Bash away from everything that gates it (the forwarded card, cli.js's classifier in auto, the
  * host's deny/ask matcher, the deny-everything callback of an unattended run), so the key is
- * sent as an explicit `false`: cli.js reads an absent one as true. `undefined` when the
- * sandbox is off.
+ * sent as an explicit `false`: cli.js reads an absent one as true. It rides a sandbox that is
+ * off too, where it is inert.
  */
 export function claudeGatedSandboxOption(
   config: SandboxSettings | null | undefined
-): Record<string, unknown> | undefined {
-  const sandbox = claudeSandboxOption(config)
-  return sandbox && { ...sandbox, autoAllowBashIfSandboxed: false }
+): Record<string, unknown> {
+  return { ...claudeSandboxOption(config), autoAllowBashIfSandboxed: false }
 }
 
 /**
