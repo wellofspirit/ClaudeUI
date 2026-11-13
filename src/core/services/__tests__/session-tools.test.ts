@@ -790,9 +790,7 @@ describe('sessionStart', () => {
     expect(created[0]).toMatchObject({
       cwd: p.caller.cwd,
       engineId: 'claude',
-      permissionMode: 'default',
-      model: 'sonnet',
-      effort: 'high',
+      config: { permissionMode: 'default', model: 'sonnet', effort: 'high' },
       createdBy: 'agent'
     })
     const childId = created[0].routingId
@@ -872,7 +870,10 @@ describe('sessionStart', () => {
       const p = born('off-inherit-claude', { engine: 'claude', mode: 'auto' })
       syncCore.setAppState({ autoModeDisabledBySettings: true })
       const out = await sessionStart(p.caller, start())
-      expect(created[0]).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+      expect(created[0]).toMatchObject({
+        engineId: 'claude',
+        config: { permissionMode: 'default' }
+      })
       expect(out.text).toMatch(NOTE)
     })
 
@@ -890,7 +891,7 @@ describe('sessionStart', () => {
         )
         expect(created).toHaveLength(2)
         for (const child of created) {
-          expect(child).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+          expect(child).toMatchObject({ engineId: 'claude', config: { permissionMode: 'default' } })
         }
         expect(inherited.text).toMatch(NOTE)
         expect(named.text).toMatch(NOTE)
@@ -910,7 +911,7 @@ describe('sessionStart', () => {
         )
         expect(created).toHaveLength(2)
         for (const child of created) {
-          expect(child).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+          expect(child).toMatchObject({ engineId: engine, config: { permissionMode: 'auto' } })
         }
         expect(inherited.text).not.toMatch(/auto mode is turned off/)
         expect(named.text).not.toMatch(/auto mode is turned off/)
@@ -922,7 +923,10 @@ describe('sessionStart', () => {
       syncCore.setAppState({ autoModeDisabledBySettings: true })
       const out = await sessionHandOff(p.caller, { title: 'Continue', handoff: HANDOFF })
       expect(out.isError).toBeUndefined()
-      expect(created[0]).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+      expect(created[0]).toMatchObject({
+        engineId: 'claude',
+        config: { permissionMode: 'default' }
+      })
     })
 
     it.each(NOT_CLAUDE)('a hand-off from a %s session in auto stays in auto', async (engine) => {
@@ -930,7 +934,7 @@ describe('sessionStart', () => {
       syncCore.setAppState({ autoModeDisabledBySettings: true })
       const out = await sessionHandOff(p.caller, { title: 'Continue', handoff: HANDOFF })
       expect(out.isError).toBeUndefined()
-      expect(created[0]).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+      expect(created[0]).toMatchObject({ engineId: engine, config: { permissionMode: 'auto' } })
     })
 
     // A proposal keeps its placement for seven days, so it can hold an `auto` saved
@@ -950,7 +954,7 @@ describe('sessionStart', () => {
       const out = await sessionStart(p.caller, { proposal_id: byId.id })
       expect(created).toHaveLength(2)
       for (const child of created) {
-        expect(child).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+        expect(child).toMatchObject({ engineId: 'claude', config: { permissionMode: 'default' } })
       }
       expect(out.text).toMatch(NOTE)
     })
@@ -967,7 +971,7 @@ describe('sessionStart', () => {
         const out = await sessionStart(p.caller, { proposal_id: byId.id })
         expect(created).toHaveLength(2)
         for (const child of created) {
-          expect(child).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+          expect(child).toMatchObject({ engineId: engine, config: { permissionMode: 'auto' } })
         }
         expect(out.text).not.toMatch(/auto mode is turned off/)
       }
@@ -982,7 +986,7 @@ describe('sessionStart', () => {
         expect(await startProposalFromClient(id)).toMatchObject({ success: true })
         expect(created).toHaveLength(2)
         for (const child of created) {
-          expect(child).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+          expect(child).toMatchObject({ engineId: engine, config: { permissionMode: 'auto' } })
         }
         expect(started.text).not.toMatch(/auto mode is turned off/)
       }
@@ -1308,9 +1312,7 @@ describe('sessionHandOff', () => {
     // Same engine, model, effort and mode as the caller by default; fresh — nothing copied.
     expect(created[0]).toMatchObject({
       engineId: 'claude',
-      model: 'opus',
-      effort: 'high',
-      permissionMode: 'default',
+      config: { model: 'opus', effort: 'high', permissionMode: 'default' },
       cwd: p.caller.cwd,
       createdBy: 'agent'
     })
@@ -2558,7 +2560,10 @@ describe('session_start with a proposal_id', () => {
     expect(m).not.toBeNull()
     const childRef = (m as RegExpExecArray)[1]
     expect(created).toHaveLength(1)
-    expect(created[0]).toMatchObject({ permissionMode: 'plan', model: 'sonnet', cwd: p.caller.cwd })
+    expect(created[0]).toMatchObject({
+      config: { permissionMode: 'plan', model: 'sonnet' },
+      cwd: p.caller.cwd
+    })
     expect(getSessionLink(childRef)).toMatchObject({ createdBy: 'agent', kind: 'started' })
     expect(prompts[0].prompt).toBe(
       `Background (from session ${p.ref} "Assistant" that started this one):\n${BACKGROUND}\n\nTask:\n${start().prompt}`
@@ -2749,9 +2754,7 @@ describe('the Start and Dismiss clicks', () => {
     expect(result).toEqual({ success: true, startedRef: expect.stringMatching(/^s-/) })
     const childRef = result.startedRef as string
     expect(created[0]).toMatchObject({
-      permissionMode: 'default',
-      effort: 'low',
-      model: 'sonnet',
+      config: { permissionMode: 'default', effort: 'low', model: 'sonnet' },
       createdBy: 'agent'
     })
     expect(getSessionLink(childRef)).toMatchObject({
