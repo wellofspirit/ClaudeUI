@@ -128,27 +128,28 @@ export async function spawnSession(
   await awaitReloadBeforeSpawn(routingId)
   const asSent = opts.from ?? useSessionStore.getState().sessions[routingId]
   assertModelResolved(asSent)
-  // Resolved BEFORE the worktree step, from what the composer showed when the user sent: that
-  // step moves the session's cwd, and the composer empties the model catalogue on a cwd change
-  // until its refetch lands. Resolved after it, a first message in a new worktree found no row
-  // for its model and spawned on the fallback effort and thinking mode, announcing no effort.
+  // Everything but the cwd comes from the session AS SENT, before the worktree step: that step
+  // moves the session's cwd, and the composer empties the model catalogue on a cwd change until
+  // its refetch lands. Resolved after it, a first message in a new worktree found no row for its
+  // model and spawned on the fallback effort and thinking mode, announcing no effort. One
+  // moment for the engine, the model and the picks also keeps them a matching set.
   const resolved = resolveSessionSdkOptions(asSent)
   const announce = spawnAnnouncement(useSessionStore.getState(), asSent, resolved.effort)
-  await createPendingWorktree(routingId)
-  // Read again after the worktree: it moves the session's cwd.
-  const session = opts.from ?? useSessionStore.getState().sessions[routingId]
   const config: SessionConfig = {
     effort: resolved.effort,
-    permissionMode: opts.permissionMode ?? session?.permissionMode,
+    permissionMode: opts.permissionMode ?? asSent?.permissionMode,
     model: resolved.model,
     thinkingMode: resolved.thinkingMode,
     // The stored pick, so a respawn (or a pick made before the first spawn) keeps it.
-    ...(session?.reasoningVariant ? { reasoningVariant: session.reasoningVariant } : {})
+    ...(asSent?.reasoningVariant ? { reasoningVariant: asSent.reasoningVariant } : {})
   }
-  const resume = resumeOf(session, routingId, opts.resume ?? 'auto')
+  const resume = resumeOf(asSent, routingId, opts.resume ?? 'auto')
+  await createPendingWorktree(routingId)
+  // Read again only for the cwd: the worktree step moved it.
+  const cwd = (opts.from ?? useSessionStore.getState().sessions[routingId])?.cwd || ''
   await window.api.createSession(routingId, {
-    cwd: session?.cwd || '',
-    engineId: session?.selectedEngineId,
+    cwd,
+    engineId: asSent?.selectedEngineId,
     config,
     ...(resume ? { resume } : {}),
     announce
