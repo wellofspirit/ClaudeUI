@@ -1,5 +1,6 @@
 import { query as sdkQuery } from '../sdk'
-import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeBehaviorSettings, claudeGatedSandboxOption } from '../sdk/args'
+import { claudeStderrTail } from './claude-stderr-tail'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
@@ -648,6 +649,10 @@ export class AutomationManager {
     let lastAssistantText = ''
     let lastAssistantMsg: ChatMessage | null = null
     const useAutoMode = (automation.permissionMode ?? 'auto') === 'auto'
+    // What the process writes to stderr: cli.js explains a refusal to start there only.
+    const stderrTail = claudeStderrTail((line) =>
+      logger.warn('AutomationManager', `automation "${automation.name}" stderr: ${line}`)
+    )
 
     try {
       const canUseTool = buildCanUseTool()
@@ -709,7 +714,11 @@ export class AutomationManager {
       // the SDK always accepts the mode; we attempt to upgrade to native auto below.
       // `settings` carries the two cli.js behaviour switches the Claude engine's
       // settings own (`claudeBehaviorSettings`, read fresh per run like a session's
-      // spawn), so an automation honours the toggles too.
+      // spawn), so an automation honours the toggles too. The run also carries the
+      // engine's sandbox, never auto-approved (ADR-116): nobody is present, so the
+      // classifier or the deny-everything callback must still see every sandboxed command.
+      const claudeConfig = loadEngineConfig('claude')
+      const sandbox = claudeGatedSandboxOption(claudeConfig.sandbox)
       const q = sdkQuery({
         prompt,
         options: {
@@ -719,7 +728,9 @@ export class AutomationManager {
           model: modelValue,
           permissionMode: useAutoMode ? ('acceptEdits' as const) : ('default' as const),
           settingSources: ['user', 'project', 'local'],
-          settings: claudeBehaviorSettings(loadEngineConfig('claude').claudeConfig),
+          settings: claudeBehaviorSettings(claudeConfig.claudeConfig),
+          ...(sandbox ? { sandbox } : {}),
+          stderr: stderrTail.note,
           abortController,
           includePartialMessages: true,
           thinking: thinkingConfig,
@@ -843,6 +854,9 @@ export class AutomationManager {
       }
 
       return { costUsd: totalCostUsd, lastText: lastAssistantText }
+    } catch (err) {
+      // An abort is the run's own doing: its error is not rewritten.
+      throw abortController.signal.aborted ? err : stderrTail.failure(err)
     } finally {
       this.activeRuns.delete(automation.id)
       this.processingAutomations.delete(automation.id)
@@ -976,7 +990,7 @@ export class AutomationManager {
       this.notifier({
         title: `Automation ${status}: ${automation.name}`,
         body:
-          run.error ||
+          run.error?.split('\n')[0] ||
           summary ||
           `Finished in ${((run.finishedAt! - run.startedAt) / 1000).toFixed(0)}s`
       })

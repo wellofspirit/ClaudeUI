@@ -12,7 +12,13 @@
  * rides in (`claude-session.ts` and the dispatcher merge it in).
  */
 import { describe, it, expect } from 'vitest'
-import { PRIVACY_PLUGIN_ID, buildArgs, claudeBehaviorSettings, claudeSandboxOption } from '../args'
+import {
+  PRIVACY_PLUGIN_ID,
+  buildArgs,
+  claudeBehaviorSettings,
+  claudeGatedSandboxOption,
+  claudeSandboxOption
+} from '../args'
 import type { QueryOptions } from '../types'
 import type { SandboxSettings } from '../../../shared/types'
 
@@ -158,5 +164,57 @@ describe('claudeSandboxOption — the engine sandbox settings as a spawn option'
       ...(sandbox ? { sandbox } : {})
     } as QueryOptions)
     expect(emittedSettings(args)).not.toHaveProperty('sandbox')
+  })
+})
+
+describe('claudeGatedSandboxOption — the sandbox of a process whose commands stay gated', () => {
+  const settings = (enabled: boolean): SandboxSettings => ({
+    enabled,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    excludedCommands: ['docker'],
+    network: {
+      restrictNetwork: true,
+      allowLocalBinding: false,
+      allowedDomains: ['example.com'],
+      allowManagedDomainsOnly: false,
+      allowAllUnixSockets: false,
+      allowUnixSockets: []
+    },
+    filesystem: { allowWrite: ['/data'], denyWrite: [], denyRead: [] }
+  })
+
+  it('is nothing when the sandbox is off, unset or null', () => {
+    expect(claudeGatedSandboxOption(undefined)).toBeUndefined()
+    expect(claudeGatedSandboxOption(null)).toBeUndefined()
+    expect(claudeGatedSandboxOption(settings(false))).toBeUndefined()
+  })
+
+  it('is the session mapping with an explicit false auto-approve, whatever the config says', () => {
+    expect(claudeGatedSandboxOption(settings(true))).toStrictEqual({
+      ...claudeSandboxOption(settings(true)),
+      autoAllowBashIfSandboxed: false
+    })
+    expect(claudeGatedSandboxOption(settings(true))).toHaveProperty(
+      'autoAllowBashIfSandboxed',
+      false
+    )
+  })
+
+  it('reaches cli.js as one --settings JSON with the switches, the sandbox and failIfUnavailable', () => {
+    const sandbox = claudeGatedSandboxOption(settings(true))
+    const args = buildArgs({
+      settings: claudeBehaviorSettings(undefined),
+      ...(sandbox ? { sandbox } : {})
+    } as QueryOptions)
+    expect(args.filter((a) => a === '--settings')).toHaveLength(1)
+    const emitted = emittedSettings(args)
+    expect(emitted).toHaveProperty('enabledPlugins')
+    expect(emitted).toHaveProperty('idleCompaction', false)
+    expect(emitted.sandbox).toMatchObject({
+      enabled: true,
+      autoAllowBashIfSandboxed: false,
+      failIfUnavailable: true
+    })
   })
 })

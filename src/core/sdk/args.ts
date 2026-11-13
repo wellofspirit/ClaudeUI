@@ -259,9 +259,9 @@ export function claudeBehaviorSettings(config: ClaudeEngineConfig | undefined): 
  * then carries no `sandbox` key at all.
  *
  * ONE mapping for every cli.js process that runs commands under the engine's
- * settings: a session (`claude-session.ts`) and a dispatched Claude agent
- * (`dispatch-claude-targets.ts`, ADR-116), so the two are never confined by
- * different rules.
+ * settings: a session (`claude-session.ts`), a dispatched Claude agent
+ * (`dispatch-claude-targets.ts`, ADR-116) and an automation run
+ * (`automation-manager.ts`), so they are never confined by different rules.
  *
  *  - The three switches and the excluded commands go out as set. cli.js reads
  *    an ABSENT `autoAllowBashIfSandboxed` as true.
@@ -305,6 +305,21 @@ export function claudeSandboxOption(
       ...(filesystem.denyRead.length > 0 ? { denyRead: filesystem.denyRead } : {})
     }
   }
+}
+
+/**
+ * `claudeSandboxOption` for a process whose sandboxed commands still go through its permission
+ * gate: a dispatch target (ADR-116) and an automation run. A session's auto-approve would take
+ * Bash away from everything that gates it (the forwarded card, cli.js's classifier in auto, the
+ * host's deny/ask matcher, the deny-everything callback of an unattended run), so the key is
+ * sent as an explicit `false`: cli.js reads an absent one as true. `undefined` when the
+ * sandbox is off.
+ */
+export function claudeGatedSandboxOption(
+  config: SandboxSettings | null | undefined
+): Record<string, unknown> | undefined {
+  const sandbox = claudeSandboxOption(config)
+  return sandbox && { ...sandbox, autoAllowBashIfSandboxed: false }
 }
 
 /**
