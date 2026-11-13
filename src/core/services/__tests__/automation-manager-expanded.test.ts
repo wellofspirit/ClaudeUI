@@ -49,9 +49,12 @@ vi.mock('electron', async () => {
 
 type SdkMode =
   | { kind: 'events'; events: Record<string, unknown>[] }
-  | { kind: 'waitForAbort' }
+  /** Wait for the run's abort, then yield `thenEvents` (what a torn-down turn still writes). */
+  | { kind: 'waitForAbort'; thenEvents?: Record<string, unknown>[] }
   /** Yield events, then idle — mirrors cli.js staying alive after a turn. */
   | { kind: 'eventsThenWait'; events: Record<string, unknown>[] }
+  /** Write `stderr` to the `stderr` option, then die with `error` (after the run's abort, if `afterAbort`). */
+  | { kind: 'stderrThenThrow'; stderr: string; error: string; afterAbort?: boolean }
 
 let sdkMode: SdkMode = { kind: 'events', events: [] }
 let lastAbortObserved = false
@@ -84,7 +87,18 @@ vi.mock('../../sdk', () => ({
               resolve()
             })
           })
+          for (const event of mode.thenEvents ?? []) yield event
           return
+        }
+        if (mode.kind === 'stderrThenThrow') {
+          params?.options?.stderr?.(Buffer.from(mode.stderr))
+          if (mode.afterAbort) {
+            await new Promise<void>((resolve) => {
+              if (ac?.signal.aborted) resolve()
+              else ac?.signal.addEventListener('abort', () => resolve())
+            })
+          }
+          throw new Error(mode.error)
         }
         if (mode.kind === 'eventsThenWait') {
           for (const event of mode.events) {
@@ -762,6 +776,231 @@ describe('AutomationManager — scheduling & runtime', () => {
       idleCompaction: true,
       enabledPlugins: { 'cc-plugin-privacy@builtin': false }
     })
+
+    mgr.stopAll()
+  })
+
+  /** Write what the Claude engine's settings screen writes (`~/.claude/ui/engines/claude.json`). */
+  const writeClaudeEngine = (config: Record<string, unknown>): void => {
+    const dir = nodePath.join(TEMP_HOME, '.claude', 'ui', 'engines')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(nodePath.join(dir, 'claude.json'), JSON.stringify(config))
+  }
+  const sandboxConfig = (enabled: boolean): Record<string, unknown> => ({
+    enabled,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    excludedCommands: ['docker'],
+    network: {
+      restrictNetwork: false,
+      allowLocalBinding: false,
+      allowedDomains: [],
+      allowManagedDomainsOnly: false,
+      allowAllUnixSockets: false,
+      allowUnixSockets: []
+    },
+    filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }
+  })
+  const done: SdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
+
+  it('carries the engine sandbox, never auto-approved, beside the behaviour switches (A1)', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    writeClaudeEngine({
+      claudeConfig: { idleCompaction: true },
+      sandbox: sandboxConfig(true)
+    })
+
+    sdkMode = done
+    mgr.upsert(makeAutomation({ id: 'sandbox-1' }))
+    await mgr.runNow('sandbox-1')
+
+    const { claudeGatedSandboxOption } = await import('../../sdk/args')
+    const options = lastSdkParams?.options
+    expect(options.sandbox).toStrictEqual(claudeGatedSandboxOption(sandboxConfig(true) as any))
+    expect(options.sandbox.autoAllowBashIfSandboxed).toBe(false)
+    expect(options.sandbox.enabled).toBe(true)
+    expect(options.settings).toMatchObject({ idleCompaction: true })
+
+    mgr.stopAll()
+  })
+
+  it('sends no sandbox key when the sandbox is off or the engine has no settings file (A2)', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    mgr.upsert(makeAutomation({ id: 'sandbox-off' }))
+    sdkMode = done
+
+    await mgr.runNow('sandbox-off')
+    expect('sandbox' in lastSdkParams.options).toBe(false)
+
+    writeClaudeEngine({ sandbox: sandboxConfig(false) })
+    await mgr.runNow('sandbox-off')
+    expect('sandbox' in lastSdkParams.options).toBe(false)
+
+    mgr.stopAll()
+  })
+
+  it('reads the sandbox per run, a follow-up included (A3)', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    mgr.upsert(makeAutomation({ id: 'sandbox-3' }))
+    sdkMode = {
+      kind: 'events',
+      events: [
+        { type: 'system', subtype: 'init', session_id: 'ses-sb' },
+        { type: 'result', total_cost_usd: 0 }
+      ]
+    }
+
+    await mgr.runNow('sandbox-3')
+    expect('sandbox' in lastSdkParams.options).toBe(false)
+
+    writeClaudeEngine({ sandbox: sandboxConfig(true) })
+    await mgr.runNow('sandbox-3')
+    expect(lastSdkParams.options.sandbox.autoAllowBashIfSandboxed).toBe(false)
+
+    // Changed again before the follow-up: it runs under the setting of the moment.
+    writeClaudeEngine({ sandbox: { ...sandboxConfig(true), excludedCommands: ['make'] } })
+    const before = sdkCalls.length
+    mgr.sendMessage('sandbox-3', 'more')
+    await vi.waitFor(() => expect(sdkCalls.length).toBeGreaterThan(before))
+    const followUp = sdkCalls[sdkCalls.length - 1].options
+    expect(followUp.resume).toBe('ses-sb')
+    expect(followUp.sandbox.excludedCommands).toEqual(['make'])
+    expect(followUp.sandbox.autoAllowBashIfSandboxed).toBe(false)
+
+    mgr.stopAll()
+  })
+
+  it('records the stderr lines of a process that died, Voice lines left out (A5)', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = {
+      kind: 'stderrThenThrow',
+      stderr: 'sandbox required but unavailable\n[Voice:Patch] chatter\n',
+      error: 'cli.js exited with code=1 signal=null'
+    }
+    mgr.upsert(makeAutomation({ id: 'stderr-1' }))
+    await mgr.runNow('stderr-1')
+
+    const [run] = mgr.listRuns('stderr-1')
+    expect(run.status).toBe('error')
+    expect(run.error).toBe(
+      'cli.js exited with code=1 signal=null\nClaude Code stderr:\nsandbox required but unavailable'
+    )
+
+    mgr.stopAll()
+  })
+
+  it('does not rewrite the error of an aborted run (A5)', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = {
+      kind: 'stderrThenThrow',
+      stderr: 'something on stderr\n',
+      error: 'killed by abort',
+      afterAbort: true
+    }
+    mgr.upsert(makeAutomation({ id: 'stderr-abort' }))
+    const run = mgr.runNow('stderr-abort')
+    await new Promise((r) => setTimeout(r, 20))
+    mgr.cancelRun('stderr-abort')
+    await run
+
+    const [recorded] = mgr.listRuns('stderr-abort')
+    expect(recorded.error ?? '').not.toContain('something on stderr')
+
+    mgr.stopAll()
+  })
+
+  // What cli.js 2.1.321 writes before it exits 1 on a start it refuses, here a required sandbox
+  // that cannot run (probed 2026-11-13). Read as the end of a turn, it recorded a success.
+  const refusedStart = {
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    num_turns: 0,
+    total_cost_usd: 0,
+    errors: ['Sandbox required but unavailable: no sandbox can run on this machine.'],
+    startup_failure_reason: 'sandbox_required_unavailable'
+  }
+
+  it('fails the run on an error result, with the reason cli.js gives', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = { kind: 'events', events: [refusedStart] }
+    mgr.upsert(makeAutomation({ id: 'refused-1' }))
+    await mgr.runNow('refused-1')
+
+    const [run] = mgr.listRuns('refused-1')
+    expect(run.status).toBe('error')
+    expect(run.error).toBe('Sandbox required but unavailable: no sandbox can run on this machine.')
+    // The process is not left waiting for a prompt: the loop's exit still closes the query.
+    expect(lastGeneratorReturned).toBe(true)
+
+    mgr.stopAll()
+  })
+
+  it('names the status of an error result that carries no message', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = {
+      kind: 'events',
+      events: [{ type: 'result', subtype: 'error_max_turns', total_cost_usd: 0.01 }]
+    }
+    mgr.upsert(makeAutomation({ id: 'refused-2' }))
+    await mgr.runNow('refused-2')
+
+    const [run] = mgr.listRuns('refused-2')
+    expect(run.status).toBe('error')
+    expect(run.error).toBe('Run ended with status: error_max_turns')
+    // A failed turn still cost what it cost.
+    expect(run.totalCostUsd).toBeCloseTo(0.01)
+
+    mgr.stopAll()
+  })
+
+  it('a success result finishes the run, and so does the error result of a cancelled one', async () => {
+    const { mgr } = await freshManager()
+    mgr.load()
+    sdkMode = {
+      kind: 'events',
+      events: [{ type: 'result', subtype: 'success', total_cost_usd: 0 }]
+    }
+    mgr.upsert(makeAutomation({ id: 'ok-1' }))
+    await mgr.runNow('ok-1')
+    expect(mgr.listRuns('ok-1')[0].status).toBe('success')
+
+    sdkMode = { kind: 'waitForAbort', thenEvents: [refusedStart] }
+    mgr.upsert(makeAutomation({ id: 'cancel-1' }))
+    const run = mgr.runNow('cancel-1')
+    await new Promise((r) => setTimeout(r, 20))
+    mgr.cancelRun('cancel-1')
+    await run
+    expect(mgr.listRuns('cancel-1')[0].error).toBeUndefined()
+
+    mgr.stopAll()
+  })
+
+  it('shows only the first line of the error in the OS notification (A5c)', async () => {
+    await freshManager()
+    const { AutomationManager } = await import('../automation-manager')
+    const notifier = vi.fn()
+    const mgr = new AutomationManager(notifier)
+    managers.push(mgr)
+    mgr.load()
+    sdkMode = {
+      kind: 'stderrThenThrow',
+      stderr: 'sandbox required but unavailable\n',
+      error: 'cli.js exited with code=1 signal=null'
+    }
+    mgr.upsert(makeAutomation({ id: 'notify-1' }))
+    await mgr.runNow('notify-1')
+
+    expect(mgr.listRuns('notify-1')[0].error).toContain('Claude Code stderr:')
+    expect(notifier).toHaveBeenCalledTimes(1)
+    expect(notifier.mock.calls[0][0].body).toBe('cli.js exited with code=1 signal=null')
 
     mgr.stopAll()
   })

@@ -458,8 +458,18 @@ the sandbox was enabled, and it ran at Claude Code's own default effort.
   `--add-dir` scope have (ADR-108).
 - **Nothing else changes.** A target still loads no settings source, gets no hosted tools, and keeps its own
   permission mode and rule handling (ADR-033, ADR-085, ADR-088).
-- **A dead process says why.** Claude Code explains a refusal to start on stderr only, so the failure a target's
+- **A dead process says why.** Claude Code explains a refusal to start on stderr, so the failure a target's
   run reports quotes the last lines its process wrote there.
+- **An automation run is bound the same way** (added 2026-11-13). It is the other Claude Code process of ClaudeUI's
+  that runs commands without being a session. It carries the engine's sandbox through the same mapping, required
+  to start, read at each run and at each follow-up message, and never auto-approved (`claudeGatedSandboxOption`,
+  one function for a run and a target). Nobody is present at a run: its gate is Claude Code's classifier in auto
+  mode and otherwise a callback that denies every ask, and auto-approval would take every sandboxed command past
+  both. A run fails on an error result, as a session's turn does, and on a process that dies, so a run that Claude
+  Code refuses to start records the reason; its notification shows the first line. Unlike a
+  target, a run loads the user's settings sources as a session does: their sandbox lists merge with the engine's,
+  and while the engine's sandbox is off a sandbox set in the user's own settings file applies to a run as it does to
+  a session.
 
 Rejected: taking `autoAllowBashIfSandboxed` as a session does (wider than a session in plan mode, and it removes
 the host-side deny and ask matching from a target's Bash); recording on the ledger row that a target was created

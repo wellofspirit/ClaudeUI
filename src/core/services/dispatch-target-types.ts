@@ -1,6 +1,7 @@
 /**
  * Types and constants shared by the dispatcher core and the per-engine dispatch target modules.
  */
+import type { ClaudeStderrTail } from './claude-stderr-tail'
 import type { EmitSessionEvent } from '../shared/sync/events'
 import type { ServerConnection } from '../opencode/OpencodeServerManager'
 import { OpencodeClient } from '../opencode/OpencodeClient'
@@ -784,7 +785,7 @@ export interface ClaudeTargetEntry extends TargetLedgerFields {
    * there (a refusal to start, such as a required sandbox that cannot run), so the failure
    * the run reports quotes them.
    */
-  stderrTail: string[]
+  stderrTail: ClaudeStderrTail
   /** The report whose tool result already went by and got the turn interrupted. */
   interruptedReport: object | null
   /** Cumulative cost across every turn this target has run (ADR-033 M4-C). */

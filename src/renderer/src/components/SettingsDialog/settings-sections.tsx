@@ -2743,7 +2743,7 @@ export const SECTIONS: Section[] = [
             <SettingsToggle
               testid="ClaudeSandbox.autoAllow"
               label="Auto-approve sandboxed commands"
-              description="Skips the permission prompt for bash that runs inside the sandbox, though deny and ask rules still block it."
+              description="Skips the permission prompt for bash that runs inside the sandbox in a session, though deny and ask rules still block it. Dispatched agents and automations never skip it."
               checked={sb.autoAllowBashIfSandboxed}
               onChange={(v) => ue({ sandbox: { ...sb, autoAllowBashIfSandboxed: v } })}
               indent

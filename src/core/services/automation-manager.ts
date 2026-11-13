@@ -1,5 +1,6 @@
 import { query as sdkQuery } from '../sdk'
-import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeBehaviorSettings, claudeGatedSandboxOption } from '../sdk/args'
+import { claudeStderrTail } from './claude-stderr-tail'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { v4 as uuid } from 'uuid'
 import * as fs from 'fs'
@@ -614,6 +615,9 @@ export class AutomationManager {
         const updatedRuns = this.loadRuns(automation.id)
         const idx = updatedRuns.findIndex((r) => r.id === runId)
         if (idx >= 0) {
+          // A run that failed after a result frame has its cost on disk only (the result
+          // handler wrote it there); `run` carries it only on success.
+          run.totalCostUsd = Math.max(run.totalCostUsd ?? 0, updatedRuns[idx].totalCostUsd ?? 0)
           updatedRuns[idx] = { ...updatedRuns[idx], ...run }
         }
         this.saveRuns(automation.id, updatedRuns)
@@ -648,6 +652,10 @@ export class AutomationManager {
     let lastAssistantText = ''
     let lastAssistantMsg: ChatMessage | null = null
     const useAutoMode = (automation.permissionMode ?? 'auto') === 'auto'
+    // What the process writes to stderr, for the error of a run whose process dies.
+    const stderrTail = claudeStderrTail((line) =>
+      logger.warn('AutomationManager', `automation "${automation.name}" stderr: ${line}`)
+    )
 
     try {
       const canUseTool = buildCanUseTool()
@@ -709,7 +717,11 @@ export class AutomationManager {
       // the SDK always accepts the mode; we attempt to upgrade to native auto below.
       // `settings` carries the two cli.js behaviour switches the Claude engine's
       // settings own (`claudeBehaviorSettings`, read fresh per run like a session's
-      // spawn), so an automation honours the toggles too.
+      // spawn), so an automation honours the toggles too. The run also carries the
+      // engine's sandbox, never auto-approved (ADR-116): nobody is present, so the
+      // classifier or the deny-everything callback must still see every sandboxed command.
+      const claudeConfig = loadEngineConfig('claude')
+      const sandbox = claudeGatedSandboxOption(claudeConfig.sandbox)
       const q = sdkQuery({
         prompt,
         options: {
@@ -719,7 +731,9 @@ export class AutomationManager {
           model: modelValue,
           permissionMode: useAutoMode ? ('acceptEdits' as const) : ('default' as const),
           settingSources: ['user', 'project', 'local'],
-          settings: claudeBehaviorSettings(loadEngineConfig('claude').claudeConfig),
+          settings: claudeBehaviorSettings(claudeConfig.claudeConfig),
+          ...(sandbox ? { sandbox } : {}),
+          stderr: stderrTail.note,
           abortController,
           includePartialMessages: true,
           thinking: thinkingConfig,
@@ -834,6 +848,23 @@ export class AutomationManager {
             }
           }
 
+          // A result that is not a success fails the run, as it fails a session's turn and a
+          // dispatched one. cli.js also writes one (zeroed, the reason in `errors`) before it
+          // exits on a start it refuses, such as a required sandbox that cannot run: read as
+          // the end of a turn, it recorded a success for a run that never started. Not after
+          // a cancel: tearing down an interrupted turn ends in an error result too.
+          const subtype = msg.subtype
+          if (
+            typeof subtype === 'string' &&
+            subtype !== 'success' &&
+            !abortController.signal.aborted
+          ) {
+            const errors = Array.isArray(msg.errors) ? msg.errors.map(String) : []
+            throw new Error(
+              errors.length > 0 ? errors.join('; ') : `Run ended with status: ${subtype}`
+            )
+          }
+
           // Automation is non-interactive — the turn ends at `result`. Break the
           // loop so the iterator's `return()` SIGTERMs cli.js; otherwise the child
           // sits idle forever waiting for a user prompt that never comes.
@@ -843,6 +874,9 @@ export class AutomationManager {
       }
 
       return { costUsd: totalCostUsd, lastText: lastAssistantText }
+    } catch (err) {
+      // An abort is the run's own doing: its error is not rewritten.
+      throw abortController.signal.aborted ? err : stderrTail.failure(err)
     } finally {
       this.activeRuns.delete(automation.id)
       this.processingAutomations.delete(automation.id)
@@ -976,7 +1010,7 @@ export class AutomationManager {
       this.notifier({
         title: `Automation ${status}: ${automation.name}`,
         body:
-          run.error ||
+          run.error?.split('\n')[0] ||
           summary ||
           `Finished in ${((run.finishedAt! - run.startedAt) / 1000).toFixed(0)}s`
       })
