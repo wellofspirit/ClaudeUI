@@ -26,7 +26,10 @@ vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
-import { migrateClaudeSandboxToSettingsFile } from '../claude-sandbox-settings'
+import {
+  migrateClaudeSandboxToSettingsFile,
+  resetClaudeSandboxMemoryForTests
+} from '../claude-sandbox-settings'
 
 let dir: string
 const prevEnv = process.env.CLAUDE_CONFIG_DIR
@@ -40,6 +43,7 @@ const copy = (over: Partial<SandboxSettings> = {}): SandboxSettings => ({
 })
 
 beforeEach(() => {
+  resetClaudeSandboxMemoryForTests()
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sandbox-mig-'))
   process.env.CLAUDE_CONFIG_DIR = dir
   store.claude = {}
@@ -128,14 +132,40 @@ describe('migrateClaudeSandboxToSettingsFile', () => {
     expect(readFile().sandbox.enabled).toBe(true)
   })
 
-  it('otherwise a file block wins and the copy is dropped', () => {
-    const block = { enabled: true, excludedCommands: ['kept'] }
-    writeFile({ sandbox: block })
-    store.claude = { claudeConfig: { idleCompaction: true }, sandbox: copy({ enabled: true }) }
+  it('both enabled: lists united, the stricter switches win, the file’s unknown key survives', () => {
+    writeFile({
+      sandbox: {
+        enabled: true,
+        failIfUnavailable: true,
+        filesystem: { denyRead: ['~/.ssh'] },
+        network: { allowLocalBinding: true, allowManagedDomainsOnly: false }
+      }
+    })
+    store.claude = {
+      sandbox: copy({
+        enabled: true,
+        autoAllowBashIfSandboxed: false,
+        allowUnsandboxedCommands: true,
+        filesystem: { allowWrite: [], denyWrite: [], denyRead: ['~/.aws'] },
+        network: {
+          ...DEFAULT_SANDBOX.network,
+          allowLocalBinding: false,
+          allowManagedDomainsOnly: true
+        }
+      })
+    }
     migrateClaudeSandboxToSettingsFile()
-    expect(readFile().sandbox).toEqual(block)
-    expect(store.claude).toEqual({ claudeConfig: { idleCompaction: true } })
+    const block = readFile().sandbox
+    expect(block.autoAllowBashIfSandboxed).toBe(false)
+    expect(block.allowUnsandboxedCommands).toBe(true)
+    expect(block.filesystem.denyRead).toEqual(['~/.ssh', '~/.aws'])
+    expect(block.network.allowLocalBinding).toBeUndefined()
+    expect(block.network.allowManagedDomainsOnly).toBe(true)
+    expect(block.failIfUnavailable).toBe(true)
+    expect(store.claude).toEqual({})
+  })
 
+  it('a disabled copy never changes a file block', () => {
     // A disabled copy never turns a file block off, nor on.
     writeFile({ sandbox: { enabled: false } })
     store.claude = { sandbox: copy({ enabled: false, excludedCommands: ['x'] }) }
@@ -175,6 +205,29 @@ describe('migrateClaudeSandboxToSettingsFile', () => {
     expect(store.claude).toEqual({
       claudeConfig: { idleCompaction: true, sandboxRememberedDomains: ['a.com', 'b.com'] }
     })
+  })
+
+  it('the remembered list moves even when the file block wins over a disabled copy', () => {
+    writeFile({ sandbox: { enabled: true } })
+    store.claude = {
+      sandbox: copy({ network: { ...DEFAULT_SANDBOX.network, allowedDomains: ['kept.com'] } })
+    }
+    migrateClaudeSandboxToSettingsFile()
+    expect(readFile().sandbox).toEqual({ enabled: true })
+    expect(store.claude).toEqual({ claudeConfig: { sandboxRememberedDomains: ['kept.com'] } })
+  })
+
+  it('the waiting warning is logged once per process, not at every attempt', async () => {
+    const { logger } = await import('../logger')
+    vi.mocked(logger.warn).mockClear()
+    fs.writeFileSync(file(), '{ broken')
+    store.claude = { sandbox: copy({ enabled: true }) }
+    migrateClaudeSandboxToSettingsFile()
+    migrateClaudeSandboxToSettingsFile()
+    migrateClaudeSandboxToSettingsFile()
+    expect(
+      vi.mocked(logger.warn).mock.calls.filter((c) => String(c[1]).includes('migration waits'))
+    ).toHaveLength(1)
   })
 
   it('a restricted list goes into the file, and nothing is remembered', () => {

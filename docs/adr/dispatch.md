@@ -442,8 +442,11 @@ enabled, and it ran at Claude Code's own default effort.
   refuses to start and the dispatch fails; a target never falls back to running unsandboxed. The filesystem and
   network lists, the excluded commands and `allowUnsandboxedCommands` are the user's. With the block not enabled
   ClaudeUI adds nothing to a session or a target: a sandbox that a project's own settings turn on applies to a
-  session as it does in the terminal, and never to a target. (2026-11-13: the settings moved from ClaudeUI's
-  engine config to the shared file; what a process is bound by while the switch is on did not change.)
+  session as it does in the terminal, and never to a target. A settings file that cannot be read (a hand edit
+  left it invalid) does not open the sandbox: the block ClaudeUI last read from it still binds; only a file that
+  is already unreadable when ClaudeUI starts counts as off, as it does to Claude Code. (2026-11-13: the settings
+  moved from ClaudeUI's engine config to the shared file; what a process is bound by while the switch is on did
+  not change.)
 - **Never auto-approved.** `autoAllowBashIfSandboxed` is the one setting a target does not take: it is always sent
   as `false`. A sandboxed command of a target is gated by everything that gates its Bash without a sandbox: the
   forwarded approval card, Claude Code's classifier in auto mode, the user's deny and ask rules, and the host's

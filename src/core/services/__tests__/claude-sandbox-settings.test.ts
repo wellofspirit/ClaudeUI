@@ -31,6 +31,7 @@ import {
   claudeSandboxScopes,
   claudeSandboxSupported,
   claudeUserSettingsPath,
+  resetClaudeSandboxMemoryForTests,
   parseSandboxPatch,
   readClaudeSandboxState,
   sandboxViewFromBlock,
@@ -44,6 +45,7 @@ const writeFile = (data: unknown): void => fs.writeFileSync(settingsFile(), JSON
 const readFile = (): Record<string, any> => JSON.parse(fs.readFileSync(settingsFile(), 'utf-8'))
 
 beforeEach(() => {
+  resetClaudeSandboxMemoryForTests()
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sandbox-'))
   process.env.CLAUDE_CONFIG_DIR = dir
   store.claude = {}
@@ -450,10 +452,52 @@ describe('claudeSandboxFlags', () => {
     expect(store.claude).toEqual({ claudeConfig: { idleCompaction: true } })
   })
 
-  it('an unparsable file with no old copy, or a disabled one, is the switch off', () => {
+  it('an unparsable file with nothing remembered, or a disabled old copy, is the switch off', () => {
     fs.writeFileSync(settingsFile(), '{ broken')
     expect(claudeSandboxFlags('session')).toBeUndefined()
     store.claude = { sandbox: structuredClone(DEFAULT_SANDBOX) }
+    expect(claudeSandboxFlags('session')).toBeUndefined()
+  })
+
+  it('an unparsable file after a read that saw the switch on keeps the block, fail-closed, for every kind', () => {
+    writeFile({
+      sandbox: { enabled: true, autoAllowBashIfSandboxed: true, excludedCommands: ['a'] }
+    })
+    const seen = readClaudeSandboxState()
+    expect(seen?.settings.enabled).toBe(true)
+
+    fs.writeFileSync(settingsFile(), '{ broken')
+    expect(claudeSandboxFlags('session')).toEqual({
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      excludedCommands: ['a'],
+      failIfUnavailable: true
+    })
+    for (const kind of ['run', 'target'] as const) {
+      expect(claudeSandboxFlags(kind)).toMatchObject({
+        enabled: true,
+        autoAllowBashIfSandboxed: false,
+        failIfUnavailable: true
+      })
+    }
+    expect(readClaudeSandboxState()).toEqual(seen)
+  })
+
+  it('an unparsable file after a read that saw the switch off is off', () => {
+    writeFile({ sandbox: { enabled: false } })
+    expect(claudeSandboxFlags('session')).toBeUndefined()
+    fs.writeFileSync(settingsFile(), '{ broken')
+    expect(claudeSandboxFlags('session')).toBeUndefined()
+    expect(claudeSandboxFlags('run')).toEqual({ autoAllowBashIfSandboxed: false })
+    expect(readClaudeSandboxState()).toBeNull()
+  })
+
+  it('a later successful read replaces what is remembered', () => {
+    writeFile({ sandbox: { enabled: true } })
+    claudeSandboxFlags('session')
+    writeFile({ sandbox: { enabled: false } })
+    claudeSandboxFlags('session')
+    fs.writeFileSync(settingsFile(), '{ broken')
     expect(claudeSandboxFlags('session')).toBeUndefined()
   })
 })

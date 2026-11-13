@@ -167,20 +167,41 @@ export function readClaudeSandboxState(): ClaudeSandboxState | null {
 }
 
 /**
+ * The block of the last successful strict read of the file (a copy; `undefined` block = the file
+ * had none), or `null` before any. When the file cannot be read, an enabled remembered block keeps
+ * the sandbox on: an unreadable file must never open it.
+ */
+let remembered: { block: Block | undefined } | null = null
+let warnedWaiting = false
+
+/** Forget what was last read (specs). */
+export function resetClaudeSandboxMemoryForTests(): void {
+  remembered = null
+  warnedWaiting = false
+}
+
+/**
  * The user block right now. With an old copy waiting in the engine config the migration runs
  * first (idempotent; it returns at once when it cannot finish), so a mended file completes it
- * without a restart. Then the file is read strictly: its block, or none. A file that cannot be
- * parsed yields the old copy mapped through the writer when that copy is enabled (what the
- * process ran under before), otherwise `null`: unreadable.
+ * without a restart. Then the file is read strictly: its block, or none, remembered. A file that
+ * cannot be parsed yields, in order: the old copy mapped through the writer when that copy is
+ * enabled (what the process ran under before); the remembered block when that was enabled (what
+ * the page still shows); otherwise `null`: unreadable, and nothing known to be on.
  */
 function userBlockNow(): { block: Block | undefined } | null {
   if (legacyCopy()) migrateClaudeSandboxToSettingsFile()
   try {
     const data = readJsonStrict(claudeUserSettingsPath())
-    return { block: isObject(data.sandbox) ? data.sandbox : undefined }
+    const block = isObject(data.sandbox) ? data.sandbox : undefined
+    remembered = { block: block && clone(block) }
+    return { block }
   } catch (err) {
     const old = legacyCopy()
     if (old?.enabled) return { block: applySandboxViewToBlock({}, old) }
+    if (remembered?.block?.enabled === true) {
+      logger.warn(LOG, 'Cannot read the user settings file; keeping the last enabled block', err)
+      return { block: clone(remembered.block) }
+    }
     logger.warn(LOG, 'Cannot read the user settings file; keeping the last state', err)
     return null
   }
@@ -219,6 +240,7 @@ export function saveClaudeSandbox(patch: SandboxSettingsPatch): void {
   }
   data.sandbox = applySandboxViewToBlock(block, next)
   writeSettingsFile(filePath, data)
+  remembered = { block: clone(data.sandbox as Block) }
   logger.debug(LOG, `Saved the sandbox block to ${filePath}`)
 }
 
@@ -319,15 +341,24 @@ export function claudeSandboxScopes(cwd: string): ClaudeSandboxScope[] {
 const union = (first: string[], second: string[]): string[] => [...new Set([...first, ...second])]
 
 /**
- * An enabled copy over a file block that is not enabled: Claude Code merged the file's lists into
- * the copy when the copy rode at flag priority, so the file's entries survive, first, then the
- * copy's. The network is restricted when either side restricts it, with the lists of the
- * restricting sides. The switches and the other booleans are the copy's.
+ * An enabled copy merged into the file's block: Claude Code merged the file's lists into the copy
+ * when the copy rode at flag priority, so the file's entries survive, first, then the copy's. The
+ * network is restricted when either side restricts it, with the lists of the restricting sides.
+ * The switches are the copy's when the file's block was not enabled, and the stricter of the two
+ * when it was: auto-approve, the unsandboxed escape, local binding and "all unix sockets" are on
+ * only if both sides have them on; "managed domains only" is on if either has it on.
  */
-function unionCopyOverFile(file: SandboxSettings, copy: SandboxSettings): SandboxSettings {
+function mergeCopyIntoFile(file: SandboxSettings, copy: SandboxSettings): SandboxSettings {
   const restrict = file.network.restrictNetwork || copy.network.restrictNetwork
+  const both = file.enabled
   return {
     ...copy,
+    autoAllowBashIfSandboxed: both
+      ? file.autoAllowBashIfSandboxed && copy.autoAllowBashIfSandboxed
+      : copy.autoAllowBashIfSandboxed,
+    allowUnsandboxedCommands: both
+      ? file.allowUnsandboxedCommands && copy.allowUnsandboxedCommands
+      : copy.allowUnsandboxedCommands,
     excludedCommands: union(file.excludedCommands, copy.excludedCommands),
     network: {
       ...copy.network,
@@ -338,6 +369,15 @@ function unionCopyOverFile(file: SandboxSettings, copy: SandboxSettings): Sandbo
             copy.network.restrictNetwork ? copy.network.allowedDomains : []
           )
         : copy.network.allowedDomains,
+      allowLocalBinding: both
+        ? file.network.allowLocalBinding && copy.network.allowLocalBinding
+        : copy.network.allowLocalBinding,
+      allowAllUnixSockets: both
+        ? file.network.allowAllUnixSockets && copy.network.allowAllUnixSockets
+        : copy.network.allowAllUnixSockets,
+      allowManagedDomainsOnly: both
+        ? file.network.allowManagedDomainsOnly || copy.network.allowManagedDomainsOnly
+        : copy.network.allowManagedDomainsOnly,
       allowUnixSockets: union(file.network.allowUnixSockets, copy.network.allowUnixSockets)
     },
     filesystem: {
@@ -350,10 +390,12 @@ function unionCopyOverFile(file: SandboxSettings, copy: SandboxSettings): Sandbo
 
 /**
  * Once, at host boot, before anything can spawn: moves `engines/claude.json#sandbox` into the
- * shared file. An enabled copy over a file block that is not enabled turns the file's block on
- * (the sandbox stays on; the file's unknown keys survive); otherwise a file block wins; with no
- * block a copy that differs from the defaults is written and an untouched one writes nothing. A
- * domain list kept with the restriction off moves to `sandboxRememberedDomains`. The file is
+ * shared file. Whenever the copy is enabled it is merged into the file's block (`mergeCopyIntoFile`:
+ * lists united, the copy's switches over a block that was not enabled, the stricter of the two
+ * over one that was; the sandbox stays on and the file's unknown keys survive). A disabled copy
+ * never changes a file block; with no block a copy that differs from the defaults is written and
+ * an untouched one writes nothing. A domain list kept with the restriction off moves to
+ * `sandboxRememberedDomains` whenever the copy is dropped. The file is
  * written first and the engine config second, so a crash between them leaves a file block for
  * the next boot. A file that cannot be parsed changes nothing (the flags' pending rule covers the
  * meantime). Never throws.
@@ -373,7 +415,10 @@ export function migrateClaudeSandboxToSettingsFile(): void {
     try {
       data = readJsonStrict(filePath)
     } catch (err) {
-      logger.warn(LOG, 'Sandbox migration waits: the user settings file cannot be parsed', err)
+      if (!warnedWaiting) {
+        warnedWaiting = true
+        logger.warn(LOG, 'Sandbox migration waits: the user settings file cannot be parsed', err)
+      }
       return
     }
     const fileBlock = isObject(data.sandbox) ? data.sandbox : undefined
@@ -381,16 +426,16 @@ export function migrateClaudeSandboxToSettingsFile(): void {
     const write =
       fileBlock === undefined
         ? JSON.stringify(copy) !== JSON.stringify(DEFAULT_SANDBOX)
-        : copy.enabled && fileBlock.enabled !== true
+        : copy.enabled
     if (write) {
       const view =
-        fileBlock === undefined ? copy : unionCopyOverFile(sandboxViewFromBlock(fileBlock), copy)
+        fileBlock === undefined ? copy : mergeCopyIntoFile(sandboxViewFromBlock(fileBlock), copy)
       data.sandbox = applySandboxViewToBlock(fileBlock, view)
       writeSettingsFile(filePath, data)
-      const n = copy.network
-      if (!n.restrictNetwork && n.allowedDomains.length > 0) {
-        cfg.claudeConfig = { ...cfg.claudeConfig, sandboxRememberedDomains: n.allowedDomains }
-      }
+    }
+    const n = copy.network
+    if (!n.restrictNetwork && n.allowedDomains.length > 0) {
+      cfg.claudeConfig = { ...cfg.claudeConfig, sandboxRememberedDomains: n.allowedDomains }
     }
     delete cfg.sandbox
     saveEngineConfig('claude', cfg)
