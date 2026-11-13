@@ -854,12 +854,133 @@ describe('sessionStart', () => {
     expect(bad.text).toMatch(/engine "vim" is not one of/)
   })
 
-  it('auto mode that settings have turned off starts in default mode and says so', async () => {
-    const p = born('start-auto', { mode: 'auto' })
-    syncCore.setAppState({ autoModeDisabledBySettings: true })
-    const out = await sessionStart(p.caller, start())
-    expect(created[0].permissionMode).toBe('default')
-    expect(out.text).toMatch(/auto mode is turned off in settings, so it started in default mode/)
+  // ADR-050: `disableAutoMode` is Claude Code's own setting. It keeps a Claude
+  // session the tools start out of auto and leaves opencode and pi alone.
+  describe('auto mode that Claude settings have turned off', () => {
+    const ENGINES: EngineId[] = ['claude', 'opencode', 'pi']
+    const NOT_CLAUDE: EngineId[] = ['opencode', 'pi']
+    const NOTE = /auto mode is turned off in settings, so it started in default mode/
+    const HANDOFF = 'Goal: fix the flaky queue test. State: reproduced once. Remaining: add a lock.'
+
+    it('a Claude session in auto starts its Claude child in default mode and is told', async () => {
+      const p = born('off-inherit-claude', { engine: 'claude', mode: 'auto' })
+      syncCore.setAppState({ autoModeDisabledBySettings: true })
+      const out = await sessionStart(p.caller, start())
+      expect(created[0]).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+      expect(out.text).toMatch(NOTE)
+    })
+
+    it.each(ENGINES)(
+      'a Claude child asked for from a %s session in auto starts in default mode, by inheritance and by name',
+      async (engine) => {
+        // The caller is in auto (the setting does not bind it, or it was before the
+        // setting was read), so `auto` is within its cap.
+        const p = born(`off-explicit-${engine}`, { engine, mode: 'auto' })
+        syncCore.setAppState({ autoModeDisabledBySettings: true })
+        const inherited = await sessionStart(p.caller, start({ engine: 'claude' }))
+        const named = await sessionStart(
+          p.caller,
+          start({ engine: 'claude', permission_mode: 'auto' })
+        )
+        expect(created).toHaveLength(2)
+        for (const child of created) {
+          expect(child).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+        }
+        expect(inherited.text).toMatch(NOTE)
+        expect(named.text).toMatch(NOTE)
+      }
+    )
+
+    it.each(NOT_CLAUDE)(
+      'a %s child starts in auto with the setting on, with no note: it is not its setting',
+      async (engine) => {
+        const own = born(`off-own-${engine}`, { engine, mode: 'auto' })
+        const fromClaude = born(`off-cross-${engine}`, { engine: 'claude', mode: 'auto' })
+        syncCore.setAppState({ autoModeDisabledBySettings: true })
+        const inherited = await sessionStart(own.caller, start())
+        const named = await sessionStart(
+          fromClaude.caller,
+          start({ engine, permission_mode: 'auto' })
+        )
+        expect(created).toHaveLength(2)
+        for (const child of created) {
+          expect(child).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+        }
+        expect(inherited.text).not.toMatch(/auto mode is turned off/)
+        expect(named.text).not.toMatch(/auto mode is turned off/)
+      }
+    )
+
+    it('a hand-off from a Claude session in auto starts in default mode', async () => {
+      const p = born('off-handoff-claude', { engine: 'claude', mode: 'auto' })
+      syncCore.setAppState({ autoModeDisabledBySettings: true })
+      const out = await sessionHandOff(p.caller, { title: 'Continue', handoff: HANDOFF })
+      expect(out.isError).toBeUndefined()
+      expect(created[0]).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+    })
+
+    it.each(NOT_CLAUDE)('a hand-off from a %s session in auto stays in auto', async (engine) => {
+      const p = born(`off-handoff-${engine}`, { engine, mode: 'auto' })
+      syncCore.setAppState({ autoModeDisabledBySettings: true })
+      const out = await sessionHandOff(p.caller, { title: 'Continue', handoff: HANDOFF })
+      expect(out.isError).toBeUndefined()
+      expect(created[0]).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+    })
+
+    // A proposal keeps its placement for seven days, so it can hold an `auto` saved
+    // before the setting was turned on. The user's click runs no mode cap: this gate
+    // is the only thing between that card and a Claude spawn cli.js would refuse.
+    it('a Claude proposal saved with auto starts in default mode, by the click and by the agent', async () => {
+      const p = born('off-proposal-claude', { engine: 'claude', mode: 'auto' })
+      const clicked = await propose(p.caller, { title: 'Clicked' })
+      const byId = await propose(p.caller, { title: 'By id' })
+      expect(JSON.parse(getSessionProposal(clicked.id)?.placement ?? '{}')).toMatchObject({
+        engine: 'claude',
+        permission_mode: 'auto'
+      })
+      syncCore.setAppState({ autoModeDisabledBySettings: true })
+
+      expect(await startProposalFromClient(clicked.id)).toMatchObject({ success: true })
+      const out = await sessionStart(p.caller, { proposal_id: byId.id })
+      expect(created).toHaveLength(2)
+      for (const child of created) {
+        expect(child).toMatchObject({ engineId: 'claude', permissionMode: 'default' })
+      }
+      expect(out.text).toMatch(NOTE)
+    })
+
+    it.each(NOT_CLAUDE)(
+      'a %s proposal saved with auto still starts in auto with the setting on',
+      async (engine) => {
+        const p = born(`off-proposal-${engine}`, { engine, mode: 'auto' })
+        const clicked = await propose(p.caller, { title: 'Clicked' })
+        const byId = await propose(p.caller, { title: 'By id' })
+        syncCore.setAppState({ autoModeDisabledBySettings: true })
+
+        expect(await startProposalFromClient(clicked.id)).toMatchObject({ success: true })
+        const out = await sessionStart(p.caller, { proposal_id: byId.id })
+        expect(created).toHaveLength(2)
+        for (const child of created) {
+          expect(child).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+        }
+        expect(out.text).not.toMatch(/auto mode is turned off/)
+      }
+    )
+
+    it.each(ENGINES)(
+      'with the setting off a %s child inherits auto, with no note',
+      async (engine) => {
+        const p = born(`on-inherit-${engine}`, { engine, mode: 'auto' })
+        const started = await sessionStart(p.caller, start())
+        const { id } = await propose(p.caller)
+        expect(await startProposalFromClient(id)).toMatchObject({ success: true })
+        expect(created).toHaveLength(2)
+        for (const child of created) {
+          expect(child).toMatchObject({ engineId: engine, permissionMode: 'auto' })
+        }
+        expect(started.text).not.toMatch(/auto mode is turned off/)
+      }
+    )
   })
 
   it('validates the brief before it spends anything', async () => {

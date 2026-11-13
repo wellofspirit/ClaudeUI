@@ -1,6 +1,8 @@
 import { useEffect, useId, useState } from 'react'
 import type { EngineId } from '../../../../shared/types'
 import { engineMeta } from '../../../../shared/engine-meta'
+import { useSessionStore } from '../../stores/session-store'
+import { ipcErrorMessage } from '../../utils/ipc-error'
 import { SelectMenu, type SelectMenuOption } from '../shared/SelectMenu'
 
 // ── The row vocabulary (ADR-065) ─────────────────────────────────────
@@ -1412,6 +1414,45 @@ export function ChatRetentionSetting(): React.JSX.Element {
         className="cursor-default"
       >
         <ToggleSwitch checked={autoDelete} />
+      </button>
+    </SettingRow>
+  )
+}
+
+/**
+ * Claude Code's own `disableAutoMode` (ADR-050), kept in ~/.claude/settings.json and
+ * written by the host. The switch shows the replicated store value and never flips
+ * ahead of it: the host's `config:claude-auto-mode-changed` echo is the applied
+ * value, on every client. A refused write (a malformed settings file) is shown in
+ * the row.
+ */
+export function ClaudeDisableAutoModeSetting(): React.JSX.Element {
+  const disabled = useSessionStore((s) => s.autoModeDisabledBySettings)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggle = (): void => {
+    window.api
+      .setClaudeDisableAutoMode(!disabled)
+      .then(() => setError(null))
+      // The handler's own sentence, without the wrapper the desktop transport adds.
+      .catch((err: unknown) => setError(ipcErrorMessage(err)))
+  }
+
+  return (
+    <SettingRow
+      testid="ClaudeDisableAutoMode"
+      label="Disable auto mode"
+      description="Claude Code's own setting, kept in its settings.json and honoured by the claude CLI too. While on, Claude sessions start in Default instead of Auto and cannot switch to Auto. opencode and pi sessions are not affected."
+      error={error ?? undefined}
+    >
+      <button
+        type="button"
+        data-testid="ClaudeDisableAutoMode.toggle"
+        aria-pressed={disabled}
+        onClick={toggle}
+        className="cursor-default"
+      >
+        <ToggleSwitch checked={disabled} />
       </button>
     </SettingRow>
   )

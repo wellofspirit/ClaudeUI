@@ -32,7 +32,8 @@ import {
 import {
   DEFAULT_AUTONOMY_MODE,
   PERMISSION_TO_AUTONOMY,
-  autoModeAvailableForEngine
+  autoModeAvailableForEngine,
+  claudeAutoModeDisabled
 } from '../../../shared/permission-modes'
 import {
   engineMeta,
@@ -689,7 +690,7 @@ export async function hydrateConfigFromDisk(): Promise<void> {
   // snapshot arrives — otherwise boot flashes defaults.
   seedLocalApp({
     settings: settings as unknown as Record<string, unknown>,
-    autoModeDisabledBySettings: userPermissions?.disableAutoMode === 'disable',
+    autoModeDisabledBySettings: claudeAutoModeDisabled(userPermissions),
     recentSessionIds: sessionConfig.recentSessions ?? [],
     pinnedSessionIds: sessionConfig.pinnedSessions ?? [],
     customTitles: sessionConfig.customTitles ?? {},
@@ -1103,11 +1104,12 @@ export const EMPTY_SESSION_STATE: PerSessionState = {
 /**
  * The PermissionMode a fresh RUN of a session should start in: the configured
  * default (`settings.defaultAutonomyMode` → `defaultPermissionMode`), degraded
- * to 'default' when this engine or account cannot actually run auto — either
- * the launch-time model fetch says no Claude model supports it, or Claude
- * settings carry `disableAutoMode: "disable"`. Gating here (before spawn)
- * beats letting cli.js reject `--permission-mode auto` and snap the mode back
- * mid-session.
+ * to 'default' when a Claude session may not be in auto — either the launch-time
+ * model fetch says no Claude model supports it, or Claude settings carry
+ * `disableAutoMode: "disable"` (ADR-050). Both gates are Claude's own: an
+ * opencode or pi session starts in auto whatever they say. Gating here (before
+ * spawn) beats letting cli.js reject `--permission-mode auto` and snap the mode
+ * back mid-session.
  *
  * Used by every path that starts a NEW RUN: createNewSession, reopening a
  * historical session, forking, and clearConversation. That set is deliberate —
@@ -1125,10 +1127,13 @@ export function bootstrapPermissionMode(
   engineId: EngineId
 ): PermissionMode {
   if (state.defaultPermissionMode !== 'auto') return state.defaultPermissionMode
-  const autoBlocked =
-    !autoModeAvailableForEngine(engineId, state.availableModels) ||
-    (engineId === 'claude' && state.autoModeDisabledBySettings)
-  return autoBlocked ? 'default' : 'auto'
+  return autoModeAvailableForEngine(
+    engineId,
+    state.availableModels,
+    state.autoModeDisabledBySettings
+  )
+    ? 'auto'
+    : 'default'
 }
 
 /**
@@ -1679,10 +1684,12 @@ export interface SessionState {
    *  session's mode is `setPermissionMode`'s job. */
   defaultPermissionMode: PermissionMode
   /** `~/.claude/settings.json` sets `disableAutoMode: "disable"` (nested under
-   *  `permissions` or top-level — cli.js honours both). Claude sessions must not
-   *  be spawned with `--permission-mode auto` when this is set: cli.js would
-   *  reject it. Claude-only — opencode and pi implement auto themselves and are
-   *  not governed by Claude's settings file. */
+   *  `permissions` or top-level — cli.js honours both). Claude Code's own setting
+   *  (ADR-050): a Claude session neither starts in auto nor is offered it while
+   *  this is set, because cli.js would reject `--permission-mode auto`. Claude
+   *  only: opencode and pi implement auto themselves and are not governed by
+   *  Claude's settings file. Ask `autoModeAvailableForEngine`, which knows that,
+   *  instead of reading this directly. */
   autoModeDisabledBySettings: boolean
   /** Bumped by EVERY model reload, whole or one engine's — what a Settings pane
    *  follows to re-read its models (e.g. after an opencode provider or
@@ -2402,7 +2409,11 @@ export const useSessionStore = create<SessionState>((set) => ({
       // survive the switch and show a pill the Shift+Tab cycle skips over.
       permissionMode:
         session.permissionMode === 'auto' &&
-        !autoModeAvailableForEngine(engineId, state.availableModels)
+        !autoModeAvailableForEngine(
+          engineId,
+          state.availableModels,
+          state.autoModeDisabledBySettings
+        )
           ? 'default'
           : session.permissionMode,
       status: {

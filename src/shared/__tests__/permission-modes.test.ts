@@ -101,15 +101,15 @@ describe('autoModeAvailableForEngine', () => {
       { engineId: 'opencode', supportsAutoMode: false },
       { engineId: 'pi', supportsAutoMode: false }
     ]
-    expect(autoModeAvailableForEngine('opencode', models)).toBe(true)
-    expect(autoModeAvailableForEngine('pi', models)).toBe(true)
+    expect(autoModeAvailableForEngine('opencode', models, false)).toBe(true)
+    expect(autoModeAvailableForEngine('pi', models, false)).toBe(true)
   })
 
   it('delegates to claudeAutoModeAvailable for the claude engine', () => {
     const allUnsupported: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[] = [
       { engineId: 'claude', supportsAutoMode: false }
     ]
-    expect(autoModeAvailableForEngine('claude', allUnsupported)).toBe(false)
+    expect(autoModeAvailableForEngine('claude', allUnsupported, false)).toBe(false)
     expect(claudeAutoModeAvailable(allUnsupported)).toBe(false)
   })
 
@@ -117,6 +117,40 @@ describe('autoModeAvailableForEngine', () => {
     const allUnsupported: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[] = [
       { engineId: 'claude', supportsAutoMode: false }
     ]
-    expect(autoModeAvailableForEngine(undefined, allUnsupported)).toBe(false)
+    expect(autoModeAvailableForEngine(undefined, allUnsupported, false)).toBe(false)
+  })
+
+  // ADR-050: `disableAutoMode` is Claude Code's own setting. The engine is part of
+  // the question: it binds a Claude session and no other.
+  describe('with auto mode turned off in Claude settings', () => {
+    const supported: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[] = [
+      { engineId: 'claude', supportsAutoMode: true },
+      { engineId: 'opencode' },
+      { engineId: 'pi' }
+    ]
+
+    it.each(['claude', undefined] as const)(
+      'is false for engine %s, whatever the models say',
+      (engineId) => {
+        expect(autoModeAvailableForEngine(engineId, supported, true)).toBe(false)
+        expect(autoModeAvailableForEngine(engineId, [], true)).toBe(false)
+      }
+    )
+
+    it.each(['opencode', 'pi'] as const)(
+      'stays true for engine %s: Claude settings do not govern it',
+      (engineId) => {
+        expect(autoModeAvailableForEngine(engineId, supported, true)).toBe(true)
+        expect(autoModeAvailableForEngine(engineId, [], true)).toBe(true)
+      }
+    )
+
+    it.each(['claude', 'opencode', 'pi', undefined] as const)(
+      'changes nothing for engine %s when the setting is off',
+      (engineId) => {
+        expect(autoModeAvailableForEngine(engineId, supported, false)).toBe(true)
+        expect(autoModeAvailableForEngine(engineId, [], false)).toBe(true)
+      }
+    )
   })
 })

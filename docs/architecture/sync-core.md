@@ -454,7 +454,9 @@ hydration:
   `seedLinkState`, slice 1b). `services/sync-seed.ts` seeds them from the same readers the renderer store
   uses, at the same point in boot. Without it, a phone connecting to a freshly-booted
   desktop got an empty sidebar, default theme and no recents until the first config save
-  of the session happened to fire a watcher.
+  of the session happened to fire a watcher. `autoModeDisabledBySettings` is also
+  event-driven since 2026-11-12: the Claude page's toggle writes the file and emits
+  `config:claude-auto-mode-changed`, which the reducer folds into the same field.
 - **User-message `id`/`timestamp`** — minted by `sendPrompt` into the event payload, so
   every replica agrees on the transcript's ids instead of inventing its own.
 - **Thinking-span `durationMs`** — timed by the emitter (`BaseSession.send` stamps

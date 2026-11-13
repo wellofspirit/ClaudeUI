@@ -39,6 +39,11 @@ nothing has to be reconciled; a UISettings copy would be a file the feature neve
   remote, `ChatRetentionSetting`). The helpers preserve other top-level keys, write mode `0o600` and clamp to an
   integer of at least 1. A save hot-reloads running sessions (`notifySettingsChanged()`), but cli.js's sweep only
   runs at startup (throttled to once a day), so a new window applies at the next launch.
+- `disableAutoMode` is the second case (2026-11-12; `claude:set-disable-auto-mode`, desktop and remote, the
+  "Disable auto mode" row on the Claude page; what it means is ADR-050 in `permissions.md`). There is no read
+  command: the value is replicated state, and a save reaches every client as `config:claude-auto-mode-changed`.
+  Its writer, `saveClaudeDisableAutoMode`, refuses to write over a settings file it cannot parse (an empty file or
+  one with a byte-order mark is fine), where the two older writers replace such a file.
 - **Auto-delete OFF writes `3650`, not `0`.** Upstream treats `0` as schema-invalid; writing it makes settings.json
   invalid and warns on every launch. The control reads `0` and any value of 3650 or more as OFF, so a hand-edited
   `0` still renders correctly.

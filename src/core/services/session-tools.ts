@@ -1397,16 +1397,8 @@ function inheritedPlan(
   // A model or effort only means something to the engine that offered it.
   const model = over.model ?? (same ? live?.selectedModel || undefined : undefined)
   const effort = over.effort ?? (same ? live?.effort || undefined : undefined)
-  let permissionMode = over.permissionMode ?? caller.permissionMode
   const notes: string[] = []
-  if (
-    permissionMode === 'auto' &&
-    engine === 'claude' &&
-    syncCore.getCanonicalState().autoModeDisabledBySettings
-  ) {
-    permissionMode = 'default'
-    notes.push('auto mode is turned off in settings, so it started in default mode')
-  }
+  const permissionMode = gateAutoMode(engine, over.permissionMode ?? caller.permissionMode, notes)
   return { engine, model, effort, permissionMode, notes }
 }
 
@@ -1512,7 +1504,14 @@ function validTitle(title: unknown): string | null {
   return null
 }
 
-/** `auto` that settings have turned off starts as `default`, and says so. */
+/**
+ * A Claude session whose `auto` Claude settings have turned off starts as
+ * `default`, and says so. Claude only (ADR-050): the flag is Claude Code's own
+ * `disableAutoMode`, cli.js would refuse the mode at spawn, and it does not
+ * govern opencode or pi. Every session the tools start passes through here: a
+ * start or hand-off (`inheritedPlan`) and a proposal's launch, which can carry an
+ * `auto` saved before the setting was turned on.
+ */
 function gateAutoMode(engine: EngineId, mode: string, notes: string[]): string {
   if (
     mode === 'auto' &&

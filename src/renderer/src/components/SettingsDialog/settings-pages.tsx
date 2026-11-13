@@ -26,7 +26,13 @@ import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
 import { sessionToolsEnabled } from '../../../../shared/app-settings'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
-import { SettingRow, SettingsToggle, ActionRow, type AppliesOn } from './settings-controls'
+import {
+  SettingRow,
+  SettingsToggle,
+  ActionRow,
+  ClaudeDisableAutoModeSetting,
+  type AppliesOn
+} from './settings-controls'
 import type { SettingsPageId, SettingsTarget } from './settings-target'
 import { notInstalledTitle, type EngineRuns } from './harness-view'
 import { UsageHubSettings } from './UsageHubSettings'
@@ -336,6 +342,17 @@ const SESSION_TOOLS: SettingItem = {
 }
 
 /**
+ * Claude Code's `disableAutoMode`, edited in ~/.claude/settings.json (ADR-050). Self-contained:
+ * the control owns its IPC and reads the replicated store value (ADR-009).
+ */
+const CLAUDE_DISABLE_AUTO_MODE: SettingItem = {
+  key: 'claudeDisableAutoMode',
+  label: 'Disable auto mode',
+  keywords: 'auto mode disable disableAutoMode judge classifier claude permission',
+  render: () => <ClaudeDisableAutoModeSetting />
+}
+
+/**
  * "Start new sessions in a worktree": the one global default. A project can differ through its
  * sidebar menu (`worktreeByProject`); read when a new session is created.
  */
@@ -371,7 +388,8 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   DISPATCH_TILE_COLOUR,
   CONTEXT_PRESSURE,
   SESSION_TOOLS,
-  START_IN_WORKTREE
+  START_IN_WORKTREE,
+  CLAUDE_DISABLE_AUTO_MODE
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -870,6 +888,16 @@ export const PAGES: SettingsPage[] = [
         note: 'Applies to newly started Claude sessions.',
         storage: 'engines/claude.json',
         items: itemsOf('claude-session')
+      },
+      // Claude Code's own setting, in its own settings.json (ADR-009, ADR-050).
+      // No `appliesOn`: new runs and the picker follow it at once, unlike the
+      // cards that say "next session". A running session's mode is not touched.
+      {
+        id: 'auto-mode',
+        label: 'Auto mode',
+        storage: '~/.claude/settings.json',
+        note: 'Applies at once to new Claude runs and the mode picker; a session already in Auto keeps it until its next run. Never reaches opencode or pi.',
+        items: [CLAUDE_DISABLE_AUTO_MODE]
       },
       // The Endpoint card is here rather than on Models & providers
       // (ADR-074 §9): `vendors/anthropic.json` only ever reaches cli.js spawns,

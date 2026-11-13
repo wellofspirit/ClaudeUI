@@ -33,6 +33,7 @@ import {
   saveUiSettings,
   mcpStatus,
   setCleanupPeriod,
+  setClaudeAutoModeDisabled,
   savePermissionsAndNotify,
   setWorkspaceTrustAndNotify
 } from './handlers-core'
@@ -174,6 +175,13 @@ export function appStateCommands(
       capability: 'config',
       kind: 'command',
       handler: async (days: number) => setCleanupPeriod(manager, days)
+    },
+    // Claude Code's disableAutoMode (~/.claude/settings.json), ADR-050
+    {
+      channel: 'claude:set-disable-auto-mode',
+      capability: 'config',
+      kind: 'command',
+      handler: async (disabled: boolean) => setClaudeAutoModeDisabled(manager, disabled)
     },
     // MCP runtime status (Claude-only: capabilities.hostedMcp AND method presence —
     // opencode advertises hostedMcp:true but does not implement the MCP methods)

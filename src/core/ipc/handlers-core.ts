@@ -5,7 +5,13 @@ import * as path from 'path'
 import type { SessionManager } from '../services/session-manager'
 import { resolveClaudeSkillCatalog } from '../services/claude-skill-catalog'
 import { claudeSkillEntryToInfo } from '../services/claude-skill-info'
-import { saveCleanupPeriodDays, saveClaudePermissions } from '../services/claude-settings'
+import {
+  loadClaudePermissions,
+  saveClaudeDisableAutoMode,
+  saveCleanupPeriodDays,
+  saveClaudePermissions
+} from '../services/claude-settings'
+import { claudeAutoModeDisabled } from '../../shared/permission-modes'
 import { setWorkspaceTrust } from '../services/claude-workspace-trust'
 import { claudeProjectKey } from '../services/claude-config-paths'
 import type {
@@ -948,6 +954,30 @@ export function setCleanupPeriod(manager: SessionManager, days: number): void {
   // Hot-reload running CLI sessions so the new retention applies immediately.
   manager.forEach((session) => {
     session.notifySettingsChanged?.().catch(() => {})
+  })
+}
+
+/**
+ * Turn Claude Code's `disableAutoMode` on or off (ADR-050). The argument is
+ * remote-reachable, so only a boolean is accepted. The event carries what the
+ * file says afterwards, not the argument. A refusal to write (a malformed
+ * settings file) propagates as the rejection and emits nothing.
+ *
+ * No running session's mode changes here. The nudge makes each running Claude
+ * session re-read its settings now instead of when its file watcher fires, so a
+ * later switch to auto is answered from the new value; cli.js re-reads rules on
+ * a settings change, not the mode (`ClaudeSession.notifySettingsChanged`), so a
+ * session already in auto keeps it until its next run. Claude sessions only: it
+ * is not opencode's or pi's setting.
+ */
+export function setClaudeAutoModeDisabled(manager: SessionManager, disabled: unknown): void {
+  if (typeof disabled !== 'boolean') throw new Error('disabled must be a boolean')
+  saveClaudeDisableAutoMode(disabled)
+  emitEvent('config:claude-auto-mode-changed', [
+    claudeAutoModeDisabled(loadClaudePermissions('user'))
+  ])
+  manager.forEach((session) => {
+    if (session.engineId === 'claude') session.notifySettingsChanged?.().catch(() => {})
   })
 }
 

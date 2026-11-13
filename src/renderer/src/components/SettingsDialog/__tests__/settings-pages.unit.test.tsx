@@ -144,7 +144,15 @@ describe('PAGES structure', () => {
       // The Anthropic endpoint next: it only ever reaches cli.js (ADR-074 §9).
       // 'agent-colours' (ADR-094): one group on each harness page, after that page's own
       // settings groups (last on Claude, before 'raw' on opencode and pi).
-      claude: ['session', 'endpoint', 'model-mapping', 'sandbox', 'proxy', 'agent-colours'],
+      claude: [
+        'session',
+        'auto-mode',
+        'endpoint',
+        'model-mapping',
+        'sandbox',
+        'proxy',
+        'agent-colours'
+      ],
       opencode: [
         'session',
         'tool-output',
@@ -174,7 +182,8 @@ describe('PAGES structure', () => {
 
   it('engine-native groups say when they apply, with the three-value badge vocabulary', () => {
     // Agent colours (ADR-094) are ClaudeUI's own setting and bind on the spot: no badge.
-    const immediate = (g: { id: string }): boolean => g.id === 'agent-colours'
+    const immediate = (g: { id: string }): boolean =>
+      g.id === 'agent-colours' || g.id === 'auto-mode'
     for (const g of pageOf('opencode').groups) {
       if (g.id === 'managed' || g.id === 'agents' || immediate(g)) continue
       expect(g.appliesOn, `opencode/${g.id}`).toBe('next-server-start')
@@ -380,7 +389,9 @@ describe('inventory guard', () => {
       // Session tools, host-wide switch.
       'sessionTools',
       // Worktrees: the global default for starting new sessions in one.
-      'startInWorktree'
+      'startInWorktree',
+      // Claude Code's disableAutoMode, edited in its settings.json.
+      'claudeDisableAutoMode'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())
@@ -434,6 +445,7 @@ describe('visibleGroups', () => {
   it('keeps every group when the engine has the capability', () => {
     expect(visibleGroups(pageOf('claude')).map((g) => g.id)).toEqual([
       'session',
+      'auto-mode',
       'endpoint',
       'model-mapping',
       'sandbox',
@@ -447,6 +459,7 @@ describe('visibleGroups', () => {
     const caps = { sandbox: false, proxy: false } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), caps).map((g) => g.id)).toEqual([
       'session',
+      'auto-mode',
       'endpoint',
       'model-mapping',
       'agent-colours'
@@ -454,6 +467,7 @@ describe('visibleGroups', () => {
     const onlyProxy = { sandbox: false, proxy: true } as unknown as EngineCapabilities
     expect(visibleGroups(pageOf('claude'), onlyProxy).map((g) => g.id)).toEqual([
       'session',
+      'auto-mode',
       'endpoint',
       'model-mapping',
       'proxy',

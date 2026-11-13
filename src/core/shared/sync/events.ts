@@ -357,6 +357,11 @@ export interface SyncEventMap {
   /** The origin link table (with `grouped`) and the sidebar id of each session it names (slice 1b). A replace. */
   'session:link-changed': (data: SessionLinksPayload) => void
   'config:settings-changed': (settings: Record<string, unknown>) => void
+  /**
+   * Claude Code's `disableAutoMode` setting changed (ADR-050): whether the host's
+   * `~/.claude/settings.json` now says `"disable"`. Carries the value the FILE holds.
+   */
+  'config:claude-auto-mode-changed': (disabled: boolean) => void
   'config:sessions-changed': (config: UISessionConfig) => void
   'git:status-update': (data: { cwd: string; status: GitStatusData }) => void
   'mockup:file-changed': (directory: string) => void

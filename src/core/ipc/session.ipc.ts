@@ -220,6 +220,7 @@ const SESSION_IPC_CHANNELS = [
   'claude:save-permissions',
   'claude:get-cleanup-period',
   'claude:set-cleanup-period',
+  'claude:set-disable-auto-mode',
   'mcp:status',
   'mcp:toggle',
   'mcp:reconnect',

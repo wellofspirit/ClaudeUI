@@ -29,16 +29,24 @@ session-level equivalent in ClaudeUI.
    deliberate pick (`session-store.ts`). A profile that pinned `defaultMode` keeps it (a pinned `default` keeps manual
    approvals and must opt into auto in Settings, deliberately); a `defaultMode` with no ClaudeUI equivalent
    (`bypassPermissions`, `dontAsk`) seeds the default instead, which only ever de-escalates.
-3. **Auto is gated at session creation, not at spawn** (`bootstrapPermissionMode`): `auto` degrades to `default`
-   when `autoModeAvailableForEngine()` says the engine/account cannot do auto (only Claude has such a gate: the model
-   fetch says no model supports it) or, for Claude sessions only, Claude settings carry `disableAutoMode: "disable"`
-   (opencode and pi implement auto themselves and are not governed by Claude's settings file, so they still start in
-   auto with the flag set). It applies to every path
-   that starts a run (new, reopened, forked, cleared). The post-spawn rejection fallback stays as the backstop.
+3. **Auto is gated at session creation, not at spawn** (`bootstrapPermissionMode`): for a Claude session `auto`
+   degrades to `default` when `autoModeAvailableForEngine()` says it may not be in auto: the account cannot do it
+   (the model fetch says no model supports it) or Claude settings carry `disableAutoMode: "disable"`. Both gates are
+   Claude's. The opt-out is Claude Code's own setting and binds Claude sessions only (2026-11-12, ratifying the scope
+   the code had): opencode and pi implement auto themselves and are not governed by Claude's settings file, so they
+   start in auto and are offered Auto with the flag set. The gate applies to every path that starts a Claude run
+   (new, reopened, forked, cleared, an engine switch before the first prompt), to the mode picker (2026-11-12:
+   Shift+Tab and the mobile sheet no longer offer Auto to a Claude session with the flag set; before, cli.js refused
+   the pick with a warning) and to a Claude session the session tools start, a stored proposal included. The
+   post-spawn rejection fallback stays as the backstop.
 4. **`disableAutoMode`** is read from user-scope Claude settings both nested under `permissions` and at the top
    level (cli.js honours both) and normalised into one field; `saveClaudePermissions` round-trips the on-disk nested
-   value so a permission edit never drops an admin-authored flag. A full managed/enterprise policy read is not done.
-   The flag reaches remote clients as `autoModeDisabledBySettings` (they cannot read the file).
+   value so a permission edit never drops an admin-authored flag. The Claude page of Settings turns it on and off
+   (2026-11-12; ADR-009: `saveClaudeDisableAutoMode` edits Claude's file in place, and the new value reaches every
+   client at once as `config:claude-auto-mode-changed`). A running session keeps the mode it has: ClaudeUI changes
+   none, and cli.js re-reads its rules on a settings change but not the mode, so the flag binds a Claude session
+   from its next run while new runs and the picker follow it at once. A full managed/enterprise policy read is not
+   done. The flag reaches remote clients as `autoModeDisabledBySettings` (they cannot read the file).
 5. **All three engines default to auto, judge cost included.** The cost is accepted because the judge fails closed:
    no judge, an unavailable judge or an unparseable verdict all degrade to asking the human, never to approval, and
    read-only calls skip the judge. The block caps (3 consecutive, 20 total, plus a same-category cap) are in

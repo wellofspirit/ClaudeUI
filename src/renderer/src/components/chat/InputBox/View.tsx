@@ -70,7 +70,7 @@ export interface InputBoxViewProps {
   showModePicker?: boolean
   /** Engine capability gate for the 'plan' mode option. */
   canPlan?: boolean
-  /** Availability gate for the 'auto' mode option (Claude account/org gate; always true for other engines). */
+  /** Availability gate for the 'auto' mode option: false for a Claude session when Claude settings turn auto mode off or the account cannot run it; always true for other engines. */
   autoAvailable?: boolean
 
   // Menus

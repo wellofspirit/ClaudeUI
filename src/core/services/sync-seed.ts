@@ -38,6 +38,7 @@ import { seedLinkState } from './session-links'
 import { interruptStaleDispatchTargets } from './dispatch-target-ledger'
 import { sweepOrphanDispatchTargets } from './dispatch-target-end'
 import { loadClaudePermissions } from './claude-settings'
+import { claudeAutoModeDisabled } from '../../shared/permission-modes'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
 import { mergeOpencodeIntoDirectories, mergePiIntoDirectories } from '../../shared/directory-merge'
@@ -323,7 +324,7 @@ export async function seedCanonicalAppState(): Promise<void> {
     // ~/.claude/settings.json. Same expression the renderer store uses.
     const permissions = loadClaudePermissions('user')
     syncCore.setAppState({
-      autoModeDisabledBySettings: permissions?.disableAutoMode === 'disable'
+      autoModeDisabledBySettings: claudeAutoModeDisabled(permissions)
     })
   } catch (err) {
     logger.warn(LOG_SOURCE, 'auto-mode gate seed failed', err)

@@ -5,7 +5,7 @@
  */
 
 import type { AutonomyMode } from './model-capabilities'
-import type { EngineId, ModelInfo, PermissionMode } from './types'
+import type { ClaudePermissions, EngineId, ModelInfo, PermissionMode } from './types'
 
 export const PERMISSION_MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'auto'] as const
 
@@ -61,9 +61,10 @@ export const AUTONOMY_LABELS: Record<AutonomyMode, string> = {
  * had already chosen a mode keeps it (see the seeding logic in session-store),
  * and only profiles with nothing set adopt this.
  *
- * It is NOT unconditional. Auto is gated per engine by
- * {@link autoModeAvailableForEngine} and, for Claude, by a settings-level
- * `disableAutoMode`; a session that cannot have auto falls back to 'default'.
+ * It is NOT unconditional. {@link autoModeAvailableForEngine} gates it for a
+ * Claude session, by what the account can run and by Claude Code's own
+ * settings-level `disableAutoMode`; a Claude session that cannot have auto falls
+ * back to 'default'. opencode and pi have no such gate.
  */
 export const DEFAULT_AUTONOMY_MODE: AutonomyMode = 'full'
 
@@ -126,14 +127,39 @@ export function claudeAutoModeAvailable(
 }
 
 /**
- * Whether 'auto' permission mode is usable for the given engine. Non-Claude
- * engines' 'auto' has no account gate, so it's always available there.
- * Claude delegates to `claudeAutoModeAvailable`'s
- * model-fetch-derived gate.
+ * Whether Claude Code's `disableAutoMode` setting is on in the user settings
+ * file (`loadClaudePermissions` folds the top-level key into the nested field).
+ * The one comparison behind `autoModeDisabledBySettings` (ADR-050).
+ */
+export function claudeAutoModeDisabled(
+  permissions: Pick<ClaudePermissions, 'disableAutoMode'> | null | undefined
+): boolean {
+  return permissions?.disableAutoMode === 'disable'
+}
+
+/**
+ * Whether a session on the given engine may be in 'auto' permission mode. The
+ * engine is part of the question: both gates are Claude's, and a session on
+ * opencode or pi, whose auto mode is ClaudeUI's own, is always allowed.
+ *
+ * For a Claude session, two negative gates:
+ *
+ * - `claudeDisabledBySettings`: Claude Code's own setting `disableAutoMode:
+ *   "disable"` in its settings.json (the store's `autoModeDisabledBySettings`,
+ *   ADR-050). It is cli.js's setting and cli.js refuses auto while it is set, so
+ *   it binds Claude sessions and nothing else. Required, so every caller hands
+ *   the setting over and this function, not the caller, decides whom it binds.
+ * - The account gate: `claudeAutoModeAvailable`'s model-fetch-derived answer.
+ *
+ * Every site that seeds or offers a mode asks this: the mode a run starts in
+ * (`bootstrapPermissionMode`), the engine switch, the Shift+Tab cycle and the
+ * mobile mode picker.
  */
 export function autoModeAvailableForEngine(
   engineId: EngineId | undefined,
-  models: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[]
+  models: Pick<ModelInfo, 'engineId' | 'supportsAutoMode'>[],
+  claudeDisabledBySettings: boolean
 ): boolean {
-  return (engineId ?? 'claude') === 'claude' ? claudeAutoModeAvailable(models) : true
+  if ((engineId ?? 'claude') !== 'claude') return true
+  return !claudeDisabledBySettings && claudeAutoModeAvailable(models)
 }
