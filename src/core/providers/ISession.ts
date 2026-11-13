@@ -7,6 +7,7 @@ import type {
   PermissionSuggestion,
   QueuedItem,
   SkillInfo,
+  SessionConfig,
   SandboxSettings
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
@@ -333,25 +334,15 @@ export interface ISession {
 }
 
 /**
- * Named spawn options for engine-session construction. Replaces the former
- * 11-positional-parameter factory tuple. All members are optional; engines
- * ignore options they do not consume (noted per member).
+ * What an engine session is constructed with: the session's config (`SessionConfig`, the same
+ * fields a live change patches through `ISession.applyConfig`) plus what only a spawn has. All
+ * members are optional; engines ignore options they do not consume (noted per member).
  */
-export interface EngineSpawnOptions {
-  /** Reasoning-effort tier. Claude + pi (applied via `set_thinking_level` at
-   *  spawn when the resolved model supports it) — opencode uses per-model
-   *  reasoning variants instead. */
-  effort?: string
+export interface EngineSpawnOptions extends SessionConfig {
   /** Engine session id to resume. Consumed by all three engines. */
   resumeSessionId?: string
-  /** Initial permission mode. Consumed by all three engines. */
-  permissionMode?: string
-  /** Model value in the engine's convention (Claude alias / opencode "vendorId/modelId" / pi model id). All three engines. */
-  model?: string
   /** Sandbox settings. Claude-only — opencode and pi never read it (ADR-022, ADR-030). */
   sandboxConfig?: SandboxSettings
-  /** Thinking mode ('adaptive' | 'enabled' | 'disabled'). Claude-only. */
-  thinkingMode?: string
   /** Fork ("branch off") anchor, in the engine's own convention: a JSONL line
    *  uuid for Claude (ADR-010), or a pi entryId / the clone-latest sentinel
    *  for pi — see PiSession.doStart's fork block. opencode fork is
