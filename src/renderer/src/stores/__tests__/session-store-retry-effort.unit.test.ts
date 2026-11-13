@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useSessionStore } from '../session-store'
+import { retrySend } from '../../lib/session-spawn'
 import type { ModelInfo } from '../../../../shared/types'
 import { emitSync, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import type { SessionSpawnRequest } from '../../../../shared/types'
@@ -60,7 +61,7 @@ function patchSession(patch: Record<string, unknown>): void {
 describe('retrySend — Claude effort', () => {
   it("respawns at the model's saved starting effort when the session has no pick", async () => {
     patchSession({ effort: null })
-    await useSessionStore.getState().retrySend('rt-1', 'again')
+    await retrySend('rt-1', 'again')
     expect(spawnReq(createSession.mock.calls[0]).config?.effort).toBe('high')
     // The starting effort freezes into the session: announced with the spawn, so
     // a later change to the per-model value cannot re-label it.
@@ -72,7 +73,7 @@ describe('retrySend — Claude effort', () => {
 
   it("a session's own pick still wins, and is announced", async () => {
     patchSession({ effort: 'low' })
-    await useSessionStore.getState().retrySend('rt-1', 'again')
+    await retrySend('rt-1', 'again')
     expect(spawnReq(createSession.mock.calls[0]).config?.effort).toBe('low')
     expect(spawnReq(createSession.mock.calls[0]).announce).toEqual({
       effort: 'low',
@@ -83,7 +84,7 @@ describe('retrySend — Claude effort', () => {
   it('an UNKNOWN model (empty catalog) announces no effort, so the pick survives the fold (GUARD)', async () => {
     useSessionStore.setState({ availableModels: [] })
     patchSession({ effort: 'low' })
-    await useSessionStore.getState().retrySend('rt-1', 'again')
+    await retrySend('rt-1', 'again')
     const announce = spawnReq(createSession.mock.calls[0]).announce as Record<string, unknown>
     // Spawned at the session's own pick, announcing nothing about it: a `null`
     // here would clear it on every replica, this one included.

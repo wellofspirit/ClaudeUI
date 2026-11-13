@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import { useSessionStore, useActiveSession } from '../../../stores/session-store'
 import type { PendingApproval, ContentBlock as _ContentBlock } from '../../../../../shared/types'
 import type { ToolView } from '../../../../../shared/tool-kinds'
-import { sessionSpawnEffort, spawnAnnouncement } from '../../../lib/session-effort'
+import { spawnSession } from '../../../lib/session-spawn'
 import { waitForModeChange } from './utils'
 import { ExitPlanModeCardView } from './View'
 
@@ -19,10 +19,8 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
   const clearConversation = useSessionStore((s) => s.clearConversation)
-  const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const openPlanPanel = useSessionStore((s) => s.openPlanPanel)
   const cwd = useActiveSession((s) => s.cwd)
-  const selectedEngineId = useActiveSession((s) => s.selectedEngineId)
 
   const [expanded, setExpanded] = useState(true)
   const [showFeedback, setShowFeedback] = useState(false)
@@ -36,22 +34,9 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     if (!planContent || !cwd || !activeSessionId) return
     if (!approval) return
 
-    // Capture the session's model / effort / thinking BEFORE clearConversation
-    // wipes them back to defaults — threading them keeps the fresh session on the
-    // user's chosen model (like every other spawn path) instead of discarding it.
+    // The session as it is BEFORE clearConversation blanks its picks: the fresh spawn resolves
+    // model / effort / thinking mode (and the birth announce) from it, like every other spawn.
     const preSession = useSessionStore.getState().sessions[activeSessionId]
-    const model = preSession?.selectedModel
-    // The spawn's own resolver (not the bare pick): a session on the model's
-    // starting effort has `effort === null`, and sending `undefined` here made the
-    // fresh session start at cli.js's heuristic instead.
-    const effort = preSession
-      ? sessionSpawnEffort(useSessionStore.getState(), preSession)
-      : undefined
-    // Read now: `clearConversation` blanks the session's picks, and the birth
-    // event below must hand the fresh spawn's effort / thinking mode back to
-    // every replica as the session's own.
-    const announce = spawnAnnouncement(useSessionStore.getState(), preSession, effort)
-    const thinkingMode = preSession?.thinkingMode ?? undefined
 
     // Get the session log path before cancelling (for transcript reference)
     const sessionLogPath = await window.api.getSessionLogPath(activeSessionId)
@@ -73,13 +58,11 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     await clearConversation(activeSessionId)
 
     // Create a fresh SDK session for the same routingId.
-    await window.api.createSession(activeSessionId, {
-      cwd,
-      engineId: selectedEngineId,
-      config: { effort, permissionMode: 'acceptEdits', model, thinkingMode },
-      announce
+    await spawnSession(activeSessionId, {
+      resume: 'none',
+      permissionMode: 'acceptEdits',
+      from: preSession
     })
-    markSdkActive(activeSessionId)
     // No local mode write: the fresh spawn's own init emits
     // `session:permission-mode` with the mode it was created in (SyncCore 4c).
 
@@ -90,16 +73,7 @@ export function ExitPlanModeCard({ view, approval }: ExitPlanModeCardProps): Rea
     }
     // User message is added by the server-relayed session:user-message event
     await window.api.sendPrompt(activeSessionId, prompt)
-  }, [
-    planContent,
-    approval,
-    cwd,
-    activeSessionId,
-    dismissApproval,
-    clearConversation,
-    markSdkActive,
-    selectedEngineId
-  ])
+  }, [planContent, approval, cwd, activeSessionId, dismissApproval, clearConversation])
 
   /** Options 2 and 3: allow the plan, then switch the mode once the approval has cleared. */
   const continueWithMode = useCallback(

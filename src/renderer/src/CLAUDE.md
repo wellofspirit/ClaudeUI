@@ -8,7 +8,7 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 - `stores/session-store.ts`: the one Zustand store. Regions by symbol: `PerSessionState`, `EMPTY_SESSION_STATE`, `SessionState` (signatures), the `create()` body (bodies). It re-exports `AppSettings` and `DEFAULT_SETTINGS` from `src/shared/app-settings.ts`, the schema core reads too.
 - `stores/replica.ts`, `stores/sealed-fields.ts`: the store is a replica of host state; the replica fold is the only writer of sealed fields. `sync/` holds only the desktop transport, not the replica.
 - `hooks/useClaudeEvents.ts`: the event listener hub; host events reach the store through the replica, this file runs the side effects.
-- `lib/`, `utils/`: plain TypeScript helpers (`lib/session-history-load.ts` loads transcripts).
+- `lib/`, `utils/`: plain TypeScript helpers (`lib/session-history-load.ts` loads transcripts; `lib/session-spawn.ts` starts a session's engine).
 - Neighbours: `src/web/` (web shell, `src/web/api-adapter.ts`), `src/preload/index.ts` (desktop bridge), `src/shared/window-api.d.ts` (types `window.api` as `ClaudeAPI`).
 
 ## Recipes
@@ -40,6 +40,8 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 - A sealed field staged with `setState` in a test is reverted by the next projection unless `mirrorStoreIntoReplica` (`src/test/helpers/replica-seed.ts`) is called right after; it copies every sealed field into the replica and is a bridge for old fixtures, not a pattern.
 - View-only per-session fields live on `PerSessionState` in the one `sessions` record; they survive projection and rekey in `src/renderer/src/stores/replica.ts`. Never a second store.
 - A new per-session field must be considered for the hand-written reset list in `clearConversation` (`src/renderer/src/stores/session-store.ts`) [nothing forces it].
+- A session's engine is started only through `spawnSession` (`src/renderer/src/lib/session-spawn.ts`): it owns the reload wait, the model check, the pending worktree, fork or resume, the config and the announce, so a first send, the voice path, review comments, a retry, a restart and an accepted plan cannot drift apart. `src/renderer/src/lib/__tests__/session-spawn-guard.unit.test.ts` fails on any other `window.api.createSession` call. A new per-session option: `src/core/providers/CLAUDE.md`.
+- `forkOrigin` means "this fork has not started yet": the rekey in `src/renderer/src/stores/replica.ts` clears it when the engine reports the fork's own id, and a later spawn then resumes the fork itself.
 - No viewport units (`vh`, `vw`, `dvh`, `h-screen`, ...) in components: the app renders under CSS `zoom`; `ZOOM_TRAP` in `eslint.config.mjs` (ADR-093).
 - Nothing here imports Electron; host access is `window.api` only, and every feature must work in `src/web`. No lint rule enforces the import ban in this directory.
 

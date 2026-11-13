@@ -842,7 +842,10 @@ function buildPatch(
     // old one — without this the store would hold both ids and split-brain the
     // session (the bug the deleted `rekeySession` action existed to avoid).
     if (rekey && sessions[rekey.oldId]) {
-      sessions[rekey.newId] = sessions[rekey.oldId]
+      // The fork has materialised (the engine reported its own id): the next spawn resumes
+      // THAT session, so the pointer at the source ends here. A fork whose first spawn failed
+      // before any id never reaches this line and still forks on the next send.
+      sessions[rekey.newId] = { ...sessions[rekey.oldId], forkOrigin: null }
       delete sessions[rekey.oldId]
       changed = true
       if (state.activeSessionId === rekey.oldId) patch.activeSessionId = rekey.newId

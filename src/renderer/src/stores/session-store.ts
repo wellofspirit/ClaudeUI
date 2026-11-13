@@ -377,7 +377,6 @@ function claudePicksOnAliases(
  */
 export { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
 import { buildTodosFromMessages, buildSentFilesFromMessages } from '../../../shared/derive-session'
-import { sessionSpawnEffort, spawnAnnouncement } from '../lib/session-effort'
 import { sessionWorkdir } from '../lib/session-workdir'
 
 import { DEFAULT_SETTINGS, type AppSettings, type ThemeId } from '../../../shared/app-settings'
@@ -867,9 +866,10 @@ export interface PerSessionState {
   sdkActive: boolean
   isHistorical: boolean
   /** Set on a freshly-forked ("branched off") session before its first send.
-   *  Tells InputBox to spawn cli.js with `--resume <source> --resume-session-at
+   *  Tells `spawnSession` to spawn cli.js with `--resume <source> --resume-session-at
    *  <anchor> --fork-session`, minting a new branch seeded with messages 1..N.
-   *  Read only while `!sdkActive`; the fork materializes lazily on first prompt. */
+   *  Read only while `!sdkActive`; the fork materializes lazily on first prompt, and the
+   *  replica's rekey (the engine reported the fork's own id) clears it. */
   forkOrigin: { sourceSessionId: string; anchorUuid: string } | null
   /**
    * "Start in a worktree" for a session that has not spawned: the toggle, the name, and where
@@ -2079,9 +2079,6 @@ export interface SessionState {
     /** Poll cadence; defaults to {@link DEVICE_CODE_POLL_MS}. A test seam — the suite passes 0. */
     pollIntervalMs?: number
   ): Promise<{ ok: boolean; error?: string }>
-  /** Respawn the session's cli.js process (so it re-reads freshly-stored
-   *  credentials) and resend a prompt. Used by the post-login Retry. */
-  retrySend: (routingId: string, prompt: string) => Promise<void>
   // Block usage analytics
   setBlockUsage: (data: BlockUsageData) => void
   setActiveView: (view: ActiveView) => void
@@ -2684,8 +2681,8 @@ export const useSessionStore = create<SessionState>((set) => ({
       patchLocalApp({ recentSessionIds, sessionEngines })
       saveSessionConfig(s, { recentSessionIds, sessionEngines })
       set((cur) => ({
-        // Render the seeded history immediately; the fork-spawn path in
-        // InputBox (gated on forkOrigin) overrides the resume target.
+        // Render the seeded history immediately; `spawnSession` (gated on forkOrigin)
+        // overrides the resume target.
         sessions: updateSession(cur.sessions, newRoutingId, () => ({
           isHistorical: true,
           forkOrigin: { sourceSessionId, anchorUuid }
@@ -3591,43 +3588,6 @@ export const useSessionStore = create<SessionState>((set) => ({
     } catch (err) {
       return fail(errorText(err))
     }
-  },
-  retrySend: async (routingId, prompt) => {
-    const session = useSessionStore.getState().sessions[routingId]
-    if (!session) return
-    // Both engines cache vendor credentials for their process's lifetime, so a
-    // post-login retry MUST respawn (createSession → session-manager cancels the
-    // old session and spawns a fresh backend that re-reads the new credential):
-    //   - Claude: the persistent cli.js process caches the OAuth token.
-    //   - opencode: the `opencode serve` process caches the instantiated AI-SDK
-    //     provider (auth baked in) for its lifetime — verified in opencode-src
-    //     provider/provider.ts (InstanceState reads auth.all() once at init; the
-    //     /oauth/callback + PUT /auth handlers persist to disk but never
-    //     invalidate that cache). cancel() releases the server ref; when it's the
-    //     last ref the process is killed, so the recreate spawns a fresh server
-    //     that re-reads auth.json. Plain sendPrompt would re-hit the stale,
-    //     still-401ing backend.
-    // opencode sessions always pass routingId as resumeSessionId (the server resumes
-    // the prior opencode session regardless of whether messages are preloaded locally).
-    const isOpencode = session.selectedEngineId === 'opencode'
-    const resumeId = hasResumableTranscript(session) || isOpencode ? routingId : undefined
-    // The composer's own resolver: a null pick falls to the per-model
-    // starting effort, not to cli.js's heuristic by way of `undefined`.
-    const effort = sessionSpawnEffort(useSessionStore.getState(), session)
-    await window.api.createSession(routingId, {
-      cwd: session.cwd || '',
-      engineId: session.selectedEngineId,
-      config: {
-        effort,
-        permissionMode: session.permissionMode,
-        model: session.selectedModel,
-        thinkingMode: session.thinkingMode ?? undefined
-      },
-      ...(resumeId !== undefined ? { resume: { sessionId: resumeId } } : {}),
-      announce: spawnAnnouncement(useSessionStore.getState(), session, effort)
-    })
-    patchLocalSession(routingId, { sdkActive: true })
-    await window.api.sendPrompt(routingId, prompt)
   },
   setBlockUsage: (data) => set({ blockUsage: data }),
   setActiveView: (view) => set({ activeView: view }),

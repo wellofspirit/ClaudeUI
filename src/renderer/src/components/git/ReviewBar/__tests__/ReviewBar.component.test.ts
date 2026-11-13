@@ -304,6 +304,58 @@ describe('ReviewBar FC — rendered', () => {
     expect(spawnReq(createCalls[0]).announce).toEqual({ effort: 'high', thinkingMode: null })
   })
 
+  it('onSend on a first message creates the pending worktree before the spawn and sends the resolved thinking mode', async () => {
+    const order: string[] = []
+    const worktree = {
+      worktreePath: `${FC_CWD}/.claude/worktrees/wt`,
+      worktreeBranch: 'worktree-wt',
+      worktreeName: 'wt',
+      originalCwd: FC_CWD,
+      gitRoot: FC_CWD,
+      originalHeadCommit: 'abc123',
+      createdAt: 1,
+      origin: 'created'
+    }
+    app.bridge.ipcMain.handle('worktree:create', () => {
+      order.push('worktree')
+      return worktree
+    })
+    app.bridge.ipcMain.handle('session:create', (_e, ...args: unknown[]) => {
+      order.push('create')
+      createCalls.push(args)
+      return null
+    })
+    useSessionStore.setState((s) => ({
+      availableModels: [
+        {
+          value: 'opus',
+          resolvedModel: 'claude-opus-5-5',
+          displayName: 'Opus',
+          description: '',
+          engineId: 'claude',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+        }
+      ],
+      sessions: {
+        ...s.sessions,
+        [FC_ROUTE]: { ...s.sessions[FC_ROUTE], selectedModel: 'opus', thinkingMode: 'enabled' }
+      }
+    }))
+    useSessionStore
+      .getState()
+      .setPendingWorktree(FC_ROUTE, { enabled: true, name: 'wt', nameTouched: true })
+    render(React.createElement(ReviewBar, { comments: [makeDiffComment()] }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    expect(order).toEqual(['worktree', 'create'])
+    expect(spawnReq(createCalls[0]).cwd).toBe(worktree.worktreePath)
+    expect(spawnReq(createCalls[0]).config?.thinkingMode).toBe('enabled')
+  })
+
   it('onSend skips session creation when already active', async () => {
     // Mark SDK as already active
     useSessionStore.getState().markSdkActive(FC_ROUTE)
