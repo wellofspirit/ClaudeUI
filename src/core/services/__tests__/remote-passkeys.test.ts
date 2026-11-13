@@ -464,6 +464,29 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     return client.waitFor('auth-response')
   }
 
+  /**
+   * Open the settings-editing SESSION on a passkey-authenticated client: a
+   * passkey step-up carrying `intent: 'settings'`. Passkey management needs one
+   * (ADR-054 decision 6), and the passkey LOGIN alone does not open it.
+   */
+  async function openSettingsSession(client: RawClient, device: VirtualAuthenticator) {
+    client.frames.length = 0
+    client.send({ type: 'step-up-challenge-request' })
+    const challenge = await client.waitFor('step-up-challenge')
+    client.send({
+      type: 'step-up',
+      intent: 'settings',
+      assertion: device.authenticate({
+        challenge: challenge.options.challenge,
+        origin: ORIGIN,
+        rpId: DNS_NAME
+      })
+    })
+    const response = await client.waitFor('step-up-response')
+    expect(response).toMatchObject({ ok: true })
+    return response
+  }
+
   async function connect(): Promise<RawClient> {
     const c = await rawConnect(port)
     clients.push(c)
@@ -1415,6 +1438,7 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     const bystander = await connect()
     await ceremony(bystander, device)
 
+    await openSettingsSession(actor, device)
     const before = policyChangeRows().length
     await expect(invoke(actor, 'webauthn:revoke', device.credId)).resolves.toEqual({ ok: true })
 
@@ -1433,11 +1457,68 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     const bystander = await connect()
     await ceremony(bystander, second)
 
+    await openSettingsSession(actor, first)
     const before = policyChangeRows().length
     await expect(invoke(actor, 'webauthn:revoke', second.credId)).resolves.toEqual({ ok: true })
 
     expect(policyChangeRows().length).toBe(before)
     expect(bystander.ws.readyState).toBe(WebSocket.OPEN)
+  })
+
+  // -------------------------------------------------------------------------
+  // Passkey management needs the settings-editing session (ADR-054 decision 6)
+  // -------------------------------------------------------------------------
+
+  describe('passkey management from a passkey connection', () => {
+    it('refuses rename, revoke and mint without a session, and changes nothing', async () => {
+      await boot('passkey-always')
+      const device = await enroll('Phone')
+      const client = await connect()
+      expect(await ceremony(client, device)).toMatchObject({ ok: true })
+      const mint = vi.spyOn(server, 'mintEnrollToken')
+
+      await expect(invoke(client, 'webauthn:rename', device.credId, 'Renamed')).rejects.toThrow(
+        'needs-settings-session'
+      )
+      await expect(invoke(client, 'webauthn:revoke', device.credId)).rejects.toThrow(
+        'needs-settings-session'
+      )
+      await expect(invoke(client, 'webauthn:mint-enroll-token')).rejects.toThrow(
+        'needs-settings-session'
+      )
+
+      // Refused, not merely failed: the credential is intact and untouched.
+      const creds = (await invoke(client, 'webauthn:credentials')) as Array<{
+        credId: string
+        nickname: string | null
+      }>
+      expect(creds).toHaveLength(1)
+      expect(creds[0]).toMatchObject({ credId: device.credId, nickname: 'Phone' })
+      expect(mint).not.toHaveBeenCalled()
+    })
+
+    it('runs all three after a passkey step-up carrying the settings intent', async () => {
+      await boot('passkey-always')
+      const device = await enroll('Phone')
+      const spare = await enroll('Spare')
+      const client = await connect()
+      await ceremony(client, device)
+      await openSettingsSession(client, device)
+
+      await expect(invoke(client, 'webauthn:rename', device.credId, 'Renamed')).resolves.toEqual({
+        ok: true
+      })
+      const minted = (await invoke(client, 'webauthn:mint-enroll-token')) as { token: string }
+      expect(typeof minted.token).toBe('string')
+      await expect(invoke(client, 'webauthn:revoke', spare.credId)).resolves.toEqual({ ok: true })
+
+      const creds = (await invoke(client, 'webauthn:credentials')) as Array<{
+        credId: string
+        nickname: string | null
+      }>
+      expect(creds).toHaveLength(1)
+      expect(creds[0]).toMatchObject({ credId: device.credId, nickname: 'Renamed' })
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -1986,6 +2067,7 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
     // Through the REGISTRY verb, so the production revoke path is what sweeps.
     const admin = await connect()
     await ceremony(admin, keeper)
+    await openSettingsSession(admin, keeper)
     await invoke(admin, 'webauthn:revoke', device.credId)
 
     const dead = await connect()

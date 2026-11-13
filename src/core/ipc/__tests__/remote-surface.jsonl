@@ -236,10 +236,10 @@
 {"channel":"voice:start","capability":"chat","kind":"command","sessionIdArg":0,"withConnection":true,"withProgress":false}
 {"channel":"voice:stop","capability":"chat","kind":"command","sessionIdArg":null,"withConnection":true,"withProgress":false}
 {"channel":"webauthn:credentials","capability":"admin","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
-{"channel":"webauthn:mint-enroll-token","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"webauthn:mint-enroll-token","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":true,"withProgress":false}
 {"channel":"webauthn:register-options","capability":"enroll","kind":"query","sessionIdArg":null,"withConnection":true,"withProgress":false}
 {"channel":"webauthn:register-verify","capability":"enroll","kind":"command","sessionIdArg":null,"withConnection":true,"withProgress":false}
-{"channel":"webauthn:rename","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"webauthn:rename","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":true,"withProgress":false}
 {"channel":"webauthn:revoke","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":true,"withProgress":false}
 {"channel":"worktree:create","capability":"git","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":true}
 {"channel":"worktree:inspect","capability":"git","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}

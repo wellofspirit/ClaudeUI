@@ -49,8 +49,7 @@
 
 import {
   AUTH_MODE_OFF_HOST_ANCHOR_ERROR,
-  LAN_LINK_UNAVAILABLE_ERROR,
-  NEEDS_SETTINGS_SESSION_ERROR
+  LAN_LINK_UNAVAILABLE_ERROR
 } from '../../shared/remote-protocol'
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../shared/types'
 import {
@@ -71,7 +70,7 @@ import { provisionPassword } from '../services/remote-auth'
 import { sanitizedRemoteConfig } from '../services/remote-config-view'
 import {
   MAX_SESSION_MAX_AGE_HOURS as MAX_SESSION_MAX_AGE_HOURS_LIMIT,
-  authcfgAllowed,
+  assertSettingsSession,
   endSettingsSession
 } from '../services/step-up-tier'
 import type { CommandConnection } from './command-registry'
@@ -112,17 +111,6 @@ export interface AuthcfgHost extends AuthSurfaceDisconnector {
    * renderer) or has already gone.
    */
   resnapshotConnection(connectionId: string): void
-}
-
-/**
- * The session backstop. Throws {@link NEEDS_SETTINGS_SESSION_ERROR} — the same
- * typed refusal the transport produces, so a client that somehow reached a body
- * directly still gets the answer that means "re-lock and let the operator press
- * Edit", rather than the ambient `needs-step-up` its generic gate would silently
- * cure.
- */
-function assertSettingsSession(connection: CommandConnection): void {
-  if (!authcfgAllowed(connection)) throw new Error(NEEDS_SETTINGS_SESSION_ERROR)
 }
 
 /**

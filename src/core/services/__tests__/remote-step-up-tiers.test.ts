@@ -1715,4 +1715,84 @@ describe('ADR-054 step-up tiers over the socket', () => {
     // set — is carried by the auth-off case above, whose connection is the only
     // remaining admitted method that does not hold `admin`.
   })
+
+  // -------------------------------------------------------------------------
+  // Passkey management joins the settings class (ADR-054 decision 6)
+  // -------------------------------------------------------------------------
+
+  describe('webauthn:rename / revoke / mint-enroll-token — the settings-editing SESSION', () => {
+    // For rename and revoke an UNKNOWN credential id is enough here: a resolved
+    // `{ ok: false }` proves the session gate was passed (the body ran and found
+    // nothing), a rejection with `needs-settings-session` proves it was not.
+    // Mint has no such fallback, so it needs the serve stub and returns a token.
+    const verbs: Array<[string, unknown[], (r: unknown) => void]> = [
+      ['webauthn:rename', ['no-such-credential', 'Nick'], (r) => expect(r).toEqual({ ok: false })],
+      ['webauthn:revoke', ['no-such-credential'], (r) => expect(r).toEqual({ ok: false })],
+      [
+        'webauthn:mint-enroll-token',
+        [],
+        (r) => expect(r).toMatchObject({ token: expect.any(String) })
+      ]
+    ]
+
+    async function adminLocked(over: Partial<RemoteConfigRow> = {}): Promise<RawClient> {
+      await boot({ authPolicy: 'passkey-always', ...over })
+      forceServeUp()
+      return await connectWithPassword()
+    }
+
+    async function unlock(client: RawClient): Promise<Record<string, unknown>> {
+      client.frames.length = 0
+      client.send({ type: 'step-up', pwProof: PROOF, intent: 'settings' })
+      return (await client.waitFor('step-up-response')) as unknown as Record<string, unknown>
+    }
+
+    for (const [channel, args, expectOk] of verbs) {
+      for (const tier of ['off', 'medium', 'strong'] as const satisfies StepUpTier[]) {
+        it(`${channel} demands an unlocked editor on tier \`${tier}\``, async () => {
+          const c = await adminLocked({ stepUpTier: tier })
+          await expect(invoke(c, channel, ...args)).rejects.toThrow('needs-settings-session')
+          expect(await unlock(c)).toMatchObject({ ok: true })
+          expectOk(await invoke(c, channel, ...args))
+        })
+      }
+
+      it(`${channel}: an ORDINARY step-up does not open the editor`, async () => {
+        const c = await adminLocked()
+        expect(await stepUp(c)).toMatchObject({ ok: true })
+        await expect(invoke(c, channel, ...args)).rejects.toThrow('needs-settings-session')
+        expect(await unlock(c)).toMatchObject({ ok: true })
+        expectOk(await invoke(c, channel, ...args))
+      })
+
+      it(`${channel}: refused again after \`authcfg:end\` and after the TTL`, async () => {
+        const c = await adminLocked()
+        expect(await unlock(c)).toMatchObject({ ok: true })
+        expectOk(await invoke(c, channel, ...args))
+
+        await expect(invoke(c, 'authcfg:end')).resolves.toMatchObject({ ok: true })
+        await expect(invoke(c, channel, ...args)).rejects.toThrow('needs-settings-session')
+
+        expect(await unlock(c)).toMatchObject({ ok: true })
+        expectOk(await invoke(c, channel, ...args))
+        advance(6)
+        await expect(invoke(c, channel, ...args)).rejects.toThrow('needs-settings-session')
+      })
+    }
+
+    it('under auth-mode `off`: needs-settings-session FIRST, then Permission denied', async () => {
+      await boot({ authPolicy: 'off' })
+      const c = await connect()
+      c.send({ type: 'auth' })
+      expect(await c.waitFor('auth-response')).toMatchObject({ ok: true, authDisabled: true })
+
+      await expect(invoke(c, 'webauthn:revoke', 'no-such-credential')).rejects.toThrow(
+        'needs-settings-session'
+      )
+      expect(await unlock(c)).toMatchObject({ ok: true })
+      await expect(invoke(c, 'webauthn:revoke', 'no-such-credential')).rejects.toThrow(
+        /Permission denied/
+      )
+    })
+  })
 })

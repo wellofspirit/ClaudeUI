@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ENROLL_UNAVAILABLE_ERROR,
+  isNeedsSettingsSessionError,
   LAST_CREDENTIAL_LOCKOUT_ERROR
 } from '../../../../shared/remote-protocol'
 import type {
@@ -8,7 +9,17 @@ import type {
   WebauthnCredential,
   WebauthnEnrollToken
 } from '../../../../shared/types'
+import { StepUpPrompt } from '../shared/StepUpPrompt'
+import { connectionHoldsAdmin } from './connection-admin'
+import { getEnrollBridge } from './enroll-flow'
 import { Button, SettingRow, TextField } from './settings-controls'
+import { formatCountdown, LockIcon } from './settings-session-ui'
+import {
+  endSettingsSession,
+  isWebClient,
+  recordSettingsSession,
+  useSettingsSessionDeadline
+} from './remote-settings-transport'
 
 // The sign-in-requirement OPTIONS, their hints, and the typed `off` confirmation
 // moved to `SessionSecuritySettings` with the rest of the editable set (ADR-054
@@ -19,6 +30,18 @@ import { Button, SettingRow, TextField } from './settings-controls'
 
 /** Testid namespace (ADR-027 tier 2). */
 const P = 'RemotePasskeySettings'
+
+/** The one write the unlock prompt is holding while the operator confirms. */
+type HeldAction =
+  | { kind: 'rename'; credId: string; nickname: string | null }
+  | { kind: 'revoke'; credId: string }
+  | { kind: 'addDevice' }
+  | { kind: 'copy' }
+  | { kind: 'open' }
+
+const NO_ADMIN_ERROR = 'This connection cannot manage passkeys.'
+/** The session closed between the unlock and the retry (a reconnect, another pane's Save). */
+const RELOCKED_ERROR = 'Passkey management locked again before this could run. Try again.'
 
 function formatTime(ms: number | null): string {
   if (!ms) return 'never'
@@ -71,6 +94,64 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
   const [enrollBlocked, setEnrollBlocked] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
+  /** The write waiting on the unlock prompt (web only); null = no prompt. */
+  const [held, setHeld] = useState<HeldAction | null>(null)
+  /** Guidance in the enrol notice slot (not an error): "Unlocked. Press ... again." */
+  const [enrollNotice, setEnrollNotice] = useState<string | null>(null)
+  const web = isWebClient()
+  const deadline = useSettingsSessionDeadline()
+  const [now, setNow] = useState(() => Date.now())
+  /** Did THIS pane's own prompt open a settings session? Read by the unmount cleanup. */
+  const openedRef = useRef(false)
+  const credentialsRef = useRef<WebauthnCredential[] | null>(null)
+  credentialsRef.current = credentials
+
+  useEffect(() => {
+    if (deadline === null) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    setNow(Date.now())
+    return () => clearInterval(id)
+  }, [deadline])
+
+  useEffect(() => {
+    return () => {
+      // Best-effort, like the security pane: the session dies with the socket anyway.
+      if (openedRef.current) void endSettingsSession()
+    }
+  }, [])
+
+  // The recorded deadline describes one connection; a reconnect or
+  // re-authentication moves it (the bridge fires on connection state changes,
+  // never on ordinary traffic).
+  useEffect(() => {
+    if (!isWebClient()) return
+    return getEnrollBridge()?.subscribe(() => recordSettingsSession(undefined))
+  }, [])
+
+  /**
+   * Handle a write the server refused for want of a settings session. Returns
+   * true when it was that refusal (and has been dealt with), false for any other
+   * error, which the caller reports as before.
+   *
+   * NOT an ambient retry: the operator's own press is answered by a labelled
+   * prompt they confirm. A refusal on the retry itself is an error, not a loop.
+   */
+  const handleRefusal = useCallback(
+    (
+      err: unknown,
+      action: HeldAction,
+      retried: boolean,
+      showError: (message: string) => void
+    ): boolean => {
+      if (!web || !isNeedsSettingsSessionError(err)) return false
+      recordSettingsSession(undefined)
+      if (retried) showError(RELOCKED_ERROR)
+      else if (!connectionHoldsAdmin()) showError(NO_ADMIN_ERROR)
+      else setHeld(action)
+      return true
+    },
+    [web]
+  )
 
   /**
    * Focus the rename field the moment it appears.
@@ -123,28 +204,33 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
   }, [loadCredentials])
 
   const handleRename = useCallback(
-    async (credId: string, nickname: string): Promise<void> => {
+    async (credId: string, nickname: string, retried = false): Promise<void> => {
       setRenaming(null)
       const trimmed = nickname.trim()
+      const next = trimmed === '' ? null : trimmed
+      // The field commits on blur, and on a phone blur is the only way out of it:
+      // an abandoned rename must neither call nor raise an unlock prompt.
+      if (!retried) {
+        const current = credentialsRef.current?.find((c) => c.credId === credId)?.nickname ?? null
+        if ((current === '' ? null : current) === next) return
+      }
       try {
-        await window.api.webauthnRename(credId, trimmed === '' ? null : trimmed)
+        await window.api.webauthnRename(credId, next)
       } catch (err) {
-        // Without this the input just closes and the old name comes back on the
-        // reload below, which reads as the rename being ignored.
-        setCredentialsError(err instanceof Error ? err.message : String(err))
+        const action: HeldAction = { kind: 'rename', credId, nickname: next }
+        if (!handleRefusal(err, action, retried, setCredentialsError)) {
+          // Without this the input just closes and the old name comes back on the
+          // reload below, which reads as the rename being ignored.
+          setCredentialsError(err instanceof Error ? err.message : String(err))
+        }
       }
       await loadCredentials()
     },
-    [loadCredentials]
+    [loadCredentials, handleRefusal]
   )
 
-  const handleRevoke = useCallback(
-    async (credId: string): Promise<void> => {
-      if (confirmRevoke !== credId) {
-        setConfirmRevoke(credId)
-        setRevokeError(null)
-        return
-      }
+  const doRevoke = useCallback(
+    async (credId: string, retried: boolean): Promise<void> => {
       setBusy(true)
       try {
         await window.api.webauthnRevoke(credId)
@@ -155,6 +241,7 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
         // config carries and nothing else would tell us about.
         await onReload()
       } catch (err) {
+        if (handleRefusal(err, { kind: 'revoke', credId }, retried, setRevokeError)) return
         const message = err instanceof Error ? err.message : String(err)
         setRevokeError(
           message.includes(LAST_CREDENTIAL_LOCKOUT_ERROR)
@@ -165,7 +252,19 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
         setBusy(false)
       }
     },
-    [confirmRevoke, loadCredentials, onReload]
+    [loadCredentials, onReload, handleRefusal]
+  )
+
+  const handleRevoke = useCallback(
+    async (credId: string): Promise<void> => {
+      if (confirmRevoke !== credId) {
+        setConfirmRevoke(credId)
+        setRevokeError(null)
+        return
+      }
+      await doRevoke(credId, false)
+    },
+    [confirmRevoke, doRevoke]
   )
 
   /**
@@ -176,54 +275,65 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
    * `qrcode` is imported dynamically so it stays out of the eagerly-loaded
    * settings chunk, the same reason `RemoteAccessModal` is lazy.
    */
-  const mintLink = useCallback(async (): Promise<WebauthnEnrollToken | null> => {
-    // Both notices describe THIS attempt only — clearing them up front is what
-    // makes the next click a genuine retry rather than a click against a stale
-    // verdict from before the operator turned serve on.
-    setEnrollError(null)
-    setEnrollBlocked(null)
-    try {
-      return await window.api.webauthnMintEnrollToken()
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      if (message.includes(ENROLL_UNAVAILABLE_ERROR)) {
-        setEnrollBlocked(
-          'Enrollment links need Tailscale HTTPS to be running — that hostname is what the passkey binds to. Turn on “Tailscale HTTPS” in the server settings and start the remote server, then try again.'
-        )
-      } else {
-        setEnrollError(message)
-      }
-      return null
-    }
-  }, [])
-
-  const handleAddDevice = useCallback(async (): Promise<void> => {
-    setBusy(true)
-    try {
-      const minted = await mintLink()
-      if (!minted) return
-      let qr: string | null = null
+  const mintLink = useCallback(
+    async (
+      action: 'addDevice' | 'copy' | 'open',
+      retried: boolean
+    ): Promise<WebauthnEnrollToken | null> => {
+      // Both notices describe THIS attempt only — clearing them up front is what
+      // makes the next click a genuine retry rather than a click against a stale
+      // verdict from before the operator turned serve on.
+      setEnrollError(null)
+      setEnrollBlocked(null)
+      setEnrollNotice(null)
       try {
-        const QRCode = (await import('qrcode')).default
-        qr = await QRCode.toDataURL(minted.url, {
-          width: 256,
-          margin: 2,
-          color: { dark: '#d1d5db', light: '#00000000' }
-        })
-      } catch {
-        // A QR we could not draw is not a reason to withhold the link.
-        qr = null
+        return await window.api.webauthnMintEnrollToken()
+      } catch (err) {
+        if (handleRefusal(err, { kind: action }, retried, setEnrollError)) return null
+        const message = err instanceof Error ? err.message : String(err)
+        if (message.includes(ENROLL_UNAVAILABLE_ERROR)) {
+          setEnrollBlocked(
+            'Enrollment links need Tailscale HTTPS to be running — that hostname is what the passkey binds to. Turn on “Tailscale HTTPS” in the server settings and start the remote server, then try again.'
+          )
+        } else {
+          setEnrollError(message)
+        }
+        return null
       }
-      setEnroll({ url: minted.url, expiresAt: minted.expiresAt, qr })
-    } finally {
-      setBusy(false)
-    }
-  }, [mintLink])
+    },
+    [handleRefusal]
+  )
+
+  const handleAddDevice = useCallback(
+    async (retried = false): Promise<void> => {
+      setBusy(true)
+      try {
+        const minted = await mintLink('addDevice', retried)
+        if (!minted) return
+        let qr: string | null = null
+        try {
+          const QRCode = (await import('qrcode')).default
+          qr = await QRCode.toDataURL(minted.url, {
+            width: 256,
+            margin: 2,
+            color: { dark: '#d1d5db', light: '#00000000' }
+          })
+        } catch {
+          // A QR we could not draw is not a reason to withhold the link.
+          qr = null
+        }
+        setEnroll({ url: minted.url, expiresAt: minted.expiresAt, qr })
+      } finally {
+        setBusy(false)
+      }
+    },
+    [mintLink]
+  )
 
   const handleCopyLink = useCallback(async (): Promise<void> => {
     setBusy(true)
     try {
-      const minted = await mintLink()
+      const minted = await mintLink('copy', false)
       if (!minted) return
       await navigator.clipboard.writeText(minted.url)
       setCopied(true)
@@ -239,7 +349,7 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
   }, [mintLink])
 
   const handleOpenInBrowser = useCallback(async (): Promise<void> => {
-    const minted = await mintLink()
+    const minted = await mintLink('open', false)
     if (!minted) return
     // `window.open` is the renderer's only route to the OS browser: main's
     // `setWindowOpenHandler` scheme-allowlists it and calls `shell.openExternal`.
@@ -247,6 +357,36 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
     // the fragment.
     window.open(minted.url, '_blank')
   }, [mintLink])
+
+  const onGranted = useCallback(
+    (expiresAt?: number): void => {
+      recordSettingsSession(expiresAt)
+      openedRef.current = true
+      const action = held
+      setHeld(null)
+      if (!action) return
+      switch (action.kind) {
+        case 'rename':
+          void handleRename(action.credId, action.nickname ?? '', true)
+          break
+        case 'revoke':
+          void doRevoke(action.credId, true)
+          break
+        case 'addDevice':
+          void handleAddDevice(true)
+          break
+        // Both need the tap's user activation, which the ceremony outlived: a
+        // retry would mint a link nobody receives.
+        case 'copy':
+          setEnrollNotice('Unlocked. Press Copy link again.')
+          break
+        case 'open':
+          setEnrollNotice('Unlocked. Press Open in browser again.')
+          break
+      }
+    },
+    [held, handleRename, doRevoke, handleAddDevice]
+  )
 
   const authOff = config.effectiveAuthPolicy === 'off'
   // Only the in-flight request disables these. A "serve is down" refusal is
@@ -277,7 +417,18 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
         description="Devices that sign in with a fingerprint or face instead of the remote password."
         error={credentialsError ?? undefined}
         errorTestid={`${P}.credentialsError`}
-      />
+      >
+        {deadline !== null && (
+          <span
+            data-testid={`${P}.countdown`}
+            className="shrink-0 flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-0.5 text-[10.5px] leading-4 text-accent"
+          >
+            <LockIcon size={11} />
+            Unlocked ·{' '}
+            <span className="tabular-nums font-semibold">{formatCountdown(deadline - now)}</span>
+          </span>
+        )}
+      </SettingRow>
 
       {credentials === null ? (
         <SettingRow testid={`${P}.credentialsLoading`} description="Loading…" />
@@ -365,6 +516,31 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
         />
       )}
 
+      {held && (
+        <SettingRow testid={`${P}.promptRow`} layout="stacked">
+          {/* `items-start`: a STRETCHED flex item has a definite height, so the
+              prompt's own `h-full` would resolve against the card and push its
+              last line over the card's bottom border. */}
+          <div className="flex justify-center items-start py-2">
+            <div className="w-full max-w-[300px] rounded-lg border border-border/60 bg-bg-primary/40 px-5 py-6 text-center">
+              <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-accent/40 bg-accent/10 text-accent">
+                <LockIcon size={20} />
+              </div>
+              <StepUpPrompt
+                testid={`${P}.prompt`}
+                intent="settings"
+                passkey
+                title="Unlock passkey management"
+                passkeyHint="Confirm it's you to manage passkeys. Editing stays open for 5 minutes."
+                passwordHint="Enter your remote-access password to manage passkeys. Editing stays open for 5 minutes."
+                onGranted={onGranted}
+                onCancel={() => setHeld(null)}
+              />
+            </div>
+          </div>
+        </SettingRow>
+      )}
+
       <SettingRow
         testid={`${P}.addDeviceRow`}
         layout="stacked"
@@ -410,6 +586,18 @@ export function RemotePasskeySettings({ config, onReload }: Props): React.JSX.El
             >
               Try again
             </Button>
+          </span>
+        </SettingRow>
+      )}
+
+      {enrollNotice && (
+        <SettingRow testid={`${P}.enrollNoticeRow`} indent>
+          <span
+            data-testid={`${P}.enrollNotice`}
+            role="status"
+            className="text-[12px] leading-4 text-text-secondary"
+          >
+            {enrollNotice}
           </span>
         </SettingRow>
       )}

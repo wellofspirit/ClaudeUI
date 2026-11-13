@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react'
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../../../shared/types'
 
 /**
@@ -83,6 +84,41 @@ export async function saveSettingsDraft(draft: SettingsDraft): Promise<RemoteCon
 }
 
 /**
+ * The settings-session deadline this page last saw the server grant, or null.
+ *
+ * A RENDERING HINT, never an authority: it only decides whether a pane shows an
+ * "Unlocked" pill. The server's typed `needs-settings-session` refusal is the
+ * truth, and a wrong hint costs one refused call (which clears it again).
+ */
+let settingsDeadline: number | null = null
+const deadlineListeners = new Set<() => void>()
+
+/** Record a granted deadline; `undefined` (or no grant) clears the record. */
+export function recordSettingsSession(expiresAt: number | undefined): void {
+  const next = expiresAt ?? null
+  if (next === settingsDeadline) return
+  settingsDeadline = next
+  for (const cb of [...deadlineListeners]) cb()
+}
+
+function subscribeDeadline(cb: () => void): () => void {
+  deadlineListeners.add(cb)
+  return () => {
+    deadlineListeners.delete(cb)
+  }
+}
+
+/**
+ * The recorded deadline while it is still in the future, else null. The pane
+ * ticks its own clock; the hook only reports moves of the record, so an expiry
+ * is seen on the pane's next tick (see `RemotePasskeySettings`).
+ */
+export function useSettingsSessionDeadline(): number | null {
+  const deadline = useSyncExternalStore(subscribeDeadline, () => settingsDeadline)
+  return deadline !== null && deadline > Date.now() ? deadline : null
+}
+
+/**
  * Close the settings-editing session.
  *
  * Best-effort and never throws: it is called from Save, from Cancel and from the
@@ -92,6 +128,7 @@ export async function saveSettingsDraft(draft: SettingsDraft): Promise<RemoteCon
  */
 export async function endSettingsSession(): Promise<void> {
   if (!isWebClient()) return
+  recordSettingsSession(undefined)
   try {
     await window.api.authcfgEnd()
   } catch {

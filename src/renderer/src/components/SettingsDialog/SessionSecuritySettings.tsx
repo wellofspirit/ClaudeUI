@@ -3,9 +3,11 @@ import { isNeedsSettingsSessionError } from '../../../../shared/remote-protocol'
 import type { RemoteAuthPolicy, RemoteConfig, StepUpTier } from '../../../../shared/types'
 import { StepUpPrompt } from '../shared/StepUpPrompt'
 import { Button, SelectField, TextField, ToggleSwitch } from './settings-controls'
+import { formatCountdown, LockIcon } from './settings-session-ui'
 import {
   endSettingsSession,
   isWebClient,
+  recordSettingsSession,
   rotateRemotePassword,
   saveSettingsDraft,
   type SettingsDraft
@@ -140,29 +142,6 @@ function formatDate(ms: number | null): string {
 /** "1 minute" / "2 minutes" — the owner's live config has a 1-minute dial. */
 function plural(n: number, unit: string): string {
   return `${n} ${unit}${n === 1 ? '' : 's'}`
-}
-
-/** `m:ss` for the countdown pill. Clamped at zero — a negative clock reads as broken. */
-function formatCountdown(msLeft: number): string {
-  const total = Math.max(0, Math.ceil(msLeft / 1000))
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
-}
-
-/** The mockup's padlock, at two sizes. */
-function LockIcon({ size = 13 }: { size?: number }): React.JSX.Element {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.2"
-    >
-      <path d="M12 11c1.7 0 3-1.3 3-3V6a3 3 0 0 0-6 0v2c0 1.7 1.3 3 3 3z" />
-      <path d="M5 11h14v9a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-9z" />
-    </svg>
-  )
 }
 
 /**
@@ -309,6 +288,8 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     (sessionExpiresAt?: number) => {
       setError(null)
       setNotice(null)
+      // Rendering hint for the passkey pane's pill; the server stays the authority.
+      if (web) recordSettingsSession(sessionExpiresAt)
       setMode({ kind: 'edit', expiresAt: web ? (sessionExpiresAt ?? Date.now()) : null })
     },
     [web]
@@ -436,7 +417,10 @@ export function SessionSecuritySettings({ config, onConfigChange }: Props): Reac
     return card(
       'unlocking',
       null,
-      <div className="flex justify-center py-2">
+      // `items-start`: a STRETCHED flex item has a definite height, so the
+      // prompt's own `h-full` would resolve against the card and push its last
+      // line over the card's bottom border.
+      <div className="flex justify-center items-start py-2">
         <div className="w-full max-w-[300px] rounded-lg border border-border/60 bg-bg-primary/40 px-5 py-6 text-center">
           <div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full border border-accent/40 bg-accent/10 text-accent">
             <LockIcon size={20} />

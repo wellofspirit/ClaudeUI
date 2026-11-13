@@ -21,6 +21,7 @@ import {
   AUTHCFG_CHANNELS,
   AUTHCFG_FREE_CHANNELS,
   BENIGN_CACHE_WRITE_CHANNELS,
+  PASSKEY_ADMIN_CHANNELS,
   SHELL_ACT_VERBS,
   SHELL_READ_VERBS,
   TERM_INPUT_CLASS,
@@ -160,7 +161,13 @@ describe('classifyDispatch', () => {
     // Ordinary mutations and reads.
     ['session:send', 'chat', 'command', 'mutation'],
     ['git:commit', 'git', 'command', 'mutation'],
-    ['webauthn:revoke', 'admin', 'command', 'mutation'],
+    // Passkey management joins the settings class (ADR-054 decision 6); the
+    // list and the enrollment ceremony stay out of it.
+    ['webauthn:revoke', 'admin', 'command', 'authcfg'],
+    ['webauthn:rename', 'admin', 'command', 'authcfg'],
+    ['webauthn:mint-enroll-token', 'admin', 'command', 'authcfg'],
+    ['webauthn:register-options', 'enroll', 'query', 'read'],
+    ['webauthn:register-verify', 'enroll', 'command', 'mutation'],
     ['config:load-settings', 'config', 'query', 'read'],
     ['terminal:availability', 'config', 'query', 'read'],
     ['webauthn:credentials', 'admin', 'query', 'read']
@@ -168,6 +175,18 @@ describe('classifyDispatch', () => {
 
   it.each(cases)('%s (%s/%s) → %s', (channel, capability, kind, expected) => {
     expect(classifyDispatch({ channel, capability, kind })).toBe(expected)
+  })
+
+  it('PASSKEY_ADMIN_CHANNELS is exactly the three management writes, disjoint from the authcfg sets', () => {
+    expect([...PASSKEY_ADMIN_CHANNELS].sort()).toEqual([
+      'webauthn:mint-enroll-token',
+      'webauthn:rename',
+      'webauthn:revoke'
+    ])
+    for (const ch of PASSKEY_ADMIN_CHANNELS) {
+      expect(AUTHCFG_CHANNELS.has(ch), ch).toBe(false)
+      expect(AUTHCFG_FREE_CHANNELS.has(ch), ch).toBe(false)
+    }
   })
 
   it('classifies an UNKNOWN shell verb as ACTING (fail closed)', () => {
