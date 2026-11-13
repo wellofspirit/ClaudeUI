@@ -39,6 +39,30 @@ import {
   type ToolOutcome
 } from '../ground-truth'
 
+/**
+ * Complexity guard that does not depend on the machine: the cost of the `small * growth` run over
+ * the cost of the `small` run. Linear work gives about `growth`, quadratic about `growth ** 2`.
+ * Each side is the fastest run after a warm-up (load only ever adds time, so the minimum is stable;
+ * at least 5 runs, up to 30 until 400 ms are spent, so a busy machine still gives a clean one); the
+ * small side is floored at 0.05 ms so a near-constant operation cannot divide by ~0.
+ */
+function growthRatio(run: (n: number) => void, small: number, growth: number): number {
+  const minMs = (n: number): number => {
+    run(n)
+    let best = Infinity
+    const start = performance.now()
+    for (let i = 0; i < 30 && (i < 5 || performance.now() - start < 400); i++) {
+      const t0 = performance.now()
+      run(n)
+      best = Math.min(best, performance.now() - t0)
+    }
+    return best
+  }
+  return minMs(small * growth) / Math.max(minMs(small), 0.05)
+}
+/** Linear work at 4x input measures about 4; quadratic about 16. */
+const MAX_GROWTH_RATIO = 10
+
 /** An exec that always succeeds with the given stdout. */
 const okExec = (stdout: string): CaptureExec => vi.fn(async () => ({ ok: true, stdout }))
 /** An exec whose process exited non-zero (not a repo, gh missing, …). */
@@ -1662,16 +1686,22 @@ describe('review round 2 — false-allow regressions', () => {
     it('C4: a command over 64 KB emits no meta', () => {
       const big = 'echo ' + '"a>b" '.repeat(40_000)
       expect(big.length).toBeGreaterThan(MAX_ANALYZE_COMMAND_LENGTH)
-      const t0 = performance.now()
       expect(analyzeRedirects(big, POSIX as never, 'linux')).toBeNull()
-      expect(performance.now() - t0).toBeLessThan(1000)
+      // Refused on length alone (the null above is that guard); the ratio adds that the refusal
+      // does no superlinear work on the oversized command first.
+      const cmds = new Map([12_000, 48_000].map((n) => [n, 'echo ' + '"a>b" '.repeat(n)]))
+      const ratio = growthRatio(
+        (n) => analyzeRedirects(cmds.get(n)!, POSIX as never, 'linux'),
+        12_000,
+        4
+      )
+      expect(ratio).toBeLessThan(MAX_GROWTH_RATIO)
     })
 
     it('C4: a many-cd chain stays linear', () => {
-      const chain = 'cd a; '.repeat(4_000) + ' echo > x'
-      const t0 = performance.now()
-      posix(chain)
-      expect(performance.now() - t0).toBeLessThan(1000)
+      const chain = (n: number): string => 'cd a; '.repeat(n) + ' echo > x'
+      expect(posix(chain(4_000))).not.toBeNull()
+      expect(growthRatio((n) => posix(chain(n)), 1_000, 4)).toBeLessThan(MAX_GROWTH_RATIO)
     })
   })
 
@@ -2148,18 +2178,23 @@ describe('review round 5 — any-occurrence mentions, cd continuations, name cap
   })
 
   describe('Q3 — many distinct temp names', () => {
-    it('Q3: 4000 bindings (~59 KB) finish fast and claim nothing', () => {
+    it('Q3: 4000 bindings (~59 KB) cost no worse than quadratic time and claim nothing', () => {
       // Ruling 18 deleted the 8-name cap together with expansion; this stays as
-      // a perf guard that a long binding chain is still linear.
-      const bindings: string[] = []
-      for (let i = 0; i < 4_000; i++) bindings.push(`v${i}=$TMPDIR`)
-      const command = `${bindings.join('; ')}; echo x > $v0/out.txt`
+      // a perf guard on a long binding chain.
+      const build = (count: number): string => {
+        const bindings: string[] = []
+        for (let i = 0; i < count; i++) bindings.push(`v${i}=$TMPDIR`)
+        return `${bindings.join('; ')}; echo x > $v0/out.txt`
+      }
+      const command = build(4_000)
       expect(command.length).toBeLessThan(MAX_ANALYZE_COMMAND_LENGTH)
-      const t0 = performance.now()
       const r = posix(command)
-      const elapsed = performance.now() - t0
-      // Generous bound: this catches a quadratic regression, not CI jitter.
-      expect(elapsed).toBeLessThan(1000)
+      // Binding handling is quadratic today (#256): 4x the bindings measures 10 to 14x, where
+      // linear would be 4 and cubic 64. The bound admits the quadratic, which the 64 KB input cap
+      // keeps to a fraction of a second, and fails on anything worse. Back to
+      // MAX_GROWTH_RATIO once #256 is fixed.
+      const commands = new Map([300, 1_200].map((n) => [n, build(n)]))
+      expect(growthRatio((n) => posix(commands.get(n)!), 300, 4)).toBeLessThan(32)
       // Nothing expands for scope; the last binding alone words the hint.
       expect(r?.unresolvable).toEqual(['$v0/out.txt'])
       expect(r?.allInScope).toBe(false)
@@ -3352,13 +3387,14 @@ describe('quote-blind cross-check (ADR-106 addendum)', () => {
       expect(posix(`echo '${body}' > ok.txt`)).toBeNull()
     })
 
-    it('stays fast on a 64 KB command of identical quote-hidden operators', () => {
-      const body = 'a > b\n'.repeat(10_000)
-      const command = `echo "${body}"`
+    it('stays linear on a 64 KB command of identical quote-hidden operators', () => {
+      const build = (lines: number): string => `echo "${'a > b\n'.repeat(lines)}"`
+      const command = build(10_000)
       expect(command.length).toBeLessThanOrEqual(MAX_ANALYZE_COMMAND_LENGTH)
-      const started = Date.now()
       expect(posix(command)).toBeNull()
-      expect(Date.now() - started).toBeLessThan(1000)
+      // 4x the operators must cost about 4x, not 16x.
+      const commands = new Map([2_500, 10_000].map((n) => [n, build(n)]))
+      expect(growthRatio((n) => posix(commands.get(n)!), 2_500, 4)).toBeLessThan(MAX_GROWTH_RATIO)
     })
   })
 

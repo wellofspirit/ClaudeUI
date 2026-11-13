@@ -14,7 +14,12 @@ import {
   fabricateWorktree,
   makeScratchDir
 } from '../../../test/helpers/fabricated-worktree'
-import { forgetLinkedWorktrees, linkedWorktreeOf, linkedWorktreeOfUncached } from '../worktree-root'
+import {
+  forgetLinkedWorktrees,
+  linkedWorktreeOf,
+  linkedWorktreeOfUncached,
+  setLinkedCacheMaxForTests
+} from '../worktree-root'
 
 describe('linkedWorktreeOf cache', () => {
   let base: string
@@ -29,6 +34,7 @@ describe('linkedWorktreeOf cache', () => {
   })
   afterEach(() => {
     vi.useRealTimers()
+    setLinkedCacheMaxForTests()
     fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 })
   })
 
@@ -83,16 +89,21 @@ describe('linkedWorktreeOf cache', () => {
     expect(linkedWorktreeOf(again)?.worktreePath).toBe(again)
   })
 
-  it('bounds the hit cache at 2000 entries: past it the cache starts over instead of growing', () => {
+  it('bounds the hit cache: past its cap the cache starts over instead of growing', () => {
+    // Every entry is a real walk of the disk, so the spec lowers the cap (2000 in the app) rather
+    // than time 2000 of them: the bound is the same code, and the test no longer takes as long as
+    // the machine's disk happens to.
+    const CAP = 20
+    setLinkedCacheMaxForTests(CAP)
     // Distinct spellings of one worktree: each cwd is its own cache key (they need not exist).
     const sub = (i: number): string => path.join(wt, `d${i}`)
     const first = linkedWorktreeOf(sub(0))
     expect(first).not.toBeNull()
     expect(linkedWorktreeOf(sub(0))).toBe(first) // a hit answers with the cached object
 
-    for (let i = 1; i < 2000; i++) linkedWorktreeOf(sub(i)) // the cache now holds 2000
+    for (let i = 1; i < CAP; i++) linkedWorktreeOf(sub(i)) // the cache now holds CAP entries
     expect(linkedWorktreeOf(sub(0))).toBe(first) // exactly full: nothing evicted yet
-    linkedWorktreeOf(sub(2000)) // the 2001st key clears the cache first
+    linkedWorktreeOf(sub(CAP)) // one key past the cap clears the cache first
 
     const again = linkedWorktreeOf(sub(0))
     expect(again).toEqual(first)

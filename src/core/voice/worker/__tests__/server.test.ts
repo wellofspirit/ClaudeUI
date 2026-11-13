@@ -431,7 +431,10 @@ describe('voice server — token', () => {
 
   it('audio before voice_start is ignored', async () => {
     const conn = await raw()
-    conn.send({ type: 'audio', data: b64(speech(4)) })
+    // One block (~21 KB of base64): under the pre-auth byte cap. Four blocks
+    // (~85 KB) are over it, and whether the server then destroyed the socket
+    // before `voice_start` depended on how the kernel split the stream into reads.
+    conn.send({ type: 'audio', data: b64(speech(1)) })
     conn.send({ type: 'voice_stop' })
     conn.send({ type: 'voice_start', token: TOKEN, preview: false })
     conn.send({ type: 'voice_stop' })
