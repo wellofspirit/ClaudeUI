@@ -409,26 +409,17 @@ afterAll(async () => {
 })
 
 /**
- * `session:create` as a WS client sends it. Positional args: (routingId, cwd,
- * effort, resumeSessionId, permissionMode, model, thinkingMode, resumeSessionAt,
- * forkSession, engineId). The mode/model/engine are supplied so the birth-config
+ * `session:create` as a WS client sends it: `(routingId, request)`. The
+ * mode/model/engine are supplied so the birth-config
  * assertions are about a REQUESTED config, not about the defaults agreeing by
  * accident.
  */
 async function createSession(): Promise<void> {
-  await client.invoke(
-    'session:create',
-    ROUTING_ID,
-    CWD,
-    undefined,
-    undefined,
-    'acceptEdits',
-    'sonnet',
-    undefined,
-    undefined,
-    undefined,
-    'claude'
-  )
+  await client.invoke('session:create', ROUTING_ID, {
+    cwd: CWD,
+    engineId: 'claude',
+    config: { permissionMode: 'acceptEdits', model: 'sonnet' }
+  })
 }
 
 /** Create the session, send a first prompt, and hand back the engine run it spawned. */

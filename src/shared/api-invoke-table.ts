@@ -260,7 +260,7 @@ export const API_INVOKES = {
   cancelSession: { channel: 'session:cancel', arity: 1, mode: 'invoke' },
   clearConversation: { channel: 'session:clear-conversation', arity: 2, mode: 'invoke' },
   respondContextPressure: { channel: 'session:context-pressure:respond', arity: 2, mode: 'invoke' },
-  createSession: { channel: 'session:create', arity: 11, mode: 'invoke' },
+  createSession: { channel: 'session:create', arity: 2, mode: 'invoke' },
   deleteProject: { channel: 'session:delete-project', arity: 1, mode: 'unwrap' },
   deleteSession: { channel: 'session:delete-session', arity: 3, mode: 'unwrap' },
   dequeueMessage: { channel: 'session:dequeue-message', arity: 2, mode: 'invoke' },

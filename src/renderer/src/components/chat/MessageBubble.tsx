@@ -7,6 +7,7 @@ import type {
   PermissionDenialBlock
 } from '../../../../shared/types'
 import { useSessionStore, useActiveSession } from '../../stores/session-store'
+import { retrySend } from '../../lib/session-spawn'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ExitPlanModeCard } from './ExitPlanModeCard'
@@ -807,7 +808,6 @@ function AuthTranscriptRow({
   )
   const providerAccounts = useSessionStore((s) => s.providerAccounts)
   const openSignIn = useSessionStore((s) => s.openSignIn)
-  const retrySend = useSessionStore((s) => s.retrySend)
   const clearAuthRequired = useSessionStore((s) => s.clearAuthRequired)
   const [expanded, setExpanded] = useState(false)
 

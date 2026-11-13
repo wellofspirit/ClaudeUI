@@ -10,12 +10,17 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
+import { retrySend } from '../../../lib/session-spawn'
 import { SidebarContext } from '../../SessionView'
 import { AuthPill } from '../AuthPill'
 import { AUTH_ISSUE_NAME, authIssueLabel } from '../../../stores/auth-issues'
 import type { AuthRequiredState } from '../../../../../shared/remote-protocol'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
+vi.mock('../../../lib/session-spawn', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../lib/session-spawn')>()),
+  retrySend: vi.fn(async () => {})
+}))
 
 const ACTIVE = 'r-pill-active'
 const BACKGROUND = 'r-pill-background'
@@ -239,8 +244,7 @@ describe('AuthPill — what a click does', () => {
   })
 
   it('the resolved pill re-sends the stopped prompt and settles the session', async () => {
-    const retrySend = vi.fn(async () => {})
-    useSessionStore.setState({ retrySend })
+    vi.mocked(retrySend).mockClear()
     blame(BACKGROUND, { providerId: 'chatgpt', resolved: true, retryPrompt: 'refactor it' })
     renderPill()
     await act(async () => {
@@ -258,8 +262,7 @@ describe('AuthPill — what a click does', () => {
    * the user is now looking at.
    */
   it('shows the user what the click did: the owed session becomes the active one', async () => {
-    const retrySend = vi.fn(async () => {})
-    useSessionStore.setState({ retrySend })
+    vi.mocked(retrySend).mockClear()
     blame(BACKGROUND, { providerId: 'chatgpt', resolved: true, retryPrompt: 'refactor it' })
     renderPill()
     expect(useSessionStore.getState().activeSessionId).toBe(ACTIVE)

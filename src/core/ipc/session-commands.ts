@@ -32,10 +32,11 @@ import type {
   EngineId
 } from '../../shared/types'
 import type { CommandConnection, CommandRegistration, Transport } from './command-registry'
-import { prepareAndCreateSession, type CreateSessionArgs } from './create-session'
+import { prepareAndCreateSession } from './create-session'
 import { answerApproval } from './approval-response'
 import { envelopeFor } from './safe-handler'
 import { opt } from './wire-args'
+import { parseSpawnRequest } from './spawn-request'
 import {
   sendPrompt,
   watchBackground,
@@ -72,34 +73,12 @@ export function sessionCommands(
       capability: 'chat',
       kind: 'command',
       sessionIdArg: 0,
-      handler: async (
-        routingId: string,
-        cwd: string,
-        effort?: string | null,
-        resumeSessionId?: string | null,
-        permissionMode?: string | null,
-        model?: string | null,
-        thinkingMode?: string | null,
-        resumeSessionAt?: string | null,
-        forkSession?: boolean | null,
-        engineId?: EngineId | null,
-        announce?: CreateSessionArgs['announce'] | null
-      ) => {
-        // Every optional argument through `opt` — see its doc comment. `effort`
-        // is the one that broke in the field; the rest are the same shape and
-        // reach the same `!== undefined` / `?: T` consumers.
+      // `(routingId, request)`; a client from before the request object sends the 11
+      // positional arguments instead (`spawn-request.ts`, the one place that tells them apart).
+      handler: async (routingId: string, ...rest: unknown[]) => {
         await prepareAndCreateSession(manager, getHostWindow(), {
           routingId,
-          cwd,
-          effort: opt(effort),
-          resumeSessionId: opt(resumeSessionId),
-          permissionMode: opt(permissionMode),
-          model: opt(model),
-          thinkingMode: opt(thinkingMode),
-          resumeSessionAt: opt(resumeSessionAt),
-          forkSession: opt(forkSession),
-          engineId: opt(engineId),
-          announce: opt(announce)
+          ...parseSpawnRequest(rest)
         })
       }
     },

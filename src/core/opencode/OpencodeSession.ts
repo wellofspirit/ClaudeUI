@@ -511,6 +511,7 @@ export class OpencodeSession extends BaseSession {
     this.location = cwd
     this._model = opts.model ?? DEFAULT_MODEL
     this.permissionMode = opts.permissionMode ?? 'default'
+    this.reasoningVariant = opts.reasoningVariant ?? null
     this.resumeSessionId = opts.resumeSessionId || undefined
     this._capabilities = this.resolveCapsForModel()
     this.sendStatus()
@@ -2586,6 +2587,14 @@ export class OpencodeSession extends BaseSession {
   }
 
   // ── Model / mode / settings ────────────────────────────────────────────────
+
+  protected readonly liveConfig = {
+    model: (v: string) => this.setModel(v),
+    permissionMode: (v: string) => this.setPermissionMode(v),
+    effort: null,
+    thinkingMode: null,
+    reasoningVariant: (v: string | null) => this.setReasoningVariant(v)
+  }
 
   async setModel(model: string): Promise<void> {
     this._model = model

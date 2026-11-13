@@ -72,10 +72,7 @@ const { gitSvcSpies, sessionManagerSpies, sessionStub } = vi.hoisted(() => {
     enqueuePrompt: vi.fn(),
     recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 })),
     askSideQuestion: vi.fn(async () => null),
-    setPermissionMode: vi.fn(async () => {}),
-    setModel: vi.fn(async () => {}),
-    setEffort: vi.fn(),
-    setThinkingMode: vi.fn(),
+    applyConfig: vi.fn(async () => {}),
     voiceStartServer: vi.fn(async () => {}),
     voiceStopServer: vi.fn(async () => {}),
     mcpServerStatus: vi.fn(async () => []),
@@ -647,7 +644,7 @@ describe('session.ipc', () => {
 
   describe('session lifecycle channels', () => {
     it('session:create is registered and creates the session under the caller routing id and cwd', async () => {
-      await harness.call('session:create', 'rid-1', '/tmp/cwd')
+      await harness.call('session:create', 'rid-1', { cwd: '/tmp/cwd' })
       expect(sessionManagerSpies.create).toHaveBeenCalledTimes(1)
       const [routingId, , cwd] = sessionManagerSpies.create.mock.calls[0]
       expect(routingId).toBe('rid-1')
@@ -1608,14 +1605,14 @@ describe('session.ipc', () => {
       expect(vi.mocked(query).mock.calls[0][0].options).toMatchObject({ reloadPlugins: false })
     })
 
-    it('session:set-permission-mode routes to session.setPermissionMode', async () => {
+    it('session:set-permission-mode routes to session.applyConfig', async () => {
       await harness.call('session:set-permission-mode', 'rid-1', 'acceptEdits')
-      expect(sessionStub.setPermissionMode).toHaveBeenCalledWith('acceptEdits')
+      expect(sessionStub.applyConfig).toHaveBeenCalledWith({ permissionMode: 'acceptEdits' })
     })
 
-    it('session:set-effort routes to session.setEffort', async () => {
+    it('session:set-effort routes to session.applyConfig', async () => {
       await harness.call('session:set-effort', 'rid-1', 'high')
-      expect(sessionStub.setEffort).toHaveBeenCalledWith('high')
+      expect(sessionStub.applyConfig).toHaveBeenCalledWith({ effort: 'high' })
     })
 
     it('registers and routes the shared-provider channel family', async () => {
@@ -1721,8 +1718,8 @@ describe('session.ipc', () => {
         cwd: '/tmp/cwd',
         run: vi.fn(),
         resolveApproval: vi.fn(),
-        setPermissionMode: vi.fn(async () => {}),
-        setModel: vi.fn(async () => {}),
+        // An engine that does not take a field does nothing for it inside `applyConfig`.
+        applyConfig: vi.fn(async () => {}),
         // Required ISession members (BaseSession implements them for every
         // engine), so a "minimal" engine still has them.
         queuedItems: [],
@@ -1730,7 +1727,7 @@ describe('session.ipc', () => {
         recallQueued: vi.fn(async () => ({ recalled: [], notRecalled: 0 }))
         // Deliberately no optional members: no watchBackground, stopTask,
         // getPlanContent, getSessionLogPath, mcpServerStatus, mcpToggleServer,
-        // setEffort, etc.
+        // etc.
       }
       sessionManagerSpies.get.mockReturnValue(minimalStub)
 
@@ -1762,6 +1759,7 @@ describe('session.ipc', () => {
       expect(mcpToggle).toEqual({ ok: false, error: 'Provider does not support hosted MCP' })
 
       await expect(harness.call('session:set-effort', 'rid-min', 'high')).resolves.toBeUndefined()
+      expect(minimalStub.applyConfig).toHaveBeenCalledWith({ effort: 'high' })
 
       // Restore the default stub for any subsequent tests in this file.
       sessionManagerSpies.get.mockReturnValue(sessionStub)

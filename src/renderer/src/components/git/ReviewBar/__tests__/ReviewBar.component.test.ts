@@ -165,6 +165,11 @@ import { markViewEvicted, useSessionStore } from '../../../../stores/session-sto
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { ReviewBarViewProps } from '../View'
 import { ReviewBar } from '../ReviewBar'
+import type { SessionSpawnRequest } from '../../../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 let viewProps: ReviewBarViewProps
 
@@ -266,7 +271,7 @@ describe('ReviewBar FC — rendered', () => {
 
     expect(createCalls).toHaveLength(1)
     // createSession args: routingId, cwd, effort, resumeId, ...
-    expect(createCalls[0][3]).toBe(FC_ROUTE)
+    expect(spawnReq(createCalls[0]).resume?.sessionId).toBe(FC_ROUTE)
   })
 
   it("onSend spawns at the model's saved starting effort, not a hardcoded 'medium'", async () => {
@@ -295,8 +300,60 @@ describe('ReviewBar FC — rendered', () => {
     })
 
     // createSession args: routingId, cwd, effort, ..., engineId, announce
-    expect(createCalls[0][2]).toBe('high')
-    expect(createCalls[0][10]).toEqual({ effort: 'high', thinkingMode: null })
+    expect(spawnReq(createCalls[0]).config?.effort).toBe('high')
+    expect(spawnReq(createCalls[0]).announce).toEqual({ effort: 'high', thinkingMode: null })
+  })
+
+  it('onSend on a first message creates the pending worktree before the spawn and sends the resolved thinking mode', async () => {
+    const order: string[] = []
+    const worktree = {
+      worktreePath: `${FC_CWD}/.claude/worktrees/wt`,
+      worktreeBranch: 'worktree-wt',
+      worktreeName: 'wt',
+      originalCwd: FC_CWD,
+      gitRoot: FC_CWD,
+      originalHeadCommit: 'abc123',
+      createdAt: 1,
+      origin: 'created'
+    }
+    app.bridge.ipcMain.handle('worktree:create', () => {
+      order.push('worktree')
+      return worktree
+    })
+    app.bridge.ipcMain.handle('session:create', (_e, ...args: unknown[]) => {
+      order.push('create')
+      createCalls.push(args)
+      return null
+    })
+    useSessionStore.setState((s) => ({
+      availableModels: [
+        {
+          value: 'opus',
+          resolvedModel: 'claude-opus-5-5',
+          displayName: 'Opus',
+          description: '',
+          engineId: 'claude',
+          supportsEffort: true,
+          supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+        }
+      ],
+      sessions: {
+        ...s.sessions,
+        [FC_ROUTE]: { ...s.sessions[FC_ROUTE], selectedModel: 'opus', thinkingMode: 'enabled' }
+      }
+    }))
+    useSessionStore
+      .getState()
+      .setPendingWorktree(FC_ROUTE, { enabled: true, name: 'wt', nameTouched: true })
+    render(React.createElement(ReviewBar, { comments: [makeDiffComment()] }))
+
+    await act(async () => {
+      await viewProps.onSend()
+    })
+
+    expect(order).toEqual(['worktree', 'create'])
+    expect(spawnReq(createCalls[0]).cwd).toBe(worktree.worktreePath)
+    expect(spawnReq(createCalls[0]).config?.thinkingMode).toBe('enabled')
   })
 
   it('onSend skips session creation when already active', async () => {

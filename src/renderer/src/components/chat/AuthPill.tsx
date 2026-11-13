@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSessionStore } from '../../stores/session-store'
+import { retrySend } from '../../lib/session-spawn'
 import { AUTH_ISSUE_NAME, authIssueLabel } from '../../stores/auth-issues'
 import type { AuthSummary, AuthTone } from '../../stores/auth-issues'
 import { useAuthSummary } from '../../stores/use-auth-summary'
@@ -121,7 +122,6 @@ export function AuthPill(): React.JSX.Element | null {
   const summary = useAuthSummary()
   const { isMobile: isMobileCtx } = useSidebarCollapsed()
   const openSignIn = useSessionStore((s) => s.openSignIn)
-  const retrySend = useSessionStore((s) => s.retrySend)
   const clearAuthRequired = useSessionStore((s) => s.clearAuthRequired)
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const switchSession = useSessionStore((s) => s.switchSession)

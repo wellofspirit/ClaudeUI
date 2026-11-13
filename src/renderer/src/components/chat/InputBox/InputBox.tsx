@@ -7,16 +7,11 @@ import {
   engineDefaultModels,
   resolveEngineDefaultModel,
   seedingModelPicks,
-  carriesPicksIntoNewSessions,
-  hasResumableTranscript
+  carriesPicksIntoNewSessions
 } from '../../../stores/session-store'
 import { resolveRekeyed } from '../../../stores/replica'
-import { awaitReloadBeforeSpawn } from '../../../lib/session-history-load'
-import {
-  createPendingWorktree,
-  onDraftSendRequest,
-  WorktreeCreateError
-} from '../../../lib/worktree-start'
+import { reportSpawnFailure, spawnSession } from '../../../lib/session-spawn'
+import { onDraftSendRequest, WorktreeCreateError } from '../../../lib/worktree-start'
 import { voiceController } from '../../../lib/voice/voice-controller'
 import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
 import {
@@ -42,12 +37,7 @@ import type {
 import { v4 as uuid } from 'uuid'
 import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
 import { recallQueuedInto } from './recall-queued'
-import {
-  catalogFor,
-  rememberedEffortPatch,
-  sessionSpawnEffort,
-  spawnAnnouncement
-} from '../../../lib/session-effort'
+import { rememberedEffortPatch, sessionSpawnEffort } from '../../../lib/session-effort'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
 import { useFallbackSlashCommands } from '../../../hooks/useFallbackSlashCommands'
 import { useFileMention } from '../../../hooks/useFileMention'
@@ -162,7 +152,6 @@ export function InputBox(): React.JSX.Element {
   const cwd = useActiveSession((s) => s.cwd)
   const status = useActiveSession((s) => s.status)
   const sdkActive = useActiveSession((s) => s.sdkActive)
-  const markSdkActive = useSessionStore((s) => s.markSdkActive)
   const queuedItems = useActiveSession((s) => s.queuedItems)
 
   const isRunning = status.state === 'running'
@@ -506,166 +495,19 @@ export function InputBox(): React.JSX.Element {
 
   // --- Handlers ---
 
-  /**
-   * Resolve the effort + thinking values to send to the SDK for a given
-   * session. Falls back to the model's default when the user hasn't
-   * explicitly picked a value (store value is `null`), and coerces any
-   * unsupported user choice against the current model's capabilities.
-   */
-  function resolveSessionSdkOptions(routingId: string): {
-    effort?: string
-    thinkingMode?: ThinkingMode
-    model?: string
-  } {
-    const state = useSessionStore.getState()
-    const session = state.sessions[routingId]
-    const engineId = session?.selectedEngineId ?? 'claude'
-    const { modelInfo } = catalogFor(state, {
-      selectedModel: session?.selectedModel ?? '',
-      selectedEngineId: engineId
-    })
-    const desiredThinking: ThinkingMode =
-      session?.thinkingMode ?? modelDefaultThinkingMode(modelInfo)
-    // Effort precedence (explicit pick > Claude's per-model starting effort >
-    // cli.js heuristic, clamped to the model): `sessionSpawnEffort`, the SAME
-    // function — fed the same inputs — as the pill and the retry / plan / review
-    // spawns.
-    const effort = session ? sessionSpawnEffort(state, session) : undefined
-    return {
-      model: session?.selectedModel,
-      effort,
-      thinkingMode: modelResolveThinkingMode(modelInfo, desiredThinking)
-    }
-  }
-
-  /**
-   * Refuse to spawn with an EMPTY model.
-   *
-   * An empty `selectedModel` only happens when the user's configured default
-   * named a model that is gone (the store seeds `''` and banners it rather than
-   * substituting). Passing that through would hand the spawn resolver
-   * `undefined`, which for pi means "use pi's own default" — the silent
-   * substitute this whole path exists to prevent. An unconfigured Claude seeds
-   * its `'default'` alias, a real value, and never trips this.
-   */
-  function assertModelResolved(routingId: string): void {
-    const state = useSessionStore.getState()
-    const session = state.sessions[routingId]
-    const engineId = session?.selectedEngineId ?? 'claude'
-    if (session?.selectedModel) return
-    // Claude's `'default'` alias is always a real value — EXCEPT when the user
-    // configured a Claude default the account no longer offers, which seeds ''
-    // (ADR-074 §8). Spawning that would let cli.js pick its own model: the
-    // silent substitute ADR-059 forbids. Unconfigured, Claude passes as before.
-    if (engineId === 'claude' && !state.claudeDefaultModelConfigured) return
-    throw new Error(
-      `No model selected for this ${engineId} session — the configured default model is no longer available. Pick one in the model picker.`
-    )
-  }
-
   const doSend = useCallback(
     async (prompt: string, attachments?: AttachmentUpload[]) => {
       if (!activeSessionId) return
-      if (!sdkActive) {
-        // The host seeds its own transcript the moment the engine spawns; a client
-        // read still in flight would then lose the race and show only this turn.
-        await awaitReloadBeforeSpawn(activeSessionId)
-        assertModelResolved(activeSessionId)
-        await createPendingWorktree(activeSessionId)
-        const { sessions } = useSessionStore.getState()
-        const session = sessions[activeSessionId]
-        const opts = resolveSessionSdkOptions(activeSessionId)
-        const fork = session?.forkOrigin
-        if (fork) {
-          // Branch: resume the SOURCE session, truncated to the anchor, forked into
-          // a fresh UUID. cli.js mints the new id and we rekey to it on first init.
-          await window.api.createSession(
-            activeSessionId,
-            session?.cwd || '',
-            opts.effort,
-            fork.sourceSessionId,
-            session?.permissionMode,
-            opts.model,
-            opts.thinkingMode,
-            fork.anchorUuid,
-            true,
-            session?.selectedEngineId,
-            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-          )
-        } else {
-          const isHistorical = session && hasResumableTranscript(session)
-          // For opencode sessions, always pass the routingId as resumeSessionId so
-          // OpencodeSession can resume a prior session even when messages are empty
-          // (history is replayed from the server, not preloaded into the store).
-          // OpencodeSession.run() verifies the id via getSession and falls back to
-          // createSession if it doesn't exist (e.g. first-ever prompt on that slot).
-          const isOpencode = session?.selectedEngineId === 'opencode'
-          const resumeId = isHistorical || isOpencode ? activeSessionId : undefined
-          await window.api.createSession(
-            activeSessionId,
-            session?.cwd || '',
-            opts.effort,
-            resumeId,
-            session?.permissionMode,
-            opts.model,
-            opts.thinkingMode,
-            undefined,
-            undefined,
-            session?.selectedEngineId,
-            spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-          )
-        }
-        markSdkActive(activeSessionId)
-      }
+      if (!sdkActive) await spawnSession(activeSessionId)
       await window.api.sendPrompt(activeSessionId, prompt, attachments)
     },
-    [activeSessionId, sdkActive, markSdkActive]
+    [activeSessionId, sdkActive]
   )
 
   const ensureSession = useCallback(async () => {
     if (!activeSessionId) return
-    if (!sdkActive) {
-      await awaitReloadBeforeSpawn(activeSessionId)
-      assertModelResolved(activeSessionId)
-      await createPendingWorktree(activeSessionId)
-      const { sessions } = useSessionStore.getState()
-      const session = sessions[activeSessionId]
-      const opts = resolveSessionSdkOptions(activeSessionId)
-      const fork = session?.forkOrigin
-      if (fork) {
-        await window.api.createSession(
-          activeSessionId,
-          session?.cwd || '',
-          opts.effort,
-          fork.sourceSessionId,
-          session?.permissionMode,
-          opts.model,
-          opts.thinkingMode,
-          fork.anchorUuid,
-          true,
-          session?.selectedEngineId,
-          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-        )
-      } else {
-        const isHistorical = session && hasResumableTranscript(session) && !session.sdkActive
-        const resumeId = isHistorical ? activeSessionId : undefined
-        await window.api.createSession(
-          activeSessionId,
-          session?.cwd || '',
-          opts.effort,
-          resumeId,
-          session?.permissionMode,
-          opts.model,
-          opts.thinkingMode,
-          undefined,
-          undefined,
-          session?.selectedEngineId,
-          spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-        )
-      }
-      markSdkActive(activeSessionId)
-    }
-  }, [activeSessionId, sdkActive, markSdkActive])
+    if (!sdkActive) await spawnSession(activeSessionId)
+  }, [activeSessionId, sdkActive])
 
   /**
    * Is the push-to-talk still held? `ensureSession()` can spawn the engine first,
@@ -1148,25 +990,13 @@ export function InputBox(): React.JSX.Element {
   // session (with resume) to apply changes mid-conversation.
   const restartSdkSession = useCallback(async () => {
     if (!activeSessionId || !sdkActive) return
-    await window.api.cancelSession(activeSessionId)
-    const { sessions } = useSessionStore.getState()
-    const session = sessions[activeSessionId]
-    const opts = resolveSessionSdkOptions(activeSessionId)
-    await window.api.createSession(
-      activeSessionId,
-      session?.cwd || '',
-      opts.effort,
-      activeSessionId,
-      session?.permissionMode,
-      opts.model,
-      opts.thinkingMode,
-      undefined,
-      undefined,
-      session?.selectedEngineId,
-      spawnAnnouncement(useSessionStore.getState(), session, opts.effort)
-    )
-    markSdkActive(activeSessionId)
-  }, [activeSessionId, sdkActive, markSdkActive])
+    try {
+      await window.api.cancelSession(activeSessionId)
+      await spawnSession(activeSessionId, { resume: 'self' })
+    } catch (err) {
+      reportSpawnFailure(activeSessionId, 'Failed to restart the session', err)
+    }
+  }, [activeSessionId, sdkActive])
 
   const handleSelectEffort = useCallback(
     async (level: string) => {

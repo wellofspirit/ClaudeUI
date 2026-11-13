@@ -45,6 +45,7 @@ import type {
   StatusLineData
 } from '../session'
 import type { EngineId } from '../engine'
+import type { SessionSpawnRequest } from '../session-config'
 import type { EngineModelGroup, ModelInfo } from '../models'
 import type { SkillInfo } from '../skills'
 import type { SlashCommandInfo, UISessionConfig } from '../ui'
@@ -59,30 +60,16 @@ export interface SessionAPI {
    */
   verifierHooks: boolean
   pickFolder(): Promise<string | null>
-  createSession(
-    routingId: string,
-    cwd: string,
-    effort?: string,
-    resumeSessionId?: string,
-    permissionMode?: string,
-    model?: string,
-    thinkingMode?: string,
-    resumeSessionAt?: string,
-    forkSession?: boolean,
-    engineId?: EngineId,
-    /**
-     * The values every replica adopts as this session's OWN on the birth event
-     * (`session:created`). `effort` has three states: a string = announce the
-     * effort the process is spawned with (the positional `effort`); `null` = the
-     * model is KNOWN to take none (clears); absent / `undefined` = the model is
-     * unknown to this client (empty or failed catalog), announce nothing so no
-     * replica loses a pick. `thinkingMode` is the raw pick (`null` = no pick). A
-     * replica thus shows what the process runs, and a later change to the per-model
-     * starting effort cannot re-label a session already started. Omitted by older
-     * clients (and `null` over WS JSON): nothing is announced.
-     */
-    announce?: { effort?: string | null; thinkingMode?: string | null }
-  ): Promise<void>
+  /**
+   * Start (or resume) an engine session for a routing id. `SessionSpawnRequest` documents the
+   * fields; `announce` is what every replica adopts as the session's OWN on the birth event
+   * (`session:created`), so a replica shows what the process runs. `announce.effort` has
+   * three states: a string = announce the effort the process is spawned with
+   * (`config.effort`); `null` = the model is KNOWN to take none (clears); absent = the model
+   * is unknown to this client (empty or failed catalog), announce nothing so no replica
+   * loses a pick. `thinkingMode` is the raw pick (`null` = no pick).
+   */
+  createSession(routingId: string, request: SessionSpawnRequest): Promise<void>
   /**
    * `rekeySession` was DELETED in SyncCore phase 4c. Core owns the rekey: it
    * applies `rekeyTargetFor` to canonical state and re-keys its own session

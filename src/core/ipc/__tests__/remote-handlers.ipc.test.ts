@@ -379,10 +379,7 @@ const sessionStub: any = {
   queuedItems: [],
   enqueuePrompt: vi.fn(),
   recallQueued: vi.fn(async () => ({ recalled: ['a'], notRecalled: 0 })),
-  setPermissionMode: vi.fn(async () => {}),
-  setModel: vi.fn(async () => {}),
-  setEffort: vi.fn(),
-  setThinkingMode: vi.fn(),
+  applyConfig: vi.fn(async () => {}),
   askSideQuestion: vi.fn(async () => 'answer'),
   mcpServerStatus: vi.fn(async () => [{ name: 'srv', connected: true }]),
   notifySettingsChanged: vi.fn(async () => {}),
@@ -1069,12 +1066,12 @@ describe('registerRemoteHandlers', () => {
       expect(sessionManagerStub.interrupt).toHaveBeenCalledWith('rid-1')
     })
 
-    it('session:set-thinking-mode routes to session.setThinkingMode', async () => {
+    it('session:set-thinking-mode routes to session.applyConfig', async () => {
       await dispatcher.handle(
         makeRequest('session:set-thinking-mode', 'rid-1', 'think'),
         remoteConn
       )
-      expect(sessionStub.setThinkingMode).toHaveBeenCalledWith('think')
+      expect(sessionStub.applyConfig).toHaveBeenCalledWith({ thinkingMode: 'think' })
     })
 
     it('session:ask-side-question returns the session answer', async () => {
@@ -1685,9 +1682,19 @@ describe('registerRemoteHandlers', () => {
   describe('session:create parity', () => {
     it('threads engineId through to manager.create (GUARD — fails pre-fix)', async () => {
       await dispatcher.handle(
+        makeRequest('session:create', 'rid-engine', { cwd: '/tmp/proj', engineId: 'opencode' }),
+        remoteConn
+      )
+      expect(sessionManagerStub.create).toHaveBeenCalled()
+      // manager.create's 5th positional arg (index 4) is engineId.
+      expect(sessionManagerStub.create.mock.calls[0][4]).toBe('opencode')
+    })
+
+    it('legacy positional args: threads engineId through to manager.create', async () => {
+      await dispatcher.handle(
         makeRequest(
           'session:create',
-          'rid-engine',
+          'rid-engine-legacy',
           '/tmp/proj',
           undefined,
           undefined,
@@ -1714,7 +1721,7 @@ describe('registerRemoteHandlers', () => {
 
       try {
         await dispatcher.handle(
-          makeRequest('session:create', 'rid-sandbox', '/tmp/proj'),
+          makeRequest('session:create', 'rid-sandbox', { cwd: '/tmp/proj' }),
           remoteConn
         )
 
@@ -1731,7 +1738,10 @@ describe('registerRemoteHandlers', () => {
     })
 
     it('claude path (default engineId) applies vendor config and skips opencode resolution', async () => {
-      await dispatcher.handle(makeRequest('session:create', 'rid-claude', '/tmp/proj'), remoteConn)
+      await dispatcher.handle(
+        makeRequest('session:create', 'rid-claude', { cwd: '/tmp/proj' }),
+        remoteConn
+      )
 
       expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
       expect(resolveOpencodeSpawnModel).not.toHaveBeenCalled()
@@ -1739,19 +1749,11 @@ describe('registerRemoteHandlers', () => {
 
     it('opencode path resolves the spawn model and skips vendor config', async () => {
       await dispatcher.handle(
-        makeRequest(
-          'session:create',
-          'rid-opencode',
-          '/tmp/proj',
-          undefined,
-          undefined,
-          undefined,
-          'opencode/some-model',
-          undefined,
-          undefined,
-          undefined,
-          'opencode'
-        ),
+        makeRequest('session:create', 'rid-opencode', {
+          cwd: '/tmp/proj',
+          engineId: 'opencode',
+          config: { model: 'opencode/some-model' }
+        }),
         remoteConn
       )
 
@@ -1769,7 +1771,7 @@ describe('registerRemoteHandlers', () => {
     // "unset" to the code downstream: an engine that validates the effort
     // treats only `undefined` as "no effort" and would reject every fresh
     // session created from the web client.
-    it('normalises null optional args to undefined before prepareAndCreateSession (GUARD — fails pre-fix)', async () => {
+    it('legacy positional args: normalises null optional args to absent before prepareAndCreateSession (GUARD — fails pre-fix)', async () => {
       await dispatcher.handle(
         makeRequest(
           'session:create',
@@ -1790,25 +1792,44 @@ describe('registerRemoteHandlers', () => {
 
       expect(createSessionSpy.prepareAndCreateSession).toHaveBeenCalledTimes(1)
       const args = createSessionSpy.prepareAndCreateSession.mock.calls[0][2]
-      for (const key of [
-        'effort',
-        'resumeSessionId',
-        'permissionMode',
-        'model',
-        'thinkingMode',
-        'resumeSessionAt',
-        'forkSession',
-        'engineId',
-        'announce'
-      ] as const) {
-        expect(args[key], `${key} must be undefined, not null`).toBeUndefined()
+      for (const key of ['config', 'resume', 'engineId', 'announce'] as const) {
+        expect(args[key], `${key} must be absent, not null`).toBeUndefined()
       }
       // Required args are untouched.
       expect(args.routingId).toBe('rid-nulls')
       expect(args.cwd).toBe('/tmp/proj')
     })
 
-    it('passes real optional values through unchanged', async () => {
+    it('an object request carries nothing but what it names (nulls and unknown keys never reach the spawn)', async () => {
+      await dispatcher.handle(
+        makeRequest('session:create', 'rid-obj-bare', {
+          cwd: '/tmp/proj',
+          engineId: null,
+          config: null,
+          resume: 'not-an-object',
+          announce: null,
+          bogus: { sandboxConfig: 1 }
+        }),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession.mock.calls[0][2]).toEqual({
+        routingId: 'rid-obj-bare',
+        cwd: '/tmp/proj'
+      })
+    })
+
+    it('an object request without a string cwd is refused', async () => {
+      await expect(
+        dispatcher.handle(
+          makeRequest('session:create', 'rid-obj-bad', { engineId: 'opencode' }),
+          remoteConn
+        )
+      ).rejects.toThrow(/string cwd/)
+      expect(createSessionSpy.prepareAndCreateSession).not.toHaveBeenCalled()
+    })
+
+    it('legacy positional args: passes real optional values through to the same request', async () => {
       await dispatcher.handle(
         makeRequest(
           'session:create',
@@ -1827,25 +1848,57 @@ describe('registerRemoteHandlers', () => {
         remoteConn
       )
 
-      expect(createSessionSpy.prepareAndCreateSession.mock.calls[0][2]).toMatchObject({
+      expect(createSessionSpy.prepareAndCreateSession.mock.calls[0][2]).toEqual({
         routingId: 'rid-values',
         cwd: '/tmp/proj',
-        effort: 'high',
-        resumeSessionId: 'resume-1',
-        permissionMode: 'plan',
-        model: 'opencode/luna',
-        thinkingMode: 'think',
-        resumeSessionAt: 'anchor-1',
-        // `false` is a real value, not "unset" — `?? undefined` must not eat it.
-        forkSession: false,
         engineId: 'opencode',
+        config: {
+          effort: 'high',
+          permissionMode: 'plan',
+          model: 'opencode/luna',
+          thinkingMode: 'think'
+        },
+        // `false` is a real value, not "unset" — `?? undefined` must not eat it.
+        resume: { sessionId: 'resume-1', at: 'anchor-1', fork: false },
+        announce: { effort: 'xhigh', thinkingMode: null }
+      })
+    })
+
+    it('an object request reaches prepareAndCreateSession with every field', async () => {
+      await dispatcher.handle(
+        makeRequest('session:create', 'rid-values-obj', {
+          cwd: '/tmp/proj',
+          engineId: 'opencode',
+          config: {
+            effort: 'high',
+            permissionMode: 'plan',
+            model: 'opencode/luna',
+            thinkingMode: 'think'
+          },
+          resume: { sessionId: 'resume-1', at: 'anchor-1', fork: false },
+          announce: { effort: 'xhigh', thinkingMode: null }
+        }),
+        remoteConn
+      )
+
+      expect(createSessionSpy.prepareAndCreateSession.mock.calls[0][2]).toEqual({
+        routingId: 'rid-values-obj',
+        cwd: '/tmp/proj',
+        engineId: 'opencode',
+        config: {
+          effort: 'high',
+          permissionMode: 'plan',
+          model: 'opencode/luna',
+          thinkingMode: 'think'
+        },
+        resume: { sessionId: 'resume-1', at: 'anchor-1', fork: false },
         announce: { effort: 'xhigh', thinkingMode: null }
       })
     })
 
     it('broadcasts session:created to the main window (remote notifies desktop)', async () => {
       await dispatcher.handle(
-        makeRequest('session:create', 'rid-broadcast', '/tmp/proj'),
+        makeRequest('session:create', 'rid-broadcast', { cwd: '/tmp/proj' }),
         remoteConn
       )
 

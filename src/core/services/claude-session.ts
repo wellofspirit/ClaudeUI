@@ -2527,6 +2527,14 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     }
   }
 
+  protected readonly liveConfig = {
+    model: (v: string) => this.setModel(v),
+    permissionMode: (v: string) => this.setPermissionMode(v),
+    effort: (v: string) => this.setEffort(v),
+    thinkingMode: (v: string) => this.setThinkingMode(v),
+    reasoningVariant: null
+  }
+
   async setPermissionMode(mode: string): Promise<void> {
     const previousMode = this.permissionMode
 

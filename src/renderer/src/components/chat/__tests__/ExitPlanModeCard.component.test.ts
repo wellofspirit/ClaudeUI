@@ -259,6 +259,11 @@ describe('waitForModeChange', () => {
 
 import { ExitPlanModeCard } from '../ExitPlanModeCard/ExitPlanModeCard'
 import { seed, mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
+import type { SessionSpawnRequest } from '../../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 const planText = 'Step 1: Do X\nStep 2: Do Y'
 const block = {
@@ -376,7 +381,7 @@ describe('ExitPlanModeCard FC', () => {
     // createSession called with acceptEdits permission mode
     const createArgs = lastCall('session:create') as unknown[]
     expect(createArgs[0]).toBe(ROUTE_FC)
-    expect(createArgs[4]).toBe('acceptEdits')
+    expect(spawnReq(createArgs).config?.permissionMode).toBe('acceptEdits')
 
     // sendPrompt called with plan content
     const sendArgs = lastCall('session:send') as unknown[]
@@ -416,9 +421,9 @@ describe('ExitPlanModeCard FC', () => {
     // createSession args: routingId, cwd, effort, resumeId, permissionMode, model, thinkingMode
     const createArgs = lastCall('session:create') as unknown[]
     // Pre-fix: model was undefined and effort was forced to 'medium'.
-    expect(createArgs[5]).toBe('claude-opus-4-7')
-    expect(createArgs[2]).toBe('high')
-    expect(createArgs[6]).toBe('enabled')
+    expect(spawnReq(createArgs).config?.model).toBe('claude-opus-4-7')
+    expect(spawnReq(createArgs).config?.effort).toBe('high')
+    expect(spawnReq(createArgs).config?.thinkingMode).toBe('enabled')
 
     unmount()
   })
@@ -451,10 +456,10 @@ describe('ExitPlanModeCard FC', () => {
 
     const createArgs = lastCall('session:create') as unknown[]
     // Pre-fix: `session.effort ?? undefined` — cli.js's heuristic, not 'high'.
-    expect(createArgs[2]).toBe('high')
+    expect(spawnReq(createArgs).config?.effort).toBe('high')
     // The starting effort freezes into the fresh session: announced, and equal to
     // the positional effort (computed BEFORE the reset blanked the session).
-    expect(createArgs[10]).toEqual({ effort: 'high', thinkingMode: null })
+    expect(spawnReq(createArgs).announce).toEqual({ effort: 'high', thinkingMode: null })
 
     unmount()
   })
@@ -489,7 +494,7 @@ describe('ExitPlanModeCard FC', () => {
       await viewProps.onStartFresh()
     })
 
-    expect((lastCall('session:create') as unknown[])[10]).toEqual({
+    expect(spawnReq(lastCall('session:create') as unknown[]).announce).toEqual({
       effort: 'low',
       thinkingMode: 'disabled'
     })

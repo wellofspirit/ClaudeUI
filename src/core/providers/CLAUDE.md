@@ -5,7 +5,7 @@ The engine-session seam: the interface and shared base every engine session impl
 ## What lives here
 
 - Name trap: "provider" here means the engine session seam. Model providers are `src/core/shared-providers/`; per-engine sign-in is `EngineAuthProvider` in `src/core/auth/`.
-- `src/core/providers/ISession.ts`: `ISession`, the optional capability-gated members, and `EngineSpawnOptions` (the named spawn options every factory receives).
+- `src/core/providers/ISession.ts`: `ISession` (a live config change goes through `applyConfig`, never a per-field setter), the optional capability-gated members, and `EngineSpawnOptions` (the session's `SessionConfig` plus what only a spawn has).
 - `src/core/providers/BaseSession.ts`: shared plumbing: `send` (typed from the event map in `src/core/shared/sync/events.ts`: a channel or payload that does not match it does not compile), the queue of record, the user-stop window, `baseStatusFields()`. It owns no turn or usage bookkeeping.
 - `src/core/providers/EngineRegistry.ts`, `src/core/providers/SpawnPrepRegistry.ts`, `src/core/providers/register-engines.ts`: engine id to session factory and to spawn prep.
 - `src/core/providers/claude-spawn-prep.ts` (spawn prep resolves the model only; siblings `src/core/pi/pi-spawn-prep.ts`, `src/core/opencode/opencode-spawn-prep.ts`), `src/core/providers/session-queue.ts`, `src/core/providers/turn-origin-ledger.ts`, `src/core/providers/client-prompt-observer.ts`.
@@ -14,15 +14,17 @@ The engine-session seam: the interface and shared base every engine session impl
 
 ## Recipes
 
-**A per-session option every engine honours** (exemplar: `effort`, spawn field plus `setEffort`; `thinkingMode` is Claude-only). It has a spawn path and a live-setter path.
+**A per-session option** (exemplar: `effort`; `thinkingMode` is Claude-only, `reasoningVariant` opencode-only). One type, `SessionConfig`, carries it at spawn and in a live change, so it cannot exist on one path only.
 
-1. `src/core/providers/ISession.ts`: `EngineSpawnOptions` field, and an optional `ISession` setter if it changes live [nothing: an unread option is silently ignored].
-2. Constructors read `opts`: `src/core/services/claude-session.ts`, `src/core/opencode/OpencodeSession.ts`, `src/core/pi/PiSession.ts` [nothing].
-3. `src/core/ipc/create-session.ts` (`CreateSessionArgs`, `spawnOpts` in `prepareAndCreateSession`) and the `session:create` handler's positional args in `src/core/ipc/session-commands.ts`, each through `opt()` [nothing: a field not copied is dropped].
-4. `src/shared/types/api/session.ts` (`createSession`) and `src/shared/api-invoke-table.ts` (`createSession` arity): append at the end [compiler: arity against the method].
-5. Every `window.api.createSession` call passes positionally: `src/renderer/src/stores/session-store.ts`, `InputBox.tsx` (including `restartSdkSession`), `ExitPlanModeCard.tsx`, `ReviewBar.tsx`; and the host-created path, `startSession` in `src/core/services/session-tools.ts` [nothing: a skipped site spawns without it].
-6. Live setter: `src/core/ipc/handlers-core.ts` (setter plus the `emitConfigChanged` patch type), the `session-config` entry in `src/core/ipc/session-commands.ts`, the entry in `src/shared/api-invoke-table.ts` [compiler]. opencode `reasoningVariant` has this path only, so a respawn drops it; Claude applies effort and thinking mode by respawn (`restartSdkSession` in `InputBox.tsx`); pi's `setEffort` applies live.
-7. Replication to every client (`session:created` announce, `session:config-changed`): `src/core/shared/sync/CLAUDE.md`.
+1. `src/shared/types/session-config.ts`: the `SessionConfig` field [compiler: steps 2 and 3 stop compiling until they name it].
+2. Each engine's `liveConfig` table (`src/core/services/claude-session.ts`, `src/core/opencode/OpencodeSession.ts`, `src/core/pi/PiSession.ts`): the setter that takes a live change, or `null` when the engine has none; and its rank in `CONFIG_RANK` in `src/core/providers/BaseSession.ts`, the order `applyConfig` applies a patch in [compiler].
+3. `CONFIG_WIRE_CHECKS` in `src/core/ipc/spawn-request.ts`: what the value must be when a client sends it; only checked fields reach the spawn options [compiler].
+4. The constructors of the engines that take it at spawn read it from `opts` (`EngineSpawnOptions` extends `SessionConfig`) [nothing: an unread option is silently ignored]. The create path needs no edit: `prepareAndCreateSession` in `src/core/ipc/create-session.ts` spreads the config whole.
+5. Renderer: `spawnSession` in `src/renderer/src/lib/session-spawn.ts` puts it in the request's `config`; it is the only caller of `window.api.createSession` [test: a guard spec fails on another caller; nothing forces the field itself]. The host-created path, `startSession` in `src/core/services/session-tools.ts`, when a tool-started session should carry it [nothing].
+6. A live change from a client: a host function in `src/core/ipc/handlers-core.ts` that validates, calls `session.applyConfig({ field })` and emits through `emitConfigChanged` (extend its patch type), the `session-config` entry in `src/core/ipc/session-commands.ts`, the method in `src/shared/types/api/session.ts` and its entry in `src/shared/api-invoke-table.ts` [compiler for the table]. Claude applies effort and thinking mode by respawn (`spawnSession` with `resume: 'self'`); pi's `setEffort` applies live.
+7. Replication to every client (`session:created` announce, `session:config-changed`): `src/core/shared/sync/CLAUDE.md`. A value the engine holds beyond the birth event is announced at spawn by `announceSpawnConfig` in `src/core/ipc/handlers-core.ts` (today the reasoning variant).
+
+`session:create` is `(routingId, request)`; `src/core/ipc/spawn-request.ts` also maps the 11 positional arguments a client loaded before 2026-11 still sends, and is the only place that knows that order.
 
 **A capability flag** (exemplar: `sideQuestion`)
 

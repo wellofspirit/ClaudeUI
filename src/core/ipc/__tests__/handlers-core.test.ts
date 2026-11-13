@@ -105,6 +105,10 @@ import {
   listPlaces,
   setPermissionMode,
   setModel,
+  setEffort,
+  setThinkingMode,
+  setReasoningVariant,
+  announceSpawnConfig,
   deleteSession,
   deleteProject,
   clearConversation,
@@ -340,13 +344,13 @@ describe('handlers-core', () => {
 
   describe('setPermissionMode', () => {
     it('delegates to session.setPermissionMode when a live session exists, without sending directly', async () => {
-      const sessionStub = makeSessionStub({ setPermissionMode: vi.fn(async () => {}) })
+      const sessionStub = makeSessionStub({ applyConfig: vi.fn(async () => {}) })
       const manager = makeManager(sessionStub)
       const win = makeFakeWindow()
 
       await setPermissionMode(manager, 'rid-1', 'acceptEdits')
 
-      expect(sessionStub.setPermissionMode).toHaveBeenCalledWith('acceptEdits')
+      expect(sessionStub.applyConfig).toHaveBeenCalledWith({ permissionMode: 'acceptEdits' })
       expect(win.webContents.send).not.toHaveBeenCalled()
     })
 
@@ -361,12 +365,12 @@ describe('handlers-core', () => {
     })
 
     it('does not throw and does not call session.setPermissionMode for an invalid mode on a live session', async () => {
-      const sessionStub = makeSessionStub({ setPermissionMode: vi.fn(async () => {}) })
+      const sessionStub = makeSessionStub({ applyConfig: vi.fn(async () => {}) })
       const manager = makeManager(sessionStub)
 
       await setPermissionMode(manager, 'rid-1', 'bogus')
 
-      expect(sessionStub.setPermissionMode).not.toHaveBeenCalled()
+      expect(sessionStub.applyConfig).not.toHaveBeenCalled()
     })
   })
 
@@ -1315,7 +1319,7 @@ describe('handlers-core', () => {
 
     it('setModel STILL emits for a live session', async () => {
       const manager = {
-        get: vi.fn(() => makeSessionStub({ setModel: vi.fn(async () => {}) })),
+        get: vi.fn(() => makeSessionStub({ applyConfig: vi.fn(async () => {}) })),
         forEach: vi.fn()
       } as any
       const sink = vi.fn()
@@ -1330,6 +1334,66 @@ describe('handlers-core', () => {
         off()
       }
     })
+  })
+})
+
+describe('live config host functions delegate to applyConfig', () => {
+  it('effort and thinking mode reach applyConfig, the variant and mode emit as before', async () => {
+    const applyConfig = vi.fn(async () => {})
+    const manager = { get: () => makeSessionStub({ applyConfig }), forEach: vi.fn() } as any
+    const sink = vi.fn()
+    const off = addSyncSubscriber(sink)
+    try {
+      await setEffort(manager, 'r', 'high')
+      setThinkingMode(manager, 'r', 'adaptive')
+      setReasoningVariant(manager, 'r', null)
+      expect(applyConfig.mock.calls).toEqual([
+        [{ effort: 'high' }],
+        [{ thinkingMode: 'adaptive' }],
+        [{ reasoningVariant: null }]
+      ])
+      expect(sink).toHaveBeenCalledWith(expect.any(Number), 'session:config-changed', [
+        'r',
+        { reasoningVariant: null }
+      ])
+    } finally {
+      off()
+    }
+  })
+
+  it('a model that takes no effort returns before applyConfig', async () => {
+    const applyConfig = vi.fn(async () => {})
+    const manager = {
+      get: () =>
+        makeSessionStub({
+          applyConfig,
+          capabilities: {
+            ...resolveClaudeCapabilities('default'),
+            reasoning: { effort: null, thinking: null }
+          }
+        }),
+      forEach: vi.fn()
+    } as any
+    await setEffort(manager, 'r', 'high')
+    expect(applyConfig).not.toHaveBeenCalled()
+  })
+
+  it('announceSpawnConfig emits a spawn variant and nothing otherwise', () => {
+    const sink = vi.fn()
+    const off = addSyncSubscriber(sink)
+    try {
+      announceSpawnConfig('r', { model: 'm' })
+      announceSpawnConfig('r', { reasoningVariant: null })
+      announceSpawnConfig('r', undefined)
+      expect(sink).not.toHaveBeenCalled()
+      announceSpawnConfig('r', { reasoningVariant: 'high' })
+      expect(sink).toHaveBeenCalledWith(expect.any(Number), 'session:config-changed', [
+        'r',
+        { reasoningVariant: 'high' }
+      ])
+    } finally {
+      off()
+    }
   })
 })
 

@@ -10,7 +10,8 @@ import type {
   ApprovalDecision,
   PermissionSuggestion,
   ModelCostEntry,
-  QueuedItem
+  QueuedItem,
+  SessionConfig
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
 import type { ISession, NonUserItem } from './ISession'
@@ -166,13 +167,46 @@ export abstract class BaseSession implements ISession {
     answers?: Record<string, string>,
     updatedPermissions?: PermissionSuggestion[]
   ): void
-  abstract setModel(model: string): Promise<void>
-  abstract setPermissionMode(mode: string): Promise<void>
+  /**
+   * How this engine takes a live change of each `SessionConfig` field: its setter, or `null`
+   * when it has none. The mapped type is the point: a new `SessionConfig` field does not
+   * compile in any engine until it says which. A property (not a method) is safe because
+   * `applyConfig` only runs after construction.
+   */
+  protected abstract readonly liveConfig: {
+    [K in keyof Required<SessionConfig>]:
+      ((value: Required<SessionConfig>[K]) => void | Promise<void>) | null
+  }
   abstract dispose(): void
 
   // ---------------------------------------------------------------------------
   // Concrete shared implementations
   // ---------------------------------------------------------------------------
+
+  /**
+   * Apply order, a rank per `SessionConfig` field (the compiler wants every key): a model
+   * change clears opencode's variant, so the variant comes after it.
+   */
+  private static readonly CONFIG_RANK: Record<keyof Required<SessionConfig>, number> = {
+    model: 0,
+    permissionMode: 1,
+    effort: 2,
+    thinkingMode: 3,
+    reasoningVariant: 4
+  }
+
+  private static readonly CONFIG_ORDER = (
+    Object.keys(BaseSession.CONFIG_RANK) as (keyof SessionConfig)[]
+  ).sort((a, b) => BaseSession.CONFIG_RANK[a] - BaseSession.CONFIG_RANK[b])
+
+  async applyConfig(patch: SessionConfig): Promise<void> {
+    for (const key of BaseSession.CONFIG_ORDER) {
+      const value = patch[key]
+      if (value === undefined) continue
+      const handler = this.liveConfig[key] as ((v: typeof value) => void | Promise<void>) | null
+      await handler?.(value)
+    }
+  }
 
   getMessages(): ChatMessage[] {
     return this.messageHistory

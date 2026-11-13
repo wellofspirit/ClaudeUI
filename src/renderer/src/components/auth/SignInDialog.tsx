@@ -78,6 +78,7 @@ import {
 } from '../../stores/session-store'
 import type { AuthRetry } from '../../stores/auth-issues'
 import { useAuthSummary } from '../../stores/use-auth-summary'
+import { retrySend } from '../../lib/session-spawn'
 import {
   UNREADABLE_ACCOUNTS,
   anthropicAccountsView,
@@ -153,7 +154,6 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
     setAuthState,
     setAccountsState,
     loadProviderAccounts,
-    retrySend,
     clearAuthRequired,
     accountsState,
     providerAccounts
@@ -172,7 +172,6 @@ function SignInDialogBody({ request }: { request: SignInProviderRequest }): Reac
       setAuthState: s.setAuthState,
       setAccountsState: s.setAccountsState,
       loadProviderAccounts: s.loadProviderAccounts,
-      retrySend: s.retrySend,
       clearAuthRequired: s.clearAuthRequired,
       // The accounts THEMSELVES, not a snapshot of them (Slice I). Both are
       // read-back caches of a host list; `accountsState` is kept current by
