@@ -44,7 +44,6 @@ const MODEL_GROUPS: EngineModelGroup[] = [
 
 /** Baseline saved config with sibling blocks that must never be clobbered. */
 const BASE_CONFIG: EngineConfig = {
-  sandbox: { mode: 'workspace-write' } as never,
   proxy: { enabled: true } as never,
   dispatch: { defaultModel: 'sonnet', allowedModels: ['sonnet'] }
 }

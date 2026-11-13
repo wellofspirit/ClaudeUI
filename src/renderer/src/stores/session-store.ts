@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
-import { VOICE_LANGUAGES } from '../../../shared/types'
+import { VOICE_LANGUAGES, DEFAULT_SANDBOX } from '../../../shared/types'
 import {
   carriesPicksIntoNewSessions,
   claudeAliasForModel,
@@ -78,6 +78,7 @@ import type {
   EngineId,
   ModelRef,
   EngineConfig,
+  ClaudeSandboxState,
   FileAttachment,
   ChatgptRateLimits,
   SubagentIndexEntry
@@ -1691,6 +1692,9 @@ export interface SessionState {
    *  Claude's settings file. Ask `autoModeAvailableForEngine`, which knows that,
    *  instead of reading this directly. */
   autoModeDisabledBySettings: boolean
+  /** The command sandbox: the `sandbox` block of Claude Code's user settings file (shared with
+   *  the claude CLI) plus whether the host can run it. Replicated (ADR-009), sealed. */
+  claudeSandbox: ClaudeSandboxState
   /** Bumped by EVERY model reload, whole or one engine's — what a Settings pane
    *  follows to re-read its models (e.g. after an opencode provider or
    *  default-model change). */
@@ -2151,6 +2155,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   // is the conservative placeholder for the window in between.
   defaultPermissionMode: 'default' as PermissionMode,
   autoModeDisabledBySettings: false,
+  claudeSandbox: { settings: DEFAULT_SANDBOX, supported: true },
   modelReloadNonce: 0,
   engineModelReloadNonces: { claude: 0, opencode: 0, pi: 0 },
   engineConfig: {},

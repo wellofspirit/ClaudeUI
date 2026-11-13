@@ -780,63 +780,58 @@ describe('AutomationManager — scheduling & runtime', () => {
     mgr.stopAll()
   })
 
-  /** Write what the Claude engine's settings screen writes (`~/.claude/ui/engines/claude.json`). */
+  /** The shared sandbox setting: the `sandbox` block of Claude Code's user settings file. */
+  const writeUserSandbox = (sandbox: Record<string, unknown>): void => {
+    vi.stubEnv('CLAUDE_CONFIG_DIR', '')
+    const dir = nodePath.join(TEMP_HOME, '.claude')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(nodePath.join(dir, 'settings.json'), JSON.stringify({ sandbox }))
+  }
   const writeClaudeEngine = (config: Record<string, unknown>): void => {
     const dir = nodePath.join(TEMP_HOME, '.claude', 'ui', 'engines')
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(nodePath.join(dir, 'claude.json'), JSON.stringify(config))
   }
-  const sandboxConfig = (enabled: boolean): Record<string, unknown> => ({
-    enabled,
-    autoAllowBashIfSandboxed: true,
-    allowUnsandboxedCommands: false,
-    excludedCommands: ['docker'],
-    network: {
-      restrictNetwork: false,
-      allowLocalBinding: false,
-      allowedDomains: [],
-      allowManagedDomainsOnly: false,
-      allowAllUnixSockets: false,
-      allowUnixSockets: []
-    },
-    filesystem: { allowWrite: [], denyWrite: [], denyRead: [] }
-  })
   const done: SdkMode = { kind: 'events', events: [{ type: 'result', total_cost_usd: 0 }] }
 
-  it('carries the engine sandbox, never auto-approved, beside the behaviour switches (A1)', async () => {
+  it('with the shared switch on, a run carries the validated user block, never auto-approved (A1)', async () => {
     const { mgr } = await freshManager()
     mgr.load()
-    writeClaudeEngine({
-      claudeConfig: { idleCompaction: true },
-      sandbox: sandboxConfig(true)
+    writeClaudeEngine({ claudeConfig: { idleCompaction: true } })
+    writeUserSandbox({
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      enableWeakerNestedSandbox: true
     })
 
     sdkMode = done
     mgr.upsert(makeAutomation({ id: 'sandbox-1' }))
     await mgr.runNow('sandbox-1')
 
-    const { claudeGatedSandboxOption } = await import('../../sdk/args')
     const options = lastSdkParams?.options
-    expect(options.sandbox).toStrictEqual(claudeGatedSandboxOption(sandboxConfig(true) as any))
-    expect(options.sandbox.autoAllowBashIfSandboxed).toBe(false)
-    expect(options.sandbox.enabled).toBe(true)
+    expect(options.sandbox).toStrictEqual({
+      enabled: true,
+      autoAllowBashIfSandboxed: false,
+      failIfUnavailable: true
+    })
     expect(options.settings).toMatchObject({ idleCompaction: true })
 
     mgr.stopAll()
   })
 
-  it('sends no sandbox key when the sandbox is off or the engine has no settings file (A2)', async () => {
+  it('with the switch off, a run carries only the inert gate key, never enabled false (A2)', async () => {
     const { mgr } = await freshManager()
     mgr.load()
+    vi.stubEnv('CLAUDE_CONFIG_DIR', '')
     mgr.upsert(makeAutomation({ id: 'sandbox-off' }))
     sdkMode = done
 
     await mgr.runNow('sandbox-off')
-    expect('sandbox' in lastSdkParams.options).toBe(false)
+    expect(lastSdkParams.options.sandbox).toStrictEqual({ autoAllowBashIfSandboxed: false })
 
-    writeClaudeEngine({ sandbox: sandboxConfig(false) })
+    writeUserSandbox({ enabled: false, excludedCommands: ['docker'] })
     await mgr.runNow('sandbox-off')
-    expect('sandbox' in lastSdkParams.options).toBe(false)
+    expect(lastSdkParams.options.sandbox).toStrictEqual({ autoAllowBashIfSandboxed: false })
 
     mgr.stopAll()
   })
@@ -844,6 +839,7 @@ describe('AutomationManager — scheduling & runtime', () => {
   it('reads the sandbox per run, a follow-up included (A3)', async () => {
     const { mgr } = await freshManager()
     mgr.load()
+    vi.stubEnv('CLAUDE_CONFIG_DIR', '')
     mgr.upsert(makeAutomation({ id: 'sandbox-3' }))
     sdkMode = {
       kind: 'events',
@@ -854,14 +850,15 @@ describe('AutomationManager — scheduling & runtime', () => {
     }
 
     await mgr.runNow('sandbox-3')
-    expect('sandbox' in lastSdkParams.options).toBe(false)
+    expect(lastSdkParams.options.sandbox).toStrictEqual({ autoAllowBashIfSandboxed: false })
 
-    writeClaudeEngine({ sandbox: sandboxConfig(true) })
+    writeUserSandbox({ enabled: true })
     await mgr.runNow('sandbox-3')
+    expect(lastSdkParams.options.sandbox.enabled).toBe(true)
     expect(lastSdkParams.options.sandbox.autoAllowBashIfSandboxed).toBe(false)
 
     // Changed again before the follow-up: it runs under the setting of the moment.
-    writeClaudeEngine({ sandbox: { ...sandboxConfig(true), excludedCommands: ['make'] } })
+    writeUserSandbox({ enabled: true, excludedCommands: ['make'] })
     const before = sdkCalls.length
     mgr.sendMessage('sandbox-3', 'more')
     await vi.waitFor(() => expect(sdkCalls.length).toBeGreaterThan(before))

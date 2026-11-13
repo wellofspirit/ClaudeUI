@@ -38,6 +38,8 @@ import { seedLinkState } from './session-links'
 import { interruptStaleDispatchTargets } from './dispatch-target-ledger'
 import { sweepOrphanDispatchTargets } from './dispatch-target-end'
 import { loadClaudePermissions } from './claude-settings'
+import { claudeSandboxSupported, readClaudeSandboxState } from './claude-sandbox-settings'
+import { DEFAULT_SANDBOX } from '../../shared/types/engine-config'
 import { claudeAutoModeDisabled } from '../../shared/permission-modes'
 import { listDirectories } from './session-history'
 import { historyFor } from './engine-history'
@@ -328,6 +330,20 @@ export async function seedCanonicalAppState(): Promise<void> {
     })
   } catch (err) {
     logger.warn(LOG_SOURCE, 'auto-mode gate seed failed', err)
+  }
+
+  try {
+    // The command sandbox: the user-scope block of Claude Code's settings file. A file that
+    // cannot be read falls back to the default settings, like every seed here; whether the
+    // host can run the sandbox is known either way.
+    syncCore.setAppState({
+      claudeSandbox: readClaudeSandboxState() ?? {
+        settings: DEFAULT_SANDBOX,
+        supported: claudeSandboxSupported()
+      }
+    })
+  } catch (err) {
+    logger.warn(LOG_SOURCE, 'sandbox seed failed', err)
   }
 
   await refreshCanonicalDirectories()

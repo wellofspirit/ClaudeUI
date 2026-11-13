@@ -68,6 +68,7 @@ import { logger } from '../services/logger'
 import { loadPersistedPrices, refreshPricesIfStale } from '../services/opencode-pricing'
 import { usageFetcher } from '../services/usage-fetcher'
 import { claudeHostTokenKeeper } from '../services/claude-host-token'
+import { migrateClaudeSandboxToSettingsFile } from '../services/claude-sandbox-settings'
 import { startDetectionScheduler } from '../harness/detect/scheduler'
 import { collectHarnessGarbage } from '../harness/install/gc'
 import { startHarnessUpdater } from '../harness/install/updater'
@@ -177,6 +178,10 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // mode. It reads no identity and subscribes before the boot-time apply, which
   // is what arms it for the first account.
   claudeHostTokenKeeper.start()
+
+  // The Claude sandbox moves into Claude Code's settings file BEFORE the session graph (whose
+  // seed reads it) and before anything can spawn (a spawn reads it). Synchronous, never throws.
+  migrateClaudeSandboxToSettingsFile()
 
   // Sessions, config, git, usage, the canonical seeds and the file watchers.
   // Takes no window since 4d — see registerSessionIpc's doc comment.

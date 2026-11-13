@@ -1176,7 +1176,7 @@ export function SettingsToggle({
    * unreachable on a phone and the 10px muted variant failed WCAG AA.
    */
   tooltip?: string
-  description?: string
+  description?: React.ReactNode
   /** The engine-native config key this toggle writes (11px mono, under the text). */
   keyText?: string
   engine?: EngineId
@@ -1517,6 +1517,7 @@ export function SandboxListSetting({
   dimmed,
   disabled,
   indent,
+  error,
   testid,
   validate,
   maxItems
@@ -1535,6 +1536,8 @@ export function SandboxListSetting({
   dimmed?: boolean
   disabled?: boolean
   indent?: boolean
+  /** A refused write, in the danger colour under the description. */
+  error?: string
   testid?: string
 } & ListEntryRules): React.JSX.Element {
   const editor = (
@@ -1569,6 +1572,7 @@ export function SandboxListSetting({
       description={description}
       dimmed={dimmed}
       indent={indent}
+      error={error}
     >
       <span className="block">
         {/* Callers pass BOTH a description and a long tooltip (the trust lists),

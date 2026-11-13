@@ -14,6 +14,7 @@ import { seedCanonicalAppState, refreshCanonicalDirectories } from '../services/
 import { voiceRefusal } from '../services/voice-gate'
 import { desktopVoiceOwner, desktopVoiceOwnerKey, voiceRelay } from '../services/voice-relay'
 import { startConfigWatcher } from '../services/ui-config'
+import { startClaudeSandboxWatcher } from '../services/claude-sandbox-watch'
 import { gitWatchRegistry } from '../services/git-watch-registry'
 import { usageFetcher } from '../services/usage-fetcher'
 import { serviceSession } from '../services/service-session'
@@ -221,6 +222,8 @@ const SESSION_IPC_CHANNELS = [
   'claude:get-cleanup-period',
   'claude:set-cleanup-period',
   'claude:set-disable-auto-mode',
+  'claude:set-sandbox',
+  'claude:sandbox-scopes',
   'mcp:status',
   'mcp:toggle',
   'mcp:reconnect',
@@ -443,6 +446,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
   // Watch ~/.claude/ui/ config files for cross-instance sync. The watcher emits
   // through the funnel now, so it no longer needs an extra-window accessor.
   startConfigWatcher()
+  // The shared sandbox block of Claude Code's own settings file: an outside edit shows live.
+  startClaudeSandboxWatcher()
 
   // SyncCore phase 4b: canonical state is the `sync-full` source, so the fields
   // that come from files/queries rather than events have to be in it before the

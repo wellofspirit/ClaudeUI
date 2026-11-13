@@ -38,6 +38,8 @@ import type {
 } from '../../../shared/remote-protocol'
 import type { SessionLinkInfo } from '../../../shared/session-links'
 import type { ContextPressureBanner } from '../../../shared/context-pressure'
+import { DEFAULT_SANDBOX } from '../../../shared/types/engine-config'
+import type { ClaudeSandboxState } from '../../../shared/types/engine-config'
 import { resolveClaudeCapabilities } from '../../../shared/model-capabilities'
 
 export interface CanonicalSessionState {
@@ -115,6 +117,8 @@ export interface CanonicalState {
   activeSessionId: string | null
   settings: Record<string, unknown>
   autoModeDisabledBySettings: boolean
+  /** The command sandbox: the user-scope block of Claude Code's settings file (ADR-009). */
+  claudeSandbox: ClaudeSandboxState
   recentSessionIds: string[]
   pinnedSessionIds: string[]
   customTitles: Record<string, string>
@@ -215,6 +219,7 @@ export function emptyCanonicalState(): CanonicalState {
     activeSessionId: null,
     settings: {},
     autoModeDisabledBySettings: false,
+    claudeSandbox: { settings: DEFAULT_SANDBOX, supported: true },
     recentSessionIds: [],
     pinnedSessionIds: [],
     customTitles: {},
@@ -289,6 +294,7 @@ export function fromSnapshot(snapshot: FullStateSnapshot): CanonicalState {
     activeSessionId: snapshot.activeSessionId ?? null,
     settings: snapshot.settings ?? {},
     autoModeDisabledBySettings: snapshot.autoModeDisabledBySettings ?? false,
+    claudeSandbox: snapshot.claudeSandbox ?? { settings: DEFAULT_SANDBOX, supported: true },
     recentSessionIds: snapshot.recentSessionIds ?? [],
     pinnedSessionIds: snapshot.pinnedSessionIds ?? [],
     customTitles: snapshot.customTitles ?? {},
@@ -335,6 +341,7 @@ export function toSnapshot(state: CanonicalState, seq: number): FullStateSnapsho
     activeSessionId: state.activeSessionId,
     settings: state.settings,
     autoModeDisabledBySettings: state.autoModeDisabledBySettings,
+    claudeSandbox: state.claudeSandbox,
     recentSessionIds: state.recentSessionIds,
     pinnedSessionIds: state.pinnedSessionIds,
     customTitles: state.customTitles,

@@ -1,8 +1,8 @@
 /**
  * @vitest-environment node
  *
- * Tests that session:create reads sandbox from loadEngineConfig('claude')
- * and proxy from loadEngineConfig('claude'), not from loadSettings().
+ * Tests that session:create reads proxy from loadEngineConfig('claude'), not from
+ * loadSettings(), and that no sandbox rides in the spawn options (it is the shared file's).
  *
  * Follows the same pattern as session.ipc.test.ts.
  */
@@ -69,6 +69,9 @@ const uiConfigMocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../../services/ui-config', () => uiConfigMocks)
+vi.mock('../../services/claude-sandbox-watch', () => ({
+  startClaudeSandboxWatcher: vi.fn(() => () => {})
+}))
 vi.mock('../../services/git-service', () => ({
   gitServiceManager: {
     get: vi.fn(() => ({
@@ -278,23 +281,8 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
   })
 
-  it('passes sandbox from engine config to session manager create()', async () => {
-    const sandboxConfig = {
-      enabled: true,
-      autoAllowBashIfSandboxed: true,
-      allowUnsandboxedCommands: false,
-      network: {
-        restrictNetwork: false,
-        allowLocalBinding: false,
-        allowedDomains: [],
-        allowManagedDomainsOnly: false,
-        allowAllUnixSockets: false,
-        allowUnixSockets: []
-      },
-      filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-      excludedCommands: []
-    }
-    uiConfigMocks.loadEngineConfig.mockReturnValue({ sandbox: sandboxConfig })
+  it('carries no sandbox into the spawn options: the session reads the shared file itself', async () => {
+    uiConfigMocks.loadEngineConfig.mockReturnValue({ sandbox: { enabled: true } })
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
     await harness.call('session:create', 'routing-2', { cwd: '/tmp/cwd' })
@@ -302,31 +290,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     expect(sessionManagerSpies.create).toHaveBeenCalled()
     // 4th argument (index 3) is the EngineSpawnOptions object in the create() call
     const callArgs = sessionManagerSpies.create.mock.calls[0]
-    expect(callArgs[3].sandboxConfig).toEqual(sandboxConfig)
-  })
-
-  it('passes undefined sandbox when engine config has no sandbox', async () => {
-    uiConfigMocks.loadEngineConfig.mockReturnValue({})
-    uiConfigMocks.loadVendorConfig.mockReturnValue({})
-
-    await harness.call('session:create', 'routing-3', { cwd: '/tmp/cwd' })
-
-    expect(sessionManagerSpies.create).toHaveBeenCalled()
-    const callArgs = sessionManagerSpies.create.mock.calls[0]
-    expect(callArgs[3].sandboxConfig).toBeUndefined()
-  })
-
-  it('does NOT read sandbox from loadSettings()', async () => {
-    uiConfigMocks.loadSettings.mockReturnValue({ sandbox: { enabled: true } })
-    uiConfigMocks.loadEngineConfig.mockReturnValue({})
-    uiConfigMocks.loadVendorConfig.mockReturnValue({})
-
-    await harness.call('session:create', 'routing-4', { cwd: '/tmp/cwd' })
-
-    const callArgs = sessionManagerSpies.create.mock.calls[0]
-    // sandbox should be undefined because it came from engine config (which returned {})
-    // NOT from loadSettings
-    expect(callArgs[3].sandboxConfig).toBeUndefined()
+    expect(callArgs[3]).not.toHaveProperty('sandboxConfig')
   })
 
   it('#6 vendor-at-spawn: derives "anthropic" vendor from Claude ModelRef (no hardcode)', async () => {

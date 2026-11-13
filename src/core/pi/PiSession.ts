@@ -705,8 +705,8 @@ export class PiSession extends BaseSession {
         catalog: () => getPiAllowedModelCatalog()
       }
     )
-    // sandboxConfig/thinkingMode are intentionally unread — Claude-only
-    // options per EngineSpawnOptions' docs / ADR-030. `effort` IS consumed
+    // thinkingMode is intentionally unread — a Claude-only
+    // option per EngineSpawnOptions' docs / ADR-030. `effort` IS consumed
     // (M2b) — see doStart()'s spawn-time effort application. resumeSessionAt/
     // forkSession are consumed (M5c) — see doStart()'s fork block.
     this.requestedModel = opts.model

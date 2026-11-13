@@ -25,6 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { TestIpcBridge } from '@test/bridges/test-ipc-bridge'
 import { useSessionStore } from '../../../stores/session-store'
+import { DEFAULT_SANDBOX } from '../../../../../shared/types'
 import {
   makePendingApproval,
   makeSessionStatus,
@@ -42,6 +43,7 @@ import { seed, resetReplicaSeam, mirrorStoreIntoReplica } from '@test/helpers/re
 let bridge: TestIpcBridge
 
 /** Captured args from the most recent approval-response IPC call */
+let sandboxPatches: unknown[] = []
 let lastApprovalResponse: {
   routingId: string
   requestId: string
@@ -87,6 +89,10 @@ beforeEach(() => {
         answers,
         suggestions
       ),
+    setClaudeSandbox: (patch: { excludedCommands?: string[] }) => {
+      sandboxPatches.push(patch)
+      return Promise.resolve()
+    },
     saveSessionConfig: () => {},
     saveSlashCommands: () => {},
     saveSettings: () => {},
@@ -106,13 +112,8 @@ beforeEach(() => {
     customTitles: {}
   })
   mirrorStoreIntoReplica()
-  // Reset sandbox exclusions (mutated by sandbox escape tests)
-  const currentSandbox = useSessionStore.getState().engineConfig.sandbox
-  if (currentSandbox) {
-    useSessionStore
-      .getState()
-      .setEngineConfig({ sandbox: { ...currentSandbox, excludedCommands: [] } })
-  }
+  sandboxPatches = []
+  useSessionStore.setState({ claudeSandbox: { settings: DEFAULT_SANDBOX, supported: true } })
 })
 
 afterEach(() => {
@@ -133,8 +134,7 @@ async function simulateApprovalResponse(
     checkedSuggestions?: boolean[]
   } = {}
 ): Promise<void> {
-  const { activeSessionId, sessions, dismissApproval, engineConfig, setEngineConfig } =
-    useSessionStore.getState()
+  const { activeSessionId, sessions, dismissApproval, claudeSandbox } = useSessionStore.getState()
   if (!activeSessionId) return
 
   const session = sessions[activeSessionId]
@@ -144,32 +144,15 @@ async function simulateApprovalResponse(
   const alwaysAllow = opts.alwaysAllow ?? false
   const checkedSuggestions =
     opts.checkedSuggestions ?? (approval.suggestions || []).map(() => false)
-  const sandboxSettings = engineConfig.sandbox
+  const sandboxSettings = claudeSandbox.settings
   const isSandboxEscape = !!approval.input?.dangerouslyDisableSandbox
 
   // Sandbox exclusion logic
   if (decision === 'allow' && alwaysAllow && isSandboxEscape && approval.input?.command) {
     const cmd = String(approval.input.command)
-    const currentExcluded = sandboxSettings?.excludedCommands ?? []
+    const currentExcluded = sandboxSettings.excludedCommands
     if (!currentExcluded.includes(cmd)) {
-      const nextSandbox = sandboxSettings
-        ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
-        : {
-            enabled: false,
-            autoAllowBashIfSandboxed: false,
-            allowUnsandboxedCommands: false,
-            network: {
-              restrictNetwork: false,
-              allowLocalBinding: false,
-              allowedDomains: [],
-              allowManagedDomainsOnly: false,
-              allowAllUnixSockets: false,
-              allowUnixSockets: []
-            },
-            filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-            excludedCommands: [cmd]
-          }
-      setEngineConfig({ ...engineConfig, sandbox: nextSandbox })
+      await window.api.setClaudeSandbox({ excludedCommands: [...currentExcluded, cmd] })
     }
   }
 
@@ -297,8 +280,7 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().engineConfig.sandbox
-    expect(sandbox?.excludedCommands).toContain('dangerous-cmd')
+    expect(sandboxPatches).toEqual([{ excludedCommands: ['dangerous-cmd'] }])
   })
 
   it('does not add to sandbox exclusions on deny', async () => {
@@ -309,8 +291,7 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('deny', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().engineConfig.sandbox
-    expect(sandbox?.excludedCommands ?? []).not.toContain('dangerous-cmd')
+    expect(sandboxPatches).toEqual([])
   })
 
   it('does not add to sandbox exclusions when alwaysAllow is false', async () => {
@@ -321,33 +302,16 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: false })
 
-    const sandbox = useSessionStore.getState().engineConfig.sandbox
-    expect(sandbox?.excludedCommands ?? []).not.toContain('dangerous-cmd')
+    expect(sandboxPatches).toEqual([])
   })
 
   it('does not duplicate command in sandbox exclusion list', async () => {
     // Pre-populate exclusion list
-    const store = useSessionStore.getState()
-    const existing = store.engineConfig.sandbox
-    store.setEngineConfig({
-      ...store.engineConfig,
-      sandbox: existing
-        ? { ...existing, excludedCommands: ['dangerous-cmd'] }
-        : {
-            enabled: false,
-            autoAllowBashIfSandboxed: false,
-            allowUnsandboxedCommands: false,
-            network: {
-              restrictNetwork: false,
-              allowLocalBinding: false,
-              allowedDomains: [],
-              allowManagedDomainsOnly: false,
-              allowAllUnixSockets: false,
-              allowUnixSockets: []
-            },
-            filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-            excludedCommands: ['dangerous-cmd']
-          }
+    useSessionStore.setState({
+      claudeSandbox: {
+        settings: { ...DEFAULT_SANDBOX, excludedCommands: ['dangerous-cmd'] },
+        supported: true
+      }
     })
 
     setup({
@@ -357,10 +321,7 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().engineConfig.sandbox
-    expect(
-      (sandbox?.excludedCommands ?? []).filter((c: string) => c === 'dangerous-cmd')
-    ).toHaveLength(1)
+    expect(sandboxPatches).toEqual([])
   })
 
   it('does not modify sandbox exclusions for non-sandbox-escape approvals', async () => {
@@ -371,8 +332,7 @@ describe('FloatingApproval approval response flow', () => {
 
     await simulateApprovalResponse('allow', { alwaysAllow: true })
 
-    const sandbox = useSessionStore.getState().engineConfig.sandbox
-    expect(sandbox?.excludedCommands ?? []).not.toContain('echo hello')
+    expect(sandboxPatches).toEqual([])
   })
 
   it('does nothing when no active session', async () => {

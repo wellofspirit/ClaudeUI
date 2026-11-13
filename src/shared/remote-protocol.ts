@@ -1007,6 +1007,7 @@ export interface WsVoiceAudio {
 // `term-data`, neither enters the event ring or audit log; item state is carried
 // by snapshots and a tail is a lossy preview of a durable reliable event.
 export type { StreamEventFrame, StreamLaneFrame } from '../core/shared/sync/stream'
+import type { ClaudeSandboxState } from './types/engine-config'
 import type { StreamEventFrame } from '../core/shared/sync/stream'
 import type { SessionLinkInfo } from './session-links'
 import type { ContextPressureBanner } from './context-pressure'
@@ -1211,6 +1212,12 @@ export interface FullStateSnapshot {
    * that mixed-version window.
    */
   autoModeDisabledBySettings?: boolean
+  /**
+   * The command sandbox: the user-scope `sandbox` block of the host's Claude Code settings
+   * file plus whether the host can run it. Optional: an older host omits it, which reads as the
+   * default (off, supported).
+   */
+  claudeSandbox?: ClaudeSandboxState
   /** Recent session IDs */
   recentSessionIds: string[]
   /** Pinned session IDs */

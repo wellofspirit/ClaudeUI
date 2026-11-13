@@ -414,9 +414,7 @@ function useUnmatchedApprovals(): PendingApproval[] {
 function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.Element {
   const activeSessionId = useSessionStore((s) => s.activeSessionId)
   const dismissApproval = useSessionStore((s) => s.dismissApproval)
-  const setEngineConfig = useSessionStore((s) => s.setEngineConfig)
-  const engineConfig = useSessionStore((s) => s.engineConfig)
-  const sandboxSettings = engineConfig.sandbox
+  const sandboxSettings = useSessionStore((s) => s.claudeSandbox.settings)
   const permissionMode = useActiveSession((s) => s.permissionMode)
   const engineId = useActiveSession((s) => s.status.engineId)
   const subagentMessages = useActiveSession((s) => s.subagentMessages)
@@ -441,28 +439,10 @@ function ApprovalCard({ approval }: { approval: PendingApproval }): React.JSX.El
       approval.input?.command
     ) {
       const cmd = String(approval.input.command)
-      const currentExcluded = sandboxSettings?.excludedCommands ?? []
+      const currentExcluded = sandboxSettings.excludedCommands
       if (!currentExcluded.includes(cmd)) {
-        const nextSandbox = sandboxSettings
-          ? { ...sandboxSettings, excludedCommands: [...currentExcluded, cmd] }
-          : {
-              enabled: false,
-              autoAllowBashIfSandboxed: false,
-              allowUnsandboxedCommands: false,
-              network: {
-                restrictNetwork: false,
-                allowLocalBinding: false,
-                allowedDomains: [],
-                allowManagedDomainsOnly: false,
-                allowAllUnixSockets: false,
-                allowUnixSockets: []
-              },
-              filesystem: { allowWrite: [], denyWrite: [], denyRead: [] },
-              excludedCommands: [cmd]
-            }
-        const nextConfig = { ...engineConfig, sandbox: nextSandbox }
-        setEngineConfig(nextConfig)
-        window.api.saveEngineConfig('claude', nextConfig).catch(() => {})
+        // The shared sandbox setting (Claude Code's settings file); the echo updates the store.
+        window.api.setClaudeSandbox({ excludedCommands: [...currentExcluded, cmd] }).catch(() => {})
       }
     }
 

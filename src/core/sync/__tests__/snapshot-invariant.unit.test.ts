@@ -54,6 +54,7 @@ import {
 import { fromSnapshot, type CanonicalState } from '../../shared/sync/state'
 import type { FullStateSnapshot } from '../../../shared/remote-protocol'
 import type { SessionStatus } from '../../../shared/types'
+import { DEFAULT_SANDBOX } from '../../../shared/types/engine-config'
 
 /** Delivery no longer selects targets (4c) — the class does. */
 const ALL: Delivery = {}
@@ -208,6 +209,10 @@ const EXTRA_EVENTS: PoolEvent[] = [
   ['session:conversation-cleared', 'uuid-9', { permissionMode: 'default' }],
   ['session:removed', 'temp-1'],
   ['config:claude-auto-mode-changed', true],
+  [
+    'config:claude-sandbox-changed',
+    { settings: { ...DEFAULT_SANDBOX, enabled: true }, supported: false }
+  ],
   // The 4b payload additions: an event-carried user identity and an
   // emitter-timed thinking span. Both must survive a snapshot + catchup fold
   // exactly like everything else.

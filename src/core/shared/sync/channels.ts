@@ -374,6 +374,11 @@ const SYNC_CHANNEL_SPECS = {
     canonical: true,
     why: 'Claude Code disableAutoMode (ADR-050), written by the Settings control. Folds into the app-level autoModeDisabledBySettings, which the boot seed also fills; a client cannot read the host settings file.'
   },
+  'config:claude-sandbox-changed': {
+    cls: 'replicated',
+    canonical: true,
+    why: "The command sandbox (ADR-009): the user-scope sandbox block of Claude Code's settings file, written by the Settings control or an outside edit the watcher notices. Folds into the app-level claudeSandbox, which the boot seed also fills; a client cannot read the host settings file."
+  },
   'config:sessions-changed': {
     cls: 'replicated',
     canonical: true,

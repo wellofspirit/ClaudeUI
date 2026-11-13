@@ -160,7 +160,7 @@ export function saveCleanupPeriodDays(days: number): void {
 // the top level, so turning it off clears both. Unlike the older writers this
 // one reads strictly: a file it cannot parse is refused, never replaced.
 
-function readJsonStrict(filePath: string): Record<string, unknown> {
+export function readJsonStrict(filePath: string): Record<string, unknown> {
   let text: string
   try {
     text = fs.readFileSync(filePath, 'utf-8')

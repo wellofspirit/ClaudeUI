@@ -79,7 +79,7 @@ const ENGINES: EngineFixture[] = [
     first: { value: 'sonnet', displayName: 'Sonnet' },
     second: { value: 'haiku', displayName: 'Haiku' },
     foreign: OPENCODE_FOREIGN,
-    siblings: { sandbox: { mode: 'workspace-write' } as never, proxy: { enabled: true } as never }
+    siblings: { proxy: { enabled: true } as never }
   },
   {
     label: 'Opencode',

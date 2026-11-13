@@ -7,6 +7,7 @@ import type {
   McpServerScope,
   McpSetServersResult
 } from '../mcp'
+import type { ClaudeSandboxScope, SandboxSettingsPatch } from '../engine-config'
 
 export interface McpAPI {
   mcpServerStatus(routingId: string): Promise<McpServerInfo[]>
@@ -65,4 +66,11 @@ export interface McpAPI {
    *  readable message when that file is not valid JSON. The applied value arrives as the
    *  `config:claude-auto-mode-changed` event, not as the result. */
   setClaudeDisableAutoMode(disabled: boolean): Promise<void>
+  /** Save the fields the user changed into the `sandbox` block of Claude Code's user settings
+   *  file. Rejects with a readable message when the file is not valid JSON or the host cannot
+   *  run the sandbox. The applied state arrives as the `config:claude-sandbox-changed` event,
+   *  not as the result. */
+  setClaudeSandbox(patch: SandboxSettingsPatch): Promise<void>
+  /** Which of the project, local and managed settings files turn the sandbox on for `cwd`. */
+  claudeSandboxScopes(cwd: string): Promise<ClaudeSandboxScope[]>
 }

@@ -924,8 +924,8 @@ export const PAGES: SettingsPage[] = [
         label: 'Sandbox',
         requires: 'sandbox',
         appliesOn: 'next-session',
-        note: 'Applies to new Claude sessions.',
-        storage: 'engines/claude.json',
+        note: 'Shared with the claude CLI; applies to Claude sessions started after the change.',
+        storage: '~/.claude/settings.json',
         items: itemsOf('sandbox')
       },
       {
