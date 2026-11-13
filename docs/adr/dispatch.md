@@ -422,6 +422,50 @@ at its next spawn or resume.
 Consequence, accepted: a broad additional directory widens every target as much as it widens the user's own sessions
 (a workspace root makes every project under it local to every target and reads there skip the judge).
 
+## A Claude target runs under the Claude engine's sandbox and at a new session's effort (ADR-116)
+
+A Claude dispatch target is a Claude Code process of ClaudeUI's, so the two Claude engine settings that decide how
+its commands run apply to it as they do to a session: the command sandbox (`engines/claude.json#sandbox`) and the
+starting effort for its model. A target loads no settings source, so without this its Bash ran unsandboxed while
+the sandbox was enabled, and it ran at Claude Code's own default effort.
+
+- **Sandbox.** The engine's sandbox settings reach a target through the mapping a session uses
+  (`claudeSandboxOption`, `src/core/sdk/args.ts`; one function, so the two are never confined by different rules)
+  and in the same `--settings` JSON as its behaviour switches and its deny and ask rules. As for a session, the
+  sandbox is required to start: where it cannot run (Windows as Claude Code ships, Linux without bubblewrap)
+  Claude Code refuses to start and the dispatch fails; a target never falls back to running unsandboxed. The
+  filesystem and network lists, the excluded commands and `allowUnsandboxedCommands` are the engine's.
+- **Never auto-approved.** `autoAllowBashIfSandboxed` is the one setting a target does not take: it is always sent
+  as `false`. A sandboxed command of a target is gated by everything that gates its Bash without a sandbox: the
+  forwarded approval card, Claude Code's classifier in auto mode, the user's deny and ask rules, and the host's
+  matcher on every forwarded ask (ADR-085). Two reasons. Claude Code suspends the auto-approve in plan mode, and a
+  target never runs in plan (`plan` maps to `default`, ADR-088), so a plan-mode session's target would run commands
+  a plan-mode session asks about. And an auto-approved command never reaches the host, so a target's deny and ask
+  rules would be matched by Claude Code's text prefix alone. The key is sent explicitly because Claude Code reads
+  an absent one as true. The sandbox therefore only ever tightens a target.
+- **Outside the sandbox.** An excluded command, and a command the agent asks to run unsandboxed where the engine
+  allows it (`dangerouslyDisableSandbox`), go through the target's normal gate. A connection the sandbox refuses is
+  asked about as `SandboxNetworkAccess` and forwarded to the dispatching session's user like any other ask.
+- **Effort.** A target starts at the effort a new Claude session gets for its model with no pick of its own: the
+  user's saved starting effort for the model, else the model's default, clamped to the levels the model accepts
+  (the ladder an automation run uses, `resolveAutomationEffort`). No `--effort` is sent for a model that takes
+  none, nor for `default` while the model catalog has no row for it: which model it names is then unknown, and a
+  guess would replace Claude Code's own default. `dispatch_agent` has no effort argument.
+- **Read at spawn, stored nowhere.** Both are read when a target's process is spawned, for a new target and for a
+  resume; the ledger records neither. A target resumed after a setting changed runs under the setting of that
+  moment, on or off. A process already running keeps what it was spawned with, including a run that continues a
+  target whose earlier result is still being delivered. This is the binding a target's `--settings` rules and
+  `--add-dir` scope have (ADR-108).
+- **Nothing else changes.** A target still loads no settings source, gets no hosted tools, and keeps its own
+  permission mode and rule handling (ADR-033, ADR-085, ADR-088).
+- **A dead process says why.** Claude Code explains a refusal to start on stderr only, so the failure a target's
+  run reports quotes the last lines its process wrote there.
+
+Rejected: taking `autoAllowBashIfSandboxed` as a session does (wider than a session in plan mode, and it removes
+the host-side deny and ask matching from a target's Bash); recording on the ledger row that a target was created
+sandboxed, so it stays so (the setting is the user's, and a session resumed after the change follows it too); an
+effort argument on `dispatch_agent`.
+
 ## Sessions start, hand off to and message other sessions with one tool family (ADR-104)
 
 A hosted family on every engine, with one description source (`src/shared/session-tools-description.ts`):

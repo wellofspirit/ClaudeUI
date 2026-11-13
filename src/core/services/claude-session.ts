@@ -58,7 +58,7 @@ import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-p
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { loadEngineConfig, saveSlashCommands } from './ui-config'
-import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeBehaviorSettings, claudeSandboxOption } from '../sdk/args'
 import { readDisabledMcpServers } from './claude-mcp'
 import { loadClaudeUiLegacyMcpServers } from './claude-mcp-files'
 import { resolveClaudeSkillCatalog } from './claude-skill-catalog'
@@ -954,6 +954,7 @@ export class ClaudeSession extends BaseSession {
         if (myAbort.signal.aborted) return
       }
 
+      const sandbox = claudeSandboxOption(this.sandboxConfig)
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -1002,66 +1003,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
                 : ''
             }`
           },
-          ...(this.sandboxConfig?.enabled
-            ? {
-                sandbox: {
-                  enabled: true,
-                  autoAllowBashIfSandboxed: this.sandboxConfig.autoAllowBashIfSandboxed,
-                  allowUnsandboxedCommands: this.sandboxConfig.allowUnsandboxedCommands,
-                  excludedCommands: this.sandboxConfig.excludedCommands,
-                  // Only pass network config when restrictions are needed.
-                  // Omitting the network key entirely lets the SDK skip domain filtering,
-                  // which is what "restrictNetwork: false" means.
-                  ...(this.sandboxConfig.network.restrictNetwork
-                    ? {
-                        network: {
-                          allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
-                          allowedDomains: this.sandboxConfig.network.allowedDomains,
-                          ...(this.sandboxConfig.network.allowManagedDomainsOnly
-                            ? { allowManagedDomainsOnly: true }
-                            : {}),
-                          ...(this.sandboxConfig.network.allowAllUnixSockets
-                            ? { allowAllUnixSockets: true }
-                            : {}),
-                          ...(this.sandboxConfig.network.allowUnixSockets.length > 0
-                            ? { allowUnixSockets: this.sandboxConfig.network.allowUnixSockets }
-                            : {})
-                        }
-                      }
-                    : {
-                        // No network restrictions — only pass through binding/socket options if set
-                        ...(this.sandboxConfig.network.allowLocalBinding ||
-                        this.sandboxConfig.network.allowAllUnixSockets ||
-                        this.sandboxConfig.network.allowUnixSockets.length > 0
-                          ? {
-                              network: {
-                                allowLocalBinding: this.sandboxConfig.network.allowLocalBinding,
-                                ...(this.sandboxConfig.network.allowAllUnixSockets
-                                  ? { allowAllUnixSockets: true }
-                                  : {}),
-                                ...(this.sandboxConfig.network.allowUnixSockets.length > 0
-                                  ? {
-                                      allowUnixSockets: this.sandboxConfig.network.allowUnixSockets
-                                    }
-                                  : {})
-                              }
-                            }
-                          : {})
-                      }),
-                  filesystem: {
-                    ...(this.sandboxConfig.filesystem.allowWrite.length > 0
-                      ? { allowWrite: this.sandboxConfig.filesystem.allowWrite }
-                      : {}),
-                    ...(this.sandboxConfig.filesystem.denyWrite.length > 0
-                      ? { denyWrite: this.sandboxConfig.filesystem.denyWrite }
-                      : {}),
-                    ...(this.sandboxConfig.filesystem.denyRead.length > 0
-                      ? { denyRead: this.sandboxConfig.filesystem.denyRead }
-                      : {})
-                  }
-                }
-              }
-            : {}),
+          // The engine's sandbox settings; a dispatched Claude agent is confined by the same
+          // mapping (ADR-116).
+          ...(sandbox ? { sandbox } : {}),
           settingSources: ['user', 'project', 'local'],
           // `--settings` flag settings: the two cli.js behaviour switches the
           // Claude engine's settings own (read fresh per spawn, so a change

@@ -9,7 +9,7 @@ record, headed by its title and ADR numbers; a superseded or removed one is a li
 `ADR-054 decision 6`) is under the same label inside the section.
 
 Adding or changing a decision: ADR-026, "Decision records" (`development-workflow.md`). The highest
-number here is ADR-115; a new decision takes the next number that is free on every remote branch.
+number here is ADR-116; a new decision takes the next number that is free on every remote branch.
 
 Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git history keeps them:
 `git log --diff-filter=D --name-only -- docs/adr` finds the commit that removed them.
@@ -29,7 +29,7 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
   Governs: `src/core/`, `src/core/host.ts`, `src/core/boot/`, `src/core/ipc/desktop-transport-binding.ts`, `src/core/services/sqlite-driver.ts`, `src/core/services/sqlite/`, `src/main/`, `src/server/`, `src/renderer/web.html`, `electron.vite.config.ts`, `scripts/build-server.mjs`, `src/web/`
 - [development-workflow.md](development-workflow.md) — Development workflow, testing and CI. ADRs 008, 013, 026, 027, 061, 113.
   Governs: `scripts/gates.sh`, `vitest.config.ts`, `src/test/setup/`, `eslint.config.mjs`, `tsconfig.web.json`, `tsconfig.node.json`, `.github/workflows/`, `src/web/`, `src/renderer/src/`, `scripts/app-shot.mjs`, `electron-builder.yml`, `CLAUDE.md`
-- [dispatch.md](dispatch.md) — Cross-engine dispatch and session tools. ADRs 033, 088, 104, 105, 108.
+- [dispatch.md](dispatch.md) — Cross-engine dispatch and session tools. ADRs 033, 088, 104, 105, 108, 116.
   Governs: `src/core/services/cross-engine-dispatcher.ts`, `src/core/services/collab-tool.ts`, `src/core/services/dispatch-claude-targets.ts`, `src/core/services/dispatch-opencode-targets.ts`, `src/core/services/dispatch-pi-targets.ts`, `src/core/services/dispatch-target-judge.ts`, `src/core/services/dispatch-target-ledger.ts`, `src/core/services/dispatch-workdir.ts`, `src/core/services/session-tools.ts`, `src/core/services/session-delivery.ts`, `src/core/services/session-links.ts`, `src/shared/handback-frame.ts`, `src/shared/dispatch-agent-description.ts`, `src/shared/dispatch-concurrency.ts`, `src/shared/session-tools-description.ts`, `src/core/providers/turn-origin-ledger.ts`, `src/core/opencode/opencode-hosted-tools.ts`
 - [engine-model.md](engine-model.md) — The engine model: engines, vendors, accounts, capabilities and the session contract. ADRs 016, 017, 018, 030, 038, 045, 053, 066, 069, 090.
   Governs: `src/core/providers/`, `src/shared/model-capabilities.ts`, `src/shared/types/engine.ts`, `src/core/ipc/approval-response.ts`, `src/core/shared/`, `src/core/opencode/`, `src/core/pi/`, `src/core/services/claude-session.ts`, `src/renderer/src/hooks/`
@@ -181,4 +181,5 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
 - ADR-113 · current · [The test suite runs on `vmForks`, with a per-file home and process guards](development-workflow.md#the-test-suite-runs-on-vmforks-with-a-per-file-home-and-process-guards-adr-113) in `development-workflow.md`
 - ADR-114 · current · [New sessions can start in a worktree, created at the first send](terminals-and-worktrees.md#new-sessions-can-start-in-a-worktree-created-at-the-first-send-adr-114) in `terminals-and-worktrees.md`
 - ADR-115 · current · [Claude skills and commands are offered in pi and opencode under Claude's names](shared-catalogs.md#claude-skills-and-commands-are-offered-in-pi-and-opencode-under-claudes-names-adr-115) in `shared-catalogs.md`
+- ADR-116 · current · [A Claude target runs under the Claude engine's sandbox and at a new session's effort](dispatch.md#a-claude-target-runs-under-the-claude-engines-sandbox-and-at-a-new-sessions-effort-adr-116) in `dispatch.md`
 <!-- prettier-ignore-end -->
