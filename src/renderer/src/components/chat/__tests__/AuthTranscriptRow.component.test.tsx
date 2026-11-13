@@ -16,10 +16,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useSessionStore } from '../../../stores/session-store'
+import { retrySend } from '../../../lib/session-spawn'
 import { MessageBubble, TranscriptSessionProvider } from '../MessageBubble'
 import type { ChatMessage } from '../../../../../shared/types'
 
 vi.mock('electron', async () => await import('../../../../../test/stubs/electron-shim'))
+vi.mock('../../../lib/session-spawn', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../lib/session-spawn')>()),
+  retrySend: vi.fn(async () => {})
+}))
 
 const ROUTING_ID = 'r-auth-row'
 /** A second, unrelated chat session — the one the ACTIVE pointer is parked on. */
@@ -274,8 +279,7 @@ describe('AuthTranscriptRow — resolved, retry owed', () => {
   })
 
   it('Retry re-sends the captured prompt and settles the row', async () => {
-    const retrySend = vi.fn(async () => {})
-    useSessionStore.setState({ retrySend })
+    vi.mocked(retrySend).mockClear()
     renderRow()
     await act(async () => {
       fireEvent.click(screen.getByTestId('AuthTranscriptRow.retry'))
@@ -332,8 +336,7 @@ describe('AuthTranscriptRow — the row belongs to ITS transcript', () => {
   })
 
   it('retries on ITS session, never on the active one', async () => {
-    const retrySend = vi.fn(async () => {})
-    useSessionStore.setState({ retrySend })
+    vi.mocked(retrySend).mockClear()
     patch({
       authRequired: {
         providerId: 'chatgpt',

@@ -134,7 +134,7 @@ async function resume(manager: SessionManager): Promise<void> {
   await prepareAndCreateSession(manager, null, {
     routingId: RID,
     cwd: '/r/repo',
-    resumeSessionId: RID,
+    resume: { sessionId: RID },
     engineId: 'claude'
   })
 }

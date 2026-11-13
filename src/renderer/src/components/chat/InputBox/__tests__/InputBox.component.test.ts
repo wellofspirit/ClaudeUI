@@ -45,6 +45,11 @@ import {
   mirrorStoreIntoReplica,
   resetReplicaSeam
 } from '@test/helpers/replica-seed'
+import type { SessionSpawnRequest } from '../../../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 // ---------------------------------------------------------------------------
 // View mock — captures whatever props the FC passes to InputBoxView
@@ -601,8 +606,8 @@ describe('InputBox FC — rendered', () => {
     mirrorStoreIntoReplica()
     renderFC()
     await sendDraft()
-    expect(ipcCalls['session:create'][0][5]).toBe('default')
-    expect(ipcCalls['session:create'][0][2]).toBe('low')
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.model).toBe('default')
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe('low')
   })
 
   it('still reads a v3.5 effort saved under the model the alias RESOLVES to', async () => {
@@ -620,8 +625,8 @@ describe('InputBox FC — rendered', () => {
     mirrorStoreIntoReplica()
     renderFC()
     await sendDraft()
-    expect(ipcCalls['session:create'][0][5]).toBe('opus')
-    expect(ipcCalls['session:create'][0][2]).toBe('low')
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.model).toBe('opus')
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe('low')
   })
 
   it('a session saved on a concrete Claude model shows its alias, and spawns its own value', async () => {
@@ -643,8 +648,8 @@ describe('InputBox FC — rendered', () => {
     renderFC()
     expect(viewProps.selectedModel.value).toBe('sonnet')
     await sendDraft()
-    expect(ipcCalls['session:create'][0][5]).toBe('claude-sonnet-5-5')
-    expect(ipcCalls['session:create'][0][2]).toBe('low')
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.model).toBe('claude-sonnet-5-5')
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe('low')
   })
 
   it('an UNCONFIGURED Claude default still spawns an empty model exactly as before', async () => {
@@ -780,7 +785,7 @@ describe('InputBox FC — rendered', () => {
   // to be `messages.length > 0`, so a prompt sent before the disk reload landed (or
   // after it failed) spawned a brand-new conversation under the same row.
   describe('a send on an evicted, empty session resumes it by id', () => {
-    const resumeIdOfSpawn = (): unknown => ipcCalls['session:create'][0][3]
+    const resumeIdOfSpawn = (): unknown => spawnReq(ipcCalls['session:create'][0]).resume?.sessionId
 
     it('control: a never-spawned empty session starts fresh (no resume id)', async () => {
       useSessionStore.getState().setDraftText('hello')
@@ -850,7 +855,7 @@ describe('InputBox FC — rendered', () => {
       })
 
       expect(ipcCalls['session:create']).toHaveLength(1)
-      expect(ipcCalls['session:create'][0][3]).toBe(FC_ROUTE)
+      expect(spawnReq(ipcCalls['session:create'][0]).resume?.sessionId).toBe(FC_ROUTE)
       expect(useSessionStore.getState().sessions[FC_ROUTE].messages.map((m) => m.id)).toEqual([
         'h1'
       ])
@@ -881,7 +886,7 @@ describe('InputBox FC — rendered', () => {
 
     expect(ipcCalls['session:create']).toHaveLength(1)
     // args: routingId, cwd, effort, resumeId, permissionMode, model, thinkingMode
-    expect(ipcCalls['session:create'][0][4]).toBe('plan')
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.permissionMode).toBe('plan')
   })
 
   it('onSend clears the draft when the engine rekeys the session mid-send', async () => {
@@ -2212,9 +2217,12 @@ describe('InputBox FC — rendered', () => {
     await act(async () => {})
     const shown = viewProps.effort
     await sendDraft()
-    expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe(shown)
     // The starting effort freezes into the session, equal to what was sent.
-    expect(ipcCalls['session:create'][0][10]).toEqual({ effort: shown, thinkingMode: null })
+    expect(spawnReq(ipcCalls['session:create'][0]).announce).toEqual({
+      effort: shown,
+      thinkingMode: null
+    })
   })
 
   it('a started session keeps displaying what it runs when the per-model effort changes', async () => {
@@ -2222,7 +2230,7 @@ describe('InputBox FC — rendered', () => {
     renderFC()
     await act(async () => {})
     await sendDraft()
-    const announce = ipcCalls['session:create'][0][10] as { effort: string | null }
+    const announce = spawnReq(ipcCalls['session:create'][0]).announce as { effort: string | null }
     expect(announce.effort).toBe('high')
 
     // Core's birth event hands the announced effort to every replica.
@@ -2248,8 +2256,10 @@ describe('InputBox FC — rendered', () => {
       await viewProps.onSelectEffort('low')
     })
     const args = ipcCalls['session:create'][0]
-    expect(args[2]).toBe('low')
-    expect((args[10] as { effort: string }).effort).toBe(args[2])
+    expect(spawnReq(args).config?.effort).toBe('low')
+    expect((spawnReq(args).announce as { effort: string }).effort).toBe(
+      spawnReq(args).config?.effort
+    )
   })
 
   describe('pi remembers effort in its own map', () => {
@@ -2312,7 +2322,7 @@ describe('InputBox FC — rendered', () => {
       await act(async () => {})
       expect(viewProps.effort).toBe('low')
       await sendDraft()
-      expect(ipcCalls['session:create'][0][2]).toBe('low')
+      expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe('low')
     })
 
     it('under configured-default a remembered pi effort is not applied: pill and spawn show the model default', async () => {
@@ -2324,7 +2334,7 @@ describe('InputBox FC — rendered', () => {
       await act(async () => {})
       expect(viewProps.effort).toBe('medium')
       await sendDraft()
-      expect(ipcCalls['session:create'][0][2]).toBe('medium')
+      expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe('medium')
     })
 
     it('a remembered value the pi model does not offer is clamped, pill and spawn alike', async () => {
@@ -2334,7 +2344,7 @@ describe('InputBox FC — rendered', () => {
       const shown = viewProps.effort
       expect(['low', 'medium', 'high']).toContain(shown)
       await sendDraft()
-      expect(ipcCalls['session:create'][0][2]).toBe(shown)
+      expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe(shown)
     })
 
     it('a pi pick on a model not in the catalog writes nothing', async () => {
@@ -2373,9 +2383,9 @@ describe('InputBox FC — rendered', () => {
     await act(async () => {})
     const shown = viewProps.effort
     await sendDraft()
-    expect(ipcCalls['session:create'][0][2]).toBe(shown)
+    expect(spawnReq(ipcCalls['session:create'][0]).config?.effort).toBe(shown)
     // Unknown model: nothing is announced about effort.
-    expect('effort' in (ipcCalls['session:create'][0][10] as object)).toBe(false)
+    expect('effort' in (spawnReq(ipcCalls['session:create'][0]).announce as object)).toBe(false)
   })
 
   it('an EMPTY catalog respawn keeps the session pick: no effort announced, still low after the fold (GUARD)', async () => {
@@ -2398,14 +2408,35 @@ describe('InputBox FC — rendered', () => {
       await viewProps.onSelectThinking('disabled')
     })
     const args = ipcCalls['session:create'][0]
-    expect(args[2]).toBe('low')
-    const announce = args[10] as Record<string, unknown>
+    expect(spawnReq(args).config?.effort).toBe('low')
+    const announce = spawnReq(args).announce as Record<string, unknown>
     expect('effort' in announce).toBe(false)
     expect(announce.thinkingMode).toBe('disabled')
     await act(async () => {
       emitSync('session:created', [FC_ROUTE, { cwd: '/test/cwd', ...announce }])
     })
     expect(useSessionStore.getState().sessions[FC_ROUTE].effort).toBe('low')
+  })
+
+  it('a restart refused for an empty model shows a session error and spawns nothing', async () => {
+    useSessionStore.setState((state) => ({
+      claudeDefaultModelConfigured: true,
+      sessions: {
+        ...state.sessions,
+        [FC_ROUTE]: { ...state.sessions[FC_ROUTE], selectedModel: '' }
+      }
+    }))
+    mirrorStoreIntoReplica()
+    useSessionStore.getState().markSdkActive(FC_ROUTE)
+    renderFC()
+    await act(async () => {})
+    await act(async () => {
+      await viewProps.onSelectThinking('disabled')
+    })
+    expect(ipcCalls['session:create'] ?? []).toEqual([])
+    expect(useSessionStore.getState().sessions[FC_ROUTE].errors.join()).toMatch(
+      /Failed to restart the session: .*No model selected/
+    )
   })
 
   it('onSelectModel (spawned, thread id not reported yet): keeps the frozen effort, coerced', () => {
@@ -2451,7 +2482,9 @@ describe('InputBox FC — rendered', () => {
     renderFC()
     await act(async () => {})
     await sendDraft()
-    expect((ipcCalls['session:create'][0][10] as { effort: unknown }).effort).toBeNull()
+    expect(
+      (spawnReq(ipcCalls['session:create'][0]).announce as { effort: unknown }).effort
+    ).toBeNull()
   })
 
   it.each(['claude', 'pi'] as const)(
@@ -2539,8 +2572,8 @@ describe('InputBox FC — rendered', () => {
     })
     expect(ipcCalls['session:create']).toHaveLength(1)
     const args = ipcCalls['session:create'][0]
-    expect(args[2]).toBe('xhigh')
-    expect(args[10]).toEqual({ effort: 'xhigh', thinkingMode: null })
+    expect(spawnReq(args).config?.effort).toBe('xhigh')
+    expect(spawnReq(args).announce).toEqual({ effort: 'xhigh', thinkingMode: null })
   })
 
   it('a thinking-mode pick is announced raw on the respawn too', async () => {
@@ -2552,7 +2585,7 @@ describe('InputBox FC — rendered', () => {
       await viewProps.onSelectThinking('disabled')
     })
     // Effort is the resolved starting effort (Opus 5.5's built-in 'medium').
-    expect(ipcCalls['session:create'][0][10]).toEqual({
+    expect(spawnReq(ipcCalls['session:create'][0]).announce).toEqual({
       effort: 'medium',
       thinkingMode: 'disabled'
     })
@@ -2639,7 +2672,7 @@ describe('InputBox FC — rendered', () => {
     // createSession args: routingId, cwd, effort, resumeId, permissionMode, model, thinkingMode
     const createArgs = ipcCalls['session:create'][0]
     expect(createArgs[0]).toBe(FC_ROUTE)
-    expect(createArgs[6]).toBe('enabled')
+    expect(spawnReq(createArgs).config?.thinkingMode).toBe('enabled')
   })
 
   it('onSelectEffort: updates store; no IPC restart when sdkActive=false', async () => {
@@ -2662,7 +2695,7 @@ describe('InputBox FC — rendered', () => {
     expect(ipcCalls['session:cancel']).toHaveLength(1)
     expect(ipcCalls['session:create']).toHaveLength(1)
     const createArgs = ipcCalls['session:create'][0]
-    expect(createArgs[2]).toBe('xhigh') // effort
+    expect(spawnReq(createArgs).config?.effort).toBe('xhigh') // effort
   })
 
   it('onSelectModel: switching to a model without effort clears the explicit effort pick', () => {

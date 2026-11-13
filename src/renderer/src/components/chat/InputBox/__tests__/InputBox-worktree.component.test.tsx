@@ -5,14 +5,20 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { createElement } from 'react'
 import { useSessionStore } from '../../../../stores/session-store'
+import { mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import { resetFactoryCounter } from '@test/factories/messages'
 import type { WorktreeInfo } from '../../../../../../shared/types'
 import type { InputBoxViewProps } from '../View'
 import { InputBox } from '../InputBox'
 import { WelcomeState } from '../../ChatPanel/WelcomeState'
+import type { ModelInfo, SessionSpawnRequest } from '../../../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 let viewProps: InputBoxViewProps
 
@@ -137,7 +143,7 @@ describe('InputBox — start in a worktree at the first send', () => {
     expect(worktreeCalls[0][2]).toEqual({ base: 'default' })
     const info = infoFor(pending!.name)
     expect(createCalls).toHaveLength(1)
-    expect(createCalls[0][1]).toBe(info.worktreePath)
+    expect(spawnReq(createCalls[0]).cwd).toBe(info.worktreePath)
     const state = useSessionStore.getState()
     expect(state.worktreeInfoMap[ROUTE]).toMatchObject({ worktreePath: info.worktreePath })
     expect(state.sessions[ROUTE].pendingWorktree).toBeNull()
@@ -194,7 +200,7 @@ describe('InputBox — start in a worktree at the first send', () => {
     expect(worktreeCalls).toHaveLength(2)
     expect(worktreeCalls[1][1]).not.toBe(original)
     expect(createCalls).toHaveLength(1)
-    expect(String(createCalls[0][1])).toContain(worktreeCalls[1][1] as string)
+    expect(String(spawnReq(createCalls[0]).cwd)).toContain(worktreeCalls[1][1] as string)
   })
 
   it('gives up on a taken auto-generated name after three attempts', async () => {
@@ -239,7 +245,7 @@ describe('InputBox — start in a worktree at the first send', () => {
 
     expect(worktreeCalls).toEqual([])
     expect(createCalls).toHaveLength(1)
-    expect(createCalls[0][1]).toBe(CWD)
+    expect(spawnReq(createCalls[0]).cwd).toBe(CWD)
   })
 
   it('treats a directory that is not a git repository as no worktree, not a failure', async () => {
@@ -252,7 +258,7 @@ describe('InputBox — start in a worktree at the first send', () => {
     })
 
     expect(createCalls).toHaveLength(1)
-    expect(createCalls[0][1]).toBe(CWD)
+    expect(spawnReq(createCalls[0]).cwd).toBe(CWD)
     expect(useSessionStore.getState().sessions[ROUTE].pendingWorktree).toBeNull()
   })
 
@@ -296,7 +302,7 @@ describe('InputBox — start in a worktree at the first send', () => {
 
       expect(worktreeCalls).toHaveLength(2)
       expect(createCalls).toHaveLength(1)
-      expect(String(createCalls[0][1])).toContain('.claude/worktrees/')
+      expect(String(spawnReq(createCalls[0]).cwd)).toContain('.claude/worktrees/')
     })
 
     it('Send without a worktree clears the intent and spawns in the chosen directory', async () => {
@@ -308,8 +314,75 @@ describe('InputBox — start in a worktree at the first send', () => {
 
       expect(worktreeCalls).toHaveLength(1)
       expect(createCalls).toHaveLength(1)
-      expect(createCalls[0][1]).toBe(CWD)
+      expect(spawnReq(createCalls[0]).cwd).toBe(CWD)
       expect(useSessionStore.getState().sessions[ROUTE].pendingWorktree).toBeNull()
+    })
+  })
+  describe('the spawn config does not depend on the worktree step', () => {
+    const OPUS: ModelInfo = {
+      value: 'opus',
+      resolvedModel: 'claude-opus-5-5',
+      displayName: 'Opus 5.5',
+      description: '',
+      engineId: 'claude',
+      supportsEffort: true,
+      supportedEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max']
+    }
+
+    /** The first send of a fresh session with a saved starting effort, with or without a worktree. */
+    async function firstSend(worktree: boolean): Promise<SessionSpawnRequest> {
+      // A catalogue fetch answers a macrotask later, as the IPC does: the cwd change that the
+      // worktree causes empties the catalogue until then.
+      app.bridge.ipcMain.handle('session:get-engine-models', async (_e: unknown, id: unknown) => {
+        await new Promise((r) => setTimeout(r, 0))
+        const models = id === 'claude' ? [OPUS] : []
+        return [{ engineId: id, vendorId: 'v', vendorName: 'V', models }]
+      })
+      startSession(worktree)
+      useSessionStore.setState((s) => ({
+        availableModels: [OPUS],
+        settings: { ...s.settings, modelEffortDefaults: { opus: 'max' } }
+      }))
+      useSessionStore.setState((s) => ({
+        sessions: { ...s.sessions, [ROUTE]: { ...s.sessions[ROUTE], selectedModel: 'opus' } }
+      }))
+      mirrorStoreIntoReplica()
+      render(createElement(InputBox))
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 5))
+      })
+      await act(async () => {
+        await viewProps.onSend()
+      })
+      expect(createCalls).toHaveLength(1)
+      return spawnReq(createCalls[0])
+    }
+
+    it('a session with no explicit pick spawns with the saved starting effort and the same announce in a worktree as without', async () => {
+      const plain = await firstSend(false)
+      expect(plain.config).toMatchObject({ effort: 'max' })
+
+      app.teardown()
+      vi.clearAllMocks()
+      cleanup()
+      app = await (await import('@test/helpers/boot-test-app')).bootTestApp()
+      createCalls = []
+      app.bridge.ipcMain.handle('file:list-dir', () => [])
+      app.bridge.ipcMain.handle('session:get-models', () => [])
+      app.bridge.ipcMain.handle('session:send', () => null)
+      app.bridge.ipcMain.handle('session:create', (_e: unknown, ...args: unknown[]) => {
+        createCalls.push(args)
+        return null
+      })
+      app.bridge.ipcMain.handle('worktree:create', (_e: unknown, ...args: unknown[]) =>
+        infoFor(args[1] as string)
+      )
+      useSessionStore.setState({ activeSessionId: null, sessions: {}, recentSessionIds: [] })
+
+      const inWorktree = await firstSend(true)
+      expect(inWorktree.cwd).not.toBe(CWD)
+      expect(inWorktree.config).toEqual({ ...plain.config })
+      expect(inWorktree.announce).toEqual(plain.announce)
     })
   })
 })

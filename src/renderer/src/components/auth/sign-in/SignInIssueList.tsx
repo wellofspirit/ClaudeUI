@@ -9,6 +9,7 @@
  */
 
 import { useSessionStore } from '../../../stores/session-store'
+import { retrySend } from '../../../lib/session-spawn'
 import { AUTH_ISSUE_NAME } from '../../../stores/auth-issues'
 import type { AuthIssue, AuthRetry } from '../../../stores/auth-issues'
 import { useAuthSummary } from '../../../stores/use-auth-summary'
@@ -21,7 +22,6 @@ import { DIALOG, DialogFrame, RetryRow, StateChip } from './shared'
 export function SignInIssueList(): React.JSX.Element {
   const closeSignIn = useSessionStore((s) => s.closeSignIn)
   const openSignIn = useSessionStore((s) => s.openSignIn)
-  const retrySend = useSessionStore((s) => s.retrySend)
   const clearAuthRequired = useSessionStore((s) => s.clearAuthRequired)
   const summary = useAuthSummary()
 

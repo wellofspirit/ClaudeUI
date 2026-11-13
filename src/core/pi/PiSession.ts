@@ -3579,6 +3579,14 @@ export class PiSession extends BaseSession {
       : { success: false, error: 'No running agent for that card' }
   }
 
+  protected readonly liveConfig = {
+    model: (v: string) => this.setModel(v),
+    permissionMode: (v: string) => this.setPermissionMode(v),
+    effort: (v: string) => this.setEffort(v),
+    thinkingMode: null,
+    reasoningVariant: null
+  }
+
   async setModel(model: string): Promise<void> {
     const prevModel = this._model
     this._model = model

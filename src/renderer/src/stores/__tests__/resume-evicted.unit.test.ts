@@ -19,9 +19,15 @@ import {
   markViewEvicted,
   useSessionStore
 } from '../session-store'
+import { retrySend } from '../../lib/session-spawn'
 import { patchLocalSession } from '../replica'
 import { resetReplicaSeam } from '@test/helpers/replica-seed'
 import { makeAssistantMessage } from '@test/factories/messages'
+import type { SessionSpawnRequest } from '../../../../shared/types'
+
+/** `session:create` is `(routingId, request)`: the request is the second argument. */
+const spawnReq = (call: unknown[] | undefined): SessionSpawnRequest =>
+  call?.[1] as SessionSpawnRequest
 
 const store = (): ReturnType<typeof useSessionStore.getState> => useSessionStore.getState()
 
@@ -65,18 +71,18 @@ describe('retrySend on an evicted, empty session', () => {
 
   it('control: a never-spawned empty session starts fresh', async () => {
     emptyClaudeSession()
-    await store().retrySend('sess-1', 'again')
+    await retrySend('sess-1', 'again')
     // createSession args: routingId, cwd, effort, resumeId, ...
-    expect(createSession.mock.calls[0]?.[3]).toBeUndefined()
+    expect(spawnReq(createSession.mock.calls[0]).resume?.sessionId).toBeUndefined()
   })
 
   it('resumes by id', async () => {
     emptyClaudeSession()
     markViewEvicted(['sess-1'])
 
-    await store().retrySend('sess-1', 'again')
+    await retrySend('sess-1', 'again')
 
-    expect(createSession.mock.calls[0]?.[3]).toBe('sess-1')
+    expect(spawnReq(createSession.mock.calls[0]).resume?.sessionId).toBe('sess-1')
     expect(sendPrompt).toHaveBeenCalledWith('sess-1', 'again')
   })
 })

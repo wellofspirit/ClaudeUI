@@ -272,7 +272,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadEngineConfig.mockReturnValue({})
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
-    await harness.call('session:create', 'routing-1', '/tmp/cwd')
+    await harness.call('session:create', 'routing-1', { cwd: '/tmp/cwd' })
 
     expect(uiConfigMocks.loadEngineConfig).toHaveBeenCalledWith('claude')
     expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
@@ -297,7 +297,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadEngineConfig.mockReturnValue({ sandbox: sandboxConfig })
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
-    await harness.call('session:create', 'routing-2', '/tmp/cwd')
+    await harness.call('session:create', 'routing-2', { cwd: '/tmp/cwd' })
 
     expect(sessionManagerSpies.create).toHaveBeenCalled()
     // 4th argument (index 3) is the EngineSpawnOptions object in the create() call
@@ -309,7 +309,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadEngineConfig.mockReturnValue({})
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
-    await harness.call('session:create', 'routing-3', '/tmp/cwd')
+    await harness.call('session:create', 'routing-3', { cwd: '/tmp/cwd' })
 
     expect(sessionManagerSpies.create).toHaveBeenCalled()
     const callArgs = sessionManagerSpies.create.mock.calls[0]
@@ -321,7 +321,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadEngineConfig.mockReturnValue({})
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
-    await harness.call('session:create', 'routing-4', '/tmp/cwd')
+    await harness.call('session:create', 'routing-4', { cwd: '/tmp/cwd' })
 
     const callArgs = sessionManagerSpies.create.mock.calls[0]
     // sandbox should be undefined because it came from engine config (which returned {})
@@ -336,15 +336,10 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
     // Explicitly pass a model string; engineId defaults to 'claude'
-    await harness.call(
-      'session:create',
-      'routing-5',
-      '/tmp/cwd',
-      undefined,
-      undefined,
-      undefined,
-      'claude-sonnet-4-6'
-    )
+    await harness.call('session:create', 'routing-5', {
+      cwd: '/tmp/cwd',
+      config: { model: 'claude-sonnet-4-6' }
+    })
 
     // claudeModel('claude-sonnet-4-6').vendorId === 'anthropic'
     expect(uiConfigMocks.loadVendorConfig).toHaveBeenCalledWith('anthropic')
@@ -354,19 +349,7 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadEngineConfig.mockReturnValue({})
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
 
-    await harness.call(
-      'session:create',
-      'routing-6',
-      '/tmp/cwd',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      'opencode'
-    )
+    await harness.call('session:create', 'routing-6', { cwd: '/tmp/cwd', engineId: 'opencode' })
 
     // opencode path skips vendor config — loadVendorConfig should NOT be called
     expect(uiConfigMocks.loadVendorConfig).not.toHaveBeenCalled()
@@ -376,19 +359,10 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     uiConfigMocks.loadEngineConfig.mockReturnValue({})
     uiConfigMocks.loadVendorConfig.mockReturnValue({})
     await expect(
-      harness.call(
-        'session:create',
-        'routing-unknown',
-        '/tmp/cwd',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'gemini' as unknown as EngineId
-      )
+      harness.call('session:create', 'routing-unknown', {
+        cwd: '/tmp/cwd',
+        engineId: 'gemini' as unknown as EngineId
+      })
     ).rejects.toThrow(/No spawn-prep registered for engine "gemini"/)
     // Pre-fix, the else-is-claude branch applied Anthropic vendor config + env for
     // any non-'opencode' id (including bogus ones). Post-fix, require() throws first.
@@ -408,19 +382,11 @@ describe('session:create spawn rewiring (Phase 3b)', () => {
     )
 
     await expect(
-      harness.call(
-        'session:create',
-        'routing-stale-model',
-        '/tmp/cwd',
-        undefined,
-        undefined,
-        undefined,
-        'openai/gpt-5.5',
-        undefined,
-        undefined,
-        undefined,
-        'opencode'
-      )
+      harness.call('session:create', 'routing-stale-model', {
+        cwd: '/tmp/cwd',
+        engineId: 'opencode',
+        config: { model: 'openai/gpt-5.5' }
+      })
     ).rejects.toThrow(/openai\/gpt-5\.5/)
 
     expect(sessionManagerSpies.create).not.toHaveBeenCalled()

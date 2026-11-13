@@ -9,7 +9,7 @@ import { spawnPrepRegistry } from '../providers/SpawnPrepRegistry'
 // populated wherever session:create runs (mirrors session-manager.ts's own
 // register-engines import).
 import '../providers/register-engines'
-import type { EngineId, ModelRef, SlashCommandInfo } from '../../shared/types'
+import type { EngineId, ModelRef, SessionSpawnRequest, SlashCommandInfo } from '../../shared/types'
 import { resolveClaudeSkillCatalog } from '../services/claude-skill-catalog'
 import { claudeSkillSlashCommands, mergeSlashCommandLists } from '../services/claude-skill-info'
 import type { EngineSpawnOptions } from '../providers/ISession'
@@ -17,40 +17,20 @@ import { getSessionMeta, setSessionMeta } from '../services/db'
 import { logger } from '../services/logger'
 import { heldCountFor } from '../services/session-delivery'
 import { engineMeta } from '../../shared/engine-meta'
+import { announceSpawnConfig } from './handlers-core'
 
 // ---------------------------------------------------------------------------
 // Shared session:create implementation (desktop IPC + remote WebSocket)
 // ---------------------------------------------------------------------------
 
-export interface CreateSessionArgs {
-  routingId: string
-  cwd: string
-  effort?: string
-  resumeSessionId?: string
-  permissionMode?: string
-  model?: string
-  thinkingMode?: string
-  resumeSessionAt?: string
-  forkSession?: boolean
-  engineId?: EngineId
-  /**
-   * The values every replica adopts as this session's own on the birth event.
-   * `effort`: a string = announce the positional spawn effort; `null` = the
-   * client knows the model takes none (clears); absent/`undefined` = the client
-   * does not know the model, announce nothing. `thinkingMode`: the raw pick
-   * (`null` = no pick). Optional because older clients (a cached phone bundle)
-   * omit it, and a WS client's JSON may carry `null` for it or for either field.
-   */
-  announce?: { effort?: string | null; thinkingMode?: string | null }
-  /**
-   * Who started the session, when it was not a client: `'agent'` for a session
-   * another session's tool started (session tools, spec §6.1). It rides the birth
-   * event so no client follows the new session; absent for every session a client
-   * or a resume creates, which behave exactly as before. Never read from a
-   * client's command — only the session tools set it.
-   */
-  createdBy?: 'agent'
-}
+/**
+ * What a client's request says (`SessionSpawnRequest`, the shape of `window.api.createSession`)
+ * plus the routing id, and `createdBy`: who started the session, when it was not a client.
+ * `'agent'` is a session another session's tool started (session tools, spec §6.1). It rides
+ * the birth event so no client follows the new session; absent for every session a client or
+ * a resume creates. Never read from a client's command — only the session tools set it.
+ */
+export type CreateSessionArgs = SessionSpawnRequest & { routingId: string; createdBy?: 'agent' }
 
 /**
  * Record the engine (and model) a session is born with, on the host.
@@ -109,20 +89,11 @@ export async function prepareAndCreateSession(
   win: HostWindowHandle | null,
   args: CreateSessionArgs
 ): Promise<void> {
-  const {
-    routingId,
-    cwd,
-    effort,
-    resumeSessionId,
-    permissionMode,
-    model,
-    thinkingMode,
-    resumeSessionAt,
-    forkSession,
-    engineId,
-    announce,
-    createdBy
-  } = args
+  const { routingId, cwd, engineId, config, resume, announce, createdBy } = args
+  const { model, permissionMode, effort } = config ?? {}
+  const resumeSessionId = resume?.sessionId
+  const resumeSessionAt = resume?.at
+  const forkSession = resume?.fork
 
   // engineId ?? 'claude' is the legacy default at the IPC/WS boundary (old callers
   // omit engineId). Any OTHER unrecognised id must throw — no silent Claude default.
@@ -133,15 +104,15 @@ export async function prepareAndCreateSession(
   const engineCfg = loadEngineConfig(resolvedEngineId)
   const prep = spawnPrepRegistry.require(resolvedEngineId)
   const { resolvedModel } = await prep(model, engineCfg)
+  // The config goes in whole, so a field added to `SessionConfig` reaches the engine with no
+  // edit here; the fields that are not config are set after it, so a request cannot supply them.
   const spawnOpts: EngineSpawnOptions = {
-    effort,
-    resumeSessionId,
-    permissionMode,
+    ...config,
     model: resolvedModel,
-    sandboxConfig: engineCfg.sandbox,
-    thinkingMode,
+    resumeSessionId,
     resumeSessionAt,
-    forkSession
+    forkSession,
+    sandboxConfig: engineCfg.sandbox
   }
   // engineId (not resolvedEngineId) — SessionManager.create()'s own `= 'claude'`
   // default preserves the legacy claude-default boundary at that layer.
@@ -247,6 +218,9 @@ export async function prepareAndCreateSession(
       ...(createdBy ? { createdBy } : {})
     }
   ])
+  // After the birth event: for a session canonical has not seen, an earlier `config-changed` finds
+  // no entry and is dropped, and `session:created` then builds the entry without the variant.
+  announceSpawnConfig(routingId, config)
   // A Claude session reports its commands only when cli.js starts (first prompt), so
   // until then its menu is the last list a Claude session reported (the cache
   // `ClaudeSession` writes: built-ins, bundled skills, MCP prompts) plus this folder's

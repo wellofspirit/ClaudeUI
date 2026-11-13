@@ -1426,11 +1426,12 @@ async function spawnChild(
       routingId,
       cwd: plan.cwd,
       engineId: plan.engine,
-      permissionMode: plan.permissionMode,
-      ...(plan.model ? { model: plan.model } : {}),
-      ...(plan.effort
-        ? { effort: plan.effort, announce: { effort: plan.effort, thinkingMode: null } }
-        : {}),
+      config: {
+        permissionMode: plan.permissionMode,
+        ...(plan.model ? { model: plan.model } : {}),
+        ...(plan.effort ? { effort: plan.effort } : {})
+      },
+      ...(plan.effort ? { announce: { effort: plan.effort, thinkingMode: null } } : {}),
       // The host, not a client, made it: no client follows it, whoever it was for.
       createdBy: 'agent'
     })

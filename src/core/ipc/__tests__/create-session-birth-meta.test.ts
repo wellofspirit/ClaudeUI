@@ -100,7 +100,7 @@ describe('prepareAndCreateSession — birth identity', { timeout: 30_000 }, () =
   it('records the resolved model for opencode, as the renderer would', async () => {
     const { db, create } = await fresh()
     try {
-      await create({ engineId: 'opencode', model: 'openai/gpt-5' })
+      await create({ engineId: 'opencode', config: { model: 'openai/gpt-5' } })
 
       expect(db.getSessionMeta(RID)).toEqual({
         engineId: 'opencode',
@@ -114,7 +114,7 @@ describe('prepareAndCreateSession — birth identity', { timeout: 30_000 }, () =
   it('records Claude too (every engine, not only the lazy ones)', async () => {
     const { db, create } = await fresh()
     try {
-      await create({ engineId: 'claude', model: 'claude-opus-4-8' })
+      await create({ engineId: 'claude', config: { model: 'claude-opus-4-8' } })
 
       expect(db.getSessionMeta(RID)?.engineId).toBe('claude')
       expect(db.getSessionMeta(RID)?.model?.modelId).toBe('claude-opus-4-8')
@@ -131,7 +131,7 @@ describe('prepareAndCreateSession — birth identity', { timeout: 30_000 }, () =
         model: { engineId: 'opencode', vendorId: 'anthropic', modelId: 'picked' }
       })
 
-      await create({ engineId: 'opencode', model: 'openai/gpt-5' })
+      await create({ engineId: 'opencode', config: { model: 'openai/gpt-5' } })
 
       expect(db.getSessionMeta(RID)?.model?.modelId).toBe('picked')
     } finally {

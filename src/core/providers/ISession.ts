@@ -7,6 +7,7 @@ import type {
   PermissionSuggestion,
   QueuedItem,
   SkillInfo,
+  SessionConfig,
   SandboxSettings
 } from '../../shared/types'
 import type { ResolvedCapabilities } from '../../shared/model-capabilities'
@@ -206,25 +207,18 @@ export interface ISession {
     updatedPermissions?: PermissionSuggestion[]
   ): void
 
-  /** Set the model for future turns. */
-  setModel(model: string): Promise<void>
-
-  /** Set the permission mode. */
-  setPermissionMode(mode: string): Promise<void>
-
   /**
-   * Set the reasoning effort variant for opencode models (e.g. 'none', 'thinking', 'low').
-   * Optional — Claude and other engines that do not support per-model variants ignore it.
-   * Pass null to revert to opencode's default (variant omitted from the prompt body).
+   * Change the running session's config: the one live entry, for every `SessionConfig` field.
+   * Applies the fields present in the patch in a fixed order; a field the engine takes no live
+   * change of is ignored. `BaseSession` implements it over the engine's `liveConfig` table.
    */
-  setReasoningVariant?(variant: string | null): void
+  applyConfig(patch: SessionConfig): Promise<void>
 
   // ---------------------------------------------------------------------------
   // Optional capability-gated members. Implemented by engines that advertise the
   // named capability flag (or, where noted, are Claude-only with no flag —
   // absence of the method is the gate). Callers MUST check the flag and/or use
-  // optional-call (`?.`) before invoking. Mirrors the setReasoningVariant?
-  // precedent above.
+  // optional-call (`?.`) before invoking.
   // ---------------------------------------------------------------------------
 
   /** Background tasks (gated by capabilities.backgroundTasks). */
@@ -250,11 +244,6 @@ export interface ISession {
    */
   voiceStartServer?(): Promise<{ port: number; startFields?: Record<string, unknown> }>
   voiceStopServer?(): Promise<void>
-
-  /** Reasoning-effort tier (gated by capabilities.reasoning.effort != null). */
-  setEffort?(effort: string): void | Promise<void>
-  /** Thinking mode (gated by capabilities.reasoning.thinking != null). */
-  setThinkingMode?(mode: string): void
 
   /** Current ExitPlanMode plan content (gated by capabilities.plan). */
   getPlanContent?(): string | null
@@ -333,25 +322,15 @@ export interface ISession {
 }
 
 /**
- * Named spawn options for engine-session construction. Replaces the former
- * 11-positional-parameter factory tuple. All members are optional; engines
- * ignore options they do not consume (noted per member).
+ * What an engine session is constructed with: the session's config (`SessionConfig`, the same
+ * fields a live change patches through `ISession.applyConfig`) plus what only a spawn has. All
+ * members are optional; engines ignore options they do not consume (noted per member).
  */
-export interface EngineSpawnOptions {
-  /** Reasoning-effort tier. Claude + pi (applied via `set_thinking_level` at
-   *  spawn when the resolved model supports it) — opencode uses per-model
-   *  reasoning variants instead. */
-  effort?: string
+export interface EngineSpawnOptions extends SessionConfig {
   /** Engine session id to resume. Consumed by all three engines. */
   resumeSessionId?: string
-  /** Initial permission mode. Consumed by all three engines. */
-  permissionMode?: string
-  /** Model value in the engine's convention (Claude alias / opencode "vendorId/modelId" / pi model id). All three engines. */
-  model?: string
   /** Sandbox settings. Claude-only — opencode and pi never read it (ADR-022, ADR-030). */
   sandboxConfig?: SandboxSettings
-  /** Thinking mode ('adaptive' | 'enabled' | 'disabled'). Claude-only. */
-  thinkingMode?: string
   /** Fork ("branch off") anchor, in the engine's own convention: a JSONL line
    *  uuid for Claude (ADR-010), or a pi entryId / the clone-latest sentinel
    *  for pi — see PiSession.doStart's fork block. opencode fork is

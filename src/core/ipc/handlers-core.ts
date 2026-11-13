@@ -23,7 +23,8 @@ import type {
   PermissionMode,
   PermissionScope,
   PromptOrigin,
-  WorkspaceTrust
+  WorkspaceTrust,
+  SessionConfig
 } from '../../shared/types'
 import { isEngineId } from '../../shared/engine-label'
 import {
@@ -362,7 +363,7 @@ export async function setPermissionMode(
     logger.warn('IPC', `session:set-permission-mode: rejecting unknown mode "${mode}"`)
     return
   }
-  await manager.get(routingId)?.setPermissionMode(mode)
+  await manager.get(routingId)?.applyConfig({ permissionMode: mode })
 }
 
 // ---------------------------------------------------------------------------
@@ -834,7 +835,7 @@ export async function setModel(
   model: string
 ): Promise<void> {
   const session = manager.get(routingId)
-  await session?.setModel(model)
+  await session?.applyConfig({ model })
   // `reasoningVariant: null` rides along because a model change genuinely
   // invalidates the variant (different models expose different variants) — the
   // desktop picker already resets it locally, so emitting only `model` would
@@ -849,14 +850,14 @@ export async function setEffort(
 ): Promise<void> {
   const s = manager.get(routingId)
   if (s && s.capabilities.reasoning.effort == null) return
-  await s?.setEffort?.(effort)
+  await s?.applyConfig({ effort })
   emitConfigChanged(s, routingId, { effort })
 }
 
 export function setThinkingMode(manager: SessionManager, routingId: string, mode: string): void {
   const s = manager.get(routingId)
   if (s && s.capabilities.reasoning.thinking == null) return
-  s?.setThinkingMode?.(mode)
+  void s?.applyConfig({ thinkingMode: mode }).catch(logLiveConfigFailure)
   emitConfigChanged(s, routingId, { thinkingMode: mode })
 }
 
@@ -866,8 +867,25 @@ export function setReasoningVariant(
   variant: string | null
 ): void {
   const s = manager.get(routingId)
-  s?.setReasoningVariant?.(variant)
+  void s?.applyConfig({ reasoningVariant: variant }).catch(logLiveConfigFailure)
   emitConfigChanged(s, routingId, { reasoningVariant: variant })
+}
+
+function logLiveConfigFailure(err: unknown): void {
+  logger.warn(
+    'IPC',
+    `live config change failed: ${err instanceof Error ? err.message : String(err)}`
+  )
+}
+
+/**
+ * A session was created with a config the engine holds beyond the birth event: today the
+ * reasoning variant (opencode). Tell every client the way a live change does, so each picker
+ * agrees with the process. The create path calls it once the session is registered.
+ */
+export function announceSpawnConfig(routingId: string, config: SessionConfig | undefined): void {
+  if (config?.reasoningVariant == null) return
+  emitEvent('session:config-changed', [routingId, { reasoningVariant: config.reasoningVariant }])
 }
 
 export function getPlanContent(manager: SessionManager, routingId: string): string | null {

@@ -1964,6 +1964,20 @@ describe('PiSession.setEffort (M2b)', () => {
   })
 })
 
+describe('PiSession.applyConfig', () => {
+  it('reaches setEffort and ignores thinkingMode and reasoningVariant', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-apply-config', win as never, '/cwd', {})
+    await session.run('hi')
+    mockRequest.mockClear()
+
+    await session.applyConfig({ effort: 'high', thinkingMode: 'enabled', reasoningVariant: 'x' })
+
+    expect(mockRequest).toHaveBeenCalledTimes(1)
+    expect(mockRequest).toHaveBeenCalledWith({ type: 'set_thinking_level', level: 'high' })
+  })
+})
+
 describe('PiSession.resolveCapsForModel — xhigh/max reach the resolved capability (M3)', () => {
   it('a luna-shaped model (thinkingLevelMap.max present) exposes xhigh+max in the post-connect resolved capabilities', async () => {
     mockGetPiModelCatalog.mockResolvedValue([
