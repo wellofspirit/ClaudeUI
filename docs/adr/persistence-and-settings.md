@@ -28,6 +28,12 @@ the standalone CLI does not share (see ADR-009 below for the Claude-side rule).
 **Settings tiers**: app, engine, vendor, session. Logging and refresh intervals are app settings; a custom endpoint or
 model override is a vendor setting.
 
+**App settings in core** (recorded 2026-11-13): core reads an app setting from canonical state through `appSetting`
+(the saved value, else the one default in `src/shared/app-settings.ts`), never from disk and never with a default of
+its own, and applies every side effect of a settings change in one place, from the settings event (`applySettings`,
+at boot and after each change). Launch params are not app settings: the proxy, endpoint and model environment is
+still re-applied where settings are saved.
+
 ## Settings that cli.js reads live in Claude's settings.json (ADR-009)
 
 A setting whose behaviour is implemented inside cli.js (read through `settingSources`) is stored in

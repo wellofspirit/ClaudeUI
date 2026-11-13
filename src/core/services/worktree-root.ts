@@ -238,6 +238,15 @@ const LINKED_MISS_TTL_MS = 30_000
 const LINKED_MISS_MAX = 2000
 /** Hits are bounded the same way: one entry per distinct cwd spelling asked about. */
 const LINKED_CACHE_MAX = 2000
+let linkedCacheMax = LINKED_CACHE_MAX
+
+/**
+ * The hit cache's cap, for the spec that fills the cache past it: every entry costs a real walk
+ * of the disk, so at the real cap the test's time is the machine's. No argument restores it.
+ */
+export function setLinkedCacheMaxForTests(max: number = LINKED_CACHE_MAX): void {
+  linkedCacheMax = max
+}
 
 /**
  * The linked worktree a cwd is in, read from the disk now (no cache): for a decision that is
@@ -302,7 +311,7 @@ export function linkedWorktreeOf(cwd: string): LinkedWorktree | null {
     linkedMisses.set(key, now + LINKED_MISS_TTL_MS)
     return null
   }
-  if (linkedCache.size >= LINKED_CACHE_MAX) linkedCache.clear()
+  if (linkedCache.size >= linkedCacheMax) linkedCache.clear()
   linkedCache.set(key, located)
   return located.found
 }

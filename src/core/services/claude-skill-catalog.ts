@@ -318,14 +318,17 @@ function loadSkillsDir(
 function loadCommandsDir(ctx: Ctx, base: string, source: ClaudeSkillSource): void {
   const seen = new Set<string>()
   const walk = (dir: string, ns: string[]): void => {
-    let st: fs.Stats
+    // bigint stats: an NTFS file ID above 2^53 does not fit the number `Stats.ino` is, so
+    // directories created one after another rounded to the same value and the second was
+    // skipped as already visited, with everything under it. cli.js stats the same way.
+    let st: fs.BigIntStats
     try {
-      st = fs.statSync(dir)
+      st = fs.statSync(dir, { bigint: true })
     } catch {
       return
     }
     const id = `${st.dev}:${st.ino}`
-    if (st.ino !== 0 && seen.has(id)) return
+    if (st.ino !== 0n && seen.has(id)) return
     seen.add(id)
     const names = readDirSorted(dir)
     const skillMd = names.find((n) => n.toLowerCase() === 'skill.md' && isFile(path.join(dir, n)))

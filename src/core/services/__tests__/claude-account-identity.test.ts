@@ -307,9 +307,14 @@ describe('resolveClaudeDirIdentity', () => {
       allowRefresh: true,
       userAgent: 'claude-code/test'
     })
-    await vi.waitFor(() => {
-      expect(fetchMock).toHaveBeenCalled()
-    })
+    // fetch is reached only after the real credential-file read, so the wait is
+    // for file I/O on a shared worker: the 1 s default expired once on CI.
+    await vi.waitFor(
+      () => {
+        expect(fetchMock).toHaveBeenCalled()
+      },
+      { timeout: 10_000 }
+    )
     release(response(200, profileBody()))
 
     expect(await first).toEqual(await second)

@@ -204,9 +204,12 @@ describe('MicrophoneSetting — the picker (desktop)', () => {
     writeMicPreference({ deviceId: 'pods', label: 'AirPods Pro' })
     const w = world([MAC, PODS], 'mac')
     render(<MicrophoneSetting enabled env={w.env} />)
+    // Before enumerateDevices resolves the list is empty, so the remembered
+    // microphone reads "AirPods Pro · not connected" (a substring match on the
+    // name alone passes on that frame): wait for the list, then assert.
     await waitFor(() =>
       expect(screen.getByTestId('MicrophoneSetting.select.trigger')).toHaveTextContent(
-        'AirPods Pro'
+        /^AirPods Pro(?!.*not connected)/
       )
     )
     expect(screen.queryByTestId('MicrophoneSetting.notConnected')).toBeNull()

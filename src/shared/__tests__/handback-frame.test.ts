@@ -230,28 +230,62 @@ describe('sanitizeReport — invisible characters hide nothing', () => {
 
 describe('sanitizeReport — untrusted input costs linear time', () => {
   // The report is a model's output and this runs in the main process: a backtracking pattern
-  // given a megabyte of the right (wrong) characters used to hang it for minutes.
+  // given a megabyte of the right (wrong) characters used to hang it for minutes. The guard is the
+  // growth rate, not a number of milliseconds: 4x the input must cost about 4x (quadratic: 16x).
   const ZW = String.fromCharCode(0x200b)
   const MB = 1_000_000
-  const cases: Array<[string, string]> = [
-    ['"<" and a megabyte of spaces', '<' + ' '.repeat(MB)],
-    ['"< " repeated', '< '.repeat(MB / 2)],
-    ['"<" and newlines', '<\n'.repeat(MB / 2)],
-    ['"</" and tabs', '</\t'.repeat(MB / 3)],
-    ['"permissions":{ repeated', '"permissions":{'.repeat(MB / 15)],
-    ['"permissions" and spaces', '"permissions"' + ' '.repeat(MB)],
-    ['zero-width run', ZW.repeat(MB)],
-    ['"<" and zero-width characters', ('<' + ZW).repeat(MB / 2)],
-    ['an artifact tag that never ends', '<artifact-' + 'a'.repeat(MB) + '!'],
-    ['line-start brackets and spaces', ('[' + ' '.repeat(100) + '\n').repeat(MB / 100)]
+  const GROWTH = 4
+  const MAX_RATIO = 10
+  /** Each case builds its hostile text for a budget of `n` characters. */
+  const cases: Array<[string, (n: number) => string]> = [
+    ['"<" and a megabyte of spaces', (n) => '<' + ' '.repeat(n)],
+    ['"< " repeated', (n) => '< '.repeat(n / 2)],
+    ['"<" and newlines', (n) => '<\n'.repeat(n / 2)],
+    ['"</" and tabs', (n) => '</\t'.repeat(n / 3)],
+    ['"permissions":{ repeated', (n) => '"permissions":{'.repeat(n / 15)],
+    ['"permissions" and spaces', (n) => '"permissions"' + ' '.repeat(n)],
+    ['zero-width run', (n) => ZW.repeat(n)],
+    ['"<" and zero-width characters', (n) => ('<' + ZW).repeat(n / 2)],
+    ['an artifact tag that never ends', (n) => '<artifact-' + 'a'.repeat(n) + '!'],
+    ['line-start brackets and spaces', (n) => ('[' + ' '.repeat(100) + '\n').repeat(n / 100)]
   ]
 
-  it.each(cases)('%s completes well under a second', (_name, text) => {
-    const started = performance.now()
-    const framed = frameHandBack({ name: 'x', engine: 'pi', model: 'm', report: text })
-    const took = performance.now() - started
-    expect(framed.length).toBeGreaterThan(text.length)
-    expect(took).toBeLessThan(500)
+  /**
+   * Fastest run after a warm-up: load only ever adds to a run, so the minimum is stable. At least 5
+   * runs, and more (up to 30) until 400 ms have been spent, so a busy machine still gives a clean one.
+   */
+  const minMs = (run: () => void): number => {
+    run()
+    let best = Infinity
+    const start = performance.now()
+    for (let i = 0; i < 30 && (i < 5 || performance.now() - start < 400); i++) {
+      const t0 = performance.now()
+      run()
+      best = Math.min(best, performance.now() - t0)
+    }
+    return best
+  }
+  /** Cost of the `n * GROWTH` run over the cost of the `n` run (small side floored at 0.05 ms). */
+  const growth = (run: (n: number) => void, n: number): number =>
+    minMs(() => run(n * GROWTH)) /
+    Math.max(
+      minMs(() => run(n)),
+      0.05
+    )
+
+  const frame = (text: string): string =>
+    frameHandBack({ name: 'x', engine: 'pi', model: 'm', report: text })
+
+  it.each(cases)('%s grows linearly with its size', (_name, build) => {
+    const texts = new Map<number, string>() // built in the warm-up, so the timed runs only frame
+    const textFor = (n: number): string => {
+      if (!texts.has(n)) texts.set(n, build(n))
+      return texts.get(n)!
+    }
+    const big = textFor(MB)
+    expect(frame(big).length).toBeGreaterThan(big.length)
+    // 100 KB vs 400 KB: at a megabyte the cost is dominated by garbage collection, which load skews.
+    expect(growth((n) => frame(textFor(n)), 100_000)).toBeLessThan(MAX_RATIO)
   })
 })
 
