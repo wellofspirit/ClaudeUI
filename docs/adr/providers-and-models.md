@@ -2,7 +2,7 @@
 
 Governs: `src/core/shared-providers/`, `src/shared/provider-registry.ts`, `src/shared/shared-provider.ts`, `src/shared/model-references.ts`, `src/shared/model-errors.ts`, `src/shared/endpoint-detect.ts`, `src/shared/model-capabilities.ts`, `src/core/auth/vault/`, `src/core/ipc/engine-models.ts`, `src/core/pi/model-discovery.ts`, `src/core/pi/PiRpcClient.ts`, `src/core/opencode/model-discovery.ts`, `src/renderer/src/components/SettingsDialog/`
 
-How ClaudeUI shares providers, credentials and model lists with the configurable harnesses (pi and opencode): the canonical definitions and the plaintext vault, the Settings surfaces (Subscriptions, API providers, curation), custom endpoints with Detect, the rule that a configured model never silently turns into another one, and how model catalogs load per engine. Accounts, sign-in and the ChatGPT identity are ADR-021, ADR-036, ADR-068, ADR-070, ADR-080 (`auth-and-accounts.md`). opencode provider Disable versus Remove is ADR-044 and native config writes are ADR-028, ADR-031 (`opencode.md`). Claude models by alias only is ADR-100 (`claude-engine.md`). The judge's model route is ADR-081 (`auto-mode-judge.md`). Capability honesty is ADR-030 (`engine-model.md`). The Settings information architecture is ADR-065 (`persistence-and-settings.md`). `docs/model-capabilities.md` is the capability reference.
+How ClaudeUI shares providers, credentials and model lists with the configurable harnesses (pi and opencode): the canonical definitions and the plaintext vault, the Settings surfaces (Subscriptions, API providers, curation), custom endpoints with Detect, the rule that a configured model never silently turns into another one, and how model catalogs load per engine. Accounts, sign-in and the ChatGPT identity are ADR-021, ADR-036, ADR-068, ADR-070, ADR-080 (`auth-and-accounts.md`). opencode provider Disable versus Remove is ADR-044 and native config writes are ADR-028, ADR-031 (`opencode.md`). Claude models by alias where one exists is ADR-100 (`claude-engine.md`). The judge's model route is ADR-081 (`auto-mode-judge.md`). Capability honesty is ADR-030 (`engine-model.md`). The Settings information architecture is ADR-065 (`persistence-and-settings.md`). `docs/model-capabilities.md` is the capability reference.
 
 ## Shared provider routing and a plaintext credential vault (ADR-037)
 
@@ -173,9 +173,9 @@ rotates it everywhere, and the sheet shows delivery per engine so a failed write
 ### §8 Claude's defaults come from Claude
 
 The Claude segment of Default models is built from cli.js's live `supportedModels()` for the signed-in account, never
-a hard-coded list, and offers aliases only (ADR-100). **Start new sessions on** is a real default model stored in
+a hard-coded list, and offers aliases, plus the concrete ids of a family no alias covers (ADR-100). **Start new sessions on** is a real default model stored in
 ClaudeUI's `engines/claude.json`, not `~/.claude/settings.json`, so the terminal `claude` is unaffected.
-**Starting effort per model** has one row per alias with effort levels from the model's own `supportedEffortLevels`; a
+**Starting effort per model** has one row per alias (or per concrete id of an alias-less family) with effort levels from the model's own `supportedEffortLevels`; a
 saved effort for a model the account no longer offers is listed, folded, with Remove. A banner says when the Claude
 page pins one model or renames aliases.
 

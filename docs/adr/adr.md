@@ -165,7 +165,7 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
 - ADR-097 · current · [opencode runs on 2.x only, one server for every directory](opencode.md#opencode-runs-on-2x-only-one-server-for-every-directory-adr-097) in `opencode.md`
 - ADR-098 · current · [Voice capture runs in the renderer; the microphone is chosen per device](voice.md#voice-capture-runs-in-the-renderer-the-microphone-is-chosen-per-device-adr-098) in `voice.md`
 - ADR-099 · current · [The desktop and web clients are one UI build](core-and-hosts.md#the-desktop-and-web-clients-are-one-ui-build-adr-099) in `core-and-hosts.md`
-- ADR-100 · current · [Claude models are picked by alias only, and ClaudeUI follows the model cli.js resolves](claude-engine.md#claude-models-are-picked-by-alias-only-and-claudeui-follows-the-model-clijs-resolves-adr-100) in `claude-engine.md`
+- ADR-100 · current · [Claude models are picked by alias where one exists, and ClaudeUI follows the model cli.js resolves](claude-engine.md#claude-models-are-picked-by-alias-where-one-exists-and-claudeui-follows-the-model-clijs-resolves-adr-100) in `claude-engine.md`
 - ADR-101 · current · [opencode and pi sessions transcribe on-device](voice.md#opencode-and-pi-sessions-transcribe-on-device-adr-101) in `voice.md`
 - ADR-102 · current · [Per-call invoke progress, chunked full sync, and opening a session before its transcript loads](sync-core.md#per-call-invoke-progress-chunked-full-sync-and-opening-a-session-before-its-transcript-loads-adr-102) in `sync-core.md`
 - ADR-103 · current · [Claude agent definitions run in pi and opencode](shared-catalogs.md#claude-agent-definitions-run-in-pi-and-opencode-adr-103) in `shared-catalogs.md`

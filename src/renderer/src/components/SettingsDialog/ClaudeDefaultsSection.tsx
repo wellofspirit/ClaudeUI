@@ -75,8 +75,9 @@ export interface ClaudeEffortRow {
 
 /**
  * Group the Claude catalog by `claudeEffortKey`, in cli.js's own order. The
- * catalog lists aliases only (ADR-100), so a group is an alias plus `default`
- * when `default` resolves where it does.
+ * catalog lists aliases where one exists (ADR-100), so a group is an alias (or
+ * an alias-less family's concrete id) plus `default` when `default` resolves
+ * where it does.
  *
  * The NAME comes from the first row that is not `default` — whose display name
  * is "Default (recommended)", which says nothing about the model. Levels come

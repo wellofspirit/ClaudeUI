@@ -23,6 +23,7 @@ import {
   claudeSavedEffort,
   isClaudeModelAlias,
   isConcreteClaudeModel,
+  claudePickerModels,
   resolveDesiredEffort,
   resolveSpawnEffort,
   withSavedEffort,
@@ -473,7 +474,7 @@ describe('claudeSavedEffort — v3.5 values saved under the resolved model id', 
 })
 
 describe('alias-only Claude catalog (ADR-100)', () => {
-  // The 2.1.293 catalog once concrete rows are dropped: aliases only.
+  // The 2.1.293 catalog once aliased concrete rows are dropped: aliases only.
   const CATALOG = [
     { value: 'default', resolvedModel: 'claude-opus-5-5[1m]' },
     { value: 'fable', resolvedModel: 'claude-fable-5-1' },
@@ -489,6 +490,51 @@ describe('alias-only Claude catalog (ADR-100)', () => {
     for (const v of ['default', 'opus', 'sonnet[1m]', 'haiku', 'fable', 'my-gateway-model']) {
       expect(isConcreteClaudeModel(v)).toBe(false)
     }
+  })
+
+  it('claudePickerModels drops concrete rows an alias covers and keeps alias-less families', () => {
+    const rows = [
+      'default',
+      'opus',
+      'opus[1m]',
+      'fable',
+      'claude-opus-4-8',
+      'claude-opus-5-5[1m]',
+      'claude-fable-5-1',
+      'claude-mythos-5-2',
+      'claude-mythos-5-1',
+      'claude-mythos-5-2[1m]',
+      'my-gateway-model'
+    ].map((value) => ({ value }))
+    expect(claudePickerModels(rows).map((m) => m.value)).toEqual([
+      'default',
+      'opus',
+      'opus[1m]',
+      'fable',
+      'claude-mythos-5-2',
+      'claude-mythos-5-1',
+      'claude-mythos-5-2[1m]',
+      'my-gateway-model'
+    ])
+  })
+
+  it('claudePickerModels keeps a family whose alias the list does not offer', () => {
+    // A [1m]-only alias still covers its family; a family with no alias row stays concrete.
+    const rows = ['sonnet[1m]', 'claude-sonnet-4-6', 'claude-haiku-4-5'].map((value) => ({
+      value
+    }))
+    expect(claudePickerModels(rows).map((m) => m.value)).toEqual(['sonnet[1m]', 'claude-haiku-4-5'])
+  })
+
+  it('claudePickerModels drops dated ids an alias covers, disabled rows and unparseable ids', () => {
+    const rows = [
+      { value: 'haiku' },
+      { value: 'claude-haiku-4-5-20251001' },
+      { value: 'claude-mythos-5-1', disabled: true },
+      { value: 'claude-mythos-5-2' },
+      { value: 'claude-3-5-haiku-20241022' }
+    ]
+    expect(claudePickerModels(rows).map((m) => m.value)).toEqual(['haiku', 'claude-mythos-5-2'])
   })
 
   it('isClaudeModelAlias is `default` and the family aliases, `[1m]` included', () => {

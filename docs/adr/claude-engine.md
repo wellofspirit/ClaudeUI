@@ -232,17 +232,24 @@ every `ChatMessage` (hot parse path, and live ids are not disk uuids), and restr
   internals (line-uuid match, `--fork-session` skipping the rebind) is re-verified on a `claudeCliVersion` bump. pi
   and the other engines implement the same capability by their own means (`ISession.forkFromMessage`).
 
-## Claude models are picked by alias only, and ClaudeUI follows the model cli.js resolves (ADR-100)
+## Claude models are picked by alias where one exists, and ClaudeUI follows the model cli.js resolves (ADR-100)
 
 cli.js resolves `opus`, `sonnet`, `haiku` and `fable` against a model catalog the server serves per account, so
 which model an alias runs can change overnight with no release. ClaudeUI's mirror of the baked catalog cannot
 predict it.
 
-1. **Aliases only.** Every Claude model list offers `default`, the family aliases and their `[1m]` variants, plus any
-   non-`claude-` value cli.js offers (a gateway's custom model option). Concrete ids (values starting with
-   `claude-`, `isConcreteClaudeModel`) are dropped once, in `queryClaudeModels`, so the composer, settings,
+1. **Aliases where one exists.** Every Claude model list offers `default`, the family aliases and their `[1m]`
+   variants, plus any non-`claude-` value cli.js offers (a gateway's custom model option). A concrete id (a value
+   starting with `claude-`, `isConcreteClaudeModel`) is dropped when an alias row in the same list covers its
+   family, and kept when none does: a family the server serves with no alias (Mythos, a confidential early-access
+   family with no `provider_alias_targets` entry) is reachable only by its concrete ids, every version cli.js
+   offers. The filter (`claudePickerModels`) runs once, in `queryClaudeModels`, so the composer, settings,
    automations, remote and the headless server see the same list. Each alias row shows the model it resolves to
-   today as cli.js reports it.
+   today as cli.js reports it. Changed 2026-11-14: concrete ids were dropped unconditionally, which hid Mythos
+   5.1 and 5.2 from accounts entitled to them. A concrete row cli.js marks `disabled`, or whose id has no
+   `claude-<family>-` form, is still dropped. On a cold catalog cache (the bootstrap list, which names Fable only
+   as `claude-fable-5-1` with no `fable` row) that concrete row now shows; a pick of it is not moved to the alias
+   later and surfaces through the stale-model path once the warm catalog drops it.
 2. **Saved concrete picks move to their alias** (`migrateSavedClaudeModels`, run on every non-empty catalog fetch,
    idempotent): the default model, dispatch default and allowlist, the last pick, every automation's model, and
    starting-effort keys (`claudeAliasForModel`, `claudeLegacyEffortKey`). A concrete pick maps to the family alias
@@ -256,7 +263,7 @@ predict it.
 4. **ClaudeUI's own one-shot calls use aliases** too: the commit-message generator asks for `haiku`, not a pinned id.
 
 Consequences: an alias moving needs no ClaudeUI release, and its starting effort moves with it (ADR-074 §8,
-providers-and-models.md). A user can no longer pin an older Anthropic model from the picker; pinning stays available
+providers-and-models.md). A user can no longer pin an older model of an aliased family from the picker; pinning stays available
 through Claude › Endpoint's model mapping (the `pin` override) and `ANTHROPIC_DEFAULT_*_MODEL`-style overrides, which
 apply before alias resolution. A session's first moments, and a third-party provider whose alias targets differ, can
 briefly show the mirror's answer. Rejected: keeping every row and fixing the mirrors (chasing a server-side
