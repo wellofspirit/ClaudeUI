@@ -1,5 +1,5 @@
 import type { ModelInfo } from '../../shared/types'
-import { isConcreteClaudeModel } from '../../shared/model-capabilities'
+import { claudePickerModels } from '../../shared/model-capabilities'
 import { query as sdkQuery } from '../sdk'
 import { ensureHostTokenFresh } from '../sdk/host-token'
 import { getSdkExecutableOpts } from './claude-session'
@@ -23,8 +23,9 @@ export {
 /**
  * Ask cli.js for Claude's model list through a throwaway init-only query and
  * record it in the catalog. Uncached: the TTL-bound read is the caller's
- * ({@link freshClaudeModels}). Concrete model rows are dropped here, so every
- * transport and the catalog list aliases only, and a non-empty answer
+ * ({@link freshClaudeModels}). Concrete rows an alias covers are dropped here
+ * (`claudePickerModels`), so every transport and the catalog list aliases where
+ * one exists, and a non-empty answer
  * moves the host's saved concrete picks to their aliases (ADR-100). `onInit`
  * receives the same initialize response (the user's account) for a caller that
  * reports login status from it; its failure is non-fatal, and the remote
@@ -54,7 +55,7 @@ export async function queryClaudeModels(
       supportedModels(): Promise<ModelInfo[]>
       initializationResult(): Promise<Record<string, unknown>>
     }
-    const models = (await handle.supportedModels()).filter((m) => !isConcreteClaudeModel(m.value))
+    const models = claudePickerModels(await handle.supportedModels())
     // An aborted query (a timed-out catalog wait) answers `[]` without asking
     // cli.js; caching that would serve an empty picker for the whole TTL.
     if (!abort.signal.aborted && models.length > 0) {

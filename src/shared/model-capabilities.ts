@@ -106,12 +106,40 @@ function claudeFamilyAlias(value: string): string | null {
 
 /**
  * Does a Claude picker value name one specific Anthropic model (`claude-opus-4-8`,
- * `claude-fable-5-1[1m]`)? ClaudeUI offers Claude models by alias only (ADR-100),
- * so these rows are dropped from cli.js's catalog. `default`, the family aliases
- * and anything else cli.js offers (a gateway's own model option) are kept.
+ * `claude-fable-5-1[1m]`)? ClaudeUI offers Claude models by alias where one
+ * exists (ADR-100): see {@link claudePickerModels}.
  */
 export function isConcreteClaudeModel(value: string): boolean {
   return value.toLowerCase().startsWith('claude-')
+}
+
+/** The family a concrete Claude id names (`claude-mythos-5-2[1m]` → `mythos`), else null. */
+function claudeModelFamily(value: string): string | null {
+  return /^claude-([a-z]+)-/.exec(value.toLowerCase())?.[1] ?? null
+}
+
+/**
+ * cli.js's model rows as ClaudeUI offers them (ADR-100): a concrete row is dropped
+ * when an alias row in the same list covers its family (`claude-opus-4-8` goes while
+ * `opus` is listed), and kept when none does: a family the server serves without an
+ * alias (Mythos) is reachable only by its concrete ids. A concrete row is also dropped
+ * when cli.js marks it `disabled` (ModelInfo cannot show that, and the turn would
+ * fail) or when its id has no `claude-<family>-` form (`claude-3-5-haiku-…`, retired).
+ * `default`, the family aliases and anything else cli.js offers (a gateway's own
+ * model option) are kept.
+ */
+export function claudePickerModels<T extends { value: string }>(models: readonly T[]): T[] {
+  const aliased = new Set<string>()
+  for (const m of models) {
+    const alias = claudeFamilyAlias(m.value)
+    if (alias) aliased.add(alias)
+  }
+  return models.filter((m) => {
+    if (!isConcreteClaudeModel(m.value)) return true
+    const family = claudeModelFamily(m.value)
+    const disabled = (m as { disabled?: unknown }).disabled === true
+    return family !== null && !aliased.has(family) && !disabled
+  })
 }
 
 /** Is this Claude picker value an alias cli.js resolves: `default` or a family alias? */

@@ -630,7 +630,7 @@ describe('InputBox FC — rendered', () => {
   })
 
   it('a session saved on a concrete Claude model shows its alias, and spawns its own value', async () => {
-    // ADR-100: the catalog lists aliases only. Display (and the effort read)
+    // ADR-100: the catalog lists aliases where one exists. Display (and the effort read)
     // goes through the alias that runs the model; the session is not rewritten.
     fcClaudeModels = [
       claudeRow('default', 'claude-opus-5-5[1m]', 'Default (recommended)'),

@@ -1409,11 +1409,11 @@ describe('AutomationManager — id validation (M-AU3)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// ADR-100: the catalog fetch lists aliases only and moves saved concrete picks
+// ADR-100: the catalog fetch lists aliases where one exists and moves saved concrete picks
 // to their aliases — engines/claude.json and every automation, on the real files.
 // ---------------------------------------------------------------------------
 
-describe('Claude catalog fetch — aliases only, saved picks moved (ADR-100)', () => {
+describe('Claude catalog fetch — aliases where one exists, saved picks moved (ADR-100)', () => {
   const ROWS = [
     { value: 'default', resolvedModel: 'claude-opus-5-5[1m]' },
     { value: 'opus', resolvedModel: 'claude-opus-5-5' },
@@ -1421,6 +1421,8 @@ describe('Claude catalog fetch — aliases only, saved picks moved (ADR-100)', (
     { value: 'haiku', resolvedModel: 'claude-haiku-5-5' },
     { value: 'claude-opus-4-8', resolvedModel: 'claude-opus-4-8' },
     { value: 'claude-sonnet-5', resolvedModel: 'claude-sonnet-5' },
+    // An alias-less family (Mythos) stays reachable by its concrete ids.
+    { value: 'claude-mythos-5-2', resolvedModel: 'claude-mythos-5-2' },
     { value: 'gateway-custom' }
   ]
   const engineFile = (): string =>
@@ -1441,7 +1443,7 @@ describe('Claude catalog fetch — aliases only, saved picks moved (ADR-100)', (
     return { mgr, automationDir, query: queryClaudeModels }
   }
 
-  it('drops concrete rows from the answer and the cache, keeping a custom value', async () => {
+  it('drops aliased concrete rows from the answer and the cache, keeping alias-less and custom values', async () => {
     const { query } = await setup()
     supportedModelsImpl = async () => ROWS
     const models = await query()
@@ -1450,6 +1452,7 @@ describe('Claude catalog fetch — aliases only, saved picks moved (ADR-100)', (
       'opus',
       'sonnet',
       'haiku',
+      'claude-mythos-5-2',
       'gateway-custom'
     ])
     const { cachedClaudeModels } = await import('../claude-model-catalog')
@@ -1469,6 +1472,7 @@ describe('Claude catalog fetch — aliases only, saved picks moved (ADR-100)', (
     mgr.upsert(makeAutomation({ id: 'concrete', model: 'claude-opus-5-5' }))
     mgr.upsert(makeAutomation({ id: 'unreached', model: 'claude-opus-4-7' }))
     mgr.upsert(makeAutomation({ id: 'alias', model: 'sonnet' }))
+    mgr.upsert(makeAutomation({ id: 'mythos', model: 'claude-mythos-5-2' }))
     supportedModelsImpl = async () => ROWS
 
     await query()
@@ -1483,6 +1487,7 @@ describe('Claude catalog fetch — aliases only, saved picks moved (ADR-100)', (
     expect(onDisk('concrete').model).toBe('opus')
     expect(onDisk('unreached').model).toBe('claude-opus-4-7')
     expect(onDisk('alias').model).toBe('sonnet')
+    expect(onDisk('mythos').model).toBe('claude-mythos-5-2')
     expect(mgr.list().find((a) => a.id === 'concrete')!.model).toBe('opus')
     mgr.stopAll()
   })
