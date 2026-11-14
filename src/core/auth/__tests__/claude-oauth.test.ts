@@ -17,6 +17,14 @@ vi.mock('../../services/logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 }))
 
+vi.mock('../../services/write-json-atomic', async () => {
+  const actual = await vi.importActual<typeof import('../../services/write-json-atomic')>(
+    '../../services/write-json-atomic'
+  )
+  return { ...actual, writeJsonAtomicAsync: vi.fn(actual.writeJsonAtomicAsync) }
+})
+
+import { writeJsonAtomicAsync } from '../../services/write-json-atomic'
 import {
   buildClaudeAuthorizeUrl,
   buildStoredCredential,
@@ -511,5 +519,88 @@ describe('ClaudeLoginFlow — the identity the sign-in resolved', () => {
       }).fetch
     )
     expect(result.identity).toEqual({ accountUuid: null, organizationUuid: null })
+  })
+})
+
+describe('ClaudeLoginFlow — a cancel after the credential write started', () => {
+  /** Resolves once `n` is true-ish; the tests below wait on real async steps. */
+  async function until(cond: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5))
+    expect(cond()).toBe(true)
+  }
+
+  it('T1: cancel() while the write is pending still settles success, with the token on disk', async () => {
+    const actual = await vi.importActual<typeof import('../../services/write-json-atomic')>(
+      '../../services/write-json-atomic'
+    )
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    let started = false
+    vi.mocked(writeJsonAtomicAsync).mockImplementationOnce(async (...args) => {
+      started = true
+      await gate
+      return actual.writeJsonAtomicAsync(...args)
+    })
+    const flow = new ClaudeLoginFlow({ accountDir: dir, fetch: fakeFetch().fetch, loopback: false })
+    const { manualUrl } = await flow.start()
+    const outcome = flow.submitCode('C', stateOf(manualUrl))
+    await until(() => started)
+    flow.cancel()
+    release()
+    const result = await outcome
+    expect(result.account.email).toBe('user@example.com')
+    expect((readCreds().claudeAiOauth as Record<string, unknown>).accessToken).toBe('at-1')
+  })
+
+  it('T2: cancel() while the roles fetch is pending aborts it and settles success with the token org', async () => {
+    const base = fakeFetch()
+    let rolesSignal: AbortSignal | undefined
+    const fetchFn = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      if (String(input) !== 'https://api.anthropic.com/api/oauth/claude_cli/roles') {
+        return (base.fetch as typeof fetch)(input, init)
+      }
+      rolesSignal = init?.signal as AbortSignal
+      return new Promise<Response>((_, reject) => {
+        rolesSignal!.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }) as unknown as typeof fetch
+    const flow = new ClaudeLoginFlow({ accountDir: dir, fetch: fetchFn, loopback: false })
+    const { manualUrl } = await flow.start()
+    const outcome = flow.submitCode('C', stateOf(manualUrl))
+    await until(() => rolesSignal !== undefined)
+    expect(rolesSignal!.aborted).toBe(false)
+    flow.cancel()
+    const result = await outcome
+    expect(rolesSignal!.aborted).toBe(true)
+    expect(result.account.organization).toBe('Token Org')
+    expect((readCreds().claudeAiOauth as Record<string, unknown>).accessToken).toBe('at-1')
+  })
+
+  it('T3: cancel() before the write (profile pending) still rejects and writes nothing', async () => {
+    const base = fakeFetch()
+    let profileStarted = false
+    const fetchFn = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      if (String(input) !== 'https://api.anthropic.com/api/oauth/profile') {
+        return (base.fetch as typeof fetch)(input, init)
+      }
+      profileStarted = true
+      return new Promise<Response>((_, reject) => {
+        init!.signal!.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    }) as unknown as typeof fetch
+    const flow = new ClaudeLoginFlow({ accountDir: dir, fetch: fetchFn, loopback: false })
+    const { manualUrl } = await flow.start()
+    const outcome = flow.submitCode('C', stateOf(manualUrl))
+    await until(() => profileStarted)
+    flow.cancel()
+    await expect(outcome).rejects.toThrow('Login cancelled')
+    expect(existsSync(join(dir, '.credentials.json'))).toBe(false)
+  })
+
+  it('T4: a write failure still rejects the outcome', async () => {
+    vi.mocked(writeJsonAtomicAsync).mockRejectedValueOnce(new Error('disk full'))
+    const flow = new ClaudeLoginFlow({ accountDir: dir, fetch: fakeFetch().fetch, loopback: false })
+    const { manualUrl } = await flow.start()
+    await expect(flow.submitCode('C', stateOf(manualUrl))).rejects.toThrow('disk full')
   })
 })

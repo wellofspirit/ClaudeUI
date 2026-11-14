@@ -38,6 +38,7 @@
  * and never the Keychain (`core/services/claude-login-state.ts`).
  */
 
+import { basename } from 'node:path'
 import { shell } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { AuthFlowState, OAuthAccount } from '../../shared/types'
@@ -46,6 +47,7 @@ import { logger } from '../../core/services/logger'
 import { emitEvent } from '../../core/services/sync-host'
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../../core/auth/auth-providers'
 import { claudeLoginSignal } from '../../core/services/claude-login-state'
+import { getSecurestorageEnv } from '../../core/sdk/securestorage-env'
 import {
   backendForPaste,
   openLoginBackend,
@@ -96,9 +98,20 @@ class AuthManager {
    */
   private settledFlow: { flow: number; state: AuthFlowState } | null = null
 
-  /** Listeners notified with the account on a successful login (ADR-015). */
-  private onSuccessCbs: ((account: OAuthAccount | null, identity: LoginIdentity | null) => void)[] =
-    []
+  /** Flows whose success side effects already ran: a flow can finalize from the loopback wait AND a paste. */
+  private sideEffectsRan = new Set<number>()
+
+  /**
+   * Listeners notified with the account on a successful login (ADR-015).
+   * `forActive` is false when the credential landed in a slot that is no longer
+   * the active account (the pointer moved mid-sign-in): the listener may record
+   * the login against its slot but must not treat it as the active account's.
+   */
+  private onSuccessCbs: ((
+    account: OAuthAccount | null,
+    identity: LoginIdentity | null,
+    forActive: boolean
+  ) => void)[] = []
 
   setWindow(win: BrowserWindow): void {
     this.window = win
@@ -114,7 +127,9 @@ class AuthManager {
 
   /** Subscribe to successful logins (used by the account manager to capture the
    *  signed-in account's email for the active account dir). */
-  onLoginSuccess(cb: (account: OAuthAccount | null, identity: LoginIdentity | null) => void): void {
+  onLoginSuccess(
+    cb: (account: OAuthAccount | null, identity: LoginIdentity | null, forActive: boolean) => void
+  ): void {
     this.onSuccessCbs.push(cb)
   }
 
@@ -337,11 +352,6 @@ class AuthManager {
   private finalize(flow: number, res: OAuthResult): AuthFlowState {
     const replay = this.replaySettled(flow)
     if (replay) return replay
-    if (flow !== this.flowId || this.settled) return IDLE
-    this.settled = true
-    this.pendingState = null
-    this.pendingManualUrl = null
-
     const account: OAuthAccount | null = res.account
       ? {
           email: res.account.email ?? null,
@@ -352,11 +362,51 @@ class AuthManager {
           apiProvider: res.account.apiProvider ?? null
         }
       : null
+    const forActive = loginIsForActiveAccount(res.identity)
 
-    const state: AuthFlowState = { status: 'success', account, error: null }
+    if (flow !== this.flowId || this.settled) {
+      // A cancelled or superseded flow whose login landed anyway: the stored
+      // credential changed whatever the UI was told, so the side effects run.
+      // The UI stays as the user left it (no `auth:state`), and none of the
+      // current flow's pending state is touched.
+      this.runSuccessEffects(flow, account, res, forActive)
+      return IDLE
+    }
+    this.settled = true
+    this.pendingState = null
+    this.pendingManualUrl = null
+
+    // The pointer moved while the credential was being written: the login is
+    // real (and recorded against its own slot) but is not the active account's,
+    // so the dialog says so instead of "Signed in".
+    const state: AuthFlowState = forActive
+      ? { status: 'success', account, error: null }
+      : {
+          status: 'error',
+          account: null,
+          error: `Signed in to ${account?.email ?? 'that account'}, but you switched accounts during sign-in. It's ready when you switch back.`
+        }
     // Remembered BEFORE the side effects below, so even a re-entrant settle
     // (from one of the `onSuccessCbs`) replays this instead of erasing it.
     this.settledFlow = { flow, state }
+    this.runSuccessEffects(flow, account, res, forActive, state)
+    return state
+  }
+
+  /**
+   * What a login that stored a credential does, current flow or not. `state`
+   * is broadcast only for the current flow, after the session invalidation and
+   * before the callbacks, as it always was.
+   */
+  private runSuccessEffects(
+    flow: number,
+    account: OAuthAccount | null,
+    res: OAuthResult,
+    forActive: boolean,
+    state?: AuthFlowState
+  ): void {
+    if (this.sideEffectsRan.has(flow)) return
+    this.sideEffectsRan.add(flow)
     logger.info('AuthManager', `Login succeeded${account?.email ? ` (${account.email})` : ''}`)
     // Every live engine process cached the credential this login just replaced,
     // so stop them main-side. Before this the ONLY reaction was the desktop
@@ -365,16 +415,18 @@ class AuthManager {
     // other client) was told nothing, and canonical never heard about it at all.
     // "The active session" is not expressible here on purpose — selection is
     // per-client view state (ADR-041) — and it is also the wrong scope: every
-    // session holds the same stale credential.
-    invalidateLiveSessions('Claude login succeeded')
-    this.broadcast(state)
+    // session holds the same stale credential. A login into a slot that is not
+    // the active one replaced nothing any live session holds.
+    if (forActive) invalidateLiveSessions('Claude login succeeded')
+    if (state) this.broadcast(state)
     for (const cb of this.onSuccessCbs) {
       try {
-        cb(account, res.identity ?? null)
+        cb(account, res.identity ?? null, forActive)
       } catch {
         /* listener errors must not break the flow */
       }
     }
+    if (!forActive) return
     // ADR-070 §2: the ONE resolution signal. Replicated, so every client — not
     // just the desktop that signed in — clears the sign-in this login fixed;
     // before it, `authRequired` was cleared only by a turn that RAN again, which
@@ -394,7 +446,6 @@ class AuthManager {
     // be that the renderer is two async IPC hops away while the loop is
     // synchronous. Ordering by luck on the Claude login path is not ordering.
     emitEvent('provider:auth-resolved', [{ providerId: ANTHROPIC_AUTH_PROVIDER_ID }])
-    return state
   }
 
   private fail(flow: number, err: unknown): AuthFlowState {
@@ -441,6 +492,12 @@ class AuthManager {
       this.window.webContents.send('auth:state', state)
     }
   }
+}
+
+/** A cli.js login has no identity and always wrote the one store; an in-app one names its slot. */
+function loginIsForActiveAccount(identity: LoginIdentity | undefined): boolean {
+  if (!identity) return true
+  return identity.accountId === basename(getSecurestorageEnv()?.dir ?? '')
 }
 
 function parseState(url: string | undefined): string | null {
