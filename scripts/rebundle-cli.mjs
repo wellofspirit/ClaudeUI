@@ -24,7 +24,7 @@
  *     hashes, builtin bytecode, bytecode string table, startup module count,
  *     module_info string table, cross-compiled bytecode). We emit none of
  *     them, so the trailer flags must be masked to `flags & 0xf` — see the
- *     comment in `writeBlob()`.
+ *     comment in `writeBlob()` (./lib/standalone-blob.mjs).
  *
  * Truncates the Authenticode cert (binary becomes unsigned — inevitable once
  * we touch the bytes) and shrinks the `.bun` section to match the new blob
@@ -34,7 +34,8 @@
  *   - Bun StandaloneModuleGraph (Zig ≤1.3 / Rust ≥1.4): 32-byte Offsets
  *     struct, 52-byte module entries (6× StringPointer + 4× u8), strings are
  *     \0-terminated, bytecode requires (offset % 128 == 120) alignment when
- *     non-empty (moot — we never emit bytecode).
+ *     non-empty (moot — we never emit bytecode), and encoding == 2 (UTF-16)
+ *     contents must start at an even offset (Bun casts them to []u16 in place).
  *   - byte_count = size of data buffer (excludes Offsets + magic).
  *
  * Usage:
@@ -59,6 +60,7 @@ import { detectFormat } from './lib/binary-format.mjs'
 import { CHUNK_DELIM_RE, isChunkConcat } from './lib/chunk-format.mjs'
 import { cliJsPath, cliTrashDir, cliVendorDir, versionJsonPath } from './lib/cli-paths.mjs'
 import { replaceFile, sweepTrash } from './lib/vendor-swap.mjs'
+import { BUN_MAGIC, ENTRY_SIZE, misalignedModules, writeBlob } from './lib/standalone-blob.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -73,8 +75,6 @@ function isInside(parent, child) {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
-const BUN_MAGIC = Buffer.from('\n---- Bun! ----\n', 'utf8')
-const ENTRY_SIZE = 52
 /** Loader byte for JavaScript modules in Bun's standalone module table. */
 const LOADER_JS = 1
 
@@ -365,130 +365,6 @@ function readBlobAtSection(buf, sectionOff, sectionSize) {
 }
 
 // ---------------------------------------------------------------------------
-// Blob writer: emit strings, modules table, argv, Offsets, magic.
-// Drops bytecode + its two companion fields (module_info,
-// bytecode_origin_path) so Bun recompiles from source, and emits none of
-// Bun 1.4's optional post-table records.
-// ---------------------------------------------------------------------------
-
-function writeBlob({ modules, argv, entry_point_id, flags }) {
-  // Allocate a generous buffer and track position; we'll slice at the end.
-  // Upper bound: only the three strings we actually emit (name, contents,
-  // sourcemap) plus their \0 terminators, then table + argv + trailer.
-  // bytecode / module_info / bytecode_origin_path are never written.
-  const estimate =
-    modules.reduce(
-      (s, m) => s + m.name.length + 1 + m.contents.length + 1 + m.sourcemap.length + 1,
-      0
-    ) +
-    argv.length +
-    1 +
-    modules.length * ENTRY_SIZE +
-    32 +
-    16 +
-    256 /* slack */
-  const out = Buffer.alloc(estimate)
-  let pos = 0
-
-  const strPtrs = [] // per-module, parallel to modules
-
-  for (const m of modules) {
-    const ptrs = {}
-    const writeStr = (bytes) => {
-      if (bytes.length === 0) return { off: 0, len: 0 }
-      const off = pos
-      bytes.copy(out, pos)
-      pos += bytes.length
-      out[pos++] = 0 // null terminator (length excludes it)
-      return { off, len: bytes.length }
-    }
-    ptrs.name = writeStr(m.name)
-    ptrs.contents = writeStr(m.contents)
-    ptrs.sourcemap = writeStr(m.sourcemap)
-    // bytecode + module_info + bytecode_origin_path: intentionally dropped —
-    // forces Bun to recompile from source. Keeps the blob small (127MB → ~38MB
-    // at 2.1.261) and avoids the offset % 128 == 120 alignment dance. The two
-    // companions only describe baked bytecode, so carrying them forward while
-    // the bytecode is gone would be at best dead weight and at worst a
-    // dangling reference from the loader's point of view.
-    ptrs.bytecode = { off: 0, len: 0 }
-    ptrs.module_info = { off: 0, len: 0 }
-    ptrs.bytecode_origin_path = { off: 0, len: 0 }
-    strPtrs.push(ptrs)
-  }
-
-  // argv blob
-  let argvPtr = { off: 0, len: 0 }
-  if (argv.length > 0) {
-    argvPtr = { off: pos, len: argv.length }
-    argv.copy(out, pos)
-    pos += argv.length
-    out[pos++] = 0
-  }
-
-  // Modules table follows all strings.
-  const mod_off = pos
-  for (let i = 0; i < modules.length; i++) {
-    const m = modules[i]
-    const p = strPtrs[i]
-    const writeSp = (sp) => {
-      out.writeUInt32LE(sp.off, pos)
-      out.writeUInt32LE(sp.len, pos + 4)
-      pos += 8
-    }
-    writeSp(p.name)
-    writeSp(p.contents)
-    writeSp(p.sourcemap)
-    writeSp(p.bytecode)
-    writeSp(p.module_info)
-    writeSp(p.bytecode_origin_path)
-    out.writeUInt8(m.encoding, pos++)
-    out.writeUInt8(m.loader, pos++)
-    out.writeUInt8(m.module_format, pos++)
-    out.writeUInt8(m.side, pos++)
-  }
-  const mod_len = modules.length * ENTRY_SIZE
-
-  // Bun 1.4 chains OPTIONAL records after the module table, each gated by a
-  // trailer flag bit: SOURCE_TEXT_CONTIGUOUS (4), HAS_SOURCE_HASHES (5),
-  // HAS_BUILTIN_BYTECODE (6), HAS_BYTECODE_STRING_TABLE (7),
-  // HAS_STARTUP_MODULE_COUNT (8), HAS_MODULE_INFO_STRING_TABLE (9),
-  // CROSS_COMPILED_BYTECODE (10). We emit none of them, so those bits MUST be
-  // cleared — copying the upstream flags verbatim (0x3ff on 2.1.261, 0x1fff on
-  // 2.1.308, 0x3fff on 2.1.317) makes the loader read whatever follows the
-  // table as record data and segfault before main. Bits 0-3
-  // (DISABLE_DEFAULT_ENV_FILES / DISABLE_AUTOLOAD_BUNFIG / _TSCONFIG /
-  // _PACKAGE_JSON) are behavioural and must be preserved.
-  const outFlags = flags & 0xf
-
-  // Offsets struct sits at byte_count (= current pos), trailer follows.
-  const byte_count = pos
-  out.writeBigUInt64LE(BigInt(byte_count), pos)
-  pos += 8
-  out.writeUInt32LE(mod_off, pos)
-  pos += 4
-  out.writeUInt32LE(mod_len, pos)
-  pos += 4
-  out.writeUInt32LE(entry_point_id, pos)
-  pos += 4
-  out.writeUInt32LE(argvPtr.off, pos)
-  pos += 4
-  out.writeUInt32LE(argvPtr.len, pos)
-  pos += 4
-  out.writeUInt32LE(outFlags, pos)
-  pos += 4
-  if (flags !== outFlags) {
-    log(`flags: 0x${flags.toString(16)} → 0x${outFlags.toString(16)} (optional records dropped)`)
-  }
-
-  // Magic
-  BUN_MAGIC.copy(out, pos)
-  pos += BUN_MAGIC.length
-
-  return out.subarray(0, pos)
-}
-
-// ---------------------------------------------------------------------------
 // Mach-O rewriter: overwrite __BUN,__bun section contents in place, preserving
 // the original section size via zero padding. Keeping the size fixed means
 // __LINKEDIT and the code-signature blob that follow stay at their original
@@ -737,7 +613,21 @@ function main() {
     log('NO-OP mode: reusing original module contents (drops bytecode + optional records only)')
   }
 
-  const newBlob = writeBlob(graph)
+  const { blob: newBlob, outFlags } = writeBlob(graph)
+  if (graph.flags !== outFlags) {
+    log(
+      `flags: 0x${graph.flags.toString(16)} → 0x${outFlags.toString(16)} (optional records dropped)`
+    )
+  }
+  // Bun casts UTF-16 contents to []u16 in place; an odd offset panics the
+  // binary when that module loads (cast_slice … not aligned to 2). Check the
+  // bytes that ship (a layout check against the writer's own alignment rule).
+  const misaligned = misalignedModules(newBlob)
+  if (misaligned.length > 0) {
+    die(
+      `writer left ${misaligned.length} module(s) misaligned: ${misaligned.slice(0, 10).join(', ')}`
+    )
+  }
   log(`new blob: ${newBlob.length} bytes (was ${origBlobLen})`)
 
   const out =
