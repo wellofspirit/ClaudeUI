@@ -33,7 +33,7 @@ gap). What is left here is the part the rebuild did not change.
 
 Four frame families, and the same four carry BOTH transports (WebSocket for the web
 client, `MessagePort` for the desktop renderer — no auth frames on the port, because the
-port IS the trust):
+port IS the trust; `invoke-chunk`, below, is a WS-only slice of an `invoke`):
 
 - `invoke` / `invoke-response` — client actions, RPC mirroring `ipcRenderer.invoke`.
   The web client's one fire-and-forget diagnostic rides it too: `sync:report-timing` (a `chat`
@@ -48,6 +48,25 @@ port IS the trust):
   `{deferStatusLine: true}` skips the cost pass), `session:load-status-line` (the status line
   that pass would have returned, same `fs-read` capability) and `session:load-subagent-history`
   (reports nothing itself; the transport's `sending` frame is what re-arms the web timeout).
+  `invoke-chunk {id, index, count, data, channel?}` (WS-only, client → host) carries ONE invoke
+  too large for a frame: the host's `ws` `maxPayload` is 4 MiB for every frame (a pre-auth
+  amplification bound), and under E2E an attachment's bytes are base64'd twice (~1.78x). The web
+  client sends an invoke whose JSON exceeds `INVOKE_CHUNK_CHARS` (512 Ki chars) as paced slices of
+  that exact JSON, one upload at a time, only to a host whose `auth-response` advertised
+  `invokeChunks {maxChars}`; an older host gets single frames and a too-large request is refused
+  client-side with a clear error instead of a frame that closes the socket. The host reassembles
+  POST-AUTH ONLY and hands the parsed request to the ordinary `handleInvoke`, so step-up, the
+  capability check and the audit row are exactly those of a single frame; the reassembled
+  `channel` must equal the one chunk 0 named. Chunk 0's `channel` exists so the host can refuse up
+  front what the invoke path would refuse anyway (a pure pre-check: unregistered channel, the
+  terminal/IDE toggles, the step-up table — no window refresh, no revoke), and a socket without the
+  base remote surface (enroll-only) cannot start a transfer. Limits: 48 Mi chars per request, 2
+  transfers per socket, 256 Mi chars across all sockets (summed from the live client records on
+  every chunk, never counted), 60 s idle (swept on the ping tick). Every refusal of a chunk with a usable id answers
+  `invoke-response {ok:false}` for the id and leaves the socket open. The client paces on
+  `bufferedAmount`, arms the 30 s invoke timeout only once the upload has drained, and closes the
+  socket on a 30 s stall (a half-open link). `sendPrompt` reports the upload as client-side
+  progress (`phase:'uploading'`), which drives the input box's per-attachment rings.
 - `event {seq, channel, args}` — server pushes. The seq is the ring's, assigned once.
 - `sync {lastSeq, epoch, chunked?}` → `sync-catchup {events}` or `sync-full {state}` — the
   reconnect protocol. The snapshot is canonical state in the main process

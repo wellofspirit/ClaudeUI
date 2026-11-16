@@ -635,6 +635,8 @@ function toggleRefusal(
 
 /** One chunked invoke being reassembled (see `RemoteServer.handleInvokeChunk`). */
 interface InvokeTransfer {
+  /** The channel chunk 0 named; the reassembled request must carry the same one. */
+  channel: string
   count: number
   /** Index the next chunk must carry. */
   next: number
@@ -4010,7 +4012,7 @@ export class RemoteServer {
         refuse(refusal)
         return
       }
-      transfer = { count: n, next: 0, parts: [], chars: 0, lastChunkAt: Date.now() }
+      transfer = { channel, count: n, next: 0, parts: [], chars: 0, lastChunkAt: Date.now() }
       client.invokeTransfers.set(id, transfer)
     } else if (!transfer || transfer.count !== n || transfer.next !== i) {
       refuse(transfer ? 'Invoke chunk out of order' : 'Unknown invoke transfer')
@@ -4041,6 +4043,9 @@ export class RemoteServer {
     // R3: release the slices before parsing so the peak is the joined string
     // plus the parse, not three copies.
     const json = transfer.parts.join('')
+    // Drop the slices themselves, not just the map entry: `transfer` is still a live
+    // local while JSON.parse runs.
+    transfer.parts = []
     client.invokeTransfers.delete(id)
     let parsed: unknown
     try {
@@ -4055,7 +4060,8 @@ export class RemoteServer {
       req === null ||
       req.type !== 'invoke' ||
       req.id !== id ||
-      typeof req.channel !== 'string' ||
+      // The channel chunk 0 was pre-checked for is the one that runs.
+      req.channel !== transfer.channel ||
       !Array.isArray(req.args)
     ) {
       refuse('Malformed chunked invoke')

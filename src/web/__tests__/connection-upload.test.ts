@@ -257,6 +257,28 @@ describe('RemoteConnection chunked invoke upload', () => {
       conn.destroy()
     })
 
+    it('a stall closes the socket, so the reconnect starts now', async () => {
+      const { conn, ws } = open(BIG)
+      const closed = vi.fn()
+      ws.close = closed
+      const result = settle(conn.invoke('x', 'a'.repeat(CHUNK * 3)))
+      await tick(31_000)
+      expect(await result).toEqual({ err: 'Connection lost: x' })
+      expect(closed).toHaveBeenCalled()
+      conn.destroy()
+    })
+
+    it('a socket swapped without a close event never leaves the upload pending', async () => {
+      const { conn, internals } = open(BIG)
+      const result = settle(conn.invoke('x', 'a'.repeat(CHUNK * 3)))
+      await tick(10)
+      internals.ws = fakeWs() // the old socket's onclose was detached: no failInvokesOnClose
+      await tick(200)
+      expect(await result).toEqual({ err: 'Connection lost: x' })
+      expect(internals.pendingInvokes.size).toBe(0)
+      conn.destroy()
+    })
+
     it('the 30 s invoke timer is armed only after the buffer has drained', async () => {
       const { conn, internals, ws } = open(BIG)
       const result = settle(conn.invoke('x', 'a'.repeat(CHUNK + 10)))

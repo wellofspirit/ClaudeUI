@@ -878,9 +878,16 @@ export class RemoteConnection {
       this.ws === ws &&
       ws.readyState === WebSocket.OPEN &&
       this.pendingInvokes.get(id) === entry
-    if (!alive()) return
-    const parts = splitSyncFullJson(json, INVOKE_CHUNK_CHARS)
     const channel = entry.channel
+    if (!alive()) {
+      // Queued behind another upload while its socket went away without a close event.
+      if (this.pendingInvokes.get(id) === entry) {
+        this.pendingInvokes.delete(id)
+        entry.reject(new Error(`Connection lost: ${channel}`))
+      }
+      return
+    }
+    const parts = splitSyncFullJson(json, INVOKE_CHUNK_CHARS)
     // bufferedAmount counts wire bytes; E2E makes a char ~4/3 bytes. Plain frames are ~1:1.
     const wireScale = this.e2e?.isReady ? 4 / 3 : 1
     let handed = 0
@@ -912,8 +919,15 @@ export class RemoteConnection {
         report()
         if (ready()) return true
         if (buffered > 0 && Date.now() - lastProgressAt >= UPLOAD_STALL_MS) {
-          this.pendingInvokes.delete(id)
-          entry.reject(new Error(`Connection lost: ${channel}`))
+          // A half-open link: close it, so every other pending invoke fails through the
+          // ordinary close path and the reconnect follows, rather than the next queued
+          // upload waiting out its own stall on a dead socket. (The browser may hold
+          // `onclose` until its closing-handshake timeout on a truly dead link.)
+          ws!.close()
+          if (this.pendingInvokes.get(id) === entry) {
+            this.pendingInvokes.delete(id)
+            entry.reject(new Error(`Connection lost: ${channel}`))
+          }
           return false
         }
         await new Promise<void>((r) => setTimeout(r, UPLOAD_POLL_MS))
@@ -940,6 +954,14 @@ export class RemoteConnection {
       if (this.pendingInvokes.get(id) === entry) {
         this.pendingInvokes.delete(id)
         entry.reject(err instanceof Error ? err : new Error(String(err)))
+      }
+    } finally {
+      // Every exit that armed no timer and left the entry pending (a frame dropped
+      // because encrypt threw, the socket swapped without a close event) would
+      // otherwise never settle: an upload has no timer of its own until it drains.
+      if (this.pendingInvokes.get(id) === entry && entry.timer === undefined) {
+        this.pendingInvokes.delete(id)
+        entry.reject(new Error(`Connection lost: ${channel}`))
       }
     }
   }

@@ -421,6 +421,29 @@ describe('chunked invokes (invoke-chunk)', () => {
       await expectAlive(c)
     })
 
+    it('inner channel differs from the one chunk 0 was pre-checked for', async () => {
+      // Both channels are valid and allowed, so only the equality rule can refuse it.
+      registerCommand({
+        channel: 'probe:other',
+        capability: 'config',
+        kind: 'query',
+        transport: 'remote',
+        handler: async () => 'other'
+      })
+      await boot()
+      const c = await login()
+      for (const f of chunks(
+        'swap',
+        'probe:other',
+        reqJson('swap', 'probe:echo', ['x'.repeat(60)]),
+        40
+      ))
+        c.send(f)
+      expect(await response(c, 'swap')).toMatchObject({ ok: false })
+      expect(seen).toEqual([])
+      await expectAlive(c)
+    })
+
     it('inner type not invoke', async () => {
       await boot()
       const c = await login()
