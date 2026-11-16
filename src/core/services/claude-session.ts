@@ -377,12 +377,13 @@ export class ClaudeSession extends BaseSession {
   private identitySeed: Promise<AgentIdentity> | null = null
   /**
    * Tasks the CURRENT process has started and not yet ended: task id → the
-   * tool_use id its card is keyed by, and the task's type. They run inside
+   * tool_use id its card is keyed by, the task's type and whether its end wakes
+   * the main agent (`wakesParent`, judged once at start). They run inside
    * cli.js, so when the process goes they go with it — and nothing else will
    * ever say so until a `--resume` reaps them. `settleOrphanedTasks` reports
    * them stopped.
    */
-  private liveTasks = new Map<string, { owner: string; taskType: string }>()
+  private liveTasks = new Map<string, { owner: string; taskType: string; wakes: boolean }>()
   /**
    * Tasks cli.js reported as BACKGROUNDED (task_started `is_backgrounded`, or
    * a later `task_updated` flip). Only a background run's end is delivered to
@@ -1922,6 +1923,10 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     if (msg.is_backgrounded === true) this.backgroundedTaskIds.add(taskId)
     else if (msg.is_backgrounded === false) this.backgroundedTaskIds.delete(taskId)
     this.taskDescriptions.set(taskId, { taskType, description: msg.description || '' })
+    // An ambient task is cli.js housekeeping (an artifact's comment watcher, a
+    // skip_transcript task): it can stay armed for the whole session, and every
+    // busy predicate upstream skips it, so it never counts as work in flight.
+    const wakesParent = taskWakesParent(taskType) && msg.ambient !== true
     const origin =
       this.originByTaskId.get(taskId) ?? this.sidecarOrigin(taskId, taskType, toolUseId)
 
@@ -1929,20 +1934,20 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     if (origin === undefined) {
       this.originByTaskId.set(taskId, toolUseId)
       this.runCountByOrigin.set(toolUseId, 1)
-      this.liveTasks.set(taskId, { owner: toolUseId, taskType })
+      this.liveTasks.set(taskId, { owner: toolUseId, taskType, wakes: wakesParent })
       this.send('session:task-started', {
         toolUseId,
         taskId,
         taskType,
         runIndex: 1,
         ...background,
-        wakesParent: taskWakesParent(taskType),
+        wakesParent,
         startedAt: Date.now()
       })
       return
     }
 
-    this.liveTasks.set(taskId, { owner: origin, taskType })
+    this.liveTasks.set(taskId, { owner: origin, taskType, wakes: wakesParent })
 
     // A start we have already counted — the same call re-reported. Re-arm the
     // card (the record may have been dropped by a notification) without
@@ -1955,7 +1960,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
         taskType,
         runIndex: this.runCountByOrigin.get(origin) ?? 1,
         ...background,
-        wakesParent: taskWakesParent(taskType),
+        wakesParent,
         startedAt: Date.now()
       })
       return
@@ -1974,7 +1979,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       runToolUseId: toolUseId,
       runIndex,
       ...background,
-      wakesParent: taskWakesParent(taskType),
+      wakesParent,
       startedAt: Date.now()
     })
   }
@@ -1997,7 +2002,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       taskType: live.taskType,
       runIndex: this.runCountByOrigin.get(live.owner) ?? 1,
       isBackgrounded: true,
-      wakesParent: taskWakesParent(live.taskType),
+      wakesParent: live.wakes,
       // Read only when the record was dropped: a re-arm of the same run keeps
       // that run's clock in the reducer.
       startedAt: Date.now()

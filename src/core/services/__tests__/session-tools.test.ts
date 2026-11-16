@@ -2075,6 +2075,7 @@ describe('sessionList', () => {
     const waiting = born('list-n', { cwd: dir('lp-s'), title: 'Waiting' })
     const bg = born('list-bg', { cwd: dir('lp-s'), title: 'Background' })
     const idle = born('list-i', { cwd: dir('lp-s'), title: 'Idle' })
+    const ambient = born('list-amb', { cwd: dir('lp-s'), title: 'Ambient' })
     status(working.caller.routingId, 'running')
     emitEvent('session:approval-request', [
       waiting.caller.routingId,
@@ -2082,8 +2083,14 @@ describe('sessionList', () => {
     ])
     emitEvent('session:task-started', [
       bg.caller.routingId,
-      { toolUseId: 'tu-1', taskId: 't1', taskType: 'agent', startedAt: 1 }
+      { toolUseId: 'tu-1', taskId: 't1', taskType: 'local_agent', wakesParent: true, startedAt: 1 }
     ])
+    // An artifact's comment watcher: armed for the session, never wakes it.
+    emitEvent('session:task-started', [
+      ambient.caller.routingId,
+      { toolUseId: 'tu-2', taskId: 't2', taskType: 'monitor_ws', wakesParent: false, startedAt: 1 }
+    ])
+    status(ambient.caller.routingId, 'idle')
     status(idle.caller.routingId, 'idle')
     emitEvent('session:status-line', [
       idle.caller.routingId,
@@ -2102,6 +2109,7 @@ describe('sessionList', () => {
     expect(rowOf(waiting.ref)).toContain(' | needs-you | ')
     expect(rowOf(bg.ref)).toContain(' | background-work | ')
     expect(rowOf(idle.ref)).toContain(' | idle | ')
+    expect(rowOf(ambient.ref)).toContain(' | idle | ')
     expect(rowOf(idle.ref)).toContain('context=25%')
     expect(rowOf(idle.ref)).toContain(`project=${path.basename(p.caller.cwd)}`)
     expect(rowOf(refFor('pi', coldId))).toContain(' | cold | ')

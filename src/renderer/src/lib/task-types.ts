@@ -1,24 +1,10 @@
-/**
- * The task types an `activeTasks` record from BEFORE `wakesParent` existed is
- * judged by (an older server's snapshot, a replayed ring).
- *
- * These are the four types upstream's own interactive busy predicate counts. They
- * are only a fallback: the emitter stamps `wakesParent` on every record it
- * writes now (`src/shared/waking-task-types.ts` holds the live set), and the
- * field wins whenever it is present.
- */
-export const LEGACY_WAKING_TASK_TYPES: ReadonlySet<string> = new Set([
-  'local_agent',
-  'remote_agent',
-  'in_process_teammate',
-  'local_workflow'
-])
+import {
+  countWakingRecords,
+  recordWakesParent,
+  type WakeableTask
+} from '../../../shared/waking-task-types'
 
-type TaskRecords = Record<string, { taskType: string; wakesParent?: boolean }>
-
-function wakes(task: { taskType: string; wakesParent?: boolean }): boolean {
-  return task.wakesParent ?? LEGACY_WAKING_TASK_TYPES.has(task.taskType)
-}
+type TaskRecords = Record<string, WakeableTask>
 
 /**
  * Is background work still running that will wake the main agent again, so this
@@ -41,7 +27,7 @@ function wakes(task: { taskType: string; wakesParent?: boolean }): boolean {
  * No pending-injection tracking is needed.
  */
 export function hasWakingTask(activeTasks: TaskRecords): boolean {
-  return Object.values(activeTasks).some(wakes)
+  return Object.values(activeTasks).some(recordWakesParent)
 }
 
 /**
@@ -50,7 +36,7 @@ export function hasWakingTask(activeTasks: TaskRecords): boolean {
  * ack.
  */
 export function countWakingTasks(activeTasks: TaskRecords): number {
-  return Object.values(activeTasks).filter(wakes).length
+  return countWakingRecords(activeTasks)
 }
 
 /**

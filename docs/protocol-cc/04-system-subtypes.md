@@ -379,6 +379,17 @@ entries also carry `subagent_type`. `@internal`: `awaited`, and
 `parent_task_id` and `spawn_depth` (on `task_started`) to tell a nested subagent's hand-back apart from the main
 agent's (`claude-session.ts`, `nestedTaskIds`), and none of the other `@internal` fields yet.
 
+### `ambient` — housekeeping, never busy (2.1.321)
+
+`...yV(e)&&{ambient:!0}`, where `yV` is `skipTranscript===!0 || type==="monitor_ws" && ambient===!0`.
+The ambient `monitor_ws` is the comment watcher that every Artifact publish arms (the
+`artifact-comment-monitor` transcript line). It can stay armed long after the turn that
+published the page. Every cli.js busy predicate skips it: the headless park, the
+running-task count and the exit-handoff tally. `background_tasks_changed` still lists it, flagged
+`ambient: true`. ClaudeUI
+stamps it `wakesParent: false` (`claude-session.ts` `handleTaskStarted`). Without that stamp
+the sidebar dot stays violet and the turn ends with no attention.
+
 ### `is_backgrounded` — foreground or background (2.1.280)
 
 The registry record's `isBackgrounded` at registration, read as

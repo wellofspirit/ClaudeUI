@@ -38,3 +38,38 @@ export const WAKING_TASK_TYPES: ReadonlySet<string> = new Set([
 export function taskWakesParent(taskType: string): boolean {
   return WAKING_TASK_TYPES.has(taskType)
 }
+
+/**
+ * The task types an `activeTasks` record from BEFORE `wakesParent` existed is
+ * judged by (an older server's snapshot, a replayed ring).
+ *
+ * These are the four types upstream's own interactive busy predicate counts. They
+ * are only a fallback: every emitter stamps `wakesParent` on the records it
+ * writes now, and the field wins whenever it is present.
+ */
+export const LEGACY_WAKING_TASK_TYPES: ReadonlySet<string> = new Set([
+  'local_agent',
+  'remote_agent',
+  'in_process_teammate',
+  'local_workflow'
+])
+
+/** An `activeTasks` record, as far as waking is concerned. */
+export interface WakeableTask {
+  taskType: string
+  wakesParent?: boolean
+}
+
+/**
+ * Will this live task record wake the main agent? The one predicate the sidebar
+ * dot, the turn-end gate, `session_list` and the agent turn notes all count by.
+ * An ambient task (an artifact's comment watcher) is stamped `false`.
+ */
+export function recordWakesParent(task: WakeableTask): boolean {
+  return task.wakesParent ?? LEGACY_WAKING_TASK_TYPES.has(task.taskType)
+}
+
+/** How many of these records will wake the main agent. */
+export function countWakingRecords(tasks: Record<string, WakeableTask>): number {
+  return Object.values(tasks).filter(recordWakesParent).length
+}

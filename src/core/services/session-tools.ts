@@ -86,6 +86,7 @@ import { recordWorktreeEntry } from './worktree-detect'
 import { loadSessionConfig, saveSessionConfig } from './ui-config'
 import { logger } from './logger'
 import { DEFAULT_MODE_CLASS, modeClass } from '../../shared/mode-class'
+import { countWakingRecords } from '../../shared/waking-task-types'
 
 const LOG = 'SessionTools'
 
@@ -513,7 +514,9 @@ function stateOf(id: string): SessionState {
   if (!live || live.status.state === 'disconnected') return 'cold'
   if (live.pendingApprovals.length > 0 || live.authRequired) return 'needs-you'
   if (live.status.state === 'running') return 'working'
-  if (Object.keys(live.activeTasks).length > 0) return 'background-work'
+  // Only work that will wake the session again: an ambient watcher or a
+  // housekeeping task is stamped `wakesParent: false` and leaves it idle.
+  if (countWakingRecords(live.activeTasks) > 0) return 'background-work'
   return 'idle'
 }
 
