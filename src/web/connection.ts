@@ -2,7 +2,9 @@ import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
 import { E2ECrypto } from '../shared/e2e-crypto'
 import { SyncClient, type SyncListener } from '../core/shared/sync/sync-client'
 import { base64ToText, textToBase64 } from '../shared/base64-text'
+import { splitSyncFullJson } from '../core/shared/sync/sync-full-chunks'
 import {
+  INVOKE_CHUNK_CHARS,
   PASSKEY_FAILED_ERROR,
   PASSKEY_REQUIRED_ERROR,
   PASSKEY_UNAVAILABLE_ERROR,
@@ -199,7 +201,10 @@ interface SyncReassembly {
 interface PendingInvoke {
   resolve: (data: unknown) => void
   reject: (err: Error) => void
-  timer: ReturnType<typeof setTimeout>
+  /** Unset while a chunked upload is still going out: the stall watchdog is the only timer then. */
+  timer?: ReturnType<typeof setTimeout>
+  /** True from registration of a chunked upload until it has drained: no progress frame re-arms `timer`. */
+  uploading?: boolean
   channel: string
   /** Progress callback of an {@link RemoteConnection.invokeWithProgress} call. */
   onProgress?: (progress: InvokeProgress) => void
@@ -263,6 +268,30 @@ export type TerminalDetachedListener = (payload: {
 }) => void
 
 const INVOKE_TIMEOUT_MS = 30_000
+
+/** Length of the E2E frame for a plaintext of `bytes`: base64(nonce 12 || seq 4 || bytes || tag 16). */
+function e2eFrameChars(bytes: number): number {
+  return Math.ceil((bytes + 32) / 3) * 4
+}
+
+function tooLarge(size: number, limit: number): Error {
+  const mb = (n: number): string => (n / (1024 * 1024)).toFixed(1)
+  return new Error(
+    `Message too large for the remote connection (${mb(size)} MB, limit ${mb(limit)} MB)`
+  )
+}
+
+/**
+ * The host's `ws` `maxPayload` (remote-server `WS_MAX_PAYLOAD_BYTES`). A host that does not
+ * advertise `invokeChunks` closes the socket (1009) on a bigger frame, so the client refuses first.
+ */
+const HOST_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024
+/** A chunked upload hands the next chunk over only while the socket buffers less than this. */
+const UPLOAD_LOW_WATER_BYTES = 1024 * 1024
+/** How often an upload samples `bufferedAmount` (it has no drain event). */
+const UPLOAD_POLL_MS = 50
+/** An upload whose `bufferedAmount` has not fallen for this long, with bytes still buffered, is dead (R6). */
+const UPLOAD_STALL_MS = 30_000
 const PING_INTERVAL_MS = 15_000
 const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000]
 /**
@@ -412,6 +441,13 @@ export class RemoteConnection {
    * replay guard would then drop as a "replay" (R4).
    */
   private sendQueue: Promise<void> = Promise.resolve()
+  /** Tail of the chunked uploads: one at a time per connection (R8, the host allows 2). */
+  private uploadTail: Promise<void> = Promise.resolve()
+  /**
+   * `auth-response.invokeChunks.maxChars` of the CURRENT socket, or null (an older host: single
+   * frames only). Reset on every new socket and re-learned from each accept (R9).
+   */
+  private invokeChunksMax: number | null = null
   /**
    * Serializes inbound decrypt+handle so frames are processed in
    * arrival order. Without this, concurrent `decrypt()` calls in `onmessage`
@@ -782,6 +818,31 @@ export class RemoteConnection {
       }
 
       const id = String(++this.reqId)
+      const request = { type: 'invoke' as const, id, channel, args }
+      const json = JSON.stringify(request)
+      // R13: the chunking decision is on character length, never a byte estimate.
+      if (json.length > INVOKE_CHUNK_CHARS) {
+        const max = this.invokeChunksMax
+        if (max !== null) {
+          if (json.length > max) {
+            reject(tooLarge(json.length, max))
+            return
+          }
+          const entry: PendingInvoke = { resolve, reject, channel, onProgress, uploading: true }
+          this.pendingInvokes.set(id, entry)
+          const ws = this.ws
+          this.uploadTail = this.uploadTail.then(() => this.uploadChunked(id, entry, json, ws))
+          return
+        }
+        // An older host: one frame or nothing. Measure what `ws` will count.
+        const wire = this.e2e?.isReady
+          ? e2eFrameChars(new TextEncoder().encode(json).length)
+          : new TextEncoder().encode(json).length
+        if (wire > HOST_MAX_PAYLOAD_BYTES) {
+          reject(tooLarge(wire, HOST_MAX_PAYLOAD_BYTES))
+          return
+        }
+      }
       this.pendingInvokes.set(id, {
         resolve,
         reject,
@@ -789,8 +850,98 @@ export class RemoteConnection {
         channel,
         onProgress
       })
-      this.send({ type: 'invoke', id, channel, args })
+      this.send(request)
     })
+  }
+
+  /**
+   * Send one invoke as paced `invoke-chunk` frames (the mirror of the sync-full chunking).
+   *
+   * Runs one at a time (`uploadTail`). The loop belongs to ONE socket and ONE pending entry:
+   * it stops the moment the entry is gone (the socket closed, or the host answered early,
+   * e.g. a step-up refusal) or `this.ws` is no longer the socket it started on — `reqId`
+   * survives a reconnect, so a later chunk must never land on a new socket (R5).
+   *
+   * No 30 s timer runs while bytes are going out: a slow uplink is not a hung call. The
+   * stall watchdog (R6) rejects when `bufferedAmount` stops falling, and the invoke timer is
+   * armed only once everything has actually left the browser (R7), so the host's own runtime
+   * is what it measures.
+   */
+  private async uploadChunked(
+    id: string,
+    entry: PendingInvoke,
+    json: string,
+    ws: WebSocket | null
+  ): Promise<void> {
+    const alive = (): boolean =>
+      ws !== null &&
+      this.ws === ws &&
+      ws.readyState === WebSocket.OPEN &&
+      this.pendingInvokes.get(id) === entry
+    if (!alive()) return
+    const parts = splitSyncFullJson(json, INVOKE_CHUNK_CHARS)
+    const channel = entry.channel
+    // bufferedAmount counts wire bytes; E2E makes a char ~4/3 bytes. Plain frames are ~1:1.
+    const wireScale = this.e2e?.isReady ? 4 / 3 : 1
+    let handed = 0
+    let reported = 0
+    let lastBuffered = ws!.bufferedAmount
+    let lastProgressAt = Date.now()
+    const report = (force = false): void => {
+      const drained = Math.min(
+        json.length,
+        Math.max(0, Math.round(handed - ws!.bufferedAmount / wireScale))
+      )
+      const done = force ? json.length : Math.max(reported, drained)
+      if (!force && done - reported < json.length / 200) return
+      reported = done
+      try {
+        entry.onProgress?.({ done, total: json.length, phase: 'uploading' })
+      } catch (err) {
+        console.error('RemoteConnection: upload progress callback failed', err)
+      }
+    }
+    /** Poll until `ready()`; false when the upload died (gone, or stalled -> rejected here). */
+    const waitUntil = async (ready: () => boolean): Promise<boolean> => {
+      while (alive()) {
+        const buffered = ws!.bufferedAmount
+        if (buffered < lastBuffered || buffered === 0) {
+          lastBuffered = buffered
+          lastProgressAt = Date.now()
+        }
+        report()
+        if (ready()) return true
+        if (buffered > 0 && Date.now() - lastProgressAt >= UPLOAD_STALL_MS) {
+          this.pendingInvokes.delete(id)
+          entry.reject(new Error(`Connection lost: ${channel}`))
+          return false
+        }
+        await new Promise<void>((r) => setTimeout(r, UPLOAD_POLL_MS))
+      }
+      return false
+    }
+    try {
+      for (let i = 0; i < parts.length; i++) {
+        if (!(await waitUntil(() => ws!.bufferedAmount < UPLOAD_LOW_WATER_BYTES))) return
+        const chunk: WsClientMessage =
+          i === 0
+            ? { type: 'invoke-chunk', id, index: 0, count: parts.length, data: parts[0], channel }
+            : { type: 'invoke-chunk', id, index: i, count: parts.length, data: parts[i] }
+        if (!(await this.sendFrame(chunk, ws)) || !alive()) return
+        handed += parts[i].length
+        lastBuffered = ws!.bufferedAmount
+        lastProgressAt = Date.now()
+      }
+      if (!(await waitUntil(() => ws!.bufferedAmount === 0))) return
+      report(true)
+      entry.uploading = false
+      entry.timer = this.armInvokeTimer(id, entry.reject, channel)
+    } catch (err) {
+      if (this.pendingInvokes.get(id) === entry) {
+        this.pendingInvokes.delete(id)
+        entry.reject(err instanceof Error ? err : new Error(String(err)))
+      }
+    }
   }
 
   /** The timeout of one pending invoke; re-armed by every progress frame. */
@@ -1212,6 +1363,7 @@ export class RemoteConnection {
     // Explicit rather than implied by `initE2E` replacing it: between here and
     // `onopen` a stale instance would make `send()` encrypt with dead counters.
     this.e2e = null
+    this.invokeChunksMax = null
     this.clearE2eActivationTimeout()
 
     try {
@@ -1398,6 +1550,11 @@ export class RemoteConnection {
           this.onResumeToken?.(null)
         }
         if (msg.ok) {
+          const maxChars = msg.invokeChunks?.maxChars
+          this.invokeChunksMax =
+            typeof maxChars === 'number' && Number.isFinite(maxChars) && maxChars > 0
+              ? maxChars
+              : null
           this.authMethodValue = msg.method
           this.authDisabledValue = msg.authDisabled === true
           this.webauthnCapableOriginValue = msg.webauthnCapableOrigin === true
@@ -1523,12 +1680,18 @@ export class RemoteConnection {
       case 'sync-catchup':
         {
           const catchup = msg as WsSyncCatchup
-          this.sync.applyCatchup(catchup.events, catchup.epoch)
           // Same proof as a full apply: the host answered a sync, so a rare
           // break days apart must not accumulate toward the give-up latch.
           this.brokenSyncTransfers = 0
+          // `connected` BEFORE the apply: it ends in the sync-answered taps, and
+          // those invoke synchronously (the automations reload) — under any other
+          // state `sendInvoke` refuses them with "Not connected".
           this.setState('connected')
-          this.startPing()
+          try {
+            this.sync.applyCatchup(catchup.events, catchup.epoch)
+          } finally {
+            this.startPing()
+          }
         }
         break
 
@@ -1553,8 +1716,10 @@ export class RemoteConnection {
           // is ignored. A live one slides its timeout window: the host is
           // demonstrably working on it.
           if (pending) {
-            clearTimeout(pending.timer)
-            pending.timer = this.armInvokeTimer(frame.id, pending.reject, pending.channel)
+            if (!pending.uploading) {
+              clearTimeout(pending.timer)
+              pending.timer = this.armInvokeTimer(frame.id, pending.reject, pending.channel)
+            }
             try {
               pending.onProgress?.({ done: frame.done, total: frame.total, phase: frame.phase })
             } catch (err) {
@@ -1660,9 +1825,14 @@ export class RemoteConnection {
     this.syncSentAt = null
     // This host can deliver a transfer, so the next break starts the count over.
     this.brokenSyncTransfers = 0
-    this.sync.applyFullState(full.state, full.epoch, full.state.seq)
+    // `connected` BEFORE the apply, as in the catchup case: the sync-answered
+    // taps at its end invoke synchronously.
     this.setState('connected')
-    this.startPing()
+    try {
+      this.sync.applyFullState(full.state, full.epoch, full.state.seq)
+    } finally {
+      this.startPing()
+    }
   }
 
   /**
@@ -1788,19 +1958,37 @@ export class RemoteConnection {
 
   /** Send a message, encrypting if E2E is active. */
   private send(msg: WsClientMessage): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return
+    void this.sendFrame(msg)
+  }
+
+  /**
+   * {@link send} that reports the hand-off: resolves true once the frame went to `ws.send`,
+   * false if it was dropped (socket not open, or — with `onlyOn` — not that socket any more).
+   * Same ordering as `send`: encrypt+send runs through `sendQueue`.
+   */
+  private sendFrame(msg: WsClientMessage, onlyOn?: WebSocket | null): Promise<boolean> {
+    const usable = (): boolean =>
+      this.ws?.readyState === WebSocket.OPEN && (onlyOn === undefined || this.ws === onlyOn)
+    if (!usable()) return Promise.resolve(false)
 
     if (this.e2e?.isReady) {
       // Serialize encrypt+send so frames leave in enqueue order — see sendQueue.
       const e2e = this.e2e
-      this.sendQueue = this.sendQueue.then(async () => {
-        if (this.ws?.readyState !== WebSocket.OPEN) return
+      const handed = this.sendQueue.then(async () => {
+        if (!usable()) return false
         const payload = await e2e.encrypt(msg)
-        if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(payload)
+        if (!usable()) return false
+        this.ws!.send(payload)
+        return true
       })
-    } else {
-      this.ws.send(JSON.stringify(msg))
+      this.sendQueue = handed.then(
+        () => undefined,
+        () => undefined
+      )
+      return handed.catch(() => false)
     }
+    this.ws!.send(JSON.stringify(msg))
+    return Promise.resolve(true)
   }
 
   /** Send a plaintext message (used for auth and e2e-activate before encryption is active). */

@@ -177,3 +177,33 @@ export function resolveSendAction(ctx: SendContext): SendAction {
 
   return { type: 'send-prompt', prompt, attachments }
 }
+
+// ---------------------------------------------------------------------------
+// Upload progress rings
+// ---------------------------------------------------------------------------
+
+/** JSON around one attachment's base64 (`{"mediaType":...,"base64Data":"...","fileName":...}`), roughly. */
+const ATTACHMENT_JSON_OVERHEAD = 80
+/** JSON before the prompt: `{"type":"invoke","id":..,"channel":"session:send","args":[routingId,`. */
+const REQUEST_JSON_OVERHEAD = 90
+
+/**
+ * Per-attachment upload progress (0..1) from `done` characters of the invoke JSON sent. The
+ * attachments' base64 sits in the JSON in order, after the prompt, so each one owns a contiguous
+ * range; the wrapper sizes are estimates, so the rings are close, not byte-exact.
+ */
+export function attachmentUploadProgress(
+  attachments: readonly Pick<FileAttachment, 'id' | 'base64Data'>[],
+  promptChars: number,
+  done: number
+): Record<string, number> {
+  const out: Record<string, number> = {}
+  let start = REQUEST_JSON_OVERHEAD + promptChars
+  for (const a of attachments) {
+    start += ATTACHMENT_JSON_OVERHEAD / 2
+    const len = a.base64Data.length
+    out[a.id] = len > 0 ? Math.min(1, Math.max(0, (done - start) / len)) : 1
+    start += len + ATTACHMENT_JSON_OVERHEAD / 2
+  }
+  return out
+}

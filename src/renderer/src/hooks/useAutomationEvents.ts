@@ -27,9 +27,13 @@ function viewingLiveStream(
 export function useAutomationEvents(): void {
   useEffect(() => {
     const load = (): void => {
-      void window.api.listAutomations().then((automations) => {
-        useAutomationStore.getState().setAutomations(automations)
-      })
+      window.api
+        .listAutomations()
+        .then((automations) => {
+          useAutomationStore.getState().setAutomations(automations)
+        })
+        // A dropped connection keeps the list it had; the next answered sync reloads.
+        .catch((err: unknown) => console.warn('[automations] list failed:', err))
     }
     load()
 

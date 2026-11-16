@@ -3977,7 +3977,8 @@ describe('RemoteServer — tailnet identity auth (Phase 3)', () => {
       type: 'auth-response',
       ok: true,
       method: 'password',
-      identity: { login: TS_OWNER }
+      identity: { login: TS_OWNER },
+      invokeChunks: { maxChars: 48 * 1024 * 1024 }
     })
 
     const status = server.getStatus()

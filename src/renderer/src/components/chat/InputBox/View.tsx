@@ -102,6 +102,10 @@ export interface InputBoxViewProps {
   modelNotice?: string
   /** Send (and Enter) stay off while the session's harness does not run. */
   sendBlocked?: boolean
+  /** A send with attachments is in flight: send stays off, the draft is held, a spinner shows. */
+  sending?: boolean
+  /** Upload progress (0..1) per attachment id; empty until the host connection reports some. */
+  uploadProgress?: Record<string, number>
   /** Shown above the input: the harness install banner, or nothing. */
   banner?: React.ReactNode
   selectedEngineId: EngineId
@@ -897,7 +901,11 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
             ))}
 
           {/* File preview row */}
-          <FileAttachmentBar attachments={attachedFiles} onRemove={onRemoveFile} />
+          <FileAttachmentBar
+            attachments={attachedFiles}
+            onRemove={onRemoveFile}
+            uploadProgress={props.uploadProgress}
+          />
 
           {/* Textarea */}
           <textarea
@@ -1038,24 +1046,34 @@ export function InputBoxView(props: InputBoxViewProps): React.JSX.Element {
                 data-testid="InputBox.send"
                 onClick={onSend}
                 disabled={
-                  (!text.trim() && attachedFiles.length === 0) || isDisabled || !!props.sendBlocked
+                  (!text.trim() && attachedFiles.length === 0) ||
+                  isDisabled ||
+                  !!props.sendBlocked ||
+                  !!props.sending
                 }
-                title={isRunning ? 'Queue message' : 'Send message'}
-                className="w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity disabled:opacity-15 cursor-pointer disabled:cursor-default"
+                title={props.sending ? 'Sending...' : isRunning ? 'Queue message' : 'Send message'}
+                className={`w-7 h-7 flex items-center justify-center rounded-full bg-text-primary text-bg-primary transition-opacity cursor-pointer disabled:cursor-default ${props.sending ? 'disabled:opacity-60' : 'disabled:opacity-15'}`}
               >
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <line x1="12" y1="19" x2="12" y2="5" />
-                  <polyline points="5 12 12 5 19 12" />
-                </svg>
+                {props.sending ? (
+                  <span
+                    data-testid="InputBox.sending"
+                    className="w-3.5 h-3.5 rounded-full border-2 border-current border-t-transparent animate-spin-slow"
+                  />
+                ) : (
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="12" y1="19" x2="12" y2="5" />
+                    <polyline points="5 12 12 5 19 12" />
+                  </svg>
+                )}
               </button>
             </div>
           </div>

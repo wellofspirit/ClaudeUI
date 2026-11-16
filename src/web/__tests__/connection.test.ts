@@ -129,6 +129,37 @@ describe('RemoteConnection', () => {
 
   // R1 — gap handling: on a seq gap, request a resync and DO NOT apply the
   // out-of-order event as if contiguous (the catchup redelivers from lastSeq).
+  // A sync-answered tap invokes synchronously (the automations reload). Before the
+  // fix the state flipped to `connected` only AFTER the apply, so that invoke was
+  // refused "Not connected" on every reconnect.
+  describe('sync-answered taps can invoke', () => {
+    function tapInvokes(frame: unknown): { sent: string[]; refused: unknown[] } {
+      const { conn, internals } = created
+      const { sent } = attachFakeSocket(internals)
+      const refused: unknown[] = []
+      const sync = internals.sync as unknown as { onSyncAnswered(cb: () => void): () => void }
+      sync.onSyncAnswered(() => {
+        conn.invoke('automation:list').catch((err: unknown) => refused.push(err))
+      })
+      internals.handleMessage(frame)
+      return { sent, refused }
+    }
+
+    it('after a catchup', async () => {
+      const { sent, refused } = tapInvokes({ type: 'sync-catchup', epoch: 'e', events: [] })
+      await Promise.resolve()
+      expect(refused).toEqual([])
+      expect(sent.some((s) => s.includes('"automation:list"'))).toBe(true)
+    })
+
+    it('after a full sync', async () => {
+      const { sent, refused } = tapInvokes({ type: 'sync-full', epoch: 'e', state: { seq: 1 } })
+      await Promise.resolve()
+      expect(refused).toEqual([])
+      expect(sent.some((s) => s.includes('"automation:list"'))).toBe(true)
+    })
+  })
+
   describe('event gap handling (R1)', () => {
     it('on a gap: requests sync (with epoch) and does not apply/advance', () => {
       const { internals, events } = created

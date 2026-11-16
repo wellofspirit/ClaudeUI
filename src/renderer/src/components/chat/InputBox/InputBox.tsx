@@ -13,6 +13,13 @@ import { resolveRekeyed } from '../../../stores/replica'
 import { reportSpawnFailure, spawnSession } from '../../../lib/session-spawn'
 import { onDraftSendRequest, WorktreeCreateError } from '../../../lib/worktree-start'
 import { voiceController } from '../../../lib/voice/voice-controller'
+import {
+  IMAGE_JPEG_QUALITIES,
+  IMAGE_MAX_RAW_BYTES,
+  base64DecodedBytes,
+  fitWithinMaxDimension,
+  imageFitsBudget
+} from '../../../lib/image-budget'
 import { noSignalMessage, switchedMessage } from '../../../lib/voice/browser-voice-capture'
 import {
   dismissStaleVoiceOffer,
@@ -35,7 +42,13 @@ import type {
   VoiceState as VoiceStateType
 } from '../../../../../shared/types'
 import { v4 as uuid } from 'uuid'
-import { resolveSendAction, filterModelsForEngine, dedupeResolvedModels, modelLabel } from './utils'
+import {
+  resolveSendAction,
+  filterModelsForEngine,
+  dedupeResolvedModels,
+  modelLabel,
+  attachmentUploadProgress
+} from './utils'
 import { recallQueuedInto } from './recall-queued'
 import { rememberedEffortPatch, sessionSpawnEffort } from '../../../lib/session-effort'
 import { useSlashMenu } from '../../../hooks/useSlashMenu'
@@ -50,6 +63,7 @@ import { HARNESS_LABEL, harnessCanRun } from '../../SettingsDialog/harness-view'
 import { engineMeta } from '../../../../../shared/engine-meta'
 import { autoModeAvailableForEngine } from '../../../../../shared/permission-modes'
 import type { EngineId, PermissionMode, SlashCommandInfo } from '../../../../../shared/types'
+import type { InvokeProgress } from '../../../../../shared/remote-protocol'
 import { HARNESS_IDS } from '../../../../../shared/harness-types'
 import {
   claudeAliasForModel,
@@ -63,7 +77,6 @@ import {
 
 const ACCEPTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
 const ACCEPTED_FILE_TYPES = [...ACCEPTED_IMAGE_TYPES, 'application/pdf']
-const MAX_IMAGE_DIMENSION = 2048
 const NO_SLASH_COMMANDS: SlashCommandInfo[] = []
 
 function processImageFile(file: File): Promise<{ mediaType: string; base64Data: string }> {
@@ -77,24 +90,25 @@ function processImageFile(file: File): Promise<{ mediaType: string; base64Data: 
 
       const img = new Image()
       img.onload = (): void => {
-        const { width, height } = img
-        if (
-          width <= MAX_IMAGE_DIMENSION &&
-          height <= MAX_IMAGE_DIMENSION &&
-          file.size <= 4 * 1024 * 1024
-        ) {
+        if (imageFitsBudget(img.width, img.height, file.size)) {
           resolve({ mediaType, base64Data: base64Raw })
           return
         }
-        const scale = Math.min(MAX_IMAGE_DIMENSION / width, MAX_IMAGE_DIMENSION / height, 1)
+        const size = fitWithinMaxDimension(img.width, img.height)
         const canvas = document.createElement('canvas')
-        canvas.width = Math.round(width * scale)
-        canvas.height = Math.round(height * scale)
+        canvas.width = size.width
+        canvas.height = size.height
         const ctx = canvas.getContext('2d')!
+        // JPEG has no alpha: transparent pixels would otherwise come out black.
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-        const resizedDataUrl = canvas.toDataURL('image/jpeg', 0.85)
-        const resizedBase64 = resizedDataUrl.split(',')[1]
-        resolve({ mediaType: 'image/jpeg', base64Data: resizedBase64 })
+        let base64Data = ''
+        for (const quality of IMAGE_JPEG_QUALITIES) {
+          base64Data = canvas.toDataURL('image/jpeg', quality).split(',')[1]
+          if (base64DecodedBytes(base64Data) <= IMAGE_MAX_RAW_BYTES) break
+        }
+        resolve({ mediaType: 'image/jpeg', base64Data })
       }
       img.onerror = (): void => reject(new Error('Failed to load image'))
       img.src = dataUrl
@@ -496,10 +510,16 @@ export function InputBox(): React.JSX.Element {
   // --- Handlers ---
 
   const doSend = useCallback(
-    async (prompt: string, attachments?: AttachmentUpload[]) => {
+    async (
+      prompt: string,
+      attachments?: AttachmentUpload[],
+      onProgress?: (progress: InvokeProgress) => void
+    ) => {
       if (!activeSessionId) return
       if (!sdkActive) await spawnSession(activeSessionId)
-      await window.api.sendPrompt(activeSessionId, prompt, attachments)
+      // A fourth argument only when there is a listener: the plain call is unchanged.
+      if (onProgress) await window.api.sendPrompt(activeSessionId, prompt, attachments, onProgress)
+      else await window.api.sendPrompt(activeSessionId, prompt, attachments)
     },
     [activeSessionId, sdkActive]
   )
@@ -694,6 +714,19 @@ export function InputBox(): React.JSX.Element {
   // Not wrapped in useCallback: deps include `text`, which changes on every
   // keystroke, so memoization gives no benefit. View is unmemoized too.
   const spawningSendRef = useRef<string | null>(null)
+  // A send carrying attachments, in flight (the session it targets): its draft is held, send is
+  // off, and the web client's chunked upload reports `uploadDone` (chars of the invoke JSON).
+  const uploadingSendRef = useRef<string | null>(null)
+  const [sendingSession, setSendingSession] = useState<string | null>(null)
+  const [uploadDone, setUploadDone] = useState<number | null>(null)
+  const sending = sendingSession !== null && sendingSession === activeSessionId
+  const uploadProgress = useMemo(
+    () =>
+      sending && uploadDone !== null
+        ? attachmentUploadProgress(attachedFiles, text.length, uploadDone)
+        : undefined,
+    [sending, uploadDone, attachedFiles, text]
+  )
   const handleSend = async (): Promise<void> => {
     if (harnessBlocked) return
     const action = resolveSendAction({
@@ -748,11 +781,29 @@ export function InputBox(): React.JSX.Element {
           if (spawningSendRef.current === sessionId) return
           spawningSendRef.current = sessionId
         }
+        // R11: a second tap while the upload runs would send the turn twice.
+        const withFiles = (action.attachments?.length ?? 0) > 0
+        if (withFiles) {
+          if (uploadingSendRef.current) {
+            if (spawning) spawningSendRef.current = null
+            return
+          }
+          uploadingSendRef.current = sessionId
+          setSendingSession(sessionId)
+          setUploadDone(null)
+        }
+        const onProgress = withFiles
+          ? (p: InvokeProgress): void => {
+              if (p.phase === 'uploading') setUploadDone(p.done)
+            }
+          : undefined
         try {
           if (action.type === 'queue-prompt') {
-            await window.api.sendPrompt(sessionId, action.prompt, action.attachments)
+            if (onProgress)
+              await window.api.sendPrompt(sessionId, action.prompt, action.attachments, onProgress)
+            else await window.api.sendPrompt(sessionId, action.prompt, action.attachments)
           } else {
-            await doSend(action.prompt, action.attachments)
+            await doSend(action.prompt, action.attachments, onProgress)
           }
         } catch (err) {
           // The welcome screen already shows why the worktree failed, with its own buttons.
@@ -763,6 +814,11 @@ export function InputBox(): React.JSX.Element {
           return
         } finally {
           if (spawning) spawningSendRef.current = null
+          if (withFiles) {
+            uploadingSendRef.current = null
+            setSendingSession(null)
+            setUploadDone(null)
+          }
         }
         // The engine can report its stable session id WHILE the send is in
         // flight — an engine may rekey on its first handshake, which lands well
@@ -1215,6 +1271,8 @@ export function InputBox(): React.JSX.Element {
           : undefined
       }
       sendBlocked={harnessBlocked}
+      sending={sending}
+      uploadProgress={uploadProgress}
       banner={harnessBlocked ? <HarnessInstallBanner engineId={effectiveEngineId} /> : null}
       selectedModel={selectedModel}
       selectedEngineId={effectiveEngineId}
