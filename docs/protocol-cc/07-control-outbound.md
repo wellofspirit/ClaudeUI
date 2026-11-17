@@ -68,6 +68,14 @@ cli.js has **three** dispatchers. Most subtypes only work on the main one.
 
 See `09-initialize.md` for full details. One-shot handshake, sent exactly once per session.
 
+2.1.326 adds three optional request fields (schema, not probed; 09 is not yet updated):
+
+- `mcpServers`: the serializable MCP server entries, read only at launch under `--await-initialize`, as the stdin form of `--mcp-config`. It keeps server credentials off the command line, and the response's `mcp_servers_applied` says whether it was used.
+- `managedSettings` (`@internal`): read only under `--await-initialize --managed-settings-in-initialize` (02 §2.14b).
+- `resumeOnly` (`@internal`, helper reconnect).
+
+The `sdkMcpServers` settings map also names `dataFlowServer` and `onPersonsMachine` as register-time keys, and a plugin entry can carry `requiredByOrganization` (`@internal`). ClaudeUI sends none of these.
+
 ---
 
 ### `set_has_subscribers` (2.1.319, `@internal`, not sent by ClaudeUI)
@@ -77,6 +85,41 @@ CLI whether anybody watches the stream-json output the host passes on (`false` n
 somebody, `null` unknown, counts as `true`). It matters only in a CLI started with
 `CLAUDE_CODE_STREAM_EVENT_HOLD_MS`, which holds most `content_block_delta` and `thinking_tokens` lines to join
 them. ClaudeUI sets none of that, so it never sends it.
+
+---
+
+### `set_message_waiting` (2.1.326, `@internal`, available, not sent by ClaudeUI)
+
+```json
+{ "subtype": "set_message_waiting", "waiting": true }
+```
+
+Schema `Ano` @3275943, handler @45065706 (2.1.326 darwin-arm64 concat). It tells the CLI that the host
+holds a person's message until the running turn's `result` (`true`), or no longer does (`false`). A
+`waiting` that is not a boolean answers `error` ("Invalid set_message_waiting: waiting must be true or
+false"). The handler calls `sessionState.setHostHoldsMessage(waiting)` and answers an empty success.
+The schema text gives the effect: while `true`, **in a Claude Desktop Code session only** (elsewhere
+it changes nothing), the turn's end does not wait for the model call behind its `post_turn_summary`.
+The `result` then comes sooner, and the summary is written without the model. The turn's end, or the
+next user message the host sends, resets it to `false`. An older CLI answers unknown-subtype, and a
+CLI that drives a cloud-hosted session rejects it. ClaudeUI spawns with `CLAUDE_CODE_ENTRYPOINT=claude-desktop`,
+so it could use this to shorten the gap before a queued message is sent. Whether ClaudeUI's spawns
+count as a "Desktop Code session" for this gate was not traced. Not adopted; backlog issue #269.
+
+---
+
+### `prompt_draft_activity` (2.1.326, `@internal`, available, not sent by ClaudeUI)
+
+```json
+{ "subtype": "prompt_draft_activity" }
+```
+
+Schema `ul` @3277677, handler @45065941. It says that the person is typing a prompt for this session
+in the host's composer, and it carries none of the text. Send it at the first key and about every
+10 s while typing goes on. The handler acknowledges at once, and when no turn is running it starts
+the CLI's between-turns preparation (`if(!Pe.running)nD(Ht)`; the schema text says "the CLI may use
+the time to get the next request ready"). During a turn it does nothing. An older CLI answers
+unknown-subtype, and a cloud-hosted session rejects it. Not adopted; backlog issue #269.
 
 ---
 
@@ -405,6 +448,10 @@ response schema `Qv` right after it; headless handler @22780459, which calls
 ```json
 { "cancelled": true }
 ```
+
+2.1.326 adds an optional `message_uuid` to the response: the uuid of the message dropped, when
+`cancelled` is true and no turn can have read it ("Use this, not the request, to tell which message
+went: a client can reuse a request id"). ClaudeUI correlates by its own request and ignores it.
 
 `{ "cancelled": false }` is also a SUCCESS: cli.js does not hold that uuid. Three reasons, from
 `Cu`:
@@ -1194,6 +1241,14 @@ change LSP tools, and so invalidate the prompt cache, cli.js answers `held: true
 `cache_impact: {mcp_servers_added, mcp_servers_removed, lsp_tool_change}` and applies nothing.
 ClaudeUI does not send it.
 
+**`refuse_if_busy: true`** (optional, 2.1.326, schema @3256422): when the session is busy, the
+request reloads nothing and answers an error with `error_code: "reload_plugins_busy"`. Busy means a
+turn is running or ending, a message is queued for one, a taken-over permission prompt is unanswered,
+background work holds the session at running, or an in-process teammate is at work. A pending
+background shell command alone does not count. It is advertised as `reload_plugins_refuse_if_busy_v1`
+in `system/init.capabilities`, and only `claude -p` reads it. The default (`false`) still serves a
+reload mid-turn. ClaudeUI's one post-initialize reload omits it, so nothing changes.
+
 #### ClaudeUI sends it once after initialize
 
 `query()` sends `{subtype:"reload_plugins"}` once the initialize response arrives, unless
@@ -1384,6 +1439,12 @@ Any subtype not matched by the else-if chain → error response:
 ```
 
 The message loop continues. Unknown subtypes never terminate the session.
+
+2.1.326: the error answer's `error_code` (an `@internal` closed set, read from the handler's state)
+documents `unsupported_request` for any subtype this end does not serve: an unknown subtype, or one
+not served in this kind of session or with a switch off. It comes only with the words "Unsupported
+control request subtype", "does not handle control_request subtype" or "is not supported in this
+context", which `error` keeps for older clients. ClaudeUI's source matches none of these words and does not read `error_code` here.
 
 ---
 

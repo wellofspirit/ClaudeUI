@@ -143,6 +143,24 @@ function fallbackTextBinding(chunk, name) {
   return null
 }
 
+// Where `name`, as seen from inside `chunk`, is a reply helper that builds the
+// FALLBACK_TEXT message from its second argument (2.1.326:
+// `aT=function(L,X){Nt(L,`${eve}: ${X}`,"unsupported_request")}`): declared in
+// the chunk as `function NAME(a,b){` or `NAME=function(a,b){`, its first
+// statement a call that passes `a` and the template `${TEXT}: ${b}`, TEXT being
+// the literal or a name fallbackTextBinding proves. Returns a description, or null.
+function fallbackHelperBinding(chunk, name) {
+  const def = new RegExp(
+    `(?:\\bfunction ${escapeRe(name)}|(?:\\b(?:var|let|const) |,)${escapeRe(name)}=function)` +
+      `\\((${V}),(${V})\\)\\{${V}\\(\\1,\`(?:${FALLBACK_TEXT}|\\$\\{(${V})\\}): \\$\\{\\2\\}\``
+  )
+  const m = def.exec(chunkBody(chunk))
+  if (!m) return null
+  if (m[3] === undefined) return `helper ${name} declared in ${chunk.spec}`
+  const text = fallbackTextBinding(chunk, m[3])
+  return text ? `helper ${name} declared in ${chunk.spec}, text ${m[3]} ${text}` : null
+}
+
 if (src.includes(PATCH_A_MARKER)) {
   console.log('Part A already applied. Skipping.')
 } else {
@@ -252,21 +270,42 @@ if (src.includes(PATCH_A_MARKER)) {
   // (fallbackTextBinding), so the loose identifier cannot pick up some other
   // `${x}: ${m.request.subtype}` message.
   //
+  // 2.1.326 moves the text into a local reply helper and passes it only the
+  // sanitised subtype:
+  //   aT=function(L,X){Nt(L,`${eve}: ${X}`,"unsupported_request")}
+  //   … else aT(V,pn(String(V.request.subtype)))}finally{…
+  // (the helper is `sT`/`aT`/`oT` on win32/darwin/linux). The call counts only
+  // when its function provably builds FALLBACK_TEXT (fallbackHelperBinding): the
+  // plugin-UI dispatch in another chunk ends `else Pe(ke,pn(String(ke.request.subtype)))`
+  // with an unrelated helper.
+  //
   // Do NOT confuse with the other "Unsupported control request subtype" sites:
   // the SDK Query transport throws (`throw Error("Unsupported control request subtype: "+…)`),
   // and DirectConnect / RemoteSessionManager prefix their message with a bracketed
   // tag. Only the stream-json stdin loop ClaudeUI drives has this exact shape.
+  // Both regexes capture the call's function as group 1 and the message variable
+  // as group 2.
   const anchorRe = new RegExp(
     `else (${V})\\((${V}),\`(?:${FALLBACK_TEXT}|\\$\\{(${V})\\}): ` +
       `\\$\\{(?:${V}\\(String\\()?\\2\\.request\\.subtype(?:\\)\\))?\\}\`\\)`,
     'g'
   )
-  const allAnchors = [...src.matchAll(anchorRe)].filter((m) => {
+  const helperAnchorRe = new RegExp(
+    `else (${V})\\((${V}),${V}\\(String\\(\\2\\.request\\.subtype\\)\\)\\)`,
+    'g'
+  )
+  const inlineAnchors = [...src.matchAll(anchorRe)].filter((m) => {
     if (m[3] === undefined) return true
     const binding = fallbackTextBinding(chunkAt(m.index), m[3])
     if (binding) console.log(`  Fallback text constant ${m[3]}: ${binding}`)
     return binding !== null
   })
+  const helperAnchors = [...src.matchAll(helperAnchorRe)].filter((m) => {
+    const binding = fallbackHelperBinding(chunkAt(m.index), m[1])
+    if (binding) console.log(`  Fallback reply ${binding}`)
+    return binding !== null
+  })
+  const allAnchors = [...inlineAnchors, ...helperAnchors]
   if (allAnchors.length === 0) {
     console.error('ERROR: Cannot locate control-request fallback anchor')
     process.exit(1)

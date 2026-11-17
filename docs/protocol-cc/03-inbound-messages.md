@@ -39,6 +39,11 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 | `control_response`       | Control channel                                 | One per inbound outbound control_request                                                  | §3.17                                      |
 | `control_cancel_request` | Control channel                                 | On abort of pending inbound control_request                                               | §3.18                                      |
 
+**2.1.326 schema diff (against 2.1.321, darwin-arm64):** the stdout message union (the schema whose
+`.describe()` starts "Every conversational and informational message the CLI emits") has the same
+top-level `type` set. Its only new member is `system/late_allow_not_run` (04 §4.33). Field additions
+are listed in §3.3, §3.4, §3.5 and §3.7.
+
 ---
 
 ## 3.3 `assistant`
@@ -112,6 +117,8 @@ Anthropic-shaped assistant message. Fires on every assistant response, including
   - `tool_deferred` — hook deferred a tool; see `result` subtype.
   - `tool_deferred_unavailable` — MCP tool vanished.
 - **Ordering** — parent `assistant` (with Task `tool_use`) arrives first; subagent messages interleave with `parent_tool_use_id`; parent's synthetic `user` tool_result arrives last for that Task. For teams, `system/task_notification` arrives when teammate completes.
+- **`supersedes` (2.1.326 widening).** The uuids of earlier messages this one replaces. Before 2.1.326 it was sent only after a refusal fallback. It is now also sent after a response whose tool call could not be parsed, and it can name **user** messages (a refused attempt's tool results), not only assistant frames. The model is re-asked behind a synthetic user frame that carries `retracted_message_uuids` (§3.4), and the next assistant message names the same uuids again in `supersedes`. The emitter is the query loop's `malformed_tool_use_retry` branch (`mt.retractedWireUuids=` @21784956, telemetry `tengu_malformed_tool_use_response`). 2.1.321 already re-asked and tombstoned the response internally but put no retraction on the wire. ClaudeUI reads neither field (it evicts only on `system/model_refusal_fallback.retracted_message_uuids`, `claude-model-fallback.ts`), so a response dropped this way stays on screen, as it did on 2.1.321.
+- **2.1.326 additions (`@internal`, not consumed):** `api_error_type` (the response body's `error.type` when it is an identifier, such as `rate_limit_error` or `overloaded_error`), and two new `api_error` values: `tls_cert_signature_failure` and `message_over_context_limit` (the turn's own text is over the model's largest context window; no request was sent).
 
 ---
 
@@ -241,6 +248,8 @@ Per patch `team-streaming-B` (retired) at char `8648903`:
   ADR-088 amendment). A foreground run also emits `system/task_notification` (its result returns
   through the tool_result), so the frame alone does not mean the model was notified.
 - **`isReplay`** — present and `true` only on replay/ack/queued-command paths. Absent on live synthetic tool_result messages.
+- **`retracted_message_uuids` (2.1.326, `@internal`, output only).** This field is set only on the synthetic user frame that re-asks the model after a response whose tool call could not be parsed. It holds the uuids of that response's messages, which cli.js has dropped from the conversation, and a host removes them on receipt. It is absent on subagent messages, over Remote Control, and when none of the response's messages was sent. The converter `case"user"` adds it from `retractedWireUuids` (@20595468). ClaudeUI's `handleUserMessage` ignores a string-content frame that is not a task notification, so the frame and the field are both dropped (§3.3 `supersedes`).
+- **Input-only additions (2.1.326, `@internal`, ClaudeUI sends neither):** `keeps_request_id` names an unanswered permission card that the sender keeps up behind this message. `run_input` is new as well.
 - **`parent_tool_use_id`** — null for top-level; non-null when the user message is inside a subagent's tool execution.
 
 ---
@@ -286,6 +295,7 @@ See `05-stream-events.md` for complete delta shapes. Summary:
 
 - **`ttft_ms`** — time-to-first-token. Present only on the first `stream_event` of an assistant turn. Useful for startup latency metrics.
 - **`parent_tool_use_id`** non-null for subagent stream events (via patches).
+- **`owed_rows` (2.1.326, `@internal`)** — rides with `user_message_uuid` on a turn's first main-thread `stream_event`. It lists the uuids of transcript rows that the turn wrote before its first model request and that change what Claude holds of a claude.ai Project. It is stripped where `user_message_uuid` is, and ClaudeUI ignores it.
 
 ---
 
@@ -339,6 +349,10 @@ Emitted exactly once per turn, last message of the turn.
   "stopped_by_permission_check": true,   // 2.1.319 @internal: auto mode ended the turn itself after a run of no-verdict responses
   "credential_expires_at": "ISO-8601",   // 2.1.319 @internal: end of a stored claude.ai login's refresh chain; absent for API-key / env-token / host-token spawns
   "process_turn_threads": {...},         // 2.1.319 @internal: CPU ms of the turn by thread, keyed by process_turn_states + between_turns
+  "api_error_type": "...",               // 2.1.326 @internal: error.type of the API error that ended the turn (as on assistant, §3.3)
+  "restored_rewind": {...},              // 2.1.326 @internal: {request_id, last_message_uuid} after a usage-limited rewind_conversation was restored
+  "invalid_config_file": {...},          // 2.1.326, error results: {path, is_global, backup_searched, backup_path?} for a config file that is not valid JSON
+  "policy_answer": "...",                // 2.1.326 @internal, error results: what the process holds of the org's policy limits (+ policy_answer_reason)
   "fast_mode_state": {...},
   "uuid": "...",
   "errors": ["..."],
@@ -430,6 +444,8 @@ webSearchRequests, costUSD, contextWindow, maxOutputTokens }` — `costUSD` is
 | `error_during_execution`                              | Stop-reason / content mismatch, or sandbox startup failure | `errors: ["[ede_diagnostic] result_type=... last_content_type=... stop_reason=...", ...]` |
 
 A required sandbox that cannot run reaches ClaudeUI three ways at once: a zeroed `error_during_execution` result (`num_turns: 0`, `is_error: true`, the message in `errors`, `startup_failure_reason: "sandbox_required_unavailable"`), two lines on stderr, and exit code 1. Probed 2026-11-13 on cli.js 2.1.321 through the harness, without `CLAUDE_CODE_STARTUP_FAILURE_RESULTS` in the environment, in three spawn shapes: the user message written at spawn (an automation run), streaming input with no message yet, and the same with no settings source (a dispatch target). The result arrives first and the exit follows about a second after the spawn. The result schema's own text says a startup failure result is written for most reasons only when the host sets that variable, and on every stream-json run for `org_config_required_unavailable`, `org_config_refused` and `config_file_invalid`; a 2026-11-12 probe of the sandbox case recorded the stderr lines and no result. So a consumer treats a result that is not a success as a failure and also handles a bare exit: a session reports the result's `errors` with its stderr tail, a dispatch target fails the turn on the result once its own turn has started, else on the process exit, quoting the stderr tail, and an automation run fails on either (ADR-116).
+
+2.1.326 adds the startup reason `managed_settings_not_delivered`. It is written when cli.js was started with `--managed-settings-in-initialize` (02 §2.14b) and cannot use the managed settings in the initialize request; `errors` says which case. ClaudeUI does not pass that flag, so this reason never reaches its spawns. A config-file failure's result now also carries `invalid_config_file` with the file's path, and ClaudeUI does not read it.
 
 ### Ordering
 

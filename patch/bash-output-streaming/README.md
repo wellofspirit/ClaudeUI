@@ -6,10 +6,10 @@ Live Bash command output never reaches the stream-json consumer until the comman
 
 `vendor/claude-cli/cli.js` — the vendored Claude Code bundle (`bun-claude`).
 
-| Component            | Version                                                                      |
-| -------------------- | ---------------------------------------------------------------------------- |
-| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105                     |
-| Last verified anchor | **2.1.321** (chunked bundle — see "Bundle shape" below; re-anchored 2.1.321) |
+| Component            | Version                                                                                                               |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105                                                              |
+| Last verified anchor | **2.1.326** (chunked bundle — see "Bundle shape" below; re-anchored 2.1.321, both optional forms reverted in 2.1.326) |
 
 ### Bundle shape (changed in 2.1.261)
 
@@ -186,6 +186,10 @@ literals) between the `{` and the four assignments, and Part A is injected **aft
 call the CLI drops never reaches the SDK stream either. Without the guard (<= 2.1.319) the injection
 point is the opening brace as before.
 
+2.1.326 dropped the guard again: the bash callback is back to
+`onProgress(Pi,aa,ul,fs,ca){jn=Pi,Hn=aa,Ln=ul,oo=ca?fs:0;let Zi=Ko;if(Zi)Ko=null,Zi()}` (pristine darwin
+concat, char 16942066), and Part A takes the no-guard branch.
+
 **Why it is unique.** 2.1.261 has exactly four `onProgress(` occurrences in the whole concat:
 
 | Offset      | Chunk               | Shape                                                                    |
@@ -280,6 +284,14 @@ Two-step capture, in this order:
    a one-arg call (<= 2.1.319) logs and skips. The whole of Part B is guarded by the early-poll marker,
    so it is idempotent. The one-arg early call we inject (default `!0`) matches the pinned value. The
    search window is 6000 chars from the Part A anchor.
+
+   **2.1.326 reverted the second parameter.** `static startPolling(e)` is one-argument again,
+   `pollProgress` always reads the output file (the `#h` "read" flag is gone), and the
+   `tengu_lazy_pumpkin` gate is no longer in the bundle. The CLI's own call is
+   `aX.startPolling(Oo.taskOutput.taskId)` (pristine darwin concat, char 16945007). Part B therefore takes the one-arg
+   branch, and nothing needs pinning: the apply log reads `One-arg startPolling (<= 2.1.319): no poll
+flag to pin.` (that label in `apply.mjs` predates 2.1.326 and now also covers it). The
+   `bash-poll-flag` rewrite stays in `apply.mjs` for a bundle that brings the parameter back.
 
    Taking the class name from a call site _inside the target chunk_ is what guarantees the
    identifier we inject is in scope there (post-split it might be an imported alias).
@@ -587,6 +599,14 @@ through Node pipes — a much larger behavioral change (it also changes what end
 - Part B: `ERROR: expected exactly 1 <TaskOutput>.startPolling(...) call ... found 0` — the CLI's call
   is now `startPolling(id,so)`. Optional second argument in the regex; the injected call stays
   one-arg.
+
+### 2.1.326 (no re-anchor)
+
+- Applied unchanged on win32-x64, darwin-arm64 and linux-x64. Both optional forms that 2.1.321
+  introduced are gone again: Part A's anchor has no late-callback guard, and Part B meets the
+  one-argument `startPolling(id)` (see above). darwin apply log (on the cross-platform build, after the other patches): `onProgress` at char 16942257;
+  TaskOutput class `aX`, shellCommand `Oo`, `.result` assignment `;let as=Oo.result;`; both markers
+  verified. Everything sits in one chunk, `chunk-4h798pp0.js` (≈5.9 MB).
 
 ## Key Functions Reference
 

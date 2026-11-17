@@ -234,8 +234,9 @@ export const PRIVACY_PLUGIN_ID = 'cc-plugin-privacy@builtin'
  *    on the `claude-desktop` / VS Code entrypoints (`isSleepCompactionHost`;
  *    `oAt()` reads it with a default of true). ClaudeUI's default is OFF.
  *  - `enabledPlugins[PRIVACY_PLUGIN_ID]` — the built-in privacy plugin that
- *    asks before a Web/Bash/Monitor/PowerShell call carrying the account email
- *    address. It is `defaultEnabled:!0` and
+ *    asks before a Bash/Monitor/PowerShell, WebFetch, Write/Edit/NotebookEdit or
+ *    MCP call carrying the account email address (file writes and MCP since
+ *    2.1.325). It is `defaultEnabled:!0` and
  *    `enabledFromTrustedSettingsOnly:!0`, so only user/flag/policy settings can
  *    turn it off; ClaudeUI's default is ON, stated explicitly so the toggle is
  *    ClaudeUI's rather than whatever the user's settings file says.

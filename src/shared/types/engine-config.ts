@@ -72,8 +72,9 @@ export interface SandboxSettings {
 
 /**
  * What the Claude page shows before anything is set: the sandbox off, and the two switches at
- * ClaudeUI's stricter defaults (Claude Code reads an ABSENT `autoAllowBashIfSandboxed` or
- * `allowUnsandboxedCommands` as true; turning the sandbox on from the page writes both).
+ * ClaudeUI's stricter defaults (Claude Code reads an ABSENT `allowUnsandboxedCommands` as true,
+ * and an absent `autoAllowBashIfSandboxed` as false since 2.1.325; turning the sandbox on from
+ * the page writes both).
  */
 export const DEFAULT_SANDBOX: SandboxSettings = {
   enabled: false,
@@ -156,8 +157,8 @@ export interface ClaudeEngineConfig {
   idleCompaction?: boolean
   /**
    * Whether cli.js's built-in `cc-plugin-privacy@builtin` plugin asks before a
-   * Web/Bash/Monitor/PowerShell call whose input holds the account email
-   * address. ClaudeUI's default is ON: absent means true. cli.js reads the
+   * Bash/Monitor/PowerShell, WebFetch, Write/Edit/NotebookEdit or MCP call whose
+   * input holds the account email address (file writes and MCP since 2.1.325). ClaudeUI's default is ON: absent means true. cli.js reads the
    * plugin's switch (`enabledPlugins`, `defaultEnabled:!0`,
    * `enabledFromTrustedSettingsOnly:!0`) only from user, flag or policy
    * settings, so it is passed per spawn as `--settings` flag settings.
