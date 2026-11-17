@@ -1120,10 +1120,11 @@ export function resolveClaudeCapabilities(
  * backgroundTasks:true — the gate `handlers-core.stopTask` checks: a per-child Stop on
  * every subagent card, row and detail panel (`OpencodeSession.stopTask` interrupts the
  * child and its live descendants). "Send to background" is deliberately NOT offered
- * (no `backgroundTask`, and the foreground run never says `isBackgrounded: false`):
- * opencode 2.1.2's `POST /session/:id/background` moves a WHOLE SESSION's blocking work
- * (shells and commands too), not one call. `background: true` calls still run and are
- * tracked (task lifecycle events); the watch/read-range members stay absent (their handlers no-op).
+ * (no `backgroundTask`): since opencode 2.3.0 every subagent already runs in the background
+ * (`isBackgrounded: true` on every run; a parent Stop leaves children running, ADR-111 §4),
+ * and `POST /session/:id/background` moves a WHOLE SESSION's blocking work (shells and
+ * commands too), not one call. Runs are tracked by task lifecycle events; the watch/read-range
+ * members stay absent (their handlers no-op).
  * fork:false / forkFromMessage:false — the end-to-end path is unwired:
  * `OpencodeClient.forkSession()` exists but has no production caller,
  * `OpencodeSession` ignores its `_resumeSessionAt`/`_forkSession` spawn params,

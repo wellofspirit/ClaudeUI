@@ -496,21 +496,28 @@ usage, run index, summary and background flag. A run is one call: `toolUseId` is
 run (grandchildren count in their own runs). `wakesParent` is true on every run. A call that steers a still-running child
 first settles the earlier call ("continued by a later call"). Cold history carries the same figures and seeding
 remembers each child's calls, so a resume continues the count. A live background child holds the idle timer, which re-arms
-when it ends.
+when it ends. Every run is a background one: the call answers at once, and the child reports each idle round to its parent
+as a synthetic `<subagent state>` message, never shown (the run's notification says it). A round that ends with the
+child's own background work still running (`state="running"`), or a child that starts again under the same call, re-arms
+the run (same run index) until a later round's end notifies it again; cold history reads the last round, `unfinished`
+while the last report still says `running`. Changed 2026-11-17: opencode 2.3.0 removed foreground subagents.
 
 ### §4 Stop per subagent; no Send to background
 
 `OpencodeSession.stopTask` interrupts the card's child and its live descendants, never siblings or the parent. The run ends
-`stopped` unless it completed first; a stopped child that a background grandchild's completion wakes again is
-interrupted again until a new call links it. The model is told the user stopped that agent so it does not re-spawn the
-work: one host instruction per Stop to the root session ("Sent by ClaudeUI for you"), sent before the interrupt, as
-user-role text (a non-user agent message would taint the session's origin and count against its agent-turn budget). It
-carries nothing the model authored: the agent's type (a safe identifier, else `subagent`) and the call id, never the
-description or prompt; the call id is quoted only when it matches `[A-Za-z0-9_.:-]{1,128}` (else "started by one of your
-calls") and is worded "started by call <id>", since a nested call was made by the child. Teardown and parent interrupts
-send no note. A Stop whose child interrupt cannot be sent is rolled back for the sessions not reached. `backgroundTasks`
-is true; `backgroundTask` is not implemented, and a foreground run omits `isBackgrounded` so cards never offer "Send to
-background": opencode's background route would move every blocked job of the turn, not the one card.
+`stopped` unless it completed first; a child idle between rounds (its interrupt is a no-op upstream) is settled `stopped`
+at once, and a stopped child that its own background work or a grandchild's completion wakes again is interrupted again
+until a new call links it. A parent's own Stop leaves its children running; each is stopped from its card (changed
+2026-11-17: opencode 2.3.0 has no foreground subagents to cancel with their parent). The model is told the user stopped
+that agent so it does not re-spawn the work: one host instruction per Stop to the root session ("Sent by ClaudeUI for
+you"), sent before the interrupt, as user-role text (a non-user agent message would taint the session's origin and count
+against its agent-turn budget). It carries nothing the model authored: the agent's type (a safe identifier, else
+`subagent`) and the call id, never the description or prompt; the call id is quoted only when it matches
+`[A-Za-z0-9_.:-]{1,128}` (else "started by one of your calls") and is worded "started by call <id>", since a nested call
+was made by the child. Teardown and parent interrupts send no note. A Stop whose child interrupt cannot be sent is
+rolled back for the sessions not reached. `backgroundTasks` is true; `backgroundTask` is not implemented, and no run says
+`isBackgrounded: false` (every run says `true`), so cards never offer "Send to background": opencode's background route
+would move every blocked job of the turn, not the one card.
 
 ### §5 ClaudeUI's model allowlist holds for subagents
 

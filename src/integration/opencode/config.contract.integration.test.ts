@@ -134,7 +134,13 @@ describeV2('opencode 2.x contract: config writers (S8)', () => {
     )
     // The production writers resolve the config dir from the env, per call.
     process.env.OPENCODE_CONFIG_DIR = configDir
-    const env = { ...isolatedEnv(home, proxy), OPENCODE_CONFIG_DIR: configDir }
+    // 2.3.0 logs routine normalization notes (a 1.x model's `attachment`) at DEBUG only
+    // (`packages/core/src/config.ts` `parseInfo`); the cases below read them from the log.
+    const env = {
+      ...isolatedEnv(home, proxy),
+      OPENCODE_CONFIG_DIR: configDir,
+      OPENCODE_LOG_LEVEL: 'DEBUG'
+    }
     const launch: HarnessLaunch = SANDBOX_AVAILABLE
       ? { command: '/usr/bin/sandbox-exec', args: ['-f', sandboxProfile(home), V2_BIN] }
       : { command: V2_BIN, args: [] }

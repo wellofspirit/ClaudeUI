@@ -6,7 +6,18 @@
 import { parse as parsePath } from 'node:path'
 import type { OpencodeClient } from './OpencodeClient'
 
-/** How long a teardown waits for its interrupts and cancels before giving up. */
+/**
+ * How long a teardown waits for its interrupts and cancels before giving up.
+ *
+ * Since 2.3.0 a user's interrupt first asks the running tools to stop and waits
+ * up to 5 s for them (`runner/step.ts` `COOPERATIVE_STOP`) before interrupting
+ * them. Only `shell` cooperates, and it settles about 0.5 s after its stop
+ * (`tool/plugin/shell.ts` `INTERRUPT_WAIT`; the SIGKILL escalation is not
+ * awaited), so a teardown normally sees the execution end well inside this
+ * window. Only a shell stop that hangs reaches upstream's cap, and then this
+ * window (started before the interrupt is sent) ends first: the best-effort
+ * outcome every teardown already accepts. Reviewed at 2.3.0 and kept equal.
+ */
 export const TEARDOWN_GRACE_MS = 5_000
 
 /** How often a teardown re-reads `GET /api/session/active`. */

@@ -91,7 +91,14 @@ function toolResultFor(r: Rig, tag: string): string | undefined {
   }
 }
 
-/** Prompts `text` (tagged) in a fresh session and waits for the turn; returns the tool result text. */
+/** What a 2.3.0 `subagent` call answers when it launched its child (always in the background). */
+const LAUNCHED = 'The subagent is working in the background'
+
+/**
+ * Prompts `text` (tagged) in a fresh session and waits for the turn; returns the tool
+ * result text. A call that launched a child also waits for the child's report to the
+ * parent (its `state`) and the parent turn that read it, so nothing spills into the next case.
+ */
 async function runPrompt(r: Rig, text: string, tag: string) {
   const parent = await r.createSession({ permissions: ALLOW_ALL })
   const from = r.feed.mark()
@@ -100,7 +107,14 @@ async function runPrompt(r: Rig, text: string, tag: string) {
   const children = r.feed.select('session.created', { after: from }).filter((e) => {
     return (e.data as { parentID?: string }).parentID === parent
   })
-  return { parent, children, result: toolResultFor(r, tag) }
+  const report =
+    children.length > 0
+      ? await r.feed.waitForReport(parent, children[0].data.sessionID, {
+          after: from,
+          timeoutMs: 60_000
+        })
+      : undefined
+  return { parent, children, result: toolResultFor(r, tag), report: report?.state }
 }
 
 async function guard(r: Rig): Promise<unknown> {
@@ -155,7 +169,8 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
     const okTag = nonce('b-ok')
     const ok = await runPrompt(r, `[submodel:fixture/fixture-model] ${okTag}`, okTag)
     expect(ok.children).toHaveLength(1)
-    expect(ok.result).toContain('state="completed"')
+    expect(ok.result).toContain(LAUNCHED)
+    expect(ok.report).toBe('completed')
   })
 
   it('(c) an agent pinned off-list is refused; one pinned on-list runs; an agent with no model inherits', async () => {
@@ -174,7 +189,8 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
     const plainTag = nonce('c-plain')
     const plain = await runPrompt(r, `[sub] ${plainTag}`, plainTag)
     expect(plain.children).toHaveLength(1)
-    expect(plain.result).toContain('state="completed"')
+    expect(plain.result).toContain(LAUNCHED)
+    expect(plain.report).toBe('completed')
   })
 
   it('(d) the gate still holds after POST /api/location/reload (setup re-ran and re-read its options)', async () => {
@@ -204,8 +220,14 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
       model: { providerID: 'fixture', id: 'other-model' }
     })
     const firstTag = nonce('g-first')
-    await r.turn(parent, `[sub] ${firstTag}`)
-    expect(toolResultFor(r, firstTag)).toContain('state="completed"')
+    const { from: firstFrom } = await r.turn(parent, `[sub] ${firstTag}`)
+    expect(toolResultFor(r, firstTag)).toContain(LAUNCHED)
+    // `[subresume]` names the child from its report (`sessionID="…"`): wait until the parent read it.
+    const [child] = r.feed
+      .select('session.created', { after: firstFrom })
+      .filter((e) => e.data.parentID === parent)
+    const first = await r.feed.waitForReport(parent, child.data.sessionID, { after: firstFrom })
+    expect(first.state).toBe('completed')
 
     // Resume it as `no-model`: no model of its own, so the stored one would run.
     const offTag = nonce('g-off')
@@ -216,8 +238,10 @@ describeV2('opencode 2.x contract: the subagent model gate (plugin options)', ()
 
     // An agent with an on-list model takes the child over and runs.
     const okTag = nonce('g-ok')
-    await r.turn(parent, `[subresume:pinned-ok] ${okTag}`)
-    expect(toolResultFor(r, okTag)).toContain('state="completed"')
+    const { from: okFrom } = await r.turn(parent, `[subresume:pinned-ok] ${okTag}`)
+    expect(toolResultFor(r, okTag)).toContain(LAUNCHED)
+    const resumed = await r.feed.waitForReport(parent, child.data.sessionID, { after: okFrom })
+    expect(resumed.state).toBe('completed')
   })
 
   it("(f) hiding Code Mode offers opencode's model LOOKUP as a direct tool (2.2.0); the gate still holds", async () => {

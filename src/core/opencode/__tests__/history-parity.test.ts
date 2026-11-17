@@ -1,7 +1,8 @@
 /**
  * Live/cold parity of the opencode 2.x mapper (ADR-097 S4) on sequences
- * RECORDED from the real 2.0.24 engine (the mapper contract suite with
- * `OPENCODE_V2_CAPTURE=1`; paths redacted): the events a chat streamed, fed
+ * RECORDED from the real engine at the pinned version (each file's `opencode`;
+ * the mapper contract suite with `OPENCODE_V2_CAPTURE=1`, re-recorded at every
+ * bump that changes the wire; paths redacted): the events a chat streamed, fed
  * through `OpencodeEventMapper` and folded the way the reducer folds them,
  * must equal the cold converter's reading of the rows opencode stored.
  *
@@ -70,7 +71,7 @@ function ends(outputs: readonly OpencodeMapperOutput[]) {
   )
 }
 
-describe('opencode 2.x mapper — live equals cold on recorded 2.0.24 sequences', () => {
+describe('opencode 2.x mapper — live equals cold on recorded sequences', () => {
   it('has the recordings', () => {
     expect(recordings.map((r) => r.scenario).sort()).toEqual([
       'denials',
@@ -79,7 +80,8 @@ describe('opencode 2.x mapper — live equals cold on recorded 2.0.24 sequences'
       'multi-tool',
       'patch',
       'resume',
-      'stops'
+      'stops',
+      'subagent-rounds'
     ])
   })
 

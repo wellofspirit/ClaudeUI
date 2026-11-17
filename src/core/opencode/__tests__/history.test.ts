@@ -376,12 +376,96 @@ ${'x'.repeat(150)}
         assistant('msg_a', 1, [subagent('call_1', { status: 'error', input: {}, error })])
       ]
       expect(childSessionsOf(rows)).toEqual(['ses_c'])
-      expect(convertOpencodeHistory(rows).taskNotifications[0]).toMatchObject({
-        taskId: 'ses_c',
-        status
-      })
+      const [note] = convertOpencodeHistory(rows).taskNotifications
+      expect(note).toMatchObject({ taskId: 'ses_c', status })
+      // The call itself failed: no background run, the error is what the card shows (as live).
+      expect(note).not.toHaveProperty('isBackgrounded')
     }
   )
+
+  it('2.3.0: a run whose child woke for a later round reads as ONE run; the `<subagent>` reports show nothing', () => {
+    const report = (id: string, created: number, state: string, text: string) =>
+      ({
+        id,
+        type: 'synthetic',
+        text: `<subagent sessionID="ses_c" state="${state}" description="d">\n${text}\n</subagent>`,
+        description: 'd',
+        metadata: { source: 'subagent', childID: 'ses_c', agent: 'general', state: 'completed' },
+        time: { created }
+      }) as unknown as Session_Message_Info
+    const rows = [
+      user('msg_u', 1, 'go'),
+      assistant('msg_a', 2, [
+        {
+          type: 'tool',
+          id: 'call_1',
+          name: 'subagent',
+          state: {
+            status: 'completed',
+            input: { agent: 'general', description: 'd', prompt: 'p' },
+            content: [{ type: 'text', text: 'The subagent is working in the background' }],
+            metadata: { sessionID: 'ses_c', status: 'running' }
+          },
+          time: { created: 2, ran: 3, completed: 4 }
+        }
+      ]),
+      idle('i_own1', 6),
+      // Round one ended with the child's background shell still running.
+      report('msg_r1', 20, 'running', 'first round\n\nBackground work still running:\n- shell'),
+      assistant('msg_w1', 21, [{ type: 'text', text: 'noted' }]),
+      idle('i_own2', 25),
+      report('msg_r2', 60, 'completed', 'second round'),
+      assistant('msg_w2', 61, [{ type: 'text', text: 'all done' }]),
+      idle('i_own3', 65)
+    ]
+    const child = [
+      user('msg_cu', 5, 'You are a subagent spawned by another session.\np'),
+      assistant('msg_c1', 7, [{ type: 'text', text: 'first round' }], {
+        cost: 0.01,
+        tokens: TOKENS
+      }),
+      idle('i_c1', 19),
+      { id: 'msg_cn', type: 'synthetic', text: 'shell finished', time: { created: 50 } },
+      assistant('msg_c2', 51, [{ type: 'text', text: 'second round' }], {
+        cost: 0.01,
+        tokens: TOKENS
+      }),
+      idle('i_c2', 59)
+    ] as Session_Message_Info[]
+    const history = convertOpencodeHistory(rows, new Map([['ses_c', child]]))
+    // The reports (and the child's own notice) are synthetic rows: nothing a transcript shows.
+    expect(history.messages.map((m) => [m.id, m.role])).toEqual([
+      ['msg_u', 'user'],
+      ['msg_a', 'assistant'],
+      ['msg_w1', 'assistant'],
+      ['msg_w2', 'assistant']
+    ])
+    expect(history.subagentMessages.call_1.map((m) => m.id)).toEqual(['msg_c1', 'msg_c2'])
+    // The run's one notification: the last round's outcome and words, every round's usage,
+    // timed from the call's start to the last idle (what the live mapper sends at that end).
+    expect(history.taskNotifications).toEqual([
+      {
+        taskId: 'ses_c',
+        toolUseId: 'call_1',
+        status: 'completed',
+        outputFile: '',
+        summary: 'second round',
+        usage: { totalTokens: 250, toolUses: 0, durationMs: 56 },
+        runIndex: 1,
+        isBackgrounded: true
+      }
+    ])
+
+    // Reopened between the rounds (its last report still says `running`): the child may
+    // still be working, and nothing follows it after a reopen — `unfinished`, not `completed`.
+    const between = convertOpencodeHistory(
+      rows.filter((row) => row.time.created < 50),
+      new Map([['ses_c', child.filter((row) => row.time.created < 50)]])
+    )
+    expect(between.taskNotifications).toMatchObject([
+      { toolUseId: 'call_1', status: 'unfinished', summary: 'first round', isBackgrounded: true }
+    ])
+  })
 
   it('a child RESUMED by a second call: each call shows its own run (as live re-links it)', () => {
     const call = (id: string, ran: number): Part => ({

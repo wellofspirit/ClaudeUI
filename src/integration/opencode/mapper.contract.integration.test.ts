@@ -24,6 +24,7 @@ import type {
 } from '../../core/opencode/protocol-v2/openapi'
 import type { SubscribeOptions } from '../../core/opencode/opencode-event-stream'
 import { OpencodeEventMapper, type OpencodeMapperOutput } from '../../core/opencode/event-mapper'
+import { harnessManifest } from '../../core/harness/manifests'
 import { convertOpencodeHistory, readOpencodeHistory } from '../../core/opencode/history'
 import { reconcileAfterReconnect, type OpencodeStateReader } from '../../core/opencode/reconnect'
 import {
@@ -246,7 +247,7 @@ async function capture(
   const body = JSON.stringify(
     {
       scenario: name,
-      opencode: '2.0.24',
+      opencode: harnessManifest('opencode').tested,
       sessionID: data.sessionID,
       events,
       messages: data.rows,
@@ -268,6 +269,27 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
 
   const clientFor = (baseUrl = rig().server.url) =>
     new OpencodeClient({ baseUrl, authHeader: basic(rig().server.password), directory: rig().cwd })
+
+  /**
+   * `childID`'s next `<subagent>` report to `parentID` (at or after the rig feed's
+   * `after`) and the parent turn that read it — on the mapper's feed too, so a
+   * live/cold comparison after it includes that whole turn (2.3.0: every child
+   * reports each idle round, and the report wakes its parent).
+   */
+  async function settledReport(
+    feed: ReturnType<typeof startMapperFeed>,
+    parentID: string,
+    childID: string,
+    after = 0
+  ) {
+    const report = await rig().feed.waitForReport(parentID, childID, { after, timeoutMs: 45_000 })
+    const endID = report.end!.id
+    await feed.until(
+      () => (feed.events.some((event) => event.id === endID) ? true : undefined),
+      'the end of the turn that read the report'
+    )
+    return report
+  }
 
   /** Waits until the MCP fixture's `fx_echo` is offered to the model (see mcp-identity). */
   async function mcpReady(): Promise<void> {
@@ -374,11 +396,14 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
               o.message.content.some((b) => b.type === 'tool_use' && b.toolName === 'fx_echo')
           )
       ).toBe(true)
-      // A subagent whose child runs a tool: child items/results route under the call.
+      // A subagent whose child runs a tool: child items/results route under the call. The
+      // call answers at once (2.3.0); the child's end is the run's notification, and its
+      // report wakes this session for a turn of its own (read before comparing).
       const sub = await turn(`[subread] ${nonce('sub')}`)
-      const started = feed.outputs.slice(sub).find((o) => o.kind === 'subagent-started')
-      expect(started).toBeDefined()
-      const callID = started?.kind === 'subagent-started' ? started.toolUseId : ''
+      const started = await feed.output('subagent-started', sub)
+      const callID = started.toolUseId
+      await feed.output('task-notification', sub, (o) => o.notification.toolUseId === callID)
+      await settledReport(feed, sessionID, started.childSessionId)
       expect(
         feed.outputs
           .slice(sub)
@@ -387,7 +412,11 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
       expect(feed.outputs.slice(sub).filter((o) => o.kind === 'task-notification')).toEqual([
         {
           kind: 'task-notification',
-          notification: expect.objectContaining({ toolUseId: callID, status: 'completed' })
+          notification: expect.objectContaining({
+            toolUseId: callID,
+            status: 'completed',
+            isBackgrounded: true
+          })
         }
       ])
       // Every step was metered once.
@@ -583,12 +612,15 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
       await client.prompt(sessionID, { text: `[subread] ${nonce('first')}` })
       expect(await feed.turnEnd(from)).toMatchObject({ kind: 'result' })
       const first = await feed.output('subagent-started', from)
+      // `[subresume]` names the child from its report: the parent must have read it.
+      const firstReport = await settledReport(feed, sessionID, first.childSessionId)
       from = feed.outputs.length
       await client.prompt(sessionID, { text: `[subresume] ${nonce('again')}` })
       expect(await feed.turnEnd(from)).toMatchObject({ kind: 'result' })
       const second = await feed.output('subagent-started', from)
       expect(second.childSessionId).toBe(first.childSessionId)
       expect(second.toolUseId).not.toBe(first.toolUseId)
+      await settledReport(feed, sessionID, first.childSessionId, firstReport.at + 1)
 
       const live = normalizeTranscript(foldOutputs(feed.outputs))
       const cold = await coldTranscript(client, sessionID)
@@ -601,6 +633,53 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
         [first.toolUseId, second.toolUseId].sort()
       )
       await capture('resume', rig().home, rig().cwd, {
+        client,
+        sessionID,
+        events: feed.events,
+        rows: cold.rows,
+        children: cold.children
+      })
+    } finally {
+      await feed.close()
+    }
+  })
+
+  it('a child’s later round (its first report said `running`) is the same run, live and cold', async () => {
+    const client = clientFor()
+    const sessionID = (await client.createSession(ALLOW_ALL)).id
+    const mapper = new OpencodeEventMapper({ sessionID })
+    const feed = startMapperFeed(client, mapper)
+    try {
+      await feed.connectedOnce()
+      const from = feed.outputs.length
+      const mark = rig().feed.mark()
+      await client.prompt(sessionID, { text: `[subshellbg] ${nonce('rounds')}` })
+      const started = await feed.output('subagent-started', from)
+      // Round one ends while the child's background shell runs; the shell's end wakes it.
+      const running = await settledReport(feed, sessionID, started.childSessionId, mark)
+      expect(running.state).toBe('running')
+      const done = await settledReport(feed, sessionID, started.childSessionId, running.at + 1)
+      expect(done.state).toBe('completed')
+
+      const live = normalizeTranscript(foldOutputs(feed.outputs))
+      const cold = await coldTranscript(client, sessionID)
+      expect(live).toEqual(cold.transcript)
+      // One run, re-armed by the `running` report and notified again by the second round.
+      expect(
+        feed.outputs.flatMap((o) =>
+          o.kind === 'task-started'
+            ? [`started ${o.data.runIndex}`]
+            : o.kind === 'task-notification'
+              ? [`notified ${o.notification.runIndex}`]
+              : []
+        )
+      ).toEqual(['started 1', 'notified 1', 'started 1', 'notified 1'])
+      expect(live.taskNotifications).toMatchObject([
+        { toolUseId: started.toolUseId, status: 'completed', runIndex: 1, isBackgrounded: true }
+      ])
+      // The reports (and the shell's notice to the child) are no transcript rows.
+      expect(live.messages.filter((m) => m.role === 'user')).toHaveLength(1)
+      await capture('subagent-rounds', rig().home, rig().cwd, {
         client,
         sessionID,
         events: feed.events,

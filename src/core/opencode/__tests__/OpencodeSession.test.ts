@@ -2458,6 +2458,10 @@ describe('recorded sequences: what the session emits folds to the cold history',
           })
           break
         }
+        case 'session:task-started':
+          // A run re-armed after its end (2.3.0: its child woke for a later round).
+          out.push({ kind: 'task-started', data: data as never })
+          break
         case 'session:task-notification':
           out.push({ kind: 'task-notification', notification: data as never })
           break
@@ -4320,7 +4324,7 @@ describe('subagent task lifecycle: events and the idle timer', () => {
   const MODEL = { providerID: 'openai', id: 'gpt-x' }
   afterEach(() => vi.useRealTimers())
 
-  /** The own session's step runs a `subagent` call that links `child`; `background` is the model's own flag. */
+  /** The own session's step runs a `subagent` call that links `child` (2.3.0: always a background run). */
   const spawn = (callId: string, child: string, input: Record<string, unknown> = {}) => [
     event('session.created', {
       sessionID: child,
@@ -4410,10 +4414,10 @@ describe('subagent task lifecycle: events and the idle timer', () => {
     return cancel
   }
 
-  it('sends task-started, task-progress and the notification with the run’s figures', async () => {
+  it('sends task-started (once, background), task-progress and the notification with the run’s figures', async () => {
     await idleSession()
-    h.feed.push(...ownTurn(), ...spawn('call_a', CHILD), ...childRuns(CHILD), childEnds(CHILD))
-    h.feed.push(settled('call_a', CHILD, 'completed'), ...ownEnds())
+    h.feed.push(...ownTurn(), ...spawn('call_a', CHILD), settled('call_a', CHILD, 'running'))
+    h.feed.push(...ownEnds(), ...childRuns(CHILD), childEnds(CHILD))
     await flush()
     expect(payloads('session:task-started')).toEqual([
       {
@@ -4423,6 +4427,7 @@ describe('subagent task lifecycle: events and the idle timer', () => {
         runIndex: 1,
         startedAt: expect.any(Number),
         wakesParent: true,
+        isBackgrounded: true,
         description: 'task call_a'
       }
     ])
@@ -4435,7 +4440,13 @@ describe('subagent task lifecycle: events and the idle timer', () => {
       }
     ])
     expect(payloads('session:task-notification')).toMatchObject([
-      { toolUseId: 'call_a', status: 'completed', runIndex: 1, usage: { totalTokens: 125 } }
+      {
+        toolUseId: 'call_a',
+        status: 'completed',
+        runIndex: 1,
+        isBackgrounded: true,
+        usage: { totalTokens: 125 }
+      }
     ])
   })
 
@@ -4443,7 +4454,7 @@ describe('subagent task lifecycle: events and the idle timer', () => {
     const cancel = await idleSession()
     h.feed.push(
       ...ownTurn(),
-      ...spawn('call_a', CHILD, { background: true }),
+      ...spawn('call_a', CHILD),
       settled('call_a', CHILD, 'running'),
       ...ownEnds()
     )
@@ -4467,14 +4478,14 @@ describe('subagent task lifecycle: events and the idle timer', () => {
     expect(cancel).toHaveBeenCalledTimes(1)
   })
 
-  it('a foreground child does not hold the timer', async () => {
+  it('a child that ended before its parent’s turn holds nothing', async () => {
     const cancel = await idleSession()
     h.feed.push(
       ...ownTurn(),
       ...spawn('call_a', CHILD),
       ...childRuns(CHILD),
       childEnds(CHILD),
-      settled('call_a', CHILD, 'completed'),
+      settled('call_a', CHILD, 'running'),
       ...ownEnds()
     )
     await flush()
@@ -4482,18 +4493,119 @@ describe('subagent task lifecycle: events and the idle timer', () => {
     expect(cancel).toHaveBeenCalledTimes(1)
   })
 
-  it('a call that turns out backgrounded (moved by another client) holds the timer from then on', async () => {
+  it('a child woken for a later round (2.3.0 `<subagent state="running">`) holds the timer again until that round ends', async () => {
     const cancel = await idleSession()
     h.feed.push(
       ...ownTurn(),
       ...spawn('call_a', CHILD),
       settled('call_a', CHILD, 'running'),
-      ...ownEnds()
+      ...ownEnds(),
+      ...childRuns(CHILD),
+      childEnds(CHILD)
     )
     await flush()
-    expect(payloads('session:task-started').map((d) => d.isBackgrounded)).toEqual([undefined, true])
+    expect(payloads('session:task-notification')).toHaveLength(1)
+    vi.advanceTimersByTime(IDLE_MS / 2)
+    // Its own background work woke it: the same run is live again.
+    h.feed.push(event('session.execution.started', { sessionID: CHILD }))
+    await flush()
+    expect(payloads('session:task-started').map((d) => [d.toolUseId, d.runIndex])).toEqual([
+      ['call_a', 1],
+      ['call_a', 1]
+    ])
     vi.advanceTimersByTime(5 * IDLE_MS)
     expect(cancel).not.toHaveBeenCalled()
+    h.feed.push(childEnds(CHILD))
+    await flush()
+    expect(payloads('session:task-notification').map((d) => [d.toolUseId, d.runIndex])).toEqual([
+      ['call_a', 1],
+      ['call_a', 1]
+    ])
+    vi.advanceTimersByTime(IDLE_MS + 1)
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('a child idle between rounds (its report said `running`) holds the timer, and its Stop settles at once', async () => {
+    const cancel = await idleSession()
+    h.feed.push(
+      ...ownTurn(),
+      ...spawn('call_a', CHILD),
+      settled('call_a', CHILD, 'running'),
+      ...ownEnds(),
+      ...childRuns(CHILD),
+      childEnds(CHILD),
+      event('session.inbox.enqueued', {
+        sessionID: SID,
+        inboxID: 'msg_report1',
+        item: {
+          type: 'synthetic',
+          delivery: 'steer',
+          payload: {
+            text: `<subagent sessionID="${CHILD}" state="running" description="d">\nx\n</subagent>`
+          }
+        }
+      })
+    )
+    await flush()
+    // Re-armed: the child waits on its own background work.
+    expect(payloads('session:task-started')).toHaveLength(2)
+    vi.advanceTimersByTime(5 * IDLE_MS)
+    expect(cancel).not.toHaveBeenCalled()
+    // Its interrupt ends nothing upstream (the child is idle): the Stop settles the card itself.
+    expect(await session.stopTask('call_a')).toMatchObject({ success: true })
+    expect(h.client.interrupt).toHaveBeenCalledWith(CHILD)
+    expect(payloads('session:task-notification').at(-1)).toMatchObject({
+      toolUseId: 'call_a',
+      status: 'stopped'
+    })
+    vi.advanceTimersByTime(IDLE_MS + 1)
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  // Owner ruling 2b (2026-11-17): opencode 2.3.0 leaves children running on a parent Stop.
+  it('a parent Stop leaves a live child running; the wake its report starts is an ordinary turn', async () => {
+    const cancel = await idleSession()
+    h.feed.push(...ownTurn(), ...spawn('call_a', CHILD), settled('call_a', CHILD, 'running'))
+    h.feed.push(event('session.execution.started', { sessionID: CHILD }))
+    h.feed.push(
+      event('permission.asked', {
+        id: 'per_child',
+        sessionID: CHILD,
+        action: 'shell',
+        resources: ['ls'],
+        source: { type: 'tool', messageID: 'msg_c1', id: 'call_c1' }
+      })
+    )
+    await flush()
+    await session.interrupt()
+    expect(h.client.interrupt).toHaveBeenCalledTimes(1)
+    expect(h.client.interrupt).toHaveBeenCalledWith(SID, { resume: true })
+    h.feed.push(event('session.execution.interrupted', { sessionID: SID, reason: 'user' }))
+    await flush()
+    expect(payloads('session:status').at(-1)).toMatchObject({ state: 'idle' })
+    // The child runs on: its card stays, its run is not settled, and it holds the idle timer.
+    expect(payloads('session:approval-dismiss')).not.toContainEqual({ requestId: 'per_child' })
+    expect(payloads('session:task-notification')).toEqual([])
+    vi.advanceTimersByTime(5 * IDLE_MS)
+    expect(cancel).not.toHaveBeenCalled()
+
+    // The child ends on its own; its report wakes the parent: a turn nobody stopped.
+    h.feed.push(childEnds(CHILD), event('session.execution.started', { sessionID: SID }))
+    await flush()
+    expect(payloads('session:task-notification')).toMatchObject([
+      { toolUseId: 'call_a', status: 'completed', isBackgrounded: true }
+    ])
+    expect(payloads('session:status').at(-1)).toMatchObject({ state: 'running' })
+    // The user-stop window (ADR-090) closed with the stopped turn: the wake's error is news.
+    h.feed.push(
+      event('session.execution.failed', {
+        sessionID: SID,
+        error: { type: 'unknown', message: 'wake failed' }
+      })
+    )
+    await flush()
+    expect(payloads('session:error')).toEqual(['wake failed'])
+    expect(payloads('session:result')).toHaveLength(2)
   })
 })
 

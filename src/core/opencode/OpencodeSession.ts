@@ -36,9 +36,12 @@
  * before that PATCH lands).
  *
  * Synthetic inbox items (`synthetic`: plan-mode reminders, background
- * completion notices, "continue" nudges) are neither rendered live nor cold:
- * the cold converter skips the stored `synthetic` rows, and live they only
- * reach the queue bookkeeping, which ignores every non-user item.
+ * completion notices, "continue" nudges, and since opencode 2.3.0 a child's
+ * `<subagent … state="…">` report after each of its idle rounds) are neither
+ * rendered live nor cold: the cold converter skips the stored `synthetic` rows,
+ * and live they only reach the queue bookkeeping, which ignores every non-user
+ * item. A report's news is the run's own task notification (the child's end);
+ * the turn it wakes renders as an ordinary turn.
  */
 import type { HostWindowHandle } from '../host'
 import { v4 as uuid } from 'uuid'
@@ -2220,11 +2223,12 @@ export class OpencodeSession extends BaseSession {
   /**
    * ISession.stopTask — the per-agent Stop on a subagent card, row or detail panel
    * (`handlers-core.stopTask`, gated on `capabilities.backgroundTasks`). Interrupts
-   * the call's child and every live descendant (deepest first; opencode cancels only
-   * FOREGROUND children with their parent, so a background grandchild is stopped
-   * itself), never a sibling or the parent. A foreground call then fails with
-   * "Subagent cancelled" and its parent's turn goes on; a background child's
-   * cancellation reaches the parent as a `<subagent state="cancelled">` message.
+   * the call's child and every live descendant (deepest first; an interrupt never
+   * reaches a session's children — since opencode 2.3.0 every child is a background
+   * one — so each is stopped itself), never a sibling or the parent. The child's
+   * cancellation reaches the parent as a `<subagent state="cancelled">` report,
+   * which wakes it (or joins its running turn); a parent's own Stop (`interrupt`)
+   * leaves its children running (ADR-111 §4).
    * The result carries `hostNote` for the model — the caller sends it once, only
    * after something was interrupted (never from a teardown).
    */
@@ -2249,6 +2253,8 @@ export class OpencodeSession extends BaseSession {
         }
       }
     }
+    // An idle child (waiting on its own background work) has no execution to end: settle it now.
+    for (const output of this.mapper?.settleIdleStops([...interrupted]) ?? []) this.dispatch(output)
     // The note is a user-role prompt the auto-mode judge reads as a `User:` line,
     // so it carries nothing the model authored: the call's `description` and
     // `prompt` stay out. It names the agent by its TYPE (opencode validates the

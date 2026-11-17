@@ -1,0 +1,1975 @@
+{
+ "scenario": "subagent-rounds",
+ "opencode": "2.3.0",
+ "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+ "events": [
+  {
+   "id": "evt_1e99ada8b0014U2s5ACuB4nAnE",
+   "created": 1794920602251,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_1e99ada8a001GXZJnXwkJI703n",
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "[subshellbg] rounds-a279e648"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada8b002WgYWeEEGXRHIM3",
+   "created": 1794920602251,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada8d001noXHRK2sg0MvMR",
+   "created": 1794920602253,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "inboxID": "msg_1e99ada8a001GXZJnXwkJI703n"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada92002lzPdHq7GS535XK",
+   "created": 1794920602258,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99ada92003CpDkDe4hfEhOI2",
+   "created": 1794920602258,
+   "type": "session.renamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "title": "Fixture title"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 6,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada990010eGvGpwOZAevtO",
+   "created": 1794920602265,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd",
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "started": 1794920602257
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 7,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada9a0024uLPdirtv7oLR4",
+   "created": 1794920602266,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd",
+    "id": "call_fx_43_0",
+    "name": "subagent"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 9,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada9a003vOYQWGTWZh8KuP",
+   "created": 1794920602266,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd",
+    "id": "call_fx_43_0",
+    "text": "{\"description\":\"contract shell rounds\",\"prompt\":\"child waits on [shellbg]\",\"agent\":\"general\"}"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 10,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada9b001D58usWmzsW55MV",
+   "created": 1794920602267,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd",
+    "id": "call_fx_43_0",
+    "input": {
+     "description": "contract shell rounds",
+     "prompt": "child waits on [shellbg]",
+     "agent": "general"
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 11,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada9c001lKSqB9uPn5SINf",
+   "created": 1794920602268,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 12,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada9d001NGKOKjqLDlC3UM",
+   "created": 1794920602269,
+   "type": "session.created",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "slug": "swift-planet",
+    "version": "2.3.0",
+    "projectID": "97d5336a520999812c1b4fc7086d9c0f736fabf2",
+    "parentID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "location": {
+     "directory": "/ws/main"
+    },
+    "subpath": ".cache/opencode-v2-it/home/ws/main",
+    "title": "contract shell rounds",
+    "agent": "general",
+    "permissions": [
+     {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
+     }
+    ]
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 0,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada9d002duA6asqMH18f6u",
+   "created": 1794920602269,
+   "type": "session.tool.progress",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd",
+    "id": "call_fx_43_0",
+    "metadata": {
+     "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+     "status": "running"
+    }
+   }
+  },
+  {
+   "id": "evt_1e99ada9e0014gWV3yI079RkeO",
+   "created": 1794920602270,
+   "type": "session.inbox.enqueued",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "inboxID": "msg_1e99ada9d003JKf1El1vancs5M",
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "item": {
+     "type": "user",
+     "payload": {
+      "text": "You are a subagent spawned by another session.\nchild waits on [shellbg]"
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 1,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ada9e003jUQ126lv8Mxotv",
+   "created": 1794920602270,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd",
+    "id": "call_fx_43_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "The subagent is working in the background (sessionID: ses_e16652564ffdUSgLYCjZJ26rwf). You will receive a <subagent> message when it goes idle, and again after each later round of work.\nDO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.\nWork on non-overlapping tasks, or briefly tell the user what you launched and end your response.\nTo send it follow-ups or change its instructions while it runs, call subagent again with this sessionID."
+     }
+    ],
+    "metadata": {
+     "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+     "status": "running",
+     "truncated": false
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 13,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_1e99ada9f001pMfpaodqAwsgzd",
+   "created": 1794920602271,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 2,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaa0002Cm2YP3QFO4EEzm",
+   "created": 1794920602272,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "inboxID": "msg_1e99ada9d003JKf1El1vancs5M"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 4,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaa90011cCnknYiypjfcN",
+   "created": 1794920602281,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ada90001UUslLWuDIWWRrd",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018,
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 14,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaaa001PHXuJz0kao605c",
+   "created": 1794920602282,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "cost": 0.00036,
+    "tokens": {
+     "input": 240,
+     "output": 60,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99adabc001Q4oQhIpz2jY7Hs",
+   "created": 1794920602300,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "started": 1794920602274
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 5,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adabd002flK9oEjuglco40",
+   "created": 1794920602301,
+   "type": "session.tool.input.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "id": "call_fx_44_0",
+    "name": "shell"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 7,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adabe001ogMn9PJIRh6Bbe",
+   "created": 1794920602302,
+   "type": "session.tool.input.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "id": "call_fx_44_0",
+    "text": "{\"command\":\"sleep 3; echo contract-bg-done\",\"description\":\"contract background shell\",\"background\":true}"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 8,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adabe002l3uIgQKYHHtulG",
+   "created": 1794920602302,
+   "type": "session.tool.called",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "id": "call_fx_44_0",
+    "input": {
+     "command": "sleep 3; echo contract-bg-done",
+     "description": "contract background shell",
+     "background": true
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 9,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adabf001RGXclIao36YMw9",
+   "created": 1794920602303,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 10,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adac2002mBBA2HsnznxC5e",
+   "created": 1794920602306,
+   "type": "session.tool.progress",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "id": "call_fx_44_0",
+    "metadata": {
+     "shellID": "sh_1e99adac0001NvWFsWQcHRQnqg"
+    }
+   }
+  },
+  {
+   "id": "evt_1e99adac3001B9YzOcfMmjIJhj",
+   "created": 1794920602307,
+   "type": "session.tool.success",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "id": "call_fx_44_0",
+    "content": [
+     {
+      "type": "text",
+      "text": "Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nPID: 420\nOutput is streaming to: /home-root/home/.local/share/opencode/shell/97d5336a520999812c1b4fc7086d9c0f736fabf2/sh_1e99adac0001NvWFsWQcHRQnqg.out"
+     },
+     {
+      "type": "text",
+      "text": "You will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output file is polling, not useful work. You may read the current output if it lets you do useful work now, but do not repeatedly check it while waiting for the command to finish. Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically when the command finishes."
+     }
+    ],
+    "metadata": {
+     "status": "running",
+     "truncated": false,
+     "shellID": "sh_1e99adac0001NvWFsWQcHRQnqg",
+     "pid": 420
+    },
+    "executed": false
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 11,
+    "version": 2
+   }
+  },
+  {
+   "id": "evt_1e99adac700150gRRQHQDnUSE9",
+   "created": 1794920602311,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_1e99adaac001g6TxKZKle0GRaf",
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "started": 1794920602285
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 15,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adac80022bO8j3YIz5y8fP",
+   "created": 1794920602312,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaac001g6TxKZKle0GRaf",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 17,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adac9001cPrHWlA3l6mYW1",
+   "created": 1794920602313,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaac001g6TxKZKle0GRaf",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: The subagent is working in the background (sessionID: ses_e16652564ffdUSgLYCjZJ26rwf). You will receive a <subagent> message when it goes idle, and again after each later round of work.\nDO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.\nWork on non-overlapping tasks, or briefly tell the user what you launched and end your response.\nTo send it follow-ups or change its instructions while it runs, call subagent again with this sessionID."
+   }
+  },
+  {
+   "id": "evt_1e99adac9002PD7SrZ3pCfCsHX",
+   "created": 1794920602313,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaac001g6TxKZKle0GRaf",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: The subagent is working in the background (sessionID: ses_e16652564ffdUSgLYCjZJ26rwf). You will receive a <subagent> message when it goes idle, and again after each later round of work.\nDO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.\nWork on non-overlapping tasks, or briefly tell the user what you launched and end your response.\nTo send it follow-ups or change its instructions while it runs, call subagent again with this sessionID."
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 18,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adac90030a9pbFkkoB9O9j",
+   "created": 1794920602313,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaac001g6TxKZKle0GRaf"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 19,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adad0001Lp5eOiM4GkKRN4",
+   "created": 1794920602320,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018,
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 12,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adad1001N3QucNagNTV4Gx",
+   "created": 1794920602321,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99adadb001f00jdgdAiRAS1M",
+   "created": 1794920602331,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaac001g6TxKZKle0GRaf",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018,
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 20,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adadc001S6Hh49RTwt3yxX",
+   "created": 1794920602332,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "cost": 0.00054,
+    "tokens": {
+     "input": 360,
+     "output": 90,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99adadc002TtQZ19Ku4N4tvY",
+   "created": 1794920602332,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 21,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adae3001AfDHXbKWW35418",
+   "created": 1794920602339,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_1e99adad3001gLmkK4fQvrnUCR",
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "started": 1794920602324
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 13,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adae3003RgZDlPxsbWEfpA",
+   "created": 1794920602339,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adad3001gLmkK4fQvrnUCR",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 15,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adae40011owZLZZsMaKXGA",
+   "created": 1794920602340,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adad3001gLmkK4fQvrnUCR",
+    "ordinal": 0,
+    "delta": "TOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nPID: 420\nOutput is streaming to: /home-root/home/.local/share/opencode/shell/97d5336a520999812c1b4fc7086d9c0f736fabf2/sh_1e99adac0001NvWFsWQcHRQnqg.out\nYou will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output"
+   }
+  },
+  {
+   "id": "evt_1e99adae40026UHZr3x2xt4G5k",
+   "created": 1794920602340,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adad3001gLmkK4fQvrnUCR",
+    "ordinal": 0,
+    "text": "TOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nPID: 420\nOutput is streaming to: /home-root/home/.local/share/opencode/shell/97d5336a520999812c1b4fc7086d9c0f736fabf2/sh_1e99adac0001NvWFsWQcHRQnqg.out\nYou will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 16,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adae40038jT6RuW6h3UXZX",
+   "created": 1794920602340,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adad3001gLmkK4fQvrnUCR"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 17,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaeb001MmVCppmwogu6ZR",
+   "created": 1794920602347,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99adad3001gLmkK4fQvrnUCR",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018,
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 18,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaec0013qv35XD5D1fawo",
+   "created": 1794920602348,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "cost": 0.00036,
+    "tokens": {
+     "input": 240,
+     "output": 60,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99adaed001t0ELKWwWUduwMn",
+   "created": 1794920602349,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 19,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaee001j8Vt0n10VGoDLh",
+   "created": 1794920602350,
+   "type": "session.inbox.enqueued",
+   "data": {
+    "inboxID": "msg_1e99ada9e002UjG3V15FfDBoD3",
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "item": {
+     "type": "synthetic",
+     "payload": {
+      "text": "<subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"running\" description=\"contract shell rounds\">\nTOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nPID: 420\nOutput is streaming to: /home-root/home/.local/share/opencode/shell/97d5336a520999812c1b4fc7086d9c0f736fabf2/sh_1e99adac0001NvWFsWQcHRQnqg.out\nYou will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output\n\nBackground work still running:\n- shell (sh_1e99adac0001NvWFsWQcHRQnqg): sleep 3; echo contract-bg-done\n</subagent>",
+      "description": "contract shell rounds",
+      "metadata": {
+       "source": "subagent",
+       "childID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+       "agent": "General",
+       "state": "completed"
+      }
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 22,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaee002XRE9fJaqUnz4Fd",
+   "created": 1794920602350,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 23,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adaf0001cp3YQnnq2FR556",
+   "created": 1794920602352,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "inboxID": "msg_1e99ada9e002UjG3V15FfDBoD3"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 24,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adafa001w8T13pKVlVnzRn",
+   "created": 1794920602362,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_1e99adaf1001fBYHcMC40FTPdy",
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "started": 1794920602354
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 25,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adafb001Ku7VLOc2sx6pao",
+   "created": 1794920602363,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaf1001fBYHcMC40FTPdy",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 27,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adafb0029z3YHUsXsMjJga",
+   "created": 1794920602363,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaf1001fBYHcMC40FTPdy",
+    "ordinal": 0,
+    "delta": "echo: <subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"running\" description=\"contract shell rounds\">\nTOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nP"
+   }
+  },
+  {
+   "id": "evt_1e99adafb003WzwC8N4xn7KtEU",
+   "created": 1794920602363,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaf1001fBYHcMC40FTPdy",
+    "ordinal": 0,
+    "text": "echo: <subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"running\" description=\"contract shell rounds\">\nTOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nP"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 28,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adafb004lZAUZrZNEimeWT",
+   "created": 1794920602363,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaf1001fBYHcMC40FTPdy"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 29,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adb02001dzG38sPOO6d2F0",
+   "created": 1794920602370,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99adaf1001fBYHcMC40FTPdy",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018,
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 30,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99adb03001ajx16dHaql7d8q",
+   "created": 1794920602371,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "cost": 0.00072,
+    "tokens": {
+     "input": 480,
+     "output": 120,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99adb030029Z0941So2AL8dE",
+   "created": 1794920602371,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 31,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae69200158lvk1ZzVSux13",
+   "created": 1794920605330,
+   "type": "session.inbox.enqueued",
+   "data": {
+    "inboxID": "msg_1e99adac2003M3G8wj6likC34M",
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "item": {
+     "type": "synthetic",
+     "payload": {
+      "text": "<shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo contract-bg-done\">\ncontract-bg-done\n\n</shell>",
+      "description": "sleep 3; echo contract-bg-done",
+      "metadata": {
+       "source": "shell",
+       "shellID": "sh_1e99adac0001NvWFsWQcHRQnqg",
+       "jobID": "sh_1e99adac0001NvWFsWQcHRQnqg",
+       "state": "completed",
+       "truncated": false,
+       "exit": 0
+      }
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 20,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae695001FO7gBc7Cb2Ols5",
+   "created": 1794920605333,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 21,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae699001sw5PXkrZuf4cK7",
+   "created": 1794920605337,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "inboxID": "msg_1e99adac2003M3G8wj6likC34M"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 22,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6aa001CKCGH8dxRk2UVr",
+   "created": 1794920605354,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_1e99ae69c001FR9oyHZAFnzMLa",
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "started": 1794920605343
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 23,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6ac001yQ96M4a3xuh3En",
+   "created": 1794920605356,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99ae69c001FR9oyHZAFnzMLa",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 25,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6ad001aTDVRqjhIWQfVC",
+   "created": 1794920605357,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99ae69c001FR9oyHZAFnzMLa",
+    "ordinal": 0,
+    "delta": "echo: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo contract-bg-done\">\ncontract-bg-done\n\n</shell>"
+   }
+  },
+  {
+   "id": "evt_1e99ae6ad0028czIpaWyvLr3Dk",
+   "created": 1794920605357,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99ae69c001FR9oyHZAFnzMLa",
+    "ordinal": 0,
+    "text": "echo: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo contract-bg-done\">\ncontract-bg-done\n\n</shell>"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 26,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6ad003KxdTlD1qWYME8V",
+   "created": 1794920605357,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99ae69c001FR9oyHZAFnzMLa"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 27,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6b6001sd6psrlSnAr6nb",
+   "created": 1794920605366,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "assistantMessageID": "msg_1e99ae69c001FR9oyHZAFnzMLa",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018,
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 28,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6b7001MwolP7tXyatnU1",
+   "created": 1794920605367,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "cost": 0.00054,
+    "tokens": {
+     "input": 360,
+     "output": 90,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99ae6b7002zSIDgV6dZcw5Cj",
+   "created": 1794920605367,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "seq": 29,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6b8002kc8H3IkFnyJjBZ",
+   "created": 1794920605368,
+   "type": "session.inbox.enqueued",
+   "data": {
+    "inboxID": "msg_1e99ae6b80018IqowVWFjZ4iGY",
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "item": {
+     "type": "synthetic",
+     "payload": {
+      "text": "<subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"completed\" description=\"contract shell rounds\">\necho: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo contract-bg-done\">\ncontract-bg-done\n\n</shell>\n</subagent>",
+      "description": "contract shell rounds",
+      "metadata": {
+       "source": "subagent",
+       "childID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+       "agent": "general",
+       "state": "completed"
+      }
+     },
+     "delivery": "steer"
+    }
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 32,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6b9001LgzZKOSMrqn57Z",
+   "created": 1794920605369,
+   "type": "session.execution.started",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 33,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6ba001nqsEPgzVwHicdA",
+   "created": 1794920605370,
+   "type": "session.inbox.delivered",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "inboxID": "msg_1e99ae6b80018IqowVWFjZ4iGY"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 34,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6c6001VCkLzGVRYPEocR",
+   "created": 1794920605382,
+   "type": "session.step.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "agent": "build",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "assistantMessageID": "msg_1e99ae6bc001rMQkh4juSiA0kw",
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "started": 1794920605373
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 35,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6c7001uZvEkU2QTHFzBq",
+   "created": 1794920605383,
+   "type": "session.text.started",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ae6bc001rMQkh4juSiA0kw",
+    "ordinal": 0
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 37,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6c7002eO1rwK1gZRFTib",
+   "created": 1794920605383,
+   "type": "session.text.delta",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ae6bc001rMQkh4juSiA0kw",
+    "ordinal": 0,
+    "delta": "echo: <subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"completed\" description=\"contract shell rounds\">\necho: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo con"
+   }
+  },
+  {
+   "id": "evt_1e99ae6c7003liQc4BeQGXyqvU",
+   "created": 1794920605383,
+   "type": "session.text.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ae6bc001rMQkh4juSiA0kw",
+    "ordinal": 0,
+    "text": "echo: <subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"completed\" description=\"contract shell rounds\">\necho: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo con"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 38,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6c7004MjTkIv5tSGTg7r",
+   "created": 1794920605383,
+   "type": "session.step.streamed",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ae6bc001rMQkh4juSiA0kw"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 39,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6ce001uCXH0DagzONeOP",
+   "created": 1794920605390,
+   "type": "session.step.ended",
+   "location": {
+    "directory": "/ws/main"
+   },
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "assistantMessageID": "msg_1e99ae6bc001rMQkh4juSiA0kw",
+    "finish": "stop",
+    "rawFinish": "stop",
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    },
+    "cost": 0.00018,
+    "snapshot": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 40,
+    "version": 1
+   }
+  },
+  {
+   "id": "evt_1e99ae6cf001G3dxreGtDW0X8f",
+   "created": 1794920605391,
+   "type": "session.usage.updated",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "cost": 0.0009000000000000001,
+    "tokens": {
+     "input": 600,
+     "output": 150,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   }
+  },
+  {
+   "id": "evt_1e99ae6d00016XF5YgkBioTXGB",
+   "created": 1794920605392,
+   "type": "session.execution.succeeded",
+   "data": {
+    "sessionID": "ses_e16652578ffeY5piRHuMkfxwbl"
+   },
+   "durable": {
+    "aggregateID": "ses_e16652578ffeY5piRHuMkfxwbl",
+    "seq": 41,
+    "version": 1
+   }
+  }
+ ],
+ "messages": [
+  {
+   "id": "msg_1e99ada8a001GXZJnXwkJI703n",
+   "time": {
+    "created": 1794920602253
+   },
+   "text": "[subshellbg] rounds-a279e648",
+   "type": "user"
+  },
+  {
+   "id": "msg_1e99ada90001UUslLWuDIWWRrd",
+   "time": {
+    "created": 1794920602257,
+    "firstToken": 1794920602266,
+    "streamed": 1794920602268,
+    "completed": 1794920602281
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_fx_43_0",
+     "name": "subagent",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "description": "contract shell rounds",
+       "prompt": "child waits on [shellbg]",
+       "agent": "general"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "The subagent is working in the background (sessionID: ses_e16652564ffdUSgLYCjZJ26rwf). You will receive a <subagent> message when it goes idle, and again after each later round of work.\nDO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.\nWork on non-overlapping tasks, or briefly tell the user what you launched and end your response.\nTo send it follow-ups or change its instructions while it runs, call subagent again with this sessionID."
+       }
+      ],
+      "metadata": {
+       "sessionID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+       "status": "running",
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1794920602266,
+      "ran": 1794920602267,
+      "completed": 1794920602270
+     }
+    }
+   ],
+   "snapshot": {
+    "start": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "end": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_1e99adaac001g6TxKZKle0GRaf",
+   "time": {
+    "created": 1794920602285,
+    "firstToken": 1794920602312,
+    "streamed": 1794920602313,
+    "completed": 1794920602331
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "TOOL_RESULT_SEEN: The subagent is working in the background (sessionID: ses_e16652564ffdUSgLYCjZJ26rwf). You will receive a <subagent> message when it goes idle, and again after each later round of work.\nDO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.\nWork on non-overlapping tasks, or briefly tell the user what you launched and end your response.\nTo send it follow-ups or change its instructions while it runs, call subagent again with this sessionID."
+    }
+   ],
+   "snapshot": {
+    "start": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "end": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_1e99adadc002TtQZ19Ku4N4tvY",
+   "time": {
+    "created": 1794920602332
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  },
+  {
+   "id": "msg_1e99ada9e002UjG3V15FfDBoD3",
+   "metadata": {
+    "source": "subagent",
+    "childID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "agent": "General",
+    "state": "completed"
+   },
+   "time": {
+    "created": 1794920602352
+   },
+   "text": "<subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"running\" description=\"contract shell rounds\">\nTOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nPID: 420\nOutput is streaming to: /home-root/home/.local/share/opencode/shell/97d5336a520999812c1b4fc7086d9c0f736fabf2/sh_1e99adac0001NvWFsWQcHRQnqg.out\nYou will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output\n\nBackground work still running:\n- shell (sh_1e99adac0001NvWFsWQcHRQnqg): sleep 3; echo contract-bg-done\n</subagent>",
+   "description": "contract shell rounds",
+   "type": "synthetic"
+  },
+  {
+   "id": "msg_1e99adaf1001fBYHcMC40FTPdy",
+   "time": {
+    "created": 1794920602354,
+    "firstToken": 1794920602362,
+    "streamed": 1794920602363,
+    "completed": 1794920602370
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "echo: <subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"running\" description=\"contract shell rounds\">\nTOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nP"
+    }
+   ],
+   "snapshot": {
+    "start": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "end": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_1e99adb030029Z0941So2AL8dE",
+   "time": {
+    "created": 1794920602371
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  },
+  {
+   "id": "msg_1e99ae6b80018IqowVWFjZ4iGY",
+   "metadata": {
+    "source": "subagent",
+    "childID": "ses_e16652564ffdUSgLYCjZJ26rwf",
+    "agent": "general",
+    "state": "completed"
+   },
+   "time": {
+    "created": 1794920605370
+   },
+   "text": "<subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"completed\" description=\"contract shell rounds\">\necho: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo contract-bg-done\">\ncontract-bg-done\n\n</shell>\n</subagent>",
+   "description": "contract shell rounds",
+   "type": "synthetic"
+  },
+  {
+   "id": "msg_1e99ae6bc001rMQkh4juSiA0kw",
+   "time": {
+    "created": 1794920605373,
+    "firstToken": 1794920605382,
+    "streamed": 1794920605383,
+    "completed": 1794920605390
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "fixture-model",
+    "providerID": "fixture"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "echo: <subagent sessionID=\"ses_e16652564ffdUSgLYCjZJ26rwf\" state=\"completed\" description=\"contract shell rounds\">\necho: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo con"
+    }
+   ],
+   "snapshot": {
+    "start": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "end": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+    "files": []
+   },
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0.00018,
+   "tokens": {
+    "input": 120,
+    "output": 30,
+    "reasoning": 0,
+    "cache": {
+     "read": 0,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_1e99ae6d00016XF5YgkBioTXGB",
+   "time": {
+    "created": 1794920605392
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": {
+  "ses_e16652564ffdUSgLYCjZJ26rwf": [
+   {
+    "id": "msg_1e99ada9d003JKf1El1vancs5M",
+    "time": {
+     "created": 1794920602272
+    },
+    "text": "You are a subagent spawned by another session.\nchild waits on [shellbg]",
+    "type": "user"
+   },
+   {
+    "id": "msg_1e99adaa10013gULzcp5aHAPQD",
+    "time": {
+     "created": 1794920602274,
+     "firstToken": 1794920602301,
+     "streamed": 1794920602303,
+     "completed": 1794920602320
+    },
+    "type": "assistant",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "content": [
+     {
+      "type": "tool",
+      "id": "call_fx_44_0",
+      "name": "shell",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "sleep 3; echo contract-bg-done",
+        "description": "contract background shell",
+        "background": true
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nPID: 420\nOutput is streaming to: /home-root/home/.local/share/opencode/shell/97d5336a520999812c1b4fc7086d9c0f736fabf2/sh_1e99adac0001NvWFsWQcHRQnqg.out"
+        },
+        {
+         "type": "text",
+         "text": "You will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output file is polling, not useful work. You may read the current output if it lets you do useful work now, but do not repeatedly check it while waiting for the command to finish. Keep working on anything that does not depend on the result. If you have nothing else to do, end your response; you will be resumed automatically when the command finishes."
+        }
+       ],
+       "metadata": {
+        "status": "running",
+        "truncated": false,
+        "shellID": "sh_1e99adac0001NvWFsWQcHRQnqg",
+        "pid": 420
+       }
+      },
+      "time": {
+       "created": 1794920602301,
+       "ran": 1794920602302,
+       "completed": 1794920602307
+      }
+     }
+    ],
+    "snapshot": {
+     "start": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+     "end": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+     "files": []
+    },
+    "finish": "tool-calls",
+    "rawFinish": "tool_calls",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_1e99adad3001gLmkK4fQvrnUCR",
+    "time": {
+     "created": 1794920602324,
+     "firstToken": 1794920602339,
+     "streamed": 1794920602340,
+     "completed": 1794920602347
+    },
+    "type": "assistant",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "TOOL_RESULT_SEEN: Command moved to the background (shell ID: sh_1e99adac0001NvWFsWQcHRQnqg).\nPID: 420\nOutput is streaming to: /home-root/home/.local/share/opencode/shell/97d5336a520999812c1b4fc7086d9c0f736fabf2/sh_1e99adac0001NvWFsWQcHRQnqg.out\nYou will be notified automatically when the command finishes. The notification will include the command's output. Unless the user explicitly asks otherwise, DO NOT poll for completion, even if you need the final result to continue. Repeatedly sleeping and reading or searching the output"
+     }
+    ],
+    "snapshot": {
+     "start": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+     "end": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+     "files": []
+    },
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_1e99adaed001t0ELKWwWUduwMn",
+    "time": {
+     "created": 1794920602349
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   },
+   {
+    "id": "msg_1e99adac2003M3G8wj6likC34M",
+    "metadata": {
+     "source": "shell",
+     "shellID": "sh_1e99adac0001NvWFsWQcHRQnqg",
+     "jobID": "sh_1e99adac0001NvWFsWQcHRQnqg",
+     "state": "completed",
+     "truncated": false,
+     "exit": 0
+    },
+    "time": {
+     "created": 1794920605337
+    },
+    "text": "<shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo contract-bg-done\">\ncontract-bg-done\n\n</shell>",
+    "description": "sleep 3; echo contract-bg-done",
+    "type": "synthetic"
+   },
+   {
+    "id": "msg_1e99ae69c001FR9oyHZAFnzMLa",
+    "time": {
+     "created": 1794920605343,
+     "firstToken": 1794920605355,
+     "streamed": 1794920605357,
+     "completed": 1794920605366
+    },
+    "type": "assistant",
+    "agent": "general",
+    "model": {
+     "id": "fixture-model",
+     "providerID": "fixture"
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "echo: <shell id=\"sh_1e99adac0001NvWFsWQcHRQnqg\" state=\"completed\" command=\"sleep 3; echo contract-bg-done\">\ncontract-bg-done\n\n</shell>"
+     }
+    ],
+    "snapshot": {
+     "start": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+     "end": "596a79ad5a619a0b25ff2161073a7ae336c69554",
+     "files": []
+    },
+    "finish": "stop",
+    "rawFinish": "stop",
+    "cost": 0.00018,
+    "tokens": {
+     "input": 120,
+     "output": 30,
+     "reasoning": 0,
+     "cache": {
+      "read": 0,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_1e99ae6b7002zSIDgV6dZcw5Cj",
+    "time": {
+     "created": 1794920605367
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   }
+  ]
+ },
+ "sessionTotals": {
+  "cost": 0.0009000000000000001,
+  "tokens": {
+   "input": 600,
+   "output": 150,
+   "reasoning": 0,
+   "cache": {
+    "read": 0,
+    "write": 0
+   }
+  }
+ }
+}

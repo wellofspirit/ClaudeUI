@@ -109,6 +109,7 @@ import { clearSyncSubscribersForTests } from '../../core/services/sync-host'
 import { formatRequests } from './harness/diagnostics'
 import {
   createApi,
+  untilReportsRead,
   createHome,
   describeV2,
   fixtureConfig,
@@ -409,10 +410,13 @@ describeV2('opencode 2.x contract: the production session enters and exits a wor
   function newSession(cwd: string, permissionMode = 'default'): OpencodeSession {
     const routingId = `wt-contract-${++routeCount}`
     sent = []
+    const capture = sent
+    // Bound to THIS test's list: an earlier test's chat may still emit (a child's report
+    // wakes its parent after that test ended, opencode 2.3.0), and must not land here.
     subscribeWindowToSync({
       webContents: {
         send: (channel: string, ...args: unknown[]) => {
-          if (args[0] === routingId) sent.push({ channel, data: args[1] })
+          if (args[0] === routingId) capture.push({ channel, data: args[1] })
         }
       }
     })
@@ -464,6 +468,21 @@ describeV2('opencode 2.x contract: the production session enters and exits a wor
       },
       `the end of the turn "${prompt.slice(0, 30)}"`
     )
+  }
+
+  /**
+   * Runs a prompt whose turn launches a subagent, then waits for that child's end (its
+   * run's notification) and the wake its report starts: since opencode 2.3.0 the call
+   * answers at once and the child works after the parent's turn.
+   */
+  async function subagentTurn(session: OpencodeSession, prompt: string): Promise<void> {
+    const notesBefore = of('session:task-notification').length
+    await turn(session, prompt)
+    await until(
+      () => of('session:task-notification').length > notesBefore,
+      `the child of "${prompt.slice(0, 30)}"`
+    )
+    await untilReportsRead(api, session.getSessionId()!)
   }
 
   /** The resources of the session's `read` deny rules that name `private/` (from opencode, live). */
@@ -587,7 +606,7 @@ describeV2('opencode 2.x contract: the production session enters and exits a wor
     const session = newSession(repo)
     const tag = nonce('childtools')
     const firstRequest = fixture.requests.length
-    await turn(session, `[subread] ${tag}`)
+    await subagentTurn(session, `[subread] ${tag}`)
     // The child's FIRST request is built from the rules it inherited at creation, before
     // ClaudeUI's PATCH (the plugin refuses the call itself in that window, and the hosted
     // tool refuses a subagent caller); every later step sees the patched rules.
@@ -615,7 +634,7 @@ describeV2('opencode 2.x contract: the production session enters and exits a wor
       const repo = newRepo()
       const session = newSession(repo)
       const tag = nonce('stalechild')
-      await turn(session, `[subread] ${tag}`)
+      await subagentTurn(session, `[subread] ${tag}`)
       // The first child read succeeded (it ran in the repo, with the parent's rules).
       expect(of('session:subagent-tool-result').some((r) => r.isError === false)).toBe(true)
 
@@ -639,7 +658,7 @@ describeV2('opencode 2.x contract: the production session enters and exits a wor
 
       const resultsBefore = of('session:subagent-tool-result').length
       const requestsBefore = fixture.requests.length
-      await turn(session, `[subresume] ${tag}`)
+      await subagentTurn(session, `[subresume] ${tag}`)
       // Deny-all hides every tool from the resumed child: it is asked with none, so it
       // cannot read, and nothing it ran reached the transcript.
       const resumed = fixture.requests

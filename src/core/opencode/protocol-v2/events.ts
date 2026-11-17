@@ -20,7 +20,12 @@
  *
  * Only what ClaudeUI maps (spike §5 table) is listed. Anything else on the
  * feed (worktree.*, skill.updated, rpc.*, …) fails `isOpencodeEvent` and is
- * the consumer's to ignore.
+ * the consumer's to ignore. Reviewed at 2.3.0 and left uncurated on purpose:
+ * `session.step.first-token` (durable, a step's first-token time only),
+ * `session.usage.recorded` (durable; `source` now also `generate` — the
+ * cumulative `session.usage.updated` already folds it, see
+ * `event-mapper.ts` `emitOverhead`) and `experimental.mcp.event` (ephemeral,
+ * only with the opt-in `experimental.mcp_events`, which ClaudeUI never sets).
  */
 import type {
   Form_Answer,
@@ -239,7 +244,10 @@ export interface DurableEventData {
 // --- Ephemeral events -------------------------------------------------------
 
 export interface EphemeralEventData {
-  /** Session-cumulative usage. */
+  /**
+   * Session-cumulative usage: every step plus the requests no step carries
+   * (`session.usage.recorded` — title, compaction and, since 2.3.0, `generate`).
+   */
   'session.usage.updated': Session & { readonly cost: Money_USD; readonly tokens: TokenUsage_Info }
   'session.text.delta': Part & { readonly delta: string }
   'session.reasoning.delta': Part & { readonly delta: string }
@@ -254,8 +262,8 @@ export interface EphemeralEventData {
   'form.created': { readonly form: Form_Info }
   'form.replied': Session & { readonly id: string; readonly answer: Form_Answer }
   'form.cancelled': Session & { readonly id: string }
-  /** credential.ts */
-  'credential.updated': EmptyData
+  /** credential.ts. `updated`: a login was added, relabelled or removed (2.3.0 names it). */
+  'credential.updated': { readonly integrationID: string; readonly credentialID: string }
   'credential.switched': { readonly integrationID: string; readonly credentialID: string | null }
   /** provider.ts / model.ts */
   'provider.updated': EmptyData

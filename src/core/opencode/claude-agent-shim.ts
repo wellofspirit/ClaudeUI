@@ -32,8 +32,8 @@
  *    of the model's variants makes the agent fail every run; the agent type
  *    catalog checks it asynchronously against model discovery and warns.
  *  - Not mapped on opencode 2.x (ADR-103): `permissionMode` (no agent field; only
- *    permission rules) and `background` (a per-call parameter of the `subagent`
- *    tool, not an agent field).
+ *    permission rules) and `background` (nothing to map: no agent field, and since
+ *    opencode 2.3.0 every `subagent` run is a background one).
  *  - `permissions` are DENY-ONLY (never an allow, so an agent cannot open
  *    anything the user's rules or the parent's ruleset keep closed): a `tools`
  *    list denies every tool action (and `question`, unless it names

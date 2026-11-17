@@ -9,7 +9,10 @@
  * The fold is strict where the reducer would silently drop or dedupe: a delta
  * for a block that is not the right kind, a result with no `tool_use` to attach
  * to, a SECOND result for a call, or a second terminal notification for a
- * call throws — mapper bugs the reducer's first-wins rules would hide.
+ * call throws — mapper bugs the reducer's first-wins rules would hide. The
+ * exceptions are the reducer's own folds: the same run re-sent with fuller usage,
+ * and a run a `task-started` re-armed after its end (opencode 2.3.0: the child
+ * woke for a later round), whose next notification replaces the first.
  */
 import type { ChatMessage, ContentBlock, TaskNotification } from '../../shared/types'
 import type { OpencodeMapperOutput } from '../../core/opencode/event-mapper'
@@ -43,12 +46,25 @@ function upsert(list: ChatMessage[], message: ChatMessage): void {
 }
 
 /** Apply live outputs in order (mutates and returns `into`). */
+/** Runs re-armed by a `task-started` after their notification, per transcript. */
+const rearmed = new WeakMap<Transcript, Set<string>>()
+
 export function foldOutputs(
   outputs: readonly OpencodeMapperOutput[],
   into: Transcript = emptyTranscript()
 ): Transcript {
+  const armed = rearmed.get(into) ?? new Set<string>()
+  rearmed.set(into, armed)
   for (const output of outputs) {
     switch (output.kind) {
+      case 'task-started': {
+        const { toolUseId, runIndex } = output.data
+        if (
+          into.taskNotifications.some((n) => n.toolUseId === toolUseId && n.runIndex === runIndex)
+        )
+          armed.add(toolUseId)
+        break
+      }
       case 'message':
         upsert(listOf(into, output.ownerToolUseId), output.message)
         break
@@ -105,6 +121,10 @@ export function foldOutputs(
         // The one repeat the reducer folds on purpose: the same run's notification re-sent
         // with fuller usage after a re-read landed steps behind it (the mapper's refresh).
         const sansUsage = (n: TaskNotification) => JSON.stringify({ ...n, usage: 0 })
+        if (earlier >= 0 && armed.delete(notification.toolUseId ?? '')) {
+          into.taskNotifications[earlier] = notification
+          break
+        }
         if (
           earlier >= 0 &&
           (sansUsage(into.taskNotifications[earlier]) !== sansUsage(notification) ||

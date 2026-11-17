@@ -21,7 +21,7 @@ import type { ClaudePermissions } from '../../shared/types'
 import { resolveOpencodeOwnDirAllows } from '../../core/opencode/own-dirs'
 import { buildSessionRuleset, type V2Rule } from '../../core/opencode/permission-v2'
 import { childSessionRuleset } from '../../core/opencode/subagent-permissions'
-import { describeV2, nonce, useRig, type Rig } from './harness/host'
+import { describeV2, nonce, untilPluginsLoaded, useRig, type Rig } from './harness/host'
 
 const perms: ClaudePermissions = {
   allow: [],
@@ -78,7 +78,7 @@ describeV2('opencode 2.x contract: the external_directory ask (2.0.25+ baseline)
   it('(a) upstream default: no agent carries an external_directory ask; only explore allows it', async () => {
     const r = rig()
     // A cold directory lists no agents until its plugins load (ADR-097 S3).
-    await r.api.ok('integration.list')
+    await untilPluginsLoaded(r.api)
     const agents = (await r.api.ok('agent.list')).data
     expect(agents.map((agent) => agent.id)).toEqual(expect.arrayContaining(['build', 'explore']))
     for (const agent of agents) {
@@ -204,14 +204,18 @@ describeV2('opencode 2.x contract: the external_directory ask (2.0.25+ baseline)
       after: from,
       where: (e) => e.data.parentID === id
     })
-    const end = await r.feed.waitForTurnEnd(id, from, 60_000)
+    // 2.3.0: the call answers at once; the child's report wakes the parent after its work.
+    const { end } = await r.feed.waitForReport(id, child.data.sessionID, {
+      after: from,
+      timeoutMs: 60_000
+    })
     expect(
       r.feed.select('permission.asked', { sessionID: child.data.sessionID, after: from })
     ).toHaveLength(0)
     expect(
       r.feed.select('session.tool.success', { sessionID: child.data.sessionID, after: from })
     ).toHaveLength(1)
-    expect(end.type).toBe('session.execution.succeeded')
+    expect(end?.type).toBe('session.execution.succeeded')
   })
 
   it('(d) an explore child under ClaudeUI’s ruleset asks for a read outside — its own allow loses to the session ask', async () => {
@@ -219,7 +223,7 @@ describeV2('opencode 2.x contract: the external_directory ask (2.0.25+ baseline)
     const file = outsideFile(r, 'd.txt')
     const { rules } = await ruleset(r, 'default')
     const id = await createWith(r, rules)
-    await r.api.ok('integration.list')
+    await untilPluginsLoaded(r.api)
     const explore = (await r.api.ok('agent.list')).data.find((agent) => agent.id === 'explore')
     expect(explore).toBeDefined()
     const from = r.feed.mark()
@@ -246,6 +250,10 @@ describeV2('opencode 2.x contract: the external_directory ask (2.0.25+ baseline)
       params: { sessionID: child.data.sessionID, requestID: asked.data.id },
       body: { decision: 'reject', message: 'ClaudeUI denied: contract' }
     })
-    expect((await r.feed.waitForTurnEnd(id, from, 60_000)).type).toBe('session.execution.succeeded')
+    const { end } = await r.feed.waitForReport(id, child.data.sessionID, {
+      after: from,
+      timeoutMs: 60_000
+    })
+    expect(end?.type).toBe('session.execution.succeeded')
   })
 })

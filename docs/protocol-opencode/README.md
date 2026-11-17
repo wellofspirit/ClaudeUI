@@ -14,15 +14,18 @@ imported from `auth.json` (`credential-store.ts`).
 
 ## Pin
 
-- opencode **2.2.6**, tag `v2.2.6`, commit `dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06` (verified
-  against upstream's `refs/tags/v2.2.6`). The wire types come from the spec the 2.2.6 binary
+- opencode **2.3.0**, tag `v2.3.0`, commit `a6b15d33daf6ab7d35569f6d711fdb630b9f04e7` (verified
+  against upstream's `refs/tags/v2.3.0`). The wire types come from the spec the 2.3.0 binary
   SERVES, not from upstream's committed `packages/protocol/openapi.json` (see Generated types;
-  at 2.2.6 the served spec differs from the committed one in 16 added, 2 removed and 51 changed
-  components and 3 operations, all in the `Event`/`Session`/`Form`/`Shell` groups: informational).
-  The served spec is 511 schemas / 170 operations (2.2.5: 363 / 169): it now names every event
+  at 2.3.0 the served spec differs from the committed one in 16 added, 2 removed and 52 changed
+  components and 3 operations, all in the `Event`/`Session`/`Form`/`Shell` groups: informational —
+  upstream's committed spec names the encoded `Event.Version` literals by a hash of their shape,
+  the served one by Effect's encounter order, `Event.VersionEncoded_<n>`, so every durable event
+  that references one differs). The served spec is 515 schemas / 170 operations (2.2.6: 511 / 170;
+  2.2.5: 363 / 169). At 2.2.6 it began naming every event
   payload as its own schema (`V2Event` and the `session_*` family; the events ClaudeUI consumes
-  are still the hand-curated `events.ts`), adds `Job` (`experimental.job.list`) and
-  `Provider.CacheWarming`, and drops `Event.SeqEncoded` / `PersistentPty.ReadLinesEncoded`
+  are still the hand-curated `events.ts`), added `Job` (`experimental.job.list`) and
+  `Provider.CacheWarming`, and dropped `Event.SeqEncoded` / `PersistentPty.ReadLinesEncoded`
   (unused by ClaudeUI). Its `SessionLogItemEncoded` is the first schema to use `contentSchema`,
   which the generator now treats as an annotation like `contentMediaType`.
   **2.1.0 changed public contracts on purpose** (upstream's "Breaking changes"): provider replay
@@ -54,6 +57,31 @@ imported from `auth.json` (`credential-store.ts`).
   `skill` and then `read`; `opencode_session_move` asks `external_directory` for a destination
   outside the project (ClaudeUI still denies the family, §Permissions); the server reads
   `OPENCODE_FLAGS` (`packages/core/src/flag.ts`), which ClaudeUI strips from the spawn env.
+  **2.3.0 changes behaviour ClaudeUI relies on** (event sources reviewed:
+  `event-manifest`, `session-event`, `credential`, `provider`, `model`):
+  - **Every subagent runs in the background** (`packages/core/src/tool/plugin/subagent.ts`; the
+    `background` input and the foreground path are gone): the call answers at once with
+    `metadata {sessionID, status: 'running'}`, and the child reports EACH idle round to its parent
+    as a synthetic `<subagent sessionID state description>` inbox item that wakes it
+    (`session/execution/subagent-report.ts`, `session/subagent-completion.ts`); `state="running"`
+    when the round ended with the child's own background work (a shell, a grandchild) still
+    running, which wakes it again later. A parent's interrupt no longer reaches its children
+    (§Turns). ClaudeUI's mapping: ADR-111 §3/§4.
+  - Handlers no longer wait for plugins (`bcaf561d94`; `AGENTS.md` "Plugin Loading"): a cold
+    location answers its catalogs empty or partial, and `integration.list` is no barrier any more.
+  - `session.generate` records its usage (`session.usage.recorded {source:'generate'}`), so a
+    `/btw` on the chat's own session reaches the session cumulative (§Event feed, Usage).
+  - Events: `credential.updated` names `{integrationID, credentialID}`; new durable
+    `session.step.first-token` and ephemeral `experimental.mcp.event` (opt-in
+    `experimental.mcp_events`), both uncurated.
+  - Shell: the structured result's exit is `exitCode`; a stopped call fails with its output so far
+    and `metadata {interrupted, notice, shellID}` (`shell/result.ts` `interrupted`); a user's
+    interrupt first asks running tools to stop, for up to 5 s (`runner/step.ts`
+    `COOPERATIVE_STOP`; only `shell` cooperates, settling ~0.5 s after its stop).
+  - Small: `agent.list` drops `ServiceUnavailableError` from its errors; `POST …/fork` writes a
+    synthetic fork-notice row (`plugin/fork-notice.ts`; history skips it); config gains
+    `experimental.shell_timeout_background`/`console_watches`/`mcp_events`, provider `tls` and model
+    `freeform`, and `experimental.codemode_vm` is a leftover (ClaudeUI writes none of these).
 - **One pin.** The version is the harness manifest's `tested`
   (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
   and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
@@ -80,9 +108,9 @@ imported from `auth.json` (`credential-store.ts`).
 - Provenance (2.0.24): every package's `repository` is `anomalyco/opencode`, maintainer `thdxr`,
   published by GitHub Actions through npm trusted publishing (OIDC); the darwin binaries are signed
   `Developer ID Application: Anomaly Innovations, Inc. (5NZ4Q7NXJ4)`.
-- `--version` prints `opencode v2.2.6` (1.x printed the bare version; a source build without a
+- `--version` prints `opencode v2.3.0` (1.x printed the bare version; a source build without a
   version prints `opencode vlocal`). Detection reads both; a 1.x install is labelled too old
-  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.2.6 or newer)"), and
+  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.3.0 or newer)"), and
   `opencode2` is searched on PATH beside `opencode`. Homebrew's `opencode` formula is a 2.x source
   build with the version stamped in (`OPENCODE_VERSION`), found at `<prefix>/bin/opencode` as
   System and labelled by its version like any other.
@@ -94,7 +122,7 @@ imported from `auth.json` (`credential-store.ts`).
 | Command       | `opencode serve --stdio --hostname 127.0.0.1 --port 0` (never `--service`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Listen line   | The FIRST stdout line is JSON `{"url":"http://127.0.0.1:<port>"}`; only a loopback `http:` URL with a port is accepted                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Auth          | HTTP Basic `opencode:<password>`; the password goes in `OPENCODE_PASSWORD` (the legacy `OPENCODE_SERVER_PASSWORD` is deleted from the child env). In `--stdio` mode the server deletes both from its own env, so its tools cannot read it                                                                                                                                                                                                                                                                                                                     |
-| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`; an inherited `OPENCODE_FLAGS` is deleted (2.2.6 reads it; `all` would enable experimental features the user did not opt into). No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                                                                 |
+| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`; an inherited `OPENCODE_FLAGS` is deleted (2.2.6+ reads it; `all` would enable experimental features the user did not opt into). No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                                                                |
 | End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway                                                                                                                                                                                                                                                                                                                                                                       |
 | Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained)                                                                                                                                                                       |
 | Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn)                                                                                                                                                                                                                                                                        |
@@ -166,12 +194,18 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   (`assistantMessageID`); `text`/`reasoning` ordinals count per kind within a step;
   `tool.called` (with the real input) comes BEFORE the tool runs and before its ask; a subagent
   call links its child by `tool.progress.metadata.sessionID` (child events before the link are
-  held); a turn ends with `execution.succeeded` / `failed{error}` / `interrupted{reason}`, and
+  held), answers at once (2.3.0), and the child's own end is the run's notification; the child's
+  `<subagent state>` reports reach the parent as synthetic inbox items, never shown; a turn ends with `execution.succeeded` / `failed{error}` / `interrupted{reason}`, and
   `interrupted{shutdown}` after a messageless reject or form cancel is a decline, not a shutdown;
   an interrupt drops pending asks WITHOUT `permission.replied` (the mapper retracts them).
 - Usage: `step.ended` carries the step's cost and DISJOINT tokens (cache subtracted from input,
-  reasoning beside output); `session.usage.updated` is the session cumulative (it also counts title
-  generation, which no step carries).
+  reasoning beside output); `session.usage.updated` is the session cumulative (it also counts what
+  no step carries: title generation and, since 2.3.0, every `POST …/generate` — ClaudeUI's `/btw`
+  on the chat's own session; the mapper reports the difference once, at a quiet point). A `/btw`
+  asked before the chat has an opencode session runs on a throwaway session, whose usage is not
+  counted.
+- `credential.updated` names the one credential that was added, relabelled or removed
+  (`{integrationID, credentialID}`, 2.3.0; `{}` before).
 
 ## Turns, the inbox and the queue (ADR-097 §9)
 
@@ -183,15 +217,17 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   as `steer` (ADR-053 §1 timing) and keeps ADR-053's queue card; take-back is `DELETE …/inbox/{id}`
   after the item's own POST settled — opencode answers 204 even for a delivered item, so the stored
   row (`GET …/message/{id}`) decides who won. `PATCH …/inbox/{id}` switches steer ↔ queue.
-- Stop is `POST …/interrupt?resume=true` (queued steers still run). A teardown interrupts the own
-  session and every child whose call is open, cancels ClaudeUI's undelivered inbox items, and
-  waits (5 s cap) until `GET /api/session/active` lists none of them (`session-support.ts`
-  `stopOpencodeSessions`): a server shutdown keeps a running execution's claim, and opencode would
-  resume it headless on its next start.
-- A CHILD session takes the same `interrupt` (ADR-111 §4, `stopTask`): its job is cancelled; a
-  foreground parent call fails `Subagent cancelled (sessionID …)` and the parent turn goes on; a
-  background child's cancellation reaches the parent as a synthetic `<subagent state="cancelled">`
-  completion, which wakes it. A parent interrupt cancels its foreground children only.
+- Stop is `POST …/interrupt?resume=true` (queued steers still run). Since 2.3.0 it first asks the
+  running tools to stop (5 s cap; a stopped shell call fails with its output so far). A teardown
+  interrupts the own session and every child whose run is live, cancels ClaudeUI's undelivered
+  inbox items, and waits (5 s cap, `TEARDOWN_GRACE_MS`) until `GET /api/session/active` lists none
+  of them (`session-support.ts` `stopOpencodeSessions`): a server shutdown keeps a running
+  execution's claim, and opencode would resume it headless on its next start.
+- A CHILD session takes the same `interrupt` (ADR-111 §4, `stopTask`): its job is cancelled and its
+  `<subagent state="cancelled">` report reaches the parent, which it wakes (or joins its running
+  turn). Interrupting an IDLE child (one waiting on its own background work) is a no-op upstream;
+  ClaudeUI settles its card itself. A parent interrupt reaches none of its children (2.3.0: every
+  child is a background one): they run on and their reports wake the parent later.
 - `POST …/background` moves EVERY foreground job the session is blocked on (subagents, shells,
   commands) to the background and posts a synthetic "User requested … moved to the background"
   note; there is no per-job route, so ClaudeUI does not call it (ADR-111 §4).
@@ -262,7 +298,7 @@ shell scanner cannot analyze command: <reason>"}` — fail closed, nothing runs,
   re-apply (`child-rulesets.ts`, shared by chats and dispatch targets); a PATCH that fails twice
   interrupts the child and refuses its asks (fail closed).
 - `subagent` asks with `resources:[agent id]`, `save:[agent id]`, no `metadata`: the call's input
-  (`agent`, `description`, `prompt`, `model`, `sessionID`, `background`) comes from its
+  (`agent`, `description`, `prompt`, `model`, `sessionID`; 2.3.0 dropped `background`) comes from its
   `tool.called`, which is published before the ask. The depth check (`experimental.subagent_depth`,
   default 1) runs before the ask. `websearch` asks with `resources:[query]`, `metadata` = input;
   `skill` with `resources:[skill id]`, after the skill lookup. Auto mode asks for all three
@@ -569,5 +605,7 @@ two directories in one global listing, the directory filter, delete, history).
    `protocol-v2/events.ts`, then `--accept-events`. The generated config schema
    (`src/shared/opencode-config-schema.json`) moves with it.
 5. The contract suite above (twice, and once with `--maxWorkers=4`). Read the files the S4–S8 notes name as wire facts (mapper, credential
-   resolution, config normalization, plugin hooks) for the release's changes.
+   resolution, config normalization, plugin hooks) for the release's changes. When the release changes
+   what a chat streams, re-record the parity recordings (`OPENCODE_V2_CAPTURE=1` on the mapper
+   contract file; `history-parity.test.ts` replays them) — 2.3.0 re-recorded all of them.
 6. Before a release: the Windows lifecycle/shell run (ADR-097 §8.2).

@@ -81,8 +81,10 @@ export interface OpencodeHistorySeedExtras {
  * - each step (`assistant` row) of the session and of its children;
  * - each compaction's own request (opencode bills it to the session);
  * - the session's remainder: its cumulative (`sessionTotals`) minus the above,
- *   which is opencode's title generation (`session.usage.recorded
- *   {source:'title'}` reaches the cumulative and nothing else), priced on the
+ *   which is what opencode billed to the session outside any step or
+ *   compaction — its title generation and, since 2.3.0, every `POST …/generate`
+ *   on it (ClaudeUI's `/btw`): `session.usage.recorded {source:'title'|
+ *   'generate'}` reaches the cumulative and nothing else — priced on the
  *   fallback model.
  * Only the own session's steps move the context meter.
  */
