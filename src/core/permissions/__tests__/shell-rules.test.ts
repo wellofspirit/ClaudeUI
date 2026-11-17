@@ -873,6 +873,99 @@ describe('isClassifierBypassingRule (cli.js ZIe parity)', () => {
   ])('%s does not', (rule) => {
     expect(isClassifierBypassingRule(rule)).toBe(false)
   })
+
+  // cli.js 2.1.326 `ce`: wildcard rules that leave the program open. Kept on 2.1.321, stripped on
+  // 2.1.326 (research: the bump's automode-diff, doc 14 §3.0).
+  it.each([
+    // Names no program.
+    'Bash(:*)',
+    'Bash(*test*)',
+    'Bash(* --help)',
+    'Bash(*.sh)',
+    'Bash(-*)',
+    'Bash(--version*)',
+    'Bash(FOO=1 *)',
+    'Bash(CI=1 *)',
+    // Shell-special characters in the program word.
+    'Bash($HOME/bin/*)',
+    'Bash($HOME/bin/tool *)',
+    'Bash(${HOME}/x *)',
+    // The partial word is a path.
+    'Bash(/usr/local/bin/*)',
+    'Bash(~/bin/*)',
+    'Bash(../tools/*)',
+    'Bash(C:/tools/*)',
+    // A Windows backslash program with nothing after it.
+    'Bash(C:\\tools\\app.exe *)',
+    'Bash(.\\gradlew.bat *)',
+    'PowerShell(C:\\tools\\app.exe *)',
+    'PowerShell(.\\build.ps1 *)',
+    // A prefix of a single-word launcher or wrapper.
+    'Bash(py*)',
+    'Bash(pyth*)',
+    'Bash(n*)',
+    'Bash(t*)',
+    // A launcher with a version or a directory.
+    'Bash(python3.11 *)',
+    'Bash(python3.11:*)',
+    'Bash(/usr/bin/python3 *)',
+    'Bash(node22 *)',
+    'Bash(/opt/homebrew/bin/node *)',
+    'PowerShell(python3.11 *)',
+    // Wrapper chains ending in a launcher or in nothing; a `-c` word strips at once.
+    'Bash(timeout 60 *)',
+    'Bash(timeout 5m python *)',
+    'Bash(nohup python *)',
+    'Bash(nice -n 10 node *)',
+    'Bash(command python *)',
+    'Bash(watch -n 1 *)',
+    'Bash(strace -f *)',
+    'Bash(busybox *)',
+    'Bash(doas *)',
+    'Bash(su *)',
+    'Bash(timeout 10 bash -c *)',
+    'Bash(timeout 10 bash -c echo *)',
+    // `/C` is the usual Windows spelling; the `-c` test is case-insensitive.
+    'Bash(cmd /C dir *)',
+    // `.exe` is dropped from a program word before the launcher lookup, and quotes are ignored.
+    'Bash(C:/Python311/python.exe *)',
+    'Bash(python3.11.exe *)',
+    'Bash(sh "-c" echo *)',
+    // cli.js unescapes `\\` before its test: the escaped space keeps the path one partial word.
+    'Bash(/Applications/My\\\\ App/bin/*)'
+  ])('%s bypasses (cli.js 2.1.326 wildcard test)', (rule) => {
+    expect(isClassifierBypassingRule(rule)).toBe(true)
+  })
+
+  it.each([
+    'Bash(./scripts/*)',
+    'Bash(bin/*)',
+    'Bash(~/bin/tool *)',
+    'Bash(/usr/bin/git *)',
+    'Bash(C:\\tools\\app.exe build *)',
+    'Bash(timeout 60 make *)',
+    'Bash(nohup ./server *)',
+    'Bash(python3.11 -m pytest *)',
+    'Bash(sudo make *)',
+    'Bash(env FOO=1 make *)',
+    'Bash(sh script.sh *)',
+    'Bash(python script.py *)',
+    'Bash(cd /repo && python *)',
+    // Upstream gaps kept for parity: a wrapper before a two-word launcher, and `\*` read as escaped.
+    'Bash(time bun run *)',
+    'Bash(.\\scripts\\*)',
+    'Bash(echo \\*)',
+    'Bash(git*)',
+    'Bash(npm*)',
+    'Bash(make*)',
+    'Bash(ls*)',
+    'Bash(make)',
+    // The transparent-word test is case-insensitive: a capitalised program is still a program.
+    'Bash(GIT:*)',
+    'Bash(Make *)'
+  ])('%s still does not (cli.js 2.1.326 keeps it too)', (rule) => {
+    expect(isClassifierBypassingRule(rule)).toBe(false)
+  })
 })
 
 describe('isCarvedOut', () => {

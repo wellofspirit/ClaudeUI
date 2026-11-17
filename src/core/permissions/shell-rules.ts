@@ -2738,6 +2738,109 @@ const ALWAYS_BYPASSING_TOOLS: ReadonlySet<string> = new Set([
   'AppifactRepl'
 ])
 
+/**
+ * cli.js 2.1.326 `pEn`: shells and wrappers a wildcard rule's leading words may pass through on
+ * the way to the program that actually runs (`timeout 60 python *` runs whatever python is given).
+ */
+const SHELLS_AND_WRAPPERS: readonly string[] = [
+  'sh',
+  'bash',
+  'zsh',
+  'fish',
+  'csh',
+  'tcsh',
+  'ksh',
+  'mksh',
+  'dash',
+  'ash',
+  'hush',
+  'rbash',
+  'rsh',
+  'busybox',
+  'toybox',
+  'wsl',
+  'cmd',
+  'powershell',
+  'pwsh',
+  'env',
+  'xargs',
+  'command',
+  'builtin',
+  'noglob',
+  'nice',
+  'stdbuf',
+  'nohup',
+  'timeout',
+  'time',
+  'watch',
+  'ionice',
+  'chrt',
+  'setsid',
+  'taskset',
+  'strace',
+  'ltrace',
+  'script',
+  'flock',
+  'unshare',
+  'nsenter',
+  'sandbox-exec',
+  'sudo',
+  'doas',
+  'pkexec',
+  'su',
+  'runuser'
+]
+
+// cli.js 2.1.326 `Le` / `ae` / `xe`, verbatim. RULE_WORD is sticky and global: use it only
+// through `matchAll` (which copies it), never `.test()`/`.exec()`, or a shared lastIndex shifts.
+// A complete word (one followed by whitespace).
+const RULE_WORD = /\s*((?:\\.|'[^']*'|"(?:\\.|[^"\\])*"|[^\s\\'"])+)(?=\s)/gsy
+// A word that names no program: an assignment, a flag, `/c`, a number or duration, a word with no
+// letter or digit, or one holding a character outside `[\w .+@%,:~/-]` (`$`, a backtick, `\`, `(`…).
+const TRANSPARENT_WORD = /^(?:\w+\+?=|-|\/+\w$|\d[\d.]*[smhd]?$|[^a-z0-9]*$)|[^\w .+@%,:~/-]/i
+// A `-c`-style word (`-c`, `-lc`, `-ec`, `/c`): whatever follows runs as code.
+const DASH_C_WORD = /^(?:-\w*c|\/c)$/i
+
+/** cli.js 2.1.326 `ue`: a program word's name — no directory, lowercase, no trailing version or `.exe`. */
+function ruleProgramName(word: string): string {
+  return word
+    .replace(/^.*[\\/]/s, '')
+    .toLowerCase()
+    .replace(/^(.*?[^\d.])?[\d.]*(?:\.exe)?$/s, '$1')
+}
+
+/**
+ * cli.js 2.1.326 `ce` (§3.0 of the classifier doc): does this wildcard rule leave the program
+ * that runs open? Walks the complete words before the first unescaped `*`, passing over words
+ * that name no program and over shells, wrappers and launchers; a `-c` word answers yes at once,
+ * any other program answers no. The partial word running into the `*` answers yes when it names
+ * no program, is an absolute / `~` / drive / `..` path, or starts a single-word name in the list
+ * (`py*`). An exact rule (no unescaped `*`) answers no. Over {@link LAUNCHERS}, the Bash and
+ * PowerShell union, so it can only strip more than cli.js's per-tool list (`Bash(iex*)`).
+ * `specifier` is unescaped first as cli.js's rule parser does (`\(` `\)` `\\`).
+ */
+function wildcardRuleRunsAnything(specifier: string): boolean {
+  const unescaped = specifier.replace(/\\([()])/g, '$1').replace(/\\\\/g, '\\')
+  const rule = unescaped.replace(/:\*$/, ' *')
+  const head = /^(?:\\[*\\]|[^*])*/.exec(rule)?.[0] ?? ''
+  if (head === rule) return false
+  const names = [...SHELLS_AND_WRAPPERS, ...LAUNCHERS]
+  let used = 0
+  for (const [raw, word = ''] of head.matchAll(RULE_WORD)) {
+    const w = word.replace(/['"]/g, '')
+    if (DASH_C_WORD.test(w)) return true
+    if (!TRANSPARENT_WORD.test(w) && !names.includes(ruleProgramName(w))) return false
+    used += raw.length
+  }
+  const tail = head.slice(used).trim().replace(/['"]/g, '')
+  const name = ruleProgramName(tail)
+  return (
+    TRANSPARENT_WORD.test(tail) ||
+    /^(?:[/~\\]|[a-z]:)|(?:^|[\\/])\.\.(?:[\\/]|$)/i.test(tail) ||
+    (name !== '' && names.some((n) => !n.includes(' ') && n.startsWith(name)))
+  )
+}
+
 /** cli.js `wJt`'s launcher shapes over {@link LAUNCHERS}; `pythonException` is Bash's `-m dotted.module:*`. */
 function launcherShape(specifier: string, pythonException: boolean): boolean {
   const n = specifier.trim().toLowerCase()
@@ -2764,15 +2867,18 @@ function launcherShape(specifier: string, pythonException: boolean): boolean {
 }
 
 /**
- * cli.js `ZIe` parity (§3.0 of the classifier doc): would this allow rule let
- * the agent bypass the auto-mode classifier wholesale? True for a bare / `*` /
- * whitespace-and-`*` Bash or PowerShell rule; a launcher shape (`g`, `g:*`,
- * `g *`, `g*`, `g -…*`) over the union launcher list, except Bash's
- * `python[digits.]* -m dotted.module:*`; and any `Agent`, `Task`, `Monitor` or
- * `AppifactRepl` rule. Pure over the rule string — `autoMode.classifyAllShell`
- * is the caller's input. `Bash(git:*)`, `Bash(npm:*)` and
- * `Bash(bun run test:*)` are NOT bypassing (parity: they survive in cli.js
- * too). Never throws (an internal failure answers `true`).
+ * cli.js parity (2.1.326 `e3o` / `t3o`, §3.0 of the classifier doc): would this
+ * allow rule let the agent bypass the auto-mode classifier wholesale? True for a
+ * bare / `*` / whitespace-and-`*` Bash or PowerShell rule; a wildcard rule that
+ * leaves the program open ({@link wildcardRuleRunsAnything}: `:*`, `FOO=1 *`,
+ * `$HOME/bin/*`, `/usr/local/bin/*`, `py*`, `python3.11 *`, `timeout 60 *`,
+ * `bash -c *`); a launcher shape (`g`, `g:*`, `g *`, `g*`, `g -…*`) over the
+ * union launcher list, except Bash's `python[digits.]* -m dotted.module:*`; and
+ * any `Agent`, `Task`, `Monitor` or `AppifactRepl` rule. Pure over the rule
+ * string — `autoMode.classifyAllShell` is the caller's input. `Bash(git:*)`,
+ * `Bash(npm:*)`, `Bash(bun run test:*)` and `Bash(timeout 60 make *)` are NOT
+ * bypassing (parity: they survive in cli.js too). Never throws (an internal
+ * failure answers `true`).
  */
 export function isClassifierBypassingRule(rule: string): boolean {
   try {
@@ -2781,8 +2887,9 @@ export function isClassifierBypassingRule(rule: string): boolean {
     if (ALWAYS_BYPASSING_TOOLS.has(parsed.tool)) return true
     if (parsed.tool !== 'Bash' && parsed.tool !== 'PowerShell') return false
     const spec = parsed.specifier
+    // `/^[\s*]+$/` is subsumed by wildcardRuleRunsAnything upstream; kept as an explicit guard.
     if (spec === undefined || /^[\s*]+$/.test(spec)) return true
-    return launcherShape(spec, parsed.tool === 'Bash')
+    return wildcardRuleRunsAnything(spec) || launcherShape(spec, parsed.tool === 'Bash')
   } catch {
     return true
   }
