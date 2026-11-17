@@ -51,7 +51,7 @@ import { randomBytes } from 'node:crypto'
 import { opencodeServerManager, OpencodePermissionGuardError } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
 import { OpencodeClient, type PermissionReply } from './OpencodeClient'
-import type { OpencodeEvent } from './protocol-v2/events'
+import { isCatalogEvent, type CatalogEvent, type OpencodeEvent } from './protocol-v2/events'
 import type { Agent_Info, Form_Answer, Model_Ref, Session_Info } from './protocol-v2/openapi'
 import {
   OpencodeEventMapper,
@@ -491,6 +491,8 @@ export class OpencodeSession extends BaseSession {
   private engineWonSkills = new Set<string>()
   /** The connection `establishSession` last published the menu on: once per connection, not per turn. */
   private publishedOn: ServerConnection | null = null
+  /** A catalog-driven menu refresh (`onCatalogUpdated`) is running; `again`: another was asked meanwhile. */
+  private menuRefresh: { again: boolean } | null = null
   private _cancelled = false
   private connectingPromise: Promise<void> | null = null
   private establishingPromise: Promise<void> | null = null
@@ -1216,6 +1218,37 @@ export class OpencodeSession extends BaseSession {
     await this.connectingPromise
   }
 
+  /**
+   * A location's catalog changed. Since 2.3.0 the catalog routes answer what is
+   * loaded now (a cold location's plugins register later, `AGENTS.md` "Plugin
+   * Loading"), and a long-lived client refreshes on these events. For this
+   * session's location: `agent.updated` and `plugin.updated` drop the cached
+   * agents (read again on their next use); `command.updated`, `skill.updated`
+   * and `plugin.updated` re-read the slash menu and the typed-name sets, one
+   * read at a time (a burst coalesces into one more). An event of another
+   * directory on the shared feed is not this session's.
+   */
+  private onCatalogUpdated(event: CatalogEvent): void {
+    const directory = event.location?.directory
+    if (directory && !samePath(directory, this.location)) return
+    if (event.type === 'agent.updated' || event.type === 'plugin.updated') this.agentList = null
+    if (event.type !== 'agent.updated') this.refreshMenu()
+  }
+
+  private refreshMenu(): void {
+    if (this.menuRefresh) {
+      this.menuRefresh.again = true
+      return
+    }
+    if (!this.client || this._cancelled) return
+    const run = { again: false }
+    this.menuRefresh = run
+    void this.publishCommands(this.locationClient()).finally(() => {
+      this.menuRefresh = null
+      if (run.again) this.refreshMenu()
+    })
+  }
+
   /** Read the location's commands and publish them with the shared Claude skills. Never throws. */
   private async publishCommands(client: OpencodeClient): Promise<void> {
     const commands = await client.commands().catch((err) => {
@@ -1376,6 +1409,10 @@ export class OpencodeSession extends BaseSession {
   private handleEvent(event: OpencodeEvent): void {
     if (event.type === 'session.created') this.childKeeper.onSessionCreated(event.data)
     else if (event.type === 'session.agent.selected') this.childKeeper.onAgentSelected(event.data)
+    else if (isCatalogEvent(event)) {
+      this.onCatalogUpdated(event)
+      return
+    }
     const mapper = this.mapper
     if (!mapper) return
     for (const output of mapper.map(event)) this.dispatch(output)

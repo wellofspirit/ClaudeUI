@@ -214,7 +214,16 @@ export interface OpencodeEndpoint {
 export interface OpencodeClientOptions {
   /** Test seam; defaults to the global fetch. */
   readonly fetch?: FetchFn
+  /** Test seam: the plugin wait's spacing and cap (`awaitLocationReady`); upstream's by default. */
+  readonly pluginWait?: { readonly pollMs: number; readonly capMs: number }
 }
+
+/**
+ * How `awaitLocationReady` waits for a location's plugins: upstream's own one-shot
+ * barrier (`packages/cli/src/services/plugin-startup.ts` `waitForPlugins`) — poll
+ * `plugin.list` 25 ms apart until it lists one, for 5 s at most.
+ */
+export const PLUGIN_WAIT = { pollMs: 25, capMs: 5_000 } as const
 
 const PAGE_SIZE = 200
 const MAX_PAGES = 500
@@ -226,6 +235,7 @@ export class OpencodeClient {
   readonly directory: string
   private readonly authHeader: string
   private readonly fetchFn: FetchFn | undefined
+  private readonly pluginWait: { readonly pollMs: number; readonly capMs: number }
   /** `awaitLocationReady` memo, per directory. */
   private readonly locationReady = new Map<string, Promise<void>>()
 
@@ -235,13 +245,14 @@ export class OpencodeClient {
     this.authHeader = endpoint.authHeader
     this.directory = endpoint.directory
     this.fetchFn = options.fetch
+    this.pluginWait = options.pluginWait ?? PLUGIN_WAIT
   }
 
   /** The same server, scoped to another directory. */
   forDirectory(directory: string): OpencodeClient {
     return new OpencodeClient(
       { baseUrl: this.baseUrl, authHeader: this.authHeader, directory },
-      { fetch: this.fetchFn }
+      { fetch: this.fetchFn, pluginWait: this.pluginWait }
     )
   }
 
@@ -669,26 +680,61 @@ export class OpencodeClient {
   // ── Catalog ───────────────────────────────────────────────────────────────
 
   /**
-   * Resolves once opencode has activated the plugins of `directory`'s
-   * location. A location starts on its first request and its plugins register
-   * the built-in agents, commands, skills, providers and models; the catalog
-   * routes do NOT wait for that, so on a cold location they answer EMPTY for
-   * ~100–250 ms (measured on 2.0.24, every catalog). `integration.list` does
-   * wait (`Plugin.awaitActivation`, `packages/server/src/handlers/integration.ts`),
-   * so it is the barrier. Memoized per directory until `reloadLocation()`; a
-   * failure is not memoized. The catalog methods below call it first.
+   * Resolves once `directory`'s location has activated its plugins, or after
+   * {@link PLUGIN_WAIT}'s cap — never rejects. A location starts on its first
+   * request and its plugins register the built-in agents, commands, skills,
+   * integrations, providers and models; since 2.3.0 NO handler waits for them
+   * (`AGENTS.md` "Plugin Loading", upstream `bcaf561d94`: `integration.list` and
+   * `skill.list` stopped waiting too), so a cold location answers its catalogs
+   * empty or partial. Clients wait on their side: this polls `plugin.list` for
+   * the directory until it lists one (the built-ins are in the first batch), as
+   * upstream's CLI does; the cap or an error ends the wait and the read takes
+   * what is loaded (a live session refreshes on the `*.updated` events). The
+   * wait is shared and memoized per directory until `reloadLocation()` — except
+   * one an error ended, so the next read waits again; a caller's signal ends
+   * only its own wait. The catalog methods call it first.
    */
   awaitLocationReady(opts?: OpencodeRequestOptions): Promise<void> {
     const directory = opts?.directory ?? this.directory
     let ready = this.locationReady.get(directory)
     if (!ready) {
-      ready = this.call('integration.list', { ...opts, directory }).then(() => undefined)
-      this.locationReady.set(directory, ready)
-      ready.catch(() => {
-        if (this.locationReady.get(directory) === ready) this.locationReady.delete(directory)
+      const wait = this.waitForPlugins(directory).then((outcome) => {
+        if (outcome === 'error' && this.locationReady.get(directory) === wait)
+          this.locationReady.delete(directory)
       })
+      this.locationReady.set(directory, wait)
+      ready = wait
     }
-    return ready
+    const signal = opts?.signal
+    if (!signal) return ready
+    return Promise.race([
+      ready,
+      new Promise<void>((resolve) => {
+        if (signal.aborted) resolve()
+        else signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    ])
+  }
+
+  /** Polls `plugin.list` (see `awaitLocationReady`); how the wait ended. */
+  private async waitForPlugins(directory: string): Promise<'loaded' | 'cap' | 'error'> {
+    const { pollMs, capMs } = this.pluginWait
+    const deadline = Date.now() + capMs
+    for (;;) {
+      const left = deadline - Date.now()
+      if (left <= 0) return 'cap'
+      try {
+        const listed = await this.call('plugin.list', { directory, timeoutMs: left })
+        if (listed.data.length > 0) return 'loaded'
+      } catch {
+        // As upstream's: an error ends the wait and never fails the caller (a request
+        // the cap cut short is the cap).
+        return Date.now() >= deadline ? 'cap' : 'error'
+      }
+      const rest = deadline - Date.now()
+      if (rest <= 0) return 'cap'
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, rest)))
+    }
   }
 
   async agents(opts?: OpencodeRequestOptions): Promise<readonly Agent_Info[]> {
@@ -735,8 +781,9 @@ export class OpencodeClient {
     return (await this.call('provider.list', opts ?? {})).data
   }
 
-  /** Integrations (providers, MCP OAuth, …) with their connect methods. Waits for activation itself. */
+  /** Integrations (providers, MCP OAuth, …) with their connect methods (they come from plugins too). */
   async integrations(opts?: OpencodeRequestOptions): Promise<readonly Integration_Info[]> {
+    await this.awaitLocationReady(opts)
     return (await this.call('integration.list', opts ?? {})).data
   }
 

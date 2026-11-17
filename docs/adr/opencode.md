@@ -282,8 +282,11 @@ per operation, operations serialized.
 - `OpencodeClient` is typed over the generated `OPERATIONS`: Basic auth and a URI-encoded `x-opencode-directory` on every
   request (a request without it is answered for the server's cwd), a permission reject without a message does not
   compile, a blank one throws before sending. `session.create` ignores the directory header, so the client always sends
-  `location`. A directory's catalogs answer empty until its plugins load, so the client awaits `integration.list` once per
-  directory before the first catalog read. The feed has no replay: a new subscription yields `connected` with
+  `location`. A directory's catalogs answer empty or partial until its plugins load, so the client polls `plugin.list`
+  (upstream's `waitForPlugins`: 25 ms apart, 5 s cap, never failing) once per directory before the first catalog read,
+  and a live session or dispatch target refreshes its cached agents and slash menu on `agent.updated`, `command.updated`,
+  `skill.updated` and `plugin.updated` (changed 2026-11-17: opencode 2.3.0's handlers stopped waiting for plugins, so
+  `integration.list` is no barrier). The feed has no replay: a new subscription yields `connected` with
   `reconnected:true` and the consumer re-reads state (`reconcileAfterReconnect`: active, messages, permissions, forms,
   inbox, applied idempotently by id).
 - The event mapper (`event-mapper.ts`, one per chat) maps the feed to the engine-neutral stream; cold history

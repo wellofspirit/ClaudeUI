@@ -582,6 +582,80 @@ describe('shared Claude skills', () => {
     expect(h.client.prompt.mock.calls.at(-1)?.[1].text).toContain('EXPANDED mine')
   })
 
+  // 2.3.0: catalogs answer what is loaded now; a long-lived client refreshes on `*.updated`.
+  describe('catalog events refresh what the session cached', () => {
+    const catalogEvent = (type: string, directory = CWD): OpencodeFeedItem =>
+      ({
+        kind: 'event',
+        event: { ...ev(type, {}), location: { directory } }
+      }) as OpencodeFeedItem
+    const menus = () => sent.filter(([c]) => c === 'session:slash-commands')
+
+    it('a skill the engine registers later is seen: the menu and the typed-name sets follow', async () => {
+      h.skillCatalog.entries = [skill('won', { file: '/cat/won/SKILL.md' })]
+      session = makeSession()
+      await startTurn('hello')
+      expect((menus().at(-1)?.[2] as { name: string }[]).map((c) => c.name)).toContain('/won')
+      // The engine's own `.agents` skill of that id loads after the first read.
+      h.client.skills.mockResolvedValue([
+        { id: 'won', name: 'won', path: '/proj/.agents/skills/won/SKILL.md' }
+      ] as never)
+      h.feed.push(catalogEvent('skill.updated'))
+      await flush()
+      expect((menus().at(-1)?.[2] as { name: string }[]).map((c) => c.name)).toEqual(['/review'])
+      // …and a typed `/won` goes to the engine as typed, not expanded.
+      await session.run('/won now')
+      await flush()
+      expect(h.client.prompt.mock.calls.at(-1)?.[1].text).toBe('/won now')
+    })
+
+    it('command, skill and plugin changes re-read the menu; a burst is one more read; another directory is not ours', async () => {
+      session = makeSession()
+      await startTurn('hello')
+      const reads = () => h.client.commands.mock.calls.length
+      const before = reads()
+      h.feed.push(catalogEvent('command.updated', '/elsewhere'), catalogEvent('agent.updated'))
+      await flush()
+      expect(reads()).toBe(before)
+      h.feed.push(
+        catalogEvent('command.updated'),
+        catalogEvent('skill.updated'),
+        catalogEvent('plugin.updated')
+      )
+      await flush()
+      // The first starts a read; the two during it coalesce into one more.
+      expect(reads()).toBe(before + 2)
+    })
+
+    it('agent and plugin changes drop the cached agents: the next use reads them again', async () => {
+      session = makeSession()
+      await startTurn('hello')
+      const reads = () => h.client.agents.mock.calls.length
+      /** A mode round trip: the default mode's apply resolves the default agent (`loadAgents`). */
+      const roundTrip = async () => {
+        await session.setPermissionMode('plan')
+        await flush()
+        await session.setPermissionMode('default')
+        await flush()
+      }
+      const before = reads()
+      await roundTrip()
+      expect(reads()).toBe(before)
+      h.feed.push(catalogEvent('agent.updated', '/elsewhere'))
+      await flush()
+      await roundTrip()
+      expect(reads()).toBe(before)
+      h.feed.push(catalogEvent('agent.updated'))
+      await flush()
+      await roundTrip()
+      expect(reads()).toBe(before + 1)
+      h.feed.push(catalogEvent('plugin.updated'))
+      await flush()
+      await roundTrip()
+      expect(reads()).toBe(before + 2)
+    })
+  })
+
   it('a failing skills() read leaves the whole catalog offered', async () => {
     h.skillCatalog.entries = [skill('deploy', { file: '/cat/deploy/SKILL.md' })]
     h.client.skills.mockRejectedValue(new Error('down'))

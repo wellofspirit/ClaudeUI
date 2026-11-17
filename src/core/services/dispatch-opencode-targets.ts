@@ -8,8 +8,10 @@ import { isOpencodeApiError, type PermissionReply } from '../opencode/OpencodeCl
 import type { Agent_Info } from '../opencode/protocol-v2/openapi'
 import {
   eventSessionID,
+  isCatalogEvent,
   type OpencodeEvent as OpencodeV2Event
 } from '../opencode/protocol-v2/events'
+import { samePath } from './worktree-root'
 import {
   OpencodeEventMapper,
   type OpencodeApprovalRoute,
@@ -1273,6 +1275,15 @@ export class OpencodeTargets {
 
   /** One feed event: the child keeper's raw hooks, liveness, then each target's mapper. */
   private handleTargetEvent(rec: ConnRecord, event: OpencodeV2Event): void {
+    if (isCatalogEvent(event)) {
+      // A location's agents changed (2.3.0 lists what is loaded and says when more arrives):
+      // its targets read them again at their next rules apply (`targetAgents`).
+      const directory = event.location?.directory
+      if (event.type === 'agent.updated' || event.type === 'plugin.updated')
+        for (const entry of rec.targets)
+          if (!directory || samePath(directory, entry.cwd)) entry.agents = null
+      return
+    }
     const sessionID = eventSessionID(event)
     for (const entry of [...rec.targets]) {
       if (event.type === 'session.created') entry.children.onSessionCreated(event.data)

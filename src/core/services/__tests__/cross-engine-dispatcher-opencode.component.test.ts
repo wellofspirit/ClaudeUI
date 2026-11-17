@@ -161,8 +161,8 @@ function makeFakeOpencode(name = 'srv', sessionPrefix = 'oc-sess-') {
     wake = null
     w?.()
   }
-  const push = (type: string, data: Wire): void =>
-    deliver({ kind: 'event', event: event(type, data) })
+  const push = (type: string, data: Wire, location?: { directory: string }): void =>
+    deliver({ kind: 'event', event: { ...event(type, data), ...(location ? { location } : {}) } })
 
   const session = (id: string): FakeSession => {
     const s = sessions.get(id)
@@ -2413,6 +2413,37 @@ describe('opencode target — turns that join a running execution (review S9 #2)
 })
 
 describe('opencode target — mid-turn mode switch (review S9 #4)', () => {
+  // 2.3.0: catalogs answer what is loaded now; a long-lived client refreshes on `*.updated`.
+  it("a change of its directory's agents (agent/plugin.updated) is read again at the next apply", async () => {
+    let mode = 'acceptEdits'
+    const { dispatcher, fake, client } = makeHarness()
+    fake.next({ hold: true })
+    const ctx = makeCtx({ getAutonomyMode: () => mode })
+    const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+    await tick()
+    const reads = () => client.agents.mock.calls.length
+    const switchTo = async (next: string) => {
+      mode = next
+      await new Promise((r) => setTimeout(r, 400))
+    }
+    const before = reads()
+    expect(before).toBeGreaterThan(0)
+    // Another directory's agents, and this directory's commands: the cached agents stand.
+    fake.push('agent.updated', {}, { directory: '/elsewhere' })
+    fake.push('command.updated', {}, { directory: ctx.cwd })
+    await switchTo('default')
+    expect(client.setSessionPermissions).toHaveBeenCalledTimes(1)
+    expect(reads()).toBe(before)
+    fake.push('agent.updated', {}, { directory: ctx.cwd })
+    await switchTo('acceptEdits')
+    expect(reads()).toBe(before + 1)
+    fake.push('plugin.updated', {}, { directory: ctx.cwd })
+    await switchTo('default')
+    expect(reads()).toBe(before + 2)
+    fake.finish('oc-sess-1')
+    expect((await running).isError).toBeUndefined()
+  })
+
   it('a switch to plan mid-turn re-applies the ruleset and the agent at once', async () => {
     let mode = 'acceptEdits'
     const { dispatcher, fake, client } = makeHarness()

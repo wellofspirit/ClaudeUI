@@ -105,6 +105,10 @@ export const EVENT_SOURCES = [
   'packages/schema/src/credential.ts',
   'packages/schema/src/provider.ts',
   'packages/schema/src/model.ts',
+  'packages/schema/src/agent.ts',
+  'packages/schema/src/command.ts',
+  'packages/schema/src/skill.ts',
+  'packages/schema/src/plugin.ts',
   'packages/schema/src/server-event.ts',
   'packages/schema/src/llm.ts',
   'packages/schema/src/location.ts'

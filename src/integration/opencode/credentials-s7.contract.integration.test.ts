@@ -54,6 +54,7 @@ import {
   nonce,
   SANDBOX_AVAILABLE,
   sandboxProfile,
+  untilPluginsLoaded,
   useRig,
   V2_BIN,
   type Rig
@@ -482,8 +483,10 @@ describeChatgpt(
       const before = rig().proxy.attempts.length
       const signin = await store.prepareSignin('openai')
       expect(signin.previousActive).toBe('cred_user_signin_case')
-      // The connect routes need the location's integrations registered (the
-      // activation barrier) — as in the app, where the provider screen lists them first.
+      // The connect routes need the location's integrations registered (its plugins
+      // loaded: 2.3.0's `integration.list` no longer waits for them) — as in the app,
+      // where the provider screen lists them first (`OpencodeClient.integrations`).
+      await untilPluginsLoaded(api)
       await api.ok('integration.list')
       // ClaudeUI's sign-in, through opencode's own connect flow (opencode picks the id).
       await api.ok('integration.connect.key', {

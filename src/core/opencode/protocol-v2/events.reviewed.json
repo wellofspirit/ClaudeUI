@@ -13,6 +13,10 @@
     "packages/schema/src/credential.ts": "1c321f9982cd47f4dc82689d3dd4001796255e4b4325c77db5043c110dab8b3b",
     "packages/schema/src/provider.ts": "7b88bcb3a36f53d952078f5a531f5360ee30bccda00a9d9ed7da261fefcbfdc4",
     "packages/schema/src/model.ts": "ef4ab2adb42010b25d17fa09a70cf6909132317cfdd3c98f9187a6a278ccfb5c",
+    "packages/schema/src/agent.ts": "2438abf1f8bbcc8ebad533b81035d739db4117b9df739a906d0113e851c0737e",
+    "packages/schema/src/command.ts": "6091f667ccf353e2ec7ac93902cd2c58b951236823f9411fb88174f9494932ab",
+    "packages/schema/src/skill.ts": "da003f8a6fd607569adb11e789c08eede92b044faa87648c422e69b47e281b4c",
+    "packages/schema/src/plugin.ts": "b453a0749f0213f141c29500e4033e2a0008e72d758ac97711310f053fd23d6a",
     "packages/schema/src/server-event.ts": "763922b807a559c3bf4dfda5336656e30ef373bbb1efe0e83d073a44b21caa12",
     "packages/schema/src/llm.ts": "f5c851d7688c0d2e420f712a971f38a0210cc0c6e8b0b9202018f04cddadb915",
     "packages/schema/src/location.ts": "cc899b5b9430c1edf62f353c8f49611a382511a544c09889e2da24f9ab2ddec4"
