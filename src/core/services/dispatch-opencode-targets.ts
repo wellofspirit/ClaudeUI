@@ -1128,9 +1128,10 @@ export class OpencodeTargets {
   }
 
   /**
-   * A step outside any turn of the dispatcher's (an execution woken by a
-   * background subagent's completion, a step landing after a give-up): its
-   * spend is still the dispatch's — one ledger row, the cap and the
+   * A step outside any turn of the dispatcher's (an execution a child's report
+   * woke after its turn had ended — a failed turn, a give-up — or a step landing
+   * after a give-up; a wake while the turn waits for its children is that turn's):
+   * its spend is still the dispatch's — one ledger row, the cap and the
    * dispatching session's breakdown.
    */
   private meterStrayStep(entry: OpencodeTargetEntry, step: OpencodeStepUsage): void {
@@ -1396,6 +1397,12 @@ export class OpencodeTargets {
         else this.meterStrayStep(entry, o.usage)
         return
       case 'result':
+        // opencode 2.3.0 runs every subagent in the background: the execution that launches one
+        // ends on the launch, and the child's answer reaches the target as a report that wakes
+        // it. The dispatched turn ends on the execution that took in the last of them (owner
+        // ruling 3): held while a child runs or its report waits. The watchdog still bounds it.
+        if (o.sessionId === entry.sessionId && entry.turnStarted && entry.mapper.childWorkPending())
+          return
         this.settleTargetTurn(entry, o.sessionId, { kind: 'done' })
         return
       case 'error':

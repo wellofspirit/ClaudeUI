@@ -16,7 +16,9 @@
  * - a judge block with no hold window: the call fails WITH the judge's reason
  *   (non-fatal), nothing is written, the turn still completes;
  * - default mode: the ask is a card on the dispatching chat, the user's allow
- *   lets the edit land.
+ *   lets the edit land;
+ * - a target that launches a subagent (2.3.0: always a background run) returns
+ *   the answer its child's report woke it for, not the launch (owner ruling 3).
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -347,6 +349,27 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
     manager.releaseIfCurrent(cwd, conn)
     await until(() => manager.activeCount === 0 && ends.length > endsBefore, 'the server end')
     await expect(ends.at(-1)).resolves.toEqual({ forced: false })
+  })
+
+  it("a target that launches a subagent returns the answer its child's report woke it for, not the launch", async () => {
+    writeFileSync(join(cwd, NOTES_FILE), 'alpha\n')
+    const ctx = dispatchingChat('default')
+    const tag = nonce('sub')
+    const result = await dispatcher.dispatch(
+      { engine: 'opencode', prompt: `[subread] ${tag}` },
+      ctx
+    )
+    expect(result.isError).toBeUndefined()
+    // The launch turn said `TOOL_RESULT_SEEN: The subagent is working in the background…`; the
+    // child read the file and ended; its report woke the target, whose answer (the fixture echoes
+    // what it was given) is the run's result.
+    expect(result.text).toContain('echo: <subagent')
+    expect(result.text).toContain('state="completed"')
+    expect(result.text).not.toContain('working in the background')
+    expect(of('session:task-notification').at(-1)).toMatchObject({
+      status: 'completed',
+      toolUseId: ctx.toolUseId
+    })
   })
 
   it('hand_back: only a dispatch target is offered the tool, it reports with it, and the run is that report', async () => {

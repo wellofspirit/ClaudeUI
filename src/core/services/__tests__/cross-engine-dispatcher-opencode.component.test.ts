@@ -1257,6 +1257,8 @@ describe('opencode target — streaming onto the dispatch card', () => {
     })
     fake.child('oc-sess-1', 'ses_child', 'call_sub')
     fake.step('ses_child', { text: 'child says hi' })
+    // 2.3.0: the child is a background run; the turn ends after the child did.
+    fake.finish('ses_child', { steps: [] })
     fake.finish('oc-sess-1', { steps: [{ text: 'done' }] })
     expect((await running).text).toBe('done')
 
@@ -1344,6 +1346,7 @@ describe('opencode target — usage and the cost cap', () => {
     await tick()
     fake.child('oc-sess-1', 'ses_child', 'call_sub')
     fake.step('ses_child', { text: 'c', cost: 0.1, tokens: { ...ZERO, input: 100, output: 10 } })
+    fake.finish('ses_child', { steps: [] })
     fake.finish('oc-sess-1', {
       steps: [
         {
@@ -1604,6 +1607,7 @@ describe('opencode target — approvals', () => {
     })
     const cards = emitted(ctx, 'session:approval-request')
     expect(cards.map((c) => c.requestId)).toEqual([`${XENG_REQUEST_PREFIX}per_edit`])
+    fake.finish('ses_child', { steps: [] })
     fake.finish('oc-sess-1')
     await running
   })
@@ -1624,6 +1628,7 @@ describe('opencode target — approvals', () => {
     const rules = patch![1] as Permission_Rule[]
     expect(rules).toEqual(expect.arrayContaining(createdRules(client)))
     expect(rules).toContainEqual({ action: 'shell', resource: 'git push*', effect: 'deny' })
+    fake.finish('ses_child', { steps: [] })
     fake.finish('oc-sess-1')
     await running
   })
@@ -1937,6 +1942,134 @@ describe('opencode target — shared machinery', () => {
     expect(emitted(ctx, 'session:task-notification').at(-1)).toMatchObject({
       usage: expect.objectContaining({ toolUses: 2 })
     })
+  })
+})
+
+// opencode 2.3.0 runs every subagent in the background: the call answers at once, the turn ends on
+// the launch, and the child's answer reaches the target later as a `<subagent>` report that wakes it.
+describe('opencode target — a turn that launched subagents (owner ruling 3, 2026-11-17)', () => {
+  const launched = (fake: FakeOpencode, childID = 'ses_child', callID = 'call_sub'): void =>
+    fake.push('session.tool.success', {
+      sessionID: 'oc-sess-1',
+      assistantMessageID: 'msg_launch',
+      id: callID,
+      content: [
+        { type: 'text', text: `The subagent is working in the background (sessionID: ${childID}).` }
+      ],
+      metadata: { sessionID: childID, status: 'running' },
+      executed: false
+    })
+  const report = (
+    fake: FakeOpencode,
+    inboxID: string,
+    childID = 'ses_child',
+    state = 'completed'
+  ) =>
+    fake.push('session.inbox.enqueued', {
+      sessionID: 'oc-sess-1',
+      inboxID,
+      item: {
+        type: 'synthetic',
+        delivery: 'steer',
+        payload: {
+          text: `<subagent sessionID="${childID}" state="${state}" description="child">\nchild result\n</subagent>`,
+          metadata: { source: 'subagent', childID, agent: 'general', state: 'completed' }
+        }
+      }
+    })
+  /** The child's own run: a step, then its end. */
+  const childRuns = (fake: FakeOpencode, childID = 'ses_child'): void =>
+    fake.finish(childID, { steps: [{ text: 'child result', cost: 0.2 }] })
+  /** The wake the report starts: the report is delivered, the target answers. */
+  const wake = (
+    fake: FakeOpencode,
+    inboxID: string,
+    text = 'final answer from the child'
+  ): void => {
+    fake.start('oc-sess-1')
+    fake.push('session.inbox.delivered', { sessionID: 'oc-sess-1', inboxID })
+    fake.finish('oc-sess-1', { steps: [{ text, cost: 0.3 }] })
+  }
+  const settledFlag = (running: Promise<unknown>) => {
+    const state = { settled: false }
+    void running.then(() => (state.settled = true))
+    return state
+  }
+
+  it('settles on the turn the child’s report woke, with its text and every step’s spend, not on the launch', async () => {
+    const { dispatcher, fake, recorded } = makeHarness()
+    fake.next({ hold: true })
+    const ctx = makeCtx({ toolUseId: 'tu-1' })
+    const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+    const state = settledFlag(running)
+    await tick()
+    fake.child('oc-sess-1', 'ses_child', 'call_sub')
+    launched(fake)
+    fake.finish('oc-sess-1', { steps: [{ text: 'launched the child', cost: 0.1 }] })
+    await tick(10)
+    // The child still works: its answer is not in yet.
+    expect(state.settled).toBe(false)
+    childRuns(fake)
+    report(fake, 'msg_report1')
+    await tick(10)
+    expect(state.settled).toBe(false)
+    wake(fake, 'msg_report1')
+    const result = await running
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('final answer from the child')
+    // One ledger row for the whole turn: the launch, the child and the wake.
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0].engineCostUsd).toBeCloseTo(0.6, 6)
+  })
+
+  it('a report already admitted when the turn ends (a fast child) holds it for the wake that reads it', async () => {
+    const { dispatcher, fake } = makeHarness()
+    fake.next({ hold: true })
+    const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    const state = settledFlag(running)
+    await tick()
+    fake.child('oc-sess-1', 'ses_child', 'call_sub')
+    launched(fake)
+    childRuns(fake)
+    report(fake, 'msg_report1')
+    fake.finish('oc-sess-1', { steps: [{ text: 'launched the child' }] })
+    await tick(10)
+    expect(state.settled).toBe(false)
+    wake(fake, 'msg_report1')
+    expect((await running).text).toBe('final answer from the child')
+  })
+
+  it('a turn with no child still settles on its own end', async () => {
+    const { dispatcher, fake } = makeHarness()
+    fake.next({ steps: [{ text: 'plain answer' }] })
+    expect((await dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())).text).toBe(
+      'plain answer'
+    )
+  })
+
+  it('a child that never ends still hits the turn timeout, and the give-up interrupts it', async () => {
+    vi.useFakeTimers()
+    let now = 0
+    const { dispatcher, fake, client } = makeHarness({
+      now: () => now,
+      loadEngineConfig: () => ({
+        dispatch: { defaultModel: 'openai/gpt-5', idleTimeoutMs: 30_000 }
+      })
+    })
+    fake.next({ hold: true })
+    const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0)
+    fake.child('oc-sess-1', 'ses_child', 'call_sub')
+    launched(fake)
+    fake.start('ses_child')
+    fake.finish('oc-sess-1', { steps: [{ text: 'launched the child' }] })
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0)
+    now = 10 * 60_000
+    await vi.advanceTimersByTimeAsync(3 * DISPATCH_WATCHDOG_INTERVAL_MS)
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(0)
+    const result = await running
+    expect(result.isError).toBe(true)
+    expect(client.interrupt).toHaveBeenCalledWith('ses_child')
   })
 })
 

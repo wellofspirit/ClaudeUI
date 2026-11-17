@@ -485,7 +485,11 @@ deny}` and `{question,*,deny}`), agent (`plan` in plan mode) and model in the bo
 - A turn: re-apply the LIVE mode's ruleset (PATCH when changed, switch the agent; a mode switch
   mid-turn re-applies at once), the ChatGPT pre-turn gate, then an inbox prompt (`steer`) — never
   once a Stop or abort has fired. The turn has started when its own inbox item is DELIVERED (a fresh
-  execution or one it joined); only a terminal output after that settles it. The target's own S4
+  execution or one it joined); only a terminal output after that settles it. A success is held
+  while a child the target launched still runs or its `<subagent>` report waits in the target's
+  inbox (`mapper.childWorkPending()`; 2.3.0 ends the launching execution on the launch, and the
+  report wakes the target), and settles on the end of the execution that took in the last of them;
+  the turn's watchdog still bounds the wait. The target's own S4
   mapper yields the text (the last own step that said something), the usage (every step, children's
   included; steps outside any dispatch turn are metered as rows of their own) and the asks.
 - A subagent caller's own deny/ask rules (option a, `caller-restriction.ts`) join the target's

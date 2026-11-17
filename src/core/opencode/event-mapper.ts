@@ -1353,6 +1353,21 @@ export class OpencodeEventMapper {
     return false
   }
 
+  /**
+   * True while the own session still has a child's answer to take in: a child's
+   * run is live, or a child's `<subagent>` report waits in the own inbox (a fast
+   * child ended before its parent's turn did; the report wakes the parent for an
+   * execution that reads it). Since 2.3.0 the turn that launches a subagent ends
+   * on the launch, so a caller waiting for the agent's ANSWER (a dispatch target,
+   * owner ruling 3) waits until this is false at the end of an execution.
+   */
+  childWorkPending(): boolean {
+    if (this.hasLiveBackgroundChild()) return true
+    for (const item of this.own.inboxItems.values())
+      if (item.type === 'synthetic' && subagentReport(item.payload.text)) return true
+    return false
+  }
+
   /** The session a call was made in (its tool state lives there). */
   private sessionOfCall(tool: ToolState): string {
     for (const s of [this.own, ...this.children.values()])

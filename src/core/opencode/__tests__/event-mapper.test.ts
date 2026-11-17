@@ -1084,6 +1084,42 @@ describe('subagents', () => {
       expect(of(out, 'task-notification')[0].notification.summary).toBe('y'.repeat(100))
     })
 
+    it('child work is pending while a child runs or its report waits in the own inbox (dispatch settlement)', () => {
+      const reportItem = (child = CHILD) => ({
+        type: 'synthetic',
+        delivery: 'steer',
+        payload: {
+          text: `<subagent sessionID="${child}" state="completed" description="d">\nx\n</subagent>`
+        }
+      })
+      expect(mapper.childWorkPending()).toBe(false)
+      map(step(), announce(), ...call('call_a', {}), result('call_a', 'running'))
+      expect(mapper.childWorkPending()).toBe(true)
+      map(
+        ev('session.execution.started', { sessionID: CHILD }),
+        ev('session.execution.succeeded', { sessionID: CHILD })
+      )
+      // Ended, but its report is admitted and not read yet.
+      map(ev('session.inbox.enqueued', { sessionID: SID, inboxID: 'msg_r', item: reportItem() }))
+      expect(mapper.childWorkPending()).toBe(true)
+      map(ev('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_r' }))
+      expect(mapper.childWorkPending()).toBe(false)
+      // Other synthetic items (reminders, notices) and a child's own inbox are no child work.
+      map(
+        ev('session.inbox.enqueued', {
+          sessionID: SID,
+          inboxID: 'msg_n',
+          item: { type: 'synthetic', delivery: 'steer', payload: { text: '<system-reminder>' } }
+        }),
+        ev('session.inbox.enqueued', {
+          sessionID: CHILD,
+          inboxID: 'msg_c',
+          item: reportItem('ses_g')
+        })
+      )
+      expect(mapper.childWorkPending()).toBe(false)
+    })
+
     it('every linked child is held until its notification', () => {
       expect(mapper.hasLiveBackgroundChild()).toBe(false)
       map(step(), announce('ses_a'), ...call('call_a', {}, 'ses_a'))
