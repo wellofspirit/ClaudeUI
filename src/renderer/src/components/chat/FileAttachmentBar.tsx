@@ -3,11 +3,53 @@ import type { FileAttachment } from '../../../../shared/types'
 interface FileAttachmentBarProps {
   attachments: FileAttachment[]
   onRemove: (id: string) => void
+  /**
+   * Upload progress (0..1) by attachment id, while a send is uploading. An id with no entry
+   * shows no ring: the desktop (instant IPC) and a small web send never report any.
+   */
+  uploadProgress?: Record<string, number>
+}
+
+const RING_RADIUS = 14
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
+
+function UploadRing({ progress }: { progress: number }): React.JSX.Element {
+  return (
+    <div
+      data-testid="FileAttachmentBar.ring"
+      data-progress={progress.toFixed(2)}
+      className="absolute inset-0 flex items-center justify-center bg-black/40"
+    >
+      <svg width="34" height="34" viewBox="0 0 34 34" className="-rotate-90">
+        <circle
+          cx="17"
+          cy="17"
+          r={RING_RADIUS}
+          fill="none"
+          stroke="white"
+          strokeOpacity="0.3"
+          strokeWidth="3"
+        />
+        <circle
+          cx="17"
+          cy="17"
+          r={RING_RADIUS}
+          fill="none"
+          stroke="white"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeDasharray={RING_CIRCUMFERENCE}
+          strokeDashoffset={RING_CIRCUMFERENCE * (1 - progress)}
+        />
+      </svg>
+    </div>
+  )
 }
 
 export function FileAttachmentBar({
   attachments,
-  onRemove
+  onRemove,
+  uploadProgress
 }: FileAttachmentBarProps): React.JSX.Element | null {
   if (attachments.length === 0) return null
 
@@ -40,6 +82,9 @@ export function FileAttachmentBar({
             </>
           ) : (
             <img src={file.previewUrl} alt={file.fileName} className="w-full h-full object-cover" />
+          )}
+          {uploadProgress?.[file.id] !== undefined && (
+            <UploadRing progress={uploadProgress[file.id]} />
           )}
           <button
             onClick={() => onRemove(file.id)}

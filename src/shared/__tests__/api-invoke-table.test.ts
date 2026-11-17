@@ -195,7 +195,8 @@ describe('table invariants', () => {
       'loadSessionStatusLine',
       'measureWorktree',
       'removeWorktree',
-      'removeWorktrees'
+      'removeWorktrees',
+      'sendPrompt'
     ])
   })
 

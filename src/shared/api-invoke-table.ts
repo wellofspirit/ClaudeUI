@@ -306,7 +306,7 @@ export const API_INVOKES = {
   readBackgroundRange: { channel: 'session:read-background-range', arity: 4, mode: 'invoke' },
   recallQueued: { channel: 'session:recall-queued', arity: 1, mode: 'invoke' },
   removeOpencodeProvider: { channel: 'session:remove-opencode-provider', arity: 2, mode: 'invoke' },
-  sendPrompt: { channel: 'session:send', arity: 3, mode: 'invoke' },
+  sendPrompt: { channel: 'session:send', arity: 4, mode: 'invoke', progress: 3 },
   setEffort: { channel: 'session:set-effort', arity: 2, mode: 'invoke' },
   setModel: { channel: 'session:set-model', arity: 2, mode: 'invoke' },
   setOpencodeProviderDisabled: {

@@ -37,6 +37,30 @@ export interface WsInvokeRequest {
   args: unknown[]
 }
 
+/**
+ * Client → Server: one slice of an invoke too large for one frame (the mirror of
+ * {@link WsSyncFullChunk}). The concatenation of `data` over `index = 0..count-1`
+ * is exactly the `JSON.stringify` of a {@link WsInvokeRequest} whose `id` is this
+ * `id`. Sent only to a host that advertised {@link WsAuthResponse.invokeChunks},
+ * one transfer at a time per client, and only post-auth.
+ *
+ * `channel` rides on index 0 only, so the host can refuse a transfer it would
+ * refuse anyway (step-up) before the bytes arrive; the reassembled request is
+ * still authorized in full by the ordinary invoke path.
+ */
+export interface WsInvokeChunk {
+  type: 'invoke-chunk'
+  id: string
+  index: number
+  count: number
+  data: string
+  /** Index 0 only: the inner request's channel. */
+  channel?: string
+}
+
+/** Characters of the invoke JSON per {@link WsInvokeChunk} (x1.33 under E2E ~ 683 KB per frame). */
+export const INVOKE_CHUNK_CHARS = 512 * 1024
+
 /** Server → Client: response to an invoke */
 export interface WsInvokeResponse {
   type: 'invoke-response'
@@ -189,6 +213,15 @@ export interface WsAuthResponse {
    * every live client reconnects and gets a fresh `auth-response`.
    */
   authDisabled?: true
+  /**
+   * Success only: this host reassembles {@link WsInvokeChunk} transfers of up to
+   * `maxChars` UTF-16 units of invoke JSON. Absent on an older host: the client
+   * then sends only single frames and refuses one too large for the host's
+   * `maxPayload` with a clear error instead of a frame that closes the socket.
+   * Sent on EVERY successful accept (the enroll upgrade included), because the
+   * client resets its per-socket facts on each one.
+   */
+  invokeChunks?: { maxChars: number }
   /**
    * Success only: THIS connection's `Host` is an origin a passkey could actually
    * be bound to — i.e. `resolveWebauthnOrigin` returned an RP ID for it (the
@@ -1018,6 +1051,7 @@ export type WsClientMessage =
   | WsAuthWebauthnStart
   | WsAuthWebauthnFinish
   | WsInvokeRequest
+  | WsInvokeChunk
   | WsSyncRequest
   | WsPing
   | WsPong

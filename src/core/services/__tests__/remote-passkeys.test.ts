@@ -1328,7 +1328,9 @@ describe('remote passkeys — handshake, enrollment, step-up', () => {
       // re-reads it on EVERY ok accept, so a frame that omitted it would RETRACT
       // a capability this very ceremony just proved — an enrollment socket only
       // exists where a credential can bind, and one was just asserted.
-      webauthnCapableOrigin: true
+      webauthnCapableOrigin: true,
+      // Same rule for the chunked-invoke capability (R9): every accept advertises it.
+      invokeChunks: { maxChars: 48 * 1024 * 1024 }
     })
 
     // `admin` and `enroll` — the full passkey set, on the very same socket.

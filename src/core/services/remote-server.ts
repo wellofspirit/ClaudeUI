@@ -98,7 +98,10 @@ import {
   PASSKEY_UNAVAILABLE_ERROR,
   PASSWORD_REQUIRED_ERROR,
   TERMINAL_DISABLED_ERROR,
+  INVOKE_CHUNK_CHARS,
+  type WsAuthResponse,
   type WsAuthWebauthnFinish,
+  type WsInvokeChunk,
   type WsClientMessage,
   type WsServerMessage,
   type WsSyncFull,
@@ -126,6 +129,21 @@ import type {
 
 const PING_INTERVAL_MS = 15_000
 const IDLE_TIMEOUT_MS = 30 * 60_000 // 30 minutes
+
+// Chunked invokes (`invoke-chunk`): one invoke too large for a frame, reassembled
+// in host memory, then handed to the ordinary `handleInvoke`. Every limit is
+// post-auth and refuses with an `invoke-response` for the transfer's id.
+/** UTF-16 units of invoke JSON per transfer; advertised to clients as `maxChars`. */
+const INVOKE_CHUNK_MAX_CHARS = 48 * 1024 * 1024
+/** Concurrent transfers one socket may hold. */
+const INVOKE_CHUNK_MAX_TRANSFERS = 2
+/** Reassembly held across every socket; summed from the live clients, never counted. */
+const INVOKE_CHUNK_HOST_MAX_CHARS = 256 * 1024 * 1024
+/** A transfer with no chunk for this long is dropped (swept on the ping tick). */
+const INVOKE_CHUNK_IDLE_MS = 60_000
+/** `maxChars / INVOKE_CHUNK_CHARS`, plus slack for a client that chunks smaller. */
+const INVOKE_CHUNK_MAX_COUNT = Math.ceil(INVOKE_CHUNK_MAX_CHARS / INVOKE_CHUNK_CHARS) * 2
+const INVOKE_CHUNK_MAX_ID_LENGTH = 256
 
 // DoS hardening (M-RM3).
 /** Cap on total sockets (authenticated + pre-auth pending). */
@@ -582,6 +600,68 @@ interface SocketChannel {
   sendQueue: Promise<void>
 }
 
+/**
+ * The error text for a refused step-up decision. WHICH refusal comes from the
+ * table, not from the transport: the one place that knows a dispatch is
+ * `authcfg` is the one that names the error, so the transport cannot pair a
+ * settings refusal with the ambient code the client's generic gate would
+ * silently retry (ADR-054 §6 amendment).
+ */
+function stepUpRefusalError(decision: { refusal?: string }): string {
+  return decision.refusal === 'settings-session'
+    ? NEEDS_SETTINGS_SESSION_ERROR
+    : NEEDS_STEP_UP_ERROR
+}
+
+/**
+ * A capability whose operator toggle is off refuses before any step-up table: the
+ * terminal (ADR-053) and, on its OWN toggle, the IDE (ADR-064). Two capabilities,
+ * two switches: an operator who armed a remote editor has not thereby armed a pty,
+ * and the reverse. Checked FIRST and independently of any grant, so a grant armed
+ * before the switch moved (or one a client cached) buys nothing. Pure: the invoke
+ * path revokes the grant itself; the chunk pre-check only reads the answer.
+ */
+function toggleRefusal(
+  capability: Capability | undefined
+): { capability: 'shell' | 'ide'; error: string } | null {
+  if (capability === 'shell' && !readTerminalPolicy().allowTerminal) {
+    return { capability, error: TERMINAL_DISABLED_ERROR }
+  }
+  if (capability === 'ide' && !readIdePolicy().allowIde) {
+    return { capability, error: `${IDE_UNAVAILABLE_ERROR}:toggle-off` }
+  }
+  return null
+}
+
+/** One chunked invoke being reassembled (see `RemoteServer.handleInvokeChunk`). */
+interface InvokeTransfer {
+  /** The channel chunk 0 named; the reassembled request must carry the same one. */
+  channel: string
+  count: number
+  /** Index the next chunk must carry. */
+  next: number
+  parts: string[]
+  chars: number
+  lastChunkAt: number
+}
+
+/**
+ * The one builder for a successful `auth-response`: the handshake accept and the
+ * enroll→webauthn upgrade both go through it, so a capability the client resets
+ * on every accept (`invokeChunks`) cannot be advertised by one and forgotten by
+ * the other.
+ */
+function authSuccessFrame(
+  fields: Omit<WsAuthResponse, 'type' | 'ok' | 'invokeChunks'>
+): WsAuthResponse {
+  return {
+    type: 'auth-response',
+    ok: true,
+    ...fields,
+    invokeChunks: { maxChars: INVOKE_CHUNK_MAX_CHARS }
+  }
+}
+
 interface AuthenticatedClient {
   ws: WebSocket
   ip: string
@@ -659,6 +739,8 @@ interface AuthenticatedClient {
    * it — a waiver must not survive as evidence of a human who never appeared.
    */
   armedByWaiver?: boolean
+  /** In-flight chunked invokes, by request id (see {@link InvokeTransfer}); dies with the record. */
+  invokeTransfers: Map<string, InvokeTransfer>
   /** A refused `sync` has been logged for this connection; later ones are silent. */
   syncRefusalLogged?: boolean
   /** Shared with the pre-auth handshake — see {@link SocketChannel}. */
@@ -3107,10 +3189,12 @@ export class RemoteServer {
         lastActivity: Date.now(),
         pingTimer: setInterval(() => {
           this.sendTo(ws, { type: 'ping', timestamp: Date.now() })
+          this.sweepInvokeTransfers(ws)
         }, PING_INTERVAL_MS),
         // The SAME channel the handshake used — on an E2E origin it is already
         // live, and the `auth-response` below is therefore ciphertext.
         channel,
+        invokeTransfers: new Map(),
         unsubscribeStream: undefined
       }
       this.clients.set(ws, newClient)
@@ -3178,29 +3262,30 @@ export class RemoteServer {
       // Through `sendTo` (i.e. the shared channel), not a raw `ws.send`: on an
       // E2E origin this frame is the SECOND encrypted frame of the handshake and
       // must be ciphertext like the `e2e-ack` before it.
-      this.sendTo(ws, {
-        type: 'auth-response',
-        ok: true,
-        method,
-        ...(login ? { identity: { login } } : {}),
-        // Every accept under `off` says so, whatever the method — kept keyed on
-        // the POLICY rather than on `method === 'none'` because a future method
-        // admitted while authentication is disabled would otherwise reach the
-        // client unwarned.
-        ...(auth.policy === 'off' ? { authDisabled: true as const } : {}),
-        // Can a passkey be BOUND on this connection's origin? The client cannot
-        // work this out — a tunnel page is HTTPS and passes every browser-side
-        // test while its RP ID is an ephemeral hostname — so the answer travels
-        // with the accept. Read off the SAME `capableOrigin` the password and
-        // ceremony gates above were decided from, never re-derived: an
-        // enrollment offer that disagreed with `passwordAuthAllowed` about which
-        // origin this is would be a UI promising what the server refuses.
-        ...(capableOrigin ? { webauthnCapableOrigin: true as const } : {}),
-        // ADR-063: present only where a real ceremony just minted one. Absent on
-        // every other accept, a `webauthn-resumed` one included — the client
-        // keeps the token it presented rather than expecting a replacement.
-        ...(opts.resumeToken ? { resumeToken: opts.resumeToken } : {})
-      })
+      this.sendTo(
+        ws,
+        authSuccessFrame({
+          method,
+          ...(login ? { identity: { login } } : {}),
+          // Every accept under `off` says so, whatever the method — kept keyed on
+          // the POLICY rather than on `method === 'none'` because a future method
+          // admitted while authentication is disabled would otherwise reach the
+          // client unwarned.
+          ...(auth.policy === 'off' ? { authDisabled: true as const } : {}),
+          // Can a passkey be BOUND on this connection's origin? The client cannot
+          // work this out — a tunnel page is HTTPS and passes every browser-side
+          // test while its RP ID is an ephemeral hostname — so the answer travels
+          // with the accept. Read off the SAME `capableOrigin` the password and
+          // ceremony gates above were decided from, never re-derived: an
+          // enrollment offer that disagreed with `passwordAuthAllowed` about which
+          // origin this is would be a UI promising what the server refuses.
+          ...(capableOrigin ? { webauthnCapableOrigin: true as const } : {}),
+          // ADR-063: present only where a real ceremony just minted one. Absent on
+          // every other accept, a `webauthn-resumed` one included — the client
+          // keeps the token it presented rather than expecting a replacement.
+          ...(opts.resumeToken ? { resumeToken: opts.resumeToken } : {})
+        })
+      )
       logger.info(
         'remote-server',
         `Client authenticated from ${ip} via ${method}${login ? ` (${login})` : ''} (${this.clients.size} total)`
@@ -3698,6 +3783,11 @@ export class RemoteServer {
           // own try/catch, so no unhandled rejection.
           void this.handleInvoke(ws, msg)
           break
+        case 'invoke-chunk':
+          // Synchronous and in order (recvQueue): reassembly state needs no lock.
+          // The finished request re-enters via handleInvoke, never this switch.
+          this.handleInvokeChunk(ws, msg)
+          break
         case 'sync':
           // Synchronous since 4b: the snapshot is canonical state, not a
           // renderer round-trip, so a sync can no longer stall the frame queue.
@@ -3850,6 +3940,145 @@ export class RemoteServer {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
       this.sendTo(ws, { type: 'invoke-response', id: msg.id, ok: false, error: errorMsg })
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Chunked invokes (`invoke-chunk`)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * One slice of an invoke too large for a frame. Only this method judges the
+   * transfer's shape and size; AUTHORIZATION of the request is untouched: the
+   * reassembled object goes to {@link handleInvoke}, which runs the real
+   * step-up gate and capability check exactly as for a single frame. Chunk 0
+   * additionally refuses what that path would refuse anyway, before the bytes
+   * are held. Every refusal answers `invoke-response` for the id and leaves the
+   * socket open.
+   */
+  private handleInvokeChunk(ws: WebSocket, msg: WsInvokeChunk): void {
+    const client = this.clients.get(ws)
+    if (!client) return
+    const raw = msg as unknown as Record<string, unknown>
+    const { id, index, count, data } = raw
+    if (typeof id !== 'string' || id.length === 0 || id.length > INVOKE_CHUNK_MAX_ID_LENGTH) {
+      // No usable id to answer, so nothing to say; the transfer cannot exist.
+      return
+    }
+    const refuse = (error: string): void => {
+      client.invokeTransfers.delete(id)
+      this.sendTo(ws, { type: 'invoke-response', id, ok: false, error })
+    }
+    if (
+      !Number.isInteger(index) ||
+      !Number.isInteger(count) ||
+      typeof data !== 'string' ||
+      (count as number) < 2 ||
+      (count as number) > INVOKE_CHUNK_MAX_COUNT ||
+      (index as number) < 0 ||
+      (index as number) >= (count as number)
+    ) {
+      refuse('Malformed invoke chunk')
+      return
+    }
+    const i = index as number
+    const n = count as number
+
+    let transfer = client.invokeTransfers.get(id)
+    if (i === 0) {
+      if (transfer) {
+        refuse('Invoke chunk out of order')
+        return
+      }
+      // R2: an enroll-only or pre-surface socket must not park memory for a
+      // request its capability check will refuse.
+      if (!holdsBaseRemoteSurface(client.connection.grants)) {
+        refuse('Permission denied')
+        return
+      }
+      if (client.invokeTransfers.size >= INVOKE_CHUNK_MAX_TRANSFERS) {
+        refuse('Too many concurrent chunked invokes')
+        return
+      }
+      // R12: pure pre-check, so a lapsed step-up window costs one frame, not the
+      // whole upload. The real gate still runs in handleInvoke.
+      const channel = raw.channel
+      if (typeof channel !== 'string') {
+        refuse('Malformed invoke chunk')
+        return
+      }
+      const refusal = this.peekInvokeRefusal(client, channel)
+      if (refusal) {
+        refuse(refusal)
+        return
+      }
+      transfer = { channel, count: n, next: 0, parts: [], chars: 0, lastChunkAt: Date.now() }
+      client.invokeTransfers.set(id, transfer)
+    } else if (!transfer || transfer.count !== n || transfer.next !== i) {
+      refuse(transfer ? 'Invoke chunk out of order' : 'Unknown invoke transfer')
+      return
+    }
+
+    if (transfer.chars + data.length > INVOKE_CHUNK_MAX_CHARS) {
+      refuse('Invoke too large')
+      return
+    }
+    // R1, on EVERY chunk (a transfer grows after chunk 0): summed from the live
+    // records, so a closed socket or a swept transfer can never leave it inflated.
+    // At most MAX_CONNECTIONS x MAX_TRANSFERS entries.
+    let held = 0
+    for (const c of this.clients.values()) {
+      for (const t of c.invokeTransfers.values()) held += t.chars
+    }
+    if (held + data.length > INVOKE_CHUNK_HOST_MAX_CHARS) {
+      refuse('Host is busy reassembling other uploads; retry shortly')
+      return
+    }
+    transfer.chars += data.length
+    transfer.parts.push(data)
+    transfer.next = i + 1
+    transfer.lastChunkAt = Date.now()
+    if (transfer.next < transfer.count) return
+
+    // R3: release the slices before parsing so the peak is the joined string
+    // plus the parse, not three copies.
+    const json = transfer.parts.join('')
+    // Drop the slices themselves, not just the map entry: `transfer` is still a live
+    // local while JSON.parse runs.
+    transfer.parts = []
+    client.invokeTransfers.delete(id)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(json)
+    } catch {
+      refuse('Malformed chunked invoke')
+      return
+    }
+    const req = parsed as Partial<WsInvokeRequest> | null
+    if (
+      typeof req !== 'object' ||
+      req === null ||
+      req.type !== 'invoke' ||
+      req.id !== id ||
+      // The channel chunk 0 was pre-checked for is the one that runs.
+      req.channel !== transfer.channel ||
+      !Array.isArray(req.args)
+    ) {
+      refuse('Malformed chunked invoke')
+      return
+    }
+    void this.handleInvoke(ws, req as WsInvokeRequest)
+  }
+
+  /** Drop transfers idle past {@link INVOKE_CHUNK_IDLE_MS}, answering each id. Runs on the ping tick. */
+  private sweepInvokeTransfers(ws: WebSocket): void {
+    const client = this.clients.get(ws)
+    if (!client || client.invokeTransfers.size === 0) return
+    const now = Date.now()
+    for (const [id, t] of client.invokeTransfers) {
+      if (now - t.lastChunkAt <= INVOKE_CHUNK_IDLE_MS) continue
+      client.invokeTransfers.delete(id)
+      this.sendTo(ws, { type: 'invoke-response', id, ok: false, error: 'Invoke upload timed out' })
     }
   }
 
@@ -4080,30 +4309,31 @@ export class RemoteServer {
     // an authentication result like any other, and a client should not have to
     // special-case where in its lifecycle the frame arrived to learn which
     // passkey it is now holding.
-    this.sendTo(ws, {
-      type: 'auth-response',
-      ok: true,
-      method: 'webauthn',
-      identity: { login: label },
-      // Same rule as the handshake accept — this frame is a re-authentication
-      // result and a client must be able to read it the same way. `fresh` is
-      // the policy re-read a few lines up, not the connect-time snapshot.
-      ...(fresh.policy === 'off' ? { authDisabled: true as const } : {}),
-      // Likewise: the client clears its per-socket origin verdict on EVERY ok
-      // accept, so omitting the field here would have this frame retract a fact
-      // that is not merely still true but was just PROVEN — `origin` is non-null
-      // by the guard at the top of this method (an enrollment socket exists only
-      // where a credential can bind), and a ceremony against it has this instant
-      // verified. Derived from the connection's own `webauthnOrigin`, the same
-      // value the handshake's `capableOrigin` came from.
-      ...(origin !== null ? { webauthnCapableOrigin: true as const } : {}),
-      // Same rule once more (ADR-063): an accept produced by a real assertion
-      // carries a resumption token, and this is one. Without it the device that
-      // just enrolled would be the ONLY passkey client with no resumption —
-      // and it is the device most likely to be a phone about to background
-      // itself.
-      resumeToken
-    })
+    this.sendTo(
+      ws,
+      authSuccessFrame({
+        method: 'webauthn',
+        identity: { login: label },
+        // Same rule as the handshake accept — this frame is a re-authentication
+        // result and a client must be able to read it the same way. `fresh` is
+        // the policy re-read a few lines up, not the connect-time snapshot.
+        ...(fresh.policy === 'off' ? { authDisabled: true as const } : {}),
+        // Likewise: the client clears its per-socket origin verdict on EVERY ok
+        // accept, so omitting the field here would have this frame retract a fact
+        // that is not merely still true but was just PROVEN — `origin` is non-null
+        // by the guard at the top of this method (an enrollment socket exists only
+        // where a credential can bind), and a ceremony against it has this instant
+        // verified. Derived from the connection's own `webauthnOrigin`, the same
+        // value the handshake's `capableOrigin` came from.
+        ...(origin !== null ? { webauthnCapableOrigin: true as const } : {}),
+        // Same rule once more (ADR-063): an accept produced by a real assertion
+        // carries a resumption token, and this is one. Without it the device that
+        // just enrolled would be the ONLY passkey client with no resumption —
+        // and it is the device most likely to be a phone about to background
+        // itself.
+        resumeToken
+      })
+    )
     this.notifyStatus()
   }
 
@@ -4139,20 +4369,43 @@ export class RemoteServer {
       capability,
       kind: this.dispatcher.kindOf(channel)
     })
-    if (capability === 'shell' && !readTerminalPolicy().allowTerminal) {
-      this.revokeShellGrant(client, 'policy-off')
-      throw new Error(TERMINAL_DISABLED_ERROR)
-    }
-    // The IDE's twin, on its OWN toggle (ADR-064). Two capabilities, two
-    // switches: an operator who armed a remote editor has not thereby armed a
-    // pty, and the reverse. Same fail-closed shape as the line above — the toggle
-    // is checked FIRST and independently of any grant, so a grant armed before
-    // the switch moved (or one a client cached) buys nothing.
-    if (capability === 'ide' && !readIdePolicy().allowIde) {
-      this.revokeIdeGrant(client)
-      throw new Error(`${IDE_UNAVAILABLE_ERROR}:toggle-off`)
+    const toggle = toggleRefusal(capability)
+    if (toggle) {
+      if (toggle.capability === 'shell') this.revokeShellGrant(client, 'policy-off')
+      else this.revokeIdeGrant(client)
+      throw new Error(toggle.error)
     }
     this.applyStepUp(client, cls)
+  }
+
+  private stepUpDecision(
+    client: AuthenticatedClient,
+    cls: DispatchClass,
+    now: number
+  ): ReturnType<typeof evaluateStepUp> {
+    return evaluateStepUp({
+      tier: client.stepUpTier,
+      cls,
+      presence: presenceOf(client.connection),
+      now
+    })
+  }
+
+  /**
+   * What the invoke path would answer for `channel`, WITHOUT acting on it: the
+   * same classification and toggles as {@link assertStepUp} and the same table,
+   * but no grant revocation and no window refresh. Used by the chunked-invoke
+   * pre-check (R12), which must never move a step-up window; the real gate still
+   * runs in {@link handleInvoke}. Returns the error text, or null to proceed.
+   */
+  private peekInvokeRefusal(client: AuthenticatedClient, channel: string): string | null {
+    if (!this.dispatcher.has(channel)) return `Channel not available: ${channel}`
+    const capability = this.dispatcher.capabilityOf(channel)
+    const toggle = toggleRefusal(capability)
+    if (toggle) return toggle.error
+    const cls = classifyDispatch({ channel, capability, kind: this.dispatcher.kindOf(channel) })
+    const decision = this.stepUpDecision(client, cls, Date.now())
+    return decision.allow ? null : stepUpRefusalError(decision)
   }
 
   /**
@@ -4163,21 +4416,8 @@ export class RemoteServer {
    */
   private applyStepUp(client: AuthenticatedClient, cls: DispatchClass): void {
     const now = Date.now()
-    const decision = evaluateStepUp({
-      tier: client.stepUpTier,
-      cls,
-      presence: presenceOf(client.connection),
-      now
-    })
-    if (!decision.allow) {
-      // WHICH refusal comes from the table, not from here: the one place that
-      // knows a dispatch is `authcfg` is the one that names the error, so the
-      // transport cannot pair a settings refusal with the ambient code the
-      // client's generic gate would silently retry (ADR-054 §6 amendment).
-      throw new Error(
-        decision.refusal === 'settings-session' ? NEEDS_SETTINGS_SESSION_ERROR : NEEDS_STEP_UP_ERROR
-      )
-    }
+    const decision = this.stepUpDecision(client, cls, now)
+    if (!decision.allow) throw new Error(stepUpRefusalError(decision))
     for (const target of decision.refresh) {
       if (target === 'shellAct') {
         client.connection.shellGrantExpiresAt = now + shellGrantIdleMs()

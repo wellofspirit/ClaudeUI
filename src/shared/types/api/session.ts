@@ -91,7 +91,16 @@ export interface SessionAPI {
     engineId: EngineId,
     messageIndex: number
   ): Promise<ForkAnchorResult>
-  sendPrompt(routingId: string, prompt: string, attachments?: AttachmentUpload[]): Promise<void>
+  sendPrompt(
+    routingId: string,
+    prompt: string,
+    attachments?: AttachmentUpload[],
+    /**
+     * Upload progress (`phase: 'uploading'`, in characters of the invoke JSON). Only the web
+     * client's chunked upload reports it; the desktop and a small send never do.
+     */
+    onProgress?: (progress: InvokeProgress) => void
+  ): Promise<void>
   cancelSession(routingId: string): Promise<void>
   /**
    * Reset a session's conversation in place ("start fresh"). Emits the
