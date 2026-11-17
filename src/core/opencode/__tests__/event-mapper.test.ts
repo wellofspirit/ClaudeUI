@@ -1256,6 +1256,41 @@ describe('subagents', () => {
           }
         })
 
+      it('a run a `running` report re-armed is no child work while its child sits idle (dispatch settlement)', () => {
+        map(...roundOne(), report('msg_r1', 'running'))
+        map(ev('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_r1' }))
+        // The card's run is live and holds the idle timer (ADR-111 §3)…
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+        // …but nothing executes and no report waits: a waiting answer is not coming.
+        expect(mapper.childWorkPending()).toBe(false)
+        // Its own background work wakes it: that round is child work until it ends.
+        map(running(CHILD, 30_000))
+        expect(mapper.childWorkPending()).toBe(true)
+        map(ended())
+        expect(mapper.childWorkPending()).toBe(false)
+      })
+
+      it('a give-up settles an idle re-armed run `stopped` and latches its child; a running one is left to its end', () => {
+        map(...roundOne(), report('msg_r1', 'running'))
+        const settled = mapper.settleGiveUp([CHILD])
+        expect(
+          settled.map(
+            (o) =>
+              o.kind === 'task-notification' && [o.notification.status, o.notification.runIndex]
+          )
+        ).toEqual([['stopped', 1]])
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+        // Its background work wakes it later: interrupted again, never re-armed.
+        const woke = map(running(CHILD, 40_000), report('msg_r2', 'running'))
+        expect(of(woke, 'reinterrupt')).toEqual([{ kind: 'reinterrupt', sessionID: CHILD }])
+        expect(started(woke)).toEqual([])
+        // A child still executing is left to its own (interrupted) end.
+        mapper = new OpencodeEventMapper({ sessionID: SID })
+        map(step(), announce(), ...call('call_a', {}), result('call_a', 'running'), running())
+        expect(mapper.settleGiveUp([CHILD])).toEqual([])
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+      })
+
       it('a `running` report re-arms the run at once: the child waits on its own work, the timer is held', () => {
         map(...roundOne())
         const out = map(report('msg_r1', 'running'))

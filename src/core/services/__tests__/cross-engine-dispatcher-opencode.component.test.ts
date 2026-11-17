@@ -75,6 +75,7 @@ import type {
 import { setOpencodeAuthHooks } from '../../opencode/opencode-auth-hooks'
 import { uiPath } from '../session-tools'
 import { __holdChildPatchesForTests } from '../../opencode/child-rulesets'
+import { OpencodeEventMapper } from '../../opencode/event-mapper'
 import { opencodeAuthProvider } from '../../auth/OpencodeAuthProvider'
 import { PLAN_MODE_DENY_REASON_NO_EXIT_TOOL } from '../../pi/permission-engine'
 import type { MergedClaudeRules } from '../../pi/permission-engine'
@@ -2037,6 +2038,66 @@ describe('opencode target — a turn that launched subagents (owner ruling 3, 20
     expect(state.settled).toBe(false)
     wake(fake, 'msg_report1')
     expect((await running).text).toBe('final answer from the child')
+  })
+
+  // Exit review of f92c650a: a `running` report re-arms the child's run for its card (ADR-111 §3),
+  // but an idle child waiting on its own background shell has no answer coming.
+  it('a child whose report says `running` (its own shell still works) does not hold: the woken turn settles', async () => {
+    const { dispatcher, fake } = makeHarness()
+    fake.next({ hold: true })
+    const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, makeCtx())
+    const state = settledFlag(running)
+    await tick()
+    fake.child('oc-sess-1', 'ses_child', 'call_sub')
+    launched(fake)
+    fake.finish('oc-sess-1', { steps: [{ text: 'launched the child' }] })
+    childRuns(fake)
+    report(fake, 'msg_report1', 'ses_child', 'running')
+    wake(fake, 'msg_report1', 'the page is up')
+    await tick(10)
+    expect(state.settled).toBe(true)
+    const result = await running
+    expect(result.isError).toBeUndefined()
+    expect(result.text).toBe('the page is up')
+  })
+
+  it('a give-up settles an idle child’s run `stopped` (its interrupt ends nothing); the next turn settles normally', async () => {
+    const settle = vi.spyOn(OpencodeEventMapper.prototype, 'settleGiveUp')
+    try {
+      const { dispatcher, fake } = makeHarness()
+      fake.next({ hold: true })
+      const ctx = makeCtx({ toolUseId: 'tu-1' })
+      const running = dispatcher.dispatch({ engine: 'opencode', prompt: 'a' }, ctx)
+      await tick()
+      fake.child('oc-sess-1', 'ses_child', 'call_sub')
+      launched(fake)
+      childRuns(fake)
+      report(fake, 'msg_report1', 'ses_child', 'running')
+      // The target takes the report in and keeps working; the child sits idle (its shell runs).
+      fake.start('oc-sess-1')
+      fake.push('session.inbox.delivered', { sessionID: 'oc-sess-1', inboxID: 'msg_report1' })
+      await tick()
+      expect(dispatcher.stopDispatch('tu-1', 'routing-1', { blockingOnly: true })).toBe(true)
+      expect(await running).toMatchObject({ isError: true, text: 'Dispatch stopped by user.' })
+      await tick(10)
+      // The give-up settled the idle child's re-armed run, as a card's Stop would.
+      expect(settle).toHaveBeenCalledWith(expect.arrayContaining(['ses_child']))
+      expect(settle.mock.results.flatMap((r) => r.value as unknown[])).toContainEqual(
+        expect.objectContaining({
+          kind: 'task-notification',
+          notification: expect.objectContaining({ taskId: 'ses_child', status: 'stopped' })
+        })
+      )
+
+      const next = await dispatcher.dispatch(
+        { engine: 'opencode', prompt: 'b', sessionId: 'oc-sess-1' },
+        makeCtx()
+      )
+      expect(next.isError).toBeUndefined()
+      expect(next.text).toBe('target answer')
+    } finally {
+      settle.mockRestore()
+    }
   })
 
   it('a turn with no child still settles on its own end', async () => {

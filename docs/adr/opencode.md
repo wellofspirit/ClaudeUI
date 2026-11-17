@@ -163,12 +163,14 @@ codemode:false}`; without `codemode:false` opencode hides MCP tools behind `exec
   Every turn re-applies the live mode's ruleset and agent, fail closed, and a mode switch mid-turn re-applies at once.
   It runs the ChatGPT pre-turn gate (§5), then posts an inbox prompt (`steer`) and never after a Stop or abort. A turn
   has started when its own inbox item is delivered (also when steered into an already running execution) and only a
-  terminal output after that settles it. A success is held while a child the target launched still runs or its report
-  waits in the target's inbox, and settles on the end of the execution that took in the last of them; the turn's
-  watchdog still bounds the wait (changed 2026-11-17: opencode 2.3.0 runs every subagent in the background, so the
-  execution that launches one ends on the launch). Give-ups (Stop, timeout, abort, refused prompt) drain: await an in-flight
-  prompt POST, interrupt the session and followed children, cancel that prompt's inbox item, re-interrupt an execution
-  that starts meanwhile. Asks are refused with a message when no dispatch turn is running; otherwise: a child ask its own
+  terminal output after that settles it. A success is held while a child the target launched has not ended its first
+  round, is executing, or has a report waiting in the target's inbox — never for an idle child that only its own
+  background work will wake (its report said `running`) — and settles on the end of the execution that took in the last
+  of them; the turn's watchdog still bounds the wait (changed 2026-11-17: opencode 2.3.0 runs every subagent in the
+  background, so the execution that launches one ends on the launch). Give-ups (Stop, timeout, abort, refused prompt) drain: await an in-flight
+  prompt POST, interrupt the session and followed children (an idle child's run is settled stopped, as a card's Stop
+  does, and its later wake is interrupted again), cancel that prompt's inbox item, re-interrupt an execution that starts
+  meanwhile. Asks are refused with a message when no dispatch turn is running; otherwise: a child ask its own
   agent denies is refused → `hostPrecheck` (user deny rules, plan mode, user ask rules) → the judge under a judged auto
   parent (ADR-088), else a card on the dispatching chat; replies go to the asking session, never `always`. A target's
   session is kept and resumed from the ledger (ADR-105); only a creation that rolled back deletes its session.

@@ -372,6 +372,12 @@ interface RunState {
   readonly description?: string
   /** ClaudeUI stopped this run (user Stop): a non-ok end reads `stopped`, not `failed`. */
   stopped: boolean
+  /**
+   * Re-armed by a `running` report only: the child sits idle while its own
+   * background work runs (`applyReport`). Live for its card and the idle timer,
+   * but no answer is coming until that work wakes the child (`childWorkPending`).
+   */
+  idleUntilWoken: boolean
   /** The terminal notification went out (a superseded run's too). */
   notified: boolean
   /** What it said, kept to re-send with fuller usage when a re-read adds steps behind it. */
@@ -1225,6 +1231,7 @@ export class OpencodeEventMapper {
         ? { description: tool.input.description }
         : {}),
       stopped: false,
+      idleUntilWoken: false,
       notified: false,
       refresh: false,
       tokens: 0,
@@ -1281,11 +1288,12 @@ export class OpencodeEventMapper {
    * more, under the same run index (the reducer folds the two). Cold history
    * reads the same run: its segment's last idle row, last text and every step.
    */
-  private reopenRun(s: SessionState, out: Out): void {
+  private reopenRun(s: SessionState, out: Out, idleUntilWoken = false): void {
     if (s === this.own || !s.owner || !s.notified) return
     const run = this.runs.get(s.owner)
     if (!run?.notified) return
     run.notified = false
+    run.idleUntilWoken = idleUntilWoken
     run.background = true
     run.final = undefined
     run.refresh = false
@@ -1309,7 +1317,7 @@ export class OpencodeEventMapper {
     this.reportsSeen.add(id)
     if (report.state !== 'running' || this.seeding || this.latched.has(report.childID)) return
     const child = this.children.get(report.childID)
-    if (child && !child.running) this.reopenRun(child, out)
+    if (child && !child.running) this.reopenRun(child, out, true)
   }
 
   /**
@@ -1328,6 +1336,26 @@ export class OpencodeEventMapper {
       if (this.runs.get(s.owner)?.stopped) this.notifyTask(s.id, s.owner, 'stopped', out)
     }
     return out
+  }
+
+  /**
+   * After a dispatcher's give-up (Stop, timeout, abort, a hand-back report)
+   * interrupted `sessions`: what a user Stop of each child's card does
+   * (`stopRun` + `settleIdleStops`) — every live run of those children is marked
+   * user-stopped and its child latched (a later wake is interrupted again), and
+   * the runs of the ones NOT executing are settled `stopped` now, since their
+   * interrupt ended nothing upstream (an idle child waiting on its own background
+   * work, one not started yet). An executing one ends on its own events.
+   */
+  settleGiveUp(sessions: readonly string[]): OpencodeMapperOutput[] {
+    for (const id of sessions) {
+      const s = this.children.get(id)
+      const run = s?.owner ? this.runs.get(s.owner) : undefined
+      if (!s || !run || run.notified) continue
+      run.stopped = true
+      this.latched.add(s.id)
+    }
+    return this.settleIdleStops(sessions)
   }
 
   /** A tool the child ran, for its run's `toolUses` and `lastToolName`. */
@@ -1355,14 +1383,21 @@ export class OpencodeEventMapper {
 
   /**
    * True while the own session still has a child's answer to take in: a child's
-   * run is live, or a child's `<subagent>` report waits in the own inbox (a fast
-   * child ended before its parent's turn did; the report wakes the parent for an
-   * execution that reads it). Since 2.3.0 the turn that launches a subagent ends
-   * on the launch, so a caller waiting for the agent's ANSWER (a dispatch target,
-   * owner ruling 3) waits until this is false at the end of an execution.
+   * run that has not ended its first round (launched, not started or executing),
+   * a child executing right now (a later round), or a child's `<subagent>` report
+   * waiting in the own inbox (a fast child ended before its parent's turn did;
+   * the report wakes the parent for an execution that reads it). NOT a run only
+   * a `running` report keeps live: its child sits idle while its own background
+   * work runs (a dev server may never end), so no answer is coming — the card
+   * still shows it running and it holds the idle timer (`hasLiveBackgroundChild`).
+   * Since 2.3.0 the turn that launches a subagent ends on the launch, so a caller
+   * waiting for the agent's ANSWER (a dispatch target, owner ruling 3) waits
+   * until this is false at the end of an execution.
    */
   childWorkPending(): boolean {
-    if (this.hasLiveBackgroundChild()) return true
+    for (const run of this.runs.values())
+      if (run.background && !run.notified && !run.idleUntilWoken) return true
+    for (const child of this.children.values()) if (child.running) return true
     for (const item of this.own.inboxItems.values())
       if (item.type === 'synthetic' && subagentReport(item.payload.text)) return true
     return false

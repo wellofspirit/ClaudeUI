@@ -947,11 +947,16 @@ export class OpencodeTargets {
           pending.posted.catch(() => {}),
           TEARDOWN_GRACE_MS
         )
+      const followed = entry.mapper.followedSessions()
       await stopOpencodeSessions(
         entry.client,
-        entry.mapper.followedSessions(),
+        followed,
         pending ? { sessionID: entry.sessionId, ids: [pending.inboxID] } : undefined
       )
+      // The interrupt ends nothing in an IDLE child (one waiting on its own background work, or
+      // not started yet): stop its run as a card's Stop does, so nothing of the given-up turn
+      // stays live for the target, and a later wake of the child is interrupted again.
+      for (const output of entry.mapper.settleGiveUp(followed)) this.onTargetOutput(entry, output)
     })()
     entry.stopping = stopping
     void stopping.finally(() => {
@@ -1375,6 +1380,15 @@ export class OpencodeTargets {
         })
         return
       }
+      case 'reinterrupt':
+        // A child a give-up stopped woke again (its own background work's end): stop it again.
+        void entry.client.interrupt(o.sessionID).catch((err) => {
+          logger.warn(
+            'CrossEngineDispatcher',
+            `opencode target ${entry.sessionId}: re-interrupt of a stopped child failed: ${errText(err)}`
+          )
+        })
+        return
       case 'subagent-started':
         // A resumed child re-links under a newer call: re-assert its ruleset.
         if (entry.children.has(o.childSessionId)) void entry.children.patchChild(o.childSessionId)
@@ -1400,7 +1414,9 @@ export class OpencodeTargets {
         // opencode 2.3.0 runs every subagent in the background: the execution that launches one
         // ends on the launch, and the child's answer reaches the target as a report that wakes
         // it. The dispatched turn ends on the execution that took in the last of them (owner
-        // ruling 3): held while a child runs or its report waits. The watchdog still bounds it.
+        // ruling 3): held while a child has not ended its first round, executes, or its report
+        // waits — never for an idle child only its own background work will wake. The watchdog
+        // still bounds it.
         if (o.sessionId === entry.sessionId && entry.turnStarted && entry.mapper.childWorkPending())
           return
         this.settleTargetTurn(entry, o.sessionId, { kind: 'done' })
