@@ -2,6 +2,26 @@
 
 Per-bump compatibility assessments for pi, newest first. A bump's assessment is written here; the wire reference is in [README.md](README.md).
 
+## 1.5.1 → 1.5.2 compatibility assessment (2026-11-17)
+
+`git diff v1.5.1..v1.5.2`. No RPC command, event, field, CLI flag or session-format change;
+`docs/rpc.md`, `modes/rpc/`, `cli/`, `core/session-manager.ts` and `packages/agent/src` are
+unchanged.
+
+- **Missing session folder** (`main.ts`, `core/session-cwd.ts`): interactive pi now offers
+  Continue / Fork / Cancel when a session's stored working directory is gone. RPC mode keeps the old
+  path (prints `MissingSessionCwdError` and exits 1); ClaudeUI matches neither message. Offering the
+  same choice through `--fork` is backlog (#269).
+- **Anthropic OAuth version string** (`packages/ai/src/api/anthropic-messages.ts`): the
+  `claude-cli/…` user-agent pi sends for `pi /login` Anthropic sign-ins moved to 2.1.322. ClaudeUI
+  syncs only `openai-codex`.
+- **Bulk of the diff** is `apps/p2`, `packages/chord` and `packages/durable`, none of which the pi
+  binary ships; `packages/coding-agent` changed by about 350 lines (the prompt above and its tests).
+- **Release assets:** same six names; every archive matched `SHA256SUMS` after download.
+- **Gated suite:** 25 of 25, no skip, on the darwin-arm64 1.5.2 managed-store binary, model calls on
+  `openai-codex/gpt-5.6-luna`, with the 1.5.1 credential recipe below unchanged. The real
+  `auth.json`'s sha256 and mtime were unchanged after the run.
+
 ## 1.5.0 → 1.5.1 compatibility assessment (2026-11-10)
 
 `git diff v1.5.0..v1.5.1`. No RPC command, event or field was added or removed; `docs/rpc.md`

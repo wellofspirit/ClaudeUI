@@ -1,32 +1,32 @@
 {
   "id": "pi",
-  "tested": "1.5.1",
-  "floor": "1.5.1",
+  "tested": "1.5.2",
+  "floor": "1.5.2",
   "ceiling": "2.0.0",
   "platforms": {
     "win32-x64": {
       "asset": "pi-windows-x64.zip",
-      "archiveSha256": "ee0c0d971c3d3db1a310a28113281d440b643008ea9842f74c33124e18e2810c"
+      "archiveSha256": "e6adb8cb8c84eca14391ad24b363de9d2be98a89ca3ba3fdee1fa4de32b7f2e8"
     },
     "win32-arm64": {
       "asset": "pi-windows-arm64.zip",
-      "archiveSha256": "2b6988ce6c1b77c1878a68ce92b3b8137f3e5d4dddb95ee8e1cf374846b84339"
+      "archiveSha256": "e83404bc5a6003ac950683edd9b6cf499dac91ec890d8439a8c32528de534a77"
     },
     "darwin-arm64": {
       "asset": "pi-darwin-arm64.tar.gz",
-      "archiveSha256": "eecbee4fbb6128c625ba44ffe30cfc15884a7791d242017ba9378f57485971d5"
+      "archiveSha256": "56b5e194d485ced555667b8ba3276157a8272e9ecde9e001e428af80985bdd9b"
     },
     "darwin-x64": {
       "asset": "pi-darwin-x64.tar.gz",
-      "archiveSha256": "9fa62a4fb68b7036c151a1c6128d8a91dd4f83f451f6b33e479ea7cb6de1a026"
+      "archiveSha256": "f997a088613514ac97d913aeea7642094d84fe6d46854ff7e64e2c12e536dc50"
     },
     "linux-x64": {
       "asset": "pi-linux-x64.tar.gz",
-      "archiveSha256": "cb69979c0a8162bf22bcee0762f3c3701a45b51b552fa16a736d467c6068509f"
+      "archiveSha256": "811c6f2c9e7aaee252b5404252e556fb713aa209c1f7f924226aa77d4ef70cb5"
     },
     "linux-arm64": {
       "asset": "pi-linux-arm64.tar.gz",
-      "archiveSha256": "98f1762f56adc5703f931996ae802216dad490dde0b6793aed1e3bb0383df1f7"
+      "archiveSha256": "42805cd5615952fcbbfc9c56b04f8feb84395134952e169a6cdc8d7676975666"
     }
   }
 }
