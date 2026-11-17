@@ -9,12 +9,14 @@
  *   3. implicit-1M model (UE(), cli.js@char3226523):
  *      claude-fable-5 | claude-mythos-5 |
  *      claude-opus-4-7 | claude-opus-4-8        → 1M
- *   4. otherwise                                → 200K
+ *   4. a model cli.js recognises               → its catalog window (200K)
+ *   5. a model it does not recognise            → 1M (200K before 2.1.323)
  *
- * Steps 1, 3, and 4 are replicated in `resolveContextWindow`
+ * Steps 1 and 3–5 are replicated in `resolveContextWindow`
  * (src/shared/model-capabilities.ts) so the renderer can share the exact same
- * logic. This module adds the main-process-only `CLAUDE_CODE_DISABLE_1M_CONTEXT`
- * env override on top. Known divergences, accepted as such:
+ * logic. This module adds the main-process-only env overrides on top:
+ * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` for an unrecognised model and
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT`. Known divergences, accepted as such:
  *   - Step 2 (explicit beta header) isn't replicated — ClaudeUI never sends
  *     custom beta headers, so the branch is unreachable for us.
  *   - Step 3 in cli.js is additionally gated on provider (first-party API,
@@ -28,7 +30,11 @@
  *     "claude-opus-4-8-20251201", Bedrock arns containing the base id)
  */
 
-import { resolveContextWindow, CONTEXT_WINDOW_DEFAULT } from '../../shared/model-capabilities'
+import {
+  resolveContextWindow,
+  isUnrecognisedModel,
+  CONTEXT_WINDOW_DEFAULT
+} from '../../shared/model-capabilities'
 
 /**
  * cli.js boolean-env semantics (`__()`, cli.js@char27057). Exported so every
@@ -40,8 +46,17 @@ export function envFlag(value: string | undefined): boolean {
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase().trim())
 }
 
-/** Returns the context window size in tokens for a model value (alias or full id). */
+/**
+ * Returns the context window size in tokens for a model value (alias or full id). Order as in
+ * cli.js 2.1.326 (`rR`): a model it does not recognise takes `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+ * when that is a positive number (since 2.1.325, whatever the id looks like), before
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT` caps everything else at 200K.
+ */
 export function getContextWindowSize(modelValue: string): number {
+  if (isUnrecognisedModel(modelValue)) {
+    const max = Number.parseInt(process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS ?? '', 10)
+    if (Number.isFinite(max) && max > 0) return max
+  }
   if (envFlag(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT)) return CONTEXT_WINDOW_DEFAULT
   return resolveContextWindow(modelValue)
 }
