@@ -177,7 +177,11 @@ export interface SystemMessage extends BaseSDKMessage {
    * internal forks — dreams, scans, fork workers). Its model never sees it.
    */
   skip_transcript?: boolean
-  /** task_notification: an ambient (housekeeping) task the model never sees. */
+  /**
+   * task_started / task_notification: an ambient (housekeeping) task the model
+   * never sees: a `skip_transcript` task, or an ambient `monitor_ws` (an
+   * artifact's comment watcher). cli.js's busy predicates all skip it.
+   */
   ambient?: boolean
   /**
    * task_notification of an Agent-tool subagent that reports through its

@@ -30,6 +30,7 @@
  */
 import type { SessionStatus } from '../../shared/types'
 import type { SessionLinkInfo } from '../../shared/session-links'
+import { countWakingRecords } from '../../shared/waking-task-types'
 import type { CanonicalSessionState, CanonicalState } from '../shared/sync/state'
 import { deliver } from './session-delivery'
 import { resolveRef, titleOf } from './session-links'
@@ -225,7 +226,8 @@ function notifyParent(
     ref: childRef,
     title,
     outcome,
-    tasksRunning: found ? Object.keys(found.session.activeTasks).length : 0,
+    // Only work that will wake the child again, as session_list counts it.
+    tasksRunning: found ? countWakingRecords(found.session.activeTasks) : 0,
     text: found ? finalText(found.session.messages, after) : ''
   })
   deliver(manager, parent.id, {

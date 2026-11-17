@@ -445,12 +445,17 @@ describe('outcome', () => {
   })
 
   it('counts the background tasks still running', async () => {
-    const task = (c: { id: string }, tool: string): void =>
-      emitEvent('session:task-started', [c.id, { toolUseId: tool, taskId: tool, taskType: 'bash' }])
+    const task = (c: { id: string }, tool: string, wakesParent = true): void =>
+      emitEvent('session:task-started', [
+        c.id,
+        { toolUseId: tool, taskId: tool, taskType: 'local_bash', wakesParent }
+      ])
     const [two] = await ended((_p, c) => {
       run(c, 'running')
       task(c, 'bg1')
       task(c, 'bg2')
+      // An artifact's comment watcher: armed, but never wakes the child.
+      task(c, 'artifact', false)
       run(c, 'idle')
     })
     expect(two).toContain('2 background tasks still running')

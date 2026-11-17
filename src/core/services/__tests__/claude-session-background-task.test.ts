@@ -348,6 +348,19 @@ describe('ClaudeSession — task_started stamps wakesParent', () => {
     )
     expect(startedEvents(sent).map((d) => d.wakesParent)).toEqual([true, true])
   })
+
+  // cli.js 2.1.321 arms an ambient monitor_ws (an artifact's comment watcher)
+  // on every Artifact publish and keeps it for the session; its busy
+  // predicates all skip it, so it must not keep the session "working".
+  it('stamps an ambient task as not waking, on start and on the background flip', async () => {
+    const { sent, handle } = await startSession('routing-wakes-ambient')
+    await feed(
+      handle,
+      { ...taskStarted('toolu_artifact', 'amb1', 'monitor_ws', false), ambient: true },
+      taskUpdated('amb1', { is_backgrounded: true })
+    )
+    expect(startedEvents(sent).map((d) => d.wakesParent)).toEqual([false, false])
+  })
 })
 
 describe('ClaudeSession — the task_updated flip', () => {
