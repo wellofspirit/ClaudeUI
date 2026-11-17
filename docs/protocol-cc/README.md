@@ -53,8 +53,8 @@ cli.js's claude.ai **login** scope list now ends with `user:privacy_consents:wri
 set, the reason enum, the env credential with `refreshToken:null`, the env-update allowlist and the
 child-env scrub) hold, at new offsets (02 §2.14, 06 §6.7, 08 §8.7). The auto-mode stage-2 prompt is byte-identical apart from its
 runtime slot's name, and the default rules are byte-identical (21 / 1 / 72 / 16). The
-classifier-bypass predicate now strips more wildcard shell rules. That diff is research for a later
-slice, and 14 is not updated. `bash-output-streaming` applies on all three platforms through its
+classifier-bypass predicate now strips more wildcard shell rules; 14 §3.0 records it and
+ClaudeUI's `isClassifierBypassingRule` mirrors it. `bash-output-streaming` applies on all three platforms through its
 ≤2.1.319 branches: the late-callback guard and the two-argument `startPolling` are gone (its README).
 The boot probe, the cross-platform apply and the sdk-contract suite passed. The live patch
 suites are run separately and are not recorded here.
