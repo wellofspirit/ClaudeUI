@@ -960,7 +960,8 @@ describe('the direct opencode_* tools (reachable since 2.2.0)', () => {
     // Console watches wake the session on outside events with nothing from the user.
     'console_watch_watch',
     'console_watch_unwatch',
-    'console_watch_watches'
+    'console_watch_watches',
+    'console_watch_events'
   ]
 
   it.each([

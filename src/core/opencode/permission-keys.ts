@@ -148,6 +148,7 @@ export const V2_BUILTIN_ACTIONS: readonly string[] = [
   'console_watch_watch',
   'console_watch_unwatch',
   'console_watch_watches',
+  'console_watch_events',
   'experimental_image_generate'
 ]
 

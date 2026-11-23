@@ -352,7 +352,7 @@ export const EXECUTE_DENY_RULE: V2Rule = rule('execute', 'deny')
  * older than 2.3.2.
  *
  * Console watches (`plugin/provider/opencode-watches.ts`, namespace `console_watch`:
- * `console_watch_watch`, `_unwatch`, `_watches`; `experimental.console_watches` or `all_flags`
+ * `console_watch_watch`, `_unwatch`, `_watches`, `_events`; `experimental.console_watches` or `all_flags`
  * plus an OpenCode Console connection) ask no permission and wake the session on Slack,
  * GitHub or MCP events with nothing from the user: denied for the same reason.
  */
