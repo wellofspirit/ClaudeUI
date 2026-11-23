@@ -188,12 +188,34 @@ describe('allowRuleSkip — shell', () => {
     ['DEBUG=1 rm -rf build', ['Bash(DEBUG=1 *)'], {}, 'rule:classifier-bypassing'],
     // …while a named program after the launcher or wrapper still skips, as in cli.js.
     [
+      'python3.11 -m pkg.mod tests',
+      ['Bash(python3.11 -m pkg.mod *)'],
+      {},
+      'allow Bash(python3.11 -m pkg.mod *)'
+    ],
+    ['nohup ./server --port 1', ['Bash(nohup ./server *)'], {}, 'allow Bash(nohup ./server *)'],
+    // cli.js 2.1.330: spellings of `npm run` and versioned/pathed launchers that skipped the judge
+    // on the 2.1.326 mirror.
+    ['/usr/bin/npm run build', ['Bash(/usr/bin/npm run:*)'], {}, 'rule:classifier-bypassing'],
+    ['npm run build', ['Bash("npm" run *)'], {}, 'rule:classifier-bypassing'],
+    ['npm run build', ['Bash(npm  run *)'], {}, 'rule:classifier-bypassing'],
+    ['python3.12', ['Bash(python3.12)'], {}, 'rule:classifier-bypassing'],
+    [
       'python3.11 -m pytest tests',
       ['Bash(python3.11 -m pytest *)'],
       {},
-      'allow Bash(python3.11 -m pytest *)'
+      'rule:classifier-bypassing'
     ],
-    ['nohup ./server --port 1', ['Bash(nohup ./server *)'], {}, 'allow Bash(nohup ./server *)'],
+    // ClaudeUI-only: the rule as the matcher reads it (a non-breaking space is a word break).
+    ['npm run build', ['Bash(npm\u00a0run:*)'], {}, 'rule:classifier-bypassing'],
+    ['npm run-script build', ['Bash(npm run-script:*)'], {}, 'rule:classifier-bypassing'],
+    // … while a named script under a pathed npm still skips.
+    [
+      '/usr/bin/npm run test',
+      ['Bash(/usr/bin/npm run test:*)'],
+      {},
+      'allow Bash(/usr/bin/npm run test:*)'
+    ],
     ['node -e x', ['Bash(node -e x)'], {}, 'allow Bash(node -e x)'],
     // (b) Write targets must resolve inside the workspace.
     ['git status; rm -rf /', ['Bash(git:*)', 'Bash(rm:*)'], {}, 'write:path:out-of-scope'],

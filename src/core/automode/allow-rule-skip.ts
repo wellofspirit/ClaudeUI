@@ -143,9 +143,9 @@ export function allowRuleSkip(action: AllowSkipAction, scope: AllowSkipScope): A
 /**
  * Which of the user's allow rules may skip the judge at all. A rule is
  * unusable when it is one of cli.js's classifier-bypassing shapes
- * (`isClassifierBypassingRule`, 2.1.326 parity: bare / `*` Bash|PowerShell, a
+ * (`isClassifierBypassingRule`, 2.1.330 parity: bare / `*` Bash|PowerShell, a
  * wildcard rule that leaves the program open (`FOO=1 *`, `python3.11 *`,
- * `timeout 60 *`), the launcher shapes, `Agent`/`Task`/`Monitor`/`AppifactRepl`); a Bash or
+ * `timeout 60 *`, `/usr/bin/npm run:*`, `pnpm dlx *`), the launcher shapes, `Agent`/`Task`/`Monitor`/`AppifactRepl`); a Bash or
  * PowerShell rule while `classifyAllShell` is set; a rule that would cover the
  * dispatch tool (`mcp__claude-ui-collab…`, and `mcp__claudeui…` — the
  * opencode hosted server's name, reserved by `claude-mcp-bridge.ts` but still

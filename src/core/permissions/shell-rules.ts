@@ -2670,7 +2670,10 @@ export function allowCovers(
 /**
  * cli.js's interpreter/launcher prefixes (`SJt` + `Qmr` for Bash, `OOn`'s list
  * for PowerShell; `docs/protocol-cc/14-auto-mode-classifier.md` §3.0) — used
- * as ONE union for both tools, each also as `<name>.exe`.
+ * as ONE union for both tools. 2.1.330 added the package runners (`pnpx`,
+ * `npm exec|x`, `pnpm exec|dlx`, `yarn exec|dlx`, `bun exec|x`); ClaudeUI adds
+ * npm's own names for `npm run` (`run-script`, `rum`, `urn`) and
+ * `pnpm run-script`, which cli.js misses (more judging only).
  */
 const LAUNCHERS: readonly string[] = [
   'python',
@@ -2685,10 +2688,23 @@ const LAUNCHERS: readonly string[] = [
   'lua',
   'npx',
   'bunx',
+  'pnpx',
   'npm run',
   'yarn run',
   'pnpm run',
   'bun run',
+  'npm exec',
+  'npm x',
+  'pnpm exec',
+  'pnpm dlx',
+  'yarn exec',
+  'yarn dlx',
+  'bun exec',
+  'bun x',
+  'npm run-script',
+  'npm rum',
+  'npm urn',
+  'pnpm run-script',
   'bash',
   'sh',
   'ssh',
@@ -2737,6 +2753,13 @@ const ALWAYS_BYPASSING_TOOLS: ReadonlySet<string> = new Set([
   'Monitor',
   'AppifactRepl'
 ])
+
+/**
+ * cli.js 2.1.330 `Qbs`: PowerShell's list shape (not its wildcard test) also takes these.
+ * ClaudeUI applies them to both tools' list shape (the one-list policy: a Bash rule may run
+ * under pwsh), so e.g. `Bash(module:*)` is judged too.
+ */
+const POWERSHELL_LIST_ONLY: readonly string[] = ['get-module', 'gmo', 'module']
 
 /**
  * cli.js 2.1.326 `pEn`: shells and wrappers a wildcard rule's leading words may pass through on
@@ -2800,6 +2823,10 @@ const RULE_WORD = /\s*((?:\\.|'[^']*'|"(?:\\.|[^"\\])*"|[^\s\\'"])+)(?=\s)/gsy
 const TRANSPARENT_WORD = /^(?:\w+\+?=|-|\/+\w$|\d[\d.]*[smhd]?$|[^a-z0-9]*$)|[^\w .+@%,:~/-]/i
 // A `-c`-style word (`-c`, `-lc`, `-ec`, `/c`): whatever follows runs as code.
 const DASH_C_WORD = /^(?:-\w*c|\/c)$/i
+// cli.js 2.1.330 `ee`, verbatim: a PowerShell `.\dir\file` program, rewritten to `./dir/file`
+// before the wildcard test, so `PowerShell(.\scripts\build.ps1 *)` keeps its allow as
+// `Bash(./scripts/build.sh *)` does. PowerShell only: for Bash it would keep rules cli.js strips.
+const DOT_BACKSLASH_PROGRAM = /^\.(?:\\[\w.+@-]*[\w+@-])+(?=[ \t]|:\*$)/
 
 /** cli.js 2.1.326 `ue`: a program word's name — no directory, lowercase, no trailing version or `.exe`. */
 function ruleProgramName(word: string): string {
@@ -2810,20 +2837,42 @@ function ruleProgramName(word: string): string {
 }
 
 /**
- * cli.js 2.1.326 `ce` (§3.0 of the classifier doc): does this wildcard rule leave the program
- * that runs open? Walks the complete words before the first unescaped `*`, passing over words
+ * cli.js 2.1.330 `R`, verbatim: a rule as its list shape is compared — trimmed, lowercase, one
+ * space between words, a run of stars as one, the first word as its program name
+ * ({@link ruleProgramName}: no folder, version or `.exe`), quotes dropped. So `/usr/bin/npm run:*`,
+ * `"npm" run *` and `python3.12` read as the launchers they spell.
+ */
+function normaliseRule(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\*[ *]*\*/g, '*')
+    .replace(/^(?:"[^"*]*"|'[^'*]*'|[^ *='"])+?(?= |:\*$|$)/, (w) =>
+      ruleProgramName(w.replace(/['"]/g, ''))
+    )
+    .replace(/['"]/g, '')
+}
+
+/**
+ * cli.js 2.1.330 `L` (§3.0 of the classifier doc): does this wildcard rule leave the program
+ * that runs open? First (new in 2.1.330): the words before the first `*`, less trailing flags and
+ * letterless words, normalised, are exactly a launcher (`npm run *`, `/usr/bin/npm run -s *`,
+ * `pnpm dlx *`). Then 2.1.326's `ce`: walk the complete words before the `*`, passing over words
  * that name no program and over shells, wrappers and launchers; a `-c` word answers yes at once,
  * any other program answers no. The partial word running into the `*` answers yes when it names
  * no program, is an absolute / `~` / drive / `..` path, or starts a single-word name in the list
  * (`py*`). An exact rule (no unescaped `*`) answers no. Over {@link LAUNCHERS}, the Bash and
  * PowerShell union, so it can only strip more than cli.js's per-tool list (`Bash(iex*)`).
- * `specifier` is unescaped first as cli.js's rule parser does (`\(` `\)` `\\`).
+ * `content` is already unescaped (`\(` `\)` `\\`), as cli.js's rule parser hands it over.
  */
-function wildcardRuleRunsAnything(specifier: string): boolean {
-  const unescaped = specifier.replace(/\\([()])/g, '$1').replace(/\\\\/g, '\\')
-  const rule = unescaped.replace(/:\*$/, ' *')
+function wildcardRuleRunsAnything(content: string): boolean {
+  const rule = content.replace(/:\*$/, ' *')
   const head = /^(?:\\[*\\]|[^*])*/.exec(rule)?.[0] ?? ''
   if (head === rule) return false
+  const words = normaliseRule(head).split(' ')
+  const last = words.findLastIndex((w) => !/^(?:-|[^a-z0-9:]*$)/.test(w))
+  if (LAUNCHERS.includes(words.slice(0, last + 1).join(' '))) return true
   const names = [...SHELLS_AND_WRAPPERS, ...LAUNCHERS]
   let used = 0
   for (const [raw, word = ''] of head.matchAll(RULE_WORD)) {
@@ -2841,44 +2890,60 @@ function wildcardRuleRunsAnything(specifier: string): boolean {
   )
 }
 
-/** cli.js `wJt`'s launcher shapes over {@link LAUNCHERS}; `pythonException` is Bash's `-m dotted.module:*`. */
-function launcherShape(specifier: string, pythonException: boolean): boolean {
-  const n = specifier.trim().toLowerCase()
+/**
+ * cli.js `wJt`'s launcher shapes (2.1.330: over the normalised rule, which also covers the
+ * `.exe` spellings) over {@link LAUNCHERS} plus {@link POWERSHELL_LIST_ONLY}; Bash keeps the
+ * `python[digits.]* -m dotted.module:*` exception.
+ */
+function launcherShape(content: string, tool: 'Bash' | 'PowerShell'): boolean {
+  const n = normaliseRule(content)
   if (n === '*') return true
-  for (const g of LAUNCHERS) {
-    const space = g.indexOf(' ')
-    const exe = space < 0 ? `${g}.exe` : `${g.slice(0, space)}.exe${g.slice(space)}`
-    for (const name of [g, exe]) {
-      if (n === name || n === `${name}:*` || n === `${name} *` || n === `${name}*`) return true
-      if (n.startsWith(`${name} -`) && n.endsWith('*')) {
-        const rest = n.slice(name.length + 1, -1)
-        if (
-          pythonException &&
-          /^python[\d.]*$/.test(g) &&
-          /^-m\s+\w+\.[\w.]+(\s*:|\s+)$/.test(rest)
-        ) {
-          continue
-        }
-        return true
+  for (const g of [...LAUNCHERS, ...POWERSHELL_LIST_ONLY]) {
+    if (n === g || n === `${g}:*` || n === `${g} *` || n === `${g}*`) return true
+    if (n.startsWith(`${g} -`) && n.endsWith('*')) {
+      const rest = n.slice(g.length + 1, -1)
+      if (
+        tool === 'Bash' &&
+        /^python[\d.]*$/.test(g) &&
+        /^-m\s+\w+\.[\w.]+(\s*:|\s+)$/.test(rest)
+      ) {
+        continue
       }
+      return true
     }
   }
   return false
 }
 
+/** One reading of a rule's content: cli.js's wildcard test, then its list shape. */
+function contentBypasses(content: string, tool: 'Bash' | 'PowerShell'): boolean {
+  const wild =
+    tool === 'PowerShell'
+      ? content.replace(DOT_BACKSLASH_PROGRAM, (m) => m.replaceAll('\\', '/'))
+      : content
+  return wildcardRuleRunsAnything(wild) || launcherShape(content, tool)
+}
+
 /**
- * cli.js parity (2.1.326 `e3o` / `t3o`, §3.0 of the classifier doc): would this
+ * cli.js parity (2.1.330 `e3o` / `t3o`, §3.0 of the classifier doc): would this
  * allow rule let the agent bypass the auto-mode classifier wholesale? True for a
  * bare / `*` / whitespace-and-`*` Bash or PowerShell rule; a wildcard rule that
  * leaves the program open ({@link wildcardRuleRunsAnything}: `:*`, `FOO=1 *`,
  * `$HOME/bin/*`, `/usr/local/bin/*`, `py*`, `python3.11 *`, `timeout 60 *`,
- * `bash -c *`); a launcher shape (`g`, `g:*`, `g *`, `g*`, `g -…*`) over the
- * union launcher list, except Bash's `python[digits.]* -m dotted.module:*`; and
- * any `Agent`, `Task`, `Monitor` or `AppifactRepl` rule. Pure over the rule
- * string — `autoMode.classifyAllShell` is the caller's input. `Bash(git:*)`,
- * `Bash(npm:*)`, `Bash(bun run test:*)` and `Bash(timeout 60 make *)` are NOT
- * bypassing (parity: they survive in cli.js too). Never throws (an internal
- * failure answers `true`).
+ * `bash -c *`, `/usr/bin/npm run:*`, `pnpm dlx *`); a launcher shape (`g`, `g:*`,
+ * `g *`, `g*`, `g -…*`) over the union launcher list, except Bash's
+ * `python[digits.]* -m dotted.module:*`; and any `Agent`, `Task`, `Monitor` or
+ * `AppifactRepl` rule. Pure over the rule string — `autoMode.classifyAllShell` is
+ * the caller's input. `Bash(git:*)`, `Bash(npm:*)`, `Bash(bun run test:*)` and
+ * `Bash(timeout 60 make *)` are NOT bypassing (parity: they survive in cli.js
+ * too).
+ *
+ * The content is unescaped once (`\(` `\)` `\\`) as cli.js's rule parser does. It is
+ * also tested as ClaudeUI's own matcher reads it (`splitRuleWords`: any whitespace
+ * splits words, a `\x` escape is `x`): a rule stripped under either reading is
+ * stripped, so `Bash(npm run:*)` typed with a non-breaking space, or `np\m run *`,
+ * cannot skip the judge for every script (ClaudeUI-only, more judging). Never
+ * throws (an internal failure answers `true`).
  */
 export function isClassifierBypassingRule(rule: string): boolean {
   try {
@@ -2889,7 +2954,10 @@ export function isClassifierBypassingRule(rule: string): boolean {
     const spec = parsed.specifier
     // `/^[\s*]+$/` is subsumed by wildcardRuleRunsAnything upstream; kept as an explicit guard.
     if (spec === undefined || /^[\s*]+$/.test(spec)) return true
-    return wildcardRuleRunsAnything(spec) || launcherShape(spec, parsed.tool === 'Bash')
+    const content = spec.replace(/\\([()])/g, '$1').replace(/\\\\/g, '\\')
+    if (contentBypasses(content, parsed.tool)) return true
+    const asMatcherReadsIt = content.replace(/\\(.)/gs, '$1').replace(/\s+/g, ' ').trim()
+    return asMatcherReadsIt !== content && contentBypasses(asMatcherReadsIt, parsed.tool)
   } catch {
     return true
   }

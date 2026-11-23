@@ -899,7 +899,6 @@ describe('isClassifierBypassingRule (cli.js ZIe parity)', () => {
     'Bash(C:\\tools\\app.exe *)',
     'Bash(.\\gradlew.bat *)',
     'PowerShell(C:\\tools\\app.exe *)',
-    'PowerShell(.\\build.ps1 *)',
     // A prefix of a single-word launcher or wrapper.
     'Bash(py*)',
     'Bash(pyth*)',
@@ -945,7 +944,6 @@ describe('isClassifierBypassingRule (cli.js ZIe parity)', () => {
     'Bash(C:\\tools\\app.exe build *)',
     'Bash(timeout 60 make *)',
     'Bash(nohup ./server *)',
-    'Bash(python3.11 -m pytest *)',
     'Bash(sudo make *)',
     'Bash(env FOO=1 make *)',
     'Bash(sh script.sh *)',
@@ -964,6 +962,109 @@ describe('isClassifierBypassingRule (cli.js ZIe parity)', () => {
     'Bash(GIT:*)',
     'Bash(Make *)'
   ])('%s still does not (cli.js 2.1.326 keeps it too)', (rule) => {
+    expect(isClassifierBypassingRule(rule)).toBe(false)
+  })
+})
+
+describe('isClassifierBypassingRule — cli.js 2.1.330 additions', () => {
+  // Checked against cli.js 2.1.330's verbatim predicate (the bump's automode-diff-330 research).
+  it.each([
+    // The package runners 2.1.330 added, in every shape.
+    'Bash(pnpx)',
+    'Bash(pnpx:*)',
+    'Bash(pnp*)',
+    'Bash(npm exec *)',
+    'Bash(npm x:*)',
+    'Bash(pnpm exec *)',
+    'Bash(pnpm dlx *)',
+    'Bash(pnpm dlx)',
+    'Bash(yarn exec:*)',
+    'Bash(yarn dlx *)',
+    'Bash(bun exec *)',
+    'Bash(bun x *)',
+    'Bash(npm exec -y *)',
+    'Bash(npm exec -- prettier *)',
+    'PowerShell(pnpm dlx *)',
+    // A first word that normalises to a launcher (folder, quotes, spacing, version).
+    'Bash(/usr/bin/npm run:*)',
+    'Bash(/usr/local/bin/npm run *)',
+    'Bash(C:/nodejs/npm run *)',
+    'Bash(~/.bun/bin/bun x *)',
+    'Bash("npm" run *)',
+    "Bash('npm' run *)",
+    'Bash(npm  run *)',
+    'Bash(npm\trun *)',
+    'Bash(/usr/bin/npm run -s *)',
+    'Bash(/usr/bin/npm run)',
+    'Bash(/usr/bin/python3)',
+    'Bash(python3.12)',
+    'Bash(node22)',
+    // A versioned or pathed launcher followed by a flag.
+    'Bash(/usr/bin/python3 -m pytest:*)',
+    'Bash(python3.11 -m pytest *)',
+    'Bash(/usr/bin/node -r x *)',
+    'PowerShell(python3.11 -m pytest *)',
+    // Exactly a launcher before the `*`, whatever follows it.
+    'Bash(npm run * --watch)',
+    'Bash(yarn run *.js)',
+    'Bash(npm run **)',
+    'Bash(npm exec --yes -- *)',
+    'Bash(yarn dlx ./ *)',
+    // PowerShell's module names (list shape), and paths that stay stripped.
+    'PowerShell(get-module)',
+    'PowerShell(Get-Module *)',
+    'PowerShell(gmo:*)',
+    'PowerShell(module -ListAvailable *)',
+    'PowerShell(.\\python.exe *)',
+    'PowerShell(..\\tools\\x.ps1 *)',
+    'Bash(.\\scripts\\build.ps1 *)',
+    // ClaudeUI-only (more judging): the module names count for Bash too (one list) …
+    'Bash(gmo:*)',
+    'Bash(module *)',
+    'Bash(Get-Module *)',
+    // … npm's own names for `npm run` …
+    'Bash(npm run-script:*)',
+    'Bash(npm rum *)',
+    'Bash(npm urn:*)',
+    'Bash(pnpm run-script *)',
+    // … and the rule as ClaudeUI's matcher reads it (any whitespace splits, `\x` is `x`).
+    'Bash(npm\u00a0run:*)',
+    'Bash(npm\u2003run *)',
+    'Bash(npm\vrun *)',
+    'Bash(np\\m run *)',
+    'Bash(npm r\\un:*)'
+  ])('%s bypasses', (rule) => {
+    expect(isClassifierBypassingRule(rule)).toBe(true)
+  })
+
+  it.each([
+    // 2.1.330 keeps a PowerShell `.\` script rule, as `./script *` is kept for Bash.
+    'PowerShell(.\\build.ps1 *)',
+    'PowerShell(.\\scripts\\build.ps1 *)',
+    'PowerShell(.\\scripts\\build.ps1:*)',
+    'PowerShell(.\\build.ps1 -Config *)',
+    'PowerShell(.\\gradlew.bat *)',
+    'PowerShell(.\\scripts\\*)',
+    // A named package or script after the runner keeps the rule.
+    'Bash(pnpm dlx create-vite:*)',
+    'Bash(npm exec prettier *)',
+    'Bash(bun x tsc *)',
+    'Bash(pnpx tsc *)',
+    'Bash(yarn dlx @scope/pkg *)',
+    'Bash(pnpm:*)',
+    'Bash(bun *)',
+    'Bash(npm *)',
+    'Bash(/usr/bin/npm run test:*)',
+    'Bash(/usr/bin/python3 -m pkg.mod:*)',
+    'Bash(python3.11 -m pkg.mod *)',
+    'Bash("git" *)',
+    // Upstream gaps kept for parity.
+    'Bash(npm.cmd run *)',
+    'Bash(env npm run *)',
+    'Bash(FOO=1 npm run *)',
+    'Bash(timeout 60 pnpm dlx *)',
+    'Bash(module load:*)'
+  ])('%s does not (cli.js 2.1.330 keeps it too)', (rule) => {
     expect(isClassifierBypassingRule(rule)).toBe(false)
   })
 })
