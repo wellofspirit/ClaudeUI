@@ -68,6 +68,20 @@ cli.js has **three** dispatchers. Most subtypes only work on the main one.
 
 See `09-initialize.md` for full details. One-shot handshake, sent exactly once per session.
 
+2.1.326 adds three optional request fields (schema, not probed; 09 is not yet updated):
+
+- `mcpServers`: the serializable MCP server entries, read only at launch under `--await-initialize`, as the stdin form of `--mcp-config`. It keeps server credentials off the command line, and the response's `mcp_servers_applied` says whether it was used.
+- `managedSettings` (`@internal`): read only under `--await-initialize --managed-settings-in-initialize` (02 §2.14b).
+- `resumeOnly` (`@internal`, helper reconnect).
+
+The `sdkMcpServers` settings map also names `dataFlowServer` and `onPersonsMachine` as register-time keys, and a plugin entry can carry `requiredByOrganization` (`@internal`). ClaudeUI sends none of these.
+
+2.1.330 adds six optional request fields and three response fields (schema @2898491, read from the 2.1.330 darwin-arm64 concat, not probed; 09 is not yet updated). ClaudeUI sends none of the request fields, and its initialize handling reads none of the response fields, so nothing changes for it:
+
+- `settings` and `disallowedTools`: read only at launch under `--await-initialize --initialize-fields=settings,disallowedTools` (02 §2.14b), as the stdin form of `--settings` / `--disallowedTools`. The response's `settings_applied` / `disallowed_tools_applied` (`@internal`) say whether the process took them. A host that sent them must send no prompt until they read true.
+- `offersBypassSwitchBack` and `keepsBypassHeld` (`@internal`, VS Code extension only, first initialize, from the process that owns stdin): with them a launch in `bypassPermissions` may be started in `auto` instead, or `bypassPermissions` held, and the response carries `bypass_auto_switch: {pause_days, offers_setup, introduces_setup, has_switched, asks_reason}`. `bypassPermissions` is then refused until a `set_permission_mode` with `answers_bypass_switch_back` (below). The switch function returns early unless one of the two fields is true (`AE()` @35708652), so a host that sends neither, as ClaudeUI does, keeps the mode it launched with.
+- `cloudEchoBeforeInit` and `cloudStatusBeforeInit` (`@internal`, cloud-hosted sessions only): write the host message's echo, or `system/cloud_session_delta` frames, before the first `init`.
+
 ---
 
 ### `set_has_subscribers` (2.1.319, `@internal`, not sent by ClaudeUI)
@@ -77,6 +91,79 @@ CLI whether anybody watches the stream-json output the host passes on (`false` n
 somebody, `null` unknown, counts as `true`). It matters only in a CLI started with
 `CLAUDE_CODE_STREAM_EVENT_HOLD_MS`, which holds most `content_block_delta` and `thinking_tokens` lines to join
 them. ClaudeUI sets none of that, so it never sends it.
+
+---
+
+### `set_message_waiting` (2.1.326, `@internal`, available, not sent by ClaudeUI)
+
+```json
+{ "subtype": "set_message_waiting", "waiting": true }
+```
+
+Schema `Ano` @3275943, handler @45065706 (2.1.326 darwin-arm64 concat). It tells the CLI that the host
+holds a person's message until the running turn's `result` (`true`), or no longer does (`false`). A
+`waiting` that is not a boolean answers `error` ("Invalid set_message_waiting: waiting must be true or
+false"). The handler calls `sessionState.setHostHoldsMessage(waiting)` and answers an empty success.
+The schema text gives the effect: while `true`, **in a Claude Desktop Code session only** (elsewhere
+it changes nothing), the turn's end does not wait for the model call behind its `post_turn_summary`.
+The `result` then comes sooner, and the summary is written without the model. The turn's end, or the
+next user message the host sends, resets it to `false`. An older CLI answers unknown-subtype, and a
+CLI that drives a cloud-hosted session rejects it. ClaudeUI spawns with `CLAUDE_CODE_ENTRYPOINT=claude-desktop`,
+so it could use this to shorten the gap before a queued message is sent. Whether ClaudeUI's spawns
+count as a "Desktop Code session" for this gate was not traced. Not adopted; backlog issue #269.
+
+---
+
+### `prompt_draft_activity` (2.1.326, `@internal`, available, not sent by ClaudeUI)
+
+```json
+{ "subtype": "prompt_draft_activity" }
+```
+
+Schema `ul` @3277677, handler @45065941. It says that the person is typing a prompt for this session
+in the host's composer, and it carries none of the text. Send it at the first key and about every
+10 s while typing goes on. The handler acknowledges at once, and when no turn is running it starts
+the CLI's between-turns preparation (`if(!Pe.running)nD(Ht)`; the schema text says "the CLI may use
+the time to get the next request ready"). During a turn it does nothing. An older CLI answers
+unknown-subtype, and a cloud-hosted session rejects it. Not adopted; backlog issue #269.
+
+---
+
+### 2.1.330 host → CLI additions (`@internal`, not sent by ClaudeUI)
+
+The union the schema describes as "Control requests a client sends to drive the loop" goes from 83 to
+88 members, all five new ones `@internal`. A sixth request, `update_queued_message`, is handled by the
+print loop without a schema in that union. Anchors are 2.1.330 darwin-arm64 concat offsets, read from
+the bundle, not probed. Each is rejected in a cloud-hosted session, and an older CLI answers
+unknown-subtype.
+
+- **`dictate`** `{op: "start" | "audio" | "stop" | "cancel", language?, pcm?}` (schema `Oa` @3001506,
+  handler @36374509). Turns speech the host recorded into text with the service and sign-in of `/voice`.
+  `pcm` (with `audio`) is base64 16 kHz mono signed 16-bit little-endian, two seconds at most. A reply is
+  `{status: "ok", text, interim, done}` or `{status: "unavailable", reason, text}`; the reply to `stop`
+  holds all the words. A dictation ends after two minutes of audio and is dropped after 15 s with no
+  request. It is behind the server flag `tengu_virtual_pancake` (`qP()` @5825847; off → the
+  unsupported-subtype fallback) and answered only on a host-owned local stdin that does not persist
+  frames. The schema text says that a public build answers it only for the VS Code extension. This is
+  cli.js's own route to the voice pipeline that `voice_server_start` (patched, below) exposes over TCP.
+  ClaudeUI does not use it.
+- **`update_queued_message`** `{message_uuid, priority?: "now" | "next" | "later", before_message_uuid?}`
+  (handler @36378821, `P9n()` @34383951). Moves a queued user message: a new priority, or ahead of
+  another queued message. A frame that carries `content` or no change is malformed. It answers
+  `{outcome: "applied" | "already" | "too_late" | "unsupported"}`, and an error with
+  `error_code: "unsupported_request"` when the server flag `tengu_patient_drawbridge` is off (`KIe()`
+  @20338647); `system/init.capabilities` lists `update_queued_message_v1` when it is on. ClaudeUI
+  withdraws a queued message with `cancel_async_message` instead.
+- **`reload_connectors`** `{}` (schema `ii` @3117851, handler @36401371): read the account's claude.ai
+  connectors again, then read `mcp_status`. Only for the program that started the process, after
+  something a person did.
+- **`log_host_events`** (schema `za` @2999871) and **`update_cloud_session`** (schema `Ca` @2998134):
+  the host's own telemetry events sent with the CLI's sign-in, and one change to a cloud session
+  (rename, archive, delete, pin, ping, …). Both join the `list_cloud_sessions` family (the 2.1.308 bounded
+  schema audit, below) and are refused where it is.
+- **`comparison_fork`** (schema `Qa` @3098208): from claude.ai's server to a cloud worker that advertises
+  `comparison_fork: true` in `system/turn_handoff_available`; a dry run that compares a rebuilt first
+  request of a turn with the one it sent.
 
 ---
 
@@ -166,6 +253,8 @@ Graceful shutdown — cli.js flushes output, breaks the main read loop, exits.
 **Note:** `"ask"` is a legacy mode name — cli.js may accept it but `"default"` is preferred.
 
 **`auto` (2.1.285, re-verified 2026-10-01):** the mode is normalised by `Kg(e.request.mode)`, and `auto` is rejected only when the auto-mode gate is off (`T==="auto"&&!vw()` → `"set_permission_mode:auto rejected — gate not enabled"`), `bypassPermissions` only when disabled by settings. A rejection comes back as a control_response error, which `q.setPermissionMode` throws (the dispatcher's Claude targets fall back to `default`, ADR-088). The full enum is in `14-auto-mode-classifier.md` §1.
+
+**2.1.330:** optional `answers_bypass_switch_back: "bypass_now" | "bypass_always"` (`@internal`, schema @2971755): the person chose `bypassPermissions` when the host asked the question that the initialize response's `bypass_auto_switch` calls for (§7.3 `initialize`). It gives a held `bypassPermissions` back first and saves the answer for this host's later launches. Honoured only from the process that owns stdin, and absent it refuses a held `bypassPermissions`. Nothing is held unless the host sent `offersBypassSwitchBack` / `keepsBypassHeld`, which ClaudeUI never does, so its `setPermissionMode` is unaffected.
 
 ---
 
@@ -405,6 +494,10 @@ response schema `Qv` right after it; headless handler @22780459, which calls
 ```json
 { "cancelled": true }
 ```
+
+2.1.326 adds an optional `message_uuid` to the response: the uuid of the message dropped, when
+`cancelled` is true and no turn can have read it ("Use this, not the request, to tell which message
+went: a client can reuse a request id"). ClaudeUI correlates by its own request and ignores it.
 
 `{ "cancelled": false }` is also a SUCCESS: cli.js does not hold that uuid. Three reasons, from
 `Cu`:
@@ -746,6 +839,10 @@ has disappeared reads as empty. The 2.1.289 SDK wrapper is
 already follow the output path from the tool result, so this additive subtype is
 not an integration break.
 
+2.1.330 adds `liveReply`, `follow`, `after` and `before` (`@internal`, schema @3126745): with an
+agent's `task_id`, on a Remote Control session whose `init` lists `agent_messages_v1`, the agent's
+messages are sent as unstored replies under the request's id instead of the output tail.
+
 ---
 
 ### `get_usage` (native as of v2.1.177)
@@ -775,6 +872,12 @@ and the handler passes `includeBehaviors: !redacted && skip_behaviors !== true`
 2.1.280: ~600 ms with the scan, ~1 ms without. `q.getUsage()` always sends
 it: its only consumer, `parseUsageResponse` (`claude-usage-api.ts`), never
 reads `behaviors`.
+
+2.1.330 adds optional `detached: true` (`@internal`, schema @2982678, advertised as
+`get_usage_detached_v1` in `system/init.capabilities`): with `skip_behaviors`, later
+messages (a prompt, an interrupt) no longer wait for this answer, which can then arrive
+after theirs. Its session totals are read when the answer is sent. ClaudeUI does not send
+it. A usage poll could, so that it never delays a prompt; that is optional.
 
 **Response (success):** structured envelope (NOT the raw API body):
 
@@ -1194,6 +1297,14 @@ change LSP tools, and so invalidate the prompt cache, cli.js answers `held: true
 `cache_impact: {mcp_servers_added, mcp_servers_removed, lsp_tool_change}` and applies nothing.
 ClaudeUI does not send it.
 
+**`refuse_if_busy: true`** (optional, 2.1.326, schema @3256422): when the session is busy, the
+request reloads nothing and answers an error with `error_code: "reload_plugins_busy"`. Busy means a
+turn is running or ending, a message is queued for one, a taken-over permission prompt is unanswered,
+background work holds the session at running, or an in-process teammate is at work. A pending
+background shell command alone does not count. It is advertised as `reload_plugins_refuse_if_busy_v1`
+in `system/init.capabilities`, and only `claude -p` reads it. The default (`false`) still serves a
+reload mid-turn. ClaudeUI's one post-initialize reload omits it, so nothing changes.
+
 #### ClaudeUI sends it once after initialize
 
 `query()` sends `{subtype:"reload_plugins"}` once the initialize response arrives, unless
@@ -1385,6 +1496,12 @@ Any subtype not matched by the else-if chain → error response:
 
 The message loop continues. Unknown subtypes never terminate the session.
 
+2.1.326: the error answer's `error_code` (an `@internal` closed set, read from the handler's state)
+documents `unsupported_request` for any subtype this end does not serve: an unknown subtype, or one
+not served in this kind of session or with a switch off. It comes only with the words "Unsupported
+control request subtype", "does not handle control_request subtype" or "is not supported in this
+context", which `error` keeps for older clients. ClaudeUI's source matches none of these words and does not read `error_code` here.
+
 ---
 
 ## 7.8 Stall detection
@@ -1444,3 +1561,5 @@ cli.js arms a 5-minute (`Fc1 = 300000` ms) timer per non-result message. If fire
 The bundle adds internal outbound queries `list_cloud_sessions` (optional `user_initiated`), `get_cloud_session` (`session_id`), and `get_cloud_session_transcript` (`session_id`, optional `cursor`). They read cloud sessions using the CLI's sign-in and have host/entrypoint restrictions. ClaudeUI does not issue them; their runtime availability was not tested. This is a schema audit, not a new host capability.
 
 **2.1.317 re-check:** the three queries are byte-identical (same subtype strings, same field sets and `.describe()` text), still `@internal`, and are still the only ones of their family — no cloud query was added or removed at 2.1.317. Their runtime availability remains untested.
+
+**2.1.330:** `list_cloud_sessions` gains `only_runs`, `only_archived` and `cursor`, `get_cloud_session_transcript` gains `agent_id`, and the family gains `update_cloud_session` and `log_host_events` (§7.3, 2.1.330 additions). All remain `@internal` and unused by ClaudeUI.

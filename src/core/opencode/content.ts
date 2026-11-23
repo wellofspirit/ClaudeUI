@@ -12,9 +12,15 @@
  *   FileDiff.Info[]` = `{file, patch, additions, deletions, status:
  *   added|deleted|modified}` (`core/src/tool/plugin/{edit,patch}.ts`,
  *   `schema/src/file-diff.ts`).
- * - `subagent` answers `<subagent sessionID="…" state="completed">\n…\n</subagent>`
- *   with `metadata {sessionID, status: completed|running}`; its failures keep
- *   `(sessionID: …)` in the message (`core/src/tool/plugin/subagent.ts`).
+ * - `subagent` (2.3.0, `core/src/tool/plugin/subagent.ts`) always runs its child
+ *   in the background: it answers at once with a launch acknowledgement and
+ *   `metadata {sessionID, status: 'running'}`; an aborted call keeps
+ *   `(sessionID: …)` in its message (`runner/publish-llm-event.ts`). The child's
+ *   answers reach the parent later as synthetic `<subagent sessionID state
+ *   description>` inbox items, one per idle round (`session/subagent-completion.ts`),
+ *   which ClaudeUI never shows. Sessions recorded before 2.3.0 also hold foreground
+ *   answers `<subagent sessionID="…" state="completed">\n…\n</subagent>` (unwrapped
+ *   below) and `Subagent failed|cancelled (sessionID: …)` failures.
  * - A user prompt is `{text, files?: {data(base64), mime, source, name?}[]}`
  *   (`schema/src/prompt.ts`); the stored `user` row and the inbox payload
  *   share it.
@@ -215,7 +221,26 @@ export function subagentChildSession(
   return text ? SESSION_ID_IN_TEXT.exec(text)?.[1] : undefined
 }
 
-/** True when the subagent call returned while its child keeps running (`background:true`). */
+const SUBAGENT_REPORT = /^<subagent sessionID="(ses_[A-Za-z0-9]+)" state="([a-z]+)"/
+
+/**
+ * A child's `<subagent sessionID="…" state="…" description="…">` report to its
+ * parent, from the synthetic item's text (`session/subagent-completion.ts`
+ * `deliver`). `running` is the model-facing tag of a round that ended while the
+ * child's own background work still runs; the item's `metadata.state` keeps the
+ * round's real status, so the text is what tells. Undefined for any other text.
+ */
+export function subagentReport(
+  text: string
+): { readonly childID: string; readonly state: string } | undefined {
+  const match = SUBAGENT_REPORT.exec(text)
+  return match ? { childID: match[1], state: match[2] } : undefined
+}
+
+/**
+ * True when the subagent call returned while its child keeps running: every launch
+ * since 2.3.0 (`status: 'running'`), a 2.2.x `background: true` call before.
+ */
 export function subagentBackgrounded(metadata: JsonRecord | undefined): boolean {
   return metadata?.status === 'running' || metadata?.background === true
 }

@@ -10,6 +10,21 @@ Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
 not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
 models, same context/pricing/capability records.
 
+**2.1.330 (2026-11-23):** baked catalog compared record by record against 2.1.326: same 24 models,
+ids, aliases (`opus` → `claude-opus-5-5`, `sonnet` → `claude-sonnet-5-5`, `haiku` →
+`claude-haiku-5-5`, `fable` → `claude-fable-5-2`), `latest_per_family`, windows, pricing tiers,
+`default_effort` and output limits; `alias_migration` is still `{}`. Only capability flags were
+added, and none is mirrored: `send_user_file_input_whole` on `claude-opus-4-8` and `claude-opus-5`,
+and `script_output_cost` on `claude-fable-5-2`. The resolver is unchanged.
+
+**2.1.326 (2026-11-17):** baked catalog compared record by record against 2.1.321: same 24 models,
+aliases, windows, pricing tiers, `default_effort` and output limits; only `vertex_fast_mode` was
+added to the capabilities of `claude-fable-5-2` and `claude-mythos-5-2` (not mirrored). The
+resolver changed: an unrecognised model id is assumed 1M (2.1.323, was 200K) and
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` sets the window of any unrecognised id (2.1.325, was non-`claude-`
+ids only); 13.1 rows 5–7 and 13.4 now mirror both. `IMPLICIT_1M_BASE_MODELS` gained
+`claude-mythos-preview` (cli.js's 1M special id).
+
 **2.1.321 (2026-11-10):** two new models, compared field by field against 2.1.319's catalog (22 → 24
 models; `schema_version`, `alias_migration` (still `{}`) and every other record identical):
 
@@ -122,9 +137,16 @@ the pre-2.1.261 `DR(model, betas)` chain, now catalog-driven):
 | 2   | request betas include `context-1m-2025-08-07` **and** catalog `supports_1m_beta`       | 1,000,000    |
 | 3   | catalog `context.native_1m` (see 13.2)                                                 | 1,000,000    |
 | 4   | `claude-sonnet-4-6` + remote config `clientDataCache.kelp_forest_sonnet` parses to > 0 | remote value |
-| 5   | fallback                                                                               | 200,000      |
+| 5   | a recognised model with no window above (catalog record or legacy id)                  | 200,000      |
+| 6   | an unrecognised id: `CLAUDE_CODE_MAX_CONTEXT_TOKENS` when > 0 (2.1.325)                | env value    |
+| 7   | an unrecognised id otherwise (2.1.323; 200,000 before)                                 | 1,000,000    |
 
-All 1M paths (1–3) are killed by `CLAUDE_CODE_DISABLE_1M_CONTEXT` (truthy per
+Recognised means the canonicaliser (`P1` in 2.1.326: exact catalog ids, then substrings, and
+`claude-opus-4` / `claude-sonnet-4` not followed by a one-digit minor as the 4.0 records) lands on
+a catalog record, a legacy id (`claude-3-opus`, `claude-3-sonnet`, `claude-3-haiku`) or
+`claude-mythos-preview` (1M), for the value, its alias resolution or the value with `[1m]`/`[2m]`
+stripped. Row 6 applies to any unrecognised id; before 2.1.325 the env value only set non-`claude-`
+ids. All 1M paths (1–3, 7) are killed by `CLAUDE_CODE_DISABLE_1M_CONTEXT` (truthy per
 boolean-env semantics: `1`/`true`/`yes`/`on`, case-insensitive). All three
 gates re-verified present in 2.1.261 (`CLAUDE_CODE_DISABLE_1M_CONTEXT`,
 `kelp_forest_sonnet`, `context-1m-2025-08-07`).
@@ -154,26 +176,27 @@ resolve most-specific-first (`claude-fable-5-1` before `claude-fable-5`).
 
 Picker aliases resolve to concrete models via the catalog's `aliases` table
 (`default` + `per_provider` overrides) before the window resolver ever sees
-them. In 2.1.261:
+them. As of 2.1.330 (rows say when a target moved):
 
 | Alias         | Resolves to (first-party default)                                                                                                  | Window |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
 | `fable`       | `claude-fable-5-2` since 2.1.321 (`claude-fable-5-1` before; gateway: `claude-fable-5`)                                            | 1M     |
-| `opus`        | `claude-opus-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`)                                                           | 1M     |
+| `opus`        | `claude-opus-5-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`; `claude-opus-5` before Opus 5.5)                        | 1M     |
 | `sonnet`      | `claude-sonnet-5-5` since 2.1.285 (bedrock/vertex/foundry/mantle: `claude-sonnet-4-5`, anthropic_aws/gateway: `claude-sonnet-4-6`) | 1M¹    |
-| `haiku`       | `claude-haiku-4-5`                                                                                                                 | 200K   |
+| `haiku`       | `claude-haiku-5-5` since 2.1.293 (every provider and gateway: `claude-haiku-4-5`)                                                  | 1M¹    |
 | `<alias>[1m]` | resolved model + `[1m]` suffix                                                                                                     | 1M     |
 
-¹ first-party; the per-provider sonnet targets are 200K models (row 4's
+¹ first-party; the per-provider sonnet and haiku targets are 200K models (row 4's
 kelp_forest override may apply to sonnet-4-6).
 
 ## 13.4 ClaudeUI's mirror
 
 Core resolver: `resolveContextWindow(modelValue)` in
-`src/shared/model-capabilities.ts`. It replicates rows 1, 3, 5 and resolves the
-`fable`/`opus` aliases itself. `getContextWindowSize()` in
-`src/core/services/context-window.ts` wraps it, layering on the
-`CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch, which is read host-process-side
+`src/shared/model-capabilities.ts`. It replicates rows 1, 3, 5 and 7 (`isUnrecognisedModel` holds
+the recognised set: `IMPLICIT_1M_BASE_MODELS`, `KNOWN_200K_BASE_MODELS` and `KNOWN_200K_PATTERNS`,
+the picker aliases) and resolves the `fable`/`opus` aliases itself. `getContextWindowSize()` in
+`src/core/services/context-window.ts` wraps it, layering on row 6 and the
+`CLAUDE_CODE_DISABLE_1M_CONTEXT` kill switch, both read host-process-side
 only (the renderer has no access to that env var, so it calls the shared
 resolver directly).
 
@@ -209,7 +232,10 @@ Known divergences (accepted):
 - **No beta header path** (13.1 row 2): ClaudeUI never sends custom betas.
 - **No remote-config override** (13.1 row 4): sonnet-4-6 stays 200K for us
   even if the server-side experiment raises it.
-- **No `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override** (13.1 row 0).
+- **No `DISABLE_COMPACT` + `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override** (13.1 row 0); row 6, the
+  same variable for an unrecognised id, is mirrored.
+- **A raw `opusplan` / `best`** reads 200K, as cli.js's resolver does for the raw value; the live
+  window follows the model `system/init` reports.
 
 History: before 2026-06 the renderer did its own `/1m/i` test against the model
 picker _description_, which (a) missed every implicit-1M model (Fable 5 / Opus

@@ -19,7 +19,7 @@ your system, and may trail behind in version.
 | ---------------------- | ------------------------------------------ |
 | SDK package            | 0.2.38 → 0.2.39 → 0.2.41 → 0.2.42 → 0.2.49 |
 | Bundled CLI (`cli.js`) | 2.1.38 → 2.1.39 → 2.1.41 → 2.1.42 → 2.1.49 |
-| Last re-anchored       | 2.1.321 (chunked)                          |
+| Last re-anchored       | 2.1.330 (chunked)                          |
 
 All versions exhibit the same behavior. Function names change between
 versions but the architecture is stable through v2.1.196. **v2.1.197 introduced a significant refactor** (BVe unification — see below) that required new patches F2 and changes to B and E; the logical problem and fix strategy are identical. **v2.1.261 changed the bundle format** (code-split ESM chunks — see the next section) and reshaped three anchors (F2, C, E); the patch design is unchanged.
@@ -76,13 +76,13 @@ rebundler's per-chunk esbuild check — and emitted a Zod schema object as
 
 ### Chunk-scoping helpers in `apply.mjs`
 
-| Helper                        | What it does                                                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `chunkAt(off)`                | `{name, start, end}` of the chunk containing `off` in the CURRENT `src` (recomputed per call — offsets shift as patches apply) |
-| `prefixWindow(off, size)`     | `src.slice(off-size, off)` clamped to the chunk — for lookback windows                                                         |
-| `suffixWindow(off, size)`     | `src.slice(off, off+size)` clamped to the chunk — for lookahead windows                                                        |
-| `findSessionIdFn(off, label)` | Resolves the in-scope `session_id:X()` getter by scanning ONLY `off`'s chunk, and only sites adjacent to `parent_tool_use_id`  |
-| `litReplace(hay, ndl, rep)`   | First-occurrence literal replace — `String.replace` interprets `$&`/`$1` in the replacement and minified names contain `$`     |
+| Helper                        | What it does                                                                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `chunkAt(off)`                | `{name, start, end}` of the chunk containing `off` in the CURRENT `src` (recomputed per call — offsets shift as patches apply)                                                                   |
+| `prefixWindow(off, size)`     | `src.slice(off-size, off)` clamped to the chunk — for lookback windows                                                                                                                           |
+| `suffixWindow(off, size)`     | `src.slice(off, off+size)` clamped to the chunk — for lookahead windows                                                                                                                          |
+| `findSessionIdFn(off, label)` | Resolves the in-scope `session_id:X()` getter by scanning ONLY `off`'s chunk, and only sites adjacent to `parent_tool_use_id`. With no such site (2.1.330), falls back to `sessionGetterInScope` |
+| `litReplace(hay, ndl, rep)`   | First-occurrence literal replace — `String.replace` interprets `$&`/`$1` in the replacement and minified names contain `$`                                                                       |
 
 On a pre-split (monolithic) bundle there are no delimiters, `chunkAt` reports
 `(monolithic bundle)` spanning the whole file, and every helper degrades to its
@@ -838,7 +838,7 @@ byte-for-byte intact, so the next interposed statement will not break this.
 
 ```
 TAIL (unique, 1 match):   <FHO>(<MSG>,<CFG1>,<CFG2>),yield*<BUF>,<BUF>.length=0;continue}
-HEAD (1 match in window): if(<CB>?.(),<IVe>(<MSG>)){
+HEAD (1 match in window): if(<CB>?.(),<IVe>(<MSG>)){    — 2.1.330: if(<IVe>(<MSG>)){ (see below)
 ```
 
 The head/tail split additionally asserts `gateArg === msgVar` — the gate must
@@ -874,6 +874,32 @@ stream_events. The comma operator binds loosest, so the statement parses as
 gate **head** is found and the tail is not, `apply.mjs` now **hard-errors**
 instead of skipping — a silent skip there ships a build with sub-agent streaming
 quietly dead, which is exactly what happened on the first 2.1.261 run.
+
+#### v2.1.330 — the progress callback became its own statement
+
+2.1.330 calls the progress callback as a statement of its own, ahead of a new wait-time update, and
+the gate head is a bare `if(IVe(MSG)){`:
+
+```js
+// 2.1.330 darwin-arm64 pristine, chunk-knp99ee7.js, tail at char 20056441
+for await (let ye of xo({...})) {
+  Xe?.();                                                    // ← CB, now its own statement
+  let Ve = kel(Mn, ye, Date.now());                          // ← NEW: per-task wait-time
+  if (Ve !== Mn && !Ke.signal.aborted) Mn = Ve, r.taskRegistry.update(X, ...);
+  if (Opn(ye)) {                                             // ← HEAD, no CB part
+    ...
+    e_i(ye, Ca, xa), yield*vn, vn.length = 0; continue       // ← TAIL, unchanged shape
+  }
+```
+
+The head regex therefore makes the callback part optional,
+`if\((?:(V)\?\.\(\),)?(V)\((V)\)\)\{`, so it matches both `if(CB?.(),IVe(MSG)){` and
+`if(IVe(MSG)){`. The callback was never used in the injection, which needs only `MSG` and the tail.
+What ties the head to this branch is unchanged: exactly one head in the 600-char window (the gap
+is 359 chars on darwin-arm64), `gateArg === msgVar`, and Patch F's marker downstream in the same
+chunk. The apply log prints `CB=(own statement)` for this form. The tail and the injected
+`MSG.type==="stream_event"&&(yield MSG)` are unchanged. Names on 2.1.330 darwin-arm64: IVe=`Opn`
+(`Mz.has(e.type)`), MSG=`ye`, FHO=`e_i`, BUF=`vn`.
 
 **How to find this code:**
 
@@ -1599,6 +1625,26 @@ bundle-analyzer find vendor/claude-cli/cli.js 'toolUseContext:this._buildIdleToo
 bundle-analyzer find vendor/claude-cli/cli.js 'tengu_subagent_resume_sidecar_read' --compact             # sidecar → Lw toolUseId
 bundle-analyzer find vendor/claude-cli/cli.js 'bg-subagent progress write failed' --compact              # the native relay
 ```
+
+#### v2.1.330 — no session-id yield site in the runner chunk
+
+On 2.1.330 the BVe anchor is in `chunk-knp99ee7.js` (darwin-arm64, char 20123722; Patch F2's tail is
+in the same chunk), and the SDK frame yields moved out of that chunk. It has no
+`session_id:X()` next to `parent_tool_use_id` any more (2.1.326's `chunk-cr640x0r.js` had 17, all
+`G()`), so `findSessionIdFn` finds no candidate. Rather than abort, or take a bundle-wide name (the
+pitfall above), it falls back to `sessionGetterInScope(chunk)`:
+
+1. Find the bootstrap session-id getter by its definition, which must occur **exactly once** in the
+   concat: `function W(){let e=C();if(e?.session)return e.session.id;return e?.sessionId??y.id}`
+   (2.1.330 darwin-arm64: `W` @270540 in `chunk-f9x2f6cx.js`; 2.1.326: `G`).
+2. If the anchor's chunk defines it, use that name.
+3. Otherwise require exactly one `export{…}` entry for it in its own chunk, and exactly one import of
+   that export name, from that chunk's basename, in the anchor's chunk. Use the local alias. On
+   2.1.330 that is `W` (imported unaliased), so the injection emits `session_id:W()`.
+
+Anything else (zero or several definitions, exports or imports) is a hard error, never a guess. The
+`parent_tool_use_id` yield scan still wins whenever it finds a candidate, so older bundles resolve as
+before. The apply log names which path was taken (`getter W imported from …`).
 
 #### v2.1.196 and earlier — Legacy re-background for-await loops
 

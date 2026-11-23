@@ -14,6 +14,18 @@ names change, offsets shift, string landmarks survive. **(I)** marks a claim rea
 off the code but not traced end to end; **(unverified)** marks text carried over
 from the 2.1.220 revision that was not re-checked.
 
+**2.1.330 bounded drift check (2026-11-23):** the stage-2 prompt (45,473 bytes) is identical apart
+from the voice-call slot's internal name, and the default rule lists are byte-identical (82,359 bytes:
+21 / 1 / 72 / 16). The allow-rule stripping predicate changed again (§3.0, "since 2.1.330"), mirrored by
+ClaudeUI; the strip sites and the classify-all-shell gate are unchanged.
+
+**2.1.326 bounded drift check (2026-11-17):** the stage-2 prompt is byte-identical to 2.1.321's
+(45,473 bytes from the extractor; the voice-call slot is renamed `mLt` → `K2t`, same text) and the
+default rule lists are byte-identical (82,359 bytes: 21 / 1 / 72 / 16). The allow-rule stripping
+predicate gained a wildcard test (§3.0), mirrored by ClaudeUI; the strip sites are unchanged. Not
+traced: whether the changelog's "stop some shell commands that ran before" also touches fast path A
+or the safe allowlist (§3.1); only the predicate and the strip sites were diffed.
+
 **2.1.321 bounded drift check (2026-11-10):** the re-extracted stage-2 prompt is byte-identical to
 2.1.319's (45,473 bytes from the extractor); its one runtime slot is now named `mLt` instead of `KAt`
 (the voice-call rule text, compared with interpolation names masked, is the same 868 characters). The
@@ -580,7 +592,49 @@ that would let the agent bypass the classifier wholesale. The predicate is
   and `Bash(docker run:*)` all survive and auto-allow;
 - it is a PowerShell rule matching `OOn` (char `~3585632`) — the same shape over
   the PowerShell list below (each name also with `.exe`), and any `g -…*`; no
-  python exception.
+  python exception;
+- **since 2.1.326**, it is a Bash or PowerShell **wildcard** rule (an unescaped
+  `*`) that leaves the program open — `ce(rule, list)` (darwin-arm64 2.1.326
+  char `5933741`), tested before the list shapes (Bash `e3o` = `ce(r, Bash list)
+|| <list shapes>`, PowerShell `t3o` likewise). It rewrites a trailing `:*` to
+  ` *` and walks the complete words before the first `*`: a `-c`-style word
+  (`-c`, `-lc`, `/c`) strips at once; a word that names no program (an
+  assignment, a flag, `/c`, a number or duration, no letter or digit, or any
+  character outside `[\w .+@%,:~/-]` such as `$`, a backtick or `\`) or whose
+  normalised name (no directory, lowercase, no trailing version or `.exe`: `ue`)
+  is a shell, wrapper (`pEn`, 45 names: shells, `env`, `xargs`, `command`,
+  `nice`, `nohup`, `timeout`, `time`, `watch`, `strace`, `sudo`, `doas`, `su`, …)
+  or launcher is passed over; any other word keeps the rule. The partial word
+  running into the `*` strips when it names no program, is an absolute / `~` /
+  drive / `..` path, or starts a single-word name in the list. Newly stripped:
+  `:*`, `*test*`, `FOO=1 *`, `$HOME/bin/*`, `/usr/local/bin/*`,
+  `C:\tools\app.exe *`, `py*`, `python3.11 *`, `/usr/bin/python3 *`,
+  `timeout 60 *`, `nohup python *`. Still kept: exact rules, `./scripts/*`,
+  `~/bin/tool *`, `/usr/bin/git *`, `timeout 60 make *`, `nohup ./server *`,
+  and two upstream gaps — `time bun run *` (a wrapper before a two-word
+  launcher) and `.\scripts\*` (`\*` reads as an escaped star). The rule content
+  reaches `ce` unescaped (`\(`, `\)`, `\\`). The `/^[\s*]+$/` early return and
+  PowerShell's `*` test are gone, subsumed by `ce`.
+
+- **since 2.1.330** (`L` / `ywo` / `Qbs`, darwin-arm64 char ~`5805300`): the launcher list gains the
+  package runners `pnpx`, `npm exec`, `npm x`, `pnpm exec`, `pnpm dlx`, `yarn exec`, `yarn dlx`,
+  `bun exec` and `bun x`; a normaliser `R` (trim, lowercase, collapse spaces/tabs and runs of `*`, the
+  first word as its program name without folder / version / `.exe`, quotes dropped) feeds both
+  list-shape checks (PowerShell's explicit `.exe` loop is gone); the wildcard test first strips a rule
+  whose words before the `*`, less trailing flags and words with no letter, digit or `:`, normalise to exactly a
+  launcher (`/usr/bin/npm run:*`, `"npm" run *`, `npm run * --watch`), then runs 2.1.326's `ce`
+  unchanged; PowerShell rewrites a `.\dir\file` program to `./dir/file` before the wildcard test (so
+  `PowerShell(.\scripts\build.ps1 *)` keeps its allow, the one strip → keep change) and adds
+  `get-module`, `gmo` and `module` to its list shape. Newly stripped for Bash: the package runners,
+  pathed / quoted / spaced spellings of a launcher (`/usr/bin/npm run -s *`), exact versioned or
+  pathed launchers (`python3.12`, `/usr/bin/python3`) and a versioned launcher before a flag
+  (`python3.11 -m pytest *`). Upstream gaps that remain: `npm.cmd run *`, `env npm run *`,
+  `FOO=1 npm run *`, `time bun run *`, `npm *`.
+
+The 2.1.326 classify-all-shell gate also holds when `toolsMayBeOnHost()` (`X0`)
+is true; the field starts false and nothing in the bundle sets it (only an
+embedding host can), so it is false for every cli.js ClaudeUI spawns and is not
+mirrored.
 
 ```
 Bash:        python python3 python2 node deno tsx ruby perl php lua npx bunx
@@ -611,8 +665,17 @@ Where it runs:
    mid-session (e.g. "always allow" session rules).
 
 ClaudeUI mirrors this predicate in `src/core/permissions/shell-rules.ts`
-`isClassifierBypassingRule` (one union of the Bash and PowerShell lists,
-`classifyAllShell` read from the user settings by the caller) and uses it, plus
+`isClassifierBypassingRule` (2.1.330 parity: the wildcard test is `wildcardRuleRunsAnything`, `R` is
+`normaliseRule`; one union of the Bash and PowerShell lists for both tools and both tests, which only
+ever strips more, e.g. `Bash(iex*)` and, with PowerShell's module names, `Bash(module *)` (that rule loses the skip;
+`Bash(module load:*)` keeps it); ClaudeUI-only additions that also only strip more: npm's own
+names for `npm run` (`npm run-script`, `npm rum`, `npm urn`, `pnpm run-script`), and the rule tested a
+second time as ClaudeUI's matcher reads it (any whitespace splits words, a `\x` escape is `x`), so
+`npm<NBSP>run:*` or `np\m run *` is stripped; the PowerShell `.\` rewrite applies to PowerShell only, as
+in cli.js; `classifyAllShell` read from the user settings by the caller; a rule with trailing
+whitespace after `:*` is trimmed by ClaudeUI's parser, so its outcome can differ from cli.js's in
+either direction: `Bash(x:* )` is kept here and stripped there, `Bash(timeout 60:* )` the reverse;
+ClaudeUI's matcher only ever applies the trimmed rule) and uses it, plus
 a carve-out and safety checks cli.js does not make, to let narrow allow rules
 skip the opencode/pi judge — `docs/adr/permissions.md`
 §4.

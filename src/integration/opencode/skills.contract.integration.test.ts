@@ -8,7 +8,9 @@
  *  (a) a `.claude/skills` skill the catalog does not name is NOT loaded natively (the flag);
  *  (b) a catalog skill (incl. a plugin skill `p:s`) is listed by `skill.list` under its Claude id,
  *      with the catalog's content, and `guard` reports `skillsLoaded: true`;
- *  (c) a same-id skill from `.agents/skills` wins over the catalog's;
+ *  (c) a same-id skill from `.agents/skills` wins over the catalog's once both are loaded
+ *      (since 2.3.0 `skill.list` answers what is loaded now, and the engine announces a
+ *      later change with `skill.updated`);
  *  (d) `reloadSkills` re-fetches and the registry changes without a new location
  *      (`skill.reload()` re-runs the plugin's transform).
  */
@@ -21,7 +23,14 @@ import type { ClaudeSkillCatalog, ClaudeSkillEntry } from '../../core/services/c
 import { startMcpHttpHost, type McpHttpHost } from '../../core/opencode/mcp-http-host'
 import { buildServerEnv } from '../../core/opencode/opencode-server-spawn'
 import type { Config_InfoEncoded } from '../../core/opencode/protocol-v2/openapi'
-import { describeV2, fixtureConfig, useRig, type Rig, type TestHome } from './harness/host'
+import {
+  describeV2,
+  fixtureConfig,
+  untilPluginsLoaded,
+  useRig,
+  type Rig,
+  type TestHome
+} from './harness/host'
 import type { FixtureProvider } from './harness/fixture-provider'
 
 const PLUGIN_SRC = join(__dirname, '..', '..', '..', 'resources', 'opencode', 'claudeui-xeng')
@@ -120,8 +129,12 @@ describeV2('opencode 2.x contract: the shared Claude skill catalog', () => {
     execFileSync('git', ['init', '-q'], { cwd: rig().cwd })
   })
 
-  /** `skill.list` once the plugin has registered (the guard RPC answers: what ClaudeUI waits for too). */
+  /**
+   * `skill.list` once the location's plugins loaded (upstream's `waitForPlugins`, what
+   * ClaudeUI's client waits for) and ours has registered (the guard RPC answers).
+   */
   const listed = async (r: Rig) => {
+    await untilPluginsLoaded(r.api)
     for (let i = 0; i < 50 && !(await rpc(r, 'guard')); i++)
       await new Promise((resolve) => setTimeout(resolve, 100))
     return (await r.api.ok('skill.list')).data
@@ -145,8 +158,16 @@ describeV2('opencode 2.x contract: the shared Claude skill catalog', () => {
     await expect(rpc(r, 'guard')).resolves.toMatchObject({ skillsLoaded: true })
   })
 
-  it("(c) the engine's own same-id skill (.agents) wins over the catalog's", async () => {
-    const clash = (await listed(rig())).find((s) => s.id === 'clash')
+  it("(c) the engine's own same-id skill (.agents) wins over the catalog's, once loaded", async () => {
+    const r = rig()
+    // The engine's `.agents` source may register after our catalog (2.3.0 answers what is
+    // loaded now and says `skill.updated` when that changes): the precedence is the settled state.
+    let clash: { content?: string } | undefined
+    for (let i = 0; i < 100; i++) {
+      clash = (await listed(r)).find((s) => s.id === 'clash')
+      if (clash?.content?.includes('ENGINE CLASH BODY')) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
     expect(clash?.content).toContain('ENGINE CLASH BODY')
     expect(clash?.content).not.toContain('CATALOG CLASH BODY')
   })

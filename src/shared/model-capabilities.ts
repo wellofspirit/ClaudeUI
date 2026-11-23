@@ -838,11 +838,45 @@ const IMPLICIT_1M_BASE_MODELS = [
   'claude-fable-5',
   'claude-haiku-5',
   'claude-mythos-5',
+  'claude-mythos-preview',
   'claude-opus-4-7',
   'claude-opus-4-8',
   'claude-opus-5',
   'claude-sonnet-5'
 ]
+
+/**
+ * Model ids cli.js recognises at a 200K window: the baked catalog's records without
+ * `native_1m` and the legacy Claude 3 ids it still recognises (`YT()`), matched the way its
+ * canonicaliser (`P1`, cli.js 2.1.326) matches them — exact catalog ids and substrings, and `claude-opus-4` /
+ * `claude-sonnet-4` followed by anything but a one-digit minor (`claude-opus-4-20250514`) as the
+ * 4.0 records. Every id cli.js does not recognise is assumed 1M since 2.1.323.
+ */
+const KNOWN_200K_BASE_MODELS = [
+  'claude-3-5-haiku',
+  'claude-3-5-sonnet',
+  'claude-3-7-sonnet',
+  'claude-3-haiku',
+  'claude-3-opus',
+  'claude-3-sonnet',
+  'claude-haiku-4-5',
+  'claude-opus-4-0',
+  'claude-opus-4-1',
+  'claude-opus-4-5',
+  'claude-opus-4-6',
+  'claude-sonnet-4-0',
+  'claude-sonnet-4-5',
+  'claude-sonnet-4-6'
+]
+const KNOWN_200K_PATTERNS = [/claude-opus-4(?!-\d(?!\d))/, /claude-sonnet-4(?!-\d(?!\d))/]
+
+/**
+ * Picker aliases cli.js recognises that the alias table below does not size at 1M: a raw
+ * `opusplan` or `best` resolves to a recognised model, so cli.js does not treat it as unknown,
+ * and its own resolver reads 200K for the raw value (the resolved model it runs is what a
+ * caller should pass).
+ */
+const RECOGNISED_200K_ALIASES = new Set(['best', 'opusplan'])
 
 /**
  * Picker aliases that cli.js's baked catalog resolves to an implicit-1M base model:
@@ -879,7 +913,27 @@ export function resolveContextWindow(modelValue: string | undefined | null): num
   if (value.includes('[1m]')) return CONTEXT_WINDOW_1M
   if (IMPLICIT_1M_BASE_MODELS.some((base) => value.includes(base))) return CONTEXT_WINDOW_1M
   if (IMPLICIT_1M_ALIASES.has(value)) return CONTEXT_WINDOW_1M
-  return CONTEXT_WINDOW_DEFAULT
+  return isUnrecognisedModel(value) ? CONTEXT_WINDOW_1M : CONTEXT_WINDOW_DEFAULT
+}
+
+/**
+ * Whether cli.js would not recognise this model value (no catalog record, legacy id or alias
+ * behind it): since 2.1.323 it assumes a 1M window for such an id, and since 2.1.325
+ * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` sets it (applied by `getContextWindowSize` in
+ * services/context-window.ts). A gateway's `claude-sonnet-latest` or a custom model id is the
+ * usual case. An empty value is not a model and counts as recognised.
+ */
+export function isUnrecognisedModel(modelValue: string | undefined | null): boolean {
+  if (!modelValue) return false
+  const value = modelValue
+    .toLowerCase()
+    .trim()
+    .replace(/\[[12]m\]$/, '')
+  if (value === '') return false
+  if (IMPLICIT_1M_ALIASES.has(value) || RECOGNISED_200K_ALIASES.has(value)) return false
+  if (IMPLICIT_1M_BASE_MODELS.some((base) => value.includes(base))) return false
+  if (KNOWN_200K_BASE_MODELS.some((base) => value.includes(base))) return false
+  return !KNOWN_200K_PATTERNS.some((re) => re.test(value))
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,10 +1174,11 @@ export function resolveClaudeCapabilities(
  * backgroundTasks:true — the gate `handlers-core.stopTask` checks: a per-child Stop on
  * every subagent card, row and detail panel (`OpencodeSession.stopTask` interrupts the
  * child and its live descendants). "Send to background" is deliberately NOT offered
- * (no `backgroundTask`, and the foreground run never says `isBackgrounded: false`):
- * opencode 2.1.2's `POST /session/:id/background` moves a WHOLE SESSION's blocking work
- * (shells and commands too), not one call. `background: true` calls still run and are
- * tracked (task lifecycle events); the watch/read-range members stay absent (their handlers no-op).
+ * (no `backgroundTask`): since opencode 2.3.0 every subagent already runs in the background
+ * (`isBackgrounded: true` on every run; a parent Stop leaves children running, ADR-111 §4),
+ * and `POST /session/:id/background` moves a WHOLE SESSION's blocking work (shells and
+ * commands too), not one call. Runs are tracked by task lifecycle events; the watch/read-range
+ * members stay absent (their handlers no-op).
  * fork:false / forkFromMessage:false — the end-to-end path is unwired:
  * `OpencodeClient.forkSession()` exists but has no production caller,
  * `OpencodeSession` ignores its `_resumeSessionAt`/`_forkSession` spawn params,

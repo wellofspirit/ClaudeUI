@@ -168,6 +168,14 @@ See `src/core/sdk/query.ts::handleCanUseTool()`. Pass-through plus:
 - Coerces missing `message` on deny to `"Denied"` (avoids ZodError).
 - Echoes `tool_use_id` as `toolUseID` in response.
 
+**2.1.330 request additions** (`@internal`, optional, schema @2957355; none read by ClaudeUI, and the response union is unchanged):
+
+- `decision_reason_code` gains `denial_limit_host_reset`: the prompt raised after three or more blocks in a row (by auto mode, or by the Chrome tools' check outside it). It is sent only when the spawn env sets `CLAUDE_CODE_HOST_ALLOW_RESETS_DENIAL_STREAK`, which ClaudeUI does not set.
+- `auto_modes_check_raised: true`: the ask reached a person after the auto-mode classifier's block or flag, or over a transcript too long for it, where `decision_reason_type` / `decision_reason_code` do not say so.
+- `rule_usually_offered` (display only, beside `suppress_always_allow_rule`) and `mcp_skill` (beside `tool_kind`).
+
+ClaudeUI keys `decision_reason_code` only on `classifier_transcript_too_long`, so its handler needs no change. A card could read `auto_modes_check_raised` to say that auto mode raised the ask; that is optional.
+
 ---
 
 ## 8.4 `mcp_message`
@@ -332,6 +340,10 @@ cli.js asks the host for a fresh OAuth access token after a 401, when it holds n
 
 Anchors are `.cache/pristine-cli.js` (2.1.280) offsets. Request schema `Wo` @2384656, response schema `aSr` @2384846, reason enum `jr` @2259660, sender `requestOAuthTokenRefresh()` @22091034.
 
+**2.1.326 anchors** (pristine darwin-arm64 concat; read from the bundle, not probed): request schema `Cl` @3306594, response schema `Qir` @3309557 (`{accessToken: string|null, reason?}`, unchanged), reason enum `aSi=["signed_out","identity_changed","transient","refresh_failed"]` @2445708 (unchanged), sender `async requestOAuthTokenRefresh(e,n)` @43793463, gate `eze()` @4212303 over the entrypoint set `iil=new Set(["claude-desktop","local-agent","claude-vscode"])` @4210176 (unchanged), headless registration `if(eze()){if(ZIn((pt,vn)=>ye.requestOAuthTokenRefresh(pt,vn))…` (two sites, the first @~44883186), 401 handler `Cq` @4259456.
+
+**2.1.330 anchors** (pristine darwin-arm64 concat; read from the bundle, not probed; every item below is structurally identical to 2.1.326's, only minified names moved): request schema `vi` @3160189, response schema `pOr` @3163152 (same fields and `.catch`), reason enum `rYi=["signed_out","identity_changed","transient","refresh_failed"]` @2227851, sender `async requestOAuthTokenRefresh(e,r)` @34701941, gate `U7e()` @3998295 over the entrypoint set `G4l=new Set(["claude-desktop","local-agent","claude-vscode"])` @3996148, headless registration `if(U7e()){if(S3n((Tt,Vn)=>Ee.requestOAuthTokenRefresh…` (two sites, the first @36213702), 401 handler `Rj` @4046557 with both log lines ("…the same expired token…" @4047589, "…as it may to this ask, so this is not a fault" @4047436). The env credential is still `{accessToken, refreshToken: null, expiresAt: null, …}` (`sm()` @4038476, 02 §2.14). No handler change is needed.
+
 **Gate:** `Mnt()` @3069074 — BOTH:
 
 - `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` is truthy
@@ -343,15 +355,31 @@ When it holds, the headless startup registers the refresh callback (`if(Mnt())Cs
 
 The 401 handler `NM()` @3100109 calls it only when the stored credential has no `refreshToken`, which is always the case for an env token (`PM()` @3094847 builds `{accessToken: CLAUDE_CODE_OAUTH_TOKEN, refreshToken: null, expiresAt: null, …}`). A returned token that differs from the one that failed is written to cli.js's own `process.env.CLAUDE_CODE_OAUTH_TOKEN` and the request is retried; `null`, or the SAME token back, counts as no refresh ("SDK getOAuthToken callback returned the same expired token; treating as no refresh"). cli.js never persists the token to a file.
 
+**2.1.326 changes to the 401 path (`Cq`):**
+
+1. When the stored credential's token already differs from the one that failed, the handler counts it as recovered **without asking**. This covers a token pushed with `update_environment_variables` (06 §6.7) that landed first.
+2. A same-token answer to a `not_refused` ask, or to a `refused` ask with `refused_call` `connector` / `other`, is "not a fault" ("SDK getOAuthToken callback returned the same token, as it may to this ask, so this is not a fault"). The handler returns without recovery and without the error-level log.
+3. A same-token answer to a `model` (or unlabelled) refused ask is still "the same expired token; treating as no refresh".
+
 It fires more than once per failure: the orchestrator's live probe (official 2.1.280, Haiku, Windows) saw an invalid token at spawn draw **four** requests (parallel startup calls plus one retry) before the turn succeeded. The answer must be single-flight.
 
 ### Request fields
 
-```json
-{ "subtype": "oauth_token_refresh" }
+```jsonc
+{
+  "subtype": "oauth_token_refresh",
+  "token_state": "refused" | "not_refused",      // 2.1.326: on every ask without `kind`
+  "refused_call": "model" | "connector" | "other" // 2.1.326: only with token_state "refused", and only where the call site sets one
+}
 ```
 
-No payload.
+Up to 2.1.321 the sign-in ask carried no payload. 2.1.326 adds:
+
+- **`token_state`.** `refused` means the ask follows a 401, or a 403 for a revoked token, on a request that carried the sign-in token. `not_refused` covers a Remote Control close code that asked for a fresh credential, a request that went with no credential, or a CLI that holds no token yet. The token may then still be good, "and the host may answer with it again". The sender maps the internal `"stale"` cause to `not_refused` and anything else to `refused`.
+- **`refused_call`.** `model` is a model call, which fails at once if the host answers with the same token or none, so the host should renew. `connector` is a claude.ai connector request. `other` is a call site whose failure on an unchanged token ends no turn. For `connector` / `other` the host may first check whether the token it holds is still good and answer with it. That check must fit well inside the CLI's 30 s limit. Absent on a `refused` ask: renew, as before.
+- A caller does not settle for a "no new token" answer to an ask that wanted less than its own. The order is `not_refused`, then `connector` / `other`, then no `refused_call`, then `model`. The caller asks again, and the host judges each ask on its own.
+
+Both enums carry `.catch(void 0)`, so a host that ignores them loses nothing. The second bearer kind (`kind: "sessions"`, answered only by a host that sets `CLAUDE_CODE_SDK_HAS_SESSIONS_OAUTH_REFRESH`) existed at 2.1.321. At 2.1.326 it also carries `refused_bearer_sha256`, the SHA-256 digests of up to 16 refused sessions bearers. ClaudeUI sets no such variable and never sees that kind.
 
 ### Response
 
@@ -381,6 +409,8 @@ No payload.
 | Network error, timeout, 408, 429 or 5xx                                                                   | `{accessToken: null, reason: "transient"}`        |
 
 The token handed over is recorded as the one the process holds. The response's `accessToken` is masked in the wire log (§1.8).
+
+**2.1.326: no handler change needed.** `query.ts` routes the request to `getOAuthToken({signal})` without reading `token_state` / `refused_call`, and the answer shape is unchanged. Two consequences follow, and both behave as on 2.1.321. First, a `not_refused` ask, or a `connector` / `other` ask, that finds the file's token equal to the process's and older than 60 s still spends a refresh grant, where the CLI would accept the same token back. Reading `token_state` in `computeAnswer` would save that grant. Second, the "straggler" row's same-token answer to a `model` ask is still logged by cli.js as the same expired token.
 
 ---
 
@@ -445,6 +475,23 @@ Not a request — a one-way cancel signal. Documented here because it comes thro
 
 > **2.1.319:** `set_has_subscribers` is a host-to-CLI request (07 §7.3), not an inbound one; no inbound
 > subtype was added or changed.
+>
+> **2.1.326:** the union of loop→client requests (the schema described as "Control requests the agent
+> loop originates and needs a reply to") holds the same 18 subtypes as 2.1.321: `can_use_tool`,
+> `elicitation`, `hook_callback`, `host_auth_token_refresh`, `mcp_message`, `oauth_token_refresh`,
+> `remote_control_work_secret`, `remote_plumbing_call`, `remote_tool_call`, `remote_tools_probe`,
+> `remote_tools_reannounce`, `request_user_dialog`, `ui_copy`, `ui_prompt_fill`, `ui_prompt_paint`,
+> `ui_prompt_read`, `ui_prompt_suggest`, `ui_read_selection`. Field changes: `oauth_token_refresh`
+> (§8.7), `host_auth_token_refresh.status` (`401` | `403`, Cowork 3P only), `ui_copy.answers_press`,
+> and wording on `can_use_tool` (`decision_reason_code` `org_ask_ceiling` now also covers a connector
+> limit; `server_policy_ask_only` is also sent on default Write/Edit and outside-the-working-directory
+> prompts). ClaudeUI keys `decision_reason_code` only on `classifier_transcript_too_long`
+> (`claude-permission-decision.ts`) and does not read `server_policy_ask_only`, so its handlers need
+> no change.
+>
+> **2.1.330:** the same 18 subtypes (schema diff against 2.1.326, darwin-arm64). Field changes:
+> `can_use_tool` (§8.3, 2.1.330 additions) and `host_auth_token_refresh.token_state` (`["not_refused"]`,
+> with `.catch(void 0)`; Cowork 3P only). `oauth_token_refresh` is unchanged (§8.7). No handler change is needed.
 
 ## 8.10 Unknown inbound subtypes
 

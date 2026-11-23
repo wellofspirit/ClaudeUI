@@ -65,20 +65,22 @@ function cloneDefaults(): SandboxSettings {
 
 /**
  * The block as the page edits it. A switch the block does not state reads as what Claude Code
- * applies while the sandbox is on (true) and as false while it is not (nothing applies, and false
- * is what turning the sandbox on from the page writes). `restrictNetwork` is "the block has a
- * `network.allowedDomains` array".
+ * applies: an absent `autoAllowBashIfSandboxed` is false (Claude Code 2.1.325 on: sandboxed
+ * commands follow the normal permission flow unless the key says true), an absent
+ * `allowUnsandboxedCommands` is true while the sandbox is on, and both are false while it is off
+ * (nothing applies, and false is what turning the sandbox on from the page writes).
+ * `restrictNetwork` is "the block has a `network.allowedDomains` array".
  */
 export function sandboxViewFromBlock(block: unknown): SandboxSettings {
   if (!isObject(block)) return cloneDefaults()
   const enabled = block.enabled === true
   const net = isObject(block.network) ? block.network : {}
   const fs_ = isObject(block.filesystem) ? block.filesystem : {}
-  const sw = (v: unknown): boolean => (typeof v === 'boolean' ? v : enabled)
+  const sw = (v: unknown, absent: boolean): boolean => (typeof v === 'boolean' ? v : absent)
   return {
     enabled,
-    autoAllowBashIfSandboxed: sw(block.autoAllowBashIfSandboxed),
-    allowUnsandboxedCommands: sw(block.allowUnsandboxedCommands),
+    autoAllowBashIfSandboxed: sw(block.autoAllowBashIfSandboxed, false),
+    allowUnsandboxedCommands: sw(block.allowUnsandboxedCommands, enabled),
     network: {
       restrictNetwork: Array.isArray(net.allowedDomains),
       allowLocalBinding: net.allowLocalBinding === true,

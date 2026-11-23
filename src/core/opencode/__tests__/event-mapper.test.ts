@@ -1,13 +1,19 @@
 /**
  * The opencode 2.x live mapper (ADR-097 S4), per event family. Payload
  * shapes follow `protocol-v2/events.ts` (transcribed from upstream
- * `schema/src/session-event.ts` at 2.0.24) and the recorded sequences in
+ * `schema/src/session-event.ts`) and the recorded sequences in
  * `fixtures/opencode-v2/`; `history-parity.test.ts` holds the mapper to the cold
  * converter on those recordings.
+ *
+ * Subagents: since opencode 2.3.0 every `subagent` call answers at once with a
+ * launch acknowledgement (`metadata.status: 'running'`) and the child's own end
+ * is the run's notification. A `completed` call result (`<subagent …>` envelope)
+ * is the foreground shape of data older than 2.3.0; the mapper still settles a
+ * run on it, and some cases below use it where the shape does not matter.
  */
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { OpencodeEvent } from '../protocol-v2/events'
-import type { Session_Message_Info } from '../protocol-v2/openapi'
+import type { Session_Message_Info, TokenUsage_Info } from '../protocol-v2/openapi'
 import {
   OpencodeEventMapper,
   type OpencodeMapperOutput,
@@ -425,6 +431,18 @@ describe('subagents', () => {
     }),
     ev('session.text.ended', { sessionID: child, assistantMessageID: msg, ordinal: 0, text: 'hi' })
   ]
+  /** What every 2.3.0 call answers: the child keeps running. */
+  const LAUNCHED = (child: string) =>
+    `The subagent is working in the background (sessionID: ${child}). You will receive a <subagent> message when it goes idle, and again after each later round of work.`
+  const launched = (callID = 'call_sub', child = CHILD) =>
+    ev('session.tool.success', {
+      sessionID: SID,
+      assistantMessageID: MSG,
+      id: callID,
+      content: [{ type: 'text', text: LAUNCHED(child) }],
+      metadata: { sessionID: child, status: 'running' },
+      executed: false
+    })
   const subSuccess = (callID = 'call_sub', child = CHILD, status = 'completed') =>
     ev('session.tool.success', {
       sessionID: SID,
@@ -465,14 +483,14 @@ describe('subagents', () => {
     ])
   })
 
-  it('a foreground call’s result is its ONE terminal notification; the child’s own end is not', () => {
+  it('the call answers at once (2.3.0); the child’s own end is the ONE notification', () => {
     const out = map(
       step(),
       ...linkEvents(),
+      launched(),
       ev('session.execution.started', { sessionID: CHILD }),
       ...childText(),
-      ev('session.execution.succeeded', { sessionID: CHILD }),
-      subSuccess()
+      ev('session.execution.succeeded', { sessionID: CHILD })
     )
     expect(of(out, 'task-notification').map((o) => o.notification)).toEqual([
       {
@@ -480,9 +498,10 @@ describe('subagents', () => {
         toolUseId: 'call_sub',
         status: 'completed',
         outputFile: '',
-        // The child's report, the call's own result text.
+        // What the child said last in the run, not the call's launch acknowledgement.
         summary: 'hi',
         runIndex: 1,
+        isBackgrounded: true,
         usage: { totalTokens: 0, toolUses: 0, durationMs: expect.any(Number) }
       }
     ])
@@ -490,7 +509,22 @@ describe('subagents', () => {
     expect(out.some((o) => o.kind === 'result')).toBe(false)
     // A settled child is not re-read on a reconnect.
     expect(mapper.followedSessions()).toEqual([SID])
-    expect(of(out, 'tool-result')[0].result.result).toBe('hi')
+    // The call's own result is the acknowledgement, as the model read it.
+    expect(of(out, 'tool-result')[0].result.result).toBe(LAUNCHED(CHILD))
+  })
+
+  it('a child that ends before its call answers is notified once; the late answer adds nothing', () => {
+    const out = map(
+      step(),
+      ...linkEvents(),
+      ev('session.execution.started', { sessionID: CHILD }),
+      ...childText(),
+      ev('session.execution.succeeded', { sessionID: CHILD }),
+      launched()
+    )
+    expect(
+      of(out, 'task-notification').map((o) => [o.notification.status, o.notification.summary])
+    ).toEqual([['completed', 'hi']])
   })
 
   it('a background call returns at once; the child’s end is the notification', () => {
@@ -504,7 +538,7 @@ describe('subagents', () => {
     expect(of(out, 'task-notification').map((o) => o.notification.status)).toEqual(['failed'])
   })
 
-  it('an aborted call is `stopped`, a failed one `failed`', () => {
+  it('an aborted call is `stopped`, a failed one `failed` — without the background flag: the error is the result', () => {
     const out = map(
       step(),
       ...linkEvents(),
@@ -517,6 +551,10 @@ describe('subagents', () => {
       })
     )
     expect(of(out, 'task-notification')[0].notification.status).toBe('stopped')
+    // The launch itself failed: nothing runs on, and the card shows the error (cold reads the same).
+    expect(of(out, 'task-notification')[0].notification).not.toHaveProperty('isBackgrounded')
+    expect(of(out, 'task-started')[0].data.isBackgrounded).toBe(true)
+    expect(mapper.hasLiveBackgroundChild()).toBe(false)
   })
 
   it('a grandchild routes under the child’s own call', () => {
@@ -636,7 +674,7 @@ describe('subagents', () => {
     const started = (out: readonly OpencodeMapperOutput[]) =>
       of(out, 'task-started').map((o) => o.data)
 
-    it('a foreground run starts without `isBackgrounded` (R1) and wakes the parent', () => {
+    it('every run starts as a background one (2.3.0) and wakes the parent', () => {
       const out = map(step(), announce(), ...call('call_a', {}))
       const [data] = started(out)
       expect(data).toEqual({
@@ -646,12 +684,14 @@ describe('subagents', () => {
         runIndex: 1,
         startedAt: expect.any(Number),
         wakesParent: true,
+        // Never `false`: only an explicit false offers "Send to background" (ADR-111 §4).
+        isBackgrounded: true,
         description: 'd call_a'
       })
-      // Never `false`: only an explicit false offers "Send to background", which opencode cannot do.
-      expect(data).not.toHaveProperty('isBackgrounded')
       // Before anything of the child's, so progress never precedes the start.
       expect(kinds(out).indexOf('task-started')).toBe(kinds(out).indexOf('subagent-started') + 1)
+      // The parent's turn may end now: the child holds the idle timer.
+      expect(mapper.hasLiveBackgroundChild()).toBe(true)
     })
 
     it('startedAt is the call’s own start', () => {
@@ -687,35 +727,17 @@ describe('subagents', () => {
       expect(started(map(step(), input, called, progress))[0].startedAt).toBe(7_000)
     })
 
-    it('a background run (`background: true`) is marked from its first event', () => {
-      const out = map(step(), announce(), ...call('call_a', { background: true }))
-      expect(started(out)).toMatchObject([
-        { toolUseId: 'call_a', isBackgrounded: true, wakesParent: true }
-      ])
-      expect(mapper.hasLiveBackgroundChild()).toBe(true)
-    })
-
-    it('a foreground call that comes back `running` without the flag re-sends the same run as background', () => {
-      const out = map(step(), announce(), ...call('call_a', {}), result('call_a', 'running'))
-      const events = started(out)
-      expect(events).toHaveLength(2)
-      expect(events[0]).not.toHaveProperty('isBackgrounded')
-      expect(events[1]).toMatchObject({ toolUseId: 'call_a', runIndex: 1, isBackgrounded: true })
-      // Same run: the reducer keeps the first clock.
-      expect(events[1].startedAt).toBe(events[0].startedAt)
-      expect(mapper.hasLiveBackgroundChild()).toBe(true)
-      // …and an input-flagged background call is not announced twice.
-      mapper = new OpencodeEventMapper({ sessionID: SID })
-      expect(
-        started(
-          map(
-            step(),
-            announce(),
-            ...call('call_a', { background: true }),
-            result('call_a', 'running')
-          )
-        )
-      ).toHaveLength(1)
+    it('the launch acknowledgement (`status: running`) does not announce the run again', () => {
+      // A 2.2.x `background: true` input changes nothing either (2.3.0 dropped the parameter).
+      for (const input of [{}, { background: true }]) {
+        mapper = new OpencodeEventMapper({ sessionID: SID })
+        const out = map(step(), announce(), ...call('call_a', input), result('call_a', 'running'))
+        expect(started(out)).toMatchObject([
+          { toolUseId: 'call_a', runIndex: 1, isBackgrounded: true }
+        ])
+        expect(of(out, 'task-notification')).toEqual([])
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+      }
     })
 
     it('a resumed child is the next run, under the resuming call', () => {
@@ -739,6 +761,84 @@ describe('subagents', () => {
         ['call_a', 1],
         ['call_b', 2]
       ])
+    })
+
+    describe('a re-read that links a later call to a child (both calls inside a feed gap)', () => {
+      /** The own session's two `subagent` calls, read back: `call_a` at 10, `call_b` at 50. */
+      const own = (): Session_Message_Info[] =>
+        (['call_a', 'call_b'] as const).map(
+          (id, i) =>
+            ({
+              id: `msg_${id}`,
+              type: 'assistant',
+              agent: 'build',
+              model: MODEL,
+              content: [
+                {
+                  type: 'tool',
+                  id,
+                  name: 'subagent',
+                  state: {
+                    status: 'completed',
+                    input: { agent: 'general', ...(i ? { sessionID: CHILD } : {}) },
+                    content: [{ type: 'text', text: 'working in the background' }],
+                    metadata: { sessionID: CHILD, status: 'running' }
+                  },
+                  time: { created: 10 + 40 * i, ran: 10 + 40 * i, completed: 11 + 40 * i }
+                }
+              ],
+              time: { created: 10 + 40 * i, completed: 12 + 40 * i }
+            }) as Session_Message_Info
+        )
+      const said = (id: string, at: number, text: string) =>
+        ({
+          id,
+          type: 'assistant',
+          agent: 'general',
+          model: MODEL,
+          content: [{ type: 'text', text }],
+          time: { created: at, completed: at + 1 }
+        }) as Session_Message_Info
+      const idle = (id: string, at: number) =>
+        ({ id, type: 'idle', outcome: 'succeeded', time: { created: at } }) as Session_Message_Info
+      const read = (child: Session_Message_Info[] | null) =>
+        mapper.reconcile({
+          sessions: {
+            [SID]: { messages: own(), permissions: [], forms: [], inbox: [] },
+            ...(child ? { [CHILD]: { messages: child, permissions: [], forms: [] } } : {})
+          },
+          active: {}
+        })
+      const notes = (out: readonly OpencodeMapperOutput[]) =>
+        of(out, 'task-notification').map((o) => [o.notification.toolUseId, o.notification.summary])
+
+      it('the earlier run that ended on its own (its idle row) is notified as itself', () => {
+        const out = read([
+          said('m1', 20, 'first'),
+          idle('i1', 30),
+          said('m2', 60, 'second'),
+          idle('i2', 70)
+        ])
+        expect(notes(out)).toEqual([
+          ['call_a', 'first'],
+          ['call_b', 'second']
+        ])
+      })
+
+      it('a real steer (no end of its own before the later call) is superseded', () => {
+        const out = read([said('m1', 20, 'first'), said('m2', 60, 'second'), idle('i2', 70)])
+        expect(notes(out)).toEqual([
+          ['call_b', 'second'],
+          ['call_a', 'continued by a later call']
+        ])
+      })
+
+      it('a child that could not be read back: its takeover settles at the next live event', () => {
+        expect(notes(read(null))).toEqual([])
+        expect(
+          notes(map(ev('session.usage.updated', { sessionID: SID, cost: 0, tokens: TOKENS })))
+        ).toEqual([['call_a', 'continued by a later call']])
+      })
     })
 
     it('a call that steers a still-running child settles the earlier call first', () => {
@@ -779,18 +879,20 @@ describe('subagents', () => {
       ).toEqual([['call_b', 2]])
     })
 
-    it('a superseded call settling late cannot background or notify the later run', () => {
+    it('a superseded call settling late notifies nothing of the later run', () => {
       const out = map(
         step(),
         announce(),
-        ...call('call_a', { background: true }),
+        ...call('call_a', {}),
         ...call('call_b', { sessionID: CHILD }),
         // The first call's own result arrives after the steer: it names a running child.
         result('call_a', 'running')
       )
       expect(of(out, 'task-notification').map((o) => o.notification.toolUseId)).toEqual(['call_a'])
-      // The child belongs to the foreground call_b now: nothing background is live.
-      expect(mapper.hasLiveBackgroundChild()).toBe(false)
+      // The child belongs to call_b now, whose run is still live.
+      expect(mapper.hasLiveBackgroundChild()).toBe(true)
+      expect(mapper.stopRun('call_a')).toBeNull()
+      expect(mapper.stopRun('call_b')?.sessions).toEqual([CHILD])
     })
 
     it('every child step of the run reports usage: tokens, distinct tools, the last tool, the clock', () => {
@@ -982,17 +1084,328 @@ describe('subagents', () => {
       expect(of(out, 'task-notification')[0].notification.summary).toBe('y'.repeat(100))
     })
 
-    it('a live background child is held until its notification', () => {
+    it('child work is pending while a child runs or its report waits in the own inbox (dispatch settlement)', () => {
+      const reportItem = (child = CHILD) => ({
+        type: 'synthetic',
+        delivery: 'steer',
+        payload: {
+          text: `<subagent sessionID="${child}" state="completed" description="d">\nx\n</subagent>`
+        }
+      })
+      expect(mapper.childWorkPending()).toBe(false)
+      map(step(), announce(), ...call('call_a', {}), result('call_a', 'running'))
+      expect(mapper.childWorkPending()).toBe(true)
+      map(
+        ev('session.execution.started', { sessionID: CHILD }),
+        ev('session.execution.succeeded', { sessionID: CHILD })
+      )
+      // Ended, but its report is admitted and not read yet.
+      map(ev('session.inbox.enqueued', { sessionID: SID, inboxID: 'msg_r', item: reportItem() }))
+      expect(mapper.childWorkPending()).toBe(true)
+      map(ev('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_r' }))
+      expect(mapper.childWorkPending()).toBe(false)
+      // Other synthetic items (reminders, notices) and a child's own inbox are no child work.
+      map(
+        ev('session.inbox.enqueued', {
+          sessionID: SID,
+          inboxID: 'msg_n',
+          item: { type: 'synthetic', delivery: 'steer', payload: { text: '<system-reminder>' } }
+        }),
+        ev('session.inbox.enqueued', {
+          sessionID: CHILD,
+          inboxID: 'msg_c',
+          item: reportItem('ses_g')
+        })
+      )
+      expect(mapper.childWorkPending()).toBe(false)
+    })
+
+    it('every linked child is held until its notification', () => {
       expect(mapper.hasLiveBackgroundChild()).toBe(false)
-      map(step(), announce(), ...call('call_fg', {}, 'ses_fg'))
-      expect(mapper.hasLiveBackgroundChild()).toBe(false)
-      map(...call('call_bg', { background: true }, 'ses_bg'), announce('ses_bg'))
+      map(step(), announce('ses_a'), ...call('call_a', {}, 'ses_a'))
+      map(announce('ses_b'), ...call('call_b', {}, 'ses_b'))
       expect(mapper.hasLiveBackgroundChild()).toBe(true)
       map(
-        ev('session.execution.started', { sessionID: 'ses_bg' }),
-        ev('session.execution.succeeded', { sessionID: 'ses_bg' })
+        ev('session.execution.started', { sessionID: 'ses_a' }),
+        ev('session.execution.succeeded', { sessionID: 'ses_a' })
+      )
+      // ses_b still runs.
+      expect(mapper.hasLiveBackgroundChild()).toBe(true)
+      map(
+        ev('session.execution.started', { sessionID: 'ses_b' }),
+        ev('session.execution.failed', {
+          sessionID: 'ses_b',
+          error: { type: 'unknown', message: 'x' }
+        })
       )
       expect(mapper.hasLiveBackgroundChild()).toBe(false)
+    })
+
+    // 2.3.0 reports every idle round of a child to its parent (`<subagent … state="running">`
+    // while the child's own background work still runs, `completed` after the last round):
+    // a round after the run's end is that run again.
+    describe('a later round of an ended run (the child woke again under the same call)', () => {
+      const ended = (session = CHILD) => ev('session.execution.succeeded', { sessionID: session })
+      const running = (session = CHILD, at?: number) =>
+        ev('session.execution.started', { sessionID: session }, at)
+      const roundOne = () => [
+        step(),
+        announce(),
+        ...call('call_a', {}),
+        result('call_a', 'running'),
+        running(CHILD, 20_000),
+        ...childStep('msg_c1', 'c1', 'shell'),
+        ...childText(CHILD, 'msg_c2'),
+        ended()
+      ]
+      const roundTwo = () => [
+        running(CHILD, 30_000),
+        ...childStep('msg_c3', 'c3'),
+        step('msg_c4', CHILD),
+        ev('session.text.started', { sessionID: CHILD, assistantMessageID: 'msg_c4', ordinal: 0 }),
+        ev('session.text.ended', {
+          sessionID: CHILD,
+          assistantMessageID: 'msg_c4',
+          ordinal: 0,
+          text: 'second round'
+        }),
+        ev('session.execution.succeeded', { sessionID: CHILD }, 31_000)
+      ]
+
+      it('re-arms the same run (clock, index), holds the idle timer, and is notified again with the later round', () => {
+        const first = map(...roundOne())
+        const [start] = started(first)
+        expect(of(first, 'task-notification').map((o) => o.notification.summary)).toEqual(['hi'])
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+
+        const woke = map(running(CHILD, 30_000))
+        expect(started(woke)).toEqual([start])
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+        expect(mapper.followedSessions()).toEqual([SID, CHILD])
+        expect(mapper.stopRun('call_a')?.sessions).toEqual([CHILD])
+      })
+
+      it('the later round’s steps report progress and its end carries the whole run', () => {
+        map(...roundOne())
+        const out = map(...roundTwo())
+        expect(of(out, 'task-progress').map((o) => o.progress.usage?.totalTokens)).toEqual([250])
+        expect(of(out, 'task-notification').map((o) => o.notification)).toEqual([
+          {
+            taskId: CHILD,
+            toolUseId: 'call_a',
+            status: 'completed',
+            outputFile: '',
+            summary: 'second round',
+            runIndex: 1,
+            isBackgrounded: true,
+            usage: { totalTokens: 250, toolUses: 2, durationMs: expect.any(Number) }
+          }
+        ])
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+      })
+
+      it('a reconnect that finds the ended child active again re-arms its run', () => {
+        map(...roundOne())
+        const out = mapper.reconcile({
+          sessions: {
+            [SID]: { messages: [], permissions: [], forms: [], inbox: [] },
+            [CHILD]: { messages: [], permissions: [], forms: [] }
+          },
+          active: { [CHILD]: { type: 'running' } }
+        })
+        expect(started(out).map((d) => [d.toolUseId, d.runIndex])).toEqual([['call_a', 1]])
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+      })
+
+      it('a stopped child that wakes is stopped again, not re-armed', () => {
+        map(step(), announce(), ...call('call_a', {}), running())
+        mapper.stopRun('call_a')
+        map(ev('session.execution.interrupted', { sessionID: CHILD, reason: 'user' }))
+        const out = map(running())
+        expect(of(out, 'reinterrupt')).toHaveLength(1)
+        expect(started(out)).toEqual([])
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+      })
+
+      it('a child a later call took over runs under that call: the earlier run stays settled', () => {
+        map(...roundOne(), ...call('call_b', { sessionID: CHILD }))
+        const out = map(running(CHILD, 30_000))
+        expect(started(out)).toEqual([])
+        expect(mapper.stopRun('call_a')).toBeNull()
+        expect(mapper.stopRun('call_b')?.sessions).toEqual([CHILD])
+      })
+
+      it('the own session starting again is a turn, never a run', () => {
+        map(...roundOne())
+        expect(kinds(map(running(SID)))).toEqual(['turn-start'])
+      })
+
+      /** The child's report to its parent's inbox (`subagent-report.ts`), as the feed admits it. */
+      const report = (id: string, state: string, parent = SID, child = CHILD) =>
+        ev('session.inbox.enqueued', {
+          sessionID: parent,
+          inboxID: id,
+          item: {
+            type: 'synthetic',
+            delivery: 'steer',
+            payload: {
+              text: `<subagent sessionID="${child}" state="${state}" description="d">\nx\n</subagent>`,
+              description: 'd',
+              metadata: { source: 'subagent', childID: child, agent: 'general', state: 'completed' }
+            }
+          }
+        })
+
+      it('a run a `running` report re-armed is no child work while its child sits idle (dispatch settlement)', () => {
+        map(...roundOne(), report('msg_r1', 'running'))
+        map(ev('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_r1' }))
+        // The card's run is live and holds the idle timer (ADR-111 §3)…
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+        // …but nothing executes and no report waits: a waiting answer is not coming.
+        expect(mapper.childWorkPending()).toBe(false)
+        // Its own background work wakes it: that round is child work until it ends.
+        map(running(CHILD, 30_000))
+        expect(mapper.childWorkPending()).toBe(true)
+        map(ended())
+        expect(mapper.childWorkPending()).toBe(false)
+      })
+
+      it('a give-up settles an idle re-armed run `stopped` and latches its child; a running one is left to its end', () => {
+        map(...roundOne(), report('msg_r1', 'running'))
+        const settled = mapper.settleGiveUp([CHILD])
+        expect(
+          settled.map(
+            (o) =>
+              o.kind === 'task-notification' && [o.notification.status, o.notification.runIndex]
+          )
+        ).toEqual([['stopped', 1]])
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+        // Its background work wakes it later: interrupted again, never re-armed.
+        const woke = map(running(CHILD, 40_000), report('msg_r2', 'running'))
+        expect(of(woke, 'reinterrupt')).toEqual([{ kind: 'reinterrupt', sessionID: CHILD }])
+        expect(started(woke)).toEqual([])
+        // A child still executing is left to its own (interrupted) end.
+        mapper = new OpencodeEventMapper({ sessionID: SID })
+        map(step(), announce(), ...call('call_a', {}), result('call_a', 'running'), running())
+        expect(mapper.settleGiveUp([CHILD])).toEqual([])
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+      })
+
+      it('a `running` report re-arms the run at once: the child waits on its own work, the timer is held', () => {
+        map(...roundOne())
+        const out = map(report('msg_r1', 'running'))
+        expect(started(out).map((d) => [d.toolUseId, d.runIndex])).toEqual([['call_a', 1]])
+        expect(mapper.hasLiveBackgroundChild()).toBe(true)
+        // The wake that follows is that run: not announced again.
+        const second = map(...roundTwo(), report('msg_r2', 'completed'))
+        expect(started(second)).toEqual([])
+        expect(of(second, 'task-notification').map((o) => o.notification.summary)).toEqual([
+          'second round'
+        ])
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+      })
+
+      it('a final report, a replayed one and an unknown child’s change nothing', () => {
+        map(...roundOne())
+        expect(
+          map(report('msg_r1', 'completed'), report('msg_x', 'running', SID, 'ses_x'))
+        ).toEqual([
+          {
+            kind: 'inbox',
+            change: 'enqueued',
+            inboxID: 'msg_r1',
+            delivery: 'steer',
+            item: expect.anything()
+          },
+          expect.objectContaining({ inboxID: 'msg_x' })
+        ])
+        map(report('msg_r2', 'running'), ...roundTwo())
+        // A re-read replays the delivered reports: applied once.
+        const read = mapper.reconcile({
+          sessions: {
+            [SID]: {
+              messages: [
+                {
+                  id: 'msg_r2',
+                  type: 'synthetic',
+                  text: `<subagent sessionID="${CHILD}" state="running" description="d">\nx\n</subagent>`,
+                  time: { created: 1 }
+                } as unknown as Session_Message_Info
+              ],
+              permissions: [],
+              forms: [],
+              inbox: []
+            }
+          },
+          active: {}
+        })
+        expect(started(read)).toEqual([])
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+      })
+
+      it('a report to a CHILD (its grandchild’s) re-arms the grandchild’s run', () => {
+        const GRAND = 'ses_grand'
+        map(
+          ...roundOne(),
+          ev('session.execution.started', { sessionID: CHILD }),
+          step('msg_c5', CHILD),
+          ...tool('call_g', 'subagent', { agent: 'general' }, CHILD, 'msg_c5'),
+          announce(GRAND, CHILD),
+          ev('session.tool.progress', {
+            sessionID: CHILD,
+            assistantMessageID: 'msg_c5',
+            id: 'call_g',
+            metadata: { sessionID: GRAND, status: 'running' }
+          }),
+          running(GRAND),
+          ended(GRAND)
+        )
+        const out = map(report('msg_rg', 'running', CHILD, GRAND))
+        expect(started(out).map((d) => d.toolUseId)).toEqual(['call_g'])
+      })
+
+      it('a Stop of a child idle between rounds settles it at once; its later wake is stopped again', () => {
+        map(...roundOne(), report('msg_r1', 'running'))
+        const plan = mapper.stopRun('call_a')
+        expect(plan?.sessions).toEqual([CHILD])
+        // The interrupt of an idle session ends nothing upstream: the host settles it.
+        const settled = mapper.settleIdleStops(plan!.sessions)
+        expect(settled.map((o) => o.kind === 'task-notification' && o.notification.status)).toEqual(
+          ['stopped']
+        )
+        expect(mapper.hasLiveBackgroundChild()).toBe(false)
+        // Its background work wakes it later: stopped again, never re-armed.
+        const woke = map(running(), report('msg_r2', 'running'))
+        expect(of(woke, 'reinterrupt')).toHaveLength(1)
+        expect(started(woke)).toEqual([])
+        // A running child is left to its own end.
+        mapper = new OpencodeEventMapper({ sessionID: SID })
+        map(step(), announce(), ...call('call_a', {}), running())
+        expect(mapper.settleIdleStops(mapper.stopRun('call_a')!.sessions)).toEqual([])
+      })
+
+      it('a later round wholly inside a feed gap is that run’s: re-read, it is notified with that round', () => {
+        map(...roundOne())
+        const rows: Session_Message_Info[] = [
+          {
+            id: 'msg_c4',
+            type: 'assistant',
+            agent: 'general',
+            model: MODEL,
+            content: [{ type: 'text', text: 'second round' }],
+            time: { created: 30_100, completed: 30_200 }
+          } as Session_Message_Info,
+          { id: 'msg_idle2', type: 'idle', outcome: 'succeeded', time: { created: 31_000 } }
+        ]
+        const out = mapper.reconcile({
+          sessions: { [CHILD]: { messages: rows, permissions: [], forms: [] } },
+          active: {}
+        })
+        expect(started(out).map((d) => d.toolUseId)).toEqual(['call_a'])
+        expect(of(out, 'task-notification').map((o) => o.notification.summary)).toEqual([
+          'second round'
+        ])
+      })
     })
 
     it('after a reopen (seed) a resume continues the run count from the stored runs', () => {
@@ -1457,6 +1870,47 @@ describe('inbox', () => {
     ).toEqual([])
   })
 
+  // 2.3.0: a child reports every idle round to its parent as a SYNTHETIC inbox item
+  // (`subagent-report.ts`); `state="running"` while its own background work still runs.
+  it.each(['running', 'completed', 'cancelled'])(
+    'a child’s `<subagent state="%s">` report is never a user message, live or re-read',
+    (state) => {
+      const report = {
+        type: 'synthetic' as const,
+        delivery: 'steer' as const,
+        payload: {
+          text: `<subagent sessionID="${CHILD}" state="${state}" description="d">\nhi\n</subagent>`,
+          description: 'd',
+          metadata: { source: 'subagent', childID: CHILD, agent: 'general', state: 'completed' }
+        }
+      }
+      const live = map(
+        ev('session.inbox.enqueued', { sessionID: SID, inboxID: 'msg_rep', item: report }),
+        ev('session.inbox.delivered', { sessionID: SID, inboxID: 'msg_rep' })
+      )
+      expect(kinds(live)).toEqual(['inbox', 'inbox'])
+      const read = mapper.reconcile({
+        sessions: {
+          [SID]: {
+            messages: [
+              {
+                id: 'msg_rep2',
+                type: 'synthetic',
+                text: report.payload.text,
+                time: { created: 5 }
+              } as unknown as Session_Message_Info
+            ],
+            permissions: [],
+            forms: [],
+            inbox: [{ id: 'msg_rep3', ...report } as never]
+          }
+        },
+        active: {}
+      })
+      expect(read.filter((o) => o.kind === 'user-message' || o.kind === 'message')).toEqual([])
+    }
+  )
+
   it('an inline image attachment comes first, a mentioned file not at all', () => {
     const out = map(
       ev('session.inbox.enqueued', {
@@ -1906,7 +2360,7 @@ describe('turn ends: cards, classification, background order, overhead', () => {
     expect(out.at(-1)).toMatchObject({ reason: 'user' })
   })
 
-  it('a turn end retracts a foreground child’s cards, not a running background child’s', () => {
+  it('a turn end retracts the cards of a child that is not running, not a running child’s', () => {
     const link = (call: string, child: string) => [
       ...tool(call, 'subagent', { agent: 'general' }),
       ev('session.created', {
@@ -2078,12 +2532,214 @@ describe('turn ends: cards, classification, background order, overhead', () => {
     expect(kinds(out).slice(-3, -1)).toEqual(['overhead-usage', 'result'])
   })
 
+  // 2.3.0: `session.generate` (ClaudeUI's `/btw` on the chat's own session) publishes
+  // `session.usage.recorded {source:'generate'}`, folded into the cumulative only.
+  it('a `generate` (`/btw`) is counted once: while idle at once, mid-turn at the turn’s end', () => {
+    const tokens = (input: number, output: number) => ({
+      input,
+      output,
+      reasoning: 0,
+      cache: { read: 0, write: 0 }
+    })
+    const stepTokens = tokens(100, 20)
+    const btw = tokens(40, 10)
+    const out = map(
+      ev('session.execution.started', { sessionID: SID }),
+      step(),
+      ev('session.step.ended', {
+        sessionID: SID,
+        assistantMessageID: MSG,
+        finish: 'stop',
+        cost: 0.1,
+        tokens: stepTokens
+      }),
+      ev('session.usage.updated', { sessionID: SID, cost: 0.1, tokens: stepTokens }),
+      ev('session.execution.succeeded', { sessionID: SID }),
+      // Idle: a `/btw`.
+      ev('session.usage.updated', { sessionID: SID, cost: 0.15, tokens: tokens(140, 30) }),
+      // A turn, and a `/btw` asked while it runs.
+      ev('session.execution.started', { sessionID: SID }),
+      ev('session.usage.updated', { sessionID: SID, cost: 0.2, tokens: tokens(180, 40) }),
+      step('msg_a2'),
+      ev('session.step.ended', {
+        sessionID: SID,
+        assistantMessageID: 'msg_a2',
+        finish: 'stop',
+        cost: 0.1,
+        tokens: stepTokens
+      }),
+      ev('session.usage.updated', { sessionID: SID, cost: 0.3, tokens: tokens(280, 60) }),
+      ev('session.execution.succeeded', { sessionID: SID }),
+      ev('session.usage.updated', { sessionID: SID, cost: 0.3, tokens: tokens(280, 60) })
+    )
+    const overhead = of(out, 'overhead-usage')
+    expect(overhead.map((o) => o.tokens)).toEqual([btw, btw])
+    expect(overhead.map((o) => o.cost)).toEqual([
+      expect.closeTo(0.05, 10),
+      expect.closeTo(0.05, 10)
+    ])
+    // The mid-turn one waits for the turn's end.
+    expect(kinds(out).slice(-3, -1)).toEqual(['overhead-usage', 'result'])
+  })
+
   it('seed(…, sessionTotals): what the cold line counted is not reported again', () => {
     const totals = { cost: 1, tokens: TOKENS }
     mapper.seed([], { sessionTotals: totals })
     expect(
       map(ev('session.usage.updated', { sessionID: SID, ...totals })).map((o) => o.kind)
     ).toEqual(['session-usage'])
+  })
+
+  // 2.3.2 writes the compaction summary in the BACKGROUND by default (`compaction.background`,
+  // `core/src/session/compaction.ts` `precompute`): its request is billed when it finishes,
+  // usually after the turn ended (`session.usage.recorded {source:'compaction'}` → the idle
+  // `session.usage.updated`, reported as overhead at once), and the compaction that later swaps
+  // it in carries the same figures again on `compaction.ended` (`usePrecomputed` → `addSpent`).
+  describe('a background compaction summary is counted once', () => {
+    const tokens = (input: number, output: number) => ({
+      input,
+      output,
+      reasoning: 0,
+      cache: { read: 0, write: 0 }
+    })
+    const stepTokens = tokens(100, 20)
+    const summary = tokens(120, 30)
+    /** Everything the outputs count: steps, compactions and overhead. */
+    const counted = (out: readonly OpencodeMapperOutput[]) => {
+      let cost = 0
+      let input = 0
+      let output = 0
+      for (const o of out) {
+        const u =
+          o.kind === 'step-usage'
+            ? o.usage
+            : o.kind === 'overhead-usage'
+              ? o
+              : o.kind === 'compaction'
+                ? o.usage
+                : undefined
+        if (!u) continue
+        cost += u.cost
+        input += u.tokens.input
+        output += u.tokens.output
+      }
+      return { cost, input, output }
+    }
+    const turn = (id: string, cumulative: { cost: number; tokens: TokenUsage_Info }) => [
+      step(id),
+      ev('session.step.ended', {
+        sessionID: SID,
+        assistantMessageID: id,
+        finish: 'stop',
+        cost: 0.1,
+        tokens: stepTokens
+      }),
+      ev('session.usage.updated', { sessionID: SID, ...cumulative })
+    ]
+    const swapped = [
+      ev('session.compaction.started', { sessionID: SID, reason: 'auto' }),
+      ev('session.compaction.ended', {
+        sessionID: SID,
+        reason: 'auto',
+        text: '## Objective\nx',
+        cost: 0.03,
+        tokens: summary,
+        model: MODEL
+      })
+    ]
+
+    it('billed while idle: reported as overhead then, and the swap adds nothing', () => {
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...turn('msg_a1', { cost: 0.1, tokens: stepTokens }),
+        ev('session.execution.succeeded', { sessionID: SID }),
+        // The background summary finishes after the turn.
+        ev('session.usage.updated', { sessionID: SID, cost: 0.13, tokens: tokens(220, 50) }),
+        // The next prompt is due for compaction: the held summary is swapped in.
+        ev('session.execution.started', { sessionID: SID }),
+        ...swapped,
+        ...turn('msg_a2', { cost: 0.23, tokens: tokens(320, 70) }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      // Counted exactly what opencode billed the session (its cumulative).
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.23, 10)
+      expect([total.input, total.output]).toEqual([320, 70])
+      expect(of(out, 'overhead-usage').map((o) => o.tokens)).toEqual([summary])
+      // The compaction itself still shows: its separator row and its end.
+      const ended = of(out, 'compaction').find((o) => o.phase === 'ended')
+      expect(ended).toMatchObject({ reason: 'auto' })
+      expect(ended?.usage).toBeUndefined()
+      expect(
+        of(out, 'message').some((o) => o.message.content[0]?.type === 'compact_separator')
+      ).toBe(true)
+    })
+
+    it('billed mid-turn (not yet reported): the swap counts it, once', () => {
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...turn('msg_a1', { cost: 0.1, tokens: stepTokens }),
+        // Started before a step, finished while the turn still runs.
+        ev('session.usage.updated', { sessionID: SID, cost: 0.13, tokens: tokens(220, 50) }),
+        ...swapped,
+        ...turn('msg_a2', { cost: 0.23, tokens: tokens(320, 70) }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.23, 10)
+      expect([total.input, total.output]).toEqual([320, 70])
+      expect(of(out, 'overhead-usage')).toEqual([])
+      expect(of(out, 'compaction').find((o) => o.phase === 'ended')?.usage).toEqual({
+        cost: 0.03,
+        tokens: summary,
+        model: MODEL
+      })
+    })
+
+    it('a foreground compaction keeps its usage, a title reported earlier notwithstanding', () => {
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...turn('msg_a1', { cost: 0.1, tokens: stepTokens }),
+        ev('session.execution.succeeded', { sessionID: SID }),
+        // A title (or `/btw`) billed while idle: overhead.
+        ev('session.usage.updated', { sessionID: SID, cost: 0.13, tokens: tokens(220, 50) }),
+        // `/compact`: the summary streams inside the execution, billed before it ends.
+        ev('session.execution.started', { sessionID: SID }),
+        ev('session.compaction.started', { sessionID: SID, reason: 'manual', inputID: 'msg_c' }),
+        ev('session.usage.updated', { sessionID: SID, cost: 0.16, tokens: tokens(340, 80) }),
+        ev('session.compaction.ended', {
+          sessionID: SID,
+          reason: 'manual',
+          text: '## Objective\nx',
+          cost: 0.03,
+          tokens: summary,
+          model: MODEL
+        }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.16, 10)
+      expect([total.input, total.output]).toEqual([340, 80])
+      expect(of(out, 'compaction').find((o) => o.phase === 'ended')?.usage).toEqual({
+        cost: 0.03,
+        tokens: summary,
+        model: MODEL
+      })
+    })
+
+    it('a summary the cold line already counted (a resume) is not counted again when swapped in', () => {
+      mapper.seed([], { sessionTotals: { cost: 0.13, tokens: tokens(220, 50) } })
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...swapped,
+        ...turn('msg_a2', { cost: 0.23, tokens: tokens(320, 70) }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      // Only the new step: the seed covered everything up to the resume.
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.1, 10)
+      expect([total.input, total.output]).toEqual([100, 20])
+    })
   })
 })
 
@@ -2221,14 +2877,32 @@ describe('a user Stop on one subagent (stopRun)', () => {
     expect(mapper.stopRun('call_b')?.sessions).toEqual([CHILD])
   })
 
-  it('a foreground call the user stopped is notified `stopped`, not `failed`', () => {
-    const control = map(step(), ...spawn('call_a', CHILD), running(CHILD), callFailed('call_a'))
+  it('a run the user stopped is notified `stopped`, not `failed`, once', () => {
+    const failedEnd = ev('session.execution.failed', {
+      sessionID: CHILD,
+      error: { type: 'unknown', message: 'aborted' }
+    })
+    const control = map(
+      step(),
+      ...spawn('call_a', CHILD),
+      background('call_a', CHILD),
+      running(CHILD),
+      failedEnd
+    )
     expect(notes(control, 'call_a')).toMatchObject([{ status: 'failed' }])
 
     mapper = new OpencodeEventMapper({ sessionID: SID })
-    map(step(), running(SID), ...spawn('call_a', CHILD), running(CHILD))
+    map(
+      step(),
+      running(SID),
+      ...spawn('call_a', CHILD),
+      background('call_a', CHILD),
+      running(CHILD)
+    )
     expect(mapper.stopRun('call_a')?.sessions).toEqual([CHILD])
-    const out = map(interrupted(CHILD), callFailed('call_a'))
+    const out = map(
+      ev('session.execution.failed', { sessionID: CHILD, error: { type: 'unknown', message: 'x' } })
+    )
     expect(notes(out, 'call_a')).toMatchObject([{ status: 'stopped', taskId: CHILD }])
     expect(notes(out)).toHaveLength(1)
   })

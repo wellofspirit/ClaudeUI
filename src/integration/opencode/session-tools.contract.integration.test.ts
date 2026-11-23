@@ -151,18 +151,17 @@ describeV2('opencode 2.x contract: the session tools', () => {
     return created.data.id
   }
 
-  /** Prompt, and answer every `permission.asked` under the session tools' actions with `once`. */
-  async function turn(
-    sessionID: string,
-    text: string
-  ): Promise<{ from: number; asks: Array<Record<string, unknown>> }> {
-    const from = feed.mark()
-    await api.ok('session.prompt', { params: { sessionID }, body: { text } })
-    const asks: Array<Record<string, unknown>> = []
-    const answered = new Set<string>()
-    const end = feed.waitForTurnEnd(sessionID, from)
+  /** Requests already answered (ids are unique; a later `answering` must not answer them again). */
+  const answered = new Set<string>()
+
+  /** Answers every `permission.asked` since `from` with `once` until `done` settles. */
+  async function answering<T>(
+    from: number,
+    done: Promise<T>,
+    asks: Array<Record<string, unknown>> = []
+  ): Promise<T> {
     let settled = false
-    void end.finally(() => {
+    void done.finally(() => {
       settled = true
     })
     while (!settled) {
@@ -177,7 +176,19 @@ describeV2('opencode 2.x contract: the session tools', () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
-    expect((await end).type).toBe('session.execution.succeeded')
+    return done
+  }
+
+  /** Prompt, and answer every `permission.asked` under the session tools' actions with `once`. */
+  async function turn(
+    sessionID: string,
+    text: string
+  ): Promise<{ from: number; asks: Array<Record<string, unknown>> }> {
+    const from = feed.mark()
+    await api.ok('session.prompt', { params: { sessionID }, body: { text } })
+    const asks: Array<Record<string, unknown>> = []
+    const end = await answering(from, feed.waitForTurnEnd(sessionID, from), asks)
+    expect(end.type).toBe('session.execution.succeeded')
     return { from, asks }
   }
 
@@ -234,7 +245,14 @@ describeV2('opencode 2.x contract: the session tools', () => {
   it("a subagent child's call is attributed to its parent chat as a subagent", async () => {
     const sessionID = await newChat(CHAT_RULES)
     const tag = nonce('child')
-    await turn(sessionID, `[subsession] ${tag}`)
+    const { from } = await turn(sessionID, `[subsession] ${tag}`)
+    // The call answered at once (opencode 2.3.0): the child asks and calls after the parent's
+    // turn, and its report wakes the parent.
+    const child = await feed.waitFor('session.created', {
+      after: from,
+      where: (event) => event.data.parentID === sessionID
+    })
+    await answering(from, feed.waitForReport(sessionID, child.data.sessionID, { after: from }))
     expect(service.run).toHaveBeenCalledTimes(1)
     const [caller, tool] = service.run.mock.calls[0] as [SessionToolCaller, string]
     // `_meta` named the CHILD session; the caller is the chat it descends from.

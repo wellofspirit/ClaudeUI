@@ -11,8 +11,8 @@ Reference documentation for the complete wire protocol between ClaudeUI's SDK ha
 ## Verified against
 
 ```
-cli.js version: 2.1.321
-upstream SDK:   @anthropic-ai/claude-code 2.1.321 (Bun 1.4.x standalone binary, chunked ESM graph)
+cli.js version: 2.1.330
+upstream SDK:   @anthropic-ai/claude-code 2.1.330 (Bun 1.4.x standalone binary, chunked ESM graph)
 ```
 
 > Bundle-format note: since 2.1.261 the vendored `vendor/claude-cli/cli.js` is a
@@ -30,6 +30,62 @@ The doc should be re-verified each time `package.json#claudeCliVersion` bumps. S
 **2.1.290 bounded verification (2026-10-06):** bundled build and the compatibility floor (floor = tested = 2.1.290, owner ruling). Compared pristine darwin-arm64 concats and native `--help` against 2.1.289. Public-contract drift: 0 long flags added or removed (71 → 71; `attach`/`logs` also take a session name); zod `subtype` literals +1, `system/file_attachments_missing` (`@internal`, bridge-worker only, answers the `@internal` `file_attachments` ClaudeUI never sends); one optional `@internal` user-frame field `refused_message_id`; one print-mode control handler `set_proactivity_level {level, offer_bypass}` with no public schema; capability id `register_repo_root_v1` appears only in the cloud-hosted unavailable set, not in `system/init`. No removals; production OAuth constants and the model-id set are unchanged. 0 consumed-wire breaks. All three registry patches apply unchanged (2,252 chunks), `test:patch` passes 3/3 (subagent-streaming 9/9, voice-server-anchors 4/4, bash-output-streaming 9/9, Haiku 4.5), the voice start/connect/idempotent-start/native-fallback/stop probe passes, and the localhost SSE ordering fixtures pass. Hidden/provider/plugin surfaces were not manually re-verified, so the banner stays at 2.1.268.
 
 **2.1.293 bounded verification (2026-10-08):** bundled build and the compatibility floor (floor = tested = 2.1.293, ADR-082 §3). Compared pristine darwin-arm64 concats and native `--help` against 2.1.290. Public-contract drift: 0 long flags added or removed (71 → 71, `--help` byte-identical; `plugin install` gained `--marketplace <source>`, unused). Zod `subtype` literals +2: `system/permission_check_status` (`@internal`, on the wire in print mode when an auto-mode permission check runs past ~4 s; 04 §4.32; not consumed) and host→CLI `ui_prompt_autocomplete` (`@internal`, never sent). Additive public fields: `run_id` on every `task_*` frame and `background_tasks_changed` entry, `parent_task_id` on `task_started` and those entries, `subagent_type` on the entries (04 §4.5 note); `agent_id` on forwarded subagent `assistant`/`user` frames, which still carry `parent_tool_use_id`, so ClaudeUI's placement and turn-start checks are unaffected (03 §3.3). Additive `@internal`: `stream_event.abandoned_blocks` on cli.js's synthesized `message_stop` (05 §5.8), `result.safety_stops`, `api_error` value `usage_limit_reached`, `request_marker_lists_v1` in `system/init.capabilities`; `@internal` `result.system_prompt_detail` removed. No print-mode handler removed; production OAuth constants and the host-token contract anchors are unchanged. 0 consumed-wire breaks. Model catalog: new `claude-haiku-5-5`, and the first-party `haiku` alias moved to it (13 header note). All three registry patches apply unchanged (2,290 chunks), `test:patch` passes 3/3 (subagent-streaming 9/9, voice-server-anchors 4/4, bash-output-streaming 9/9, Haiku 4.5), the voice start/connect/idempotent-start/native-fallback/stop probe passes, and the localhost SSE ordering fixtures pass (5 tests). Hidden/provider/plugin surfaces were not manually re-verified, so the banner stays at 2.1.268.
+
+**2.1.330 bounded verification (2026-11-23):** bundled build and the compatibility floor are
+2.1.330. Compared pristine darwin-arm64 concats and native `--help` against 2.1.326, by schema diff
+rather than a live wire log. `--help` keeps the same 67 long flags with three wording changes. Hidden
+options added: `--initialize-fields <names>` (the `settings` / `disallowedTools` of the initialize
+request in place of their flags, under `--await-initialize`, which is now documented too),
+`--hold-repository-while-parked`, `--metadata` and `auth login --organization-gateway` (02 §2.14b);
+ClaudeUI passes none. The stdout union gains `system/shell_cwd` (sent only to a host whose PostToolUse
+matcher sets `replacedByFrame: "shell_cwd"`, 04 §4.34) and the schema-only `system/task_list_statuses`
+(04 §4.35); the top-level `type` set is unchanged. `system/init` gains `served_by_anthropic` and
+`host_dropped_env` (04). The CLI → host request set is unchanged (18 subtypes), with additive
+`can_use_tool` fields (08 §8.3). Host → CLI gains five `@internal` requests (`dictate`,
+`reload_connectors`, `log_host_events`, `update_cloud_session`, `comparison_fork`), plus
+`update_queued_message`, which has no schema and sits behind a server flag (07 §7.3). It also gains
+`initialize` fields for the VS Code "bypass switched to auto" flow and `set_permission_mode.answers_bypass_switch_back`.
+That flow is inert unless the host sends `offersBypassSwitchBack` / `keepsBypassHeld`. Every other change is
+additive, and no handler ClaudeUI depends on changed shape, so there are 0 consumed-wire breaks. The
+production OAuth config object, the refresh, authorize and exchange bodies and the login scope list are
+unchanged. The host-token anchors are structurally identical at new offsets (06 §6.7, 08 §8.7). One
+change reaches ClaudeUI: cli.js now also keeps `CLAUDE_CODE_OAUTH_SCOPES` out of a child that does
+not get the session's token (02 §2.14). The model catalog only gained capability flags (13), and the
+sandbox auto-allow default read is unchanged. Patches: subagent-streaming F2 and E were re-anchored
+(the progress callback is its own statement before the gate; the runner chunk has no session-id yield
+site), and bash-output-streaming was re-anchored (each patch's README). voice-server's helper-form anchor
+still matches on all three platforms. The boot probe and the cross-platform apply passed. The live patch
+suites passed on the rebuilt binary with a real login (subagent-streaming 9/9, foreground and
+background; bash-output-streaming 9/9; voice-server anchors OK). The auto-mode changes (wider allow-rule
+stripping) are recorded in 14 by their own slice, not by this check.
+
+**2.1.326 bounded verification (2026-11-17):** bundled build and the compatibility floor are
+2.1.326. Compared pristine darwin-arm64 concats (2,917 → 3,150 chunks) and native `--help` against
+2.1.321, by schema diff rather than a live wire log. `--help` changed wording only: the long-flag set
+is the same 67 names. Hidden: `--managed-settings-in-initialize` and the teammate flag
+`--lead-verify-key` were added, and the hidden `worktree-hook` command (02 §2.14b); ClaudeUI passes
+none. The absent `sandbox.autoAllowBashIfSandboxed` now reads as false behind a server gate (02 §2.6).
+The stdout message union adds one subtype, `system/late_allow_not_run` (cloud workers only, 04 §4.33),
+and the top-level `type` set is unchanged. A voice-call message is now stored in the transcript as a
+`system/voice_call_talk` row, which is not on stdout (04 §4.27). The CLI → host control-request set is
+unchanged (18 subtypes). Its `oauth_token_refresh` gains `token_state` and `refused_call`, and its 401
+path now tolerates a same-token answer to a "not refused" ask (08 §8.7). Host → CLI gains two
+`@internal` requests, `set_message_waiting` and `prompt_draft_activity`, plus `reload_plugins.refuse_if_busy`
+(07). `update_environment_variables` now answers `{applied: [...]}` (06 §6.7), and `supersedes` /
+`retracted_message_uuids` also cover a response whose tool call could not be parsed (03 §3.3–3.4).
+Every other change is additive. No handler ClaudeUI depends on changed shape, so there are 0
+consumed-wire breaks. The OAuth `TOKEN_URL`, client ids, the refresh body and the authorize and
+exchange bodies are unchanged. The prod config gained `PRIVACY_CONSENTS_SCOPE_REGISTERED: true`, so
+cli.js's claude.ai **login** scope list now ends with `user:privacy_consents:write`, which
+`CLI_OAUTH.loginScopes` requests too (owner, 2026-11-23). The host-token anchors (the gate and its entrypoint
+set, the reason enum, the env credential with `refreshToken:null`, the env-update allowlist and the
+child-env scrub) hold, at new offsets (02 §2.14, 06 §6.7, 08 §8.7). The auto-mode stage-2 prompt is byte-identical apart from its
+runtime slot's name, and the default rules are byte-identical (21 / 1 / 72 / 16). The
+classifier-bypass predicate now strips more wildcard shell rules; 14 §3.0 records it and
+ClaudeUI's `isClassifierBypassingRule` mirrors it. `bash-output-streaming` applies on all three platforms through its
+≤2.1.319 branches: the late-callback guard and the two-argument `startPolling` are gone (its README).
+The boot probe, the cross-platform apply and the sdk-contract suite passed. The live patch
+suites are run separately and are not recorded here.
 
 **2.1.321 bounded verification (2026-11-10, facts slice):** compared pristine darwin-arm64 concats
 and native `--help` against 2.1.319. `--help` is byte-identical (83 flag lines). The baked model

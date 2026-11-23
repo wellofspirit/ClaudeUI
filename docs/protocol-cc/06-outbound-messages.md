@@ -183,6 +183,10 @@ We currently don't send keep_alive. It's documented here for completeness.
 
 **Sent by our harness** to hand a live process a rotated OAuth token (multi-account). Anchors are `.cache/pristine-cli.js` (2.1.280) offsets: the branch in `processLine` @22072957, the allowlist `le` @22061980.
 
+**2.1.326 re-check** (pristine darwin-arm64 concat, read from the bundle, not probed): the branch `if(n.type==="update_environment_variables")` is @43761665, and the allowlist `se=new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN","CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSIONS_OAUTH_TOKEN"])` is @43741573. It already held three keys at 2.1.321. The behaviour below holds, with two changes: the success answer now carries the applied keys (step 5), and one more key can be applied, `takesHostCredential` (step 3).
+
+**2.1.330 re-check** (pristine darwin-arm64 concat, read from the bundle, not probed): the branch is @34668945, the allowlist `re=new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN","CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSIONS_OAUTH_TOKEN"])` @34647972 (same three keys) and the `response:{applied:…}` answer @34671312. The branch body is structurally identical to 2.1.326's (only minified names differ), so the behaviour below is unchanged.
+
 ### Shape
 
 ```json
@@ -199,9 +203,9 @@ This is the frame Claude Desktop 2.9939.2 writes when it rotates a session's tok
 
 1. `acceptsInboundEnvUpdates()` must hold. It is `!0` for the stdio transport (@22080337); the remote-worker transport refuses when hosted. A refused frame is logged and dropped with NO response.
 2. `variables` must be an object of string values, else cli.js answers `control_response` `error` ("variables must be an object of string values") when a `request_id` was given.
-3. Only allowlisted keys are applied: `le = new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])`. Any other key is logged ("refused update_environment_variables for non-allowlisted keys") and skipped; the frame still succeeds.
+3. Only allowlisted keys are applied: `le = new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])`. Any other key is logged ("refused update_environment_variables for non-allowlisted keys") and skipped; the frame still succeeds. (2.1.326: the set also holds `CLAUDE_CODE_SESSIONS_OAUTH_TOKEN`, which is handled apart. It also takes the variable that `CLAUDE_CODE_HOST_AUTH_ENV_VAR` names, but only under `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` on the `claude-desktop-3p` entrypoint. ClaudeUI meets neither condition.)
 4. Applied keys are set on cli.js's `process.env`. A new `CLAUDE_CODE_OAUTH_TOKEN` also runs `Gk()` (@3096708), the same credential-cache reset the 401 handler runs after adopting a host token (08 §8.7).
-5. With a `request_id`, cli.js answers `{"type":"control_response","response":{"subtype":"success","request_id":"<id>"}}` — no `response` payload.
+5. With a `request_id`, cli.js answers `{"type":"control_response","response":{"subtype":"success","request_id":"<id>"}}`, with no `response` payload, through 2.1.321. **2.1.326** adds `"response":{"applied":[<keys applied>]}` (@43764032). A key that was refused, or a `CLAUDE_CODE_OAUTH_TOKEN` offered to a launcher-login judge ("offered … to the session's judge, not applied yet"), is not in the list. ClaudeUI's `ControlChannel.updateEnvironmentVariables` resolves on the success and ignores the payload. That still works, but the handle reports `true` even when the token was not in `applied`.
 
 ### Gotchas
 

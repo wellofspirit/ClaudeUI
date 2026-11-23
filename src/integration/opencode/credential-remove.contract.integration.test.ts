@@ -26,7 +26,7 @@ import {
   memorySlotMemory,
   type CredentialLease
 } from '../../core/opencode/credential-store'
-import { describeV2, isolatedEnv, useRig, type Rig } from './harness/host'
+import { describeV2, isolatedEnv, untilPluginsLoaded, useRig, type Rig } from './harness/host'
 
 const memory = memorySlotMemory()
 
@@ -115,6 +115,7 @@ describeV2('opencode 2.x contract: an explicit Remove deletes every row of the i
     // Non-vacuous: the rows alone make the provider available right now. (The
     // location's integrations register on the first list, as in the app, where the
     // provider screen lists them first; a cold location answers an empty catalog.)
+    await untilPluginsLoaded(api)
     await api.ok('integration.list')
     await vi.waitFor(async () => expect(await providerIds(rig())).toContain('openrouter'), {
       timeout: 5000,

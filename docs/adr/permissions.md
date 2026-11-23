@@ -136,7 +136,8 @@ nice command builtin exec timeout stdbuf busybox`, their flags and `K=V`, PowerS
   uses ADR-084's two-dialect lexer and refuses redirections, newlines, `$` and every construct the dialects split
   differently. Both are word-boundary prefix or exact, case-sensitive, un-normalised (`Bash(git:*)` does not cover
   `git-lfs`; `Bash(bun run test:*)` does not cover `bun run test:unit`).
-- **Predicates for §4:** `isClassifierBypassingRule` (cli.js parity over the Bash and PowerShell launcher lists;
+- **Predicates for §4:** `isClassifierBypassingRule` (cli.js parity over the Bash and PowerShell launcher lists, with
+  the wildcard test for rules that leave the program open (2.1.330);
   `Agent`/`Task`/`Monitor`/`AppifactRepl`), `isCarvedOut` (same program and one rule's positional words are a prefix of
   the other's, both directions: `git:*` contains `git push --force`), `canLaunchOtherPrograms`,
   `isLauncherShapedSegment` (a segment that runs code its own words do not show: `npx`, `bunx`, `bun x|run|-e`,

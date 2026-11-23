@@ -1562,7 +1562,7 @@ function ClaudeSessionBehaviorSection({
       <SettingsToggle
         testid="ClaudeSessionBehaviorSection.privacyEmailCheck"
         label="Ask before sending your email address"
-        description="Claude Code asks before a web or shell call that would send your account email address off this machine. Applies to sessions started after the change."
+        description="Claude Code asks before a shell, web, file-write or MCP call that would send your account email address off this machine or use it as a client identity. Applies to sessions started after the change."
         keyText="engines/claude.json · claudeConfig.privacyEmailCheck"
         checked={privacyEmailCheck}
         onChange={(v) => save('privacyEmailCheck', v)}
@@ -2573,7 +2573,7 @@ export const SECTIONS: Section[] = [
         key: 'claudeSessionBehavior',
         label: 'Session behaviour',
         keywords:
-          'idle compaction compact summarise summarize summary 200k long conversation history email privacy address account web shell send leave machine',
+          'idle compaction compact summarise summarize summary 200k long conversation history email privacy address account web shell file write mcp send leave machine',
         render: (_s, _u, e, ue) => (
           <ClaudeSessionBehaviorSection engineConfig={e} updateEngineConfig={ue} />
         )

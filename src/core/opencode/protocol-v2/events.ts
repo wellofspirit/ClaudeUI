@@ -15,12 +15,24 @@
  * that touches any of them fails generate and check until this file is
  * re-reviewed and `--accept-events` records the new digests. Sources, at the
  * pinned tag: `packages/schema/src/{event,session-event,session-inbox,
- * permission,form,credential,provider,model,llm,location}.ts` and
- * `packages/protocol/src/groups/event.ts`.
+ * permission,form,credential,provider,model,agent,command,skill,plugin,llm,
+ * location}.ts` and `packages/protocol/src/groups/event.ts`.
  *
  * Only what ClaudeUI maps (spike §5 table) is listed. Anything else on the
- * feed (worktree.*, skill.updated, rpc.*, …) fails `isOpencodeEvent` and is
- * the consumer's to ignore.
+ * feed (worktree.*, config.updated, rpc.*, …) fails `isOpencodeEvent` and is
+ * the consumer's to ignore. Reviewed at 2.3.0 and left uncurated on purpose:
+ * `session.step.first-token` (durable, a step's first-token time only),
+ * `session.usage.recorded` (durable; `source` now also `generate` — the
+ * cumulative `session.usage.updated` already folds it, see
+ * `event-mapper.ts` `emitOverhead`) and `experimental.mcp.event` (ephemeral,
+ * only with the opt-in `experimental.mcp_events`, which ClaudeUI never sets).
+ * Reviewed at 2.3.2: the only event-source change is `Model.Type` gaining `"video"`
+ * (`packages/schema/src/model.ts`); no event ClaudeUI maps carries a model type.
+ * Behaviour that is not in the shapes: a background compaction summary (2.3.2's
+ * default) is billed as `session.usage.recorded {source:'compaction'}` when it
+ * finishes, often while the session is idle, and `session.compaction.ended`
+ * repeats it when a compaction swaps the summary in (`event-mapper.ts`
+ * `uncounted` counts it once).
  */
 import type {
   Form_Answer,
@@ -239,7 +251,10 @@ export interface DurableEventData {
 // --- Ephemeral events -------------------------------------------------------
 
 export interface EphemeralEventData {
-  /** Session-cumulative usage. */
+  /**
+   * Session-cumulative usage: every step plus the requests no step carries
+   * (`session.usage.recorded` — title, compaction and, since 2.3.0, `generate`).
+   */
   'session.usage.updated': Session & { readonly cost: Money_USD; readonly tokens: TokenUsage_Info }
   'session.text.delta': Part & { readonly delta: string }
   'session.reasoning.delta': Part & { readonly delta: string }
@@ -254,12 +269,21 @@ export interface EphemeralEventData {
   'form.created': { readonly form: Form_Info }
   'form.replied': Session & { readonly id: string; readonly answer: Form_Answer }
   'form.cancelled': Session & { readonly id: string }
-  /** credential.ts */
-  'credential.updated': EmptyData
+  /** credential.ts. `updated`: a login was added, relabelled or removed (2.3.0 names it). */
+  'credential.updated': { readonly integrationID: string; readonly credentialID: string }
   'credential.switched': { readonly integrationID: string; readonly credentialID: string | null }
   /** provider.ts / model.ts */
   'provider.updated': EmptyData
   'model.updated': EmptyData
+  /**
+   * A location's catalog changed (agent.ts, command.ts, skill.ts, plugin.ts): the
+   * envelope's `location` names whose. Since 2.3.0 the catalog routes answer what
+   * is loaded now, and long-lived clients refresh on these (`AGENTS.md` "Plugin Loading").
+   */
+  'agent.updated': EmptyData
+  'command.updated': EmptyData
+  'skill.updated': EmptyData
+  'plugin.updated': EmptyData
 }
 
 /**
@@ -340,7 +364,25 @@ export const EVENT_DURABILITY: { readonly [Type in OpencodeEventType]: 'durable'
   'credential.updated': 'ephemeral',
   'credential.switched': 'ephemeral',
   'provider.updated': 'ephemeral',
-  'model.updated': 'ephemeral'
+  'model.updated': 'ephemeral',
+  'agent.updated': 'ephemeral',
+  'command.updated': 'ephemeral',
+  'skill.updated': 'ephemeral',
+  'plugin.updated': 'ephemeral'
+}
+
+/** The catalog events a long-lived client refreshes on (see `EphemeralEventData`). */
+export type CatalogEvent = EventOf<
+  'agent.updated' | 'command.updated' | 'skill.updated' | 'plugin.updated'
+>
+
+export function isCatalogEvent(event: OpencodeEvent): event is CatalogEvent {
+  return (
+    event.type === 'agent.updated' ||
+    event.type === 'command.updated' ||
+    event.type === 'skill.updated' ||
+    event.type === 'plugin.updated'
+  )
 }
 
 /** Narrows a parsed frame to the curated union; anything else is not ClaudeUI's concern. */

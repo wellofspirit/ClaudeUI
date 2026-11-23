@@ -66,7 +66,7 @@ describe('Engines › Claude Code › Session behaviour', () => {
       'Ask before sending your email address'
     )
     expect(toggle('privacyEmailCheck').textContent).toContain(
-      'Claude Code asks before a web or shell call that would send your account email address off this machine. Applies to sessions started after the change.'
+      'Claude Code asks before a shell, web, file-write or MCP call that would send your account email address off this machine or use it as a client identity. Applies to sessions started after the change.'
     )
   })
 

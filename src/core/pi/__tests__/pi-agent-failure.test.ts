@@ -122,6 +122,24 @@ describe('classifyPiAgentFailure (ADR-089 S1b) — one case per rule, first matc
     }
   })
 
+  it('follows the patterns pi 1.6.0 added (connection closed, bare socket codes, Codex WebSocket limit)', () => {
+    for (const m of [
+      '{"type":"error","error":{"type":"api_error","message":"Connection closed."}}',
+      'read ECONNRESET',
+      'write EPIPE',
+      'connect ETIMEDOUT 1.2.3.4:443',
+      'connect ECONNREFUSED 127.0.0.1:443',
+      'socket ECONNABORTED',
+      'Connection reset by peer',
+      'websocket_connection_limit_reached',
+      'Responses websocket connection limit reached'
+    ]) {
+      expect(classify(m), m).toBe('transient')
+    }
+    // A socket code inside a longer identifier is not the bare code.
+    expect(classify('MY_ECONNRESETTING_FLAG is not set')).toBe('permanent')
+  })
+
   it('follows the patterns pi 1.0.4 added (z.ai CN overflow, ChatGPT subscription, capacity, HTTP/2 cancel)', () => {
     expect(classify('{"code":"1261","message":"Prompt exceeds max length"}')).toBe('permanent')
     for (const m of [

@@ -7,6 +7,7 @@ const DEFAULT = 200_000
 describe('getContextWindowSize', () => {
   afterEach(() => {
     delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    delete process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS
   })
 
   describe('[1m] suffix', () => {
@@ -65,26 +66,69 @@ describe('getContextWindowSize', () => {
       expect(getContextWindowSize('haiku')).toBe(ONE_M)
     })
 
-    it('opusplan stays at the 200K default', () => {
+    it('opusplan and best stay at the 200K default (recognised aliases, not unknown ids)', () => {
       expect(getContextWindowSize('opusplan')).toBe(DEFAULT)
+      expect(getContextWindowSize('best')).toBe(DEFAULT)
     })
   })
 
-  describe('200K models', () => {
+  describe('200K models (recognised by cli.js 2.1.326, no native 1M)', () => {
     it.each([
       'claude-sonnet-4-6',
       'claude-sonnet-4-5',
+      'claude-sonnet-4-20250514',
+      'claude-sonnet-4-0',
       'claude-haiku-4-5',
+      'claude-haiku-4-5-20251001',
       'claude-opus-4-6',
       'claude-opus-4-5',
       'claude-opus-4-1',
-      'claude-3-5-sonnet'
+      'claude-opus-4-20250514',
+      'claude-3-7-sonnet-20250219',
+      'claude-3-5-sonnet',
+      'claude-3-5-haiku',
+      'claude-3-opus-20240229',
+      'claude-3-haiku',
+      'us.anthropic.claude-3-5-sonnet-20241022-v2:0'
     ])('%s → 200K', (model) => {
       expect(getContextWindowSize(model)).toBe(DEFAULT)
     })
+  })
 
-    it('unknown models fall back to 200K', () => {
-      expect(getContextWindowSize('some-future-model')).toBe(DEFAULT)
+  describe('models cli.js does not recognise (2.1.323: assumed 1M)', () => {
+    it.each(['some-future-model', 'claude-sonnet-latest', 'claude-opus-6', 'gpt-5'])(
+      '%s → 1M',
+      (model) => {
+        expect(getContextWindowSize(model)).toBe(ONE_M)
+      }
+    )
+
+    it('claude-mythos-preview is recognised at 1M', () => {
+      expect(getContextWindowSize('claude-mythos-preview')).toBe(ONE_M)
+    })
+
+    it('CLAUDE_CODE_MAX_CONTEXT_TOKENS sets the window of an unrecognised id only (2.1.325)', () => {
+      process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '300000'
+      expect(getContextWindowSize('claude-sonnet-latest')).toBe(300_000)
+      expect(getContextWindowSize('gateway/custom-model')).toBe(300_000)
+      expect(getContextWindowSize('claude-sonnet-4-6')).toBe(DEFAULT)
+      expect(getContextWindowSize('claude-fable-5')).toBe(ONE_M)
+      expect(getContextWindowSize('sonnet')).toBe(ONE_M)
+    })
+
+    it.each(['0', '-5', 'abc', ''])(
+      'ignores a non-positive CLAUDE_CODE_MAX_CONTEXT_TOKENS %j',
+      (v) => {
+        process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = v
+        expect(getContextWindowSize('claude-sonnet-latest')).toBe(ONE_M)
+      }
+    )
+
+    it('CLAUDE_CODE_MAX_CONTEXT_TOKENS wins over CLAUDE_CODE_DISABLE_1M_CONTEXT for an unrecognised id', () => {
+      process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
+      expect(getContextWindowSize('claude-sonnet-latest')).toBe(DEFAULT)
+      process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '300000'
+      expect(getContextWindowSize('claude-sonnet-latest')).toBe(300_000)
     })
   })
 

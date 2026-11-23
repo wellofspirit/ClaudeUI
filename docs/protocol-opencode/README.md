@@ -14,15 +14,18 @@ imported from `auth.json` (`credential-store.ts`).
 
 ## Pin
 
-- opencode **2.2.6**, tag `v2.2.6`, commit `dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06` (verified
-  against upstream's `refs/tags/v2.2.6`). The wire types come from the spec the 2.2.6 binary
+- opencode **2.3.2**, tag `v2.3.2`, commit `c0ad18b402eb2827fc1ee71c171b1177b3fc02d1` (verified
+  against upstream's `refs/tags/v2.3.2`). The wire types come from the spec the 2.3.2 binary
   SERVES, not from upstream's committed `packages/protocol/openapi.json` (see Generated types;
-  at 2.2.6 the served spec differs from the committed one in 16 added, 2 removed and 51 changed
-  components and 3 operations, all in the `Event`/`Session`/`Form`/`Shell` groups: informational).
-  The served spec is 511 schemas / 170 operations (2.2.5: 363 / 169): it now names every event
+  at 2.3.2, as at 2.3.0, the served spec differs from the committed one in 16 added, 2 removed and 52 changed
+  components and 3 operations, all in the `Event`/`Session`/`Form`/`Shell` groups: informational —
+  upstream's committed spec names the encoded `Event.Version` literals by a hash of their shape,
+  the served one by Effect's encounter order, `Event.VersionEncoded_<n>`, so every durable event
+  that references one differs). The served spec is 532 schemas / 173 operations (2.3.0: 515 / 170;
+  2.2.6: 511 / 170; 2.2.5: 363 / 169). At 2.2.6 it began naming every event
   payload as its own schema (`V2Event` and the `session_*` family; the events ClaudeUI consumes
-  are still the hand-curated `events.ts`), adds `Job` (`experimental.job.list`) and
-  `Provider.CacheWarming`, and drops `Event.SeqEncoded` / `PersistentPty.ReadLinesEncoded`
+  are still the hand-curated `events.ts`), added `Job` (`experimental.job.list`) and
+  `Provider.CacheWarming`, and dropped `Event.SeqEncoded` / `PersistentPty.ReadLinesEncoded`
   (unused by ClaudeUI). Its `SessionLogItemEncoded` is the first schema to use `contentSchema`,
   which the generator now treats as an annotation like `contentMediaType`.
   **2.1.0 changed public contracts on purpose** (upstream's "Breaking changes"): provider replay
@@ -54,6 +57,82 @@ imported from `auth.json` (`credential-store.ts`).
   `skill` and then `read`; `opencode_session_move` asks `external_directory` for a destination
   outside the project (ClaudeUI still denies the family, §Permissions); the server reads
   `OPENCODE_FLAGS` (`packages/core/src/flag.ts`), which ClaudeUI strips from the spawn env.
+  **2.3.0 changes behaviour ClaudeUI relies on** (event sources reviewed:
+  `event-manifest`, `session-event`, `credential`, `provider`, `model`):
+  - **Every subagent runs in the background** (`packages/core/src/tool/plugin/subagent.ts`; the
+    `background` input and the foreground path are gone): the call answers at once with
+    `metadata {sessionID, status: 'running'}`, and the child reports EACH idle round to its parent
+    as a synthetic `<subagent sessionID state description>` inbox item that wakes it
+    (`session/execution/subagent-report.ts`, `session/subagent-completion.ts`); `state="running"`
+    when the round ended with the child's own background work (a shell, a grandchild) still
+    running, which wakes it again later. A parent's interrupt no longer reaches its children
+    (§Turns). ClaudeUI's mapping: ADR-111 §3/§4.
+  - Handlers no longer wait for plugins (`bcaf561d94`; `AGENTS.md` "Plugin Loading"): a cold
+    location answers its catalogs empty or partial, and `integration.list` (or `skill.list`) is no
+    barrier any more. ClaudeUI polls `plugin.list` instead and refreshes on the `*.updated` events
+    (§Requests, Catalog).
+  - `session.generate` records its usage (`session.usage.recorded {source:'generate'}`), so a
+    `/btw` on the chat's own session reaches the session cumulative (§Event feed, Usage).
+  - Events: `credential.updated` names `{integrationID, credentialID}`; new durable
+    `session.step.first-token` and ephemeral `experimental.mcp.event` (opt-in
+    `experimental.mcp_events`), both uncurated.
+  - Shell: the structured result's exit is `exitCode`; a stopped call fails with its output so far
+    and `metadata {interrupted, notice, shellID}` (`shell/result.ts` `interrupted`); a user's
+    interrupt first asks running tools to stop, for up to 5 s (`runner/step.ts`
+    `COOPERATIVE_STOP`; only `shell` cooperates, settling ~0.5 s after its stop).
+  - Small: `agent.list` drops `ServiceUnavailableError` from its errors; `POST …/fork` writes a
+    synthetic fork-notice row (`plugin/fork-notice.ts`; history skips it); config gains
+    `experimental.shell_timeout_background`/`console_watches`/`mcp_events`, provider `tls` and model
+    `freeform`, and `experimental.codemode_vm` is a leftover (ClaudeUI writes none of these).
+
+  **2.3.2 changes behaviour ClaudeUI relies on** (event sources reviewed: only
+  `packages/schema/src/model.ts` changed, `Model.Type` gains `video`; no event ClaudeUI maps
+  carries one):
+  - **Compaction summaries are written in the background by default** (`compaction.background`,
+    default on; the `background_compaction` flag is gone; `core/src/session/compaction.ts`
+    `precompute`, started as a turn's last step completes or before a step, `session/runner/llm.ts`).
+    The summary request is billed when it finishes, usually after the turn: the idle
+    `session.usage.updated` holds it, and the compaction that later swaps the summary in carries
+    the same figures again on `compaction.ended` (§Event feed, Usage: counted once). A summary that
+    is never used still costs its request.
+  - **A foreground shell that reaches its timeout moves to the background**, always (the
+    `shell_timeout_background` flag is gone; `tool/plugin/shell.ts`): the call answers with a notice
+    and `shellID`, the command keeps running, and its end wakes the session like a background
+    command's. A foreground `timeout: 0` now means the 120 s default. Accepted (owner, 2026-11-23):
+    a session no longer sits stuck on a hung command. Consequences: §Turns, §Dispatch targets.
+  - **Automations replace schedules** (`tool/plugin/automation.ts`, `core/src/automation.ts`): the
+    tools are `opencode_automation_create|list|pause|resume|delete` and a `/automation` command,
+    turned on by `experimental.automations`, the old `experimental.schedules` (now an alias,
+    `schema/src/config/flag.ts` `aliases`) or `all_flags`. An automation prompts a session of the
+    project or a new child, or runs a Code Mode action without a model, on a timer or an MCP event;
+    any server process runs the due ones (`server/src/process.ts`). ClaudeUI denies the family
+    (§Permissions).
+  - **CLAUDE.md is read as instructions** where a directory has no `AGENTS.md`, and
+    `~/.claude/CLAUDE.md` when the global `AGENTS.md` is missing (`config/plugin/instruction.ts`,
+    `instruction-discovery.ts`; off only with `OPENCODE_DISABLE_CLAUDE_CODE[_PROMPT]`). ClaudeUI
+    leaves it on: an opencode session reads the instructions a Claude session would (owner,
+    2026-11-23).
+  - **A process a successful command left running survives the server** (opencode-pty 0.6.0,
+    `packages/process-daemon/SPEC.md` "A successful command may leave background processes running
+    untracked"; only a non-zero exit kills the process group). So `npm run dev &` in a shell call
+    outlives ClaudeUI's quit; a background shell call (`background: true`) still ends with the
+    server (§Server lifecycle, End).
+  - The ChatGPT and OpenAI plugins read the stored credential at load without resolving or
+    refreshing it (`plugin/provider/credential-settings.ts` `storedCredential`; §Credentials).
+  - A reject still settles the session's other pending asks, but only those of the same message
+    (`core/src/permission.ts` `reply`); every ClaudeUI card is answered on its own anyway.
+  - A request that fails with no response of its own is a 500 with a JSON
+    `UnknownError {message, ref}` body instead of an empty one (`server/src/middleware/defect-response.ts`);
+    `OpencodeApiError` shows the message and ClaudeUI branches on the status only.
+  - Small: a child's `<subagent state="running">` now comes from a snapshot of its outstanding
+    work (`recovery.outstanding`, `session/subagent-completion.ts`) instead of the body text; the
+    report's text is unchanged. Config gains `experimental.automations`/`video_generate` (an HTTP
+    API, no model tool)/`full_codemode` (opt-in only, never by `all_flags`; with it `shell`,
+    `edit`, `write` and `patch` become Code Mode tools — direct again, since ClaudeUI hides
+    `execute` — and `webfetch` is not registered at all) and `compaction.background`;
+    `experimental.shell_timeout_background`/`background_compaction` are gone, and a leftover key is
+    dropped silently (`config/normalize.ts` copies only known keys).
+
 - **One pin.** The version is the harness manifest's `tested`
   (`src/shared/harness-manifests/opencode.json`); `scripts/generate-opencode-protocol.mjs` reads it
   and keeps only the reviewed commit (`PIN_COMMIT`), which it proves the tag still names. A unit
@@ -71,7 +150,9 @@ imported from `auth.json` (`credential-store.ts`).
   postinstall replaces with a hard link to the platform build on every OS) and one package per host,
   `@opencode/cli-<os>-<arch>` (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`,
   `windows-x64`, `windows-arm64`, plus `-baseline` / `-musl` variants). Each platform tarball holds
-  exactly `package/package.json` and `package/bin/opencode[.exe]`.
+  two files, `package/package.json` and `package/bin/opencode[.exe]`; the darwin and windows
+  tarballs also list the `package/` and `package/bin/` directories (4 entries; the linux ones 2,
+  at 2.3.2). The installer keeps only the binary.
 - ClaudeUI's managed copy: the installer reads `@opencode%2fcli-<os>-<arch>/<version>` from
   `registry.npmjs.org`, checks the tarball against npm's `integrity` and, for the tested version,
   the reviewed `integrity` and `binarySha256` in the manifest, and keeps only the binary
@@ -80,30 +161,30 @@ imported from `auth.json` (`credential-store.ts`).
 - Provenance (2.0.24): every package's `repository` is `anomalyco/opencode`, maintainer `thdxr`,
   published by GitHub Actions through npm trusted publishing (OIDC); the darwin binaries are signed
   `Developer ID Application: Anomaly Innovations, Inc. (5NZ4Q7NXJ4)`.
-- `--version` prints `opencode v2.2.6` (1.x printed the bare version; a source build without a
+- `--version` prints `opencode v2.3.2` (1.x printed the bare version; a source build without a
   version prints `opencode vlocal`). Detection reads both; a 1.x install is labelled too old
-  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.2.6 or newer)"), and
+  ("opencode 1.18.34 is from the 1.x line; ClaudeUI uses opencode 2.x (2.3.2 or newer)"), and
   `opencode2` is searched on PATH beside `opencode`. Homebrew's `opencode` formula is a 2.x source
   build with the version stamped in (`OPENCODE_VERSION`), found at `<prefix>/bin/opencode` as
   System and labelled by its version like any other.
 
 ## Server lifecycle (`opencode-server-spawn.ts`, `OpencodeServerManager.ts`)
 
-| What          | 2.x                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Command       | `opencode serve --stdio --hostname 127.0.0.1 --port 0` (never `--service`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Listen line   | The FIRST stdout line is JSON `{"url":"http://127.0.0.1:<port>"}`; only a loopback `http:` URL with a port is accepted                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Auth          | HTTP Basic `opencode:<password>`; the password goes in `OPENCODE_PASSWORD` (the legacy `OPENCODE_SERVER_PASSWORD` is deleted from the child env). In `--stdio` mode the server deletes both from its own env, so its tools cannot read it                                                                                                                                                                                                                                                                                                                     |
-| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`; an inherited `OPENCODE_FLAGS` is deleted (2.2.6 reads it; `all` would enable experimental features the user did not opt into). No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6)                                                                                                                                                                 |
-| End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway                                                                                                                                                                                                                                                                                                                                                                       |
-| Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained)                                                                                                                                                                       |
-| Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn)                                                                                                                                                                                                                                                                        |
-| Release       | `releaseIfCurrent(cwd, conn)` — exact: a server's URL + password is unique per spawn, so a stale lease never releases a replacement. There is no cwd-only release                                                                                                                                                                                                                                                                                                                                                                                             |
-| Death         | An unexpected exit fans out to `subscribeExit` listeners (exact per lease)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| First contact | Before a server serves anything that can activate a location, the credential store's proven-copy cleanup runs on it (S7); until it succeeds the server serves credential-route leases only (fail closed, `OpencodeCredentialCleanupError`). On 2.2.5 `list`/`remove`/`activate`/relabel do not activate a location, but `credential.create` DOES (it boots the global-config Location), so a create is refused until the cleanup has succeeded — in the store's own process and on a lease the manager vouches for (`ServerConnection.cleaned`); §Credentials |
-| Readiness     | Per (server, directory): `POST /api/rpc/claudeui-xeng/tools` lists the registered `claudeui_*` tools; `acquire` waits (10 s cap, logged, never throws) until `claudeui_dispatch_agent` is there. Fallback: `GET /api/mcp` connected + 400 ms                                                                                                                                                                                                                                                                                                                  |
-| Guard         | Per (server, directory): `POST /api/rpc/claudeui-xeng/guard` must answer `{permissionHook:true, mcpDirect:true, modelGate:true}` (plus `allowlistLoaded`, reported and logged, never required) within 10 s, else a turn-running `acquire` throws `OpencodePermissionGuardError` (fail closed; only `active` is memoized)                                                                                                                                                                                                                                      |
-| Config reload | After a ClaudeUI config write: per server `POST /api/location/reload`, then readiness again — but never on a server with a running execution (a reload cancels pending asks and forms; opencode's own config watcher applies the files there, ~0.5 s)                                                                                                                                                                                                                                                                                                         |
+| What          | 2.x                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Command       | `opencode serve --stdio --hostname 127.0.0.1 --port 0` (never `--service`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Listen line   | The FIRST stdout line is JSON `{"url":"http://127.0.0.1:<port>"}`; only a loopback `http:` URL with a port is accepted                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Auth          | HTTP Basic `opencode:<password>`; the password goes in `OPENCODE_PASSWORD` (the legacy `OPENCODE_SERVER_PASSWORD` is deleted from the child env). In `--stdio` mode the server deletes both from its own env, so its tools cannot read it                                                                                                                                                                                                                                                                                                                                                                                   |
+| Env           | `OPENCODE_CONFIG_CONTENT` (the injection, §Config; it holds secrets — never logged), `OPENCODE_DISABLE_AUTOUPDATE=1`, `OPENCODE_DISABLE_SHARE=1`, `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` (the plugin serves the Claude skill catalog); an inherited `OPENCODE_FLAGS` is deleted (2.2.6+ reads it; `all` would enable experimental features the user did not opt into). `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` is NOT set: 2.3.2 reads CLAUDE.md as instructions, as a Claude session does (owner, 2026-11-23). No `HOME`/`XDG_*` override: the data dir is SHARED with the user's own opencode (owner decision, ADR-097 §6) |
+| End           | Close stdin (the `--stdio` lease, as pi, ADR-092); a tree kill (`taskkill /T` on Windows) only if the process outlives 5 s. If ClaudeUI dies the pipe closes and the server ends anyway. Its shell daemon and the commands it still tracks end with it; a process a SUCCESSFUL command left running detached (`npm run dev &`) does not (opencode-pty 0.6.0, 2.3.2; accepted, owner 2026-11-23)                                                                                                                                                                                                                             |
+| Keying        | ONE server per distinct config injection (`configIdentity`, a digest of bridged MCP + plugin dir + agent permission overlay), not per cwd: the directory travels per request. In practice one long-lived server per app; a cwd with a project-scoped Claude MCP server gets its own. A config change starts a new server for new leases; the old one ends at its last release (drained)                                                                                                                                                                                                                                     |
+| Leases        | `acquire(cwd)` (turn-running: waits for the hosted tools and requires the plugin guard), `acquire(cwd, {waitForHostedTools:false})` (reads), `lingerMs` (a read lease keeps the server idle 60 s after the last release), `acquireIfRunning` (a background read that must never spawn)                                                                                                                                                                                                                                                                                                                                      |
+| Release       | `releaseIfCurrent(cwd, conn)` — exact: a server's URL + password is unique per spawn, so a stale lease never releases a replacement. There is no cwd-only release                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Death         | An unexpected exit fans out to `subscribeExit` listeners (exact per lease)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| First contact | Before a server serves anything that can activate a location, the credential store's proven-copy cleanup runs on it (S7); until it succeeds the server serves credential-route leases only (fail closed, `OpencodeCredentialCleanupError`). On 2.2.5 `list`/`remove`/`activate`/relabel do not activate a location, but `credential.create` DOES (it boots the global-config Location), so a create is refused until the cleanup has succeeded — in the store's own process and on a lease the manager vouches for (`ServerConnection.cleaned`); §Credentials                                                               |
+| Readiness     | Per (server, directory): `POST /api/rpc/claudeui-xeng/tools` lists the registered `claudeui_*` tools; `acquire` waits (10 s cap, logged, never throws) until `claudeui_dispatch_agent` is there. Fallback: `GET /api/mcp` connected + 400 ms                                                                                                                                                                                                                                                                                                                                                                                |
+| Guard         | Per (server, directory): `POST /api/rpc/claudeui-xeng/guard` must answer `{permissionHook:true, mcpDirect:true, modelGate:true}` (plus `allowlistLoaded`, reported and logged, never required) within 10 s, else a turn-running `acquire` throws `OpencodePermissionGuardError` (fail closed; only `active` is memoized)                                                                                                                                                                                                                                                                                                    |
+| Config reload | After a ClaudeUI config write: per server `POST /api/location/reload`, then readiness again — but never on a server with a running execution (a reload cancels pending asks and forms; opencode's own config watcher applies the files there, ~0.5 s)                                                                                                                                                                                                                                                                                                                                                                       |
 
 ## Requests (`OpencodeClient.ts`)
 
@@ -113,18 +194,18 @@ Typed per operationId from the generated table; a non-2xx is `OpencodeApiError` 
 error union when tagged), our timeout `OpencodeTimeoutError` (60 s; `generate` 240 s, under undici's
 300 s `headersTimeout`).
 
-| Area        | Routes ClaudeUI uses                                                                                                                                                                                                              | Notes                                                                                                                                                                                                                                                                                     |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Sessions    | `POST /api/session`, `GET /api/session/{id}`, `GET /api/session`, `PATCH /api/session/{id}`, `DELETE /api/session/{id}`, `POST …/agent`, `POST …/model`, `POST …/fork`                                                            | `session.create` IGNORES the directory header: the client always sends `location:{directory}` (a child, `parentID`, inherits its parent's). `GET /api/session` is GLOBAL (every directory in the DB); `directory` narrows it, `parentID=null` keeps roots. `PATCH {permissions}` REPLACES |
-| Turns       | `POST …/prompt`, `POST …/command`, `POST …/interrupt`, `GET /api/session/active`, `POST …/generate`                                                                                                                               | `prompt`/`command` enqueue into the inbox and answer at once; the turn is followed on the feed. `active`: absent = idle. `interrupt?resume=true` lets queued steers run after the stop. `generate` is one transient completion (nothing written)                                          |
-| Inbox       | `GET …/inbox`, `DELETE …/inbox/{id}`, `PATCH …/inbox/{id} {delivery}`                                                                                                                                                             | See §Inbox                                                                                                                                                                                                                                                                                |
-| Asks        | `GET …/permission`, `POST …/permission/{id}/reply`, `GET …/form`, `POST …/form/{id}/reply`, `DELETE …/form/{id}?message=`                                                                                                         | Replies go to the ASKING session (a child answers its own asks). See §Permissions                                                                                                                                                                                                         |
-| History     | `GET …/message` (cursor paged; the client reads oldest first)                                                                                                                                                                     | Rows: `user`, `assistant` (per step), `tool` parts inside assistant content, `idle` (a turn's end and outcome), `compaction`, `synthetic`, `agent-switched`, …                                                                                                                            |
-| Shells      | `GET /api/shell/{id}`, `GET /api/shell/{id}/output?cursor=`                                                                                                                                                                       | 2.x pushes no shell output; `tool.progress` carries the `shellID` and ClaudeUI pages the output (it re-reads the bytes of a character cut at a page end)                                                                                                                                  |
-| Catalog     | `GET /api/integration` (the activation barrier), `/api/agent`, `/api/command`, `/api/skill`, `/api/model`, `/api/model/default`, `/api/provider`, `/api/mcp`, `GET /api/location`, `GET /api/config`, `POST /api/location/reload` | A cold location answers its catalogs EMPTY for ~100–250 ms until its plugins load; `integration.list` waits for them, so the client awaits it once per directory. `/api/model` can stay empty right after boot (`modelListIsAuthoritative`)                                               |
-| Credentials | `GET/POST /api/credential`, `PATCH /api/credential/{id} {label}`, `DELETE /api/credential/{id}`, `POST /api/credential/{id}/activate`, the integration OAuth flow routes                                                          | See §Credentials                                                                                                                                                                                                                                                                          |
-| Plugin RPC  | `POST /api/rpc/{rpcID}/{method}` (`{input}` → `{output}`)                                                                                                                                                                         | The spec's params omit `{method}`; the client builds the path                                                                                                                                                                                                                             |
-| Events      | `GET /api/event` (SSE)                                                                                                                                                                                                            | See §Event feed                                                                                                                                                                                                                                                                           |
+| Area        | Routes ClaudeUI uses                                                                                                                                                                                                                             | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sessions    | `POST /api/session`, `GET /api/session/{id}`, `GET /api/session`, `PATCH /api/session/{id}`, `DELETE /api/session/{id}`, `POST …/agent`, `POST …/model`, `POST …/fork`                                                                           | `session.create` IGNORES the directory header: the client always sends `location:{directory}` (a child, `parentID`, inherits its parent's). `GET /api/session` is GLOBAL (every directory in the DB); `directory` narrows it, `parentID=null` keeps roots. `PATCH {permissions}` REPLACES                                                                                                                                                                                                                                                                                               |
+| Turns       | `POST …/prompt`, `POST …/command`, `POST …/interrupt`, `GET /api/session/active`, `POST …/generate`                                                                                                                                              | `prompt`/`command` enqueue into the inbox and answer at once; the turn is followed on the feed. `active`: absent = idle. `interrupt?resume=true` lets queued steers run after the stop. `generate` is one transient completion (nothing written)                                                                                                                                                                                                                                                                                                                                        |
+| Inbox       | `GET …/inbox`, `DELETE …/inbox/{id}`, `PATCH …/inbox/{id} {delivery}`                                                                                                                                                                            | See §Inbox                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Asks        | `GET …/permission`, `POST …/permission/{id}/reply`, `GET …/form`, `POST …/form/{id}/reply`, `DELETE …/form/{id}?message=`                                                                                                                        | Replies go to the ASKING session (a child answers its own asks). See §Permissions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| History     | `GET …/message` (cursor paged; the client reads oldest first)                                                                                                                                                                                    | Rows: `user`, `assistant` (per step), `tool` parts inside assistant content, `idle` (a turn's end and outcome), `compaction`, `synthetic`, `agent-switched`, …                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Shells      | `GET /api/shell/{id}`, `GET /api/shell/{id}/output?cursor=`                                                                                                                                                                                      | 2.x pushes no shell output; `tool.progress` carries the `shellID` and ClaudeUI pages the output (it re-reads the bytes of a character cut at a page end; since 2.3.2 the server ends a page before such a character itself)                                                                                                                                                                                                                                                                                                                                                             |
+| Catalog     | `GET /api/plugin` (the activation barrier), `/api/integration`, `/api/agent`, `/api/command`, `/api/skill`, `/api/model`, `/api/model/default`, `/api/provider`, `/api/mcp`, `GET /api/location`, `GET /api/config`, `POST /api/location/reload` | No handler waits for a location's plugins (2.3.0, `AGENTS.md` "Plugin Loading"): a cold location answers its catalogs empty or partial until they load. The client polls `plugin.list` until it lists one (25 ms apart, 5 s cap, never failing; upstream's `waitForPlugins`) once per directory before the first catalog read, and a live session or dispatch target refreshes its cached agents and slash menu on `agent.updated` / `command.updated` / `skill.updated` / `plugin.updated` for its location. `/api/model` can stay empty right after boot (`modelListIsAuthoritative`) |
+| Credentials | `GET/POST /api/credential`, `PATCH /api/credential/{id} {label}`, `DELETE /api/credential/{id}`, `POST /api/credential/{id}/activate`, the integration OAuth flow routes                                                                         | See §Credentials                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Plugin RPC  | `POST /api/rpc/{rpcID}/{method}` (`{input}` → `{output}`)                                                                                                                                                                                        | The spec's params omit `{method}`; the client builds the path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Events      | `GET /api/event` (SSE)                                                                                                                                                                                                                           | See §Event feed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 `GET /api/skill` lists every REGISTERED skill, while the `skill` tool offers only what the agent's
 rules let through (`packages/core/src/skill.ts` `available`). So the skill list ClaudeUI shows is
@@ -161,17 +242,38 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   - ephemeral: `session.usage.updated`, `session.text.delta`, `session.reasoning.delta`,
     `session.tool.input.delta`, `session.tool.progress`, `session.compaction.delta`,
     `permission.asked/replied`, `form.created/replied/cancelled`, `credential.updated/switched`,
-    `provider.updated`, `model.updated`.
+    `provider.updated`, `model.updated`, and the catalog events `agent.updated`,
+    `command.updated`, `skill.updated`, `plugin.updated` (no session: scoped by the envelope's
+    `location`; §Requests, Catalog).
 - Facts the S4 mapper (`event-mapper.ts`) is built on: one assistant message per STEP
   (`assistantMessageID`); `text`/`reasoning` ordinals count per kind within a step;
   `tool.called` (with the real input) comes BEFORE the tool runs and before its ask; a subagent
   call links its child by `tool.progress.metadata.sessionID` (child events before the link are
-  held); a turn ends with `execution.succeeded` / `failed{error}` / `interrupted{reason}`, and
+  held), answers at once (2.3.0), and the child's own end is the run's notification; the child's
+  `<subagent state>` reports reach the parent as synthetic inbox items, never shown; a turn ends with `execution.succeeded` / `failed{error}` / `interrupted{reason}`, and
   `interrupted{shutdown}` after a messageless reject or form cancel is a decline, not a shutdown;
   an interrupt drops pending asks WITHOUT `permission.replied` (the mapper retracts them).
 - Usage: `step.ended` carries the step's cost and DISJOINT tokens (cache subtracted from input,
-  reasoning beside output); `session.usage.updated` is the session cumulative (it also counts title
-  generation, which no step carries).
+  reasoning beside output); `session.usage.updated` is the session cumulative (it also counts what
+  no step carries: title generation and, since 2.3.0, every `POST …/generate` — ClaudeUI's `/btw`
+  on the chat's own session; the mapper reports the difference once, at a quiet point). A `/btw`
+  asked before the chat has an opencode session runs on a throwaway session, whose usage is not
+  counted.
+- A compaction's request is on `compaction.ended`/`failed` AND in the cumulative. Usually it is
+  billed inside the execution, so the mapper counts it on the compaction. A BACKGROUND summary
+  (2.3.2's default) is billed when it finishes, typically while the session is idle, so the mapper
+  has already reported it as overhead when a compaction swaps it in: the compaction then counts
+  only what the cumulative cannot explain (accounted + its usage − cumulative, never more than
+  overhead no earlier compaction claimed; `event-mapper.ts` `uncounted`), and a resume's seed is
+  treated the same way. Live therefore totals the session's cumulative, as the cold line does
+  (its compaction rows plus the remainder) in engine cost and tokens; the summary's tokens may show
+  under the session's model instead of the compaction's, so when compaction runs on another model the
+  per-model split and the re-priced equivalent cost (`opencodeCostInputs`) can differ between live
+  and cold (`history-parity.test.ts` `background-compaction`). After a reconnect the headline can
+  read low by up to the summary until the next `session.usage.updated`, and a child's discarded
+  background summary is counted neither live nor cold.
+- `credential.updated` names the one credential that was added, relabelled or removed
+  (`{integrationID, credentialID}`, 2.3.0; `{}` before).
 
 ## Turns, the inbox and the queue (ADR-097 §9)
 
@@ -183,15 +285,21 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   as `steer` (ADR-053 §1 timing) and keeps ADR-053's queue card; take-back is `DELETE …/inbox/{id}`
   after the item's own POST settled — opencode answers 204 even for a delivered item, so the stored
   row (`GET …/message/{id}`) decides who won. `PATCH …/inbox/{id}` switches steer ↔ queue.
-- Stop is `POST …/interrupt?resume=true` (queued steers still run). A teardown interrupts the own
-  session and every child whose call is open, cancels ClaudeUI's undelivered inbox items, and
-  waits (5 s cap) until `GET /api/session/active` lists none of them (`session-support.ts`
-  `stopOpencodeSessions`): a server shutdown keeps a running execution's claim, and opencode would
-  resume it headless on its next start.
-- A CHILD session takes the same `interrupt` (ADR-111 §4, `stopTask`): its job is cancelled; a
-  foreground parent call fails `Subagent cancelled (sessionID …)` and the parent turn goes on; a
-  background child's cancellation reaches the parent as a synthetic `<subagent state="cancelled">`
-  completion, which wakes it. A parent interrupt cancels its foreground children only.
+- Stop is `POST …/interrupt?resume=true` (queued steers still run). Since 2.3.0 it first asks the
+  running tools to stop (5 s cap; a stopped shell call fails with its output so far). A teardown
+  interrupts the own session and every child whose run is live, cancels ClaudeUI's undelivered
+  inbox items, and waits (5 s cap, `TEARDOWN_GRACE_MS`) until `GET /api/session/active` lists none
+  of them (`session-support.ts` `stopOpencodeSessions`): a server shutdown keeps a running
+  execution's claim, and opencode would resume it headless on its next start.
+- A foreground shell that reaches its timeout (120 s unless the call asks for more) moves to the
+  background since 2.3.2: the call settles with a notice and the `shellID`, the turn goes on (and
+  usually ends), and the command's end later wakes the session with its result, a turn of its
+  own. In a subagent child that background work makes the round end `state="running"` (ADR-111 §3).
+- A CHILD session takes the same `interrupt` (ADR-111 §4, `stopTask`): its job is cancelled and its
+  `<subagent state="cancelled">` report reaches the parent, which it wakes (or joins its running
+  turn). Interrupting an IDLE child (one waiting on its own background work) is a no-op upstream;
+  ClaudeUI settles its card itself. A parent interrupt reaches none of its children (2.3.0: every
+  child is a background one): they run on and their reports wake the parent later.
 - `POST …/background` moves EVERY foreground job the session is blocked on (subagents, shells,
   commands) to the background and posts a synthetic "User requested … moved to the background"
   note; there is no per-job route, so ClaudeUI does not call it (ADR-111 §4).
@@ -211,13 +319,15 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   (`packages/core/src/tool/plugin/opencode.ts` at v2.2.6: `session_rename`,
   `worktree_create`, `worktree_list`, `models`; `worktree_remove` asks `edit`; `session_move`
   asks `external_directory` for a destination outside the project). So in EVERY mode
-  ClaudeUI wholly denies `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*` and
-  `opencode_schedule_*` (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`, next to the Code Mode deny
-  and moved last by `wireOrder`, so no user allow re-opens them) — the model must not rename or
-  move the session, create or remove worktrees, publish artifacts or schedule turns on its own.
-  `opencode_models`, `opencode_list_mcp_resources` and `opencode_read_mcp_resource` stay
-  available (they read), and the artifact/schedule families exist only when the user enables
-  those features.
+  ClaudeUI wholly denies `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*`,
+  `opencode_automation_*` and `opencode_schedule_*` (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`,
+  next to the Code Mode deny and moved last by `wireOrder`, so no user allow re-opens them) — the
+  model must not rename or move the session, create or remove worktrees, publish artifacts or set
+  up automations on its own. `opencode_models`, `opencode_list_mcp_resources` and
+  `opencode_read_mcp_resource` stay available (they read), and the artifact/automation families
+  exist only when the user enables those features (2.3.2 renamed `schedule` to `automation`; the
+  schedule rule stays for an older server). The `/automation` command stays in the slash menu, as
+  `/schedule` did: it only prompts the model, which has no automation tool to call.
 - `experimental_image_generate` (`tool/plugin/image-generate.ts`, on by default since 2.2.2) is a
   paid model call the model can start without the user asking for an image: it asks in default,
   acceptEdits and auto, like `webfetch`, and is wholly denied (hidden) in plan mode.
@@ -233,7 +343,7 @@ shell scanner cannot analyze command: <reason>"}` — fail closed, nothing runs,
 - Per-session rules ride `POST /api/session {permissions}` and `PATCH` (which REPLACES). The
   session ruleset ClaudeUI sends only tightens: mode gates (asks) → the user's compiled rules (no
   allows under auto; no mutating allows in plan) → plan enforcement → `{execute,*,deny}` and the
-  four `DIRECT_TOOL_DENY_RULES` families → the
+  five `DIRECT_TOOL_DENY_RULES` families → the
   `claudeui_dispatch_agent` ask, whole-category denies moved last.
 - `external_directory` (a tool target outside the session dir AND its git worktree; resource
   `<dir>/*`, slashed, absolute): **since 2.0.25 no agent asks** (the baseline is `{*: allow}`;
@@ -262,7 +372,7 @@ shell scanner cannot analyze command: <reason>"}` — fail closed, nothing runs,
   re-apply (`child-rulesets.ts`, shared by chats and dispatch targets); a PATCH that fails twice
   interrupts the child and refuses its asks (fail closed).
 - `subagent` asks with `resources:[agent id]`, `save:[agent id]`, no `metadata`: the call's input
-  (`agent`, `description`, `prompt`, `model`, `sessionID`, `background`) comes from its
+  (`agent`, `description`, `prompt`, `model`, `sessionID`; 2.3.0 dropped `background`) comes from its
   `tool.called`, which is published before the ask. The depth check (`experimental.subagent_depth`,
   default 1) runs before the ask. `websearch` asks with `resources:[query]`, `metadata` = input;
   `skill` with `resources:[skill id]`, after the skill lookup. Auto mode asks for all three
@@ -388,15 +498,19 @@ metadata:{accountID}}`) plus the sign-ins started from ClaudeUI (labelled
 - Rotation is replace, never PATCH (`PATCH` takes only `label`; a value is silently ignored, a
   re-POST of an id is a 409): POST the next generation `activate:true`, then DELETE the previous.
   2.x hot-reloads credentials (`credential.switched`); there is no recycle.
-- opencode resolves (and may refresh) the active OAuth credential only when a LOCATION activates
-  its plugins, never at boot. Of the credential routes, `list`, `remove`, `activate` and relabel
-  never activate one; **`credential.create` does** on 2.2.5 (it boots the global-config Location,
-  `packages/server/src/handlers/credential.ts`, loading the user's plugins — the ChatGPT plugin
-  then resolves the active connection). That is why the first-contact cleanup runs before any
-  location request, and why `OpencodeCredentialStore` fails a create closed until the cleanup has
-  succeeded in this process and on a lease the manager vouched for (`credential-store.ts`
-  `createGuard`, `OpencodeCredentialCleanupError`); every other credential operation is
-  unchanged and needs neither.
+- opencode reads the active OAuth credential only when a LOCATION activates its plugins, never at
+  boot. Of the credential routes, `list`, `remove`, `activate` and relabel never activate one;
+  **`credential.create` does** (since 2.2.5: it boots the global-config Location,
+  `packages/server/src/handlers/credential.ts`, loading the user's plugins). Up to 2.3.0 the
+  ChatGPT and OpenAI plugins then RESOLVED the active connection at load, which can refresh it;
+  since 2.3.2 they read the stored credential without resolving it
+  (`plugin/provider/chatgpt.ts` and `openai.ts` `load`, `credential-settings.ts`
+  `storedCredential`: "it never refreshes a token"), and a refresh can only come from a request
+  that resolves it (a turn). The guard stays (defence in depth): the first-contact cleanup runs
+  before any location request, and `OpencodeCredentialStore` fails a create closed until the
+  cleanup has succeeded in this process and on a lease the manager vouched for
+  (`credential-store.ts` `createGuard`, `OpencodeCredentialCleanupError`); every other credential
+  operation is unchanged and needs neither.
 - An expired ChatGPT bearer surfaces as `session.execution.failed {error:{type:'provider.auth'}}`.
 - On 2.2.x a ChatGPT sign-in REPLACES openai's model list with the codex set and disables every
   model that is not newer than `gpt-5.5` (`packages/core/src/plugin/provider/openai.ts`:
@@ -416,6 +530,14 @@ metadata:{accountID}}`) plus the sign-ins started from ClaudeUI (labelled
   mapping (`agents`, `system`, `permissions`, `request.body`, `capabilities.input`, `variants`,
   `providers`, `experimental.policies`, …). `src/shared/opencode-config-schema.json` is generated
   from the pinned `Config.InfoEncoded`.
+- A key a later pin drops stays in the user's file and is harmless: 2.3.2 dropped
+  `experimental.shell_timeout_background` and `background_compaction`, which opencode now ignores
+  (`config/normalize.ts` copies known keys only). The raw editor never renders `experimental` (a
+  pointer to Session behavior), that pane edits only `experimental.subagent_depth`, and a write
+  that touches `experimental` validates with `additionalProperties:false` removed
+  (`opencode-native-raw.ts` `prepareSchema`), so the leftover blocks nothing; a SET of a dropped
+  key is refused. The new `compaction.background` (on by default) has no curated row; the raw
+  editor shows `compaction` as a pointer too, so it is set in the file.
 
 ## Session list and history (ADR-097 §6, S9; `opencode-session-list.ts`)
 
@@ -445,7 +567,17 @@ deny}` and `{question,*,deny}`), agent (`plan` in plan mode) and model in the bo
 - A turn: re-apply the LIVE mode's ruleset (PATCH when changed, switch the agent; a mode switch
   mid-turn re-applies at once), the ChatGPT pre-turn gate, then an inbox prompt (`steer`) — never
   once a Stop or abort has fired. The turn has started when its own inbox item is DELIVERED (a fresh
-  execution or one it joined); only a terminal output after that settles it. The target's own S4
+  execution or one it joined); only a terminal output after that settles it. A success is held
+  while a child the target launched has not ended its first round, is executing, or has a
+  `<subagent>` report waiting in the target's inbox (`mapper.childWorkPending()`; 2.3.0 ends the
+  launching execution on the launch, and the report wakes the target) — never for an idle child
+  whose report said `running` (only its own background work, maybe a dev server, will wake it) —
+  and settles on the end of the execution that took in the last of them; the turn's watchdog
+  still bounds the wait. A give-up settles an idle child's run `stopped` (`mapper.settleGiveUp`).
+  Nothing holds for the target's OWN shell: one that reaches its timeout moves to the background
+  (2.3.2, §Turns), so the turn settles on the interim text the model wrote around it, and the
+  command's end later wakes the target outside any dispatch turn — a stray turn, metered as its
+  own row, whose answer nobody reads (accepted, owner 2026-11-23). The target's own S4
   mapper yields the text (the last own step that said something), the usage (every step, children's
   included; steps outside any dispatch turn are metered as rows of their own) and the asks.
 - A subagent caller's own deny/ask rules (option a, `caller-restriction.ts`) join the target's
@@ -547,8 +679,9 @@ predate the 1.x removal and keep their names; there is no other opencode integra
 What it covers, per file: the raw client and wire facts (`client`, `turn`, `inbox`, `permission`,
 `form`, `mcp-identity`, `credential`, `credential-location` — which credential route boots a
 location, `paths`, `ruleset`, `plugin-permissions`, `external-directory`, `direct-tools` — the
-direct `opencode_*` tools absent from the tool list the model is sent), the S4 mapper
-against recorded and live sequences (`mapper`), and the production stack end to end — the server
+direct `opencode_*` tools, automations on, absent from the tool list the model is sent), the S4
+mapper against recorded and live sequences (`mapper`, including a background compaction summary
+counted once), and the production stack end to end — the server
 manager (`server-manager`: readiness, `_meta` identity incl. a subagent child's, a second
 directory, stdin-EOF end), the chat (`session`), credentials (`credentials-s7`), config
 (`config`), the dispatcher with an opencode target (`dispatch`: judged ask → runs → returns, a
@@ -569,5 +702,8 @@ two directories in one global listing, the directory filter, delete, history).
    `protocol-v2/events.ts`, then `--accept-events`. The generated config schema
    (`src/shared/opencode-config-schema.json`) moves with it.
 5. The contract suite above (twice, and once with `--maxWorkers=4`). Read the files the S4–S8 notes name as wire facts (mapper, credential
-   resolution, config normalization, plugin hooks) for the release's changes.
+   resolution, config normalization, plugin hooks) for the release's changes. When the release changes
+   what a chat streams, re-record the parity recordings (`OPENCODE_V2_CAPTURE=1` on the mapper
+   contract file; `history-parity.test.ts` replays them) — 2.3.0 re-recorded all of them; 2.3.2
+   added `background-compaction` (`-t` on one case records only its file).
 6. Before a release: the Windows lifecycle/shell run (ADR-097 §8.2).

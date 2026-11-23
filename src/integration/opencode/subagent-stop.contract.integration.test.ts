@@ -6,16 +6,19 @@
  *   OPENCODE_V2_INTEGRATION=1 bun run test:integration \
  *     src/integration/opencode/subagent-stop.contract.integration.test.ts
  *
- * Pins what the unit suites assume of 2.1.2:
- *   - interrupting a FOREGROUND child fails the parent's call ("Subagent
- *     cancelled") and the parent's turn goes on — the model sees the failure;
- *   - interrupting a BACKGROUND child delivers a cancelled completion to the
- *     parent (a synthetic `<subagent … state="cancelled">` message the model reads);
- *   - interrupting the PARENT cancels a foreground child but a background child
- *     survives and still ends on its own;
- *   - a stopped child with a background grandchild (`experimental.subagent_depth`
- *     2): the plan stops grandchild then child, and nothing of the stopped
- *     subtree keeps running or is woken to run again.
+ * Pins what the unit suites assume of 2.3.0, where every subagent runs in the
+ * background:
+ *   - stopping a child while the PARENT's turn still runs: the parent's turn is
+ *     not cut, the card reads stopped, and the cancellation reaches the parent's
+ *     model as a `<subagent … state="cancelled">` report;
+ *   - stopping a child after the parent's turn ended: the cancelled report wakes
+ *     the parent for a turn the model reads;
+ *   - interrupting the PARENT leaves its child running (owner ruling 2b): the
+ *     child ends on its own, `completed`, and its report wakes the parent for an
+ *     ordinary turn;
+ *   - a stopped child with a grandchild (`experimental.subagent_depth` 2): the
+ *     plan stops grandchild then child, and nothing of the stopped subtree keeps
+ *     running or is woken to run again.
  */
 import { expect, it } from 'vitest'
 import { OpencodeClient } from '../../core/opencode/OpencodeClient'
@@ -125,31 +128,30 @@ describeV2('opencode 2.x contract: a per-subagent Stop', () => {
       `the child of ${callId} streaming`
     )
 
-  it('foreground: the parent’s call fails "Subagent cancelled", the turn goes on, the card reads stopped', async () => {
+  it('while the parent’s turn runs: the turn is not cut, the card reads stopped, the model reads the cancellation', async () => {
     const r = rig()
     const sessionID = await r.createSession(ALLOW_ALL)
     const m = driven(r, sessionID)
-    const tag = nonce('fg')
-    const from = await prompt(r, sessionID, `[subslow] ${tag}`)
+    const tag = nonce('mid')
+    // The parent streams slowly after the launch: its turn is still running at the Stop.
+    const from = await prompt(r, sessionID, `[subbg] [afterslow] ${tag}`)
     const started = await m.until(() => m.of('task-started')[0], 'the run to start')
     const callId = started.data.toolUseId
     await streaming(m, callId)
+    expect(await m.active()).toContain(sessionID)
 
     const plan = await m.stop(callId)
     expect(plan.sessions).toEqual([started.data.taskId])
 
-    // The parent's turn is NOT cut: it ends on its own, after the model read the failure.
-    const end = await r.feed.waitForTurnEnd(sessionID, from)
-    expect(end.type).toBe('session.execution.succeeded')
-    const next = r.fixture.mentioning('Subagent cancelled')
-    expect(next.length).toBeGreaterThan(0)
-    expect(m.of('tool-result').find((o) => o.result.toolUseId === callId)).toMatchObject({
-      result: { isError: true }
-    })
+    // The parent's turn is NOT cut, and the cancelled report reaches its model.
+    const report = await r.feed.waitForReport(sessionID, started.data.taskId, { after: from })
+    expect(report.state).toBe('cancelled')
+    expect(report.end?.type).toBe('session.execution.succeeded')
+    expect(r.feed.select('session.execution.interrupted', { sessionID, after: from })).toEqual([])
+    expect(r.fixture.mentioning('state="cancelled"').length).toBeGreaterThan(0)
     // One notification, the Stop's own.
-    await sleep(300)
     expect(m.of('task-notification').map((o) => o.notification)).toMatchObject([
-      { toolUseId: callId, status: 'stopped', taskId: started.data.taskId }
+      { toolUseId: callId, status: 'stopped', taskId: started.data.taskId, isBackgrounded: true }
     ])
     expect(m.mapper.hasLiveBackgroundChild()).toBe(false)
     expect(await m.active()).not.toContain(started.data.taskId)
@@ -157,7 +159,7 @@ describeV2('opencode 2.x contract: a per-subagent Stop', () => {
     expect(m.mapper.stopRun(callId)).toBeNull()
   })
 
-  it('background: the stop delivers a cancelled completion that the parent’s model reads', async () => {
+  it('after the parent’s turn: the stop delivers a cancelled report that wakes the parent', async () => {
     const r = rig()
     const sessionID = await r.createSession(ALLOW_ALL)
     const m = driven(r, sessionID)
@@ -188,49 +190,44 @@ describeV2('opencode 2.x contract: a per-subagent Stop', () => {
     expect(await m.active()).not.toContain(started.data.taskId)
   })
 
-  it('a parent interrupt cancels a foreground child, but a background child survives and ends on its own', async () => {
+  it('a parent interrupt leaves its child running: it ends on its own and its report wakes the parent', async () => {
     const r = rig()
-    // Foreground: cancelled with the parent.
-    const fgSession = await r.createSession(ALLOW_ALL)
-    const fg = driven(r, fgSession)
-    const fgFrom = await prompt(r, fgSession, `[subslow] ${nonce('pfg')}`)
-    const fgStarted = await fg.until(() => fg.of('task-started')[0], 'the foreground run')
-    await streaming(fg, fgStarted.data.toolUseId)
-    await fg.client.interrupt(fgSession)
-    const fgEnd = await r.feed.waitForTurnEnd(fgSession, fgFrom)
-    expect(fgEnd.type).toBe('session.execution.interrupted')
-    const fgChildEnd = await r.feed.waitForTurnEnd(fgStarted.data.taskId, fgFrom)
-    expect(fgChildEnd.type).toBe('session.execution.interrupted')
-
-    // Background: the parent streams on after launching it; interrupting the parent leaves it be.
-    const bgSession = await r.createSession(ALLOW_ALL)
-    const bg = driven(r, bgSession)
-    const bgFrom = await prompt(r, bgSession, `[subbg] [afterslow] ${nonce('pbg')}`)
-    const bgStarted = await bg.until(() => bg.of('task-started')[0], 'the background run')
-    expect(bgStarted.data.isBackgrounded).toBe(true)
-    await streaming(bg, bgStarted.data.toolUseId)
+    const sessionID = await r.createSession(ALLOW_ALL)
+    const m = driven(r, sessionID)
+    const from = await prompt(r, sessionID, `[subbg] [afterslow] ${nonce('parent')}`)
+    const started = await m.until(() => m.of('task-started')[0], 'the run')
+    expect(started.data.isBackgrounded).toBe(true)
+    await streaming(m, started.data.toolUseId)
     // The parent is still streaming (its slow answer after the launch result).
     await r.feed.waitFor('session.text.delta', {
-      sessionID: bgSession,
-      after: bgFrom,
+      sessionID,
+      after: from,
       where: (event) => event.data.delta.startsWith('after')
     })
-    await bg.client.interrupt(bgSession)
-    const bgEnd = await r.feed.waitForTurnEnd(bgSession, bgFrom)
-    expect(bgEnd.type).toBe('session.execution.interrupted')
+    await m.client.interrupt(sessionID, { resume: true })
+    const end = await r.feed.waitForTurnEnd(sessionID, from)
+    expect(end.type).toBe('session.execution.interrupted')
     await sleep(500)
-    // Still running, and it finishes by itself: completed, not stopped.
-    expect(await bg.active()).toContain(bgStarted.data.taskId)
-    const done = await bg.until(
-      () => bg.of('task-notification').find((o) => o.notification.status !== undefined),
-      'the background child’s own end',
-      45_000
-    )
+    m.pump()
+    // Still running, still live to the mapper (it holds the idle timer), nothing settled.
+    expect(await m.active()).toContain(started.data.taskId)
+    expect(m.mapper.hasLiveBackgroundChild()).toBe(true)
+    expect(m.of('task-notification')).toEqual([])
+    // It finishes by itself: completed, not stopped …
+    const done = await m.until(() => m.of('task-notification')[0], 'the child’s own end', 45_000)
     expect(done.notification).toMatchObject({
-      toolUseId: bgStarted.data.toolUseId,
+      toolUseId: started.data.toolUseId,
       status: 'completed',
       isBackgrounded: true
     })
+    // … and its report wakes the parent: a new turn, which nobody stopped.
+    const report = await r.feed.waitForReport(sessionID, started.data.taskId, {
+      after: from,
+      timeoutMs: 45_000
+    })
+    expect(report.state).toBe('completed')
+    expect(report.end?.type).toBe('session.execution.succeeded')
+    expect(m.mapper.hasLiveBackgroundChild()).toBe(false)
   })
 
   // `reversed` interrupts the child BEFORE its grandchild and waits for the child's end first (the
@@ -268,9 +265,13 @@ describeV2('opencode 2.x contract: a per-subagent Stop', () => {
       )
       expect(plan.sessions).toEqual([grand.data.taskId, child.data.taskId])
 
-      // The parent call fails "Subagent cancelled" and the root's turn ends on its own.
+      // The root's own turn ended long before (the call answered at once); the child's
+      // cancelled report wakes it for a turn that ends on its own.
       const end = await r.feed.waitForTurnEnd(sessionID, from)
       expect(end.type).toBe('session.execution.succeeded')
+      const report = await r.feed.waitForReport(sessionID, child.data.taskId, { after: mark })
+      expect(report.state).toBe('cancelled')
+      expect(report.end?.type).toBe('session.execution.succeeded')
       // Give a woken child its chance (a cancelled grandchild's completion wakes its parent).
       await sleep(2_500)
       m.pump()

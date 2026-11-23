@@ -109,6 +109,18 @@ function findSessionIdFn(off, label) {
     if (!near.includes('parent_tool_use_id')) continue
     counts.set(m[1], (counts.get(m[1]) || 0) + 1)
   }
+  if (counts.size === 0) {
+    const fallback = sessionGetterInScope({ name: chunkName, start, end })
+    if (fallback.fn) {
+      console.log(`${label} session ID function: ${fallback.fn}() (${fallback.how})`)
+      return fallback.fn
+    }
+    console.error(
+      `ERROR: no session-id function for ${label} in chunk ${chunkName}: no SDK yield site, and ` +
+        `${fallback.error}. Aborting rather than emitting an out-of-scope binding.`
+    )
+    process.exit(1)
+  }
   if (counts.size !== 1) {
     console.error(
       `ERROR: ${counts.size} candidate session-id functions for ${label} in chunk ${chunkName} ` +
@@ -120,6 +132,49 @@ function findSessionIdFn(off, label) {
   const [[fn, hits]] = [...counts.entries()]
   console.log(`${label} session ID function: ${fn}() (${hits} SDK yields in chunk ${chunkName})`)
   return fn
+}
+
+/**
+ * The session-id getter as `chunk` names it, found by its definition rather than by a yield site.
+ *
+ * Since 2.1.330 Patch E's chunk (the background runner) no longer yields SDK frames itself, so it
+ * holds no `session_id:X()` next to `parent_tool_use_id`. The getter is the bootstrap state's
+ * `function W(){let e=F();if(e?.session)return e.session.id;return e?.sessionId??S.id}` (2.1.326:
+ * `G`), defined exactly once in the bundle. Returns its name when `chunk` defines it, else the
+ * local alias of `chunk`'s own import of its export; `{ error }` when either is missing or
+ * ambiguous — never a bundle-wide name.
+ */
+function sessionGetterInScope(chunk) {
+  const defRe = new RegExp(
+    `function (${V})\\(\\)\\{let (${V})=${V}\\(\\);if\\(\\2\\?\\.session\\)return \\2\\.session\\.id;` +
+      `return \\2\\?\\.sessionId\\?\\?${V}\\.id\\}`,
+    'g'
+  )
+  const defs = [...src.matchAll(defRe)]
+  if (defs.length !== 1)
+    return { error: `${defs.length} session-id getter definitions (expected 1)` }
+  const def = defs[0]
+  const defChunk = chunkAt(def.index)
+  if (defChunk.name === chunk.name) return { fn: def[1], how: `defined in ${chunk.name}` }
+  const defBody = src.slice(defChunk.start, defChunk.end)
+  const exported = [...defBody.matchAll(/export\{([^{}]*)\}/g)]
+    .flatMap((m) => m[1].split(','))
+    .map((spec) => spec.split(' as ').map((s) => s.trim()))
+    .filter(([local]) => local === def[1])
+    .map(([local, as = local]) => as)
+  if (exported.length !== 1) {
+    return {
+      error: `the getter ${def[1]} is exported ${exported.length} times from ${defChunk.name}`
+    }
+  }
+  const base = (p) => p.slice(p.lastIndexOf('/') + 1)
+  const locals = [...chunkImports(src.slice(chunk.start, chunk.end)).entries()]
+    .filter(([, imp]) => imp.imported === exported[0] && base(imp.from) === base(defChunk.name))
+    .map(([local]) => local)
+  if (locals.length !== 1) {
+    return { error: `${locals.length} imports of the getter ${exported[0]} from ${defChunk.name}` }
+  }
+  return { fn: locals[0], how: `getter ${exported[0]} imported from ${defChunk.name}` }
 }
 
 /**
@@ -396,9 +451,12 @@ if (src.includes(patchF2Marker)) {
   const preFilterTailRe = new RegExp(
     `(${V})\\((${V}),(${V}),(${V})\\),yield\\*(${V}),\\5\\.length=0;continue\\}`
   )
-  // HEAD: if(CB?.(),IVe(MSG)){
+  // HEAD: if(CB?.(),IVe(MSG)){   — or, since 2.1.330, `CB?.();…;if(IVe(MSG)){`
   //   CB = optional-call progress callback, IVe = the Bam/DCo `.has(MSG.type)` gate.
-  const preFilterHeadRe = new RegExp(`if\\((${V})\\?\\.\\(\\),(${V})\\((${V})\\)\\)\\{`, 'g')
+  //   2.1.330 calls CB as its own statement and splices a wait-time update between it and
+  //   the gate, so CB is optional in the head; the window, the MSG agreement with the
+  //   tail and the Patch F co-location check below are what tie the head to this branch.
+  const preFilterHeadRe = new RegExp(`if\\((?:(${V})\\?\\.\\(\\),)?(${V})\\((${V})\\)\\)\\{`, 'g')
   /** Chars before the tail in which the IVe gate head must appear (117 in v2.1.261). */
   const F2_HEAD_WINDOW = 600
 
@@ -483,7 +541,7 @@ if (src.includes(patchF2Marker)) {
     src = src.slice(0, tailIdx) + newTail + src.slice(tailIdx + tailStr.length)
     patchCount++
     console.log(
-      `Applied at char ${tailIdx}. msg=${msgVar}, CB=${cbVar}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}, ` +
+      `Applied at char ${tailIdx}. msg=${msgVar}, CB=${cbVar ?? '(own statement)'}, IVe=${iveFn}, fHo=${fhoFn}, buf=${buf}, ` +
         `head gap=${tailIdx - (headWindowStart + heads[0].index + heads[0][0].length)} chars`
     )
   }

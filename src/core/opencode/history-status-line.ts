@@ -79,11 +79,16 @@ export interface OpencodeHistorySeedExtras {
  * folds subagent transcripts into the session, `session-history.ts`
  * `foldSubagentCosts`): every request the chat caused counts —
  * - each step (`assistant` row) of the session and of its children;
- * - each compaction's own request (opencode bills it to the session);
+ * - each compaction's own request (opencode bills it to the session); a
+ *   background summary (2.3.2's default) is on the row of the compaction that
+ *   swapped it in;
  * - the session's remainder: its cumulative (`sessionTotals`) minus the above,
- *   which is opencode's title generation (`session.usage.recorded
- *   {source:'title'}` reaches the cumulative and nothing else), priced on the
- *   fallback model.
+ *   which is what opencode billed to the session outside any step or
+ *   compaction — its title generation, since 2.3.0 every `POST …/generate`
+ *   on it (ClaudeUI's `/btw`), and since 2.3.2 a background summary no
+ *   compaction used: `session.usage.recorded {source:'title'|'generate'|
+ *   'compaction'}` reaches the cumulative — priced on the fallback model.
+ *   So every request counts once, as live (`event-mapper.ts` `uncounted`).
  * Only the own session's steps move the context meter.
  */
 export function opencodeHistorySeed(

@@ -99,6 +99,7 @@ import { clearSyncSubscribersForTests } from '../../core/services/sync-host'
 import { formatRequests } from './harness/diagnostics'
 import {
   createApi,
+  untilReportsRead,
   createHome,
   describeV2,
   fixtureConfig,
@@ -223,10 +224,13 @@ describeV2('opencode 2.x contract: the production OpencodeSession', () => {
   function newSession(): OpencodeSession {
     const routingId = `contract-${++routeCount}`
     sent = []
+    const capture: Sent[] = sent
+    // Bound to THIS test's list: an earlier test's chat may still emit (a child's report
+    // wakes its parent after that test ended, opencode 2.3.0), and must not land here.
     subscribeWindowToSync({
       webContents: {
         send: (channel: string, ...args: unknown[]) => {
-          if (args[0] === routingId) sent.push({ channel, data: args[1] })
+          if (args[0] === routingId) capture.push({ channel, data: args[1] })
         }
       }
     })
@@ -363,7 +367,10 @@ describeV2('opencode 2.x contract: the production OpencodeSession', () => {
       const session = newSession()
       const tag = nonce('child')
       await session.run(`[subread] ${tag}`)
-      await until(() => idle() && results() > 0, 'the turn end')
+      // The call answers at once (2.3.0); the child works after the parent's turn: its end
+      // is the run's notification, and its report wakes the parent for a second turn.
+      await until(() => of('session:task-notification').length > 0, 'the child’s end')
+      await untilReportsRead(api!, session.getSessionId()!)
       const childResults = of('session:subagent-tool-result')
       expect(childResults.length).toBeGreaterThan(0)
       expect(childResults.every((r) => r.isError === true)).toBe(true)
@@ -397,7 +404,8 @@ describeV2('opencode 2.x contract: the production OpencodeSession', () => {
       const session = newSession()
       const tag = nonce('window')
       await session.run(`[subread] ${tag}`)
-      await until(() => idle() && results() > 0, 'the turn end')
+      await until(() => of('session:task-notification').length > 0, 'the child’s end')
+      await untilReportsRead(api!, session.getSessionId()!)
       // The child ran its whole turn on the parent's inherited rules: no PATCH landed.
       expect(patchesHeld).toHaveLength(1)
       const childID = patchesHeld[0]

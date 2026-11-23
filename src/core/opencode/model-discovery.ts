@@ -156,7 +156,7 @@ function probeDiscovery(): Promise<DiscoveryProbe> {
     try {
       if (!current()) return EMPTY_PROBE
       const { client } = lease
-      // `integration.list` waits for the location's plugins (S3's barrier).
+      // The client waits for the location's plugins first (`awaitLocationReady`).
       const integrations = await settle('GET /api/integration', () => client.integrations(), [])
       let [providers, models] = await Promise.all([
         settle('GET /api/provider', () => client.providers(), []),

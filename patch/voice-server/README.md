@@ -197,16 +197,24 @@ The control-request fallback warning. Until 2.1.280 `queue-control`, `background
 ```
 2.1.261  else Be(r,`Unsupported control request subtype: ${Xn(String(r.request.subtype))}`)
 2.1.285  else qe(C,`${r7e}: ${en(String(C.request.subtype))}`)
+2.1.326  else aT(V,pn(String(V.request.subtype)))      with  aT=function(L,X){Nt(L,`${eve}: ${X}`,"unsupported_request")}
 ```
 
-Regex (tolerates the pre-2.1.261, 2.1.261 and 2.1.285 shapes; `FALLBACK_TEXT` is
+Two regexes; a match from either counts, and exactly one must remain. The inline form
+(tolerates the pre-2.1.261, 2.1.261 and 2.1.285 shapes; `FALLBACK_TEXT` is
 `Unsupported control request subtype`):
 
 ```js
 else ([\w$]+)\(([\w$]+),`(?:FALLBACK_TEXT|\$\{([\w$]+)\}): \$\{(?:[\w$]+\(String\()?\2\.request\.subtype(?:\)\))?\}`\)
 ```
 
-Three version notes baked into that pattern:
+The helper form (2.1.326 on):
+
+```js
+else ([\w$]+)\(([\w$]+),[\w$]+\(String\(\2\.request\.subtype\)\)\)
+```
+
+Four version notes baked into these patterns:
 
 - **Tail-less since 2.1.219.** The dispatch chain is wrapped in `try/finally`, so the old
   `;continue}else if(MSG.type==="control_response")` tail no longer directly follows the fallback.
@@ -222,6 +230,13 @@ Three version notes baked into that pattern:
   fallback site to the loop, the `ui_*` gate
   ``else if(G8r(C.request.subtype,…))qe(C,`${r7e}: …`)``. The leading `else ` (not `)qe(`)
   excludes it, and it rejects only `ui_*` subtypes, so it never shadows `voice_server_*`.
+- **Reply helper since 2.1.326.** The fallback calls a local helper with the sanitised subtype
+  alone, and the helper adds the text (see **2.1.326 fallback reply helper** below). A helper-form
+  match only counts when `fallbackHelperBinding()` proves its function is declared in the anchor's
+  chunk as `function H(a,b){X(a,`…`)` or `H=function(a,b){X(a,`…`)`, with the template
+  `${TEXT}: ${b}` and TEXT the literal or a name `fallbackTextBinding()` proves. The plugin-UI
+  dispatch in another chunk ends with the same call shape
+  (`else Pe(ke,pn(String(ke.request.subtype)))`) and an unrelated helper, so it is excluded.
 
 Sites that must **not** match, all present in 2.1.261:
 
@@ -671,3 +686,28 @@ helper `Xe` and aborted. The locator now filters `X(I,{})` matches to the fallba
 before requiring name agreement. Five retained sites resolve to `Xe`; the voice function is `oEr`
 in `chunk-6t02be4p.js`, dynamically imported from the dispatch loop in
 `chunk-6vwtcget.js`. This is anchor drift only; the injected protocol and behavior are unchanged.
+
+## 2.1.326 fallback reply helper
+
+The stdin loop's fallback no longer builds its message inline: it calls a local reply helper with
+the sanitised subtype, `else aT(V,pn(String(V.request.subtype)))}finally{…`, and the helper is
+`aT=function(L,X){Nt(L,`${eve}: ${X}`,"unsupported_request")}` (it also passes an error code now).
+The helper is `sT` on win32-x64, `aT` on darwin-arm64 and `oT` on linux-x64; its text constant is
+imported (`Qve`, `eve`, `Kke`). The anchor gained the helper form (see **Anchor** above); the
+injection is unchanged, since it uses only the message variable, the success helper (`Xt`, four
+`Xt(V,{})`-style sites in the loop's chunk on every platform) and the voice function (`vRs`, `gRs`,
+`mCs`, dynamically imported). Anchor drift only; the injected protocol and behaviour are unchanged.
+
+## 2.1.330 check (no re-anchor)
+
+The helper-form anchor still matches exactly once on all three platforms, unchanged in shape:
+`else lS(z,wn(String(z.request.subtype)))}finally{…`, with
+``lS=function(Q,re){Yt(Q,`${aue}: ${re}`,"unsupported_request")}``. The helper is `lS` on win32-x64,
+darwin-arm64 and linux-x64 alike this time. Its imported text constant is `nue`, `aue` and `Jce`
+respectively, and the message variable is `z`. The success helper is `bn` (four `bn(z,{})`-style
+sites in the loop's chunk on every platform). The voice function is `Htr`, `unr` and `btr`,
+dynamically imported from its own chunk. Checked by running this patch's `apply.mjs` on scratch copies
+of the three pristine 2.1.330 concats (`CLAUDEUI_CLI_VENDOR_DIR`); each applied and verified its
+marker. The 2.1.330 dispatch loop also gained a cli.js-native `dictate` request (speech the host
+recorded → text, behind a server flag; `docs/protocol-cc/07-control-outbound.md` §7.3). It does not
+replace this patch: a public build answers it only for the VS Code extension.

@@ -69,10 +69,12 @@ describe('sandboxViewFromBlock', () => {
     }
   })
 
-  it('an enabled block that does not state the two switches reads them as on', () => {
+  it('an enabled block that does not state the two switches reads them as Claude Code does', () => {
+    // Claude Code 2.1.325 on: an absent autoAllowBashIfSandboxed is false (sandboxed commands
+    // follow the normal permission flow); an absent allowUnsandboxedCommands is still true.
     const v = sandboxViewFromBlock({ enabled: true })
     expect(v.enabled).toBe(true)
-    expect(v.autoAllowBashIfSandboxed).toBe(true)
+    expect(v.autoAllowBashIfSandboxed).toBe(false)
     expect(v.allowUnsandboxedCommands).toBe(true)
   })
 
@@ -238,7 +240,7 @@ describe('saveClaudeSandbox and readClaudeSandboxState', () => {
       sandbox: {
         enabled: true,
         failIfUnavailable: true,
-        autoAllowBashIfSandboxed: true,
+        autoAllowBashIfSandboxed: false,
         allowUnsandboxedCommands: true,
         filesystem: { denyRead: ['~/.ssh'] }
       }

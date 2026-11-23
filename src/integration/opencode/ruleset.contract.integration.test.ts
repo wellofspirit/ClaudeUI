@@ -29,7 +29,15 @@ import {
   messageText,
   type FixtureProvider
 } from './harness/fixture-provider'
-import { describeV2, fixtureConfig, nonce, SHELL_ASKS, useRig, type Rig } from './harness/host'
+import {
+  describeV2,
+  fixtureConfig,
+  nonce,
+  SHELL_ASKS,
+  untilPluginsLoaded,
+  useRig,
+  type Rig
+} from './harness/host'
 
 function perms(p: Partial<ClaudePermissions> = {}): ClaudePermissions {
   return { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined, ...p }
@@ -204,7 +212,8 @@ describeV2('opencode 2.x contract: compiled session rulesets', () => {
       params: { sessionID: child.data.sessionID, requestID: asked.data.id },
       body: { decision: 'reject', message: 'ClaudeUI denied: contract' }
     })
-    expect((await r.feed.waitForTurnEnd(id, from)).type).toBe('session.execution.succeeded')
+    const { end } = await r.feed.waitForReport(id, child.data.sessionID, { after: from })
+    expect(end?.type).toBe('session.execution.succeeded')
   })
 })
 
@@ -227,7 +236,7 @@ describeV2(
       const id = await create(r, rules)
       // What S5 caches per session: the agents' own rulesets.
       // A cold directory lists no agents until its plugins load (ADR-097 S3).
-      await r.api.ok('integration.list')
+      await untilPluginsLoaded(r.api)
       const agents = (await r.api.ok('agent.list')).data
       const general = agents.find((agent) => agent.id === 'general')
       expect(general).toBeDefined()
@@ -248,9 +257,10 @@ describeV2(
           body: { permissions: childSessionRuleset(rules, general!.permissions) }
         })
       }
-      const end = await r.feed.waitForTurnEnd(id, from, 60_000)
+      // 2.3.0: the call answers at once; the child's report wakes the parent after its work.
+      const { end } = await r.feed.waitForReport(id, childID, { after: from, timeoutMs: 60_000 })
       return {
-        end,
+        end: end!,
         childID,
         succeeded: r.feed.select('session.tool.success', { sessionID: childID, after: from }),
         failed: r.feed.select('session.tool.failed', { sessionID: childID, after: from }),

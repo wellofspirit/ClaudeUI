@@ -35,6 +35,7 @@ import {
   type OpencodeEvent,
   type OpencodeEventType
 } from '../../../core/opencode/protocol-v2/events'
+import { subagentReport } from '../../../core/opencode/content'
 import { harnessManifest } from '../../../core/harness/manifests'
 import { installDir } from '../../../core/harness/store'
 import { formatRequests, formatTrace, redact } from './diagnostics'
@@ -409,6 +410,16 @@ export function createApi(baseUrl: string, password: string, directory: string):
 
 // --- SSE feed ---------------------------------------------------------------
 
+/** A child's `<subagent sessionID state>` report, when this inbox admission is one. */
+function reportOf(
+  event: EventOf<'session.inbox.enqueued'>
+): { childID: string; state: string; text: string } | undefined {
+  if (event.data.item.type !== 'synthetic') return undefined
+  const text = event.data.item.payload.text
+  const report = subagentReport(text)
+  return report && { ...report, text }
+}
+
 type TurnEnd =
   | EventOf<'session.execution.succeeded'>
   | EventOf<'session.execution.failed'>
@@ -498,6 +509,41 @@ export class EventFeed {
   waitFor<T extends OpencodeEventType>(type: T, options: WaitOptions<T> = {}): Promise<EventOf<T>> {
     const label = type + (options.sessionID ? ` on ${options.sessionID}` : '')
     return this.until(() => this.select(type, options)[0], label, options.timeoutMs)
+  }
+
+  /**
+   * The next `<subagent … state>` report `childID` sends `parentID` at or after
+   * `after` (opencode 2.3.0: one per idle round of the child, admitted to the
+   * parent's inbox), optionally of one `state`. Unless `read` is false, also the
+   * end of the parent turn that READ it: the first end after its delivery (the
+   * wake it started, or the running turn it steered into).
+   */
+  async waitForReport(
+    parentID: string,
+    childID: string,
+    options: { after?: number; state?: string; read?: boolean; timeoutMs?: number } = {}
+  ): Promise<{ state: string; text: string; at: number; end?: TurnEnd }> {
+    const { timeoutMs } = options
+    const enqueued = await this.waitFor('session.inbox.enqueued', {
+      sessionID: parentID,
+      after: options.after,
+      timeoutMs,
+      where: (event) => {
+        const report = reportOf(event)
+        return report?.childID === childID && (!options.state || report.state === options.state)
+      }
+    })
+    const at = this.events.indexOf(enqueued)
+    const { state, text } = reportOf(enqueued)!
+    if (options.read === false) return { state, text, at }
+    const delivered = await this.waitFor('session.inbox.delivered', {
+      sessionID: parentID,
+      after: at,
+      timeoutMs,
+      where: (event) => event.data.inboxID === enqueued.data.inboxID
+    })
+    const end = await this.waitForTurnEnd(parentID, this.events.indexOf(delivered), timeoutMs)
+    return { state, text, at, end }
   }
 
   /** The first execution end of `sessionID` at or after `after`. */
@@ -613,6 +659,47 @@ export const SHELL_ASKS: Operations['session.create']['body'] = {
     { action: '*', resource: '*', effect: 'allow' },
     { action: 'shell', resource: '*', effect: 'ask' }
   ]
+}
+
+/**
+ * A one-shot client's barrier before it reads a location's catalogs, as upstream's own CLI
+ * does it (`packages/cli/src/services/plugin-startup.ts` `waitForPlugins`): since 2.3.0 no
+ * handler waits for the location's plugins (`AGENTS.md` "Plugin Loading"; `integration.list`
+ * is no barrier any more), so a cold location answers its agents, commands and integrations
+ * empty or partial. Polls `plugin.list` for the api's directory until it lists one, 25 ms
+ * apart and 5 s at most; never fails (a read after it simply sees what is loaded).
+ */
+export async function untilPluginsLoaded(api: Api, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const listed = await api.call('plugin.list').catch(() => undefined)
+    if (listed?.ok && listed.data.data.length > 0) return
+    await new Promise((done) => setTimeout(done, 25))
+  }
+}
+
+/**
+ * Waits until `parentID` has read every report its subagents sent (its inbox is empty) and
+ * runs nothing: the state after a child's `<subagent>` report woke it, or joined its running
+ * turn, and that turn ended (opencode 2.3.0). Held over a few reads, since a report is admitted
+ * just after the child's end. For tests that drive the production session (no raw feed).
+ */
+export async function untilReportsRead(
+  api: Api,
+  parentID: string,
+  timeoutMs = 45_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (let quiet = 0; quiet < 3;) {
+    const active = (await api.ok('session.active')).data
+    const inbox = (await api.ok('session.inbox.list', { params: { sessionID: parentID } })).data
+    quiet = parentID in active || inbox.length > 0 ? 0 : quiet + 1
+    if (Date.now() > deadline)
+      throw new Error(
+        `${parentID} never settled: active=${parentID in active}, inbox=${inbox.length}`
+      )
+    await new Promise((done) => setTimeout(done, 150))
+  }
 }
 
 /** A unique tag for prompts, so fixture requests can be matched to one test. */

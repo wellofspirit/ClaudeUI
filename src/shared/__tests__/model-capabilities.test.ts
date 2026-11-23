@@ -838,8 +838,9 @@ describe('resolveContextWindow', () => {
     expect(resolveContextWindow('claude-opus-4-6')).toBe(DEFAULT)
   })
 
-  it('falls back to the default for unknown / empty values', () => {
-    expect(resolveContextWindow('some-future-model')).toBe(DEFAULT)
+  it('assumes 1M for a model cli.js does not recognise (2.1.323), 200K for no model', () => {
+    expect(resolveContextWindow('some-future-model')).toBe(1_000_000)
+    expect(resolveContextWindow('claude-sonnet-latest')).toBe(1_000_000)
     expect(resolveContextWindow('')).toBe(DEFAULT)
     expect(resolveContextWindow(undefined)).toBe(DEFAULT)
     expect(resolveContextWindow(null)).toBe(DEFAULT)

@@ -51,6 +51,7 @@ import {
   SANDBOX_AVAILABLE,
   sandboxProfile,
   startRefusingProxy,
+  untilPluginsLoaded,
   useRig,
   V2_BIN,
   type RefusingProxy,
@@ -138,7 +139,7 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
 
   it('(a) agent.list shows them as subagents: own rules last and deny-only, the preamble in system', async () => {
     const r = rig()
-    await r.api.ok('integration.list')
+    await untilPluginsLoaded(r.api)
     const agents = (await r.api.ok('agent.list')).data
     const reader = agents.find((agent) => agent.id === 'orch-reader')
     expect(reader).toBeDefined()
@@ -192,9 +193,9 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
       body: { text: `[subas:orch-reader:read] ${tag}` }
     })
     const child = await childOf(r, parent, from)
-    expect((await r.feed.waitForTurnEnd(parent, from, 60_000)).type).toBe(
-      'session.execution.succeeded'
-    )
+    // 2.3.0: the call answers at once; the child's report wakes the parent after its work.
+    const report = await r.feed.waitForReport(parent, child, { after: from, timeoutMs: 60_000 })
+    expect(report.end?.type).toBe('session.execution.succeeded')
     expect(r.feed.select('session.tool.success', { sessionID: child, after: from })).toHaveLength(1)
     const childRequests = r.fixture.requests.filter(
       (q) => q.lastUserText.includes('child does [read]') && q.tools.length > 0
@@ -208,7 +209,7 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
   it('(c) a tools list without Edit/Write: the child cannot edit (no ask, file untouched); naming Edit keeps it', async () => {
     const r = rig()
     writeFileSync(join(r.cwd, NOTES_FILE), 'alpha\n')
-    await r.api.ok('integration.list')
+    await untilPluginsLoaded(r.api)
     const reader = (await r.api.ok('agent.list')).data.find((agent) => agent.id === 'orch-reader')
     // The parent opens edit through an ask: the child's own rules must beat it, unasked.
     const parentRules = [
@@ -228,7 +229,7 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
       params: { sessionID: child },
       body: { permissions: childSessionRuleset(parentRules, reader!.permissions) }
     })
-    await r.feed.waitForTurnEnd(parent, from, 60_000)
+    await r.feed.waitForReport(parent, child, { after: from, timeoutMs: 60_000 })
     expect(readFileSync(join(r.cwd, NOTES_FILE), 'utf8')).toBe('alpha\n')
     expect(r.feed.select('permission.asked', { sessionID: child, after: from })).toHaveLength(0)
     expect(r.feed.select('session.tool.success', { sessionID: child, after: from })).toHaveLength(0)
@@ -261,14 +262,14 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
       params: { sessionID: editor, requestID: asked.data.id },
       body: { decision: 'once' }
     })
-    await r.feed.waitForTurnEnd(parent, controlFrom, 60_000)
+    await r.feed.waitForReport(parent, editor, { after: controlFrom, timeoutMs: 60_000 })
     expect(readFileSync(join(r.cwd, NOTES_FILE), 'utf8')).toBe('beta\n')
   })
 
   it('(d) a Read-only child still reads outside the workspace when the parent allows it, host ruleset applied', async () => {
     const r = rig()
     const file = outsideFile(r, 'd.txt', 'outside-ok\n')
-    await r.api.ok('integration.list')
+    await untilPluginsLoaded(r.api)
     const reader = (await r.api.ok('agent.list')).data.find((agent) => agent.id === 'orch-reader')
     expect(reader).toBeDefined()
     const parent = await r.createSession({ permissions: ALLOW_ALL })
@@ -286,9 +287,8 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
       params: { sessionID: child },
       body: { permissions: ruleset }
     })
-    expect((await r.feed.waitForTurnEnd(parent, from, 60_000)).type).toBe(
-      'session.execution.succeeded'
-    )
+    const report = await r.feed.waitForReport(parent, child, { after: from, timeoutMs: 60_000 })
+    expect(report.end?.type).toBe('session.execution.succeeded')
     expect(r.feed.select('permission.asked', { sessionID: child, after: from })).toHaveLength(0)
     expect(r.feed.select('session.tool.success', { sessionID: child, after: from })).toHaveLength(1)
     expect(
@@ -412,7 +412,7 @@ Shim body.
       expect(spawned[0].agentsBytes).toBeGreaterThanOrEqual(20 * 1024)
       expect(spawned[0].configChars).toBeLessThan(32_767)
       const api = createApi(conn.baseUrl, conn.password, ws)
-      await api.ok('integration.list')
+      await untilPluginsLoaded(api)
       const listed = (await api.ok('agent.list')).data
       expect(listed.map((agent) => agent.id)).toEqual(
         expect.arrayContaining(['big-a', 'big-b', 'big-c'])

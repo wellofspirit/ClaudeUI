@@ -48,9 +48,10 @@
  *   not, and only a deny is immune to the shared saved-allow table).
  * - Whole-category denies go LAST, so the tool is hidden (Claude Code removes a
  *   wholly denied tool from the model's list too) — {@link wireOrder}.
- * - `execute` (Code Mode) is wholly denied in every mode: its runtime carries
- *   an UNGATED `fetch` (`core/src/codemode/web.ts`), which would bypass the
- *   `webfetch` gate and the auto-mode judge. Its tools do not go away with it
+ * - `execute` (Code Mode) is wholly denied in every mode. (This note used to say
+ *   its runtime carries an ungated `fetch`; since at least 2.2.6 that `fetch`,
+ *   `core/src/codemode/fetch.ts`, asserts the `webfetch` rules, so the deny's
+ *   rationale is due a review — backlog #269. The deny stands.) Its tools do not go away with it
  *   (2.2.0): they become direct tools, so every family ClaudeUI does not want
  *   the model to reach is wholly denied too ({@link DIRECT_TOOL_DENY_RULES}).
  * - `experimental_image_generate` is gated as `webfetch` is (ask in default,
@@ -327,7 +328,8 @@ export const EXECUTE_DENY_RULE: V2Rule = rule('execute', 'deny')
  * `worktree_list`, `models`; `session_move` asks `external_directory` for a
  * destination outside the project only), so only a deny can stop them: in
  * every mode the model must not rename or move the session, create or remove
- * worktrees, publish artifacts or schedule future turns behind the user's back.
+ * worktrees, publish artifacts or set up automations (future turns, children,
+ * model-less Code Mode runs) behind the user's back.
  *
  * Hidden, not merely refused: `resource:"*"` last makes `whollyDisabled` drop them
  * from the tool list ({@link wireOrder}). `opencode_worktree_remove` is the exception:
@@ -338,13 +340,29 @@ export const EXECUTE_DENY_RULE: V2Rule = rule('execute', 'deny')
  * `opencode_list_mcp_resources` and `opencode_read_mcp_resource` stay available: they
  * read, and a model that cannot look up a model id guesses one — a server-level user
  * deny/ask still covers that server's resources ({@link compileClaudeRulesV2}). The
- * artifact and schedule families only exist when the user turns those features on.
+ * artifact and automation families only exist when the user turns those features on.
+ *
+ * Automations: 2.3.2 renamed the experimental schedules (`opencode_schedule_*`, flag
+ * `schedules`) to automations (`tool/plugin/automation.ts`: `opencode_automation_create`,
+ * `_list`, `_pause`, `_resume`, `_delete`), turned on by `experimental.automations`, the
+ * old `experimental.schedules` (an alias, `schema/src/config/flag.ts` `aliases`) or
+ * `all_flags`. An automation prompts this or another session of the project or a new
+ * child, or runs a Code Mode action without a model, on a timer or an MCP event, so the
+ * model must not create one behind the user's back. The schedule rule stays for a server
+ * older than 2.3.2.
+ *
+ * Console watches (`plugin/provider/opencode-watches.ts`, namespace `console_watch`:
+ * `console_watch_watch`, `_unwatch`, `_watches`, `_events`; `experimental.console_watches` or `all_flags`
+ * plus an OpenCode Console connection) ask no permission and wake the session on Slack,
+ * GitHub or MCP events with nothing from the user: denied for the same reason.
  */
 export const DIRECT_TOOL_DENY_RULES: readonly V2Rule[] = [
   rule('opencode_session_*', 'deny'),
   rule('opencode_worktree_*', 'deny'),
   rule('opencode_artifact_*', 'deny'),
-  rule('opencode_schedule_*', 'deny')
+  rule('opencode_automation_*', 'deny'),
+  rule('opencode_schedule_*', 'deny'),
+  rule('console_watch_*', 'deny')
 ]
 
 /**

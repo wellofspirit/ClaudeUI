@@ -53,8 +53,29 @@ Exception: `session_state_changed` has no `session_id`/`uuid` (raw emit, not thr
 | `instruction_size_warning` | Instruction files exceed size limits (2.1.289)   | Main generator (§4.31)           |
 | `permission_check_status`  | Auto-mode permission check past ~4 s (2.1.293)   | SDK event queue (§4.32)          |
 | `peer_message_hold`        | Peer message parked/released/dropped             | Receive policy (15 §15.2.3)      |
+| `late_allow_not_run`       | Cloud worker refused a late Allow (2.1.326)      | Worker print loop (§4.33)        |
+| `shell_cwd`                | Host hook matcher opted in (2.1.330)             | Bash/PowerShell call end (§4.34) |
+| `task_list_statuses`       | Schema only in 2.1.330 (no emitter found)        | — (§4.35)                        |
 
 Subtypes that exist in the SDK schema union but are **not** emitted on the SDK stdout wire are cataloged in §4.27.
+
+**2.1.326 additive fields (schema diff against 2.1.321; none consumed by ClaudeUI, and unknown fields are ignored):**
+
+- `init`: each `plugin_errors[]` entry can carry `managed_lock: {plugin_enabled, name, marketplace?}` when a managed-settings `enabledPlugins` entry dropped a directory copy of a plugin. `capabilities` gains `reload_plugins_refuse_if_busy_v1` (07 §7.4 `reload_plugins`).
+- `task_notification`: `summary_is_report` (`@internal`; the `summary` is a background subagent's report, with no review still to come).
+- `background_tasks_changed` entries: `off_host` (`@internal`; the task's work runs outside this process).
+- `hook_started`: `origin`, `label` and `plugin_name` (`@internal`; SessionStart hooks in the Claude desktop app's Code tab only). `hook_progress`: `backgrounded: true` (`@internal`).
+- `informational`: `hook_no_verdict` (`@internal`; a PreToolUse hook gave no verdict, and its failure did not refuse the call).
+- `plugin_install`: without `CLAUDE_CODE_SYNC_PLUGIN_INSTALL` the install now runs in the background, so frames can come before or after `init`, or not at all. In that case only the Claude desktop app gets them, once it asks for them.
+- `session_metadata`: the `artifacts` list no longer carries `type_id`.
+
+**2.1.330 additive fields (schema diff against 2.1.326; none consumed by ClaudeUI):**
+
+- `init`: `served_by_anthropic` (`@internal`; true when this session's model requests go to Anthropic's own API, with no other base URL, socket or provider; absent where the process cannot tell) and `host_dropped_env` (`@internal`; only in a session Claude Desktop itself started, the provider or gateway variables of managed settings that this start dropped, as `[{source: "policySettings", names: [...]}]`, never values). `capabilities` can list `get_usage_detached_v1` (07 `get_usage`) and, behind a server flag, `update_queued_message_v1` (07 §7.3).
+- `background_tasks_changed` entries: `tool_use_id` (`@internal`, only beside `off_host`).
+- `informational`: `saved_files` and `saved_from` (`@internal`; on the `connector_files` line when a connector saved files on this computer).
+- `peer_message_hold`: `outcome` gains `denied`, and a new `reason` (`rate-limited`, `duplicate`, `hop-loop`, `hop-runaway`, `queue-full`, `unverified`) says which check dropped the message.
+- `turn_handoff_available`: `comparison_fork: true` (cloud workers, 07 §7.3). `ui_invalidate`: `unhooked` (`@internal`).
 
 ---
 
@@ -1178,8 +1199,11 @@ The SDK schema union (region `~7060000–7100000` in 2.1.170) declares more subt
 | `local_command_output` | Output from a local slash command (e.g. `/usage`)                                          |
 | `files_persisted`      | Attachment-file persistence results                                                        |
 | `session_metadata`     | 2.1.285: `metadata.artifacts` from the same `notifyMetadataChanged` path as `task_summary` |
+| `voice_call_talk`      | 2.1.326: a voice-call message's **stored transcript row** (see below)                      |
 
 If one of these is observed on stdout in a future CLI version, promote it to a numbered section.
+
+`voice_call_talk` (2.1.326) is the transcript (JSONL) form of a `user` message or `queued_command` attachment whose `origin.kind` is `voice-call`. Its shape is `{type:"system", subtype:"voice_call_talk", level:"info", isMeta:true, msgV:1, content, blocks?, fold?, origin}`. `fold` keeps the original attachment's fields so that a reader can rebuild it. The builder is `j()` @3467102 in the 2.1.326 darwin-arm64 concat; the writer `ddr()` is @3466047 and the reader `cdr()`, which turns the row back into its `user` / `attachment` form, is @3466605. It is not a member of the stdout message union. Only a host that sends voice-call messages (Claude Desktop) produces these rows, and ClaudeUI sends none. `session-history.ts` drops `system` rows other than `compact_boundary` and the two fallback subtypes, so a Desktop session's voice talk is simply absent from ClaudeUI's cold load.
 
 ---
 
@@ -1327,3 +1351,43 @@ inside a subagent, as on `permission_denied` (§4.25). It travels the shared SDK
 queue (the `task_notification` path), so it is on the stream-json wire in print mode.
 Read from the 2.1.293 bundle, not probed live. ClaudeUI does not consume it; unknown
 subtypes are no-ops.
+
+## 4.33 `late_allow_not_run`
+
+**Added in 2.1.326, `@internal`, cloud workers only.** A worker reports that a permission card's call will not run on a late Allow. The card is one that a message had closed while the client kept it up. Either the worker refused the person's Allow, a Deny came, or the worker cancelled the card itself.
+
+```json
+{
+  "type": "system",
+  "subtype": "late_allow_not_run",
+  "request_id": "…",
+  "tool_use_id": "toolu_…",
+  "reason": "turn_running" | "card_open" | "call_gone" | "invalid_answer" | "limited" | "stopped" | "declined" | "asked_again" | "withdrawn" | "expired" | "not_run",
+  "uuid": "…",
+  "session_id": "…"
+}
+```
+
+Any other `reason` is read as "did not run". The schema is `P6` @3004992 and the emitter (`this.io.write({type:"system",subtype:"late_allow_not_run",…})`) is @44350876, both in the 2.1.326 darwin-arm64 concat. It is written only by the code that hands parked permission cards from one cloud worker to the next. That code pairs it with the input-only `user.keeps_request_id` (03 §3.4), which ClaudeUI never sends. Read from the bundle, not probed. ClaudeUI does not consume it; unknown subtypes are no-ops.
+
+## 4.34 `shell_cwd`
+
+**Added in 2.1.330, `@internal`, opt-in by the host.** The folder that a main-thread Bash or PowerShell call that did not fail left its shell in, whether or not the call moved it.
+
+```json
+{ "type": "system", "subtype": "shell_cwd", "cwd": "/abs/path", "uuid": "…", "session_id": "…" }
+```
+
+`cwd` is the folder a PostToolUse hook on this call would be given. A call that overlapped another reports its own folder, so the last frame need not say where the next command starts. It is sent before the call's result and before its PostToolUse hooks, and Claude Code does not wait for the host. Never for a subagent's call or for a call served for another machine's session.
+
+It is sent only to a host that asked for it in `initialize.hooks`: a `PostToolUse` matcher with `replacedByFrame: "shell_cwd"`, from the process that owns the CLI's stdin, not `onFailure: "block"`, and with a `matcher` naming only Bash and PowerShell. cli.js then never calls that matcher's callbacks (they are dropped) and sends this frame in their place. Anchors (2.1.330 darwin-arm64 concat): schema `mY` @2871351, matcher handling @36026871, emitter `Swn()` @12434245 (`Fs({type:"system",subtype:"shell_cwd",cwd:pe()})`). The remote (CCR) transport's writer drops it. ClaudeUI's hook matchers carry no `replacedByFrame`, so it never receives this frame. A future consumer could track the shell's folder from it instead of a PostToolUse callback. Read from the bundle, not probed.
+
+## 4.35 `task_list_statuses`
+
+**Added in 2.1.330 as a schema, `@internal`.** The statuses of tasks on the task list, in a session where Claude Code sets them itself and no `TaskUpdate` call shows the change.
+
+```json
+{ "type": "system", "subtype": "task_list_statuses", "statuses": [{ "id": "…", "status": "pending" | "in_progress" | "completed" }], "uuid": "…", "session_id": "…" }
+```
+
+Per the schema it is sent during turns and after their results whenever a status changes. It sets the tasks it names, a task it leaves out keeps its last status, and a later `TaskUpdate` result that changes a status wins. The schema is `fY` @2877051 in the 2.1.330 darwin-arm64 concat. No emitter was found there, only the stdout filters and the cloud worker's held-result logic, which read it. ClaudeUI does not consume it; unknown subtypes are no-ops.

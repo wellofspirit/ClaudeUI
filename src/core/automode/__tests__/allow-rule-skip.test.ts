@@ -172,6 +172,50 @@ describe('allowRuleSkip — shell', () => {
     ['xargs git status', ['Bash(xargs git:*)'], {}, 'launcher:xargs'],
     // `sh -c …` rules are ZIe-stripped, and a shell never names what it runs.
     ['sh -c "ls"', ['Bash(sh -c ls:*)'], {}, 'rule:classifier-bypassing'],
+    // cli.js 2.1.326 strips wildcard rules that leave the program open; these skipped the judge
+    // on the 2.1.321 mirror.
+    ['python3.11 evil.py', ['Bash(python3.11 *)'], {}, 'rule:classifier-bypassing'],
+    ['python3.11 evil.py', ['Bash(python3.11:*)'], {}, 'rule:classifier-bypassing'],
+    ['/usr/bin/python3 evil.py', ['Bash(/usr/bin/python3 *)'], {}, 'rule:classifier-bypassing'],
+    ['node22 evil.js', ['Bash(node22 *)'], {}, 'rule:classifier-bypassing'],
+    [
+      '/opt/homebrew/bin/node evil.js',
+      ['Bash(/opt/homebrew/bin/node *)'],
+      {},
+      'rule:classifier-bypassing'
+    ],
+    ['CI=1 rm -rf build', ['Bash(CI=1 *)'], {}, 'rule:classifier-bypassing'],
+    ['DEBUG=1 rm -rf build', ['Bash(DEBUG=1 *)'], {}, 'rule:classifier-bypassing'],
+    // …while a named program after the launcher or wrapper still skips, as in cli.js.
+    [
+      'python3.11 -m pkg.mod tests',
+      ['Bash(python3.11 -m pkg.mod *)'],
+      {},
+      'allow Bash(python3.11 -m pkg.mod *)'
+    ],
+    ['nohup ./server --port 1', ['Bash(nohup ./server *)'], {}, 'allow Bash(nohup ./server *)'],
+    // cli.js 2.1.330: spellings of `npm run` and versioned/pathed launchers that skipped the judge
+    // on the 2.1.326 mirror.
+    ['/usr/bin/npm run build', ['Bash(/usr/bin/npm run:*)'], {}, 'rule:classifier-bypassing'],
+    ['npm run build', ['Bash("npm" run *)'], {}, 'rule:classifier-bypassing'],
+    ['npm run build', ['Bash(npm  run *)'], {}, 'rule:classifier-bypassing'],
+    ['python3.12', ['Bash(python3.12)'], {}, 'rule:classifier-bypassing'],
+    [
+      'python3.11 -m pytest tests',
+      ['Bash(python3.11 -m pytest *)'],
+      {},
+      'rule:classifier-bypassing'
+    ],
+    // ClaudeUI-only: the rule as the matcher reads it (a non-breaking space is a word break).
+    ['npm run build', ['Bash(npm\u00a0run:*)'], {}, 'rule:classifier-bypassing'],
+    ['npm run-script build', ['Bash(npm run-script:*)'], {}, 'rule:classifier-bypassing'],
+    // … while a named script under a pathed npm still skips.
+    [
+      '/usr/bin/npm run test',
+      ['Bash(/usr/bin/npm run test:*)'],
+      {},
+      'allow Bash(/usr/bin/npm run test:*)'
+    ],
     ['node -e x', ['Bash(node -e x)'], {}, 'allow Bash(node -e x)'],
     // (b) Write targets must resolve inside the workspace.
     ['git status; rm -rf /', ['Bash(git:*)', 'Bash(rm:*)'], {}, 'write:path:out-of-scope'],

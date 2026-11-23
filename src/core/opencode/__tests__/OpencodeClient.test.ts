@@ -12,6 +12,7 @@ import {
   OpencodeApiError,
   OpencodeClient,
   OpencodeTimeoutError,
+  PLUGIN_WAIT,
   encodeQuery,
   isOpencodeApiError
 } from '../OpencodeClient'
@@ -311,8 +312,8 @@ describe('responses', () => {
     const { api } = client((s) =>
       s.url.endsWith('/api/agent')
         ? json({ location: { directory: DIR }, data: agents })
-        : s.url.endsWith('/api/integration')
-          ? json({ location: { directory: DIR }, data: [] })
+        : s.url.endsWith('/api/plugin')
+          ? json({ location: { directory: DIR }, data: [{ id: 'builtin' }] })
           : empty()
     )
     expect(await api.agents()).toEqual(agents)
@@ -453,14 +454,37 @@ describe('timeouts and abort', () => {
   })
 })
 
-describe('cold-location barrier', () => {
+describe('cold-location barrier (upstream `waitForPlugins`)', () => {
   const catalog = () => json({ location: { directory: DIR }, data: [] }, 200)
+  const plugins = (n: number) =>
+    json({
+      location: { directory: DIR },
+      data: Array.from({ length: n }, (_, i) => ({ id: `p${i}` }))
+    })
+  const loaded = (s: Sent) => (s.url.endsWith('/api/plugin') ? plugins(1) : catalog())
+  /** A client whose plugin wait is fast (the defaults are upstream's 25 ms / 5 s). */
+  function waiting(reply: Parameters<typeof fakeFetch>[0], pluginWait = { pollMs: 1, capMs: 200 }) {
+    const fake = fakeFetch(reply)
+    return {
+      ...fake,
+      api: new OpencodeClient(
+        { baseUrl: BASE, authHeader: AUTH, directory: DIR },
+        { fetch: fake.fetchFn, pluginWait }
+      )
+    }
+  }
+  const paths = (sent: readonly Sent[]) => sent.map((s) => new URL(s.url).pathname)
 
-  it('waits for plugin activation (integration.list) before the first catalog read, once per directory', async () => {
-    const { api, sent } = client(catalog)
+  it('uses upstream’s spacing and cap by default', () => {
+    expect(PLUGIN_WAIT).toEqual({ pollMs: 25, capMs: 5_000 })
+  })
+
+  it('waits for a listed plugin before the first catalog read, once per directory', async () => {
+    const { api, sent } = waiting(loaded)
     await api.agents()
     await api.skills()
     await api.models()
+    await api.integrations()
     await api.skills({ directory: '/other' })
     expect(
       sent.map(
@@ -468,45 +492,102 @@ describe('cold-location barrier', () => {
           `${new URL(s.url).pathname} @${decodeURIComponent(s.headers['x-opencode-directory'])}`
       )
     ).toEqual([
-      `/api/integration @${DIR}`,
+      `/api/plugin @${DIR}`,
       `/api/agent @${DIR}`,
       `/api/skill @${DIR}`,
       `/api/model @${DIR}`,
-      '/api/integration @/other',
+      // 2.3.0: `integration.list` no longer waits for the plugins that register integrations.
+      `/api/integration @${DIR}`,
+      '/api/plugin @/other',
       '/api/skill @/other'
     ])
   })
 
-  it('takes the barrier again after a location reload', async () => {
-    const { api, sent } = client((s) => (s.url.endsWith('/reload') ? empty() : catalog()))
+  it('keeps polling while the location lists no plugin yet, then reads', async () => {
+    let cold = 3
+    const { api, sent } = waiting((s) =>
+      s.url.endsWith('/api/plugin') ? plugins(cold-- > 0 ? 0 : 2) : catalog()
+    )
     await api.commands()
-    await api.reloadLocation()
-    await api.commands()
-    expect(sent.map((s) => new URL(s.url).pathname)).toEqual([
-      '/api/integration',
-      '/api/command',
-      '/api/location/reload',
-      '/api/integration',
+    expect(paths(sent)).toEqual([
+      '/api/plugin',
+      '/api/plugin',
+      '/api/plugin',
+      '/api/plugin',
       '/api/command'
     ])
   })
 
-  it('does not memoize a failed barrier', async () => {
+  it('gives up at the cap without failing the caller, and does not wait again', async () => {
+    const { api, sent } = waiting((s) => (s.url.endsWith('/api/plugin') ? plugins(0) : catalog()), {
+      pollMs: 5,
+      capMs: 40
+    })
+    const started = Date.now()
+    await expect(api.agents()).resolves.toEqual([])
+    expect(Date.now() - started).toBeGreaterThanOrEqual(35)
+    const polls = paths(sent).filter((path) => path === '/api/plugin').length
+    expect(polls).toBeGreaterThan(1)
+    await api.agents()
+    expect(paths(sent).filter((path) => path === '/api/plugin')).toHaveLength(polls)
+  })
+
+  it('an error ends the wait (the read goes on) and is not memoized', async () => {
     let failFirst = true
-    const { api, sent } = client((s) => {
-      if (s.url.endsWith('/api/integration') && failFirst) {
+    const { api, sent } = waiting((s) => {
+      if (s.url.endsWith('/api/plugin') && failFirst) {
         failFirst = false
         return json({ _tag: 'UnknownError', message: 'boom' }, 500)
       }
-      return catalog()
+      return loaded(s)
     })
-    await expect(api.providers()).rejects.toBeInstanceOf(OpencodeApiError)
+    await expect(api.providers()).resolves.toEqual([])
     await api.providers()
-    expect(sent.map((s) => new URL(s.url).pathname)).toEqual([
-      '/api/integration',
-      '/api/integration',
+    await api.providers()
+    expect(paths(sent)).toEqual([
+      '/api/plugin',
+      '/api/provider',
+      '/api/plugin',
+      '/api/provider',
       '/api/provider'
     ])
+  })
+
+  it('takes the barrier again after a location reload', async () => {
+    const { api, sent } = waiting((s) => (s.url.endsWith('/reload') ? empty() : loaded(s)))
+    await api.commands()
+    await api.reloadLocation()
+    await api.commands()
+    expect(paths(sent)).toEqual([
+      '/api/plugin',
+      '/api/command',
+      '/api/location/reload',
+      '/api/plugin',
+      '/api/command'
+    ])
+  })
+
+  it('callers share one wait; an aborted caller stops waiting alone', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const { api, sent } = waiting(
+      async (s) => {
+        if (s.url.endsWith('/api/plugin')) {
+          await gate
+          return plugins(1)
+        }
+        return catalog()
+      },
+      { pollMs: 1, capMs: 5_000 }
+    )
+    const controller = new AbortController()
+    const first = api.awaitLocationReady()
+    const aborted = api.awaitLocationReady({ signal: controller.signal })
+    controller.abort()
+    await aborted
+    release()
+    await first
+    expect(paths(sent)).toEqual(['/api/plugin'])
   })
 })
 

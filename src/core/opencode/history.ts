@@ -17,7 +17,10 @@
  * - a completed compaction is a separator row with opencode's summary;
  * - `synthetic`, `system`, `skill`, `shell`, `idle` and the switch markers
  *   carry nothing a transcript row shows (an interrupted turn keeps its
- *   partial blocks; ADR-090 adds no stop row);
+ *   partial blocks; ADR-090 adds no stop row). That includes a child's
+ *   `<subagent … state="…">` report to its parent (2.3.0: one per idle round,
+ *   `running` while its own background work still runs): the run's card says it;
+ *   the turn it woke shows as the assistant rows that follow;
  * - a subagent call's child transcript goes under `subagentMessages[callID]`
  *   (grandchildren under the child's own call), with one terminal
  *   `TaskNotification` per call.
@@ -37,6 +40,7 @@ import {
   modelLabel,
   subagentBackgrounded,
   subagentChildSession,
+  subagentReport,
   SUBAGENT_TOOL_NAMES,
   toolFailureResult,
   toolInputRecord,
@@ -140,8 +144,27 @@ export function convertOpencodeHistory(
 ): OpencodeHistory {
   const history: OpencodeHistory = { messages: [], subagentMessages: {}, taskNotifications: [] }
   const calls = callsByChild([rows, ...children.values()])
-  convertInto(history, rows, { children, calls, path: new Set() }, null)
+  const reports = lastReports([rows, ...children.values()])
+  convertInto(history, rows, { children, calls, reports, path: new Set() }, null)
   return history
+}
+
+/**
+ * Each child's LAST `<subagent … state>` report to its parent (a synthetic row of
+ * the parent, 2.3.0), by child session id. `running`: the child's latest round
+ * ended with its own background work still running, so it may still be working.
+ */
+function lastReports(sessions: Iterable<readonly Session_Message_Info[]>): Map<string, string> {
+  const last = new Map<string, { state: string; at: number }>()
+  for (const rows of sessions)
+    for (const row of rows) {
+      if (row.type !== 'synthetic') continue
+      const report = subagentReport(row.text)
+      const seen = report && last.get(report.childID)
+      if (report && (!seen || seen.at <= row.time.created))
+        last.set(report.childID, { state: report.state, at: row.time.created })
+    }
+  return new Map([...last].map(([id, { state }]) => [id, state]))
 }
 
 export interface ChildCall {
@@ -153,6 +176,8 @@ export interface ChildCall {
 interface Walk {
   readonly children: OpencodeChildRows
   readonly calls: ReadonlyMap<string, readonly ChildCall[]>
+  /** Each child's last report state (`lastReports`). */
+  readonly reports: ReadonlyMap<string, string>
   /** Child sessions being converted on the current path (a cycle guard). */
   readonly path: Set<string>
 }
@@ -257,10 +282,12 @@ function convertChild(
     walk.path.delete(childID)
   }
   if (state.status === 'running') return
-  // The mapper's `background`: the model's own input, or the result saying the child still ran.
+  // The mapper's `background`: a call that answered while its child ran on — every launch
+  // since 2.3.0 (`status: 'running'`); before, a 2.2.x `background: true` call. A call that
+  // FAILED is not one (live drops the flag too): its error is the result the card shows.
   const background =
-    toolInputRecord(state.input).background === true ||
-    (state.status === 'completed' && subagentBackgrounded(state.metadata))
+    state.status === 'completed' &&
+    (subagentBackgrounded(state.metadata) || toolInputRecord(state.input).background === true)
   const calls = walk.calls.get(childID) ?? []
   const index = calls.findIndex((call) => call.toolId === tool.id)
   // A background call a LATER call took over while its child still ran (opencode
@@ -272,10 +299,11 @@ function convertChild(
   // Usage keeps what the segment's rows give: the step in flight at the steer
   // may be attributed to the later run here, where live counts it for the run
   // whose step it was at its end. The run's end is the later call's start.
-  // Known difference (ADR-111): live treats ANY earlier run the later call took
-  // over before its notification as superseded; cold only a BACKGROUND one (a
-  // foreground run's segment carries its own result). So parallel foreground
-  // `sessionID` calls to one child can read differently after a reopen.
+  // Known difference (ADR-111), only for sessions recorded before 2.3.0: live treats
+  // ANY earlier run the later call took over before its notification as superseded;
+  // cold only a BACKGROUND one (a foreground run's segment carries its own result). So
+  // parallel foreground `sessionID` calls to one child can read differently after a
+  // reopen. Since 2.3.0 every run is a background one.
   const next = index >= 0 ? calls[index + 1] : undefined
   const superseded =
     state.status !== 'error' &&
@@ -283,6 +311,10 @@ function convertChild(
     next !== undefined &&
     rows !== undefined &&
     !rows.some((row) => row.type === 'idle')
+  // The child's latest run whose last report said `running` waits on its own background
+  // work (live keeps that run open, `event-mapper.ts` `applyReport`): reopened, it may still
+  // be working, and nothing here follows it, so it is neither running nor settled.
+  const waiting = next === undefined && walk.reports.get(childID) === 'running'
   const status: TaskNotification['status'] =
     state.status === 'error'
       ? state.error.type === 'aborted'
@@ -291,7 +323,9 @@ function convertChild(
       : superseded
         ? 'completed'
         : subagentBackgrounded(state.metadata)
-          ? childOutcome(rows)
+          ? waiting
+            ? 'unfinished'
+            : childOutcome(rows)
           : 'completed'
   const usage = rows
     ? runUsage(tool, rows, background, superseded ? next.start : undefined)
@@ -301,7 +335,8 @@ function convertChild(
     toolUseId: tool.id,
     status,
     outputFile: '',
-    // A foreground run's result is the call's; a background run's, what its child said last.
+    // A background run's result is what its child said last (the LAST round's words, as live
+    // re-notifies a run its child woke again); a foreground run's (before 2.3.0), the call's.
     summary: superseded
       ? SUPERSEDED_SUMMARY
       : taskSummary(background ? lastText(rows) : toolResult(tool)?.result),
@@ -323,10 +358,11 @@ function lastText(rows: readonly Session_Message_Info[] | undefined): string {
 /**
  * One run's figures as the mapper counts them live (`event-mapper.ts` `meter`):
  * the child's own metered steps' input + output + reasoning, its distinct tool
- * calls, and the time from the call's start to its end — the call's result for
- * a foreground run, the child's idle row for a background one (the later call's
- * start when that call took the run over). Undefined when
- * the rows do not say when it ended (nothing is invented).
+ * calls, and the time from the call's start to its end — the child's LAST idle
+ * row in the segment for a background run (every round it ran under the call;
+ * the later call's start when that call took the run over), the call's result for
+ * a foreground one (before 2.3.0). Undefined when the rows do not say when it
+ * ended (nothing is invented).
  */
 function runUsage(
   tool: Session_Message_Assistant_Tool,

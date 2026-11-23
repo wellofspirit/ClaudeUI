@@ -74,6 +74,7 @@ import {
   SHELL_TOOL_NAMES,
   subagentBackgrounded,
   subagentChildSession,
+  subagentReport,
   SUBAGENT_TOOL_NAMES,
   toolFailureResult,
   toolInputRecord,
@@ -191,12 +192,17 @@ export type OpencodeMapperOutput =
     }
   /**
    * A subagent run began (`session:task-started`): at every link of a child to a
-   * call, and again for the same run once it turns out backgrounded.
+   * call, and again for the same run when its child, after the run's end, starts
+   * another round under that call (`reopenRun`).
    */
   | { readonly kind: 'task-started'; readonly data: TaskStartedData }
   /** A step of a run ended (`session:task-progress`): its usage so far. */
   | { readonly kind: 'task-progress'; readonly progress: TaskProgress }
-  /** The ONE terminal notification of a subagent call (foreground: its tool result; background: the child's end). */
+  /**
+   * The terminal notification of a subagent run: the child's end (every run is a
+   * background one since opencode 2.3.0), or the call's own failure. A run its
+   * child re-opens is notified again at its next end, under the same run index.
+   */
   | { readonly kind: 'task-notification'; readonly notification: TaskNotification }
   | {
       readonly kind: 'approval'
@@ -206,7 +212,7 @@ export type OpencodeMapperOutput =
   /** A request or form was settled (ours, a cascade, another client): retract its card. */
   | { readonly kind: 'approval-resolved'; readonly requestId: string }
   | { readonly kind: 'step-usage'; readonly usage: OpencodeStepUsage }
-  /** Session-cumulative usage (includes title/compaction requests opencode ran). */
+  /** Session-cumulative usage (includes the title, compaction and `generate` requests opencode ran). */
   | { readonly kind: 'session-usage'; readonly cost: number; readonly tokens: TokenUsage_Info }
   | {
       readonly kind: 'retry'
@@ -230,8 +236,11 @@ export type OpencodeMapperOutput =
       readonly ownerToolUseId?: string
     }
   /**
-   * Own-session usage no step or compaction carries (title generation),
-   * from the session's cumulative. Counted in the headline like the rest.
+   * Own-session usage no step or compaction carries (title generation; since
+   * 2.3.0 also `POST …/generate`, ClaudeUI's `/btw`; since 2.3.2 a background
+   * compaction summary billed before a compaction used it, which that
+   * compaction then does not count again), from the session's cumulative.
+   * Counted in the headline like the rest.
    */
   | {
       readonly kind: 'overhead-usage'
@@ -355,9 +364,22 @@ interface RunState {
   readonly startedAt: number
   /** 1-based position among the calls that ran this child. */
   readonly runIndex: number
+  /**
+   * The call launched its child in the background — every launch since opencode
+   * 2.3.0 (it has no foreground subagents). False once the call ITSELF failed: then
+   * nothing runs on and the error is the run's result (cold history reads the same).
+   */
   background: boolean
+  /** The call's `description`, for a re-sent `task-started`. */
+  readonly description?: string
   /** ClaudeUI stopped this run (user Stop): a non-ok end reads `stopped`, not `failed`. */
   stopped: boolean
+  /**
+   * Re-armed by a `running` report only: the child sits idle while its own
+   * background work runs (`applyReport`). Live for its card and the idle timer,
+   * but no answer is coming until that work wakes the child (`childWorkPending`).
+   */
+  idleUntilWoken: boolean
   /** The terminal notification went out (a superseded run's too). */
   notified: boolean
   /** What it said, kept to re-send with fuller usage when a re-read adds steps behind it. */
@@ -391,12 +413,8 @@ interface SessionState {
   armedStop?: 'denied' | 'form-cancelled'
   /** A reconnect ended the turn without an idle row (shutdown): drop the late terminal event. */
   endedWithoutIdle: boolean
-  /** Background child: its own end is the call's terminal notification. */
-  background: boolean
   /** The terminal notification for the current call went out. */
   notified: boolean
-  /** A child that ended before its call said it went to the background (the outcome waits for it). */
-  endedAs?: TaskNotification['status']
   readonly messages: Map<string, MessageState>
   readonly tools: Map<string, ToolState>
   readonly idleSeen: Set<string>
@@ -424,7 +442,6 @@ function newSession(id: string, owner?: string): SessionState {
     running: false,
     declined: new Map(),
     endedWithoutIdle: false,
-    background: false,
     notified: false,
     messages: new Map(),
     tools: new Map(),
@@ -443,6 +460,9 @@ interface Usage {
   readonly cost: number
   readonly tokens: TokenUsage_Info
 }
+
+/** A compaction request's usage, with the model it ran on when the event names one. */
+type CompactionUsage = Usage & { readonly model?: Model_Ref }
 const ZERO_USAGE: Usage = {
   cost: 0,
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
@@ -476,6 +496,22 @@ function subtractUsage(a: Usage, b: Usage): Usage {
   return addUsage(a, neg(b))
 }
 
+/** Field-wise min. */
+function minUsage(a: Usage, b: Usage): Usage {
+  return {
+    cost: Math.min(a.cost, b.cost),
+    tokens: {
+      input: Math.min(a.tokens.input, b.tokens.input),
+      output: Math.min(a.tokens.output, b.tokens.output),
+      reasoning: Math.min(a.tokens.reasoning, b.tokens.reasoning),
+      cache: {
+        read: Math.min(a.tokens.cache.read, b.tokens.cache.read),
+        write: Math.min(a.tokens.cache.write, b.tokens.cache.write)
+      }
+    }
+  }
+}
+
 /** Field-wise max(0, x); undefined when nothing is left (cost below a nano-dollar, no token). */
 function positivePart(u: Usage): Usage | undefined {
   const p = (x: number) => (x > 0 ? x : 0)
@@ -492,6 +528,11 @@ function positivePart(u: Usage): Usage | undefined {
   return out.cost > 0 || t.input || t.output || t.reasoning || t.cache.read || t.cache.write
     ? out
     : undefined
+}
+
+/** A run's status from the idle row its child's execution ended on. */
+function idleStatus(outcome: 'succeeded' | 'failed' | 'interrupted'): TaskNotification['status'] {
+  return outcome === 'succeeded' ? 'completed' : outcome === 'failed' ? 'failed' : 'stopped'
 }
 
 /** Where a turn ending at `idle` began: its first row after the previous idle. */
@@ -533,6 +574,11 @@ export class OpencodeEventMapper {
    * is interrupted again, until a new call links it (`linkChild`).
    */
   private readonly latched = new Set<string>()
+  /**
+   * `<subagent …>` reports already applied, by inbox item id (= the row it
+   * becomes): a re-read replays every delivered one, and only new ones count.
+   */
+  private readonly reportsSeen = new Set<string>()
   /** Epoch ms of the event (or stored row) being applied: the clock of `usage.durationMs`. */
   private at = 0
   /** Open approval cards: request/form id → the asking session and the call it is about. */
@@ -542,10 +588,20 @@ export class OpencodeEventMapper {
   private seeding = false
   /** Rows from a re-read are being applied (provenance the feed would have told is unknown). */
   private reading = false
+  /**
+   * Earlier calls a RE-READ call took a child over from. Live, a takeover of a run
+   * that has not ended is a steer (`SUPERSEDED_SUMMARY`); read back, whether that
+   * run was steered or had already ended on its own is in the CHILD's rows, applied
+   * after the own session's (in this pass, or in the next round when the read just
+   * linked the child). Decided once they were, else at the next live event.
+   */
+  private takeovers: { childID: string; toolId: string }[] = []
   /** Own-session usage already reported (see `emitOverhead`). */
   private accounted: Usage = ZERO_USAGE
   /** The own session's last cumulative usage (`session.usage.updated`). */
   private cumulative?: Usage
+  /** Overhead reported that no compaction has claimed yet (see `uncounted`). */
+  private overheadUnclaimed: Usage = ZERO_USAGE
 
   constructor(options: OpencodeEventMapperOptions) {
     this.sessionID = options.sessionID
@@ -586,14 +642,16 @@ export class OpencodeEventMapper {
     const sessionID = eventSessionID(event)
     if (!sessionID) return []
     this.at = event.created
-    if (event.type === 'session.created') return this.announce(event)
+    const out: Out = []
+    // A re-read's takeovers whose child could not be read back: the feed is live again.
+    if (this.takeovers.length > 0) this.settleTakeovers(out)
+    if (event.type === 'session.created') return [...out, ...this.announce(event)]
     const session = this.sessionOf(sessionID)
     if (!session) {
       const pending = this.pending.get(sessionID)
       if (pending && pending.buffer.length < PENDING_CHILD_BUFFER) pending.buffer.push(event)
-      return []
+      return out
     }
-    const out: Out = []
     this.apply(session, event, out)
     return out
   }
@@ -780,6 +838,7 @@ export class OpencodeEventMapper {
         s.endedWithoutIdle = false
         if (own) out.push({ kind: 'turn-start' })
         else if (this.latched.has(s.id)) out.push({ kind: 'reinterrupt', sessionID: s.id })
+        else this.reopenRun(s, out)
         return
       case 'session.execution.succeeded':
         this.endExecution(s, { outcome: 'succeeded' }, event.created, event.id, out)
@@ -865,6 +924,9 @@ export class OpencodeEventMapper {
         this.resolve(event.data.id, out)
         return
       case 'session.inbox.enqueued': {
+        // A child's report reaches its parent's inbox: the own session's or a child's.
+        if (event.data.item.type === 'synthetic')
+          this.applyReport(event.data.inboxID, event.data.item.payload.text, out)
         if (!own) return
         const { inboxID, item } = event.data
         s.inboxItems.set(inboxID, item)
@@ -1164,7 +1226,6 @@ export class OpencodeEventMapper {
     if (child) {
       child.owner = tool.id
       child.notified = false
-      child.endedAs = undefined
     } else {
       child = newSession(childID, tool.id)
       this.children.set(childID, child)
@@ -1176,31 +1237,37 @@ export class OpencodeEventMapper {
     // joins the child's job): the earlier call is then never told its child
     // ended — settle its card now, or its task record would hold the parent
     // as waiting for good.
-    if (previous && previous !== tool.id)
-      this.notifyTask(childID, previous, 'completed', out, SUPERSEDED_SUMMARY)
+    if (previous && previous !== tool.id) {
+      if (this.reading) this.takeovers.push({ childID, toolId: previous })
+      else this.notifyTask(childID, previous, 'completed', out, SUPERSEDED_SUMMARY)
+    }
     const run: RunState = {
       toolId: tool.id,
       childID,
       parentToolUseId: tool.message.owner ?? null,
       startedAt: tool.startedAt ?? this.at,
       runIndex: calls.findIndex((call) => call.toolId === tool.id) + 1,
-      // `tool.called` carries the model's own input (before opencode's repair hook).
-      background: tool.input.background === true,
+      // opencode 2.3.0 runs every subagent in the background: the call answers at once and
+      // the child's own end is the run's notification.
+      background: true,
+      ...(typeof tool.input.description === 'string' && tool.input.description
+        ? { description: tool.input.description }
+        : {}),
       stopped: false,
+      idleUntilWoken: false,
       notified: false,
       refresh: false,
       tokens: 0,
       toolUses: new Set()
     }
     this.runs.set(tool.id, run)
-    child.background = run.background
     out.push({
       kind: 'subagent-started',
       toolUseId: tool.id,
       childSessionId: childID,
       ...this.ownerOf(tool.message)
     })
-    out.push(this.taskStarted(run, tool))
+    out.push(this.taskStarted(run))
     const pending = this.pending.get(childID)
     this.pending.delete(childID)
     const at = this.at
@@ -1216,8 +1283,7 @@ export class OpencodeEventMapper {
    * (each call has its own card and roster row; a resume is a new call), and
    * every run wakes the parent when it ends (pi parity).
    */
-  private taskStarted(run: RunState, tool: ToolState): OpencodeMapperOutput {
-    const description = tool.input.description
+  private taskStarted(run: RunState): OpencodeMapperOutput {
     return {
       kind: 'task-started',
       data: {
@@ -1227,13 +1293,92 @@ export class OpencodeEventMapper {
         runIndex: run.runIndex,
         startedAt: run.startedAt,
         wakesParent: true,
-        // Owner ruling R1: opencode 2.1.2 cannot move ONE call to the background, so a
-        // foreground run OMITS the flag — the cards offer "Send to background" only for an
-        // explicit `isBackgrounded: false`.
+        // Every run is a background one (opencode 2.3.0 removed foreground subagents), and
+        // the flag is never `false`: the cards offer "Send to background" only for an
+        // explicit `isBackgrounded: false`, and `backgroundTask` is not implemented (ADR-111 §4).
         ...(run.background ? { isBackgrounded: true } : {}),
-        ...(typeof description === 'string' && description ? { description } : {})
+        ...(run.description ? { description: run.description } : {})
       }
     }
+  }
+
+  /**
+   * A child whose run already ended started executing again under the SAME call
+   * (nothing re-linked it): opencode woke it for its own background work's notice
+   * (a shell, a grandchild), or someone prompted it directly. Since 2.3.0 the
+   * child reports every such round to its parent, so the run is live again —
+   * its card runs, it holds the idle timer — until its next end notifies it once
+   * more, under the same run index (the reducer folds the two). Cold history
+   * reads the same run: its segment's last idle row, last text and every step.
+   */
+  private reopenRun(s: SessionState, out: Out, idleUntilWoken = false): void {
+    if (s === this.own || !s.owner || !s.notified) return
+    const run = this.runs.get(s.owner)
+    if (!run?.notified) return
+    run.notified = false
+    run.idleUntilWoken = idleUntilWoken
+    run.background = true
+    run.final = undefined
+    run.refresh = false
+    s.notified = false
+    out.push(this.taskStarted(run))
+  }
+
+  /**
+   * A child's `<subagent … state="…">` report to a followed session (`id` is its
+   * inbox item, = the row it becomes). It follows the child's end, which already
+   * notified the run. `running` says that round ended while the child's own
+   * background work (a shell, a grandchild) still runs and will wake it: the run
+   * is live again from now — card running, idle timer held (ADR-111 §3) — not
+   * only once the child wakes. Any other state needs nothing: the end said it.
+   * A child the user stopped is not re-armed (`latched`).
+   */
+  private applyReport(id: string, text: string, out: Out): void {
+    if (this.reportsSeen.has(id)) return
+    const report = subagentReport(text)
+    if (!report) return
+    this.reportsSeen.add(id)
+    if (report.state !== 'running' || this.seeding || this.latched.has(report.childID)) return
+    const child = this.children.get(report.childID)
+    if (child && !child.running) this.reopenRun(child, out, true)
+  }
+
+  /**
+   * After a user Stop's interrupts went out (`stopRun`): settle `stopped` the
+   * runs of the stopped sessions that are not executing. An interrupt of an idle
+   * session is a no-op upstream, so a run its child's `running` report re-armed
+   * (the child waits on its own background work) would otherwise stay live until
+   * that work wakes the child, which may be never (a dev server). A later wake is
+   * interrupted again (the latch). Running ones end on their own events.
+   */
+  settleIdleStops(sessions: readonly string[]): OpencodeMapperOutput[] {
+    const out: Out = []
+    for (const id of sessions) {
+      const s = this.children.get(id)
+      if (!s?.owner || s.running || s.notified) continue
+      if (this.runs.get(s.owner)?.stopped) this.notifyTask(s.id, s.owner, 'stopped', out)
+    }
+    return out
+  }
+
+  /**
+   * After a dispatcher's give-up (Stop, timeout, abort, a hand-back report)
+   * interrupted `sessions`: what a user Stop of each child's card does
+   * (`stopRun` + `settleIdleStops`) — every live run of those children is marked
+   * user-stopped and its child latched (a later wake is interrupted again), and
+   * the runs of the ones NOT executing are settled `stopped` now, since their
+   * interrupt ended nothing upstream (an idle child waiting on its own background
+   * work, one not started yet). An executing one ends on its own events.
+   */
+  settleGiveUp(sessions: readonly string[]): OpencodeMapperOutput[] {
+    for (const id of sessions) {
+      const s = this.children.get(id)
+      const run = s?.owner ? this.runs.get(s.owner) : undefined
+      if (!s || !run || run.notified) continue
+      run.stopped = true
+      this.latched.add(s.id)
+    }
+    return this.settleIdleStops(sessions)
   }
 
   /** A tool the child ran, for its run's `toolUses` and `lastToolName`. */
@@ -1259,6 +1404,28 @@ export class OpencodeEventMapper {
     return false
   }
 
+  /**
+   * True while the own session still has a child's answer to take in: a child's
+   * run that has not ended its first round (launched, not started or executing),
+   * a child executing right now (a later round), or a child's `<subagent>` report
+   * waiting in the own inbox (a fast child ended before its parent's turn did;
+   * the report wakes the parent for an execution that reads it). NOT a run only
+   * a `running` report keeps live: its child sits idle while its own background
+   * work runs (a dev server may never end), so no answer is coming — the card
+   * still shows it running and it holds the idle timer (`hasLiveBackgroundChild`).
+   * Since 2.3.0 the turn that launches a subagent ends on the launch, so a caller
+   * waiting for the agent's ANSWER (a dispatch target, owner ruling 3) waits
+   * until this is false at the end of an execution.
+   */
+  childWorkPending(): boolean {
+    for (const run of this.runs.values())
+      if (run.background && !run.notified && !run.idleUntilWoken) return true
+    for (const child of this.children.values()) if (child.running) return true
+    for (const item of this.own.inboxItems.values())
+      if (item.type === 'synthetic' && subagentReport(item.payload.text)) return true
+    return false
+  }
+
   /** The session a call was made in (its tool state lives there). */
   private sessionOfCall(tool: ToolState): string {
     for (const s of [this.own, ...this.children.values()])
@@ -1270,8 +1437,9 @@ export class OpencodeEventMapper {
    * The user's Stop on one subagent card: what to interrupt, and the marks that
    * make it read as the user's. Null when the call has no live run (never ran,
    * ended, or a later call took its child over). The plan lists the child and
-   * every live descendant, deepest first (a background grandchild survives its
-   * parent's interrupt, so each is stopped itself); nothing else is touched.
+   * every live descendant, deepest first (a grandchild survives its parent's
+   * interrupt — every child is a background one — so each is stopped itself);
+   * nothing else is touched.
    * The runs are marked user-stopped and the children latched BEFORE the
    * interrupts go out: a non-ok end then reads `stopped`, a completion that won
    * the race stays `completed`, and a stopped child a cancelled grandchild wakes
@@ -1376,24 +1544,14 @@ export class OpencodeEventMapper {
       )
     if (!childID) return
     if (tool.childSession !== childID) this.linkChild(tool, childID, out)
-    const child = this.children.get(childID)
-    // A run a later call took over has its notification already, and the child is that call's now.
-    const current = child?.owner === tool.id
-    if (outcome.ok && subagentBackgrounded(outcome.metadata)) {
-      if (!current) return
-      const run = this.runs.get(tool.id)
-      if (run && !run.background && !run.notified) {
-        // It went to the background without the model asking (another client
-        // moved it): same run, now backgrounded.
-        run.background = true
-        out.push(this.taskStarted(run, tool))
-      }
-      // The child may already have ended (a near-instant run): its outcome is the notification.
-      if (child?.endedAs && !child.running)
-        this.notifyTask(childID, tool.id, child.endedAs, out, this.childText(child, tool.id))
-      else if (child) child.background = true
-      return
-    }
+    // The launch acknowledgement (every successful call since 2.3.0): the child's own end
+    // is the run's notification, whether it is still to come or already went out.
+    if (outcome.ok && subagentBackgrounded(outcome.metadata)) return
+    // The call itself failed (a launch refused or cut short): nothing runs on, and its
+    // error is the run's result. A `completed` answer is the foreground shape of data
+    // older than 2.3.0, never sent live by a supported server.
+    const run = this.runs.get(tool.id)
+    if (run && !outcome.ok && !run.notified) run.background = false
     this.notifyTask(
       childID,
       tool.id,
@@ -1414,8 +1572,9 @@ export class OpencodeEventMapper {
   }
 
   /**
-   * The ONE terminal notification of a call's run. A superseded run (the child
-   * now belongs to a later call) is told without touching the child.
+   * The terminal notification of a call's run, once per end (a run `reopenRun`
+   * re-armed is told again at its next end). A superseded run (the child now
+   * belongs to a later call) is told without touching the child.
    */
   private notifyTask(
     childID: string,
@@ -1533,23 +1692,20 @@ export class OpencodeEventMapper {
     this.sealSession(s, out)
     // Nothing answers a card once its execution is over: an interrupt drops
     // pending permission asks with no `permission.replied` (core/src/permission.ts
-    // assert: only `pending.delete`). A foreground child is interrupted with its
-    // parent; a background one keeps running and keeps its cards.
+    // assert: only `pending.delete`). A running child outlives its parent's end —
+    // since 2.3.0 every child is a background one, and a parent interrupt leaves
+    // it running (ADR-111 §4) — so it keeps its cards.
     this.resolveAll(s.id, out)
     if (s === this.own)
-      for (const child of this.children.values())
-        if (!(child.background && child.running)) this.resolveAll(child.id, out)
+      for (const child of this.children.values()) if (!child.running) this.resolveAll(child.id, out)
     // A child announced under this session but never linked to a call will not be.
     for (const [childID, pending] of [...this.pending])
       if (pending.parentID === s.id) this.pending.delete(childID)
     if (s !== this.own) {
       const status: TaskNotification['status'] =
         outcome === 'succeeded' ? 'completed' : outcome === 'failed' ? 'failed' : 'stopped'
-      // A background child's end is its call's one terminal notification; if the
-      // call has not said it went to the background yet, the outcome waits for it.
-      if (s.background && s.owner)
-        this.notifyTask(s.id, s.owner, status, out, this.childText(s, s.owner))
-      else s.endedAs = status
+      // The child's end is its run's terminal notification (every run is a background one).
+      if (s.owner) this.notifyTask(s.id, s.owner, status, out, this.childText(s, s.owner))
       return
     }
     this.emitOverhead(out)
@@ -1638,7 +1794,7 @@ export class OpencodeEventMapper {
       reason: 'auto' | 'manual'
       summary?: string
       error?: Session_StructuredError
-      usage?: { cost: number; tokens: TokenUsage_Info; model?: Model_Ref }
+      usage?: CompactionUsage
     },
     eventID: string | null,
     created: number,
@@ -1661,11 +1817,10 @@ export class OpencodeEventMapper {
       s.compactionsSeen.add(id)
       out.push({ kind: 'message', message: compactionChatMessage(id, end.summary, at) })
     }
-    const usage = end.usage && !s.compactionsMetered.has(id) ? end.usage : undefined
-    if (usage) {
-      s.compactionsMetered.add(id)
-      if (own) this.account(usage)
-    }
+    const billed = end.usage && !s.compactionsMetered.has(id) ? end.usage : undefined
+    if (billed) s.compactionsMetered.add(id)
+    const usage = billed && own ? this.uncounted(billed) : billed
+    if (usage && own) this.account(usage)
     if (!own && !usage) return
     out.push({
       kind: 'compaction',
@@ -1684,17 +1839,49 @@ export class OpencodeEventMapper {
 
   /**
    * Usage opencode billed to the own session that no step or compaction
-   * carries — its title generation (`session.usage.recorded {source:'title'}`
-   * is folded into the session's cumulative, `session.usage.updated`, and
-   * nowhere else). Emitted at quiet points (turn end, an update while idle)
-   * as the positive part of cumulative − accounted.
+   * carries — its title generation and, since 2.3.0, every `generate` on it
+   * (`session.usage.recorded {source:'title'|'generate'}` is folded into the
+   * session's cumulative, `session.usage.updated`, and nowhere else; a
+   * compaction's record is carried by its own `compaction.ended` too and is
+   * accounted there, see `uncounted`). Emitted at quiet points (turn end, an
+   * update while idle) as the positive part of cumulative − accounted, so a
+   * `/btw` asked while a turn runs is counted once, at that turn's end.
    */
   private emitOverhead(out: Out): void {
     if (!this.cumulative) return
     const extra = positivePart(subtractUsage(this.cumulative, this.accounted))
     if (!extra) return
     this.account(extra)
+    this.overheadUnclaimed = addUsage(this.overheadUnclaimed, extra)
     out.push({ kind: 'overhead-usage', cost: extra.cost, tokens: extra.tokens })
+  }
+
+  /**
+   * The part of an own compaction's usage nothing has counted yet. Since 2.3.2
+   * opencode writes the summary in the BACKGROUND by default
+   * (`compaction.background`; `core/src/session/compaction.ts` `precompute`,
+   * started as a turn ends or before a step): its request is billed when it
+   * finishes, typically while the session is idle, so the cumulative already
+   * holds it and `emitOverhead` has reported it. The compaction that later swaps
+   * the summary in (`usePrecomputed` → `addSpent`) carries the same figures on
+   * `compaction.ended`/`failed`. A resume's seed counted it the same way (the
+   * cold line's remainder).
+   *
+   * So a compaction counts only what the cumulative cannot already explain —
+   * accounted + usage − cumulative, field by field — and never more of it than
+   * overhead reported and not yet claimed by an earlier compaction. A
+   * foreground summary (billed inside the execution, its update before its end)
+   * keeps all of its usage. Without a cumulative yet, nothing was reported.
+   */
+  private uncounted(usage: CompactionUsage): CompactionUsage | undefined {
+    if (!this.cumulative) return usage
+    const excess = positivePart(subtractUsage(addUsage(this.accounted, usage), this.cumulative))
+    const claimed =
+      excess && positivePart(minUsage(minUsage(excess, usage), this.overheadUnclaimed))
+    if (!claimed) return usage
+    this.overheadUnclaimed = subtractUsage(this.overheadUnclaimed, claimed)
+    const rest = positivePart(subtractUsage(usage, claimed))
+    return rest && { ...rest, ...(usage.model ? { model: usage.model } : {}) }
   }
 
   /** Retract every card a session still shows (its execution ended: nothing will answer them). */
@@ -1797,7 +1984,14 @@ export class OpencodeEventMapper {
       )
     // The cold status line counted the session's whole cumulative (title
     // generation included, `opencodeHistorySeed`): that is all accounted for.
-    if (options.sessionTotals) this.accounted = options.sessionTotals
+    // Its remainder beyond the rows is overhead a held background summary's
+    // compaction may still claim (`uncounted`).
+    if (options.sessionTotals) {
+      this.overheadUnclaimed =
+        positivePart(subtractUsage(options.sessionTotals, this.accounted)) ?? ZERO_USAGE
+      this.accounted = options.sessionTotals
+      this.cumulative = options.sessionTotals
+    }
     for (const row of messages) if (row.type === 'idle') this.own.idleSeen.add(row.id)
   }
 
@@ -1808,9 +2002,30 @@ export class OpencodeEventMapper {
    */
   reconcile(snapshot: OpencodeReconnectSnapshot): OpencodeMapperOutput[] {
     const out: Out = []
-    for (const s of [this.own, ...this.children.values()]) {
+    const applied = this.reconcileSessions(snapshot, out)
+    this.settleTakeovers(out, (childID) => applied.has(childID))
+    this.refreshNotifications(out)
+    return out
+  }
+
+  /** A taken-over call whose own end its child's rows did not show was steered: superseded. */
+  private settleTakeovers(out: Out, ready: (childID: string) => boolean = () => true): void {
+    const waiting = this.takeovers.filter((t) => !ready(t.childID))
+    for (const { childID, toolId } of this.takeovers)
+      if (ready(childID)) this.notifyTask(childID, toolId, 'completed', out, SUPERSEDED_SUMMARY)
+    this.takeovers = waiting
+  }
+
+  /** Applies the snapshot's sessions, children the read links included; returns those applied. */
+  private reconcileSessions(snapshot: OpencodeReconnectSnapshot, out: Out): Set<string> {
+    const applied = new Set<string>()
+    for (;;) {
+      const s = [this.own, ...this.children.values()].find(
+        (candidate) => !applied.has(candidate.id) && snapshot.sessions[candidate.id]
+      )
+      if (!s) return applied
+      applied.add(s.id)
       const read = snapshot.sessions[s.id]
-      if (!read) continue
       // Deltas from the gap are gone: an open stream shows nothing more until its end.
       for (const message of s.messages.values())
         for (const item of message.items) if (item.open) item.gapped = true
@@ -1820,8 +2035,6 @@ export class OpencodeEventMapper {
       if (s === this.own) this.reconcileInbox(s, read.inbox ?? [], read.messages, out)
       this.reconcileRunning(s, read.messages, before, snapshot.active[s.id] !== undefined, out)
     }
-    this.refreshNotifications(out)
-    return out
   }
 
   private ingestRows(s: SessionState, rows: readonly Session_Message_Info[], out: Out): void {
@@ -1846,6 +2059,9 @@ export class OpencodeEventMapper {
           break
         case 'assistant':
           this.ingestAssistant(s, row, out)
+          break
+        case 'synthetic':
+          this.applyReport(row.id, row.text, out)
           break
         case 'compaction':
           if (row.status === 'running') {
@@ -2015,6 +2231,7 @@ export class OpencodeEventMapper {
       })
     }
     for (const item of inbox) {
+      if (item.type === 'synthetic') this.applyReport(item.id, item.payload.text, out)
       const known = s.inbox.get(item.id)
       if (known === undefined) {
         const entry = {
@@ -2061,13 +2278,32 @@ export class OpencodeEventMapper {
         row.type === 'idle' && !idleBefore.has(row.id)
     )
     for (const row of unseen) s.idleSeen.add(row.id)
-    const last = unseen.at(-1)
+    const lastIdle = unseen.at(-1)
+    let last = lastIdle
+    if (s !== this.own) {
+      // A child's idle rows can end the runs of EARLIER calls (a call that took the child
+      // over after it had ended, read back in one go): each such run ends there, as it did
+      // live, and never the current call's.
+      for (const row of unseen) {
+        const owner = this.ownerAt(s, row.time.created)
+        if (!owner || owner === s.owner || this.runs.get(owner)?.notified !== false) continue
+        this.at = row.time.created
+        this.notifyTask(s.id, owner, idleStatus(row.outcome), out, this.childText(s, owner))
+      }
+      if (last && this.ownerAt(s, last.time.created) !== s.owner) {
+        // The current call's run has not ended: the execution that did was an earlier one.
+        s.running = false
+        s.turnStartedAt = undefined
+        last = undefined
+      }
+    }
     if (last) {
       if (!s.running) {
-        // A whole turn ran inside the gap.
+        // A whole turn ran inside the gap (for a child whose run ended: a later round of it).
         s.running = true
         s.turnStartedAt = turnStart(rows, last)
         if (s === this.own) out.push({ kind: 'turn-start' })
+        else if (!this.latched.has(s.id)) this.reopenRun(s, out)
       }
       this.at = last.time.created
       // The stored row keeps the outcome, not the error: take the step's, if one failed.
@@ -2087,7 +2323,7 @@ export class OpencodeEventMapper {
       )
     }
     // Active, but the read ends on the idle just handled: the turn ended between the reads.
-    const endedSinceActiveRead = last !== undefined && rows.at(-1) === last
+    const endedSinceActiveRead = lastIdle !== undefined && rows.at(-1) === lastIdle
     if (active && !endedSinceActiveRead) {
       if (!s.running) {
         s.running = true
@@ -2096,6 +2332,7 @@ export class OpencodeEventMapper {
         s.turnStartedAt = Date.now()
         if (s === this.own) out.push({ kind: 'turn-start' })
         else if (this.latched.has(s.id)) out.push({ kind: 'reinterrupt', sessionID: s.id })
+        else this.reopenRun(s, out)
       }
       return
     }

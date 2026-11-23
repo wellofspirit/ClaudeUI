@@ -18,7 +18,7 @@
  * | mcp__s__t / mcp__s / mcp__s__*  | s_t                   | s_t / s_*           | `*` (sanitized `[^a-zA-Z0-9_-]` → `_`, `tool/mcp.ts`)                    |
  * | additionalDirectories           | (any file tool)       | external_directory  | `<dir>/*` of the target's directory, absolute (`file-access.ts`)         |
  * | (none)                          | question              | question            | `*`                                                                       |
- * | (none)                          | opencode.<session\|worktree\|artifact\|schedule>.* | opencode_<tool> | `*` — wholly denied and hidden (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`); `worktree_remove` asks `edit` |
+ * | (none)                          | opencode.<session\|worktree\|artifact\|automation\|schedule>.* | opencode_<tool> | `*` — wholly denied and hidden (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`); `worktree_remove` asks `edit`; `automation` is 2.3.2's rename of `schedule` |
  * | (none)                          | experimental_image_generate | experimental_image_generate | `providerID/modelID` (the model the call will bill)                  |
  * | (none)                          | execute (Code Mode)   | (never asserted)    | visibility only — `whollyDisabled("execute")`                             |
  * | (none)                          | list/read_mcp_resource| opencode_list_mcp_resources / opencode_read_mcp_resource | server names / `server:uri` |
@@ -105,7 +105,8 @@ export function v2ActionForV1Key(key: string): string | null {
  * A server-level MCP ALLOW glob (`s_*`) that matches one of these is never
  * emitted — an allow on `opencode_*` would also grant
  * `opencode_read_mcp_resource`. At v2.2.5 (`tool/plugin/opencode.ts`,
- * `artifact.ts`, `schedule.ts`, `image-generate.ts`).
+ * `artifact.ts`, `schedule.ts`, `image-generate.ts`); `automation.ts` at v2.3.2
+ * (the schedules renamed; the schedule ids stay for an older server).
  */
 export const V2_BUILTIN_ACTIONS: readonly string[] = [
   'shell',
@@ -134,11 +135,20 @@ export const V2_BUILTIN_ACTIONS: readonly string[] = [
   'opencode_artifact_read',
   'opencode_artifact_update',
   'opencode_artifact_delete',
+  'opencode_automation_create',
+  'opencode_automation_list',
+  'opencode_automation_pause',
+  'opencode_automation_resume',
+  'opencode_automation_delete',
   'opencode_schedule_create',
   'opencode_schedule_list',
   'opencode_schedule_pause',
   'opencode_schedule_resume',
   'opencode_schedule_delete',
+  'console_watch_watch',
+  'console_watch_unwatch',
+  'console_watch_watches',
+  'console_watch_events',
   'experimental_image_generate'
 ]
 

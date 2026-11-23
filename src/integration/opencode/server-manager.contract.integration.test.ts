@@ -247,7 +247,13 @@ describeV2('opencode 2.x contract: production server manager', () => {
     const feed = feeds[0]
     const tag = nonce('subdispatch')
     const before = dispatched.length
-    const { sessionID } = await turn(api, feed, ws, `[subdispatch] ${tag}`, true)
+    const { sessionID, from } = await turn(api, feed, ws, `[subdispatch] ${tag}`, true)
+    // 2.3.0: the call answers at once; the child dispatches after the parent's turn, then reports.
+    const spawned = await feed.waitFor('session.created', {
+      after: from,
+      where: (event) => event.data.parentID === sessionID
+    })
+    await feed.waitForReport(sessionID, spawned.data.sessionID, { after: from })
 
     expect(dispatched).toHaveLength(before + 1)
     const { ctx } = dispatched[before]

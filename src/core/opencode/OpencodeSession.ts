@@ -36,9 +36,12 @@
  * before that PATCH lands).
  *
  * Synthetic inbox items (`synthetic`: plan-mode reminders, background
- * completion notices, "continue" nudges) are neither rendered live nor cold:
- * the cold converter skips the stored `synthetic` rows, and live they only
- * reach the queue bookkeeping, which ignores every non-user item.
+ * completion notices, "continue" nudges, and since opencode 2.3.0 a child's
+ * `<subagent … state="…">` report after each of its idle rounds) are neither
+ * rendered live nor cold: the cold converter skips the stored `synthetic` rows,
+ * and live they only reach the queue bookkeeping, which ignores every non-user
+ * item. A report's news is the run's own task notification (the child's end);
+ * the turn it wakes renders as an ordinary turn.
  */
 import type { HostWindowHandle } from '../host'
 import { v4 as uuid } from 'uuid'
@@ -48,7 +51,7 @@ import { randomBytes } from 'node:crypto'
 import { opencodeServerManager, OpencodePermissionGuardError } from './OpencodeServerManager'
 import type { ServerConnection } from './OpencodeServerManager'
 import { OpencodeClient, type PermissionReply } from './OpencodeClient'
-import type { OpencodeEvent } from './protocol-v2/events'
+import { isCatalogEvent, type CatalogEvent, type OpencodeEvent } from './protocol-v2/events'
 import type { Agent_Info, Form_Answer, Model_Ref, Session_Info } from './protocol-v2/openapi'
 import {
   OpencodeEventMapper,
@@ -488,6 +491,8 @@ export class OpencodeSession extends BaseSession {
   private engineWonSkills = new Set<string>()
   /** The connection `establishSession` last published the menu on: once per connection, not per turn. */
   private publishedOn: ServerConnection | null = null
+  /** A catalog-driven menu refresh (`onCatalogUpdated`) is running; `again`: another was asked meanwhile. */
+  private menuRefresh: { again: boolean } | null = null
   private _cancelled = false
   private connectingPromise: Promise<void> | null = null
   private establishingPromise: Promise<void> | null = null
@@ -1213,6 +1218,37 @@ export class OpencodeSession extends BaseSession {
     await this.connectingPromise
   }
 
+  /**
+   * A location's catalog changed. Since 2.3.0 the catalog routes answer what is
+   * loaded now (a cold location's plugins register later, `AGENTS.md` "Plugin
+   * Loading"), and a long-lived client refreshes on these events. For this
+   * session's location: `agent.updated` and `plugin.updated` drop the cached
+   * agents (read again on their next use); `command.updated`, `skill.updated`
+   * and `plugin.updated` re-read the slash menu and the typed-name sets, one
+   * read at a time (a burst coalesces into one more). An event of another
+   * directory on the shared feed is not this session's.
+   */
+  private onCatalogUpdated(event: CatalogEvent): void {
+    const directory = event.location?.directory
+    if (directory && !samePath(directory, this.location)) return
+    if (event.type === 'agent.updated' || event.type === 'plugin.updated') this.agentList = null
+    if (event.type !== 'agent.updated') this.refreshMenu()
+  }
+
+  private refreshMenu(): void {
+    if (this.menuRefresh) {
+      this.menuRefresh.again = true
+      return
+    }
+    if (!this.client || this._cancelled) return
+    const run = { again: false }
+    this.menuRefresh = run
+    void this.publishCommands(this.locationClient()).finally(() => {
+      this.menuRefresh = null
+      if (run.again) this.refreshMenu()
+    })
+  }
+
   /** Read the location's commands and publish them with the shared Claude skills. Never throws. */
   private async publishCommands(client: OpencodeClient): Promise<void> {
     const commands = await client.commands().catch((err) => {
@@ -1373,6 +1409,10 @@ export class OpencodeSession extends BaseSession {
   private handleEvent(event: OpencodeEvent): void {
     if (event.type === 'session.created') this.childKeeper.onSessionCreated(event.data)
     else if (event.type === 'session.agent.selected') this.childKeeper.onAgentSelected(event.data)
+    else if (isCatalogEvent(event)) {
+      this.onCatalogUpdated(event)
+      return
+    }
     const mapper = this.mapper
     if (!mapper) return
     for (const output of mapper.map(event)) this.dispatch(output)
@@ -2220,11 +2260,12 @@ export class OpencodeSession extends BaseSession {
   /**
    * ISession.stopTask — the per-agent Stop on a subagent card, row or detail panel
    * (`handlers-core.stopTask`, gated on `capabilities.backgroundTasks`). Interrupts
-   * the call's child and every live descendant (deepest first; opencode cancels only
-   * FOREGROUND children with their parent, so a background grandchild is stopped
-   * itself), never a sibling or the parent. A foreground call then fails with
-   * "Subagent cancelled" and its parent's turn goes on; a background child's
-   * cancellation reaches the parent as a `<subagent state="cancelled">` message.
+   * the call's child and every live descendant (deepest first; an interrupt never
+   * reaches a session's children — since opencode 2.3.0 every child is a background
+   * one — so each is stopped itself), never a sibling or the parent. The child's
+   * cancellation reaches the parent as a `<subagent state="cancelled">` report,
+   * which wakes it (or joins its running turn); a parent's own Stop (`interrupt`)
+   * leaves its children running (ADR-111 §4).
    * The result carries `hostNote` for the model — the caller sends it once, only
    * after something was interrupted (never from a teardown).
    */
@@ -2249,6 +2290,8 @@ export class OpencodeSession extends BaseSession {
         }
       }
     }
+    // An idle child (waiting on its own background work) has no execution to end: settle it now.
+    for (const output of this.mapper?.settleIdleStops([...interrupted]) ?? []) this.dispatch(output)
     // The note is a user-role prompt the auto-mode judge reads as a `User:` line,
     // so it carries nothing the model authored: the call's `description` and
     // `prompt` stay out. It names the agent by its TYPE (opencode validates the

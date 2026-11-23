@@ -24,20 +24,26 @@
  *   [websearch] `websearch` tool call (query `contract query`)
  *   [skill]     `skill` tool call loading `SKILL_ID` (a test creates it under `.opencode/skills/`)
  *   [question]  `question` tool call (one single-choice question)
+ *   Subagents (opencode 2.3.0): EVERY `subagent` call runs its child in the background — the
+ *   call answers at once (`status: running`), the parent's turn goes on (and usually ends), and
+ *   the child reports each idle round to the parent as a synthetic
+ *   `<subagent sessionID="…" state="…">` message that wakes it (`EventFeed.waitForReport`).
  *   [sub]       `subagent` tool call
  *   [subread]   `subagent` tool call whose child prompt is `[read]`
  *   [submodel:<provider/id>]  `subagent` call (agent `general`) passing that `model`; prompt `child says hi`
  *   [subresume] `subagent` call RESUMING the last child named in the conversation
- *               (`sessionID="ses_…"` of an earlier result); its prompt is `[read]` too
+ *               (`sessionID="ses_…"` of an earlier report); its prompt is `[read]` too
  *   [subresume:<agent>]  the same, resuming it with `<agent>` (default `general`)
- *   [subbg]     BACKGROUND `subagent` call (`background: true`, agent `general`) whose child
- *               prompt is `child works [slow]` (the child streams for SLOW_CHUNKS × `slowChunkMs`)
- *   [substeer]  BACKGROUND `subagent` call STEERING the last child named in the conversation
- *               (`sessionID: ses_…` of a background result) while it still runs; prompt `steer [read]`
- *   [subslow]   FOREGROUND `subagent` call (agent `general`) whose child prompt is `child works [slow]`
- *   [subnest]   FOREGROUND `subagent` call whose child prompt is `[subbg] [afterslow] nested`: that
- *               child launches a BACKGROUND grandchild, then streams slowly (needs
- *               `experimental.subagent_depth` ≥ 2)
+ *   [subbg]     `subagent` call (agent `general`) whose child prompt is `child works [slow]` (a
+ *               SLOW child: it streams for SLOW_CHUNKS × `slowChunkMs`, long after the call answered)
+ *   [substeer]  `subagent` call STEERING the last child named in the conversation (`sessionID: ses_…`
+ *               of a launch result or a report) while it still runs; prompt `steer [read]`
+ *   [subnest]   `subagent` call whose child prompt is `[subbg] [afterslow] nested`: that child
+ *               launches a slow grandchild, then streams slowly (needs `experimental.subagent_depth` ≥ 2)
+ *   [subshellbg] `subagent` call whose child prompt is `[shellbg]`: the child's first round ends
+ *               while its background shell runs (its report says `state="running"`), the shell's
+ *               end wakes it for a second round (`state="completed"`)
+ *   [shellbg]   BACKGROUND `shell` call (`background: true`) of `SHELL_BG_COMMAND`
  *   [afterslow] after a tool result, stream slowly instead of answering at once (keeps the turn
  *               running while a background child works)
  *               The same turn flavour answers a woken child (a background grandchild's `state="cancelled"`
@@ -54,6 +60,10 @@
  *   [patch]     `patch` updating `notes.txt` (falls back to text when not offered)
  *   [multi]     ONE response with two calls: `read` of `notes.txt` and `write` of `multi.txt`
  *   [slow]      many text chunks, `slowChunkMs` apart (steer / interrupt window)
+ *   [bigctx]    AT THE START of the last user text: the echo reports `BIG_CONTEXT_TOKENS` prompt
+ *               tokens, so a rig with a small compaction ceiling nears it after one turn (2.3.2's
+ *               background summary). Only a prompt that starts with it: the echo and a compaction
+ *               checkpoint quoting it do not
  *   a compaction request ("summarize the conversation") gets a summary that
  *               fills opencode's template (`COMPACTION_SUMMARY`)
  *   otherwise   "echo: <text>"
@@ -103,6 +113,8 @@ export const SLOW_CHUNKS = 30
 /** What a `[handback]` prompt reports. */
 export const HAND_BACK_REPORT = 'contract report from the target'
 export const SHELL_COMMAND = 'echo contract-tool-ran'
+/** `[shellbg]`'s command: long enough that the child's round ends before it. */
+export const SHELL_BG_COMMAND = 'sleep 3; echo contract-bg-done'
 /** `[toolwrite]`'s command: a redirect into the workspace, which the read-only gate never vouches for. */
 export const WRITE_COMMAND = 'echo judged > judged.txt'
 export const REASONING_TEXT = 'thinking it over'
@@ -118,6 +130,13 @@ export const NOTES_FILE = 'notes.txt'
 export const WORKTREE_REMOVE_DIR = '/claudeui-contract/no-such-worktree'
 
 const USAGE = { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 }
+/** The prompt size a `[bigctx]` answer reports. */
+export const BIG_CONTEXT_TOKENS = 50_000
+const BIG_USAGE = {
+  prompt_tokens: BIG_CONTEXT_TOKENS,
+  completion_tokens: 30,
+  total_tokens: BIG_CONTEXT_TOKENS + 30
+}
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export function messageText(content: unknown): string {
@@ -165,12 +184,17 @@ export async function startFixtureProvider(
         ...(usage ? { usage } : {})
       })}\n\n`
     )
-  const finishStream = (res: ServerResponse, reason: string) => {
+  const finishStream = (res: ServerResponse, reason: string, usage: object = USAGE) => {
     chunk(res, {}, reason)
-    chunk(res, {}, null, USAGE)
+    chunk(res, {}, null, usage)
     res.end('data: [DONE]\n\n')
   }
-  const streamText = async (res: ServerResponse, text: string, pieces = 1) => {
+  const streamText = async (
+    res: ServerResponse,
+    text: string,
+    pieces = 1,
+    usage: object = USAGE
+  ) => {
     chunk(res, { role: 'assistant', content: '' })
     if (pieces === 1) chunk(res, { content: text })
     else
@@ -180,7 +204,7 @@ export async function startFixtureProvider(
         chunk(res, { content: `${text}#${i} ` })
         await sleep(slowChunkMs)
       }
-    if (!res.destroyed) finishStream(res, 'stop')
+    if (!res.destroyed) finishStream(res, 'stop', usage)
   }
   const streamToolCall = async (res: ServerResponse, name: string | undefined, args: object) =>
     streamToolCalls(res, [{ name, args }])
@@ -258,6 +282,8 @@ export async function startFixtureProvider(
       const last = messages.at(-1)
       if (tools.length === 0) return streamText(res, 'Fixture title')
       if (text.includes('summarize the conversation')) return streamText(res, COMPACTION_SUMMARY)
+      if (text.startsWith('[bigctx]'))
+        return streamText(res, `echo: ${text.slice(0, 200)}`, 1, BIG_USAGE)
       if (last?.role === 'tool' && text.includes('[afterslow]'))
         return streamText(res, 'after', SLOW_CHUNKS)
       if (
@@ -399,18 +425,27 @@ export async function startFixtureProvider(
           {
             description: 'contract background',
             prompt: 'child works [slow]',
-            agent: 'general',
-            background: true
+            agent: 'general'
           }
         )
-      if (text.includes('[subslow]'))
+      if (text.includes('[subshellbg]'))
         return streamToolCall(
           res,
           tools.find((tool) => tool === 'subagent'),
           {
-            description: 'contract slow',
-            prompt: 'child works [slow]',
+            description: 'contract shell rounds',
+            prompt: 'child waits on [shellbg]',
             agent: 'general'
+          }
+        )
+      if (text.includes('[shellbg]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'shell'),
+          {
+            command: SHELL_BG_COMMAND,
+            description: 'contract background shell',
+            background: true
           }
         )
       if (text.includes('[subnest]'))
@@ -436,7 +471,6 @@ export async function startFixtureProvider(
             description: 'contract steer',
             prompt: 'steer [read]',
             agent: 'general',
-            background: true,
             ...(sessionID ? { sessionID } : {})
           }
         )

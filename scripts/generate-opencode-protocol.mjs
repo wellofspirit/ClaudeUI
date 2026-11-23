@@ -71,7 +71,7 @@ export const GENERATOR_VERSION = 2
  * names that commit, so bumping `tested` without re-reviewing `PIN_COMMIT`
  * fails both generate and check.
  */
-const PIN_COMMIT = 'dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06'
+const PIN_COMMIT = 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1'
 const manifest = JSON.parse(
   readFileSync(new URL('../src/shared/harness-manifests/opencode.json', import.meta.url), 'utf8')
 )
@@ -105,6 +105,10 @@ export const EVENT_SOURCES = [
   'packages/schema/src/credential.ts',
   'packages/schema/src/provider.ts',
   'packages/schema/src/model.ts',
+  'packages/schema/src/agent.ts',
+  'packages/schema/src/command.ts',
+  'packages/schema/src/skill.ts',
+  'packages/schema/src/plugin.ts',
   'packages/schema/src/server-event.ts',
   'packages/schema/src/llm.ts',
   'packages/schema/src/location.ts'
