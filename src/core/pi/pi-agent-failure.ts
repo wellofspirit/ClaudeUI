@@ -12,8 +12,8 @@
  *
  * PORTED PATTERNS. The message patterns below are copied from pi's own
  * classifiers so the host agrees with pi on what "retryable" means. Source
- * tree: `vendor/pi-src/packages/ai/src/utils/`, ported from pi 1.5.0
- * (`src/shared/harness-manifests/pi.json#tested`). A pin bump must re-diff
+ * tree: `vendor/pi-src/packages/ai/src/utils/`, re-diffed at pi 1.6.0
+ * (`src/shared/harness-manifests/pi.json#tested`; `overflow.ts` unchanged since 1.5.0). A pin bump must re-diff
  * `overflow.ts` and `retry.ts` against the three blocks marked PORTED.
  *
  * Pure: no I/O, no imports beyond the shared status parse.
@@ -79,7 +79,7 @@ const NON_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /too many requests/i // Generic HTTP 429 style
 ]
 
-// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.5.1) ─────
+// ── PORTED from vendor/pi-src/packages/ai/src/utils/retry.ts (pi 1.6.0) ─────
 function buildProviderErrorPattern(patterns: readonly string[]): RegExp {
   return new RegExp(patterns.join('|'), 'i')
 }
@@ -152,11 +152,19 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   'connection.?error',
   'connection.?refused',
   'connection.?lost',
+  // Gateway mid-stream drop relayed as an Anthropic-style `api_error` event,
+  // e.g. {"type":"error","error":{"type":"api_error","message":"Connection closed."}} (#12064).
+  'connection.?closed',
   'other side closed',
   'fetch failed',
   // node-fetch system errors, including Google ADC OAuth token fetch failures.
   'request to \\S+ failed, reason:',
   'getaddrinfo',
+  // Bare Node socket error codes, e.g. "read ECONNRESET", "write EPIPE", or
+  // "connect ETIMEDOUT 1.2.3.4:443" when a transport reports only the code (#12128).
+  // The codes must not be part of a longer identifier.
+  '(?<![a-z0-9_])(?:ECONNRESET|ECONNABORTED|ECONNREFUSED|ETIMEDOUT|EPIPE)(?![a-z0-9_])',
+  'connection reset by peer',
   'ENOTFOUND',
   'EAI_AGAIN',
   'upstream.?connect',
@@ -170,6 +178,9 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
   // WebSocket transports can report close/error text instead of HTTP/fetch text.
   'websocket.?closed',
   'websocket.?error',
+  // Codex 60-minute WebSocket lifetime limit, as code `websocket_connection_limit_reached` or as
+  // text "Responses websocket connection limit reached". A retry opens a fresh connection (#12124).
+  'websocket.?connection.?limit.?reached',
 
   // Premature stream endings from SDKs and transports. Anthropic can throw
   // "stream ended without ..." and "Anthropic stream ended before message_stop"

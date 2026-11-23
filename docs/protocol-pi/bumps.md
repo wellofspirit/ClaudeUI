@@ -2,6 +2,42 @@
 
 Per-bump compatibility assessments for pi, newest first. A bump's assessment is written here; the wire reference is in [README.md](README.md).
 
+## 1.5.2 → 1.6.0 compatibility assessment (2026-11-23)
+
+`git diff v1.5.2..v1.6.0`. No RPC command, event or field was added or removed; `docs/rpc.md`,
+`docs/session-format.md`, `modes/rpc/rpc-types.ts`, `packages/agent/src/types.ts`,
+`packages/ai/src/types.ts`, auth storage, the model registry and the settings manager are unchanged.
+`cli/args.ts` changed only its help text, so the plain `send_message` appended to `--tools` is fine.
+
+- **Retry patterns** (`packages/ai/src/utils/retry.ts`): four new retryable patterns
+  (`connection.?closed`, bare socket codes `ECONNRESET|ECONNABORTED|ECONNREFUSED|ETIMEDOUT|EPIPE`,
+  `connection reset by peer`, `websocket.?connection.?limit.?reached`); ported into
+  `src/core/pi/pi-agent-failure.ts`, so a subagent that failed on a dropped connection stays
+  resumable. `overflow.ts`, `core/tools/path-utils.ts`, `utils/paths.ts` and the MCP server-name rule
+  are unchanged.
+- **Session replacement in RPC** (`modes/rpc/rpc-mode.ts`): the extra `rebindSession()` after
+  `new_session` / `switch_session` / `fork` / `clone` is gone, so `session_start` handlers run once
+  (the bridge's MCP and skills failure notices fire once per fork/clone instead of twice). Startup and
+  post-replacement diagnostics (e.g. "Could not restore model x/y") now go to stderr, which ClaudeUI
+  debug-logs and keeps in the exit-diagnostic tail.
+- **`get_last_assistant_text`** skips a message with `stopReason !== "stop"` and no text. ClaudeUI
+  calls it on success paths only.
+- **Abort mid-batch** (`packages/agent/src/agent-loop.ts`): every call not yet started now gets
+  `tool_execution_start` / `end` and an "Operation aborted" result before the hooks run, so the bridge
+  `tool_call` gate is not reached after an abort. ADR-090's `stopReason: "error"` path is unchanged;
+  the line references in README "An abort during a tool batch" are to 1.5.x.
+- **Models**: `openai-codex`'s default is now `gpt-6.2-sol` (ClaudeUI always passes a model); GPT-6.2
+  has no `off` / `minimal` thinking levels and pi clamps them, so a subagent defined with
+  `thinking: off` runs at the lowest level the model has.
+- **find tool**: path patterns are anchored at the search path; containment checks `path`, not the
+  pattern.
+- **Bulk of the diff** is `apps/p2`, `apps/p3`, `apps/p2-mac`, `packages/chord` and `packages/durable`,
+  none of which the pi binary ships.
+- **Release assets:** same six names; every archive matched `SHA256SUMS` after download.
+- **Gated suite:** 25 of 25, no skip, on the darwin-arm64 1.6.0 managed-store binary, model calls on
+  `openai-codex/gpt-5.6-luna`, with the 1.5.1 credential recipe below. The real `auth.json`'s sha256
+  and mtime were unchanged after the run.
+
 ## 1.5.1 → 1.5.2 compatibility assessment (2026-11-17)
 
 `git diff v1.5.1..v1.5.2`. No RPC command, event, field, CLI flag or session-format change;
