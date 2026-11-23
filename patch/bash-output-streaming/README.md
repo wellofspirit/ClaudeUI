@@ -478,7 +478,16 @@ command keeps running; Part B's poll keeps reading the output file every second,
 auto-backgrounded command streams until it is moved, then its tail freezes. Part A deliberately
 stays downstream of the wrapper (a call the CLI drops never reaches the SDK stream). Restoring
 background streaming would mean teeing the call _before_ the wrapper, at `onProgress:ws.call`,
-which forwards exactly the calls the CLI now drops — a decision for the owner, not a re-anchor.
+which forwards exactly the calls the CLI now drops.
+
+What that costs, measured on 2.1.330 in the real app (2026-11-23): nothing the user sees. ClaudeUI
+tails a background command's `.output` file itself (`ClaudeSession.watchBackground`, every 500 ms; the
+file is named in the tool result) into `backgroundOutputs`, which the inline Bash card and the Tasks
+panel draw. For an explicit `run_in_background` loop, an auto-backgrounded one (timeout) and a
+"Send to background" one, both kept growing line by line to the end while `bash_output` stopped at
+the move. Only `bashOutputs[id]` in the store goes stale from the move to completion, and nothing
+visible reads it then. Accepted as is (no tee before the wrapper); Part B's early poll still re-reads a
+backgrounded command's file every second and discards the result.
 
 ## Message Format
 
