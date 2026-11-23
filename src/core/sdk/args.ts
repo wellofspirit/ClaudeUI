@@ -482,8 +482,9 @@ export function buildSpawnEnv(base: NodeJS.ProcessEnv = process.env): SpawnEnv {
  * and a gateway named in the user's shell must not be handed the account's
  * OAuth token (cli.js's default is the Anthropic API). cli.js keeps the
  * token, the subscription and tier variables and the refresh flag out of every
- * child it spawns (Bash, MCP, hooks); `CLAUDE_CODE_OAUTH_SCOPES` does reach
- * them, and is only a scope list.
+ * child it spawns (Bash, MCP, hooks), and since 2.1.330 also
+ * `CLAUDE_CODE_OAUTH_SCOPES` from a child that does not get the session's token
+ * (it was only a scope list).
  *
  * ClaudeUI addition (Desktop parity unverified): `CLAUDE_CODE_ACCOUNT_UUID` +
  * `CLAUDE_CODE_ORGANIZATION_UUID`, both or neither. They are cli.js's identity

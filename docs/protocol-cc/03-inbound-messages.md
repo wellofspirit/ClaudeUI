@@ -44,6 +44,22 @@ A fourth pseudo-path queues vT-class system subtypes (`task_notification`, `task
 top-level `type` set. Its only new member is `system/late_allow_not_run` (04 §4.33). Field additions
 are listed in §3.3, §3.4, §3.5 and §3.7.
 
+**2.1.330 schema diff (against 2.1.326, darwin-arm64 concats, read from the bundle, not probed):**
+the stdout union goes from 66 to 68 members with the same top-level `type` set. The two new members
+are `system/shell_cwd` (04 §4.34) and `system/task_list_statuses` (04 §4.35). Additive fields, all
+optional and none read by ClaudeUI (its parsers ignore unknown keys):
+
+- `assistant.api_error` (§3.3) gains `oauth_refresh_store_refused` (a refreshed login could not be
+  saved, for example a locked macOS Keychain) and `named_profile_unusable`.
+- `user` (§3.4): `client_content_width` (`@internal`, the sending client's chat-column width in CSS
+  pixels), and `plugin_approval` in the per-`tool_use_id` display metadata.
+- `result` (§3.7): `begun_message_ids` (`@internal`; the API `msg_*` ids of the main conversation's
+  responses that began to stream in this turn, only with partial messages on), and the startup
+  reason `initialize_fields_not_delivered` (below).
+- `control_cancel_request` (§3.18): `takes_late_allow` and `tool_use_id` (`@internal`, only from a
+  remote session's worker). ClaudeUI's cancel path keys only on `request_id`.
+- `conversation_reset`: `user_message_from_human` (`@internal`, beside `user_message_uuid`).
+
 ---
 
 ## 3.3 `assistant`
@@ -446,6 +462,8 @@ webSearchRequests, costUSD, contextWindow, maxOutputTokens }` — `costUSD` is
 A required sandbox that cannot run reaches ClaudeUI three ways at once: a zeroed `error_during_execution` result (`num_turns: 0`, `is_error: true`, the message in `errors`, `startup_failure_reason: "sandbox_required_unavailable"`), two lines on stderr, and exit code 1. Probed 2026-11-13 on cli.js 2.1.321 through the harness, without `CLAUDE_CODE_STARTUP_FAILURE_RESULTS` in the environment, in three spawn shapes: the user message written at spawn (an automation run), streaming input with no message yet, and the same with no settings source (a dispatch target). The result arrives first and the exit follows about a second after the spawn. The result schema's own text says a startup failure result is written for most reasons only when the host sets that variable, and on every stream-json run for `org_config_required_unavailable`, `org_config_refused` and `config_file_invalid`; a 2026-11-12 probe of the sandbox case recorded the stderr lines and no result. So a consumer treats a result that is not a success as a failure and also handles a bare exit: a session reports the result's `errors` with its stderr tail, a dispatch target fails the turn on the result once its own turn has started, else on the process exit, quoting the stderr tail, and an automation run fails on either (ADR-116).
 
 2.1.326 adds the startup reason `managed_settings_not_delivered`. It is written when cli.js was started with `--managed-settings-in-initialize` (02 §2.14b) and cannot use the managed settings in the initialize request; `errors` says which case. ClaudeUI does not pass that flag, so this reason never reaches its spawns. A config-file failure's result now also carries `invalid_config_file` with the file's path, and ClaudeUI does not read it.
+
+2.1.330 adds the startup reason `initialize_fields_not_delivered`, the same failure for `--initialize-fields` (02 §2.14b): the `settings` or `disallowedTools` named there were missing from the initialize request or could not be used. ClaudeUI passes neither flag.
 
 ### Ordering
 

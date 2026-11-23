@@ -6,10 +6,13 @@ Live Bash command output never reaches the stream-json consumer until the comman
 
 `vendor/claude-cli/cli.js` — the vendored Claude Code bundle (`bun-claude`).
 
-| Component            | Version                                                                                                               |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105                                                              |
-| Last verified anchor | **2.1.326** (chunked bundle — see "Bundle shape" below; re-anchored 2.1.321, both optional forms reverted in 2.1.326) |
+| Component            | Version                                                                                         |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
+| Original discovery   | SDK 0.2.97 → 0.2.105 / bundled `cli.js` 2.1.97 → 2.1.105                                        |
+| Last verified anchor | **2.1.330** (chunked bundle — see "Bundle shape" below; Part A re-anchored 2.1.321 and 2.1.330) |
+
+Unpatched (Anthropic's own binary), Bash output still reaches the consumer only through the CLI's own
+`progress` messages, from ~2 s after the command starts; the app has no `bash_output` frames to draw.
 
 ### Bundle shape (changed in 2.1.261)
 
@@ -91,9 +94,11 @@ Bash tool .call()  →  ats()  (async generator, chunk-9c0rs7w4.js)
 
 ```
   ├─ tn = await w6(..., onProgress(){ [Part A] emit bash_output to stdout; ...original... })
+  │     (2.1.330+: onProgress:ws.call, ws = new Wrapper((...)=>{ [Part A] ...original... }))
   ├─ let gn = tn.result
   ├─ [Part B] aI.startPolling(tn.taskOutput.taskId)   ← polling starts NOW, ~2 s earlier
-  ├─ if (run_in_background) → return { backgroundTaskId }   (still polling — see "Why it's safe")
+  ├─ if (run_in_background) → return { backgroundTaskId }   (still polling — see "Why it's safe";
+  │                                                           2.1.330+: nothing emitted after the return)
   ├─ await Promise.race([gn, setTimeout(null, Hnr)])
   ├─ aI.startPolling(...)                              ← CLI's own call, now a no-op
   └─ ... unchanged ...
@@ -159,65 +164,158 @@ structural fingerprint Part A anchors on.
 
 #### Anchor (unique, 1 match)
 
-Structural shape, no literals needed:
+The callback's **body** is the anchor. It has had the same shape since 2.1.97:
 
 ```
-onProgress(<p1>,<p2>,<p3>,<p4>,<p5>){<a>=<p1>,<b>=<p2>,<c>=<p3>,<d>=<p5>?<p4>:0;let <e>=<r>;if(<e>)<r>=null,<e>()}
+<a>=<p1>,<b>=<p2>,<c>=<p3>,<d>=<p5>?<p4>:0;let <e>=<r>;if(<e>)<r>=null,<e>()
 ```
 
-Regex in `apply.mjs`:
+Two **heads** have carried it. `apply.mjs` lists both in `SHAPES`; each is tried pristine
+(`head + BODY + tail`) and already-patched (`head + marker`), and the total across all four
+searches must be exactly 1:
+
+| Shape     | Versions   | Head                                         | Tail |
+| --------- | ---------- | -------------------------------------------- | ---- |
+| `wrapped` | 2.1.330+   | `new <W>((p1,p2,p3,p4,p5)=>{`                | `})` |
+| method    | <= 2.1.326 | `onProgress(p1,p2,p3,p4,p5){` + `lateGuard?` | `}`  |
 
 ```js
-;`onProgress\\((${V}),(${V}),(${V}),(${V}),(${V})\\)\\{` +
+const P5 = `\\((${V}),(${V}),(${V}),(${V}),(${V})\\)`
+const BODY =
   `(${V})=\\1,(${V})=\\2,(${V})=\\3,(${V})=\\5\\?\\4:0;` +
-  `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)\\}`
+  `let (${V})=(${V});if\\(\\10\\)\\11=null,\\10\\(\\)`
+// wrapped: head `new ${V}\\(${P5}=>\\{`, tail `\\}\\)`
+// method:  head `onProgress${P5}\\{(?:${lateGuard})?`, tail `\\}`
 ```
 
-**Optional late-callback guard (2.1.321).** 2.1.321 opens the body with a guard that drops the first
-stray call after the command is killed/completed:
+Neither head adds a capture group, so groups 1-5 are the params and 10/11 the resolver temp and
+resolver in both shapes. The injection point is the end of the head (`^head` re-run on the match).
+
+**2.1.330: the callback moved into a disposable wrapper.** The runner option is no longer a method;
+the generator builds the callback as an arrow, wraps it, and passes the wrapper's `call`:
+
+```js
+// 2.1.330, darwin (pristine concat), generator jGi, char 16954181
+using ws=new _eo((fi,fs,hi,Ea,gl)=>{lo=fi,Dn=fs,Ho=hi,To=gl?Ea:0;let Ii=Jo;if(Ii)Jo=null,Ii()});
+let wr,rs,hs,Es;try{...,wr=await Xrt(ln,be.signal,"bash",{timeout:Es,owningAgentId:ct,caller:it,
+  turnAbortBackgrounds:hs,onProgress:ws.call,session:Oe,...})}catch(fi){throw Lo?.(),fi}
+// char 16672654, same chunk
+class _eo{#e;constructor(e){this.#e=e}call=(...e)=>this.#e?.(...e);[Symbol.dispose](){this.#e=null}}
+```
+
+`_eo` **is the CLI's late-call guard now.** `using` disposes `ws` when the generator's scope exits
+(return or throw), dispose nulls the arrow, and every later poll hits `this.#e?.(...)` and is
+dropped. Part A goes **inside the arrow**, downstream of the wrapper, so a call the CLI drops never
+reaches the SDK stream either — the same rule as the 2.1.321 guard below. The PowerShell tool uses
+the same class (`using qe=new _eo((Q,ee,oe,te,ye)=>{we=Q,me=ee,Je=oe,Ue=ye?te:0})`, no resolver).
+
+For the wrapped shape, `apply.mjs` also proves the arrow is the runner's option: the 64 chars
+before the match must end `<X>=` (the wrapper's binding, `ws`), and `onProgress:<X>.call[,}]` must
+occur exactly once within 4,000 chars after the match (2.1.330: ~350).
+
+**Bash runner literal (both shapes).** The 400 chars before the `onProgress` option (the method
+itself, or `onProgress:ws.call`) must contain `,"bash",{` — the runner call's shell-name argument,
+`Xrt(ln,be.signal,"bash",{...` (2.1.330, ~95 chars before). PowerShell's call reads
+`"powershell",{`. This puts a string literal under an otherwise purely structural anchor.
+
+**Optional late-callback guard (2.1.321 only).** 2.1.321 opened the method body with a guard that
+drops the first stray call after the command is killed/completed:
 
 ```js
 // 2.1.321, darwin, char 15727659
 onProgress(Si,pa,qa,kl,dl){if(!so&&!Pn&&(Nr.status==="killed"||Nr.status==="completed")){Pn=!0;return}No=Si,co=pa,Ho=qa,yo=dl?kl:0;let ed=Rr;if(ed)Rr=null,ed()}
 ```
 
-`apply.mjs` accepts it as an optional group (`lateGuard`, keyed on the `"killed"` / `"completed"`
-literals) between the `{` and the four assignments, and Part A is injected **after** the guard, so a
-call the CLI drops never reaches the SDK stream either. Without the guard (<= 2.1.319) the injection
-point is the opening brace as before.
+`apply.mjs` accepts it as an optional group in the method head (`lateGuard`, keyed on the
+`"killed"` / `"completed"` literals), and Part A is injected **after** the guard. 2.1.326 dropped the
+guard again (`onProgress(Pi,aa,ul,fs,ca){jn=Pi,Hn=aa,Ln=ul,oo=ca?fs:0;let Zi=Ko;if(Zi)Ko=null,Zi()}`,
+pristine darwin concat, char 16942066), and 2.1.330 replaced it with the wrapper.
 
-2.1.326 dropped the guard again: the bash callback is back to
-`onProgress(Pi,aa,ul,fs,ca){jn=Pi,Hn=aa,Ln=ul,oo=ca?fs:0;let Zi=Ko;if(Zi)Ko=null,Zi()}` (pristine darwin
-concat, char 16942066), and Part A takes the no-guard branch.
+**Why it is unique.** In 2.1.330 (darwin and win32 alike) there are exactly two five-parameter
+arrows passed to `new <W>(`, and no five-parameter `onProgress(` method at all:
 
-**Why it is unique.** 2.1.261 has exactly four `onProgress(` occurrences in the whole concat:
+| Offset (darwin) | Chunk               | Shape                                                                   |
+| --------------- | ------------------- | ----------------------------------------------------------------------- |
+| 16,954,181      | `chunk-bzyb60p0.js` | **the target** — bash, with the `let Ii=Jo;if(Ii)Jo=null,Ii()` resolver |
+| 31,024,932      | `chunk-e5txm7fq.js` | PowerShell tool — same 4 assignments, **no resolver tail**              |
 
-| Offset      | Chunk               | Shape                                                                    |
-| ----------- | ------------------- | ------------------------------------------------------------------------ |
-| ~9,070,524  | `chunk-9c0rs7w4.js` | **the target** — bash, with the `let Br=Wt;if(Br)Wt=null,Br()` resolver  |
-| ~20,004,080 | `chunk-98vnsjhm.js` | PowerShell tool — same 4 assignments, **no resolver tail**               |
-| ~15,891,569 | `chunk-jkzh538b.js` | `de.onProgress(ge.data)` — an agent-runner call, not a method definition |
-| ~19,657,603 | `chunk-f8rcj764.js` | `this.sink?.onProgress(w)` — same                                        |
+2.1.261 had the same pair as methods (bash at ~9,070,524, PowerShell at ~20,004,080) plus two
+`onProgress(` calls that are not definitions (`de.onProgress(ge.data)`, `this.sink?.onProgress(w)`).
 
 The `let <e>=<r>;if(<e>)<r>=null,<e>()` resolver tail is what excludes PowerShell. **PowerShell is
 deliberately not patched** — its generator has no resolver promise and a different progress loop.
 If a future bundle makes the two shapes converge, the uniqueness assertion in `apply.mjs` will fail
-loudly rather than patch the wrong one; do not weaken it to "first match wins".
+loudly rather than patch the wrong one; do not weaken it to "first match wins". Note that the same
+resolver tail also appears elsewhere in the 2.1.330 generator (`let Ii=Jo;if(Ii)Jo=null,Ii();` in
+the auto-background helper), but not right after the four assignments, so it does not match.
 
 #### toolUseId capture
 
-`M` is read out of the 2,000 chars _before_ the anchor with `toolUseId:(V)[,}]`. In 2.1.261 that
-window contains exactly one match — the generator's own parameter destructuring
-(`...,toolUseId:M,attributionMessageId:N,agentId:F,...` at anchor −723). Note the same window later
-contains `sandboxAttributionId:M`, which is the _same variable_ but would not match the pattern.
+The emitted `tool_use_id` must be the Bash generator's **own destructured parameter**. `apply.mjs`
+reads it from the generator head, never from a nearby `toolUseId:` (2.1.330 has
+`toolUseId:g.toolUseId` in the tool's `call()` just before the generator and `toolUseId:Ve` in
+calls inside it):
 
-#### Before (2.1.261, pristine)
+1. The last `async function*` in the 6,000 chars before the anchor (chunk-clamped). 2.1.330:
+   `async function*jGi({input:e,...,toolUseId:Ve,attributionMessageId:Xe,...,startTelemetry:En}){`,
+   1,358 chars before the anchor; 2.1.326: `zxi`, 1,533 chars.
+2. Its parameter list must be one flat destructured object, `^async function\*[\w$]*\(\{([^(){}]*)\}\)\{`
+   on at most 3,000 chars (a default with parens or braces fails closed).
+3. `toolUseId:(V)` must occur exactly once in that list.
+4. The name must not be one of the callback's five params or its `let` resolver temp (group 10). The
+   callback never reads `toolUseId`, so a minifier is free to reuse the name inside it; the injected
+   code would then read the shadowing binding, or throw in the `let` temporal dead zone.
+
+The callback is defined directly in the generator body, so the parameter is in scope there.
+
+#### Before (2.1.330, pristine, wrapped shape)
+
+```js
+using ws = new _eo((fi, fs, hi, Ea, gl) => {
+  ;((lo = fi), (Dn = fs), (Ho = hi), (To = gl ? Ea : 0))
+  let Ii = Jo
+  if (Ii) ((Jo = null), Ii())
+})
+```
+
+#### After (2.1.330)
+
+```js
+using ws = new _eo((fi, fs, hi, Ea, gl) => {
+  /*PATCHED:bash-output-streaming*/ {
+    let _bo_now = Date.now()
+    if (!globalThis._bo_map) globalThis._bo_map = new Map()
+    let _bo_k = Ve || '',
+      _bo_last = globalThis._bo_map.get(_bo_k) || 0
+    if (_bo_now - _bo_last >= 200) {
+      globalThis._bo_map.set(_bo_k, _bo_now)
+      try {
+        process.stdout.write(
+          JSON.stringify({
+            type: 'bash_output',
+            tool_use_id: Ve,
+            output: fs,
+            full_output: fi,
+            total_lines: hi,
+            total_bytes: Ea
+          }) + '\n'
+        )
+      } catch (_bo_e) {}
+    }
+  }
+  ;((lo = fi), (Dn = fs), (Ho = hi), (To = gl ? Ea : 0))
+  let Ii = Jo
+  if (Ii) ((Jo = null), Ii())
+})
+```
+
+#### Before (2.1.261, pristine, method shape)
 
 ```js
 onProgress(hn,vt,Fn,Kn,Zr){je=hn,He=vt,Ve=Fn,et=Zr?Kn:0;let Br=Wt;if(Br)Wt=null,Br()}
 ```
 
-#### After
+#### After (2.1.261)
 
 ```js
 onProgress(hn,vt,Fn,Kn,Zr){/*PATCHED:bash-output-streaming*/{let _bo_now=Date.now();
@@ -247,6 +345,9 @@ tool use so a chatty command can't flood stdout.
 - `process.stdout.write` is inside try/catch — a closed/blocked stdout can't take down the CLI.
 - `_bo_`-prefixed globals avoid collisions with the bundle and with other patches.
 - Only the bash generator's callback is patched, so no other tool reaches this code.
+- 2.1.330: the block sits inside the arrow, behind `_eo.call`'s `this.#e?.(...)`. After the
+  generator's scope disposes the wrapper, the CLI drops every poll before it reaches the arrow, and
+  Part A with it. 2.1.326 is byte-identical to the old script's output (the method shape).
 
 ### Part B: start the file poll as soon as the runner returns
 
@@ -289,8 +390,8 @@ Two-step capture, in this order:
    `pollProgress` always reads the output file (the `#h` "read" flag is gone), and the
    `tengu_lazy_pumpkin` gate is no longer in the bundle. The CLI's own call is
    `aX.startPolling(Oo.taskOutput.taskId)` (pristine darwin concat, char 16945007). Part B therefore takes the one-arg
-   branch, and nothing needs pinning: the apply log reads `One-arg startPolling (<= 2.1.319): no poll
-flag to pin.` (that label in `apply.mjs` predates 2.1.326 and now also covers it). The
+   branch, and nothing needs pinning: the apply log reads `One-arg startPolling (all but 2.1.321): no
+poll flag to pin.` 2.1.330 is one-argument too (`one.startPolling(wr.taskOutput.taskId)`). The
    `bash-poll-flag` rewrite stays in `apply.mjs` for a bundle that brings the parameter back.
 
    Taking the class name from a call site _inside the target chunk_ is what guarantees the
@@ -300,17 +401,20 @@ flag to pin.` (that label in `apply.mjs` predates 2.1.326 and now also covers it
 
    ```js
    new RegExp(`(?:\\),|;let )(${V})=${reEsc(shellCmdVar)}\\.result;`, 'g')
-   // 2.1.261 → ;let gn=tn.result;      (the `;let ` alternative)
+   // 2.1.330 → ;let Ms=wr.result;      (the `;let ` alternative, since 2.1.261)
+   // 2.1.261 → ;let gn=tn.result;
    // <=2.1.241 → ),h=k.result;         (the `),` alternative — one comma expression)
    ```
 
-Both searches run over a window that starts at the Part A anchor, is 4,000 chars long, and is
-clamped to the next `\n// @bun-chunk ` delimiter. Both assert **exactly one** match.
+Both searches run over a window that starts at the Part A anchor, is 6,000 chars long
+(`PART_B_WINDOW`), and is clamped to the next `\n// @bun-chunk ` delimiter. Both assert **exactly
+one** match.
 
-Window sizing: in 2.1.261 the `.result` assignment sits at anchor +527 and the CLI's own
-`startPolling` at anchor +1775 in the pristine file. Part A has already injected ~450 chars into
-that window by the time Part B runs, pushing `startPolling` to ~+2225 — which is why the window is
-4,000 and not the old 3,000.
+Window sizing: Part A has already injected ~450 chars into the window by the time Part B runs. The
+CLI's own `startPolling` sits at anchor +1,775 (2.1.261), ~+2,940 (2.1.326) and +3,270 (2.1.330,
+measured from the `new _eo(` match) in the pristine file, so ~+3,720 after Part A; the `.result`
+assignment at +527 (2.1.261) and +994 (2.1.330). The window went 3,000 → 4,000 → 6,000 as the
+generator grew.
 
 #### Before (2.1.261, pristine)
 
@@ -348,14 +452,33 @@ Four separate properties were verified against 2.1.261 source:
    - explicit `run_in_background` and auto-backgrounded returns → `jne()` registers `rnr`, whose
      `shellCommand.result.then(...)` runs `snr()` → `taskOutput.flush()` + `shellCommand.cleanup()`.
 
+**Re-verified on 2.1.330** (generator `jGi`, TaskOutput `one`, registry accessor `txe`): the
+registry `startPolling` is still `Map.set` + one `unref`'d interval; `static startPolling(e)` still
+returns when the instance is unregistered or has no callback; the pre-spawn stub is
+`BT(e,o){let r=new one(OT("local_bash"),null);return{status:"completed",...,taskOutput:r,...,cleanup(){}}}`
+(callback `null`, never registered); the exit paths are the race (`if(fi!==null)return
+wr.cleanup(),$zo(fi)`), the explicit and auto-background returns (`BSt({...,shellCommand:wr,...})`
+or the served-background `adopt(wr,...)`), and the progress loop's
+`finally{if(one.stopPolling(wr.taskOutput.taskId),...`.
+
 Point 4 is the one to re-verify on every bump — it is the only thing standing between this patch
 and an interval that keeps re-reading a finished command's output file and emitting `bash_output`
 forever.
 
-There is one intended behavior change: **backgrounded commands now stream too.** Unpatched, an
-explicitly backgrounded command returns before `startPolling` is ever reached, so nothing polls it;
-patched, polling is already running, so `bash_output` keeps flowing for the life of the background
-task. That is what the GUI's background bash cards want.
+Up to 2.1.326 there was one intended behavior change: **backgrounded commands streamed too.**
+Unpatched, an explicitly backgrounded command returns before `startPolling` is ever reached, so
+nothing polls it; patched, polling is already running, so `bash_output` kept flowing for the life of
+the background task (the task panel's `TaskEntry` draws `bashOutputs[toolUseId]` for a Bash task).
+
+**2.1.330 ends that.** The callback now sits behind the `_eo` wrapper, which `using` disposes when the
+generator returns. A backgrounded command's generator returns (`{backgroundTaskId}`) while the
+command keeps running; Part B's poll keeps reading the output file every second, but
+`ws.call` → `this.#e?.(...)` is a no-op from then on, so Part A emits nothing. An explicit
+`run_in_background` returns before the first 1 s poll tick, so it emits nothing at all; an
+auto-backgrounded command streams until it is moved, then its tail freezes. Part A deliberately
+stays downstream of the wrapper (a call the CLI drops never reaches the SDK stream). Restoring
+background streaming would mean teeing the call _before_ the wrapper, at `onProgress:ws.call`,
+which forwards exactly the calls the CLI now drops — a decision for the owner, not a re-anchor.
 
 ## Message Format
 
@@ -414,18 +537,30 @@ binary. Renaming a marker breaks that test.
 the `.cmd` extension from Git Bash) works on the concat. Plain `rg` / a `node -e` offset script is
 an equally good fallback and is what was used for the 2.1.261 re-anchor.
 
-### The bash generator (`ats`) — best single entry point
+### The bash generator (`ats` 2.1.261, `jGi` 2.1.330) — best single entry point
 
 ```bash
 bundle-analyzer.cmd find cli.js '"tengu_bash_command_explicitly_backgrounded"' --compact
-# exactly 1 hit in 2.1.261, ~1.6 KB after the onProgress anchor, inside the generator
+# exactly 1 hit, inside the generator: ~1.6 KB after the anchor in 2.1.261, ~2.6 KB in 2.1.330
 ```
 
 ### The `onProgress` callback (Part A anchor)
 
 ```bash
+# 2.1.330+: the option is a wrapper's .call; 2 hits, bash ("bash",{ just before) and PowerShell
+bundle-analyzer.cmd find cli.js 'onProgress:%V%\.call\b' --regex --compact
+# the wrapper's binding (`using ws=new _eo(`) and the arrow sit ~350 chars before the bash hit
+
+# <= 2.1.326: a method on the options object; the target is the one whose body ends
+# `let X=Y;if(X)Y=null,X()` (2.1.261: 4 `onProgress(` hits, PowerShell's has no resolver)
 bundle-analyzer.cmd find cli.js 'onProgress(' --compact
-# 4 hits; the target is the one whose body ends `let X=Y;if(X)Y=null,X()`
+```
+
+### The disposable wrapper class (`_eo`, 2.1.330)
+
+```bash
+bundle-analyzer.cmd find cli.js 'call=(...e)=>this.#e?.(...e)' --compact
+# 1 hit: class _eo{#e;constructor(e){this.#e=e}call=(...e)=>this.#e?.(...e);[Symbol.dispose](){this.#e=null}}
 ```
 
 ### The startPolling call + TaskOutput class (Part B step 1)
@@ -506,7 +641,10 @@ it happened to look like a delimiter — never emit a line starting with `// @bu
 ### Pitfall: regexes that bridge chunks
 
 Any `[\s\S]*?` span wide enough to cross a `\n// @bun-chunk ` delimiter can match two unrelated
-modules. This patch has no such span, and Part B additionally clamps its window to the chunk edge.
+modules. This patch has no such span. Only the anchor search scans the whole file (each pattern
+starts at a literal, `onProgress(` or `new `, and has no open-ended span); every search after it
+runs on a fixed-size slice clamped to the enclosing chunk (`GEN_LOOKBACK`, `GEN_PARAMS_MAX`,
+`WRAPPER_SITE_WINDOW`, `BASH_CALL_LOOKBACK`, `PART_B_WINDOW` at the top of `apply.mjs`).
 
 **Always syntax-check after applying.** For the chunked bundle, `node --check` on the whole concat
 is meaningless (it is not a valid single module); check the modified chunk instead:
@@ -523,6 +661,35 @@ fs.writeFileSync(process.env.SCRATCH+'/chunk.mjs', s.slice(h,e))" \
 
 (The repo's rebundler does this for you with esbuild on every chunk the patches touched.)
 
+### Pitfall: exiting with `process.exit()` (the 2.1.330 "hang")
+
+`apply.mjs` never calls `process.exit()`, on success or failure. It returns an exit code from
+`main()`, sets `process.exitCode`, and lets Node exit by itself; an unexpected throw is caught and
+turned into exit code 1 the same way.
+
+```js
+// WRONG — with the ~60 MB bundle in the heap this can hang forever at 0% CPU (Node 26.3, macOS arm64)
+if (!anchorMatch) { console.error('ERROR: ...'); process.exit(1) }
+
+// CORRECT
+function main() { /* ... */ if (!hit) return fail('ERROR: ...') /* ... */ return 0 }
+try { process.exitCode = main() } catch (err) { console.error(err); process.exitCode = 1 }
+```
+
+`process.exit()` runs Node's default exit handler, which disposes the V8 platform and joins its
+worker threads _without_ tearing the isolate down first. A worker that is mid-way through a
+concurrent baseline (Sparkplug) compile and needs a GC parks in
+`CollectionBarrier::AwaitCollectionBackground`, waiting for the main thread to collect; the main
+thread is in `uv_thread_join` waiting for the worker. `sample <pid>` on a hung run shows exactly
+those two stacks. A natural exit disposes the isolate first, which wakes the parked worker.
+
+It is timing-dependent and not tied to a platform's bundle. In the error path on the 2.1.330
+bundles, the old script hung in 6 and 13 of 30 runs (win32 input) and 2 of 30 (darwin input); the
+rewritten one in 0 of 125 (50 error, 50 skip, 25 write runs). The script that hung for 21 hours inside
+`check-patches-cross-platform.mjs` was the old one on win32-x64, exiting through `process.exit(1)`
+after Part A failed to anchor. `subagent-streaming/apply.mjs`, `voice-server/apply.mjs` and
+`apply-all.mjs` still call `process.exit()` after reading the bundle and can hit the same deadlock.
+
 ## What's NOT Changed
 
 **The `onProgress` signature and body.** Part A prepends a block; the original assignments and
@@ -536,9 +703,12 @@ not move or remove one. `bash_output` is a side channel, not a replacement for `
 gives up waiting, and shortening it would change tool semantics. The patch removes the _output_
 delay without touching it.
 
-**The PowerShell tool.** `chunk-98vnsjhm.js` has a near-identical `onProgress`, but no resolver
-promise and a different loop. It has never been patched. Adding it would need its own anchor and
-its own uniqueness proof.
+**The PowerShell tool.** It has a near-identical callback (2.1.261: `chunk-98vnsjhm.js`; 2.1.330:
+`chunk-e5txm7fq.js`, wrapped in the same `_eo` class), but no resolver promise and a different
+loop. It has never been patched. Adding it would need its own anchor and its own uniqueness proof.
+
+**The `_eo` wrapper (2.1.330).** Its dispose is what drops late calls, and Part A stays behind it.
+The wrapper class, its `using` binding and the `onProgress:ws.call` option are untouched.
 
 **`onStdout`.** Passing it to the runner would flip `stdoutToFile` to false and reroute output
 through Node pipes — a much larger behavioral change (it also changes what ends up in the
@@ -549,14 +719,21 @@ through Node pipes — a much larger behavioral change (it also changes what end
 1. `node patch/bash-output-streaming/apply.mjs` — applies both parts, exits 0.
 2. Run it again — "Already applied (both parts). Skipping.", exits 0.
 3. Delete only the Part B injection and re-run — Part A reports "already applied", Part B
-   re-applies. (The `apply.mjs` fallback anchor exists for exactly this half-patched state.)
+   re-applies. (The patched-shape search, `head + marker`, exists for exactly this half-patched
+   state.)
 4. Syntax-check the modified chunk (see Syntax Pitfalls). Expect exit 0.
-5. `node patch/apply-all.mjs` — all patches pass.
-6. `bun run test` — `src/main/__tests__/patches.test.ts` checks both markers in the built binary.
-7. `node patch/bash-output-streaming/test.mjs` — behavioral; spawns the **real** rebundled binary,
+5. `node scripts/check-patches-cross-platform.mjs --version <new>`, then `--version <previous>`:
+   every platform `ok` (linux rebundle `skip (ELF)`). Run it under a timeout (e.g. Python
+   `subprocess.run(..., timeout=900)`): the checker's own `spawnSync` calls have none.
+6. On a scratch copy, run the script ~30 times in a loop with a per-run timeout, on the error, skip
+   and write paths: no run may hang (see "exiting with `process.exit()`").
+7. `node patch/apply-all.mjs` — all patches pass.
+8. `bun run test` — `src/main/__tests__/patches.test.ts` checks both markers in the built binary.
+9. `node patch/bash-output-streaming/test.mjs` — behavioral; spawns the **real** rebundled binary,
    so it only runs in the main repo after `bun run ensure-cli`, not in a bare worktree.
-8. Manual: run `for i in $(seq 1 20); do echo "line-$i"; sleep 0.2; done` in the app. Output should
-   appear in the tool card within ~1 s, not ~4 s. Repeat with `run_in_background: true`.
+10. Manual: run `for i in $(seq 1 20); do echo "line-$i"; sleep 0.2; done` in the app. Output should
+    appear in the tool card within ~1 s, not ~4 s. With `run_in_background: true`, 2.1.326 streamed
+    into the task panel; 2.1.330 shows nothing live once the call returns (Part B "Why it's safe").
 
 ## Discovery Method
 
@@ -608,7 +785,41 @@ through Node pipes — a much larger behavioral change (it also changes what end
   TaskOutput class `aX`, shellCommand `Oo`, `.result` assignment `;let as=Oo.result;`; both markers
   verified. Everything sits in one chunk, `chunk-4h798pp0.js` (≈5.9 MB).
 
+### 2.1.330 re-anchor
+
+- Part A: `ERROR: Cannot locate the bash onProgress callback.` on all three platforms. The runner
+  option became `onProgress:ws.call`, and the callback an arrow passed to `using ws=new _eo(...)`, a
+  class whose `call` forwards to the arrow until `[Symbol.dispose]` nulls it. The body is unchanged.
+  `SHAPES` now lists both heads (`new W(` arrow, `onProgress(` method); the wrapped shape is
+  confirmed by its binding and a single `onProgress:<binding>.call`, and both shapes by the
+  `,"bash",{` literal before the option.
+- toolUseId: the old "first `toolUseId:V[,}]` in the 2,000 chars before the anchor" was replaced by
+  the enclosing generator's own destructured parameter, plus a shadowing check against the callback's
+  params and `let` temp (see "toolUseId capture"). 2.1.326 binds the same `Fe` either way.
+- Part B: unchanged and one-argument (`one.startPolling(wr.taskOutput.taskId)`, `;let Ms=wr.result;`).
+- The cross-platform check hung for 21 hours on win32-x64. Not a regex: the old script's
+  `process.exit(1)` after the Part A failure deadlocked Node's shutdown (see Syntax Pitfalls). The
+  script now exits naturally, and every post-anchor search is a fixed, chunk-clamped slice.
+- Behavior change from the wrapper: backgrounded commands stop streaming once the tool call returns
+  (Part B "Why it's safe", last paragraph).
+- darwin apply log (after subagent-streaming): callback at char 16954181, wrapper `ws`,
+  params `fi,fs,hi,Ea`, toolUseId `Ve`, TaskOutput `one`, shellCommand `wr`, `;let Ms=wr.result;`;
+  win32: char 17107429, TaskOutput `Xte`, `;let Ps=wr.result;`. Both parts sit in one chunk
+  (`chunk-bzyb60p0.js` darwin, `chunk-8dxpsdkx.js` win32); the patched chunk passes `node --check`.
+  On 2.1.326 the new script's injections are byte-identical to the old script's.
+
 ## Key Functions Reference
+
+| Name (v2.1.330, darwin) | Purpose                                      | Char offset (pristine concat) | Chunk               |
+| ----------------------- | -------------------------------------------- | ----------------------------- | ------------------- |
+| `jGi`                   | Bash async generator                         | 16,952,823                    | `chunk-bzyb60p0.js` |
+| `new _eo((fi,...)=>{`   | Part A anchor (the wrapped arrow)            | 16,954,181                    | `chunk-bzyb60p0.js` |
+| `onProgress:ws.call`    | the runner option                            | 16,954,530 (anchor +349)      | `chunk-bzyb60p0.js` |
+| `;let Ms=wr.result;`    | Part B injection point                       | anchor +994                   | `chunk-bzyb60p0.js` |
+| `one.startPolling(...)` | CLI's own late call                          | anchor +3,270                 | `chunk-bzyb60p0.js` |
+| `_eo`                   | disposable callback wrapper (late-call drop) | 16,672,654                    | `chunk-bzyb60p0.js` |
+| `one`                   | TaskOutput class (`static startPolling`)     | ~11,431,049                   | `chunk-bzyb60p0.js` |
+| `BT`                    | pre-spawn-error ShellCommand stub            | 11,444,882                    | `chunk-bzyb60p0.js` |
 
 | Name (v2.1.261)        | Purpose                                   | Char offset (pristine concat) | Chunk               |
 | ---------------------- | ----------------------------------------- | ----------------------------- | ------------------- |

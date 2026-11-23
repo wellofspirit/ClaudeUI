@@ -185,6 +185,8 @@ We currently don't send keep_alive. It's documented here for completeness.
 
 **2.1.326 re-check** (pristine darwin-arm64 concat, read from the bundle, not probed): the branch `if(n.type==="update_environment_variables")` is @43761665, and the allowlist `se=new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN","CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSIONS_OAUTH_TOKEN"])` is @43741573. It already held three keys at 2.1.321. The behaviour below holds, with two changes: the success answer now carries the applied keys (step 5), and one more key can be applied, `takesHostCredential` (step 3).
 
+**2.1.330 re-check** (pristine darwin-arm64 concat, read from the bundle, not probed): the branch is @34668945, the allowlist `re=new Set(["CLAUDE_CODE_SESSION_ACCESS_TOKEN","CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSIONS_OAUTH_TOKEN"])` @34647972 (same three keys) and the `response:{applied:…}` answer @34671312. The branch body is structurally identical to 2.1.326's (only minified names differ), so the behaviour below is unchanged.
+
 ### Shape
 
 ```json

@@ -697,3 +697,17 @@ imported (`Qve`, `eve`, `Kke`). The anchor gained the helper form (see **Anchor*
 injection is unchanged, since it uses only the message variable, the success helper (`Xt`, four
 `Xt(V,{})`-style sites in the loop's chunk on every platform) and the voice function (`vRs`, `gRs`,
 `mCs`, dynamically imported). Anchor drift only; the injected protocol and behaviour are unchanged.
+
+## 2.1.330 check (no re-anchor)
+
+The helper-form anchor still matches exactly once on all three platforms, unchanged in shape:
+`else lS(z,wn(String(z.request.subtype)))}finally{…`, with
+``lS=function(Q,re){Yt(Q,`${aue}: ${re}`,"unsupported_request")}``. The helper is `lS` on win32-x64,
+darwin-arm64 and linux-x64 alike this time. Its imported text constant is `nue`, `aue` and `Jce`
+respectively, and the message variable is `z`. The success helper is `bn` (four `bn(z,{})`-style
+sites in the loop's chunk on every platform). The voice function is `Htr`, `unr` and `btr`,
+dynamically imported from its own chunk. Checked by running this patch's `apply.mjs` on scratch copies
+of the three pristine 2.1.330 concats (`CLAUDEUI_CLI_VENDOR_DIR`); each applied and verified its
+marker. The 2.1.330 dispatch loop also gained a cli.js-native `dictate` request (speech the host
+recorded → text, behind a server flag; `docs/protocol-cc/07-control-outbound.md` §7.3). It does not
+replace this patch: a public build answers it only for the VS Code extension.

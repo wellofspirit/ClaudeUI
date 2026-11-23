@@ -10,6 +10,13 @@ Verified against cli.js **2.1.268**. The 2.1.268 catalog is byte-identical to
 not mirror) and a new `CLAUDE_CODE_MODEL_CAPABILITIES` env override — same 30
 models, same context/pricing/capability records.
 
+**2.1.330 (2026-11-23):** baked catalog compared record by record against 2.1.326: same 24 models,
+ids, aliases (`opus` → `claude-opus-5-5`, `sonnet` → `claude-sonnet-5-5`, `haiku` →
+`claude-haiku-5-5`, `fable` → `claude-fable-5-2`), `latest_per_family`, windows, pricing tiers,
+`default_effort` and output limits; `alias_migration` is still `{}`. Only capability flags were
+added, and none is mirrored: `send_user_file_input_whole` on `claude-opus-4-8` and `claude-opus-5`,
+and `script_output_cost` on `claude-fable-5-2`. The resolver is unchanged.
+
 **2.1.326 (2026-11-17):** baked catalog compared record by record against 2.1.321: same 24 models,
 aliases, windows, pricing tiers, `default_effort` and output limits; only `vertex_fast_mode` was
 added to the capabilities of `claude-fable-5-2` and `claude-mythos-5-2` (not mirrored). The
@@ -169,17 +176,17 @@ resolve most-specific-first (`claude-fable-5-1` before `claude-fable-5`).
 
 Picker aliases resolve to concrete models via the catalog's `aliases` table
 (`default` + `per_provider` overrides) before the window resolver ever sees
-them. In 2.1.261:
+them. As of 2.1.330 (rows say when a target moved):
 
 | Alias         | Resolves to (first-party default)                                                                                                  | Window |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------ |
 | `fable`       | `claude-fable-5-2` since 2.1.321 (`claude-fable-5-1` before; gateway: `claude-fable-5`)                                            | 1M     |
-| `opus`        | `claude-opus-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`)                                                           | 1M     |
+| `opus`        | `claude-opus-5-5` (foundry: `claude-opus-4-6`, gateway: `claude-opus-4-7`; `claude-opus-5` before Opus 5.5)                        | 1M     |
 | `sonnet`      | `claude-sonnet-5-5` since 2.1.285 (bedrock/vertex/foundry/mantle: `claude-sonnet-4-5`, anthropic_aws/gateway: `claude-sonnet-4-6`) | 1M¹    |
-| `haiku`       | `claude-haiku-4-5`                                                                                                                 | 200K   |
+| `haiku`       | `claude-haiku-5-5` since 2.1.293 (every provider and gateway: `claude-haiku-4-5`)                                                  | 1M¹    |
 | `<alias>[1m]` | resolved model + `[1m]` suffix                                                                                                     | 1M     |
 
-¹ first-party; the per-provider sonnet targets are 200K models (row 4's
+¹ first-party; the per-provider sonnet and haiku targets are 200K models (row 4's
 kelp_forest override may apply to sonnet-4-6).
 
 ## 13.4 ClaudeUI's mirror

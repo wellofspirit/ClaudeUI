@@ -889,7 +889,9 @@ What `buildEnv()` sets on every multi-account spawn that has no custom endpoint 
 
 Removed from the spawn env at the same time: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS` (as Desktop does), an inherited `ANTHROPIC_BASE_URL` (Desktop pins the base URL to its own API host, so the account's token never goes to a gateway named in the user's shell), and any inherited `CLAUDE_CODE_OAUTH_TOKEN`, `SKIP_SECURESTORAGE`, `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDE_CODE_ACCOUNT_UUID`, `CLAUDE_CODE_ORGANIZATION_UUID` or `CLAUDE_CODE_USER_EMAIL` (the email is never set: with all three and no `oauthAccount`, cli.js's `hNs` writes one into the shared `~/.claude.json`). With multi-account on and no readable token the spawn is refused (`HostTokenUnavailableError`); it never falls through to the machine's default login. Under a custom endpoint profile the profile's `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` win and none of the above is set. Single-account spawns pass the inherited env through.
 
-What reaches cli.js's children (Bash, MCP stdio servers, hooks): its child-env builder `Zs()` @2440665 deletes `CLAUDE_CODE_OAUTH_TOKEN` (in `uPt` @767797) and `CLAUDE_CODE_SUBSCRIPTION_TYPE`, `CLAUDE_CODE_RATE_LIMIT_TIER`, `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` (`Ne` @2441912). `CLAUDE_CODE_OAUTH_SCOPES` passes through, and so do the two identity UUIDs (2.1.321's `Scn` strip list omits them), so a `claude` an agent starts from Bash inherits this account's org over its own login's. The orchestrator's live probe (official 2.1.280, Windows) confirmed both from a Bash child, and found the token in no file cli.js wrote. Re-read on 2.1.326 (darwin-arm64 concat, not probed): the strip set is `qe=new Set([...imt(),"CLAUDE_CODE_SUBSCRIPTION_TYPE","CLAUDE_CODE_RATE_LIMIT_TIER",…,"CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH",…])` @2390108, and `imt()` starts from the token list `vFe=["CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSIONS_OAUTH_TOKEN",…]` @853581. Against 2.1.321 it adds five unrelated names and still omits `CLAUDE_CODE_OAUTH_SCOPES` and the two identity UUIDs. The env credential builder is `j_()` @4251437, and the `CLAUDE_CODE_OAUTH_TOKEN` variant is `wq()` @4251676 (it now returns `{tokens, loginEnded}`). Both read the same scopes, subscription and tier variables.
+What reaches cli.js's children (Bash, MCP stdio servers, hooks): its child-env builder `Zs()` @2440665 deletes `CLAUDE_CODE_OAUTH_TOKEN` (in `uPt` @767797) and `CLAUDE_CODE_SUBSCRIPTION_TYPE`, `CLAUDE_CODE_RATE_LIMIT_TIER`, `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` (`Ne` @2441912). The two identity UUIDs pass through (2.1.321's `Scn` strip list omits them), so a `claude` an agent starts from Bash inherits this account's org over its own login's. Through 2.1.326 `CLAUDE_CODE_OAUTH_SCOPES` passed through as well (only a scope list; since 2.1.330 it does not, below). The orchestrator's live probe (official 2.1.280, Windows) confirmed both from a Bash child, and found the token in no file cli.js wrote. Re-read on 2.1.326 (darwin-arm64 concat, not probed): the strip set is `qe=new Set([...imt(),"CLAUDE_CODE_SUBSCRIPTION_TYPE","CLAUDE_CODE_RATE_LIMIT_TIER",…,"CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH",…])` @2390108, and `imt()` starts from the token list `vFe=["CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSIONS_OAUTH_TOKEN",…]` @853581. Against 2.1.321 it adds five unrelated names and still omits `CLAUDE_CODE_OAUTH_SCOPES` and the two identity UUIDs. The env credential builder is `j_()` @4251437, and the `CLAUDE_CODE_OAUTH_TOKEN` variant is `wq()` @4251676 (it now returns `{tokens, loginEnded}`). Both read the same scopes, subscription and tier variables.
+
+**2.1.330: `CLAUDE_CODE_OAUTH_SCOPES` no longer reaches a child that does not get the session's token** (darwin-arm64 concat, read from the bundle, not probed). The builder is `Hs()` @2272620 and its strip set `lt=new Set([...Yke(),"CLAUDE_CODE_SUBSCRIPTION_TYPE","CLAUDE_CODE_RATE_LIMIT_TIER",…])` @2276774. `Yke()` @2269605 starts from the token list `P6e=["CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSIONS_OAUTH_TOKEN",…]` @609287 and adds `CLAUDE_CODE_OAUTH_SCOPES` when the parent env holds `CLAUDE_CODE_OAUTH_TOKEN` and the child keeps neither that token nor `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` (`bra()` @609788), or on a BYOC remote worker. The child keeps the token only when it is the unix-socket placeholder beside `ANTHROPIC_UNIX_SOCKET`, which ClaudeUI never sets, so on every host-token spawn the scopes are stripped too. The bridge child spawn applies the same rule through `qDo()` @609918. The subscription, tier and refresh-flag names are still stripped and the two identity UUIDs still pass through. The env credential builder is `sm()` @4038476 and the `CLAUDE_CODE_OAUTH_TOKEN` variant `wj()` @4038715, structurally identical to 2.1.326's.
 
 **Why the identity UUIDs (2.1.321, probed 2026-11-11).** cli.js builds the picker at startup from its served model catalog cached under `<config home>/cache/model-catalog/`, and refreshes that cache in the background for the next launch; a headless (stream-json) spawn never waits on a stale cache. The cache file is `<orgUuid>-<sha256(accountUuid)[:12]>-<surface>.json` when cli.js knows the account (store login, or an env token with both UUIDs), else `tok-<sha256(accessToken)[:12]>-<surface>.json`. Without the UUIDs every rotated host token got a cold cache and the picker fell back to the bootstrap list (`additional_model_options`), which named Fable only as a concrete id with no `fable` alias row (dropped by ADR-100 until 2026-11-14; it now surfaces as that concrete row). The UUIDs come from the account row (the usage poll's identity check), so an account's first spawn before that poll still uses the token key. The cache counts as fresh for about an hour (`staleAt` ≈ `fetchedAt` + 1 h ±10%); a fresh entry is used without a network call (`We()` → `cache_fresh`), so a new model reaches the picker within about an hour of the server offering it.
 
@@ -966,6 +968,35 @@ definitions (`new Option(…)` / `.option(…)`) gained, all hidden:
 Removed: `plugin install --registry <url>`. Every flag `src/core/sdk/args.ts` can pass is still in
 the bundle, except `--assistant`, which is in neither 2.1.321 nor 2.1.326. That branch is dead:
 no caller sets `QueryOptions.assistant`.
+
+Re-diffed at **2.1.330** against 2.1.326 (pristine darwin-arm64 binaries, isolated `HOME`, no
+login; the rebuilt `vendor/claude-cli/bun-claude --help` is byte-identical to the pristine one):
+the long-flag set in `--help` is the same 67 names, and only three descriptions changed
+(`--autocompact`: "at least 100k tokens", no upper bound; `-n, --name` also names a new cloud
+session; `--restricted` also starts no plugin language servers). The bundle's option definitions
+gained five, all hidden; ClaudeUI passes none:
+
+- `--await-initialize` (unchanged since 2.1.326, `cli.js@char22292246`, documented here for
+  the first time): read the `initialize` control request from stdin during startup, so its
+  launch-scoped fields (`plugins`, `mcpServers`) apply as their command-line flags would. Only for
+  the process that writes that request as the first stdin line at spawn, and only with
+  `--input-format=stream-json`. ClaudeUI sends `initialize` after spawn and does not pass it.
+- `--initialize-fields <names>` (new, `cli.js@char22313108`): with `--await-initialize`, read the
+  named fields of the initialize request in place of their flags, comma-separated: `settings` for
+  `--settings`, `disallowedTools` for `--disallowedTools`. It exits with "Error: --initialize-fields
+  requires --await-initialize and --input-format=stream-json with stdin piped, and cannot be used
+  with --sdk-url or a subcommand." when misused. A field it cannot use ends the run with a startup
+  result whose `startup_failure_reason` is `initialize_fields_not_delivered` (03 §3.7). The
+  initialize response confirms each field in `settings_applied` / `disallowed_tools_applied`
+  (07 §7.3). It keeps a long `--settings` JSON or tool list off the command line.
+- `--hold-repository-while-parked` (spare processes with `--project-config-root`, requires
+  `--await-claim`), `--metadata <key=value>` (repeatable; cloud sessions on a self-hosted
+  environment), and `auth login --organization-gateway` (sign in to an organization gateway through
+  its identity provider).
+
+`--nested-model-access` also appears, but as a runner-mode argument parsed by hand, not a commander
+option. No option was removed. Of the 38 flags `args.ts` can pass, all are still in the bundle
+except the dead `--assistant` branch (as at 2.1.326).
 
 | Flag                                          | Type / values      | Effect                                                                                                                                                                                                                                                                               |
 | --------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

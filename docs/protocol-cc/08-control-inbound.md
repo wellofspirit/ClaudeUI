@@ -168,6 +168,14 @@ See `src/core/sdk/query.ts::handleCanUseTool()`. Pass-through plus:
 - Coerces missing `message` on deny to `"Denied"` (avoids ZodError).
 - Echoes `tool_use_id` as `toolUseID` in response.
 
+**2.1.330 request additions** (`@internal`, optional, schema @2957355; none read by ClaudeUI, and the response union is unchanged):
+
+- `decision_reason_code` gains `denial_limit_host_reset`: the prompt raised after three or more blocks in a row (by auto mode, or by the Chrome tools' check outside it). It is sent only when the spawn env sets `CLAUDE_CODE_HOST_ALLOW_RESETS_DENIAL_STREAK`, which ClaudeUI does not set.
+- `auto_modes_check_raised: true`: the ask reached a person after the auto-mode classifier's block or flag, or over a transcript too long for it, where `decision_reason_type` / `decision_reason_code` do not say so.
+- `rule_usually_offered` (display only, beside `suppress_always_allow_rule`) and `mcp_skill` (beside `tool_kind`).
+
+ClaudeUI keys `decision_reason_code` only on `classifier_transcript_too_long`, so its handler needs no change. A card could read `auto_modes_check_raised` to say that auto mode raised the ask; that is optional.
+
 ---
 
 ## 8.4 `mcp_message`
@@ -334,6 +342,8 @@ Anchors are `.cache/pristine-cli.js` (2.1.280) offsets. Request schema `Wo` @238
 
 **2.1.326 anchors** (pristine darwin-arm64 concat; read from the bundle, not probed): request schema `Cl` @3306594, response schema `Qir` @3309557 (`{accessToken: string|null, reason?}`, unchanged), reason enum `aSi=["signed_out","identity_changed","transient","refresh_failed"]` @2445708 (unchanged), sender `async requestOAuthTokenRefresh(e,n)` @43793463, gate `eze()` @4212303 over the entrypoint set `iil=new Set(["claude-desktop","local-agent","claude-vscode"])` @4210176 (unchanged), headless registration `if(eze()){if(ZIn((pt,vn)=>ye.requestOAuthTokenRefresh(pt,vn))…` (two sites, the first @~44883186), 401 handler `Cq` @4259456.
 
+**2.1.330 anchors** (pristine darwin-arm64 concat; read from the bundle, not probed; every item below is structurally identical to 2.1.326's, only minified names moved): request schema `vi` @3160189, response schema `pOr` @3163152 (same fields and `.catch`), reason enum `rYi=["signed_out","identity_changed","transient","refresh_failed"]` @2227851, sender `async requestOAuthTokenRefresh(e,r)` @34701941, gate `U7e()` @3998295 over the entrypoint set `G4l=new Set(["claude-desktop","local-agent","claude-vscode"])` @3996148, headless registration `if(U7e()){if(S3n((Tt,Vn)=>Ee.requestOAuthTokenRefresh…` (two sites, the first @36213702), 401 handler `Rj` @4046557 with both log lines ("…the same expired token…" @4047589, "…as it may to this ask, so this is not a fault" @4047436). The env credential is still `{accessToken, refreshToken: null, expiresAt: null, …}` (`sm()` @4038476, 02 §2.14). No handler change is needed.
+
 **Gate:** `Mnt()` @3069074 — BOTH:
 
 - `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH` is truthy
@@ -478,6 +488,10 @@ Not a request — a one-way cancel signal. Documented here because it comes thro
 > prompts). ClaudeUI keys `decision_reason_code` only on `classifier_transcript_too_long`
 > (`claude-permission-decision.ts`) and does not read `server_policy_ask_only`, so its handlers need
 > no change.
+>
+> **2.1.330:** the same 18 subtypes (schema diff against 2.1.326, darwin-arm64). Field changes:
+> `can_use_tool` (§8.3, 2.1.330 additions) and `host_auth_token_refresh.token_state` (`["not_refused"]`,
+> with `.catch(void 0)`; Cowork 3P only). `oauth_token_refresh` is unchanged (§8.7). No handler change is needed.
 
 ## 8.10 Unknown inbound subtypes
 
