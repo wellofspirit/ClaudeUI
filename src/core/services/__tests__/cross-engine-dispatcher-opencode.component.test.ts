@@ -750,7 +750,9 @@ describe('opencode target — lifecycle', () => {
       { action: 'opencode_session_*', resource: '*', effect: 'deny' },
       { action: 'opencode_worktree_*', resource: '*', effect: 'deny' },
       { action: 'opencode_artifact_*', resource: '*', effect: 'deny' },
+      { action: 'opencode_automation_*', resource: '*', effect: 'deny' },
       { action: 'opencode_schedule_*', resource: '*', effect: 'deny' },
+      { action: 'console_watch_*', resource: '*', effect: 'deny' },
       // Without `requireHandBack` (the dispatcher's own suites) a target is an ordinary session of the server.
       { action: 'claudeui_hand_back', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },

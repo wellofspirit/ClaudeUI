@@ -26,6 +26,13 @@
  * cumulative `session.usage.updated` already folds it, see
  * `event-mapper.ts` `emitOverhead`) and `experimental.mcp.event` (ephemeral,
  * only with the opt-in `experimental.mcp_events`, which ClaudeUI never sets).
+ * Reviewed at 2.3.2: the only event-source change is `Model.Type` gaining `"video"`
+ * (`packages/schema/src/model.ts`); no event ClaudeUI maps carries a model type.
+ * Behaviour that is not in the shapes: a background compaction summary (2.3.2's
+ * default) is billed as `session.usage.recorded {source:'compaction'}` when it
+ * finishes, often while the session is idle, and `session.compaction.ended`
+ * repeats it when a compaction swaps the summary in (`event-mapper.ts`
+ * `uncounted` counts it once).
  */
 import type {
   Form_Answer,

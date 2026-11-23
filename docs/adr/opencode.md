@@ -43,7 +43,14 @@ Accepted losses: the plan panel (`todo.updated` has no 2.x source, the panel sta
   loopback URL is accepted. Never `--service`. The password goes in `OPENCODE_PASSWORD` (HTTP Basic `opencode:<pw>`;
   `--stdio` scrubs it from the child env so tools cannot read it). `OPENCODE_DISABLE_AUTOUPDATE=1`. No `HOME` or `XDG_*`
   override: the data dir is shared (§6).
-- The process ends by closing stdin (the pi pattern, ADR-092); a tree kill only after 5 s.
+- The process ends by closing stdin (the pi pattern, ADR-092); a tree kill only after 5 s. Its shell daemon and the
+  commands it tracks end with it, but a process a successful command left running detached (`npm run dev &`) survives,
+  ClaudeUI's quit included: opencode-pty 0.6.0 reaps the process group only after a failed command. Accepted, with no
+  teardown of our own (2026-11-23, opencode 2.3.2).
+- ClaudeUI sets `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` (its plugin serves the Claude skill catalog) but not
+  `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`: since opencode 2.3.2 a session reads CLAUDE.md where a directory has no
+  AGENTS.md, and `~/.claude/CLAUDE.md` when the global AGENTS.md is missing, which is what a Claude session reads
+  (2026-11-23).
 - **One server per distinct config injection, not per cwd.** The directory travels per request
   (`x-opencode-directory`, `location.directory`). The key is a digest of what is injected (bridged MCP, plugin dir,
   agent-permission overlay), so in practice one long-lived server per app; a cwd with a project-scoped MCP server gets
@@ -85,11 +92,13 @@ tools as `<server>_<tool>`. Dead 1.x keys are dropped.
 - A whole-category deny (`resource:"*"` last for its action) hides the tool from the model. A user deny on a whole tool
   hides it (Claude Code parity); a narrow user deny stays a server-side deny per call (tool visible); mode gates never
   hide; plan mode hides `edit`/`write`/`patch`, image generation and the worktree tools and denies the `general`
-  subagent; throwaway sessions run `{*,*,deny}`. `execute` (Code Mode, whose runtime has an ungated `fetch`) is hidden
+  subagent; throwaway sessions run `{*,*,deny}`. `execute` (Code Mode) is hidden
   in every mode.
 - **Direct tools are denied in every mode (opencode 2.2.x):** hiding `execute` makes Code Mode tools direct, and most
-  run with no permission check, so `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*` and
-  `opencode_schedule_*` are wholly denied (`DIRECT_TOOL_DENY_RULES`, moved last so no user allow re-opens them). The
+  run with no permission check, so `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*`,
+  `opencode_automation_*` and `opencode_schedule_*` are wholly denied (`DIRECT_TOOL_DENY_RULES`, moved last so no user
+  allow re-opens them; changed 2026-11-23: opencode 2.3.2 renamed schedules to automations, which can also start
+  children and model-less Code Mode runs; the schedule rule stays for an older server). The
   plugin refuses `opencode_worktree_remove` (its permission id is `edit`). `opencode_models` and the MCP-resource tools
   stay available; a server-level MCP deny or ask also covers that server's `opencode_*_mcp_resource` calls.
   `experimental_image_generate` is a paid call the model can start unasked: gated like `webfetch` (ask), denied in plan.
@@ -170,7 +179,10 @@ codemode:false}`; without `codemode:false` opencode hides MCP tools behind `exec
   background, so the execution that launches one ends on the launch). Give-ups (Stop, timeout, abort, refused prompt) drain: await an in-flight
   prompt POST, interrupt the session and followed children (an idle child's run is settled stopped, as a card's Stop
   does, and its later wake is interrupted again), cancel that prompt's inbox item, re-interrupt an execution that starts
-  meanwhile. Asks are refused with a message when no dispatch turn is running; otherwise: a child ask its own
+  meanwhile. Nothing holds for the target's own shell: since opencode 2.3.2 one that reaches its timeout moves to the
+  background, so the turn settles on the interim text and the command's later wake is a stray turn, metered as its own
+  row and read by nobody (accepted 2026-11-23: a session no longer sits on a hung command). Asks are refused with a
+  message when no dispatch turn is running; otherwise: a child ask its own
   agent denies is refused → `hostPrecheck` (user deny rules, plan mode, user ask rules) → the judge under a judged auto
   parent (ADR-088), else a card on the dispatching chat; replies go to the asking session, never `always`. A target's
   session is kept and resumed from the ledger (ADR-105); only a creation that rolled back deletes its session.
@@ -508,7 +520,9 @@ when it ends. Every run is a background one: the call answers at once, and the c
 as a synthetic `<subagent state>` message, never shown (the run's notification says it). A round that ends with the
 child's own background work still running (`state="running"`), or a child that starts again under the same call, re-arms
 the run (same run index) until a later round's end notifies it again; cold history reads the last round, `unfinished`
-while the last report still says `running`. Changed 2026-11-17: opencode 2.3.0 removed foreground subagents.
+while the last report still says `running`. Changed 2026-11-17: opencode 2.3.0 removed foreground subagents. Since
+opencode 2.3.2 a child's foreground shell that reaches its timeout also moves to the background, so it ends the round
+`running` and re-arms the run the same way (2026-11-23).
 
 ### §4 Stop per subagent; no Send to background
 

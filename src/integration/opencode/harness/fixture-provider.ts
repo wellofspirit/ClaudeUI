@@ -60,6 +60,10 @@
  *   [patch]     `patch` updating `notes.txt` (falls back to text when not offered)
  *   [multi]     ONE response with two calls: `read` of `notes.txt` and `write` of `multi.txt`
  *   [slow]      many text chunks, `slowChunkMs` apart (steer / interrupt window)
+ *   [bigctx]    AT THE START of the last user text: the echo reports `BIG_CONTEXT_TOKENS` prompt
+ *               tokens, so a rig with a small compaction ceiling nears it after one turn (2.3.2's
+ *               background summary). Only a prompt that starts with it: the echo and a compaction
+ *               checkpoint quoting it do not
  *   a compaction request ("summarize the conversation") gets a summary that
  *               fills opencode's template (`COMPACTION_SUMMARY`)
  *   otherwise   "echo: <text>"
@@ -126,6 +130,13 @@ export const NOTES_FILE = 'notes.txt'
 export const WORKTREE_REMOVE_DIR = '/claudeui-contract/no-such-worktree'
 
 const USAGE = { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 }
+/** The prompt size a `[bigctx]` answer reports. */
+export const BIG_CONTEXT_TOKENS = 50_000
+const BIG_USAGE = {
+  prompt_tokens: BIG_CONTEXT_TOKENS,
+  completion_tokens: 30,
+  total_tokens: BIG_CONTEXT_TOKENS + 30
+}
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export function messageText(content: unknown): string {
@@ -173,12 +184,17 @@ export async function startFixtureProvider(
         ...(usage ? { usage } : {})
       })}\n\n`
     )
-  const finishStream = (res: ServerResponse, reason: string) => {
+  const finishStream = (res: ServerResponse, reason: string, usage: object = USAGE) => {
     chunk(res, {}, reason)
-    chunk(res, {}, null, USAGE)
+    chunk(res, {}, null, usage)
     res.end('data: [DONE]\n\n')
   }
-  const streamText = async (res: ServerResponse, text: string, pieces = 1) => {
+  const streamText = async (
+    res: ServerResponse,
+    text: string,
+    pieces = 1,
+    usage: object = USAGE
+  ) => {
     chunk(res, { role: 'assistant', content: '' })
     if (pieces === 1) chunk(res, { content: text })
     else
@@ -188,7 +204,7 @@ export async function startFixtureProvider(
         chunk(res, { content: `${text}#${i} ` })
         await sleep(slowChunkMs)
       }
-    if (!res.destroyed) finishStream(res, 'stop')
+    if (!res.destroyed) finishStream(res, 'stop', usage)
   }
   const streamToolCall = async (res: ServerResponse, name: string | undefined, args: object) =>
     streamToolCalls(res, [{ name, args }])
@@ -266,6 +282,8 @@ export async function startFixtureProvider(
       const last = messages.at(-1)
       if (tools.length === 0) return streamText(res, 'Fixture title')
       if (text.includes('summarize the conversation')) return streamText(res, COMPACTION_SUMMARY)
+      if (text.startsWith('[bigctx]'))
+        return streamText(res, `echo: ${text.slice(0, 200)}`, 1, BIG_USAGE)
       if (last?.role === 'tool' && text.includes('[afterslow]'))
         return streamText(res, 'after', SLOW_CHUNKS)
       if (

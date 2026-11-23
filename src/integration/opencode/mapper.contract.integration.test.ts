@@ -34,6 +34,7 @@ import {
 } from '../../test/helpers/opencode-v2-transcript'
 import { basic, startRelay } from './harness/client-feed'
 import {
+  BIG_CONTEXT_TOKENS,
   COMPACTION_SUMMARY,
   NOTES_FILE,
   REASONING_TEXT,
@@ -862,6 +863,150 @@ describeV2('opencode 2.x contract: the S4 mapper on the production client', () =
     } finally {
       await feed.close()
       await relay.close()
+    }
+  })
+})
+
+/**
+ * opencode 2.3.2 writes the compaction summary in the BACKGROUND by default
+ * (`compaction.background`; `core/src/session/compaction.ts` `precompute`, called as a
+ * turn's last step completes, `session/runner/llm.ts`). The summary request is billed when
+ * it finishes, after the turn, so the session's cumulative (`session.usage.updated`) already
+ * holds it — reported as overhead — when the next prompt's compaction swaps it in and
+ * `compaction.ended` carries the same figures again (`usePrecomputed` → `addSpent`).
+ *
+ * The rig's ceiling sits just above one `[bigctx]` answer: after the first turn the context
+ * is within min(PRECOMPUTE_LEAD, half the cycle's room) of it, so the summary starts; the
+ * next prompt crosses it, so the compaction is due and takes the held summary.
+ */
+describeV2('opencode 2.x contract: a background compaction summary is counted once', () => {
+  const WINDOW = 100_000
+  const CEILING = BIG_CONTEXT_TOKENS + 40
+  const rig = useRig('mapper-bgcompact', {
+    config: (fixture) => {
+      const base = fixtureConfig(fixture)
+      const model = base.providers!.fixture!.models!['fixture-model']!
+      return {
+        ...base,
+        providers: {
+          fixture: {
+            ...base.providers!.fixture!,
+            models: { 'fixture-model': { ...model, limit: { context: WINDOW, output: 4096 } } }
+          }
+        },
+        // `compaction.background` is left at its 2.3.2 default (on).
+        compaction: { buffer: WINDOW - CEILING }
+      }
+    }
+  })
+
+  const summaryRequests = () =>
+    rig().fixture.requests.filter((request) =>
+      request.lastUserText.includes('summarize the conversation')
+    ).length
+
+  /**
+   * Waits until the session's cumulative is final (unchanged over a few reads) and the
+   * mapper has seen it (its last `session-usage` names the same figures).
+   */
+  async function settledTotals(
+    client: OpencodeClient,
+    feed: ReturnType<typeof startMapperFeed>,
+    sessionID: string
+  ) {
+    const deadline = Date.now() + 20_000
+    let previous = ''
+    for (let stable = 0; ;) {
+      const session = await client.getSession(sessionID)
+      const key = JSON.stringify([session.cost, session.tokens])
+      const seen = feed.outputs.findLast((o) => o.kind === 'session-usage')
+      stable =
+        key === previous && seen && JSON.stringify([seen.cost, seen.tokens]) === key
+          ? stable + 1
+          : 0
+      previous = key
+      if (stable >= 3) return { cost: session.cost, tokens: session.tokens }
+      if (Date.now() > deadline) throw new Error(`the session's usage never settled: ${key}`)
+      await new Promise((done) => setTimeout(done, 100))
+    }
+  }
+
+  it('live usage totals the session cumulative; the swapped compaction reads as cold', async () => {
+    const r = rig()
+    const client = new OpencodeClient({
+      baseUrl: r.server.url,
+      authHeader: basic(r.server.password),
+      directory: r.cwd
+    })
+    const sessionID = (await client.createSession(ALLOW_ALL)).id
+    const mapper = new OpencodeEventMapper({ sessionID })
+    const feed = startMapperFeed(client, mapper)
+    try {
+      await feed.connectedOnce()
+      let from = feed.outputs.length
+      await client.prompt(sessionID, { text: `[bigctx] ${nonce('bgc')}` })
+      expect(await feed.turnEnd(from)).toMatchObject({ kind: 'result' })
+      // The summary was started in the background, and is billed by now.
+      await feed.until(
+        () => (summaryRequests() === 1 ? true : undefined),
+        'the background summary request'
+      )
+      await settledTotals(client, feed, sessionID)
+
+      from = feed.outputs.length
+      // Long enough that the prompt crosses the ceiling (the compaction is due).
+      await client.prompt(sessionID, {
+        text: `${nonce('bgc-next')} ${'one more prompt, past the ceiling. '.repeat(4)}`
+      })
+      expect(await feed.turnEnd(from)).toMatchObject({ kind: 'result' })
+      // The compaction took the held summary: no second summary request.
+      expect(summaryRequests()).toBe(1)
+      expect(
+        feed.outputs.slice(from).find((o) => o.kind === 'compaction' && o.phase === 'ended')
+      ).toMatchObject({ reason: 'auto' })
+
+      // Everything the chat counted equals what opencode billed the session: steps, the
+      // title (overhead) and the summary, once.
+      const totals = await settledTotals(client, feed, sessionID)
+      const live = { cost: 0, input: 0, output: 0, reasoning: 0, read: 0, write: 0 }
+      for (const o of feed.outputs) {
+        const u =
+          o.kind === 'step-usage'
+            ? o.usage
+            : o.kind === 'overhead-usage'
+              ? o
+              : o.kind === 'compaction'
+                ? o.usage
+                : undefined
+        if (!u) continue
+        live.cost += u.cost
+        live.input += u.tokens.input
+        live.output += u.tokens.output
+        live.reasoning += u.tokens.reasoning
+        live.read += u.tokens.cache.read
+        live.write += u.tokens.cache.write
+      }
+      expect(live.cost).toBeCloseTo(totals.cost, 10)
+      expect([live.input, live.output, live.reasoning, live.read, live.write]).toEqual([
+        totals.tokens.input,
+        totals.tokens.output,
+        totals.tokens.reasoning,
+        totals.tokens.cache.read,
+        totals.tokens.cache.write
+      ])
+
+      const cold = await coldTranscript(client, sessionID)
+      expect(normalizeTranscript(foldOutputs(feed.outputs))).toEqual(cold.transcript)
+      expect(cold.rows.some((row) => row.type === 'compaction')).toBe(true)
+      await capture('background-compaction', r.home, r.cwd, {
+        client,
+        sessionID,
+        events: feed.events,
+        rows: cold.rows,
+        children: cold.children
+      })
+    } finally {
+      await feed.close()
     }
   })
 })

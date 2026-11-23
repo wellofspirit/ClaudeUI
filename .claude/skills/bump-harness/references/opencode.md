@@ -12,6 +12,10 @@ and nothing to patch. This list is what past bumps forgot.
   own rules, e.g. `explore`). 2.0.25 silently stopped asking for `external_directory`; the contract
   suite stayed green and only the source diff caught it. If a default changed, ClaudeUI's mode gates
   must restate the rule, with a contract test.
+- **Diff the tool plugins** (`packages/core/src/tool/plugin/`, `schema/src/config/flag.ts`): a new
+  or renamed `opencode`-namespace tool is a DIRECT tool while ClaudeUI hides `execute`, and most
+  carry no permission check (2.3.2 renamed `schedule_*` to `automation_*`). Each needs a
+  `DIRECT_TOOL_DENY_RULES` decision and a `direct-tools` contract case with its flag on.
 - Types are generated from the spec the installed binary serves (`GET /openapi.json`), not from
   upstream's committed `packages/protocol/openapi.json`, which upstream stopped regenerating at
   2.0.25.
@@ -45,5 +49,10 @@ and nothing to patch. This list is what past bumps forgot.
 - Quitting ClaudeUI removes the opencode ChatGPT login ClaudeUI itself wrote (ADR-097 §5); a
   different token the user added stays.
 - A new session starts on the last-picked model.
+- (2.3.2) A foreground shell that reaches its timeout moves to the background; a dispatch target
+  then answers with its interim text and the shell's later wake is a stray turn.
+- (2.3.2) opencode reads CLAUDE.md (and `~/.claude/CLAUDE.md`) where no AGENTS.md exists;
+  ClaudeUI does not set `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`.
+- (2.3.2) A process a successful command left detached (`npm run dev &`) survives ClaudeUI's quit.
 - Verifiers must not run a second app on the owner's real profile: its quit removes the shared
   credential. Isolate the home.

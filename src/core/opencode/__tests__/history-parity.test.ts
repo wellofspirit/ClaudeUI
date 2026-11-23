@@ -74,6 +74,7 @@ function ends(outputs: readonly OpencodeMapperOutput[]) {
 describe('opencode 2.x mapper — live equals cold on recorded sequences', () => {
   it('has the recordings', () => {
     expect(recordings.map((r) => r.scenario).sort()).toEqual([
+      'background-compaction',
       'denials',
       'form-cancel',
       'form-compaction',

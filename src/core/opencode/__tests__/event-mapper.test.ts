@@ -13,7 +13,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest'
 import type { OpencodeEvent } from '../protocol-v2/events'
-import type { Session_Message_Info } from '../protocol-v2/openapi'
+import type { Session_Message_Info, TokenUsage_Info } from '../protocol-v2/openapi'
 import {
   OpencodeEventMapper,
   type OpencodeMapperOutput,
@@ -2588,6 +2588,158 @@ describe('turn ends: cards, classification, background order, overhead', () => {
     expect(
       map(ev('session.usage.updated', { sessionID: SID, ...totals })).map((o) => o.kind)
     ).toEqual(['session-usage'])
+  })
+
+  // 2.3.2 writes the compaction summary in the BACKGROUND by default (`compaction.background`,
+  // `core/src/session/compaction.ts` `precompute`): its request is billed when it finishes,
+  // usually after the turn ended (`session.usage.recorded {source:'compaction'}` → the idle
+  // `session.usage.updated`, reported as overhead at once), and the compaction that later swaps
+  // it in carries the same figures again on `compaction.ended` (`usePrecomputed` → `addSpent`).
+  describe('a background compaction summary is counted once', () => {
+    const tokens = (input: number, output: number) => ({
+      input,
+      output,
+      reasoning: 0,
+      cache: { read: 0, write: 0 }
+    })
+    const stepTokens = tokens(100, 20)
+    const summary = tokens(120, 30)
+    /** Everything the outputs count: steps, compactions and overhead. */
+    const counted = (out: readonly OpencodeMapperOutput[]) => {
+      let cost = 0
+      let input = 0
+      let output = 0
+      for (const o of out) {
+        const u =
+          o.kind === 'step-usage'
+            ? o.usage
+            : o.kind === 'overhead-usage'
+              ? o
+              : o.kind === 'compaction'
+                ? o.usage
+                : undefined
+        if (!u) continue
+        cost += u.cost
+        input += u.tokens.input
+        output += u.tokens.output
+      }
+      return { cost, input, output }
+    }
+    const turn = (id: string, cumulative: { cost: number; tokens: TokenUsage_Info }) => [
+      step(id),
+      ev('session.step.ended', {
+        sessionID: SID,
+        assistantMessageID: id,
+        finish: 'stop',
+        cost: 0.1,
+        tokens: stepTokens
+      }),
+      ev('session.usage.updated', { sessionID: SID, ...cumulative })
+    ]
+    const swapped = [
+      ev('session.compaction.started', { sessionID: SID, reason: 'auto' }),
+      ev('session.compaction.ended', {
+        sessionID: SID,
+        reason: 'auto',
+        text: '## Objective\nx',
+        cost: 0.03,
+        tokens: summary,
+        model: MODEL
+      })
+    ]
+
+    it('billed while idle: reported as overhead then, and the swap adds nothing', () => {
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...turn('msg_a1', { cost: 0.1, tokens: stepTokens }),
+        ev('session.execution.succeeded', { sessionID: SID }),
+        // The background summary finishes after the turn.
+        ev('session.usage.updated', { sessionID: SID, cost: 0.13, tokens: tokens(220, 50) }),
+        // The next prompt is due for compaction: the held summary is swapped in.
+        ev('session.execution.started', { sessionID: SID }),
+        ...swapped,
+        ...turn('msg_a2', { cost: 0.23, tokens: tokens(320, 70) }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      // Counted exactly what opencode billed the session (its cumulative).
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.23, 10)
+      expect([total.input, total.output]).toEqual([320, 70])
+      expect(of(out, 'overhead-usage').map((o) => o.tokens)).toEqual([summary])
+      // The compaction itself still shows: its separator row and its end.
+      const ended = of(out, 'compaction').find((o) => o.phase === 'ended')
+      expect(ended).toMatchObject({ reason: 'auto' })
+      expect(ended?.usage).toBeUndefined()
+      expect(
+        of(out, 'message').some((o) => o.message.content[0]?.type === 'compact_separator')
+      ).toBe(true)
+    })
+
+    it('billed mid-turn (not yet reported): the swap counts it, once', () => {
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...turn('msg_a1', { cost: 0.1, tokens: stepTokens }),
+        // Started before a step, finished while the turn still runs.
+        ev('session.usage.updated', { sessionID: SID, cost: 0.13, tokens: tokens(220, 50) }),
+        ...swapped,
+        ...turn('msg_a2', { cost: 0.23, tokens: tokens(320, 70) }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.23, 10)
+      expect([total.input, total.output]).toEqual([320, 70])
+      expect(of(out, 'overhead-usage')).toEqual([])
+      expect(of(out, 'compaction').find((o) => o.phase === 'ended')?.usage).toEqual({
+        cost: 0.03,
+        tokens: summary,
+        model: MODEL
+      })
+    })
+
+    it('a foreground compaction keeps its usage, a title reported earlier notwithstanding', () => {
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...turn('msg_a1', { cost: 0.1, tokens: stepTokens }),
+        ev('session.execution.succeeded', { sessionID: SID }),
+        // A title (or `/btw`) billed while idle: overhead.
+        ev('session.usage.updated', { sessionID: SID, cost: 0.13, tokens: tokens(220, 50) }),
+        // `/compact`: the summary streams inside the execution, billed before it ends.
+        ev('session.execution.started', { sessionID: SID }),
+        ev('session.compaction.started', { sessionID: SID, reason: 'manual', inputID: 'msg_c' }),
+        ev('session.usage.updated', { sessionID: SID, cost: 0.16, tokens: tokens(340, 80) }),
+        ev('session.compaction.ended', {
+          sessionID: SID,
+          reason: 'manual',
+          text: '## Objective\nx',
+          cost: 0.03,
+          tokens: summary,
+          model: MODEL
+        }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.16, 10)
+      expect([total.input, total.output]).toEqual([340, 80])
+      expect(of(out, 'compaction').find((o) => o.phase === 'ended')?.usage).toEqual({
+        cost: 0.03,
+        tokens: summary,
+        model: MODEL
+      })
+    })
+
+    it('a summary the cold line already counted (a resume) is not counted again when swapped in', () => {
+      mapper.seed([], { sessionTotals: { cost: 0.13, tokens: tokens(220, 50) } })
+      const out = map(
+        ev('session.execution.started', { sessionID: SID }),
+        ...swapped,
+        ...turn('msg_a2', { cost: 0.23, tokens: tokens(320, 70) }),
+        ev('session.execution.succeeded', { sessionID: SID })
+      )
+      // Only the new step: the seed covered everything up to the resume.
+      const total = counted(out)
+      expect(total.cost).toBeCloseTo(0.1, 10)
+      expect([total.input, total.output]).toEqual([100, 20])
+    })
   })
 })
 

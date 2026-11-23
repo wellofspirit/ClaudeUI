@@ -6,7 +6,9 @@
  * tools instead (`packages/core/src/tool.ts` `snapshot`: "Without Code Mode its tools would be
  * unreachable, so expose them as direct tools instead.", 2.2.0+). Most of them run a call with
  * NO permission check of their own (`packages/core/src/tool/plugin/opencode.ts` at v2.2.5), and
- * the artifact/schedule families join them when the user turns those features on.
+ * the artifact/automation families join them when the user turns those features on. This rig
+ * turns automations on (`experimental.automations`, 2.3.2's rename of `schedules`,
+ * `tool/plugin/automation.ts`), so the family is there to be hidden.
  *
  * So the control below is "hide Code Mode only": the model is OFFERED those tools. ClaudeUI's
  * compiled ruleset must instead deny the families wholly, which is what makes the engine hide
@@ -17,7 +19,7 @@ import { expect, it } from 'vitest'
 import type { ClaudePermissions } from '../../shared/types'
 import type { Permission_Rule } from '../../core/opencode/protocol-v2/openapi'
 import { buildSessionRuleset } from '../../core/opencode/permission-v2'
-import { describeV2, nonce, useRig, type Rig } from './harness/host'
+import { describeV2, fixtureConfig, nonce, useRig, type Rig } from './harness/host'
 
 function perms(p: Partial<ClaudePermissions> = {}): ClaudePermissions {
   return { allow: [], deny: [], ask: [], additionalDirectories: [], defaultMode: undefined, ...p }
@@ -52,13 +54,27 @@ const UNCHECKED = [
   'opencode_worktree_list'
 ] as const
 
+/**
+ * 2.3.2's automations (`tool/plugin/automation.ts`, namespace `opencode`): registered only
+ * while the user's config turns the feature on, and none asks a permission of its own.
+ */
+const AUTOMATION = [
+  'opencode_automation_create',
+  'opencode_automation_list',
+  'opencode_automation_pause',
+  'opencode_automation_resume',
+  'opencode_automation_delete'
+] as const
+
 /** Code Mode hidden, nothing else: the state the 2.2.0 change exposes the tools in. */
 const HIDE_CODE_MODE: readonly Permission_Rule[] = [
   { action: 'execute', resource: '*', effect: 'deny' }
 ]
 
 describeV2('opencode 2.x contract: the direct opencode_* tools', () => {
-  const rig = useRig('direct-tools')
+  const rig = useRig('direct-tools', {
+    config: (fixture) => ({ ...fixtureConfig(fixture), experimental: { automations: true } })
+  })
 
   it('hiding Code Mode alone offers them to the model (the 2.2.0 fact this slice rules on)', async () => {
     const r = rig()
@@ -69,6 +85,8 @@ describeV2('opencode 2.x contract: the direct opencode_* tools', () => {
     // Code Mode itself is gone; its tools are not.
     expect(tools).not.toContain('execute')
     for (const tool of UNCHECKED) expect(tools, tool).toContain(tool)
+    // The flag is on in this rig: the automation tools are offered too.
+    for (const tool of AUTOMATION) expect(tools, tool).toContain(tool)
     // `worktree_remove` asks `edit`, so it is offered whatever the families say.
     expect(tools).toContain('opencode_worktree_remove')
   })
@@ -79,7 +97,7 @@ describeV2('opencode 2.x contract: the direct opencode_* tools', () => {
     ['plan', false],
     ['auto', true]
   ] as const)(
-    '%s (classifier %s): the session/worktree families are hidden, the read-only tools stay',
+    '%s (classifier %s): the session/worktree/automation families are hidden, the read-only tools stay',
     async (mode, autoMode) => {
       const r = rig()
       const { rules, agent } = buildSessionRuleset({
@@ -93,8 +111,10 @@ describeV2('opencode 2.x contract: the direct opencode_* tools', () => {
       await r.turn(id, tag)
       const tools = offered(r, tag)
       for (const tool of UNCHECKED) expect(tools, tool).not.toContain(tool)
-      // The artifact and schedule families are not registered in this rig (features off): a
-      // session that could reach them would still be denied (permission-v2.test pins that).
+      for (const tool of AUTOMATION) expect(tools, tool).not.toContain(tool)
+      // The artifact family is not registered in this rig (feature off), nor are 2.2.x's
+      // schedules (renamed): a session that could reach them would still be denied
+      // (permission-v2.test pins that).
       // What must stay available is the read-only lookup the model needs to name a model.
       expect(tools).toContain('opencode_models')
     }

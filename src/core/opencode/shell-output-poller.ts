@@ -108,7 +108,11 @@ export class ShellOutputPoller {
    * - a multibyte character cut at a page end arrives as U+FFFD — its bytes
    *   are read again with the next page (a client-side streaming decoder
    *   cannot help: the server already decoded), and one cut at the jump's
-   *   start is dropped;
+   *   start is dropped. Since 2.3.2 the server itself ends a page before a
+   *   character it would cut and starts one after a partial one (`output`,
+   *   `splitCharacter`), so this stays as the fallback for an older server;
+   *   what still ends in U+FFFD is a genuine one (invalid bytes, a truncated
+   *   final character), which the final read keeps;
    * - it sleeps between every read, and ends when the shell is no longer
    *   running (after one last read) — not only when stopped.
    */

@@ -107,10 +107,16 @@ export function buildServerEnv(
   // Claude skill catalog under Claude's names instead (cli/src/server-process.ts `claude`).
   env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = '1'
   // 2.2.6 reads OPENCODE_FLAGS (packages/core/src/flag.ts); `all` would switch on
-  // every registered flag (todo, background_compaction, media_blob, schedules,
-  // artifacts: packages/schema/src/config/flag.ts) in our server. Users opt in
-  // through their config instead (`experimental.<key>`, or `experimental.all_flags`),
-  // so an inherited value must not widen that.
+  // every registered flag but the opt-in-only ones (at 2.3.2: todo, media_blob,
+  // automations, artifacts, video_generate, console_watches, mcp_events;
+  // `full_codemode` needs its own name: packages/schema/src/config/flag.ts) in our
+  // server, and a bare `schedules` still turns automations on (an alias). Users opt
+  // in through their config instead (`experimental.<key>`, or
+  // `experimental.all_flags`), so an inherited value must not widen that.
+  // OPENCODE_DISABLE_CLAUDE_CODE_PROMPT stays unset on purpose: 2.3.2+ reads
+  // CLAUDE.md where a directory has no AGENTS.md, and `~/.claude/CLAUDE.md` when the
+  // global AGENTS.md is missing (config/plugin/instruction.ts), as a Claude session
+  // would (owner ruling 2026-11-23, ADR-097 §2).
   delete env.OPENCODE_FLAGS
   return env
 }

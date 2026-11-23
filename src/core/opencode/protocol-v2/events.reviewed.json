@@ -1,6 +1,6 @@
 {
-  "version": "2.3.0",
-  "commit": "a6b15d33daf6ab7d35569f6d711fdb630b9f04e7",
+  "version": "2.3.2",
+  "commit": "c0ad18b402eb2827fc1ee71c171b1177b3fc02d1",
   "sources": {
     "packages/protocol/src/groups/event.ts": "cdf88186681b233031bdc70dd478e660680ca0334f82f98d131900c81aae7048",
     "packages/schema/src/event.ts": "f39ab332fe69fcb85adeda95bcf4af608e13fc7e32d9dca5887fc35c51390fa9",
@@ -12,7 +12,7 @@
     "packages/schema/src/form.ts": "432caf3dc6f73b02cfa797b2d693dfd503add34575e883202709972e4a39b93a",
     "packages/schema/src/credential.ts": "1c321f9982cd47f4dc82689d3dd4001796255e4b4325c77db5043c110dab8b3b",
     "packages/schema/src/provider.ts": "7b88bcb3a36f53d952078f5a531f5360ee30bccda00a9d9ed7da261fefcbfdc4",
-    "packages/schema/src/model.ts": "ef4ab2adb42010b25d17fa09a70cf6909132317cfdd3c98f9187a6a278ccfb5c",
+    "packages/schema/src/model.ts": "b1879fe3a02f196d0e446db4b8c93b6d4ef39c387ccd6e1f9292030e10c132f5",
     "packages/schema/src/agent.ts": "2438abf1f8bbcc8ebad533b81035d739db4117b9df739a906d0113e851c0737e",
     "packages/schema/src/command.ts": "6091f667ccf353e2ec7ac93902cd2c58b951236823f9411fb88174f9494932ab",
     "packages/schema/src/skill.ts": "da003f8a6fd607569adb11e789c08eede92b044faa87648c422e69b47e281b4c",

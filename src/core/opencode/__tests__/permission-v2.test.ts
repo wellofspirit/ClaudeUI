@@ -945,11 +945,22 @@ describe('the direct opencode_* tools (reachable since 2.2.0)', () => {
     'opencode_artifact_read',
     'opencode_artifact_update',
     'opencode_artifact_delete',
+    // 2.3.2 renamed the schedules to automations (`tool/plugin/automation.ts`); an older
+    // server's schedule tools stay denied.
+    'opencode_automation_create',
+    'opencode_automation_list',
+    'opencode_automation_pause',
+    'opencode_automation_resume',
+    'opencode_automation_delete',
     'opencode_schedule_create',
     'opencode_schedule_list',
     'opencode_schedule_pause',
     'opencode_schedule_resume',
-    'opencode_schedule_delete'
+    'opencode_schedule_delete',
+    // Console watches wake the session on outside events with nothing from the user.
+    'console_watch_watch',
+    'console_watch_unwatch',
+    'console_watch_watches'
   ]
 
   it.each([
@@ -960,14 +971,18 @@ describe('the direct opencode_* tools (reachable since 2.2.0)', () => {
     ['plan', undefined],
     ['bypassPermissions', undefined]
   ] as const)(
-    '%s (autoMode %s): every session/worktree/artifact/schedule tool is denied and hidden, whatever the user allows',
+    '%s (autoMode %s): every session/worktree/artifact/automation/schedule tool is denied and hidden, whatever the user allows',
     (mode, autoMode) => {
       // Even a user allow/ask naming the exact tool action cannot re-open them: the deny is last.
       const rules = build(
         mode,
         {
-          allow: ['mcp__opencode__session_rename', 'mcp__opencode__worktree_create'],
-          ask: ['mcp__opencode__schedule_create']
+          allow: [
+            'mcp__opencode__session_rename',
+            'mcp__opencode__worktree_create',
+            'mcp__opencode__automation_create'
+          ],
+          ask: ['mcp__opencode__schedule_create', 'mcp__opencode__automation_list']
         },
         autoMode
       )

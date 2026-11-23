@@ -237,8 +237,10 @@ export type OpencodeMapperOutput =
     }
   /**
    * Own-session usage no step or compaction carries (title generation; since
-   * 2.3.0 also `POST …/generate`, ClaudeUI's `/btw`), from the session's
-   * cumulative. Counted in the headline like the rest.
+   * 2.3.0 also `POST …/generate`, ClaudeUI's `/btw`; since 2.3.2 a background
+   * compaction summary billed before a compaction used it, which that
+   * compaction then does not count again), from the session's cumulative.
+   * Counted in the headline like the rest.
    */
   | {
       readonly kind: 'overhead-usage'
@@ -458,6 +460,9 @@ interface Usage {
   readonly cost: number
   readonly tokens: TokenUsage_Info
 }
+
+/** A compaction request's usage, with the model it ran on when the event names one. */
+type CompactionUsage = Usage & { readonly model?: Model_Ref }
 const ZERO_USAGE: Usage = {
   cost: 0,
   tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
@@ -489,6 +494,22 @@ function subtractUsage(a: Usage, b: Usage): Usage {
     }
   })
   return addUsage(a, neg(b))
+}
+
+/** Field-wise min. */
+function minUsage(a: Usage, b: Usage): Usage {
+  return {
+    cost: Math.min(a.cost, b.cost),
+    tokens: {
+      input: Math.min(a.tokens.input, b.tokens.input),
+      output: Math.min(a.tokens.output, b.tokens.output),
+      reasoning: Math.min(a.tokens.reasoning, b.tokens.reasoning),
+      cache: {
+        read: Math.min(a.tokens.cache.read, b.tokens.cache.read),
+        write: Math.min(a.tokens.cache.write, b.tokens.cache.write)
+      }
+    }
+  }
 }
 
 /** Field-wise max(0, x); undefined when nothing is left (cost below a nano-dollar, no token). */
@@ -579,6 +600,8 @@ export class OpencodeEventMapper {
   private accounted: Usage = ZERO_USAGE
   /** The own session's last cumulative usage (`session.usage.updated`). */
   private cumulative?: Usage
+  /** Overhead reported that no compaction has claimed yet (see `uncounted`). */
+  private overheadUnclaimed: Usage = ZERO_USAGE
 
   constructor(options: OpencodeEventMapperOptions) {
     this.sessionID = options.sessionID
@@ -1771,7 +1794,7 @@ export class OpencodeEventMapper {
       reason: 'auto' | 'manual'
       summary?: string
       error?: Session_StructuredError
-      usage?: { cost: number; tokens: TokenUsage_Info; model?: Model_Ref }
+      usage?: CompactionUsage
     },
     eventID: string | null,
     created: number,
@@ -1794,11 +1817,10 @@ export class OpencodeEventMapper {
       s.compactionsSeen.add(id)
       out.push({ kind: 'message', message: compactionChatMessage(id, end.summary, at) })
     }
-    const usage = end.usage && !s.compactionsMetered.has(id) ? end.usage : undefined
-    if (usage) {
-      s.compactionsMetered.add(id)
-      if (own) this.account(usage)
-    }
+    const billed = end.usage && !s.compactionsMetered.has(id) ? end.usage : undefined
+    if (billed) s.compactionsMetered.add(id)
+    const usage = billed && own ? this.uncounted(billed) : billed
+    if (usage && own) this.account(usage)
     if (!own && !usage) return
     out.push({
       kind: 'compaction',
@@ -1821,16 +1843,45 @@ export class OpencodeEventMapper {
    * (`session.usage.recorded {source:'title'|'generate'}` is folded into the
    * session's cumulative, `session.usage.updated`, and nowhere else; a
    * compaction's record is carried by its own `compaction.ended` too and is
-   * accounted there). Emitted at quiet points (turn end, an update while idle)
-   * as the positive part of cumulative − accounted, so a `/btw` asked while a
-   * turn runs is counted once, at that turn's end.
+   * accounted there, see `uncounted`). Emitted at quiet points (turn end, an
+   * update while idle) as the positive part of cumulative − accounted, so a
+   * `/btw` asked while a turn runs is counted once, at that turn's end.
    */
   private emitOverhead(out: Out): void {
     if (!this.cumulative) return
     const extra = positivePart(subtractUsage(this.cumulative, this.accounted))
     if (!extra) return
     this.account(extra)
+    this.overheadUnclaimed = addUsage(this.overheadUnclaimed, extra)
     out.push({ kind: 'overhead-usage', cost: extra.cost, tokens: extra.tokens })
+  }
+
+  /**
+   * The part of an own compaction's usage nothing has counted yet. Since 2.3.2
+   * opencode writes the summary in the BACKGROUND by default
+   * (`compaction.background`; `core/src/session/compaction.ts` `precompute`,
+   * started as a turn ends or before a step): its request is billed when it
+   * finishes, typically while the session is idle, so the cumulative already
+   * holds it and `emitOverhead` has reported it. The compaction that later swaps
+   * the summary in (`usePrecomputed` → `addSpent`) carries the same figures on
+   * `compaction.ended`/`failed`. A resume's seed counted it the same way (the
+   * cold line's remainder).
+   *
+   * So a compaction counts only what the cumulative cannot already explain —
+   * accounted + usage − cumulative, field by field — and never more of it than
+   * overhead reported and not yet claimed by an earlier compaction. A
+   * foreground summary (billed inside the execution, its update before its end)
+   * keeps all of its usage. Without a cumulative yet, nothing was reported.
+   */
+  private uncounted(usage: CompactionUsage): CompactionUsage | undefined {
+    if (!this.cumulative) return usage
+    const excess = positivePart(subtractUsage(addUsage(this.accounted, usage), this.cumulative))
+    const claimed =
+      excess && positivePart(minUsage(minUsage(excess, usage), this.overheadUnclaimed))
+    if (!claimed) return usage
+    this.overheadUnclaimed = subtractUsage(this.overheadUnclaimed, claimed)
+    const rest = positivePart(subtractUsage(usage, claimed))
+    return rest && { ...rest, ...(usage.model ? { model: usage.model } : {}) }
   }
 
   /** Retract every card a session still shows (its execution ended: nothing will answer them). */
@@ -1933,7 +1984,14 @@ export class OpencodeEventMapper {
       )
     // The cold status line counted the session's whole cumulative (title
     // generation included, `opencodeHistorySeed`): that is all accounted for.
-    if (options.sessionTotals) this.accounted = options.sessionTotals
+    // Its remainder beyond the rows is overhead a held background summary's
+    // compaction may still claim (`uncounted`).
+    if (options.sessionTotals) {
+      this.overheadUnclaimed =
+        positivePart(subtractUsage(options.sessionTotals, this.accounted)) ?? ZERO_USAGE
+      this.accounted = options.sessionTotals
+      this.cumulative = options.sessionTotals
+    }
     for (const row of messages) if (row.type === 'idle') this.own.idleSeen.add(row.id)
   }
 

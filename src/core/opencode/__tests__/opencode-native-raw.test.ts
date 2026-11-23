@@ -248,6 +248,34 @@ describe('patchOpencodeNativeRaw (opencode 2.x schema, ADR-097 S8)', () => {
     expect(jsoncParse(fs.readFileSync(p, 'utf8')).compaction).toEqual({ prune: true, auto: false })
   })
 
+  it('a flag a later pin dropped (2.3.2: shell_timeout_background, background_compaction) blocks nothing', () => {
+    const p = writeConfig(
+      'opencode.json',
+      `{ "experimental": { "shell_timeout_background": true, "background_compaction": true } }`
+    )
+    // The Session behavior pane's write validates the whole `experimental` object.
+    patchOpencodeNativeRaw([{ path: ['experimental', 'subagent_depth'], value: 2 }])
+    expect(jsoncParse(fs.readFileSync(p, 'utf8')).experimental).toEqual({
+      shell_timeout_background: true,
+      background_compaction: true,
+      subagent_depth: 2
+    })
+    // It cannot be set again, only removed; its successors are 2.3.2 keys.
+    expect(() =>
+      patchOpencodeNativeRaw([{ path: ['experimental', 'shell_timeout_background'], value: false }])
+    ).toThrow(/no such config key/)
+    patchOpencodeNativeRaw([
+      { path: ['experimental', 'shell_timeout_background'] },
+      { path: ['experimental', 'background_compaction'] },
+      { path: ['compaction', 'background'], value: false },
+      { path: ['experimental', 'automations'], value: false }
+    ])
+    expect(jsoncParse(fs.readFileSync(p, 'utf8'))).toEqual({
+      experimental: { subagent_depth: 2, automations: false },
+      compaction: { background: false }
+    })
+  })
+
   it('a no-op patch (value already present) does not rewrite the file', () => {
     const p = writeConfig(
       'opencode.jsonc',
