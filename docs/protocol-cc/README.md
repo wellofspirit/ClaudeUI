@@ -77,7 +77,7 @@ Every other change is additive. No handler ClaudeUI depends on changed shape, so
 consumed-wire breaks. The OAuth `TOKEN_URL`, client ids, the refresh body and the authorize and
 exchange bodies are unchanged. The prod config gained `PRIVACY_CONSENTS_SCOPE_REGISTERED: true`, so
 cli.js's claude.ai **login** scope list now ends with `user:privacy_consents:write`, which
-`CLI_OAUTH.loginScopes` does not yet request. The host-token anchors (the gate and its entrypoint
+`CLI_OAUTH.loginScopes` requests too (owner, 2026-11-23). The host-token anchors (the gate and its entrypoint
 set, the reason enum, the env credential with `refreshToken:null`, the env-update allowlist and the
 child-env scrub) hold, at new offsets (02 §2.14, 06 §6.7, 08 §8.7). The auto-mode stage-2 prompt is byte-identical apart from its
 runtime slot's name, and the default rules are byte-identical (21 / 1 / 72 / 16). The

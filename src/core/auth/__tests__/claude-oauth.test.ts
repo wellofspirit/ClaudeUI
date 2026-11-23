@@ -39,10 +39,11 @@ const NOW = 1_800_000_000_000
 
 /**
  * cli.js `kCr()` @~431400: `U([...c, ...gqe()])`, c = [org:create_api_key,
- * user:profile], gqe() = r + user:plugins (PLUGINS_SCOPE_REGISTERED: !0).
+ * user:profile], gqe() = r + user:plugins (PLUGINS_SCOPE_REGISTERED: !0), then
+ * user:privacy_consents:write (PRIVACY_CONSENTS_SCOPE_REGISTERED: !0, since 2.1.326).
  */
 const LOGIN_SCOPE =
-  'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins'
+  'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins user:privacy_consents:write'
 
 const TOKENS: ClaudeTokenResponse = {
   access_token: 'at-1',

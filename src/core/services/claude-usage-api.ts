@@ -104,7 +104,12 @@ export const CLI_OAUTH = {
    * `kCr()`: `U([...c, ...gqe()])` with `c = [org:create_api_key, user:profile]`
    * and `gqe()` = the five scopes of `r` plus `user:plugins` (production has
    * `PLUGINS_SCOPE_REGISTERED: true`). `U` is an order-keeping dedupe, which
-   * drops the second `user:profile`.
+   * drops the second `user:profile`. Since 2.1.326 the builder then appends
+   * `user:privacy_consents:write` (production `PRIVACY_CONSENTS_SCOPE_REGISTERED:
+   * true`), which lets cli.js accept updated terms in-session instead of asking
+   * for `/login`; checked again on 2.1.330. Requested for parity (owner,
+   * 2026-11-23) although cli.js's in-session consent screen may never show over
+   * stream-json: the scope then mostly lets the token write privacy consents.
    */
   loginScopes: [
     'org:create_api_key',
@@ -113,7 +118,8 @@ export const CLI_OAUTH = {
     'user:sessions:claude_code',
     'user:mcp_servers',
     'user:file_upload',
-    'user:plugins'
+    'user:plugins',
+    'user:privacy_consents:write'
   ]
 } as const
 
@@ -352,7 +358,10 @@ async function exchangeRefreshToken(
   // JSON, not a form: cli.js posts this body as `application/json` (see
   // {@link CLI_OAUTH}), and the `scope` field is part of the request it makes.
   // The credential's OWN scopes are sent when it has them, so the refreshed
-  // token is granted no more than the one it replaces.
+  // token is granted no more than the one it replaces. Deliberately narrower
+  // than cli.js 2.1.330, which refreshes with `toa(stored)` (its default list
+  // plus the stored projects / privacy-consents scopes, without
+  // `org:create_api_key`) and retries with the stored scopes on `invalid_scope`.
   const resp = await fetch(CLI_OAUTH.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
