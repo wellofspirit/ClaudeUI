@@ -120,6 +120,8 @@ describe('MediaCard', () => {
     renderCard('tu2')
     expect(state()).toBe('running')
     expect(screen.queryByTestId('MediaCard.elapsed')).not.toBeInTheDocument()
+    // No task record means nothing a Stop could reach (opencode's own generate_image).
+    expect(screen.queryByTestId('MediaCard.stop')).not.toBeInTheDocument()
   })
 
   it('running: the clock counts from startedAt and Stop goes through session:stop-task', async () => {

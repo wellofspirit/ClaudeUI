@@ -535,7 +535,9 @@ export function MediaCard({
               {formatElapsed(Math.floor(Math.max(0, (now - startedAt) / 1000)))}
             </span>
           )}
-          {isStopping ? (
+          {/* Stop only for a job with a task record (ClaudeUI's own jobs): opencode's own
+              generate_image has none, and nothing could stop it. */}
+          {!activeTask ? null : isStopping ? (
             <span className="text-[11px] text-text-muted">stopping...</span>
           ) : (
             <button

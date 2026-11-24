@@ -124,6 +124,13 @@ describe('the output path', () => {
       ok: true,
       path: path.join(cwd, 'pic.png')
     })
+    // A case-only difference is the same extension: the agent's own `Hero.PNG` is replaced, not
+    // side-stepped to a fresh name.
+    fs.writeFileSync(path.join(cwd, 'Hero.PNG'), PNG)
+    const upper = out('Hero.PNG')
+    if (!upper.ok) throw new Error('setup')
+    const final = finalOutputPath(ctx, upper.path, 'image/png', 'image', true, 'j2')
+    expect(final.ok && path.basename(final.path).toLowerCase()).toBe('hero.png')
   })
 
   it('a changed extension never lands on an existing file the agent did not name', () => {

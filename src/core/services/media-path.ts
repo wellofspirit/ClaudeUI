@@ -185,7 +185,9 @@ export function finalOutputPath(
   const parsed = path.parse(provisional)
   const ext = extForMime(mime, kind)
   let file = path.join(parsed.dir, parsed.name + ext)
-  if (agentGiven && file !== provisional && lexists(file)) {
+  // Only a REAL extension change can land on a file the agent didn't name: compared case-folded,
+  // so `Hero.PNG` returned as PNG still replaces the file the agent asked to replace.
+  if (agentGiven && ext !== parsed.ext.toLowerCase() && lexists(file)) {
     file = path.join(parsed.dir, `${parsed.name}.${safeSegment(jobId)}${ext}`)
   }
   const error = checkOutput(ctx, file, kind, agentGiven)
