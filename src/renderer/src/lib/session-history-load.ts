@@ -8,7 +8,13 @@
  * from disk itself, through the same per-engine load a sidebar click runs.
  */
 
-import type { ChatMessage, DirectoryGroup, ModelRef, SessionInfo } from '../../../shared/types'
+import type {
+  ChatMessage,
+  DirectoryGroup,
+  EngineHistoryLoad,
+  ModelRef,
+  SessionInfo
+} from '../../../shared/types'
 import {
   clearViewEvicted,
   markViewEvicted,
@@ -65,6 +71,13 @@ export interface HistoryLoadOptions {
 }
 
 /**
+ * Sessions whose sidebar placeholder was the first entry they ever had here: their
+ * read is the FIRST load, the only one that restores the reasoning level. Consumed
+ * by the commit; a retry after a declined or failed read still counts as first.
+ */
+const firstLoads = new Set<string>()
+
+/**
  * Seed `sessionEngines` for a session reopened from another engine's own store,
  * before `loadHistoricalSession` reads it back.
  *
@@ -73,20 +86,37 @@ export interface HistoryLoadOptions {
  * composer's pill names the configured default — a model the session never ran
  * and the resume will not spawn. A model already persisted for this routing id
  * is the user's own last pick in this session and always wins.
+ *
+ * The reasoning level (`lastReasoning`) follows the same rule, and rides only with
+ * the model it was set on: it seeds when no model is persisted, or when the
+ * persisted one is the transcript's; a different persisted model leaves it alone,
+ * and a persisted level always wins.
  */
 function seedHistoricalEngine(
   routingId: string,
   engineId: 'opencode' | 'pi',
-  lastModel: ModelRef | null | undefined
+  lastModel: ModelRef | null | undefined,
+  lastReasoning?: EngineHistoryLoad['lastReasoning']
 ): void {
   const state = useSessionStore.getState()
   const existing = state.sessionEngines[routingId]
+  const sameModel =
+    !!existing?.model &&
+    !!lastModel &&
+    existing.model.vendorId === lastModel.vendorId &&
+    existing.model.modelId === lastModel.modelId
+  const seedReasoning = !!lastModel && (!existing?.model || sameModel)
+  const effort = seedReasoning && !existing?.effort ? lastReasoning?.effort : undefined
+  const reasoningVariant =
+    seedReasoning && !existing?.reasoningVariant ? lastReasoning?.reasoningVariant : undefined
   const sessionEngines = {
     ...state.sessionEngines,
     [routingId]: {
       ...existing,
       engineId,
-      ...(!existing?.model && lastModel ? { model: lastModel } : {})
+      ...(!existing?.model && lastModel ? { model: lastModel } : {}),
+      ...(effort ? { effort } : {}),
+      ...(reasoningVariant ? { reasoningVariant } : {})
     }
   }
   useSessionStore.setState({ sessionEngines })
@@ -105,6 +135,8 @@ function seedHistoricalEngine(
  */
 export function beginTranscriptPlaceholder(info: SessionInfo): void {
   if (info.engineId === 'opencode' || info.engineId === 'pi') {
+    // No entry yet: this is the session's first load, which restores its reasoning level.
+    if (!useSessionStore.getState().sessions[info.sessionId]) firstLoads.add(info.sessionId)
     seedHistoricalEngine(info.sessionId, info.engineId, null)
   }
   useSessionStore.getState().beginTranscriptLoad(info)
@@ -189,10 +221,11 @@ export async function loadSessionIntoStore(
     if (!isCurrent()) return 'skipped'
     // A failed read paints empty on a click; over a held transcript it must not.
     if (!loaded && replace && holdsTranscript(routingId)) return 'declined'
-    const { messages, statusLine, lastModel } = loaded ?? {
+    const { messages, statusLine, lastModel, lastReasoning } = loaded ?? {
       messages: [] as ChatMessage[],
       statusLine: null,
-      lastModel: null
+      lastModel: null,
+      lastReasoning: null
     }
     // Host-run pi subagent transcripts (ADR-089) come back inline, keyed by the
     // parent `agent` call id. opencode returns none.
@@ -206,7 +239,8 @@ export async function loadSessionIntoStore(
     if (replace && !stripForReplace(routingId, messages)) return 'declined'
     // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
     // engine (and model) — it is the one that restores both onto the session.
-    seedHistoricalEngine(routingId, engineId, lastModel)
+    seedHistoricalEngine(routingId, engineId, lastModel, lastReasoning)
+    const firstLoad = firstLoads.delete(routingId) || !store().sessions[routingId]
     store().loadHistoricalSession(
       routingId,
       messages,
@@ -216,7 +250,8 @@ export async function loadSessionIntoStore(
       statusLine,
       undefined,
       undefined,
-      loaded && 'activeTasks' in loaded ? loaded.activeTasks : undefined
+      loaded && 'activeTasks' in loaded ? loaded.activeTasks : undefined,
+      firstLoad
     )
     if (info.title && info.title !== 'Untitled') store().setCustomTitle(routingId, info.title)
     return 'loaded'
@@ -373,6 +408,7 @@ const loadsInFlight = new Map<string, Promise<void>>()
 /** Test seam: forget every load in flight (module state outlives a test). */
 export function resetHistoryLoadForTests(): void {
   loadsInFlight.clear()
+  firstLoads.clear()
 }
 
 /** Is a transcript load for `routingId` already running? A second click must not start another. */

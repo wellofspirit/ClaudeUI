@@ -296,11 +296,19 @@ function statusLineFromSeed(
 export function lastOpencodeModel(messages: readonly Session_Message_Info[]): {
   providerID: string
   modelID: string
+  /** The reasoning variant the last step ran on; omitted for the model's default. */
+  variant?: string
 } {
   for (let i = messages.length - 1; i >= 0; i--) {
     const row = messages[i]
-    if (row?.type === 'assistant')
-      return { providerID: row.model.providerID, modelID: row.model.id }
+    if (row?.type === 'assistant') {
+      const variant = row.model.variant
+      return {
+        providerID: row.model.providerID,
+        modelID: row.model.id,
+        ...(variant && variant !== 'default' ? { variant } : {})
+      }
+    }
   }
   return { providerID: '', modelID: '' }
 }

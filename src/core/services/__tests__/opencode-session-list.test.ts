@@ -632,6 +632,27 @@ describe('loadOpencodeSessionHistory (HTTP, global-by-id, 2.x rows)', () => {
     const { lastModel } = await loadOpencodeSessionHistory('ses_a')
     expect(lastModel).toBeNull()
   })
+
+  // The reasoning variant rides on the assistant row's model; "default" is the
+  // model's own default, which ClaudeUI keeps as no variant at all.
+  it('names the variant the LAST step ran on', async () => {
+    mockListMessages.mockResolvedValue([
+      assistant('msg_a1', 1, [], { model: { providerID: 'openai', id: 'gpt-x', variant: 'low' } }),
+      assistant('msg_a2', 3, [], { model: { providerID: 'openai', id: 'gpt-x', variant: 'high' } })
+    ])
+
+    const { lastReasoning } = await loadOpencodeSessionHistory('ses_a')
+    expect(lastReasoning).toEqual({ reasoningVariant: 'high' })
+  })
+
+  it.each([['default'], [undefined]])('reads variant %s as the model default', async (variant) => {
+    mockListMessages.mockResolvedValue([
+      assistant('msg_a1', 1, [], { model: { providerID: 'openai', id: 'gpt-x', variant } })
+    ])
+
+    const loaded = await loadOpencodeSessionHistory('ses_a')
+    expect(loaded.lastReasoning).toBeUndefined()
+  })
 })
 
 describe('the opencode session list — Claude-format projectKey (merge regression guard)', () => {

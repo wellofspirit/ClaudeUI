@@ -13,6 +13,7 @@ import { markViewEvicted, useSessionStore } from '../../stores/session-store'
 import { patchLocalSession } from '../../stores/replica'
 import {
   awaitReloadBeforeSpawn,
+  beginTranscriptPlaceholder,
   awaitTranscriptReload,
   ensureTranscriptLoaded,
   finishHydrate,
@@ -514,6 +515,138 @@ describe('a sidebar click on a parent whose X-Agent still runs (ADR-105 §5)', (
       expect(store().sessions['sess'].activeTasks).toEqual({ toolu_1: record })
     })
   }
+})
+
+describe('a cold load restores the reasoning level the engine stored (opencode, pi)', () => {
+  const OC = { engineId: 'opencode', vendorId: 'openai', modelId: 'gpt-x' } as const
+  const PI = { engineId: 'pi', vendorId: 'openai', modelId: 'gpt-x' } as const
+  const OTHER = { engineId: 'opencode', vendorId: 'openai', modelId: 'gpt-other' } as const
+
+  const read = (engineId: 'opencode' | 'pi', over: Record<string, unknown>): void => {
+    const load = vi.fn(async () => ({ messages: [message('h1')], statusLine: null, ...over }))
+    ;(window.api as unknown as Record<string, unknown>)[
+      engineId === 'opencode' ? 'loadOpencodeHistory' : 'loadPiHistory'
+    ] = load
+  }
+  const open = (engineId: 'opencode' | 'pi'): Promise<string> =>
+    loadSessionIntoStore({ ...INFO, engineId }, { isCurrent: () => true, replace: false })
+
+  it('opencode: the transcript variant seeds a session with no persisted model', async () => {
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'high' } })
+    expect(await open('opencode')).toBe('loaded')
+    expect(store().sessions['sess'].reasoningVariant).toBe('high')
+  })
+
+  it('opencode: no stored variant leaves the model default (null)', async () => {
+    read('opencode', { lastModel: OC })
+    await open('opencode')
+    expect(store().sessions['sess'].reasoningVariant).toBeNull()
+  })
+
+  it('pi: the transcript thinking level becomes the effort', async () => {
+    read('pi', { lastModel: PI, lastReasoning: { effort: 'medium' } })
+    await open('pi')
+    expect(store().sessions['sess'].effort).toBe('medium')
+  })
+
+  it('pi: no stored level leaves the effort unset', async () => {
+    read('pi', { lastModel: PI })
+    await open('pi')
+    expect(store().sessions['sess'].effort).toBeNull()
+  })
+
+  it('seeds when the persisted model is the transcript one', async () => {
+    useSessionStore.setState({ sessionEngines: { sess: { engineId: 'opencode', model: OC } } })
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'high' } })
+    await open('opencode')
+    expect(store().sessions['sess'].reasoningVariant).toBe('high')
+  })
+
+  it('leaves the reasoning alone when the persisted model differs from the transcript one', async () => {
+    useSessionStore.setState({ sessionEngines: { sess: { engineId: 'opencode', model: OTHER } } })
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'high' } })
+    await open('opencode')
+    expect(store().sessions['sess'].reasoningVariant).toBeNull()
+  })
+
+  it('a persisted level beats the transcript one', async () => {
+    useSessionStore.setState({
+      sessionEngines: { sess: { engineId: 'pi', model: PI, effort: 'low' } }
+    })
+    read('pi', { lastModel: PI, lastReasoning: { effort: 'high' } })
+    await open('pi')
+    expect(store().sessions['sess'].effort).toBe('low')
+  })
+
+  it('the sidebar path (placeholder first, then the read) still restores it', async () => {
+    // beginTranscriptPlaceholder has made an evicted entry that holds no level yet.
+    beginTranscriptPlaceholder({ ...INFO, engineId: 'pi' })
+    read('pi', { lastModel: PI, lastReasoning: { effort: 'medium' } })
+    await loadSessionIntoStore(
+      { ...INFO, engineId: 'pi' },
+      { isCurrent: () => true, replace: replaceOnClick(store().sessions['sess']) }
+    )
+    expect(store().sessions['sess'].effort).toBe('medium')
+  })
+
+  it('an evicted entry that holds its own level keeps it', async () => {
+    evictedEntry(['tail-1'], { effort: 'low' })
+    useSessionStore.setState({
+      sessionEngines: { sess: { engineId: 'pi', model: PI, effort: 'high' } }
+    })
+    read('pi', { lastModel: PI, lastReasoning: { effort: 'high' } })
+    await loadSessionIntoStore(
+      { ...INFO, engineId: 'pi' },
+      { isCurrent: () => true, replace: replaceOnClick(store().sessions['sess']) }
+    )
+    expect(store().sessions['sess'].effort).toBe('low')
+  })
+
+  it('an evicted entry the user reset to the default stays at the default', async () => {
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'high' } })
+    await open('opencode')
+    expect(store().sessions['sess'].reasoningVariant).toBe('high')
+
+    store().setReasoningVariant(null, 'sess')
+    markViewEvicted(['sess'])
+    await loadSessionIntoStore(
+      { ...INFO, engineId: 'opencode' },
+      { isCurrent: () => true, replace: replaceOnClick(store().sessions['sess']) }
+    )
+    expect(store().sessions['sess'].reasoningVariant).toBeNull()
+  })
+
+  it('a model change drops the restored level from the persisted entry', async () => {
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'high' } })
+    await open('opencode')
+    useSessionStore.setState({ activeSessionId: 'sess' })
+    store().setSelectedModel('openai/gpt-other')
+    expect(store().sessionEngines['sess'].model?.modelId).toBe('gpt-other')
+    expect(store().sessionEngines['sess'].reasoningVariant).toBeUndefined()
+    expect(store().sessionEngines['sess'].effort).toBeUndefined()
+  })
+
+  it('drops an effort the model catalog no longer lists', async () => {
+    useSessionStore.setState({
+      availableModels: [
+        { value: 'openai/gpt-x', engineId: 'pi', supportedEffortLevels: ['low', 'medium'] }
+      ] as never
+    })
+    read('pi', { lastModel: PI, lastReasoning: { effort: 'max' } })
+    await open('pi')
+    expect(store().sessions['sess'].effort).toBeNull()
+  })
+
+  it('drops a variant the model catalog no longer lists', async () => {
+    useSessionStore.setState({
+      availableModels: [
+        { value: 'openai/gpt-x', engineId: 'opencode', reasoningVariants: ['low', 'high'] }
+      ] as never
+    })
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'xhigh' } })
+    await open('opencode')
+    expect(store().sessions['sess'].reasoningVariant).toBeNull()
+  })
 })
 
 describe('finishHydrate', () => {

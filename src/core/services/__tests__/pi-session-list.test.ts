@@ -1149,6 +1149,57 @@ describe('loadPiSessionHistory — lastModel', () => {
     const { lastModel } = await loadPiSessionHistory('sess-lm2')
     expect(lastModel).toBeNull()
   })
+
+  const header = (id: string, cwd: string) => ({
+    type: 'session',
+    version: 3,
+    id,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    cwd
+  })
+  const levelEntry = (id: string, parentId: string, thinkingLevel: string) => ({
+    type: 'thinking_level_change',
+    id,
+    parentId,
+    timestamp: '2024-01-01T00:00:00.000Z',
+    thinkingLevel
+  })
+
+  it('names the LAST thinking level the active branch set, as the session effort', async () => {
+    writeSessionFile('--proj-tl--', 'x_sess-tl.jsonl', [
+      header('sess-tl', '/proj/tl'),
+      levelEntry('t1', 'x0', 'low'),
+      userEntry('u1', 't1', 'hi'),
+      assistantEntry('a1', 'u1', 'openai', 'gpt-x'),
+      levelEntry('t2', 'a1', 'medium')
+    ])
+
+    const { lastReasoning } = await loadPiSessionHistory('sess-tl')
+    expect(lastReasoning).toEqual({ effort: 'medium' })
+  })
+
+  it.each([['off'], ['minimal']])('does not restore pi-only level %s', async (level) => {
+    writeSessionFile('--proj-tl3--', `x_sess-tl3-${level}.jsonl`, [
+      header(`sess-tl3-${level}`, '/proj/tl3'),
+      levelEntry('t1', 'x0', level),
+      userEntry('u1', 't1', 'hi'),
+      assistantEntry('a1', 'u1', 'openai', 'gpt-x')
+    ])
+
+    const loaded = await loadPiSessionHistory(`sess-tl3-${level}`)
+    expect(loaded.lastReasoning).toBeUndefined()
+  })
+
+  it('names no level when the session never changed it', async () => {
+    writeSessionFile('--proj-tl2--', 'x_sess-tl2.jsonl', [
+      header('sess-tl2', '/proj/tl2'),
+      userEntry('u1', null, 'hi'),
+      assistantEntry('a1', 'u1', 'openai', 'gpt-x')
+    ])
+
+    const loaded = await loadPiSessionHistory('sess-tl2')
+    expect(loaded.lastReasoning).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------

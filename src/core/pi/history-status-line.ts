@@ -19,6 +19,7 @@ import { totalCosts } from '../../shared/cost-rule'
 import { piCostInputs, piCostReport, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { peekPiModelContextWindow } from './model-discovery'
 import type { PiSessionEntry } from './pi-protocol'
+import { EFFORT_LEVELS } from '../../shared/model-capabilities'
 
 /** What a walk of a session file's active branch recovers. */
 export interface PiHistorySeed {
@@ -29,6 +30,8 @@ export interface PiHistorySeed {
   lastContextLength: number
   /** The model the session last answered on, for the context window lookup. */
   lastModel: { vendorId: string; modelId: string } | null
+  /** The thinking level of the last `thinking_level_change` entry, or null when there is none. */
+  lastThinkingLevel: string | null
 }
 
 /**
@@ -42,8 +45,10 @@ export function piHistorySeed(entries: PiSessionEntry[]): PiHistorySeed {
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   let lastContextLength = 0
   let lastModel: { vendorId: string; modelId: string } | null = null
+  let lastThinkingLevel: string | null = null
 
   for (const entry of entries) {
+    if (entry.type === 'thinking_level_change') lastThinkingLevel = entry.thinkingLevel
     if (entry.type !== 'message') continue
     const message = entry.message
     if (message.role !== 'assistant') continue
@@ -79,7 +84,7 @@ export function piHistorySeed(entries: PiSessionEntry[]): PiHistorySeed {
     lastContextLength = usage.input + usage.cacheRead
   }
 
-  return { costInputs, tokens, lastContextLength, lastModel }
+  return { costInputs, tokens, lastContextLength, lastModel, lastThinkingLevel }
 }
 
 /**
@@ -92,6 +97,19 @@ export function piLastModelRef(entries: PiSessionEntry[]): ModelRef | null {
   const { lastModel } = piHistorySeed(entries)
   if (!lastModel?.vendorId || !lastModel.modelId) return null
   return { engineId: 'pi', vendorId: lastModel.vendorId, modelId: lastModel.modelId }
+}
+
+/**
+ * {@link piHistorySeed}'s last thinking level as a `lastReasoning`: pi's `effort`
+ * IS its thinking level. Null when the session never changed it.
+ */
+export function piLastReasoning(entries: PiSessionEntry[]): { effort: string } | null {
+  const { lastThinkingLevel } = piHistorySeed(entries)
+  // pi also writes 'off' / 'minimal', which are not ClaudeUI efforts: they would make
+  // the spawn skip the model's saved effort, so they restore as the default.
+  return lastThinkingLevel && (EFFORT_LEVELS as readonly string[]).includes(lastThinkingLevel)
+    ? { effort: lastThinkingLevel }
+    : null
 }
 
 /**

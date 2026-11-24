@@ -470,7 +470,10 @@ type PersistedSessionFields = {
   hiddenSessionIds: string[]
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for session engine persistence. */
-  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  sessionEngines: Record<
+    string,
+    { engineId: EngineId; model?: ModelRef; effort?: string; reasoningVariant?: string }
+  >
 }
 
 /**
@@ -788,7 +791,8 @@ function forgetDroppedSession(state: PersistedSessionFields, routingId: string):
 function historicalIdentity(
   state: SessionState,
   routingId: string,
-  cwd: string
+  cwd: string,
+  restoreReasoning = false
 ): {
   base: PerSessionState
   identity: Partial<CanonicalSessionState>
@@ -830,6 +834,28 @@ function historicalIdentity(
   const modelInfo = state.availableModels.find(
     (m) => m.value === selectedModel && isModelForEngine(m, persistedEngineId)
   )
+  // The reasoning level the model last ran on (seeded from the transcript by
+  // `seedHistoricalEngine`). Restored only on a session's FIRST load (`restoreReasoning`:
+  // no entry yet, or the sidebar's placeholder for one): an entry already loaded or
+  // evicted keeps exactly what it holds, null (the model default) included. A variant
+  // the model's catalog row no longer lists is dropped; with no row loaded there is
+  // nothing to judge it by, so it stays.
+  const persistedVariant = persistedEntry?.reasoningVariant
+  const persistedEffort = persistedEntry?.effort
+  const restoredEffort =
+    restoreReasoning &&
+    persistedEffort &&
+    (!modelInfo?.supportedEffortLevels?.length ||
+      (modelInfo.supportedEffortLevels as readonly string[]).includes(persistedEffort))
+      ? persistedEffort
+      : null
+  const restoredVariant =
+    restoreReasoning &&
+    persistedVariant &&
+    (!modelInfo?.reasoningVariants?.length ||
+      modelInfo.reasoningVariants.includes(persistedVariant))
+      ? persistedVariant
+      : null
   return {
     base,
     identity: {
@@ -837,6 +863,8 @@ function historicalIdentity(
       permissionMode: base.permissionMode,
       selectedEngineId: persistedEngineId,
       selectedModel,
+      ...(restoredEffort ? { effort: restoredEffort } : {}),
+      ...(restoredVariant ? { reasoningVariant: restoredVariant } : {}),
       status: {
         ...base.status,
         engineId: persistedEngineId,
@@ -1646,7 +1674,10 @@ export interface SessionState {
   /** Project keys hidden from the sidebar */
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
-  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  sessionEngines: Record<
+    string,
+    { engineId: EngineId; model?: ModelRef; effort?: string; reasoningVariant?: string }
+  >
   /** Origin links between sessions, keyed by the started session's ref (slice 1b). Replicated. */
   sessionLinks: Record<string, SessionLinkInfo>
   /** sidebar id → ref for every session a link names (slice 1b). Replicated. */
@@ -1846,7 +1877,9 @@ export interface SessionState {
       statusBytes: number
     },
     /** The X-Agents still running (ADR-105 §5): their records, which no transcript holds. */
-    activeTasks?: Record<string, ActiveTask>
+    activeTasks?: Record<string, ActiveTask>,
+    /** The session's FIRST load: restore the reasoning level `sessionEngines` carries. */
+    restoreReasoning?: boolean
   ) => void
   /**
    * The sidebar's click on a session that is not resident (ADR-102): create the
@@ -2502,7 +2535,8 @@ export const useSessionStore = create<SessionState>((set) => ({
     statusLine?,
     warnings?,
     background?,
-    activeTasks?
+    activeTasks?,
+    restoreReasoning?
   ) => {
     const state = useSessionStore.getState()
     // A disk read can finish after this session has resumed. Guard config as
@@ -2515,7 +2549,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     {
       // Session identity + config (engine / model / permission mode / capabilities):
       // the same block the sidebar's loading placeholder applies up front.
-      const { base, identity } = historicalIdentity(state, routingId, cwd)
+      const { base, identity } = historicalIdentity(state, routingId, cwd, restoreReasoning)
       // A LOCAL decision (which engine/model this session reopens as comes from
       // `sessionEngines`, not from any event), so it is applied unconditionally.
       patchLocalSession(routingId, identity, { create: true })
@@ -2575,7 +2609,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     const existing = state.sessions[routingId]
     if (existing && (existing.sdkActive || existing.status.state === 'running')) return
     if (!existing) {
-      const { identity } = historicalIdentity(state, routingId, info.cwd)
+      const { identity } = historicalIdentity(state, routingId, info.cwd, true)
       patchLocalSession(routingId, identity, { create: true })
     }
     // An existing evicted entry keeps everything it holds (draft, effort, mode);
@@ -3285,7 +3319,11 @@ export const useSessionStore = create<SessionState>((set) => ({
         : {})
     })
     if (existing) {
-      const sessionEngines = { ...state.sessionEngines, [id]: { ...existing, model: modelRef } }
+      // The restored level belonged to the old model: it is not carried over.
+      const sessionEngines = {
+        ...state.sessionEngines,
+        [id]: { engineId: existing.engineId, model: modelRef }
+      }
       patchLocalApp({ sessionEngines })
       saveSessionConfig(state, { sessionEngines })
     }
