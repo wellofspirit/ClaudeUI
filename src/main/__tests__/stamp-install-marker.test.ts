@@ -37,7 +37,52 @@ describe('stamp-install-marker', () => {
     const target = writeInstallMarker(app, 'mac')
     expect(target).toBe(path.join(app, 'Contents', 'Resources', 'claudeui-install.json'))
     expect(parseInstallMarker(JSON.parse(fs.readFileSync(target, 'utf8')))?.entries).toEqual([])
-    expect(installMarkerFor(app, 'mac').entries).toEqual([])
+    expect(installMarkerFor(app, 'mac', { version: '1.0.0' }).entries).toEqual([])
+  })
+
+  it('server: marks the folder root with kind server and the build identity from its build-info', () => {
+    const dir = path.join(root, 'claudeui-server-3.9.2-linux-x64')
+    fs.mkdirSync(path.join(dir, 'out'), { recursive: true })
+    fs.writeFileSync(path.join(dir, 'claudeui-server'), '')
+    fs.writeFileSync(
+      path.join(dir, 'out', 'build-info.json'),
+      JSON.stringify({
+        schema: 1,
+        kind: 'release',
+        version: '3.9.2',
+        channel: 'stable',
+        git: {
+          describe: null,
+          baseTag: null,
+          ahead: null,
+          commit: 'abcdef1234',
+          dirty: null,
+          branch: null
+        },
+        builtAt: '2026-11-25T00:00:00.000Z'
+      })
+    )
+    const target = writeInstallMarker(dir, 'server')
+    expect(target).toBe(path.join(dir, 'claudeui-install.json'))
+    const raw = JSON.parse(fs.readFileSync(target, 'utf8'))
+    expect(parseInstallMarker(raw)).toBeNull() // not a desktop marker
+    expect(parseInstallMarker(raw, 'server')).toEqual({
+      schema: 1,
+      product: 'com.claudeui.app',
+      kind: 'server',
+      entries: ['claudeui-server', 'out'],
+      version: '3.9.2',
+      buildId: 'abcdef1@2026-11-25T00:00:00.000Z'
+    })
+  })
+
+  it("falls back to package.json's version without a readable build-info", () => {
+    const app = path.join(root, 'ClaudeUI.app')
+    fs.mkdirSync(path.join(app, 'Contents', 'Resources'), { recursive: true })
+    const target = writeInstallMarker(app, 'mac', path.join(root, 'missing.json'))
+    const marker = parseInstallMarker(JSON.parse(fs.readFileSync(target, 'utf8')))
+    expect(marker?.version).toMatch(/^\d+\.\d+\.\d+/)
+    expect(marker?.buildId).toBeUndefined()
   })
 
   it('refuses a bad platform, a non-.app on mac and a missing resources folder', () => {

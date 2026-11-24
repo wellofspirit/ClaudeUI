@@ -17,8 +17,24 @@ describe('parseInstallMarker', () => {
     expect(parsed!.entries).not.toBe(good.entries)
   })
 
+  it('carries version and buildId when present', () => {
+    const raw = { ...good, version: '3.9.2', buildId: 'abc1234@2026-11-25T00:00:00Z' }
+    expect(parseInstallMarker(raw)).toEqual(raw)
+  })
+
+  it('reads a server marker only when asked for one', () => {
+    const server = { ...good, kind: 'server' }
+    expect(parseInstallMarker(server)).toBeNull()
+    expect(parseInstallMarker(server, 'server')).toEqual(server)
+    expect(parseInstallMarker(good, 'server')).toBeNull()
+  })
+
   it.each([
     ['null', null],
+    ['an empty version', { ...good, version: '' }],
+    ['a non-string version', { ...good, version: 3 }],
+    ['a version with a newline', { ...good, version: '1.0.0\nx' }],
+    ['a non-string buildId', { ...good, buildId: {} }],
     ['an array', [good]],
     ['another schema', { ...good, schema: 2 }],
     ['another product', { ...good, product: 'com.example.app' }],

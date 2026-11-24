@@ -17,17 +17,28 @@ export const INSTALL_MARKER_FILE = 'claudeui-install.json'
 /** The product id the marker names (electron-builder.yml `appId`). */
 export const INSTALL_MARKER_PRODUCT = 'com.claudeui.app'
 
-export type InstallMarkerPlatform = 'mac' | 'win'
+/**
+ * Where the marker sits: a macOS bundle, a Windows desktop folder, or the root of
+ * a headless `claudeui-server` folder (whose layout is the same on every OS).
+ */
+export type InstallMarkerPlatform = 'mac' | 'win' | 'server'
+
+/** What the marked directory is: the desktop app or the headless server. */
+export type InstallMarkerKind = 'desktop' | 'server'
 
 export interface InstallMarker {
   schema: 1
   product: typeof INSTALL_MARKER_PRODUCT
-  kind: 'desktop'
+  kind: InstallMarkerKind
   /**
-   * Windows: the sorted top-level names of the packaged directory. macOS: empty
-   * (a bundle is self-contained, its parent is the user's folder).
+   * Windows and server: the sorted top-level names of the packaged directory.
+   * macOS: empty (a bundle is self-contained, its parent is the user's folder).
    */
   entries: string[]
+  /** The build's version (`out/build-info.json`), so a staged build can be checked without unpacking it. */
+  version?: string
+  /** The build's id (`buildId` in `src/shared/build-info.ts`). */
+  buildId?: string
 }
 
 /**
@@ -35,6 +46,7 @@ export interface InstallMarker {
  * install root (the `.app` bundle on macOS, the folder holding the exe on Windows).
  */
 export const INSTALL_MARKER_SEGMENTS: Readonly<Record<InstallMarkerPlatform, readonly string[]>> = {
+  server: [INSTALL_MARKER_FILE],
   mac: ['Contents', 'Resources', INSTALL_MARKER_FILE],
   win: ['resources', INSTALL_MARKER_FILE]
 }
@@ -54,13 +66,30 @@ function isEntryName(v: unknown): v is string {
   return typeof v === 'string' && v !== '' && v !== '.' && v !== '..' && !/[\\/\0]/.test(v)
 }
 
-/** The marker, or null for anything that is not exactly a ClaudeUI desktop marker. */
-export function parseInstallMarker(raw: unknown): InstallMarker | null {
+const isLabel = (v: unknown): v is string =>
+  typeof v === 'string' && v !== '' && v.length <= 200 && !/[\0\r\n]/.test(v)
+
+/**
+ * The marker, or null for anything that is not exactly a ClaudeUI marker of
+ * `kind` (a desktop check never accepts a server marker, nor the reverse).
+ */
+export function parseInstallMarker(
+  raw: unknown,
+  kind: InstallMarkerKind = 'desktop'
+): InstallMarker | null {
   if (!isRecord(raw)) return null
-  if (raw.schema !== 1 || raw.product !== INSTALL_MARKER_PRODUCT || raw.kind !== 'desktop')
-    return null
+  if (raw.schema !== 1 || raw.product !== INSTALL_MARKER_PRODUCT || raw.kind !== kind) return null
   if (!Array.isArray(raw.entries) || !raw.entries.every(isEntryName)) return null
-  return { schema: 1, product: INSTALL_MARKER_PRODUCT, kind: 'desktop', entries: [...raw.entries] }
+  if (raw.version !== undefined && !isLabel(raw.version)) return null
+  if (raw.buildId !== undefined && !isLabel(raw.buildId)) return null
+  return {
+    schema: 1,
+    product: INSTALL_MARKER_PRODUCT,
+    kind,
+    entries: [...raw.entries],
+    ...(raw.version !== undefined ? { version: raw.version } : {}),
+    ...(raw.buildId !== undefined ? { buildId: raw.buildId } : {})
+  }
 }
 
 /**
