@@ -17,7 +17,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useSessionStore, DEFAULT_SETTINGS } from '../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
-import { makePendingApproval } from '@test/factories/messages'
+import { makePendingApproval, makeSessionStatus } from '@test/factories/messages'
+import { resolvePiCapabilities } from '../../../../../shared/model-capabilities'
 import type {
   ChatMessage,
   ContentBlock,
@@ -265,6 +266,27 @@ describe('TaskCard — "Send to background" gate', () => {
     act(() => started(true))
 
     expect(screen.queryByText('sending to background…')).not.toBeInTheDocument()
+  })
+
+  it("a pi child's FOREGROUND agent card (pending, registered isBackgrounded: false) offers Send to background and shows no background chip; a root card registered in the background shows the chip and no Send to background", () => {
+    seed.status(ROUTE, makeSessionStatus({ engineId: 'pi', capabilities: resolvePiCapabilities() }))
+    // A child's default call: no run_in_background on the input, no result yet.
+    const piInput = { description: 'Explore ChatView components', prompt: 'p' }
+    const block = makeTaskBlock({ toolName: 'agent', toolInput: piInput })
+    const view = PiEngineToolMap.normalize('task', piInput) as typeof defaultTaskView
+    started(false)
+    const fg = render(<TaskCard block={block} view={view} />)
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
+    expect(screen.getByTestId('TaskCard.sendToBackground')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskCard.background')).not.toBeInTheDocument()
+    fg.unmount()
+
+    // A root call (always background): its task-started says so before any result.
+    act(() => started(true))
+    render(<TaskCard block={block} view={view} />)
+    expect(screen.getByTestId('TaskCard.background')).toBeInTheDocument()
+    expect(screen.queryByTestId('TaskCard.sendToBackground')).not.toBeInTheDocument()
+    expect(screen.getByTestId('TaskCard.stop')).toBeInTheDocument()
   })
 
   it('comes back after a failed attempt', async () => {

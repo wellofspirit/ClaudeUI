@@ -27,9 +27,11 @@
  *
  * SCOPE. Supported fields: `name`, `description`, `tools`, `disallowedTools`,
  * `model`, `harness.pi.model`, `thinking` (or Claude Code's `effort`),
- * `permissionMode`, `background`. Claude Code's `mcpServers`, `skills`,
- * `color`, `memory`, `isolation`, `maxTurns` and `omitClaudeMd` are out of
- * scope and ignored, as is any other unknown key.
+ * `permissionMode`, `background` (it forces background for a CHILD's call,
+ * which is otherwise foreground; the root's calls always run in the
+ * background). Claude Code's `mcpServers`, `skills`, `color`, `memory`,
+ * `isolation`, `maxTurns` and `omitClaudeMd` are out of scope and ignored, as
+ * is any other unknown key.
  *
  * A pure module (fs via the shared reader + the pi data-root helper): no
  * session class, no dispatcher.
@@ -77,7 +79,7 @@ export interface PiAgentDefinition {
   thinking?: PiThinkingLevel
   /** Narrows only (ADR-089 D3). */
   permissionMode?: string
-  /** Parsed and stored; background runs arrive in S3. */
+  /** True forces background for a child's `agent` call (the root's always run in the background). */
   background?: boolean
   /** False for Explore/Plan: they never get the `agent` tool. */
   canSpawn: boolean

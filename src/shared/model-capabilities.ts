@@ -1360,9 +1360,9 @@ export function resolveOpencodeCapabilitiesFromModel(m?: {
  *     cost-seeding posture.
  *   - backgroundTasks → true since ADR-089 S2: it is the gate
  *     `handlers-core.stopTask` checks, and a host-run subagent's TaskCard has
- *     a per-agent Stop (`PiSession.stopTask`). Since ADR-089 S3 pi also sends
- *     `isBackgrounded` and implements `backgroundTask`, so "Send to background"
- *     works on a foreground run and background runs exist.
+ *     a per-agent Stop (`PiSession.stopTask`). pi also sends `isBackgrounded`
+ *     and implements `backgroundTask`: a child's foreground `agent` run (the
+ *     root's runs are always background) offers "Send to background".
  *   - voice → true since ADR-101: pi has no transcription of its own, so the
  *     session starts the host's on-device worker (`BaseSession.voiceStartServer`)
  *     and PiSession's `capabilities` getter ANDs `voicePackPlatformKey() !== null`

@@ -326,7 +326,7 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       subagent: 'Explore',
       name: 'Explore',
       model: 'openai-codex/gpt-5.6-luna',
-      background: true
+      background: false
     })
     expect(
       PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', name: 'scout' })
@@ -336,11 +336,19 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       prompt: 'p',
       subagent: 'general-purpose',
       name: 'scout',
-      background: true
+      background: false
     })
-    // ADR-089 S3: background is the default; only an explicit false is foreground.
+    // Before a result only an explicit true is background: a child's default call runs in the
+    // foreground (Claude Code 2.1.330), and a root card reads background from its task-started.
     expect(
       PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: false })
+    ).toMatchObject({ kind: 'task', background: false })
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: true })
+    ).toMatchObject({ kind: 'task', background: true })
+    // Anything but a boolean true (the host refuses it from a child) is not background.
+    expect(
+      PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: 'yes' })
     ).toMatchObject({ kind: 'task', background: false })
     // Without description it is not the agent shape (the generic fallback stays).
     expect(PiEngineToolMap.normalize('task', { prompt: 'do X' })).toMatchObject({ description: '' })
@@ -488,16 +496,26 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
     expect(stateOf(bg, true, true).isRunning).toBe(false)
   })
 
-  it('a definition that forced background (input said false) reads background on reload', () => {
+  it('a launch whose input said false (a root call, or a forced definition) reads background on reload (the result decides)', () => {
     const view = PiEngineToolMap.normalize('task', { ...input, run_in_background: false }, launched)
     expect(view).toMatchObject({ background: true })
   })
 
-  it('a foreground report is not background; before a result the input decides', () => {
+  it('a foreground report is not background (the result decides); before a result only an explicit true is', () => {
     expect(PiEngineToolMap.normalize('task', input, result('the report'))).toMatchObject({
       background: false
     })
-    expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
+    // A run_in_background: true call that came back foreground (none does today) still reads the result.
+    expect(
+      PiEngineToolMap.normalize('task', { ...input, run_in_background: true }, result('the report'))
+    ).toMatchObject({ background: false })
+    expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: false })
+    expect(PiEngineToolMap.normalize('task', { ...input, run_in_background: false })).toMatchObject(
+      { background: false }
+    )
+    expect(PiEngineToolMap.normalize('task', { ...input, run_in_background: true })).toMatchObject({
+      background: true
+    })
   })
 })
 

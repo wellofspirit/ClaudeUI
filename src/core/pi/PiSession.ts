@@ -694,7 +694,7 @@ export class PiSession extends BaseSession {
         retractChildGates: (scope) => session.retractChildGates(scope),
         deliverToSession: (payload) => session.deliverAgentMessage(payload),
         backgroundWorkChanged: () => {
-          // Re-arm (or hold) the idle timer: it waits for background agents.
+          // Re-arm (or hold) the idle timer: it waits for live agents.
           if (!session.isProcessing) session.resetInactivityTimer()
         }
       },
@@ -788,15 +788,16 @@ export class PiSession extends BaseSession {
   }
 
   protected override idleTimerHeld(): boolean {
-    return this.subagents.liveBackgroundCount > 0 || super.idleTimerHeld()
+    return this.subagents.liveCount > 0 || super.idleTimerHeld()
   }
 
   protected override resetInactivityTimer(): void {
     this.clearInactivityTimer()
-    // A live background agent keeps the session (ADR-089 S3): disposing would
-    // kill it and lose its notification. backgroundWorkChanged re-arms this
-    // once the last one ends. A running X-Agent holds it the same way
-    // (`idleTimerHeld`; the dispatcher re-arms through `rearmIdleTimer`).
+    // A live agent (at any depth, foreground or background) keeps the session
+    // (ADR-089 S3): disposing would kill it and lose its notification.
+    // backgroundWorkChanged re-arms this once the last one ends. A running
+    // X-Agent holds it the same way (`idleTimerHeld`; the dispatcher re-arms
+    // through `rearmIdleTimer`).
     if (this.idleTimerHeld()) return
     if (this.inactivityTimeoutMs > 0) {
       this.inactivityTimer = setTimeout(() => {
@@ -1136,6 +1137,11 @@ export class PiSession extends BaseSession {
           // on whether this session's mode happens to be 'plan' right now
           // (that's a separate, later step — see the re-entry send below).
           ...(this.capabilities.plan ? { CLAUDEUI_PI_PLAN_TOOLS: '1' } : {}),
+          // The root's `agent` calls always run in the background, so its
+          // `agent` has no run_in_background (ADR-089, the root shape). Set
+          // unconditionally: a ClaudeUI started from inside a subagent's shell
+          // must not hand its own session a subagent's '1'.
+          CLAUDEUI_PI_AGENT_SUBAGENT: '',
           // Host-run subagents (ADR-089): the bridge's own `agent` (+
           // `task_stop`) and `send_message` tools, and the agent types for
           // the `agent` description. No second `-e`.
@@ -1191,7 +1197,8 @@ export class PiSession extends BaseSession {
       // grants — a /hosted-tool POST racing this exit has nothing left to
       // execute against anyway.
       this.rejectAllPendingGates('Interrupted')
-      // Foreground children belong to the turn that just died with it.
+      // Every child goes with the pi process: nothing is left to take its
+      // report (a dispose stop delivers nothing).
       this.subagents.stopAll('dispose')
       if (this.bridgeHost) {
         this.bridgeHost.dispose()
@@ -1701,7 +1708,7 @@ export class PiSession extends BaseSession {
 
   /**
    * Put an agent-authored message into this session (ADR-089 S3): a
-   * background agent's notification whose owner is the root, and (S3b) a
+   * run's notification whose owner is the root, and (S3b) a
    * `send_message` to `main`. The ONLY path is the bridge's `/cui-deliver`
    * command (pi-delivery.ts, the marking rule): never run(), never a plain
    * `prompt`, `steer` or `follow_up`. Nothing is recorded or emitted here —
@@ -2047,9 +2054,8 @@ export class PiSession extends BaseSession {
     if (this.isProcessing) this.beginUserStop()
     // Deny FIRST (synchronous, local) — a hanging extension fetch would
     // otherwise wedge pi's turn forever waiting on a human who just hit stop.
-    // Only the session's OWN cards (ADR-089 S3, Q9): a background agent's
-    // cards survive the interrupt with it, and every foreground child stopped
-    // below retracts its own.
+    // Only the session's OWN cards (ADR-089 S3, Q9): every agent survives the
+    // interrupt, its open cards with it.
     this.rejectOwnPendingGates('Interrupted')
     // Audit-residual B fix: pi's own turn-abort (the `abort` RPC below) does
     // NOT cancel a `dispatch_agent` child this turn started — the bridge's
@@ -2069,10 +2075,11 @@ export class PiSession extends BaseSession {
       crossEngineDispatcher.stopDispatch(id, this.routingId, { blockingOnly: true })
     }
     this.inFlightDispatchIds.clear()
-    // Host-run subagents (ADR-089 S3, Q9 — Claude Code's Esc spares
-    // background agents too): a foreground child belongs to the turn being
-    // aborted; a background one does not.
-    this.subagents.stopForeground('interrupt')
+    // Host-run subagents (ADR-089 S3, Q9): an interrupt stops NO agent. The
+    // root's agents all run in the background (opencode spares them too,
+    // ADR-111 §4), and a child's foreground run belongs to that
+    // child's turn, which this interrupt does not touch; each card keeps its
+    // own Stop (`stopTask`).
     if (!this.client) return
     try {
       await this.client.request({ type: 'abort' })
@@ -3558,25 +3565,29 @@ export class PiSession extends BaseSession {
   }
 
   /**
-   * ISession.backgroundTask — "Send to background" on a host-run subagent's
-   * TaskCard (ADR-089 S3b, Q7; `handlers-core.backgroundTask`, gated on
-   * `capabilities.backgroundTasks`): the waiting `agent` call returns the
-   * async-launched text now, and the run notifies when it ends.
-   */
-  async backgroundTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
-    return this.subagents.background(toolUseId)
-  }
-
-  /**
    * ISession.stopTask — the per-agent Stop on a host-run subagent's TaskCard
    * (ADR-088; `handlers-core.stopTask`, gated on `capabilities.backgroundTasks`).
-   * Stops that agent and its descendants; its run returns "Agent stopped by
-   * user." to the parent. A run already past its end (closing) is not stopped.
+   * Stops that agent and its descendants; a background run ends stopped and
+   * notifies its owner passively, a foreground one returns "Agent stopped by
+   * user." to the child waiting on it. A run already past its end (closing)
+   * is not stopped.
    */
   async stopTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
     return this.subagents.stop(toolUseId)
       ? { success: true }
       : { success: false, error: 'No running agent for that card' }
+  }
+
+  /**
+   * ISession.backgroundTask — "Send to background" on a host-run subagent's
+   * TaskCard (ADR-089 S3b, Q7; `handlers-core.backgroundTask`, gated on
+   * `capabilities.backgroundTasks`): the waiting `agent` call returns the
+   * async-launched text now, and the run notifies when it ends. Only a
+   * child's foreground run can be sent: the root's calls all run in the
+   * background, so for any other card this fails cleanly.
+   */
+  async backgroundTask(toolUseId: string): Promise<{ success: boolean; error?: string }> {
+    return this.subagents.background(toolUseId)
   }
 
   protected readonly liveConfig = {
