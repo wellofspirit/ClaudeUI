@@ -15,25 +15,30 @@
  * id, NEVER through `PiSession.dispatchOutput`: that path records into the
  * parent transcript, which the judge and `/btw` read (kickoff C8).
  *
- * RUNS (ADR-089). Every run is a BACKGROUND run: the `agent` call returns the
- * async-launched text once the child has started, and the run notifies its
- * owner when it ends, through the bridge's `/cui-deliver` command
- * (pi-delivery.ts — never as the user's text). There is no foreground mode
- * (Claude Code parity): a stray `run_in_background` in the call is ignored,
- * whatever its value. The child process is disposed when its run ends
- * (completed, failed or stopped); the session file stays on disk under
- * `~/.claude/ui/pi-subagents/<agentId>/`, outside `~/.pi` so the sidebar
- * never lists a child as a session. An interrupt of the parent's turn stops no
- * agent (each card keeps its own Stop); a session going away stops everything
- * without notifying.
+ * RUNS (ADR-089, Claude Code 2.1.330 parity). The ROOT session's `agent`
+ * calls always run in the BACKGROUND: the call returns the async-launched text
+ * once the child has started, and the run notifies its owner when it ends,
+ * through the bridge's `/cui-deliver` command (pi-delivery.ts — never as the
+ * user's text); a stray `run_in_background` from the root is ignored, whatever
+ * its value. A CHILD's `agent` call is FOREGROUND by default: it waits and
+ * returns the report as its result. `run_in_background: true` (or the
+ * definition's `background: true`) runs it in the background instead, and Send
+ * to background (`background`) turns a waiting foreground run into one. The
+ * child process is disposed when its run ends (completed, failed or stopped);
+ * the session file stays on disk under `~/.claude/ui/pi-subagents/<agentId>/`,
+ * outside `~/.pi` so the sidebar never lists a child as a session. The
+ * composer Stop (an interrupt of the root's turn) stops no agent: the root has
+ * no foreground runs, and a child's foreground run belongs to that child's
+ * turn. A session going away stops everything without notifying.
  *
  * MESSAGING (S3b). Every agent leaves a record (`records`): `send_message`
  * steers a running one (a delivery) or RESUMES a finished one — a fresh
  * process on the same session file, started by a host-built delivery through
  * `PiChildRunner.resumeWithDelivery`, never by text — and `task_stop` stops
  * one (a child: its descendants only). Model-authored message text only ever
- * travels as a delivery's `text`. Any agent may message `main` and its
- * launcher; depth-1 records are rebuilt from history on resume (`adoptRecord`).
+ * travels as a delivery's `text`. Any agent may message `main`; a foreground
+ * run may not message its launcher (the launcher is blocked waiting for its
+ * report). Depth-1 records are rebuilt from history on resume (`adoptRecord`).
  *
  * Imports no session class and not the dispatcher (require-cycle rule).
  */
@@ -143,7 +148,10 @@ export interface PiSubagentHost {
    * the manager; the session serializes and gates it.
    */
   deliverToSession(payload: PiAgentDelivery): void
-  /** The number of live children changed (the parent's idle timer waits for them). */
+  /**
+   * A child run started or ended, or a foreground run went to the background
+   * (the parent's idle timer waits for every live child, `liveCount`).
+   */
   backgroundWorkChanged(): void
 }
 
@@ -174,6 +182,10 @@ export interface PiChildScope {
   canSpawn: boolean
   stopped: boolean
 }
+
+/** A foreground child messaging its launcher: its channel is its final report. */
+const FOREGROUND_CHANNEL_REFUSAL =
+  'You are running in the foreground; your final report is returned to the agent that launched you.'
 
 /** The refusal for an `agent` call from a child that may not launch agents. */
 export const CANNOT_SPAWN_REASON = 'This agent cannot launch agents'
@@ -211,8 +223,9 @@ export function narrowMode(parentMode: string, definitionMode?: string): string 
  * `buildPiTargetChildEnv` argument). A child gets no hosted tools, never
  * `dispatch_agent`, no plan-mode tools (the parent's gate enforces plan mode
  * for children), and the `agent` tool (with `task_stop`) only when it may
- * spawn. Every child gets `send_message` (S3b) and the parent's MCP catalog
- * (ADR-096).
+ * spawn, in its subagent shape (`CLAUDEUI_PI_AGENT_SUBAGENT`: foreground by
+ * default, with `run_in_background`). Every child gets `send_message` (S3b)
+ * and the parent's MCP catalog (ADR-096).
  */
 export function buildPiSubagentChildEnv(
   bridge: { url: string; token: string },
@@ -228,6 +241,8 @@ export function buildPiSubagentChildEnv(
     CLAUDEUI_PI_SESSION_TOOLS: '',
     CLAUDEUI_PI_PLAN_TOOLS: '',
     CLAUDEUI_PI_AGENT_TOOL: opts.childCanSpawn ? '1' : '',
+    // A child's `agent` (bridge v28): foreground by default, `run_in_background` to background.
+    CLAUDEUI_PI_AGENT_SUBAGENT: opts.childCanSpawn ? '1' : '',
     CLAUDEUI_PI_AGENT_LISTING: opts.childCanSpawn ? opts.listing : '',
     CLAUDEUI_PI_SEND_MESSAGE: '1',
     // The parent's Claude skill catalog (shared catalog), served by the child's own bridge host.
@@ -321,6 +336,8 @@ export interface PiAgentRecord {
   spawnerToolUseId: string | null
   spawnerLabel: string | null
   canSpawn: boolean
+  /** The latest run's mode (only a child's call can run in the foreground). */
+  background: boolean
   runIndex: number
   status: 'running' | TaskTerminalStatus
   stoppedBy: PiStopReason | null
@@ -369,14 +386,18 @@ interface LiveChild {
   closing: boolean
   /** Resolves the run's stop race once the abort has drained. */
   onStopped: (() => void) | null
+  /** Send to background (G6): releases a foreground caller that is still waiting. */
+  onDetach: (() => void) | null
 }
 
 /** How a run starts: the call's prompt, or (a resume) a host-built agent message. */
 type RunStart = { kind: 'prompt'; prompt: string } | { kind: 'delivery'; payload: PiAgentDelivery }
 
-/** How a run ended, as its notifications (the UI's and the owner's) need it. */
+/** How a run ended, as its foreground tool result and its notifications (the UI's and the owner's) need it. */
 interface RunEnd {
   status: TaskTerminalStatus
+  /** The foreground tool-result text. */
+  text: string
   /** The UI `session:task-notification` summary (its first 100 characters are sent). */
   summary: string
   /** completed: the report; failed: the error; stopped: none. */
@@ -396,13 +417,25 @@ function textResult(text: string): PiHostedToolResult {
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
 
+const usageBlock = (u: { totalTokens: number; toolUses: number; durationMs: number }): string =>
+  `<usage>total_tokens: ${u.totalTokens}\ntool_uses: ${u.toolUses}\nduration_ms: ${u.durationMs}</usage>`
+
 const firstLine = (s: string): string => s.split('\n', 1)[0]
 
-/** A stopped run's UI notification summary. */
+/** A stopped run's foreground tool-result text and UI notification summary. */
 function stoppedText(reason: PiStopReason): string {
   if (reason === 'user') return 'Agent stopped by user.'
   if (reason === 'agent') return 'Agent stopped.'
   return 'Agent cancelled.'
+}
+
+/**
+ * A FOREGROUND report is model-authored and becomes the tool result. One that
+ * opens with the host's launch acknowledgement would read as a background
+ * launch on the card (`isPiAsyncLaunchResult`), so it gets a fixed header.
+ */
+export function safeForegroundReport(report: string): string {
+  return report.startsWith(PI_ASYNC_LAUNCHED_PREFIX) ? `Agent report:\n${report}` : report
 }
 
 /**
@@ -420,12 +453,16 @@ const RESERVED_AGENT_NAMES = new Set(['main', 'user', 'system', 'team-lead'])
 const AGENT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+const continueLine = (agentId: string, handle: string): string =>
+  `agentId: ${agentId} (use send_message with to: '${handle}' to continue this agent.)`
+
 /**
  * CC's background launch text (cli.js 2.1.285, adapted; kickoff CC1). An agent
- * a CHILD launched (`launchedByAgent`) gets its own last paragraph: the report
- * reaches the child only while the child still runs, else the main session
- * (owner routing, Q4), so the child is not told it "will be notified" or to
- * "respond to the user".
+ * a CHILD launched (`launchedByAgent`: `run_in_background: true`, a definition
+ * that forces background, or Send to background) gets its own last paragraph:
+ * the report reaches the child only while the child still runs, else the main
+ * session (owner routing, Q4), so the child is not told it "will be notified"
+ * or to "respond to the user".
  */
 export function asyncLaunchedText(
   agentId: string,
@@ -444,7 +481,7 @@ export function asyncLaunchedText(
       'report, assume, or predict them; continue other work or respond to the user in the meantime.'
   return (
     `${PI_ASYNC_LAUNCHED_PREFIX}\n` +
-    `agentId: ${agentId} (use send_message with to: '${handle}' to continue this agent.)\n` +
+    `${continueLine(agentId, handle)}\n` +
     `${piAgentModelLine(model)}\n` +
     last
   )
@@ -495,7 +532,10 @@ const attr = (v: string): string => v.replace(/["<>\r\n]/g, ' ')
  * agent is, who launched it and how to reach it, and how agent messages look.
  * Built from host state only. The spawner is `main` at depth 1 (the main
  * session), otherwise the launching agent, addressed by its name when it has
- * one, else its id (the two handles `send_message` resolves).
+ * one, else its id (the two handles `send_message` resolves). A foreground
+ * run cannot message its launcher (it waits on the report), hence the second
+ * sentence; the session never launches a foreground run, so for `main` it
+ * never applies (one wording for every depth).
  */
 export function piAgentIdentityBlock(opts: {
   agentId: string
@@ -510,7 +550,8 @@ export function piAgentIdentityBlock(opts: {
   const handle = opts.spawner ? opts.spawner.handle : 'main'
   return [
     `Your agent id is ${opts.agentId}${who}. You were launched by ${spawner}.`,
-    `To message the agent that launched you, use send_message with to: '${handle}'.`,
+    `To message the agent that launched you while you run in the background, use send_message with to: '${handle}'. ` +
+      'In the foreground your final report is your only channel to it.',
     'Messages from other agents arrive inside <agent-message from="…" from-id="…"> tags; reply ' +
       'with send_message to that from-id. An agent you message that has already finished is ' +
       'resumed with your message, which costs a new run: message agents only when it helps the task.'
@@ -542,6 +583,12 @@ export class PiSubagentManager {
   private readonly live = new Map<string, LiveChild>()
   /** Every agent this session ran (G1), by agent id. */
   private readonly records = new Map<string, PiAgentRecord>()
+  /**
+   * Bumped by every `stopAll('dispose')` (cancel, a crash): a launch that was
+   * parked on an await when the session went away is refused once it resumes
+   * (#275). A counter, not a flag: the session may start again after a crash.
+   */
+  private disposeEpoch = 0
 
   constructor(
     private readonly host: PiSubagentHost,
@@ -582,11 +629,15 @@ export class PiSubagentManager {
   }
 
   /**
-   * Run one `agent` call, always in the background (D2): returns the
+   * Run one `agent` call (D2, Claude Code 2.1.330 parity). The ROOT's call
+   * (`parent` null) always runs in the background: it returns the
    * async-launched text once the child has started, and the run notifies its
-   * owner when it ends. `run_in_background` is not read (a model habit from
-   * Claude's schema; any value is ignored, never an error). Never throws:
-   * every failure is an isError result.
+   * owner when it ends; its `run_in_background` is not read (a model habit
+   * from Claude's schema; any value is ignored, never an error). A CHILD's
+   * call is foreground unless `run_in_background: true` or the definition's
+   * `background: true`: it waits for the report (unless the user sends it to
+   * the background, G6) and returns it as the result. Never throws: every
+   * failure is an isError result.
    */
   async run(
     input: Record<string, unknown>,
@@ -597,6 +648,7 @@ export class PiSubagentManager {
     // Host-side spawn limit (see PiChildScope.canSpawn): a child that may not
     // launch agents is refused here even if a grant was somehow obtained.
     if (parent && !parent.canSpawn) return errorResult(`${CANNOT_SPAWN_REASON}.`)
+    const epoch = this.disposeEpoch
     const prompt = str(input.prompt)
     if (prompt === undefined || prompt.trim() === '') {
       return errorResult('agent requires a non-empty string "prompt".')
@@ -611,6 +663,14 @@ export class PiSubagentManager {
     if (name !== undefined) {
       const nameError = this.nameError(name)
       if (nameError) return errorResult(nameError)
+    }
+    // Only a child's schema has the parameter; the root's is ignored whatever its type.
+    if (
+      parent &&
+      input.run_in_background !== undefined &&
+      typeof input.run_in_background !== 'boolean'
+    ) {
+      return errorResult('agent "run_in_background" must be a boolean.')
     }
     const registry = this.registry
     const requestedType = str(input.subagent_type)
@@ -659,7 +719,16 @@ export class PiSubagentManager {
       )
     }
     if (this.live.has(toolUseId)) return errorResult('This agent call is already running.')
+    // #275: a stop of the spawner, or the session going away, that landed while
+    // this call was parked on the catalog read could not see it (it is not in
+    // `live` yet), so check both again before anything is spawned.
+    if (parent?.stopped) return errorResult('Agent stopped.')
+    if (this.disposeEpoch !== epoch) return errorResult('The session is closing.')
 
+    // D2: the root is background-only; a child's call is foreground unless it
+    // asks for the background or its definition forces it.
+    const background =
+      parent === null || definition.background === true || input.run_in_background === true
     const depth = (parent?.depth ?? 0) + 1
     const canSpawn = childCanSpawnAt(depth, definition)
 
@@ -683,35 +752,75 @@ export class PiSubagentManager {
       spawnerToolUseId: parent?.toolUseId ?? null,
       spawnerLabel: parent ? (spawnerRecord?.label ?? parent.definition.name) : null,
       canSpawn,
+      background,
       dir,
       promptFile,
       description,
       prompt
     })
 
-    const launched = await this.launch(record, { kind: 'prompt', prompt })
+    const start: RunStart = { kind: 'prompt', prompt }
+    const launched = await this.launch(record, background, start)
     if (!launched.ok) {
       // Never ran: the call failed, so no record is kept for it.
       this.records.delete(agentId)
       return errorResult(launched.error)
     }
-    this.driveInBackground(launched.entry, { kind: 'prompt', prompt })
-    return {
+    const entry = launched.entry
+
+    const cuiAgent = {
+      v: 1,
+      agentId,
+      subagentType: definition.name,
+      ...(name ? { name } : {}),
+      ...(description ? { description } : {}),
+      model
+    }
+    // The persisted link (§persistence): `background` and `async_launched`
+    // are what history reads to mark a launch with no notification unfinished.
+    const asyncResult = (): PiHostedToolResult => ({
       content: [
         { type: 'text', text: asyncLaunchedText(agentId, name || agentId, model, parent !== null) }
       ],
-      // The persisted link (§persistence): `background` and `async_launched`
-      // are what history reads to mark a launch with no notification unfinished.
+      details: { cuiAgent: { ...cuiAgent, background: true, status: 'async_launched' } }
+    })
+
+    if (background) {
+      this.driveInBackground(entry, start)
+      return asyncResult()
+    }
+    // The spawner ended while this run was still starting (review F2's gap):
+    // its end found no waiting call to send to the background, and nobody
+    // waits on this one any more, so its report goes out by notification.
+    // A spawner STOP is not this case: its cascade already stopped this run
+    // (it was in `live`), and the stopped drive below returns at once.
+    if (parent && !entry.stopReason && !this.liveRunner(parent.toolUseId)) {
+      this.markBackground(entry)
+      this.driveInBackground(entry, start)
+      return asyncResult()
+    }
+
+    // Foreground (a child's call): the drive, raced with Send to background (G6).
+    const driven = this.drive(entry, start)
+    const detached = new Promise<'detached'>((resolve) => {
+      entry.onDetach = () => resolve('detached')
+    })
+    const first = await Promise.race([driven, detached])
+    if (first === 'detached') {
+      this.afterBackgroundRun(entry, driven)
+      return asyncResult()
+    }
+    entry.onDetach = null
+    const end = first
+    return {
+      content: [{ type: 'text', text: end.text }],
+      ...(end.status === 'completed' ? {} : { isError: true }),
       details: {
         cuiAgent: {
-          v: 1,
-          agentId,
-          subagentType: definition.name,
-          ...(name ? { name } : {}),
-          ...(description ? { description } : {}),
-          model,
-          background: true,
-          status: 'async_launched'
+          ...cuiAgent,
+          status: end.status,
+          ...(end.status === 'stopped' && entry.stopReason ? { stoppedBy: entry.stopReason } : {}),
+          ...runFailureDetails(end)
         }
       }
     }
@@ -730,6 +839,18 @@ export class PiSubagentManager {
           }
         : null
     })
+  }
+
+  /**
+   * The ONE rule that a FOREGROUND child cannot message its launcher: the
+   * launcher is blocked inside the `agent` call and only sees a message after
+   * the final report, which is its channel. Null when `caller` runs in the
+   * background. (`main` is never refused: a foreground run's launcher is
+   * always a child, never the session.)
+   */
+  private foregroundChannelRefusal(caller: PiChildScope): PiHostedToolResult | null {
+    const live = this.live.get(caller.toolUseId)
+    return live && live.record.background ? null : errorResult(FOREGROUND_CHANNEL_REFUSAL)
   }
 
   /** The catalog for resolution and listing; a discovery failure is an empty one, never a throw. */
@@ -791,6 +912,7 @@ export class PiSubagentManager {
     spawnerToolUseId: string | null
     spawnerLabel: string | null
     canSpawn: boolean
+    background: boolean
     dir: string
     promptFile: string
     description: string
@@ -815,6 +937,7 @@ export class PiSubagentManager {
       spawnerToolUseId: opts.spawnerToolUseId,
       spawnerLabel: opts.spawnerLabel === null ? null : cleanAgentLabel(opts.spawnerLabel),
       canSpawn: opts.canSpawn,
+      background: opts.background,
       runIndex: opts.runIndex ?? 0,
       status: opts.status ?? 'running',
       stoppedBy: opts.stoppedBy ?? null,
@@ -851,6 +974,7 @@ export class PiSubagentManager {
    */
   private async launch(
     record: PiAgentRecord,
+    background: boolean,
     start: RunStart
   ): Promise<{ ok: true; entry: LiveChild } | { ok: false; error: string }> {
     const definition = record.definition
@@ -879,6 +1003,7 @@ export class PiSubagentManager {
     scope.grants.clear()
     scope.stopped = false
     record.runIndex += 1
+    record.background = background
     record.status = 'running'
     record.stoppedBy = null
     record.failure = null
@@ -891,9 +1016,11 @@ export class PiSubagentManager {
       startedAt: this.now(),
       stopReason: null,
       closing: false,
-      onStopped: null
+      onStopped: null,
+      onDetach: null
     }
     this.live.set(toolUseId, entry)
+    // Every live run counts (the parent's idle timer waits for them all).
     this.host.backgroundWorkChanged()
 
     let runner: PiChildRunner
@@ -974,24 +1101,28 @@ export class PiSubagentManager {
       toolUseId,
       taskId: record.agentId,
       taskType: 'local_agent',
-      // A finished child wakes its owner (ADR-089), so it is work, not a pause.
+      // A finished background child wakes its owner (ADR-089), so it is work, not a pause.
       wakesParent: true,
       runIndex: record.runIndex,
       startedAt: entry.startedAt,
-      // Every run is background, so no pi card offers "Send to background"
-      // (it needs `isBackgrounded: false`); the renderer still reads the field.
-      isBackgrounded: true
+      // Q7: a foreground run (only a child's call) says so, so its card can
+      // offer "Send to background".
+      isBackgrounded: background
     })
     logger.info(
       'PiSubagents',
-      `agent ${record.agentId} run ${record.runIndex} started (${definition.name}, depth ${record.depth}, model ${record.model}${start.kind === 'delivery' ? ', resumed' : ''})`
+      `agent ${record.agentId} run ${record.runIndex} started (${definition.name}, depth ${record.depth}, model ${record.model}${background ? ', background' : ''}${start.kind === 'delivery' ? ', resumed' : ''})`
     )
     return { ok: true, entry }
   }
 
   /** Fire and forget: `drive` and `notify` never reject; the catch is a last guard. */
   private driveInBackground(entry: LiveChild, start: RunStart): void {
-    void this.drive(entry, start)
+    this.afterBackgroundRun(entry, this.drive(entry, start))
+  }
+
+  private afterBackgroundRun(entry: LiveChild, driven: Promise<RunEnd>): void {
+    void driven
       .then((end) => this.notify(entry, end))
       .catch((err) =>
         logger.warn(
@@ -1008,13 +1139,16 @@ export class PiSubagentManager {
    * S2/S3), so while one is still undelivered (or such a run is already going)
    * the child is kept and that run awaited; without this it would be disposed
    * under it. Accumulators span the whole run. Then the UI notification (C10:
-   * before the owner's delivery), flush, dispose. Never rejects.
+   * before a foreground tool result returns and before the owner's delivery),
+   * the foreground runs this run launched that still wait on it go to the
+   * background (review F2), flush, dispose. Never rejects.
    */
   private async drive(entry: LiveChild, start: RunStart): Promise<RunEnd> {
     const runner = entry.runner!
     const { scope, record } = entry
     let end: RunEnd = {
       status: 'failed',
+      text: 'Agent failed.',
       summary: 'Agent failed.',
       report: null,
       // A run that threw inside the host is not recognised: permanent.
@@ -1069,9 +1203,11 @@ export class PiSubagentManager {
         durationMs: this.now() - entry.startedAt
       }
       if (entry.stopReason) {
+        const text = stoppedText(entry.stopReason)
         end = {
           status: 'stopped',
-          summary: stoppedText(entry.stopReason),
+          text,
+          summary: text,
           report: null,
           failure: null,
           usage
@@ -1080,6 +1216,10 @@ export class PiSubagentManager {
         const report = (await runner.lastAssistantText()) ?? '(the agent returned no text)'
         end = {
           status: 'completed',
+          text:
+            `${safeForegroundReport(report)}\n\n` +
+            `${continueLine(record.agentId, record.name || record.agentId)}\n` +
+            `${piAgentModelLine(record.model)}\n${usageBlock(usage)}`,
           summary: report,
           report,
           failure: null,
@@ -1089,6 +1229,7 @@ export class PiSubagentManager {
         const message = outcome === 'stopped' ? 'stopped' : outcome.message
         end = {
           status: 'failed',
+          text: `Agent failed: ${message}`,
           summary: `Agent failed: ${message}`,
           report: message,
           failure: classifyPiAgentFailure(failureInput(outcome, message)),
@@ -1112,16 +1253,17 @@ export class PiSubagentManager {
       if (record.stoppedBy !== 'user') record.userStopHold = false
       record.failure = end.status === 'failed' ? end.failure : null
       record.failureMessage = runFailureMessage(end)
-      // One end line for every run (ids only).
+      // One end line for every run, foreground or background (ids only).
       logger.info(
         'PiSubagents',
-        `agent ${record.agentId} run ${record.runIndex} ${end.status}${record.stoppedBy ? ` (by ${record.stoppedBy})` : ''}`
+        `agent ${record.agentId} run ${record.runIndex} ${end.status}${record.stoppedBy ? ` (by ${record.stoppedBy})` : ''} (${record.background ? 'background' : 'foreground'})`
       )
       // F1: whatever the run was granted dies with it.
       scope.grants.clear()
-      // C10 ordering: the notification goes out BEFORE the model delivery, so
+      // C10 ordering: the notification goes out BEFORE the hosted tool
+      // returns (foreground) and before the model delivery (background), so
       // the reducer has dropped this `local_agent` before the turn that
-      // delivery starts can end.
+      // follows can end.
       this.host.send('session:task-notification', {
         taskId: scope.agentId,
         toolUseId: scope.toolUseId,
@@ -1131,6 +1273,12 @@ export class PiSubagentManager {
         usage: end.usage,
         runIndex: record.runIndex
       })
+      // Review F2: a foreground run this run launched waits on an exchange
+      // that dies with this run (it exited, failed or ended), so it goes to the
+      // background: its report then reaches its owner by notification (the
+      // root, since this run is closing). A stop of this run already stopped
+      // them (the cascade), so this only catches an exit or a failure.
+      this.releaseWaitingChildren(scope.toolUseId)
       try {
         runner.flush()
         runner.dispose() // Q3: the session file stays; a resume respawns on it.
@@ -1144,9 +1292,23 @@ export class PiSubagentManager {
     return end
   }
 
+  /** Review F2: send every foreground run `spawnerToolUseId` launched that still waits on it to the background. */
+  private releaseWaitingChildren(spawnerToolUseId: string): void {
+    for (const [id, other] of [...this.live]) {
+      if (other.parentToolUseId !== spawnerToolUseId) continue
+      if (other.record.background || !other.onDetach || other.stopReason || other.closing) continue
+      logger.info(
+        'PiSubagents',
+        `agent ${other.record.agentId} run ${other.record.runIndex}: its spawner ended while it waited — sent to the background`
+      )
+      this.background(id)
+    }
+  }
+
   /**
-   * A finished run tells its owner (E4/E5), except when the session is going
-   * away. Completed/failed wake the owner; a stop is passive (Q5).
+   * A finished BACKGROUND run tells its owner (E4/E5), except when the session
+   * is going away; a foreground run's report is its tool result. Completed/
+   * failed wake the owner; a stop is passive (Q5).
    * The owner is the spawning child while its run is live — it launched the
    * agent and can still act on the result — otherwise the root session (Claude
    * Code's rule, Q4: resuming a finished spawner only to read a notification
@@ -1154,6 +1316,7 @@ export class PiSubagentManager {
    * then names the spawner, so the root can tell it never launched that id.
    */
   private async notify(entry: LiveChild, end: RunEnd): Promise<void> {
+    if (!entry.record.background) return
     if (entry.stopReason === 'dispose') {
       logger.debug(
         'PiSubagents',
@@ -1358,6 +1521,13 @@ export class PiSubagentManager {
     if (caller && target.agentId === caller.agentId) {
       return errorResult('You cannot send a message to yourself.')
     }
+    // The launcher of a foreground agent is blocked on its report (resolved
+    // first, so an id and a name are both caught). Only the launcher: `main`
+    // (above) is never a foreground run's launcher.
+    if (caller && sender?.spawnerAgentId === target.agentId) {
+      const refusal = this.foregroundChannelRefusal(caller)
+      if (refusal) return refusal
+    }
     const payload: PiAgentDelivery = {
       v: 1,
       deliveryId: uuidv4(),
@@ -1427,7 +1597,7 @@ export class PiSubagentManager {
       'PiSubagents',
       `agent-message ${payload.deliveryId} ${fromId} → ${target.agentId} (resume)`
     )
-    const launched = await this.launch(target, start)
+    const launched = await this.launch(target, true, start)
     if (!launched.ok) return errorResult(launched.error)
     this.driveInBackground(launched.entry, start)
     // The run notifies the agent's OWNER (its launcher while that runs, else
@@ -1462,6 +1632,39 @@ export class PiSubagentManager {
   }
 
   /**
+   * Send to background (G6): a live FOREGROUND run (only a child's call runs
+   * in the foreground) becomes a background one — its waiting call returns the
+   * async-launched text now (the child variant), the card re-arms with
+   * `isBackgrounded: true` (same run), and its end notifies its owner.
+   */
+  background(toolUseId: string): { success: boolean; error?: string } {
+    const entry = this.live.get(toolUseId)
+    if (!entry || entry.record.background || entry.stopReason || entry.closing || !entry.onDetach) {
+      return { success: false, error: 'No foreground agent is running for that card' }
+    }
+    this.markBackground(entry)
+    const detach = entry.onDetach
+    entry.onDetach = null
+    detach()
+    return { success: true }
+  }
+
+  /** A foreground run becomes a background one: its record, the re-armed card (same run), the idle timer. */
+  private markBackground(entry: LiveChild): void {
+    entry.record.background = true
+    this.host.send('session:task-started', {
+      toolUseId: entry.record.originToolUseId,
+      taskId: entry.record.agentId,
+      taskType: 'local_agent',
+      wakesParent: true,
+      runIndex: entry.record.runIndex,
+      startedAt: entry.startedAt,
+      isBackgrounded: true
+    })
+    this.host.backgroundWorkChanged()
+  }
+
+  /**
    * Rebuild a depth-1 record from the parent's history (G7), so a reopened
    * session can `send_message` an agent from an earlier app run. The type is
    * re-resolved from the current registry; a missing one keeps the record but
@@ -1491,6 +1694,7 @@ export class PiSubagentManager {
       spawnerToolUseId: null,
       spawnerLabel: null,
       canSpawn: found ? childCanSpawnAt(1, found) : false,
+      background: link.background === true,
       dir,
       promptFile: join(dir, 'system-prompt.md'),
       description: link.description ?? '',
@@ -1522,9 +1726,10 @@ export class PiSubagentManager {
    * Per-agent Stop (any depth): that agent and ALL its descendants. `'user'`
    * = the TaskCard's Stop; `'agent'` = `task_stop`; `'interrupt'` = a call
    * nobody waits on any more (pi abandoned the exchange). False when no live
-   * agent has that call id. An interrupt of the parent's turn calls none of
-   * this: every agent runs in the background and survives it (Claude Code's
-   * Esc keeps background agents).
+   * agent has that call id. An interrupt of the root's turn calls none of
+   * this: the root's agents all run in the background and survive it (as
+   * opencode's do, ADR-111 §4), and a child's foreground run belongs
+   * to that child's turn, which the root's interrupt does not touch.
    */
   stop(toolUseId: string, reason: 'user' | 'agent' | 'interrupt' = 'user'): boolean {
     return this.stopWith(toolUseId, reason)
@@ -1532,6 +1737,7 @@ export class PiSubagentManager {
 
   /** The session is going away (cancel, process exit): every child, no deliveries. */
   stopAll(reason: 'dispose'): void {
+    this.disposeEpoch += 1
     for (const id of [...this.live.keys()]) this.stopWith(id, reason)
   }
 
@@ -1642,8 +1848,9 @@ function runFailureMessage(end: RunEnd): string | null {
 }
 
 /**
- * What a failed run adds to the persisted notification `details`: the
- * classification and its message, only when there is a failure.
+ * What a failed run adds to the persisted `details` (a foreground result's
+ * `cuiAgent` and a background notification alike): the classification and its
+ * message, only when there is a failure.
  */
 function runFailureDetails(end: RunEnd): { failure?: PiAgentFailure; failureMessage?: string } {
   if (end.status !== 'failed' || !end.failure) return {}

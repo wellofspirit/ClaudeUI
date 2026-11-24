@@ -182,16 +182,17 @@ function until<T>(probe: () => T | undefined, what: string): Promise<T> {
 }
 
 /**
- * ONE `agent` call, followed to its run's END. Every run is a background run
- * (ADR-089), so the call's own result (`launched`) only says the child
- * STARTED: anything that needs the run to be over — its report, its stop, its
- * owner's delivery, or that something did NOT happen — awaits `ended()` (the
- * run's `session:task-notification`, sent once the child is flushed and
- * disposed, before the owner's delivery) or `delivered()` (the ROOT session's
+ * ONE BACKGROUND `agent` call, followed to its run's END. A root call always
+ * runs in the background (ADR-089), a child's only with `run_in_background:
+ * true`, so the call's own result (`launched`) only says the child STARTED:
+ * anything that needs the run to be over — its report, its stop, its owner's
+ * delivery, or that something did NOT happen — awaits `ended()` (the run's
+ * `session:task-notification`, sent once the child is flushed and disposed,
+ * before the owner's delivery) or `delivered()` (the ROOT session's
  * task-notification delivery for it). Both are lazy: a test that never asks
  * leaves no rejected promise behind. `launched` is what the call returned —
  * `mgr.run(...)` for a root launch, a child's `hostedToolHandler` for a nested
- * one.
+ * one. (A child's FOREGROUND call returns its report as `launched` itself.)
  */
 function agentRun(
   log: { sent: Array<[string, unknown]>; delivered: PiAgentDelivery[] },
@@ -312,6 +313,8 @@ describe('buildPiSubagentChildEnv', () => {
       CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
       CLAUDEUI_PI_PLAN_TOOLS: '',
       CLAUDEUI_PI_AGENT_TOOL: '1',
+      // Bridge v28: a child's `agent` is foreground by default, with run_in_background.
+      CLAUDEUI_PI_AGENT_SUBAGENT: '1',
       CLAUDEUI_PI_AGENT_LISTING: '- x: y',
       CLAUDEUI_PI_SEND_MESSAGE: '1',
       // Slice 2: a host-run child never gets the session tools (root agent only).
@@ -326,6 +329,7 @@ describe('buildPiSubagentChildEnv', () => {
       { childCanSpawn: false, listing: '- x: y' }
     )
     expect(cannot.CLAUDEUI_PI_AGENT_TOOL).toBe('')
+    expect(cannot.CLAUDEUI_PI_AGENT_SUBAGENT).toBe('')
     expect(cannot.CLAUDEUI_PI_AGENT_LISTING).toBe('')
     expect(Object.keys(cannot).sort()).toEqual(Object.keys(can).sort())
   })
@@ -555,7 +559,7 @@ describe('PiSubagentManager.run', () => {
 
     const started = sent.find(([c]) => c === 'session:task-started')![1] as Record<string, unknown>
     expect(started).toMatchObject({ toolUseId: 'call-7', taskType: 'local_agent', runIndex: 1 })
-    // Every run is background: no card offers "Send to background".
+    // A root run is background: its card offers no "Send to background".
     expect(started.isBackgrounded).toBe(true)
     const progress = sent.find(([c]) => c === 'session:task-progress')![1]
     expect(progress).toMatchObject({
@@ -701,11 +705,11 @@ describe('PiSubagentManager.run', () => {
     const child = fake.children[0]
     await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
 
-    // A grandchild launched through the child's own (granted) agent tool.
+    // A grandchild launched through the child's own (granted) agent tool, in the background.
     const grandGate = await child.opts.gateHandler({
       toolCallId: 'grand-call',
       toolName: 'agent',
-      input: { description: 'd', prompt: 'q' }
+      input: { description: 'd', prompt: 'q', run_in_background: true }
     })
     expect(grandGate).toEqual({ behavior: 'allow' })
     const grand = agentRun(
@@ -713,7 +717,7 @@ describe('PiSubagentManager.run', () => {
       'grand-call',
       child.opts.hostedToolHandler!({
         toolName: 'agent',
-        input: { description: 'd', prompt: 'q' },
+        input: { description: 'd', prompt: 'q', run_in_background: true },
         toolCallId: 'grand-call'
       })
     )
@@ -790,14 +794,14 @@ describe('PiSubagentManager.run', () => {
     await child.opts.gateHandler({
       toolCallId: 'grand-1',
       toolName: 'agent',
-      input: { description: 'd', prompt: 'q' }
+      input: { description: 'd', prompt: 'q', run_in_background: true }
     })
     const grand = agentRun(
       log,
       'grand-1',
       child.opts.hostedToolHandler!({
         toolName: 'agent',
-        input: { description: 'd', prompt: 'q' },
+        input: { description: 'd', prompt: 'q', run_in_background: true },
         toolCallId: 'grand-1'
       })
     )
@@ -1023,7 +1027,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     expect(host.backgroundWorkChanged).toHaveBeenCalledTimes(2)
   })
 
-  it('a stray run_in_background (false, or not even a boolean) is ignored: the call launches in the background and the run notifies the root', async () => {
+  it('the ROOT ignores run_in_background (false, true, or not even a boolean): every call launches in the background and the run notifies the root', async () => {
     const fake = makeFakeSpawn()
     const log = makeHost()
     const mgr = new PiSubagentManager(log.host, {
@@ -1036,6 +1040,11 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
         log,
         'bg-false',
         mgr.run({ description: 'd', prompt: 'p', run_in_background: false }, 'bg-false', null)
+      ),
+      agentRun(
+        log,
+        'bg-true',
+        mgr.run({ description: 'd', prompt: 'p', run_in_background: true }, 'bg-true', null)
       ),
       agentRun(
         log,
@@ -1052,17 +1061,18 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     const starts = log.sent.filter(([c]) => c === 'session:task-started').map(([, d]) => d)
     expect(starts).toEqual([
       expect.objectContaining({ toolUseId: 'bg-false', isBackgrounded: true }),
+      expect.objectContaining({ toolUseId: 'bg-true', isBackgrounded: true }),
       expect.objectContaining({ toolUseId: 'bg-yes', isBackgrounded: true })
     ])
-    // Both still running after their calls returned.
-    expect(mgr.liveCount).toBe(2)
+    // All still running after their calls returned.
+    expect(mgr.liveCount).toBe(3)
     for (const c of fake.children) await settle(c)
     for (const run of runs) {
       expect(await run.delivered()).toMatchObject({ wake: true, details: { status: 'completed' } })
     }
   })
 
-  it("a child's launch result says the report reaches it only while it still runs; the root's says it will be notified", async () => {
+  it("a child's background launch (run_in_background: true) says the report reaches it only while it still runs; the root's says it will be notified", async () => {
     const fake = makeFakeSpawn()
     const log = makeHost()
     const mgr = new PiSubagentManager(log.host, {
@@ -1082,7 +1092,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     expect(rootText).not.toContain('if you finish first')
     const a = fake.children[0]
     await promptedWith(a)
-    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true, name: 'grand' }
     await a.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     const grand = agentRun(
       log,
@@ -1182,7 +1192,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     const launch = async (
       id: string
     ): Promise<{ child: FakeChild; run: ReturnType<typeof agentRun> }> => {
-      const input = { description: id, prompt: 'q' }
+      const input = { description: id, prompt: 'q', run_in_background: true }
       await a.opts.gateHandler({ toolCallId: id, toolName: 'agent', input })
       const n = fake.children.length
       const run = agentRun(
@@ -1229,7 +1239,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     await vi.waitFor(() => expect(fake.children).toHaveLength(1))
     const a = fake.children[0]
     await promptedWith(a)
-    const input = { description: 'g', prompt: 'q' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true }
     await a.opts.gateHandler({ toolCallId: 'g', toolName: 'agent', input })
     await a.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'g' })
     await vi.waitFor(() => expect(fake.children).toHaveLength(2))
@@ -1305,7 +1315,7 @@ describe('PiSubagentManager — background runs (ADR-089 S3)', () => {
     await vi.waitFor(() => expect(fake.children).toHaveLength(1))
     const a = fake.children[0]
     await promptedWith(a)
-    const input = { description: 'g', prompt: 'q' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true }
     await a.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     const grand = agentRun(
       log,
@@ -1346,7 +1356,7 @@ describe('PiSubagentManager — owner routing liveness (ADR-089 S3 review R2)', 
     await vi.waitFor(() => expect(fake.children).toHaveLength(1))
     const f = fake.children[0]
     await vi.waitFor(() => expect(f.commands().some((c) => c.type === 'prompt')).toBe(true))
-    const input = { description: 'GB', prompt: 'q' }
+    const input = { description: 'GB', prompt: 'q', run_in_background: true }
     await f.opts.gateHandler({ toolCallId: 'call-GB', toolName: 'agent', input })
     const runGb = agentRun(
       log,
@@ -1404,6 +1414,502 @@ describe('PiSubagentManager — owner routing liveness (ADR-089 S3 review R2)', 
     expect(deliveriesOn(f)).toHaveLength(0)
     release()
     await runF.ended()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A child's foreground runs (Claude Code 2.1.330 parity): the root is
+// background-only, a child's `agent` call waits for the report by default
+// ---------------------------------------------------------------------------
+
+describe("PiSubagentManager — a child's foreground runs (Claude Code 2.1.330 parity)", () => {
+  function mgrWith(
+    fake: ReturnType<typeof makeFakeSpawn>,
+    host: PiSubagentHost,
+    registry: PiAgentRegistry = builtins()
+  ) {
+    return new PiSubagentManager(host, { spawn: fake.spawn, registry, sessionsRoot: root })
+  }
+  const agentIdOf = (child: FakeChild): string => {
+    const args = child.opts.args!
+    return args[args.indexOf('--session-id') + 1]
+  }
+  /** The `session:task-started` payloads of one card, in order. */
+  const startsFor = (
+    log: ReturnType<typeof makeHost>,
+    toolUseId: string
+  ): Array<Record<string, unknown>> =>
+    log.sent
+      .filter(([c, d]) => c === 'session:task-started' && (d as TaskNote).toolUseId === toolUseId)
+      .map(([, d]) => d as Record<string, unknown>)
+  /**
+   * A root agent `lead` (background) and `launch`, which calls `agent` through
+   * LEAD's own granted tool as its model would (the gate, then the hosted
+   * call). `result` is that call's own promise: for a foreground run, it
+   * settles only at the run's end.
+   */
+  async function withLead(
+    fake: ReturnType<typeof makeFakeSpawn>,
+    mgr: PiSubagentManager,
+    log: ReturnType<typeof makeHost>
+  ) {
+    const n = fake.children.length
+    const run = agentRun(
+      log,
+      'call-L',
+      mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(n + 1))
+    const lead = fake.children[n]
+    await promptedWith(lead)
+    const launch = async (
+      toolCallId: string,
+      input: Record<string, unknown>
+    ): Promise<{ result: Promise<PiHostedToolResult>; child: FakeChild }> => {
+      expect(await lead.opts.gateHandler({ toolCallId, toolName: 'agent', input })).toEqual({
+        behavior: 'allow'
+      })
+      const m = fake.children.length
+      const result = lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId })
+      await vi.waitFor(() => expect(fake.children).toHaveLength(m + 1))
+      const child = fake.children[m]
+      await promptedWith(child)
+      return { result, child }
+    }
+    return { run, lead, launch }
+  }
+  const NO_FOREGROUND = { success: false, error: 'No foreground agent is running for that card' }
+
+  it("a child's default call waits for the run and returns the report as its tool result (continue line, model, <usage>); no owner is notified", async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    const mgr = mgrWith(fake, log.host)
+    const { run, lead, launch } = await withLead(fake, mgr, log)
+    const { result, child } = await launch('call-F', { description: 'fg', prompt: 'q', name: 'fg' })
+    const fgId = agentIdOf(child)
+    // Q7: a foreground run says so, so its card offers "Send to background".
+    expect(startsFor(log, 'call-F')).toEqual([
+      expect.objectContaining({ runIndex: 1, isBackgrounded: false, wakesParent: true })
+    ])
+    expect(mgr.record(fgId)!.background).toBe(false)
+    let returned = false
+    void result.then(() => (returned = true))
+    await new Promise((r) => setTimeout(r, 10))
+    expect(returned).toBe(false)
+    expect(mgr.liveCount).toBe(2)
+
+    child.push(usageEnd(10, 5))
+    child.push({ type: 'agent_settled' })
+    const r = await result
+    expect(r.isError).toBeUndefined()
+    expect(r.content[0].text).toMatch(
+      new RegExp(
+        `^report 2\\n\\nagentId: ${fgId} \\(use send_message with to: 'fg' to continue this agent\\.\\)\\n` +
+          'model: openai-codex/parent-model\\n' +
+          '<usage>total_tokens: 15\\ntool_uses: 0\\nduration_ms: \\d+</usage>$'
+      )
+    )
+    // The persisted link of a foreground run: terminal, with no `background`.
+    expect(r.details).toEqual({
+      cuiAgent: {
+        v: 1,
+        agentId: fgId,
+        subagentType: 'general-purpose',
+        name: 'fg',
+        description: 'fg',
+        model: 'openai-codex/parent-model',
+        status: 'completed'
+      }
+    })
+    // C10: the UI end went out before the result returned.
+    expect(
+      log.sent.find(
+        ([c, d]) => c === 'session:task-notification' && (d as TaskNote).toolUseId === 'call-F'
+      )?.[1]
+    ).toMatchObject({ status: 'completed', summary: 'report 2' })
+    expect(child.client.dispose).toHaveBeenCalledTimes(1)
+    // The report reached lead as its tool result: no notification on lead, none at the root.
+    await new Promise((r) => setTimeout(r, 10))
+    expect(deliveriesOn(lead)).toHaveLength(0)
+    expect(log.delivered).toHaveLength(0)
+
+    lead.push({ type: 'agent_settled' })
+    expect((await run.delivered()).details).toMatchObject({ toolUseId: 'call-L' })
+    expect(log.delivered).toHaveLength(1)
+  })
+
+  it("a child's failed foreground run is an isError result carrying its failure; a stopped one carries stoppedBy and no failure", async () => {
+    const overflow = 'prompt is too long: 213462 tokens > 200000 maximum'
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    const mgr = mgrWith(fake, log.host)
+    const { run, lead, launch } = await withLead(fake, mgr, log)
+
+    const failed = await launch('call-F1', { description: 'f1', prompt: 'q' })
+    failed.child.push(errorEnd(overflow))
+    const f = await failed.result
+    expect(f).toMatchObject({ isError: true, content: [{ text: `Agent failed: ${overflow}` }] })
+    expect(f.details).toMatchObject({
+      cuiAgent: { status: 'failed', failure: 'permanent', failureMessage: overflow }
+    })
+    expect(f.details).not.toHaveProperty('cuiAgent.background')
+
+    const stopped = await launch('call-F2', { description: 'f2', prompt: 'q' })
+    expect(mgr.stop('call-F2', 'user')).toBe(true)
+    stopped.child.push({ type: 'agent_settled' })
+    const s = await stopped.result
+    expect(s).toMatchObject({ isError: true, content: [{ text: 'Agent stopped by user.' }] })
+    expect(s.details).toMatchObject({ cuiAgent: { status: 'stopped', stoppedBy: 'user' } })
+    expect(s.details).not.toHaveProperty('cuiAgent.failure')
+    expect(log.delivered).toHaveLength(0)
+
+    lead.push({ type: 'agent_settled' })
+    await run.delivered()
+  })
+
+  it("a child's non-boolean run_in_background is refused with no spawn; a definition's background: true (parsed from a real file) forces the background for a child and changes nothing for the root", async () => {
+    const defs = path.join(root, 'defs')
+    fs.mkdirSync(defs)
+    fs.writeFileSync(
+      path.join(defs, 'bg-only.md'),
+      '---\nname: bg-only\ndescription: Always in the background\nbackground: true\n---\nScan.\n'
+    )
+    const registry = loadPiAgentRegistry({
+      cwd: root,
+      userAgentsDir: defs,
+      claudeUserAgentsDir: path.join(root, 'no-claude-agents')
+    })
+    expect(registry.resolve('bg-only')).toMatchObject({ name: 'bg-only', background: true })
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    const mgr = mgrWith(fake, log.host, registry)
+    const { run, lead, launch } = await withLead(fake, mgr, log)
+
+    for (const value of ['yes', 1, null]) {
+      const input = { description: 'x', prompt: 'q', run_in_background: value }
+      await lead.opts.gateHandler({ toolCallId: `bad-${value}`, toolName: 'agent', input })
+      expect(
+        await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: `bad-${value}` })
+      ).toEqual({
+        content: [{ type: 'text', text: 'agent "run_in_background" must be a boolean.' }],
+        isError: true
+      })
+    }
+    expect(fake.children).toHaveLength(1)
+
+    // The definition wins over an explicit false.
+    const forced = await launch('call-BG', {
+      description: 'b',
+      prompt: 'q',
+      subagent_type: 'bg-only',
+      run_in_background: false
+    })
+    const r = await forced.result
+    expect(r.content[0].text).toMatch(/^Async agent launched successfully\./)
+    expect(r.content[0].text).toContain('only if you are still running when it finishes')
+    expect(r.details).toMatchObject({ cuiAgent: { background: true, status: 'async_launched' } })
+    expect(startsFor(log, 'call-BG')).toEqual([expect.objectContaining({ isBackgrounded: true })])
+    await settle(forced.child)
+    await vi.waitFor(() => expect(deliveriesOn(lead)).toHaveLength(1))
+    expect(deliveriesOn(lead)[0].details).toMatchObject({ toolUseId: 'call-BG' })
+
+    // The root: background whatever the definition says (it always is).
+    const rootRun = agentRun(
+      log,
+      'call-R',
+      mgr.run({ description: 'r', prompt: 'p', subagent_type: 'bg-only' }, 'call-R', null)
+    )
+    expect((await rootRun.launched).content[0].text).toContain(
+      'You will be notified automatically when it completes.'
+    )
+    await settle(fake.children[2])
+    await rootRun.delivered()
+
+    lead.push(deliveredEvent(deliveriesOn(lead)[0]))
+    lead.push({ type: 'agent_settled' })
+    await run.delivered()
+  })
+
+  it("Send to background (G6) on a child's foreground run: the waiting call returns the child's async text, the card re-arms (same run, isBackgrounded), and the end notifies its owner; a root run has nothing to send", async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    const mgr = mgrWith(fake, log.host)
+    const { run, lead, launch } = await withLead(fake, mgr, log)
+    expect(mgr.background('call-L')).toEqual(NO_FOREGROUND)
+
+    const { result, child } = await launch('call-S', {
+      description: 's',
+      prompt: 'q',
+      name: 'slow'
+    })
+    const [first] = startsFor(log, 'call-S')
+    expect(first).toMatchObject({ isBackgrounded: false, wakesParent: true })
+    vi.mocked(log.host.backgroundWorkChanged).mockClear()
+
+    expect(mgr.background('call-S')).toEqual({ success: true })
+    const r = await result
+    expect(r.content[0].text).toBe(
+      'Async agent launched successfully.\n' +
+        `agentId: ${agentIdOf(child)} (use send_message with to: 'slow' to continue this agent.)\n` +
+        'model: openai-codex/parent-model\n' +
+        'The agent is working in the background. Its report reaches you as a notification only if ' +
+        'you are still running when it finishes; if you finish first, it goes to the main session ' +
+        'instead. You know nothing about its results until that notification arrives — do not ' +
+        'report, assume, or predict them. If you end your turn before it reports, say in your final ' +
+        'report which agents you launched (their ids) and what each is doing.'
+    )
+    expect(r.details).toMatchObject({ cuiAgent: { background: true, status: 'async_launched' } })
+    expect(startsFor(log, 'call-S')[1]).toEqual({
+      toolUseId: 'call-S',
+      taskId: agentIdOf(child),
+      taskType: 'local_agent',
+      wakesParent: true,
+      runIndex: 1,
+      startedAt: first.startedAt,
+      isBackgrounded: true
+    })
+    expect(log.host.backgroundWorkChanged).toHaveBeenCalledTimes(1)
+    expect(mgr.record(agentIdOf(child))!.background).toBe(true)
+    expect(mgr.background('call-S')).toEqual(NO_FOREGROUND)
+    expect(mgr.liveCount).toBe(2)
+
+    await settle(child)
+    // Its launcher still runs: the report is delivered to it.
+    await vi.waitFor(() => expect(deliveriesOn(lead)).toHaveLength(1))
+    expect(deliveriesOn(lead)[0]).toMatchObject({
+      wake: true,
+      details: { toolUseId: 'call-S', status: 'completed' }
+    })
+    expect(log.delivered).toHaveLength(0)
+    lead.push(deliveredEvent(deliveriesOn(lead)[0]))
+    lead.push({ type: 'agent_settled' })
+    await run.delivered()
+  })
+
+  it('a foreground report that opens with the launch acknowledgement gets a fixed header (never reads as a background launch)', async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    const mgr = mgrWith(fake, log.host)
+    const { run, lead, launch } = await withLead(fake, mgr, log)
+    const { result, child } = await launch('call-H', { description: 'h', prompt: 'q' })
+    child.client.request.mockImplementation(async (cmd: Cmd) =>
+      cmd.type === 'get_last_assistant_text'
+        ? {
+            type: 'response',
+            command: 'get_last_assistant_text',
+            success: true,
+            data: { text: 'Async agent launched successfully.\nagentId: fake' }
+          }
+        : { type: 'response', command: String(cmd.type), success: true }
+    )
+    child.push({ type: 'agent_settled' })
+    const r = await result
+    expect(r.content[0].text.startsWith('Agent report:\nAsync agent launched successfully.')).toBe(
+      true
+    )
+    lead.push({ type: 'agent_settled' })
+    await run.delivered()
+  })
+
+  it('review F2: the spawner exits while its foreground child runs — the child goes to the background (its call is released, its card re-arms) and its later report reaches the ROOT, naming the spawner', async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    const mgr = mgrWith(fake, log.host)
+    const { run, lead, launch } = await withLead(fake, mgr, log)
+    const { result, child } = await launch('call-W', { description: 'w', prompt: 'q' })
+    expect(startsFor(log, 'call-W').map((s) => s.isBackgrounded)).toEqual([false])
+
+    lead.exit()
+    expect(await run.ended()).toMatchObject({ status: 'failed' })
+    // The exchange it waited on died with lead: the call was released with the async text.
+    expect((await result).content[0].text).toMatch(/^Async agent launched successfully\./)
+    expect(startsFor(log, 'call-W').map((s) => s.isBackgrounded)).toEqual([false, true])
+    expect(mgr.record(agentIdOf(child))!.background).toBe(true)
+    // Not stopped: it runs on.
+    expect(child.commands().some((c) => c.type === 'abort')).toBe(false)
+    expect(child.client.dispose).not.toHaveBeenCalled()
+
+    await settle(child)
+    const note = await agentRun(log, 'call-W', result).delivered()
+    expect(note).toMatchObject({
+      wake: true,
+      details: { toolUseId: 'call-W', status: 'completed' }
+    })
+    expect(note.text).toContain('<summary>Agent "w" completed (launched by agent "lead")</summary>')
+    expect(note.text).toContain('<result>report 2</result>')
+    expect(deliveriesOn(lead)).toHaveLength(0)
+  })
+
+  it("review F2's gap: a spawner that ends while its foreground child is still starting leaves nobody waiting, so the child runs in the background and reports to the ROOT", async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    let release: () => void = () => {}
+    const held = new Promise<void>((r) => (release = r))
+    let holdNext = false
+    const mgr = new PiSubagentManager(log.host, {
+      spawn: async (o) => {
+        if (holdNext) await held
+        return fake.spawn(o)
+      },
+      registry: builtins(),
+      sessionsRoot: root
+    })
+    const { run, lead } = await withLead(fake, mgr, log)
+    holdNext = true
+    const input = { description: 'late', prompt: 'q' }
+    await lead.opts.gateHandler({ toolCallId: 'call-late', toolName: 'agent', input })
+    const result = lead.opts.hostedToolHandler!({
+      toolName: 'agent',
+      input,
+      toolCallId: 'call-late'
+    })
+    await vi.waitFor(() => expect(mgr.liveCount).toBe(2))
+
+    lead.exit()
+    await run.ended()
+    release()
+    expect((await result).content[0].text).toMatch(/^Async agent launched successfully\./)
+    expect(startsFor(log, 'call-late').map((s) => s.isBackgrounded)).toEqual([false, true])
+    await settle(fake.children[1])
+    const note = await agentRun(log, 'call-late', result).delivered()
+    expect(note.text).toContain('(launched by agent "lead")')
+  })
+
+  it('a Stop of the spawner while it is blocked in a foreground call stops both, with no hang (the spawner settles its abort only after the grandchild has returned)', async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    const mgr = mgrWith(fake, log.host)
+    const { run, lead, launch } = await withLead(fake, mgr, log)
+    const { result, child } = await launch('call-B', { description: 'b', prompt: 'q' })
+
+    expect(mgr.stop('call-L', 'user')).toBe(true)
+    // The cascade: the grandchild is aborted first, then the spawner.
+    expect(child.commands().some((c) => c.type === 'abort')).toBe(true)
+    expect(lead.commands().some((c) => c.type === 'abort')).toBe(true)
+
+    // The grandchild drains and its call returns, stopped, to the still-draining spawner…
+    child.push({ type: 'agent_settled' })
+    const r = await result
+    expect(r).toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: 'Agent stopped by user.' }],
+      details: { cuiAgent: { status: 'stopped', stoppedBy: 'user' } }
+    })
+    // …and only then does the spawner settle its own abort.
+    lead.push({ type: 'agent_settled' })
+    expect(await run.ended()).toMatchObject({ status: 'stopped' })
+    expect(await run.delivered()).toMatchObject({
+      wake: false,
+      details: { status: 'stopped', stoppedBy: 'user' }
+    })
+    expect(mgr.liveCount).toBe(0)
+    // Not sent to the background on the spawner's end (it was stopped), and its
+    // report was its result: nothing else was delivered anywhere.
+    expect(startsFor(log, 'call-B').map((s) => s.isBackgrounded)).toEqual([false])
+    await new Promise((r) => setTimeout(r, 10))
+    expect(log.delivered.map((p) => p.details.toolUseId)).toEqual(['call-L'])
+    expect(deliveriesOn(lead)).toHaveLength(0)
+  })
+
+  it('exit review F1: a Stop of the spawner while its foreground call is still SPAWNING stops both; the grandchild is never sent to the background or reported', async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    let release: () => void = () => {}
+    const held = new Promise<void>((r) => (release = r))
+    let spawns = 0
+    const mgr = new PiSubagentManager(log.host, {
+      spawn: async (o) => {
+        spawns += 1
+        if (spawns === 2) await held
+        return fake.spawn(o)
+      },
+      registry: builtins(),
+      sessionsRoot: root
+    })
+    const { run, lead } = await withLead(fake, mgr, log)
+    const input = { description: 'b', prompt: 'q' }
+    expect(await lead.opts.gateHandler({ toolCallId: 'call-B', toolName: 'agent', input })).toEqual(
+      { behavior: 'allow' }
+    )
+    const result = lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-B' })
+    await vi.waitFor(() => expect(spawns).toBe(2))
+    // The cascade reaches the grandchild while its process is still starting.
+    expect(mgr.stop('call-L', 'user')).toBe(true)
+    release()
+    expect(await result).toMatchObject({
+      isError: true,
+      content: [{ type: 'text', text: 'Agent stopped by user.' }],
+      details: { cuiAgent: { status: 'stopped', stoppedBy: 'user' } }
+    })
+    lead.push({ type: 'agent_settled' })
+    expect(await run.ended()).toMatchObject({ status: 'stopped' })
+    // Never re-armed as a background run, and nothing but the spawner's own
+    // passive notice reaches the root.
+    expect(startsFor(log, 'call-B').map((s) => s.isBackgrounded)).toEqual([false])
+    await new Promise((r) => setTimeout(r, 10))
+    expect(log.delivered.map((p) => p.details.toolUseId)).toEqual(['call-L'])
+    expect(mgr.liveCount).toBe(0)
+  })
+
+  it('#275: a spawner stopped while its agent call is parked on the catalog read launches nothing', async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    let release: (c: never[]) => void = () => {}
+    const gate = new Promise<never[]>((r) => (release = r))
+    const mgr = new PiSubagentManager(log.host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root,
+      catalog: () => gate
+    })
+    const { run, lead } = await withLead(fake, mgr, log)
+    const input = { description: 'b', prompt: 'q', model: 'opus' }
+    expect(await lead.opts.gateHandler({ toolCallId: 'call-B', toolName: 'agent', input })).toEqual(
+      { behavior: 'allow' }
+    )
+    const result = lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-B' })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(mgr.stop('call-L', 'user')).toBe(true)
+    release([])
+    expect(await result).toEqual({
+      content: [{ type: 'text', text: 'Agent stopped.' }],
+      isError: true
+    })
+    expect(fake.spawn).toHaveBeenCalledTimes(1)
+    lead.push({ type: 'agent_settled' })
+    expect(await run.ended()).toMatchObject({ status: 'stopped' })
+  })
+
+  it('#275: the session going away while a call is parked on the catalog read refuses it; a later launch (a restarted session) still runs', async () => {
+    const fake = makeFakeSpawn()
+    const log = makeHost()
+    let release: (c: never[]) => void = () => {}
+    const gate = new Promise<never[]>((r) => (release = r))
+    let parked = true
+    const mgr = new PiSubagentManager(log.host, {
+      spawn: fake.spawn,
+      registry: builtins(),
+      sessionsRoot: root,
+      catalog: () => (parked ? gate : Promise.resolve([]))
+    })
+    const result = mgr.run({ description: 'd', prompt: 'p', model: 'opus' }, 'call-x', null)
+    await new Promise((r) => setTimeout(r, 0))
+    mgr.stopAll('dispose')
+    release([])
+    expect(await result).toEqual({
+      content: [{ type: 'text', text: 'The session is closing.' }],
+      isError: true
+    })
+    expect(fake.spawn).not.toHaveBeenCalled()
+    parked = false
+    const later = agentRun(
+      log,
+      'call-y',
+      mgr.run({ description: 'd', prompt: 'p', model: 'opus' }, 'call-y', null)
+    )
+    expect((await later.launched).isError).toBeUndefined()
+    await settle(fake.children[0])
+    expect(await later.ended()).toMatchObject({ status: 'completed' })
   })
 })
 
@@ -1576,7 +2082,7 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
         'call-a',
         mgr.run({ description: 'd', prompt: 'p', name: 'alpha' }, 'call-a', null)
       ),
-      // Before the change, this one ran in the foreground and was refused "main".
+      // A ROOT call's run_in_background: false is ignored: it runs in the background.
       agentRun(
         log,
         'call-b',
@@ -1673,7 +2179,7 @@ describe('PiSubagentManager — messaging (ADR-089 S3b)', () => {
     await mgr.run({ description: 'd', prompt: 'p', name: 'other' }, 'call-O', null)
     const [lead, other] = fake.children
     await promptedWith(lead)
-    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true, name: 'grand' }
     await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
     await vi.waitFor(() => expect(fake.children).toHaveLength(3))
@@ -1861,7 +2367,7 @@ describe('PiSubagentManager — S3b review round 1', () => {
     await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
     const lead = fake.children[0]
     await promptedWith(lead)
-    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true, name: 'grand' }
     await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
     await vi.waitFor(() => expect(fake.children).toHaveLength(2))
@@ -2141,7 +2647,7 @@ describe('PiSubagentManager — logging (S4, ids and kinds only)', () => {
     })
   }
 
-  it('L1: one start and one end line per run — a completion and a user stop', async () => {
+  it("L1: one start and one end line per run — a completion, a user stop, and a child's foreground run", async () => {
     const fake = makeFakeSpawn()
     const log = makeHost()
     const mgr = mgrWith(fake, log.host)
@@ -2149,7 +2655,7 @@ describe('PiSubagentManager — logging (S4, ids and kinds only)', () => {
     const done = agentRun(log, 'bg-l1', mgr.run({ description: 'd', prompt: 'p' }, 'bg-l1', null))
     await settle(fake.children[0])
     await done.delivered()
-    expect(lines().filter((l) => / run 1 completed$/.test(l))).toHaveLength(1)
+    expect(lines().filter((l) => / run 1 completed \(background\)$/.test(l))).toHaveLength(1)
 
     const stopped = agentRun(
       log,
@@ -2161,12 +2667,39 @@ describe('PiSubagentManager — logging (S4, ids and kinds only)', () => {
     expect(mgr.stop('bg-stop', 'user')).toBe(true)
     fake.children[1].push({ type: 'agent_settled' })
     await stopped.delivered()
-    expect(lines().filter((l) => / run 1 stopped \(by user\)$/.test(l))).toHaveLength(1)
+    expect(
+      lines().filter((l) => / run 1 stopped \(by user\) \(background\)$/.test(l))
+    ).toHaveLength(1)
     // No run logged its start or its end twice.
     expect(
       lines().filter((l) => / run 1 started \(general-purpose, depth 1, /.test(l))
     ).toHaveLength(2)
     expect(lines().filter((l) => / run 1 (completed|stopped|failed)/.test(l))).toHaveLength(2)
+
+    // A child's default call: its start line has no ", background", its end says foreground.
+    const lead = agentRun(
+      log,
+      'bg-lead',
+      mgr.run({ description: 'd', prompt: 'p' }, 'bg-lead', null)
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    await promptedWith(fake.children[2])
+    const input = { description: 'f', prompt: 'q' }
+    await fake.children[2].opts.gateHandler({ toolCallId: 'fg-l1', toolName: 'agent', input })
+    const fg = fake.children[2].opts.hostedToolHandler!({
+      toolName: 'agent',
+      input,
+      toolCallId: 'fg-l1'
+    })
+    await vi.waitFor(() => expect(fake.children).toHaveLength(4))
+    await settle(fake.children[3])
+    expect((await fg).isError).toBeUndefined()
+    expect(lines().filter((l) => / run 1 completed \(foreground\)$/.test(l))).toHaveLength(1)
+    expect(
+      lines().filter((l) => / run 1 started \(general-purpose, depth 2, model [^,)]+\)$/.test(l))
+    ).toHaveLength(1)
+    await settle(fake.children[2])
+    await lead.delivered()
   })
 
   it('L2: a background notification is logged with its delivery id, owner and wake — never its text', async () => {
@@ -2311,7 +2844,7 @@ describe('PiSubagentManager — S1a: the user-stop hold', () => {
     await mgr.run({ description: 'd', prompt: 'p', name: 'lead' }, 'call-L', null)
     const lead = fake.children[0]
     await promptedWith(lead)
-    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true, name: 'grand' }
     await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
     await vi.waitFor(() => expect(fake.children).toHaveLength(2))
@@ -2781,7 +3314,8 @@ describe('piAgentIdentityBlock (S2)', () => {
     expect(piAgentIdentityBlock({ agentId: ID, spawner: null })).toBe(
       [
         `Your agent id is ${ID}. You were launched by the main session.`,
-        "To message the agent that launched you, use send_message with to: 'main'.",
+        "To message the agent that launched you while you run in the background, use send_message with to: 'main'. " +
+          'In the foreground your final report is your only channel to it.',
         TAIL
       ].join('\n')
     )
@@ -2827,6 +3361,8 @@ describe('PiSubagentManager — S2: identity in the system prompt, messaging the
   }
   const promptOf = (mgr: PiSubagentManager, child: FakeChild): string =>
     fs.readFileSync(mgr.record(agentIdOf(child))!.promptFile, 'utf-8')
+  const FOREGROUND_REFUSAL =
+    'You are running in the foreground; your final report is returned to the agent that launched you.'
 
   it('every launch appends the identity block to system-prompt.md: depth 1 and depth 2, and a resume rewrites it', async () => {
     const fake = makeFakeSpawn()
@@ -2840,12 +3376,13 @@ describe('PiSubagentManager — S2: identity in the system prompt, messaging the
     expect(text).toContain(PI_SUBAGENT_SUFFIX)
     expect(text).toContain(
       `Your agent id is ${leadId} and your name is "lead". You were launched by the main session.\n` +
-        "To message the agent that launched you, use send_message with to: 'main'.\n" +
+        "To message the agent that launched you while you run in the background, use send_message with to: 'main'. " +
+        'In the foreground your final report is your only channel to it.\n' +
         'Messages from other agents arrive inside <agent-message from="…" from-id="…"> tags; reply '
     )
 
     // Depth 2: a named grandchild, addressed through its spawner's NAME.
-    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true, name: 'grand' }
     await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
     await vi.waitFor(() => expect(fake.children).toHaveLength(2))
@@ -2895,7 +3432,7 @@ ${scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')}`)
     ])
 
     // a grandchild shares the same (the parent session's) scratchpad
-    const input = { description: 'g', prompt: 'q', name: 'grand' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true, name: 'grand' }
     await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
     await vi.waitFor(() => expect(fake.children).toHaveLength(2))
@@ -2919,7 +3456,7 @@ ${scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')}`)
     await mgr.run({ description: 'Scan the repo', prompt: 'p' }, 'call-L', null)
     const lead = fake.children[0]
     await promptedWith(lead)
-    const input = { description: 'g', prompt: 'q' }
+    const input = { description: 'g', prompt: 'q', run_in_background: true }
     await lead.opts.gateHandler({ toolCallId: 'call-G', toolName: 'agent', input })
     await lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-G' })
     await vi.waitFor(() => expect(fake.children).toHaveLength(2))
@@ -2931,10 +3468,10 @@ ${scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')}`)
     lead.push({ type: 'agent_settled' })
   })
 
-  it('a child messages its launcher by name and by id — even one launched with a stray run_in_background: false — and each lands on the launcher', async () => {
+  it('a FOREGROUND grandchild is refused when it messages its launcher by name or id, and reaches main; a BACKGROUND one steers its launcher', async () => {
     const fake = makeFakeSpawn()
     const log = makeHost()
-    const { host } = log
+    const { host, delivered } = log
     const mgr = mgrWith(fake, host)
     const leadRun = agentRun(
       log,
@@ -2946,44 +3483,75 @@ ${scratchpadPrompt('/t/claudeui/proj/sess/scratchpad')}`)
     await promptedWith(lead)
     const leadId = agentIdOf(lead)
 
-    // Before the change, this child ran in the foreground and was refused its launcher.
-    const input = { description: 'w', prompt: 'q', name: 'worker', run_in_background: false }
-    await lead.opts.gateHandler({ toolCallId: 'call-W', toolName: 'agent', input })
-    const workerRun = agentRun(
-      log,
-      'call-W',
-      lead.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'call-W' })
-    )
-    expect((await workerRun.launched).content[0].text).toMatch(
-      /^Async agent launched successfully\./
-    )
+    // A child's default call runs in the foreground: `lead` is blocked in it.
+    const fgInput = { description: 'f', prompt: 'q', name: 'fg' }
+    await lead.opts.gateHandler({ toolCallId: 'call-F', toolName: 'agent', input: fgInput })
+    const fgRun = lead.opts.hostedToolHandler!({
+      toolName: 'agent',
+      input: fgInput,
+      toolCallId: 'call-F'
+    })
     await vi.waitFor(() => expect(fake.children).toHaveLength(2))
-    const worker = fake.children[1]
-    await promptedWith(worker)
-    const workerScope = await scopeOf(host, worker)
+    const fg = fake.children[1]
+    await promptedWith(fg)
+    const fgScope = await scopeOf(host, fg)
     for (const to of ['lead', leadId]) {
-      expect(await mgr.sendMessage({ to, message: `hi ${to}` }, workerScope)).toEqual({
+      expect(await mgr.sendMessage({ to, message: 'hi' }, fgScope)).toEqual({
+        content: [{ type: 'text', text: FOREGROUND_REFUSAL }],
+        isError: true
+      })
+    }
+    expect(deliveriesOn(lead)).toHaveLength(0)
+    // Only its launcher is off limits: `main` is never a foreground run's launcher.
+    expect(await mgr.sendMessage({ to: 'main', message: 'note' }, fgScope)).toEqual({
+      content: [{ type: 'text', text: "Message queued for the main conversation's next turn." }]
+    })
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toMatchObject({
+      kind: 'agent-message',
+      details: { from: 'fg', fromId: agentIdOf(fg), to: 'main' }
+    })
+    // Itself keeps its own rule.
+    expect((await mgr.sendMessage({ to: 'fg', message: 'me' }, fgScope)).content[0].text).toBe(
+      'You cannot send a message to yourself.'
+    )
+
+    // A background sibling (run_in_background: true) reaches the same launcher.
+    const bgInput = { description: 'b', prompt: 'q', name: 'bg', run_in_background: true }
+    await lead.opts.gateHandler({ toolCallId: 'call-B', toolName: 'agent', input: bgInput })
+    const bgRun = agentRun(
+      log,
+      'call-B',
+      lead.opts.hostedToolHandler!({ toolName: 'agent', input: bgInput, toolCallId: 'call-B' })
+    )
+    await vi.waitFor(() => expect(fake.children).toHaveLength(3))
+    const bg = fake.children[2]
+    await promptedWith(bg)
+    const bgScope = await scopeOf(host, bg)
+    for (const to of ['lead', leadId]) {
+      expect(await mgr.sendMessage({ to, message: `hi ${to}` }, bgScope)).toEqual({
         content: [
           { type: 'text', text: 'Message queued for delivery to lead at its next tool round.' }
         ]
       })
     }
-    expect(deliveriesOn(lead)).toHaveLength(2)
     expect(deliveriesOn(lead).map((p) => p.details)).toEqual([
-      expect.objectContaining({ from: 'worker', fromId: agentIdOf(worker) }),
-      expect.objectContaining({ from: 'worker', fromId: agentIdOf(worker) })
+      expect.objectContaining({ from: 'bg', fromId: agentIdOf(bg) }),
+      expect.objectContaining({ from: 'bg', fromId: agentIdOf(bg) })
     ])
-    // Itself is still refused.
-    expect(
-      (await mgr.sendMessage({ to: 'worker', message: 'me' }, workerScope)).content[0].text
-    ).toBe('You cannot send a message to yourself.')
 
+    // The foreground run ends: its report is lead's tool result, never a notification.
+    fg.push({ type: 'agent_settled' })
+    expect((await fgRun).content[0].text).toMatch(/^report 2\n\nagentId: /)
     for (const p of deliveriesOn(lead)) lead.push(deliveredEvent(p))
     lead.push({ type: 'agent_settled' })
     await leadRun.ended()
-    worker.push({ type: 'agent_settled' })
-    // Its launcher has finished, so its own report goes to the root.
-    expect((await workerRun.delivered()).text).toContain('(launched by agent "lead")')
+    bg.push({ type: 'agent_settled' })
+    // Its launcher has finished, so the background run's report goes to the root.
+    expect((await bgRun.delivered()).text).toContain('(launched by agent "lead")')
+    expect(
+      delivered.filter((p) => p.kind === 'task-notification' && p.details.toolUseId === 'call-F')
+    ).toEqual([])
   })
 })
 

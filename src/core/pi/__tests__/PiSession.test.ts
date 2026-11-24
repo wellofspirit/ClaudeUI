@@ -872,6 +872,8 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
           CLAUDEUI_PI_DISPATCH_DESCRIPTION: expect.stringContaining('DIFFERENT engine'),
           CLAUDEUI_PI_PLAN_TOOLS: '1',
+          // The root's `agent` shape (bridge v28): every call runs in the background.
+          CLAUDEUI_PI_AGENT_SUBAGENT: '',
           CLAUDEUI_PI_AGENT_TOOL: '1',
           CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: '),
           CLAUDEUI_PI_SEND_MESSAGE: '1'
@@ -6774,6 +6776,9 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const opts = lastSpawnOpts()
     expect(opts.args.filter((a) => a === '-e')).toHaveLength(1)
     expect(opts.env.CLAUDEUI_PI_AGENT_TOOL).toBe('1')
+    // The root shape (bridge v28): '' explicitly, never absent, so a ClaudeUI started from a
+    // subagent's shell (which carries '1') cannot hand its own session the subagent shape.
+    expect(opts.env).toHaveProperty('CLAUDEUI_PI_AGENT_SUBAGENT', '')
     for (const name of ['general-purpose', 'Explore', 'Plan']) {
       expect(opts.env.CLAUDEUI_PI_AGENT_LISTING).toContain(`- ${name}: `)
     }
@@ -7134,18 +7139,26 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     await vi.waitFor(() => expect(kids.children).toHaveLength(2))
     const gc = kids.children[1]
     await vi.waitFor(() => expect(gc.commands().some((c) => c.type === 'prompt')).toBe(true))
-    const started = sentPayloads(win, 'session:task-started') as Array<{ toolUseId: string }>
-    expect(started.map((s) => s.toolUseId)).toEqual(['call-agent-12', 'grand-z'])
-    expect(((await grand) as { content: Array<{ text: string }> }).content[0].text).toMatch(
-      /^Async agent launched successfully\./
-    )
+    const started = sentPayloads(win, 'session:task-started') as Array<{
+      toolUseId: string
+      isBackgrounded: boolean
+    }>
+    // A child's default call runs in the foreground (Claude Code 2.1.330 parity).
+    expect(started.map((s) => [s.toolUseId, s.isBackgrounded])).toEqual([
+      ['call-agent-12', true],
+      ['grand-z', false]
+    ])
     gc.push({ type: 'agent_settled' })
-    await agentRunEnded(win, 'grand-z')
-    // Its spawner still runs, so the grandchild's report is delivered to it, not the session.
-    await vi.waitFor(() => expect(childDeliveries(child)).toHaveLength(1))
-    child.push(deliveredEvent(childDeliveries(child)[0]) as unknown as Record<string, unknown>)
+    // Its report is the child's tool result, never a notification.
+    expect(((await grand) as { content: Array<{ text: string }> }).content[0].text).toMatch(
+      /^child report 2\n\nagentId: /
+    )
+    expect(childDeliveries(child)).toHaveLength(0)
     child.push({ type: 'agent_settled' })
     await ended()
+    await vi.waitFor(() =>
+      expect(parentDeliveries().map((p) => p.details.toolUseId)).toEqual(['call-agent-12'])
+    )
     session.dispose()
   })
   /** The pending card a child call raised on the parent, by the child's call id. */
@@ -8038,6 +8051,36 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(parentDeliveries()).toHaveLength(1)
   })
 
+  it("B7b: interrupt() leaves a child's FOREGROUND grandchild running (the child's turn, not the session's): no abort anywhere, and its report still returns to the child as its tool result", async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-s3-b7b', win)
+    const lead = await launch(win, kids, 'call-b7-lead', BG_INPUT)
+    const GRAND = 'grand-b7'
+    const input = { description: 'nested', prompt: 'go deeper' }
+    expect(
+      await lead.child.opts.gateHandler({ toolCallId: GRAND, toolName: 'agent', input })
+    ).toEqual({ behavior: 'allow' })
+    // A child's default call runs in the foreground: the child waits on it.
+    const grand = lead.child.opts.hostedToolHandler!({
+      toolName: 'agent',
+      input,
+      toolCallId: GRAND
+    }) as Promise<{ content: Array<{ text: string }> }>
+    await vi.waitFor(() => expect(kids.children).toHaveLength(2))
+    const gc = kids.children[1]
+    await vi.waitFor(() => expect(gc.commands().some((c) => c.type === 'prompt')).toBe(true))
+
+    await session.interrupt()
+    for (const k of kids.children) {
+      expect(k.commands().some((c) => c.type === 'abort')).toBe(false)
+    }
+    gc.push({ type: 'agent_settled' })
+    expect((await grand).content[0].text).toMatch(/^child report 2\n\nagentId: /)
+    lead.child.push({ type: 'agent_settled' })
+    expect(await lead.ended()).toMatchObject({ status: 'completed' })
+    session.dispose()
+  })
+
   it('B8 (session): a user Stop of a background child → stopped notification, then a passive delivery', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-s3-b8', win)
@@ -8085,8 +8128,8 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const { session, kids } = await parent('rid-s3-b9b', win)
     session.setInactivityTimeout(1_000)
     const lead = await launch(win, kids, 'call-lead9', BG_INPUT)
-    // The child launches a grandchild through its own agent tool.
-    const input = { description: 'nested', prompt: 'go deeper' }
+    // The child launches a grandchild through its own agent tool, in the background.
+    const input = { description: 'nested', prompt: 'go deeper', run_in_background: true }
     expect(
       await lead.child.opts.gateHandler({ toolCallId: 'grand-b9', toolName: 'agent', input })
     ).toEqual({ behavior: 'allow' })
@@ -8241,6 +8284,52 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect((await hostedTool('task_stop', { task_id: 'nobody' }, 'g-ts')).content[0].text).toBe(
       'No agent "nobody" in this session. Agents: (none)'
     )
+    session.dispose()
+  })
+
+  it("G1 (session): backgroundTask on a child's FOREGROUND agent card returns the async text to the child's waiting call; a root agent card has no foreground run to send", async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-g1', win)
+    const lead = await launch(win, kids, 'call-g1', BG_INPUT)
+    // Every root call runs in the background: nothing to send, and nothing changes.
+    expect(await session.backgroundTask('call-g1')).toEqual({
+      success: false,
+      error: 'No foreground agent is running for that card'
+    })
+    const GRAND = 'grand-g1'
+    const input = { description: 'nested', prompt: 'go deeper' }
+    expect(
+      await lead.child.opts.gateHandler({ toolCallId: GRAND, toolName: 'agent', input })
+    ).toEqual({ behavior: 'allow' })
+    // A child's default call runs in the foreground: the child waits on it.
+    const grand = lead.child.opts.hostedToolHandler!({
+      toolName: 'agent',
+      input,
+      toolCallId: GRAND
+    }) as Promise<{ content: Array<{ text: string }> }>
+    await vi.waitFor(() => expect(kids.children).toHaveLength(2))
+    const gc = kids.children[1]
+    await vi.waitFor(() => expect(gc.commands().some((c) => c.type === 'prompt')).toBe(true))
+    expect(await session.backgroundTask(GRAND)).toEqual({ success: true })
+    expect((await grand).content[0].text).toMatch(/^Async agent launched successfully\./)
+    const starts = (
+      sentPayloads(win, 'session:task-started') as Array<{
+        toolUseId: string
+        isBackgrounded: boolean
+      }>
+    ).filter((st) => st.toolUseId === GRAND)
+    expect(starts.map((st) => st.isBackgrounded)).toEqual([false, true])
+    expect(await session.backgroundTask(GRAND)).toMatchObject({ success: false })
+
+    gc.push({ type: 'agent_settled' })
+    // Its launcher still runs: the report is delivered to it, not to the session.
+    await vi.waitFor(() => expect(childDeliveries(lead.child)).toHaveLength(1))
+    expect(childDeliveries(lead.child)[0].details).toMatchObject({ toolUseId: GRAND })
+    lead.child.push(
+      deliveredEvent(childDeliveries(lead.child)[0]) as unknown as Record<string, unknown>
+    )
+    lead.child.push({ type: 'agent_settled' })
+    await lead.ended()
     session.dispose()
   })
 

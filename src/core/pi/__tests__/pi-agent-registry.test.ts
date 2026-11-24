@@ -647,7 +647,7 @@ describe('parseAgentFile', () => {
     expect(diagnostics).toHaveLength(1)
   })
 
-  it('collapses the description, trims the body, accepts a BOM and CRLF', () => {
+  it('collapses the description, trims the body, keeps background, accepts a BOM and CRLF', () => {
     const r = parseAgentFile(
       '﻿---\r\nname: My Agent\r\ndescription: |\r\n  line one\r\n  line two\r\nbackground: true\r\ncolor: red\r\n---\r\n\r\n  Do the thing.  \r\n',
       'project',
@@ -657,19 +657,27 @@ describe('parseAgentFile', () => {
       name: 'My Agent',
       description: 'line one line two',
       prompt: 'Do the thing.',
+      background: true,
       scope: 'project',
       filePath: '/x/b.md',
       canSpawn: true
     })
   })
 
-  it('ignores background, like color: every pi agent runs in the background (no warning, no field)', () => {
-    for (const value of ['true', 'false', 'sometimes', '[1, 2]']) {
+  it('background: a boolean is kept (it forces background for a child call); anything else warns and is dropped', () => {
+    for (const value of [true, false]) {
       const diagnostics: string[] = []
-      const def = parse(`name: a\ndescription: d\nbackground: ${value}\ncolor: red`, diagnostics)
-      expect('background' in def, value).toBe(false)
-      expect(diagnostics, value).toEqual([])
+      const def = parse(`name: a\ndescription: d\nbackground: ${value}`, diagnostics)
+      expect(def.background, String(value)).toBe(value)
+      expect(diagnostics, String(value)).toEqual([])
     }
+    for (const value of ['sometimes', '[1, 2]', '1']) {
+      const diagnostics: string[] = []
+      const def = parse(`name: a\ndescription: d\nbackground: ${value}`, diagnostics)
+      expect('background' in def, value).toBe(false)
+      expect(diagnostics, value).toEqual(['/x/a.md: background is not a boolean; ignored'])
+    }
+    expect('background' in parse('name: a\ndescription: d')).toBe(false)
   })
 
   it('rejects a bad name and an unterminated block', () => {

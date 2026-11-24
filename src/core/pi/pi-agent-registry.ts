@@ -27,10 +27,11 @@
  *
  * SCOPE. Supported fields: `name`, `description`, `tools`, `disallowedTools`,
  * `model`, `harness.pi.model`, `thinking` (or Claude Code's `effort`),
- * `permissionMode`. Claude Code's `background` (every pi agent runs in the
- * background), `mcpServers`, `skills`, `color`, `memory`, `isolation`,
- * `maxTurns` and `omitClaudeMd` are out of scope and ignored, as is any other
- * unknown key.
+ * `permissionMode`, `background` (it forces background for a CHILD's call,
+ * which is otherwise foreground; the root's calls always run in the
+ * background). Claude Code's `mcpServers`, `skills`, `color`, `memory`,
+ * `isolation`, `maxTurns` and `omitClaudeMd` are out of scope and ignored, as
+ * is any other unknown key.
  *
  * A pure module (fs via the shared reader + the pi data-root helper): no
  * session class, no dispatcher.
@@ -78,6 +79,8 @@ export interface PiAgentDefinition {
   thinking?: PiThinkingLevel
   /** Narrows only (ADR-089 D3). */
   permissionMode?: string
+  /** True forces background for a child's `agent` call (the root's always run in the background). */
+  background?: boolean
   /** False for Explore/Plan: they never get the `agent` tool. */
   canSpawn: boolean
   /**
@@ -297,6 +300,12 @@ export function parseAgentFile(
     }
   }
 
+  let background: boolean | undefined
+  if (data.background !== undefined && data.background !== null) {
+    if (typeof data.background === 'boolean') background = data.background
+    else warn('background is not a boolean; ignored')
+  }
+
   return {
     name,
     description,
@@ -309,6 +318,7 @@ export function parseAgentFile(
     model,
     ...(thinking ? { thinking } : {}),
     ...(permissionMode ? { permissionMode } : {}),
+    ...(background === undefined ? {} : { background }),
     canSpawn: true
   }
 }

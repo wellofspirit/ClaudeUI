@@ -98,6 +98,8 @@ export function defaultChildEnv(bridge: { url: string; token: string }): NodeJS.
     CLAUDEUI_PI_DISPATCH_DESCRIPTION: '',
     // The session tools are for a session's root agent only.
     CLAUDEUI_PI_SESSION_TOOLS: '',
+    // Never a subagent's `agent` shape (bridge v28) leaking in from the process env.
+    CLAUDEUI_PI_AGENT_SUBAGENT: '',
     // No bridged MCP catalog unless the consumer's env asks for it (ADR-096).
     CLAUDEUI_PI_MCP: '',
     // Likewise no Claude skill catalog.

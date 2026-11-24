@@ -27,7 +27,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
     expect(PI_BRIDGE_VERSION.length).toBeGreaterThan(0)
   })
 
-  it('is version 28 (agent takes no run_in_background: every agent runs in the background)', () => {
+  it('is version 28 (agent: the root shape is background-only, a subagent may ask for the background)', () => {
     expect(PI_BRIDGE_VERSION).toBe('28')
   })
 
@@ -259,6 +259,7 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
   'CLAUDEUI_PI_PLAN_TOOLS',
   'CLAUDEUI_PI_AGENT_TOOL',
+  'CLAUDEUI_PI_AGENT_SUBAGENT',
   'CLAUDEUI_PI_AGENT_LISTING',
   'CLAUDEUI_PI_SEND_MESSAGE',
   'CLAUDEUI_PI_HAND_BACK',
@@ -620,7 +621,12 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-089)', () =>
     })
   })
 
-  it('describes the agent types from CLAUDEUI_PI_AGENT_LISTING; every agent runs in the background, so there is no run_in_background (bridge v28)', () => {
+  const ROOT_SENTENCE =
+    "Every agent runs in the background: the call returns at once with the agent's id, and you are notified automatically when it completes."
+  const SUBAGENT_SENTENCE =
+    "By default the call waits for the agent's final report and returns it; set run_in_background to true to run it in the background."
+
+  it('describes the agent types from CLAUDEUI_PI_AGENT_LISTING; the root shape (CLAUDEUI_PI_AGENT_SUBAGENT unset) has no run_in_background (bridge v28)', () => {
     withEnv(
       {
         ...BRIDGE_CREDS,
@@ -630,7 +636,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-089)', () =>
       () => {
         const agent = runExtension().tools.get('agent')!
         expect(agent.description).toContain(
-          "Every agent runs in the background: the call returns at once with the agent's id, and you are notified automatically when it completes."
+          `Launch an agent to carry out a task autonomously in its own pi process. ${ROOT_SENTENCE} Several agent calls in one message run in parallel.`
         )
         expect(agent.description).not.toContain('run_in_background')
         expect(agent.description).not.toContain('final report')
@@ -660,6 +666,53 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — agent tool (bridge v9, ADR-089)', () =>
         })
       }
     )
+  })
+
+  it("the subagent shape only under CLAUDEUI_PI_AGENT_SUBAGENT exactly '1': a boolean run_in_background (default false) and the wait-for-the-report sentence; '' or any other value is the root shape (fail closed)", () => {
+    const shapeUnder = (subagent: string | undefined) =>
+      withEnv(
+        {
+          ...BRIDGE_CREDS,
+          CLAUDEUI_PI_AGENT_TOOL: '1',
+          CLAUDEUI_PI_AGENT_SUBAGENT: subagent,
+          CLAUDEUI_PI_AGENT_LISTING: '- Explore: reads (Tools: read)'
+        },
+        () => runExtension().tools.get('agent')!
+      )
+    const sub = shapeUnder('1')
+    expect(sub.description).toContain(
+      `Launch an agent to carry out a task autonomously in its own pi process. ${SUBAGENT_SENTENCE} Several agent calls in one message run in parallel.`
+    )
+    expect(sub.description).not.toContain('Every agent runs in the background')
+    // The rest of the description is shared.
+    expect(sub.description).toMatch(/Available agent types:\n- Explore: reads \(Tools: read\)$/)
+    expect(sub.parameters).toEqual({
+      type: 'object',
+      properties: {
+        description: { type: 'string', description: expect.any(String) },
+        prompt: { type: 'string', description: expect.any(String) },
+        subagent_type: { type: 'string', description: expect.any(String) },
+        model: { type: 'string', description: expect.any(String) },
+        name: { type: 'string', description: expect.any(String) },
+        run_in_background: {
+          type: 'boolean',
+          description:
+            'Default false: the call waits for the agent and returns its final report. Set true to return at once; its report then reaches you as a notification only if you are still running when it finishes, otherwise it goes to the main session.'
+        }
+      },
+      required: ['description', 'prompt']
+    })
+    const rootShape = shapeUnder(undefined)
+    for (const value of ['', '0', 'true', 'yes', ' 1']) {
+      const agent = shapeUnder(value)
+      expect(agent.description, value).toBe(rootShape.description)
+      expect(agent.description, value).toContain(ROOT_SENTENCE)
+      expect(agent.parameters, value).toEqual(rootShape.parameters)
+      expect(
+        (agent.parameters as { properties: Record<string, unknown> }).properties,
+        value
+      ).not.toHaveProperty('run_in_background')
+    }
   })
 
   it('agent.execute() POSTs toolName "agent" to /hosted-tool and fails closed on a network error', async () => {
