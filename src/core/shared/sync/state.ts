@@ -123,7 +123,10 @@ export interface CanonicalState {
   pinnedSessionIds: string[]
   customTitles: Record<string, string>
   worktreeInfoMap: Record<string, WorktreeInfo>
-  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  sessionEngines: Record<
+    string,
+    { engineId: EngineId; model?: ModelRef; effort?: string; reasoningVariant?: string }
+  >
   hiddenSessions: string[]
   hiddenProjects: string[]
   /** Origin links between sessions, keyed by the started session's ref (slice 1b). */

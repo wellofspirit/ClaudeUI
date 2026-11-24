@@ -470,7 +470,10 @@ type PersistedSessionFields = {
   hiddenSessionIds: string[]
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for session engine persistence. */
-  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  sessionEngines: Record<
+    string,
+    { engineId: EngineId; model?: ModelRef; effort?: string; reasoningVariant?: string }
+  >
 }
 
 /**
@@ -830,6 +833,21 @@ function historicalIdentity(
   const modelInfo = state.availableModels.find(
     (m) => m.value === selectedModel && isModelForEngine(m, persistedEngineId)
   )
+  // The reasoning level the model last ran on (seeded from the transcript by
+  // `seedHistoricalEngine`). Only a level the entry does not already hold is
+  // restored: a fresh load holds none, and an evicted entry keeps its own — but
+  // the sidebar's placeholder is an evicted entry that holds none YET, so "none"
+  // is the test, not "fresh". A variant the model's catalog row no longer lists is
+  // dropped; with no row loaded there is nothing to judge it by, so it stays.
+  const restoredEffort = base.effort ?? persistedEntry?.effort ?? null
+  const persistedVariant = persistedEntry?.reasoningVariant
+  const restoredVariant =
+    base.reasoningVariant ??
+    (persistedVariant &&
+    (!modelInfo?.reasoningVariants?.length ||
+      modelInfo.reasoningVariants.includes(persistedVariant))
+      ? persistedVariant
+      : null)
   return {
     base,
     identity: {
@@ -837,6 +855,10 @@ function historicalIdentity(
       permissionMode: base.permissionMode,
       selectedEngineId: persistedEngineId,
       selectedModel,
+      ...(restoredEffort && restoredEffort !== base.effort ? { effort: restoredEffort } : {}),
+      ...(restoredVariant && restoredVariant !== base.reasoningVariant
+        ? { reasoningVariant: restoredVariant }
+        : {}),
       status: {
         ...base.status,
         engineId: persistedEngineId,
@@ -1646,7 +1668,10 @@ export interface SessionState {
   /** Project keys hidden from the sidebar */
   hiddenProjectKeys: string[]
   /** Maps sessionId → { engineId, model? } for engine persistence across restarts. */
-  sessionEngines: Record<string, { engineId: EngineId; model?: ModelRef }>
+  sessionEngines: Record<
+    string,
+    { engineId: EngineId; model?: ModelRef; effort?: string; reasoningVariant?: string }
+  >
   /** Origin links between sessions, keyed by the started session's ref (slice 1b). Replicated. */
   sessionLinks: Record<string, SessionLinkInfo>
   /** sidebar id → ref for every session a link names (slice 1b). Replicated. */

@@ -21,7 +21,10 @@ export interface UISessionConfig {
    * On reopen, the optional `model` field seeds `selectedModel` so the last
    * model choice is restored (Phase 1 behavior addition).
    */
-  sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
+  sessionEngines?: Record<
+    string,
+    { engineId: EngineId; model?: ModelRef; effort?: string; reasoningVariant?: string }
+  >
 }
 
 export interface SlashCommandInfo {

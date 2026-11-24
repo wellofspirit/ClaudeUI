@@ -163,6 +163,13 @@ export interface EngineHistoryLoad {
    */
   lastModel?: ModelRef | null
   /**
+   * The reasoning level the engine's own store has the session at: pi's
+   * thinking level (`effort`) or opencode's variant (`reasoningVariant`). Seeds
+   * the reopened session the way `lastModel` seeds its model; absent when the
+   * store records none (the model's default).
+   */
+  lastReasoning?: { effort?: string; reasoningVariant?: string } | null
+  /**
    * Host-run pi subagent transcripts (ADR-089), by the parent `agent` call id
    * — the key `session:subagent-message` uses live. pi only; absent when the
    * session ran no agents.

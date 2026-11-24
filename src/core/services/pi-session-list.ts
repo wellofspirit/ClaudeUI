@@ -31,7 +31,7 @@ import type { PiSessionEntry, PiSessionHeader, PiUserMessage } from '../pi/pi-pr
 import { cwdToProjectKey } from '../../shared/project-key'
 import { convertPiSessionEntries } from '../pi/history'
 import { piAgentDeliveryDetails } from '../pi/pi-delivery'
-import { piHistoryStatusLine, piLastModelRef } from '../pi/history-status-line'
+import { piHistoryStatusLine, piLastModelRef, piLastReasoning } from '../pi/history-status-line'
 import { piAuthProvider } from '../auth/PiAuthProvider'
 import { dispatchedCostEntriesFor } from './dispatched-cost-entries'
 import { findPiForkAnchorEntryId } from './fork-anchor'
@@ -308,10 +308,12 @@ export async function loadPiSessionHistory(sessionId: string): Promise<EngineHis
     await piAuthProvider.probe().catch(() => {})
     const statusLine =
       active.length > 0 ? piHistoryStatusLine(active, dispatchedCostEntriesFor(sessionId)) : null
+    const lastReasoning = piLastReasoning(active)
     return {
       messages,
       statusLine,
       lastModel: piLastModelRef(active),
+      ...(lastReasoning ? { lastReasoning } : {}),
       ...(Object.keys(subagentMessages).length > 0 ? { subagentMessages } : {}),
       ...(taskNotifications.length > 0 ? { taskNotifications } : {})
     }

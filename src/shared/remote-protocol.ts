@@ -1263,7 +1263,10 @@ export interface FullStateSnapshot {
   /** Per-session engine + model map (sessionId → { engineId, model? }). Carried
    *  so a remote client's saves don't round-trip an empty map that wipes every
    *  session's engine/model mapping on the desktop (H15). */
-  sessionEngines?: Record<string, { engineId: EngineId; model?: ModelRef }>
+  sessionEngines?: Record<
+    string,
+    { engineId: EngineId; model?: ModelRef; effort?: string; reasoningVariant?: string }
+  >
   /** Hidden session ids — carried for the same non-destructive-save reason. */
   hiddenSessions?: string[]
   /** Hidden project keys — carried for the same non-destructive-save reason. */

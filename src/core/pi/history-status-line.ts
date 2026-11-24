@@ -29,6 +29,8 @@ export interface PiHistorySeed {
   lastContextLength: number
   /** The model the session last answered on, for the context window lookup. */
   lastModel: { vendorId: string; modelId: string } | null
+  /** The thinking level of the last `thinking_level_change` entry, or null when there is none. */
+  lastThinkingLevel: string | null
 }
 
 /**
@@ -42,8 +44,10 @@ export function piHistorySeed(entries: PiSessionEntry[]): PiHistorySeed {
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   let lastContextLength = 0
   let lastModel: { vendorId: string; modelId: string } | null = null
+  let lastThinkingLevel: string | null = null
 
   for (const entry of entries) {
+    if (entry.type === 'thinking_level_change') lastThinkingLevel = entry.thinkingLevel
     if (entry.type !== 'message') continue
     const message = entry.message
     if (message.role !== 'assistant') continue
@@ -79,7 +83,7 @@ export function piHistorySeed(entries: PiSessionEntry[]): PiHistorySeed {
     lastContextLength = usage.input + usage.cacheRead
   }
 
-  return { costInputs, tokens, lastContextLength, lastModel }
+  return { costInputs, tokens, lastContextLength, lastModel, lastThinkingLevel }
 }
 
 /**
@@ -92,6 +96,15 @@ export function piLastModelRef(entries: PiSessionEntry[]): ModelRef | null {
   const { lastModel } = piHistorySeed(entries)
   if (!lastModel?.vendorId || !lastModel.modelId) return null
   return { engineId: 'pi', vendorId: lastModel.vendorId, modelId: lastModel.modelId }
+}
+
+/**
+ * {@link piHistorySeed}'s last thinking level as a `lastReasoning`: pi's `effort`
+ * IS its thinking level. Null when the session never changed it.
+ */
+export function piLastReasoning(entries: PiSessionEntry[]): { effort: string } | null {
+  const { lastThinkingLevel } = piHistorySeed(entries)
+  return lastThinkingLevel ? { effort: lastThinkingLevel } : null
 }
 
 /**

@@ -412,6 +412,7 @@ export async function loadOpencodeSessionHistory(sessionId: string): Promise<Eng
       messages: history.messages,
       statusLine,
       lastModel,
+      ...(last.variant ? { lastReasoning: { reasoningVariant: last.variant } } : {}),
       ...(Object.keys(history.subagentMessages).length > 0
         ? { subagentMessages: history.subagentMessages }
         : {}),
