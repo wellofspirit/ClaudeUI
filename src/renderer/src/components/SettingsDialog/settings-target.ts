@@ -22,6 +22,7 @@ export const SETTINGS_PAGE_IDS = [
   'models',
   'dispatch',
   'mockups',
+  'media',
   'remote',
   'harnesses',
   'claude',

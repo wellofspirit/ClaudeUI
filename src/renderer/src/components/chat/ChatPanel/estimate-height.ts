@@ -161,7 +161,7 @@ const TASK_CARD = 36 + 1 + 31 + 2
 const LIFTED_HEADER = 38
 /** AskUserQuestionBlock while a question is open: header + question + options. A coarse constant. */
 const QUESTION_OPEN = 220
-/** Diagram / mockup / image cards: h-9 header plus a body that renders asynchronously (SVG, iframe). A coarse constant. */
+/** Diagram / mockup / media cards: h-9 header plus a body that renders asynchronously (SVG, iframe). A coarse constant. */
 const MEDIA_CARD = 36 + 2 + 260
 
 // ── Messages (MessageBubble.tsx) ─────────────────────────────────────────────
@@ -562,7 +562,7 @@ function bodyHeight(
       return args + (hasText ? resultSection(result!, columnPx, o, true) : 0)
     }
     // The kinds with no body of their own take the generic tail below.
-    case 'image':
+    case 'media':
     case 'todo':
     case 'task':
     case 'plan':
@@ -646,6 +646,7 @@ function toolHeight(
       return result ? LIFTED_HEADER : QUESTION_OPEN
     case 'diagram':
     case 'mockup':
+    case 'media':
       return MEDIA_CARD
     case 'command':
     case 'fileEdit':
@@ -653,7 +654,6 @@ function toolHeight(
     case 'fileRead':
     case 'search':
     case 'web':
-    case 'image':
     case 'mcp':
     case 'detail':
     case 'findings':

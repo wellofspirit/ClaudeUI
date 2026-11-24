@@ -234,6 +234,15 @@ vi.mock('../../core/services/cross-engine-dispatcher', () => ({
   crossEngineDispatchAvailable: (): boolean => false,
   XENG_REQUEST_PREFIX: 'xeng:'
 }))
+vi.mock('../../core/services/media-jobs', () => ({
+  mediaJobs: {
+    configure: vi.fn(),
+    rekey: vi.fn(),
+    onSessionRemoved: vi.fn(),
+    shutdown: vi.fn(),
+    stop: vi.fn(() => false)
+  }
+}))
 vi.mock('../../core/services/subagent-watcher', () => ({ unwatchAllSubagents: vi.fn() }))
 vi.mock('../../core/services/context-window', () => ({
   getContextWindowSize: vi.fn(() => 200000)

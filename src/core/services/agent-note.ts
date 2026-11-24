@@ -15,6 +15,7 @@ import {
   CROSS_SESSION_MESSAGE_TAG,
   SESSION_MESSAGE_TAG,
   isAnyXAgentSender,
+  isMediaJobSender,
   isXAgentMessageSender,
   isXAgentSender,
   parseSessionMessageWrapper,
@@ -27,6 +28,8 @@ export const AGENT_NOTE_FRAGMENT_LABEL = 'from an agent, not from you'
 export const SESSION_MESSAGE_FRAGMENT_LABEL = 'from another session, not from you'
 /** The label of an X-Agent's result delivered into its parent (ADR-105 §3). */
 export const X_AGENT_RESULT_FRAGMENT_LABEL = 'from an X-Agent, not from you'
+/** The label of a media job's outcome delivered into the session that started it. */
+export const MEDIA_JOB_FRAGMENT_LABEL = 'from a media job, not from you'
 
 export interface AgentNoteInput {
   id: string
@@ -66,6 +69,10 @@ export function sessionMessageNoteTitle(
     const name = xAgentBareName(fromTitle)
     return name ? `Report from X-Agent ${name}` : 'Report from an X-Agent'
   }
+  // A media job's outcome: its sender title already says what it was ("Image job finished").
+  if (fromKey !== undefined && !native && isMediaJobSender(fromKey)) {
+    return fromTitle.trim() || 'Media job finished'
+  }
   // A message it sent while it ran is not its report (ADR-105 §4).
   if (fromKey !== undefined && !native && isXAgentMessageSender(fromKey)) {
     const name = xAgentBareName(fromTitle)
@@ -99,7 +106,11 @@ export function sessionMessageNote(input: {
     title: sessionMessageNoteTitle(input.fromTitle, input.native, input.fromKey),
     text: input.text,
     timestamp: input.timestamp,
-    label: result ? X_AGENT_RESULT_FRAGMENT_LABEL : SESSION_MESSAGE_FRAGMENT_LABEL
+    label: result
+      ? X_AGENT_RESULT_FRAGMENT_LABEL
+      : input.fromKey !== undefined && !input.native && isMediaJobSender(input.fromKey)
+        ? MEDIA_JOB_FRAGMENT_LABEL
+        : SESSION_MESSAGE_FRAGMENT_LABEL
   })
 }
 

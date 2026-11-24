@@ -34,6 +34,7 @@ import { usageHubCommands } from './usage-hub-commands'
 import { openrouterCommands } from './openrouter-commands'
 import { harnessCommands } from './harness-commands'
 import { voicePackCommands } from './voice-pack-commands'
+import { mediaCommands } from './media-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
@@ -485,6 +486,11 @@ export function registerRemoteHandlers(
   // model); install, cancel and remove are `admin`, so a base connection is
   // refused them by the registry.
   for (const cmd of voicePackCommands()) {
+    handleRemote(cmd)
+  }
+
+  // Media generation catalog: a `config` query, in the base remote grant set.
+  for (const cmd of mediaCommands()) {
     handleRemote(cmd)
   }
 

@@ -27,6 +27,7 @@ import { internAttachments } from '../services/blob-store'
 import { dispatchedCostsByRouting } from '../services/db'
 import { hasRunningDispatch } from '../services/dispatch-runs'
 import { logger } from '../services/logger'
+import { hasRunningMediaJob } from '../services/media-job-ledger'
 import { reholdNonUserItem } from '../services/session-delivery'
 import { emitEvent } from '../services/sync-host'
 import type { EmitArgs, SessionEventChannel, SessionEventData } from '../shared/sync/events'
@@ -546,12 +547,12 @@ export abstract class BaseSession implements ISession {
 
   /**
    * Is something running for this session that its idle timer must outlast? A running
-   * X-Agent (ADR-105 §3): the timer's `cancel()` would drop the session object the run
+   * X-Agent (ADR-105 §3) or media job (`generate_image`/`generate_video`): the timer's `cancel()` would drop the session object the run
    * reports into. The engines' `resetInactivityTimer` overrides all consult this; pi adds
    * its own background agents.
    */
   protected idleTimerHeld(): boolean {
-    return hasRunningDispatch(this.routingId)
+    return hasRunningDispatch(this.routingId) || hasRunningMediaJob(this.routingId)
   }
 
   /**

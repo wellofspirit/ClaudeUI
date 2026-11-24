@@ -55,7 +55,7 @@ function allItemsOf(group: SettingsGroup): Array<{ key: string; engine?: string 
 }
 
 describe('PAGES structure', () => {
-  it('has the 13 documented pages, in order', () => {
+  it('has the 14 documented pages, in order', () => {
     expect(PAGES.map((p) => p.id)).toEqual([
       'appearance',
       'chat',
@@ -65,6 +65,7 @@ describe('PAGES structure', () => {
       'models',
       'dispatch',
       'mockups',
+      'media',
       'remote',
       'harnesses',
       'claude',
@@ -82,7 +83,7 @@ describe('PAGES structure', () => {
   it('rail membership matches ADR-065 / ADR-082 (App / Features / Harnesses)', () => {
     const byRail = (rail: string): string[] => PAGES.filter((p) => p.rail === rail).map((p) => p.id)
     expect(byRail('app')).toEqual(['appearance', 'chat', 'sessions', 'advanced', 'about'])
-    expect(byRail('features')).toEqual(['models', 'dispatch', 'mockups', 'remote'])
+    expect(byRail('features')).toEqual(['models', 'dispatch', 'mockups', 'media', 'remote'])
     // ADR-082 §1: Installed first, then the per-harness pages.
     expect(byRail('engines')).toEqual(['harnesses', 'claude', 'opencode', 'pi'])
   })
@@ -137,6 +138,7 @@ describe('PAGES structure', () => {
       // 'tile' (ADR-094): the X tile's one colour, app-level like the cap.
       dispatch: ['concurrency', 'tile', 'into', 'limits'],
       mockups: ['network'],
+      media: ['engines', 'models', 'jobs', 'output'],
       // 'usage-hub' last (ADR-072 §7): the one group here that pushes OUT.
       remote: ['follow', 'server', 'access', 'security', 'links', 'usage-hub'],
       harnesses: ['harnesses', 'updates'],
@@ -391,7 +393,12 @@ describe('inventory guard', () => {
       // Worktrees: the global default for starting new sessions in one.
       'startInWorktree',
       // Claude Code's disableAutoMode, edited in its settings.json.
-      'claudeDisableAutoMode'
+      'claudeDisableAutoMode',
+      // Media generation: one body per group of the page, all writing `mediaGeneration`.
+      'mediaEngines',
+      'mediaModels',
+      'mediaJobs',
+      'mediaOutput'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())

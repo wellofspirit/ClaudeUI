@@ -113,3 +113,22 @@ export function parseSentFileQuery(params: URLSearchParams): SentFileQuery | nul
     inline: params.get('inline') === '1'
   }
 }
+
+/**
+ * `GET /media-file?job=<id>&token=<fileToken>`: a saved image/video of a media job (ClaudeUI's hosted
+ * `generate_image` / `generate_video`), by JOB id: the host serves only the file its ledger names for that
+ * id, with HTTP Range, behind the same scoped file token as {@link SENT_FILE_ROUTE}.
+ */
+export const MEDIA_FILE_ROUTE = '/media-file'
+
+/** A media job id as the ledger mints it (12 hex characters). */
+export const MEDIA_JOB_ID_RE = /^[0-9a-f]{12}$/
+
+export function buildMediaFileUrl(
+  baseOrigin: string,
+  jobId: string,
+  opts: { token: string }
+): string {
+  const params = new URLSearchParams({ job: jobId, token: opts.token })
+  return `${baseOrigin.replace(/\/$/, '')}${MEDIA_FILE_ROUTE}?${params.toString()}`
+}

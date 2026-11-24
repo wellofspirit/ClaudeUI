@@ -29,6 +29,15 @@ const usageMocks = vi.hoisted(() => ({
     fetch: vi.fn(async () => null)
   }
 }))
+vi.mock('../../services/media-jobs', () => ({
+  mediaJobs: {
+    configure: vi.fn(),
+    rekey: vi.fn(),
+    onSessionRemoved: vi.fn(),
+    shutdown: vi.fn(),
+    stop: vi.fn(() => false)
+  }
+}))
 vi.mock('../../services/usage-fetcher', () => usageMocks)
 
 vi.mock('../../services/logger', () => ({

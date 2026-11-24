@@ -1136,12 +1136,14 @@ export class CredentialSync {
    * **The one method on this class that returns TOKEN MATERIAL.** Everything
    * else here is deliberately token-free (`getStatus`, and the
    * `provider-account:*` commands built on it); this exists because the
-   * auto-mode judge route and the ChatGPT usage-limits read call ChatGPT's
-   * backend directly with the vaulted access token (ADR-068 §1).
+   * auto-mode judge route, the ChatGPT usage-limits read and the media
+   * generation ChatGPT-plan client call ChatGPT's backend directly with the
+   * vaulted access token (ADR-068 §1).
    *
    * Nothing in it logs, and its result must never reach a log line, an IPC
-   * result or a snapshot. The callers are `automode/judge-route.ts` and
-   * `shared-providers/chatgpt-rate-limits.ts`.
+   * result or a snapshot. The callers are `automode/judge-route.ts`,
+   * `shared-providers/chatgpt-rate-limits.ts` and
+   * `services/media-providers/chatgpt-plan.ts`.
    *
    * `accountId` null means the ACTIVE account. Returns null when the vault holds
    * no credential for that account, or when the credential carries no workspace

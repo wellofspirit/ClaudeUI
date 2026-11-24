@@ -36,6 +36,7 @@ import { loadSettings, loadSessionConfig } from './ui-config'
 import { pruneOrphanClaudeSessionMeta } from './session-meta-prune'
 import { seedLinkState } from './session-links'
 import { interruptStaleDispatchTargets } from './dispatch-target-ledger'
+import { interruptStaleMediaJobs } from './media-job-ledger'
 import { sweepOrphanDispatchTargets } from './dispatch-target-end'
 import { loadClaudePermissions } from './claude-settings'
 import { claudeSandboxSupported, readClaudeSandboxState } from './claude-sandbox-settings'
@@ -317,6 +318,8 @@ export async function seedCanonicalAppState(): Promise<void> {
   // ADR-105: an X-Agent still `running` after a restart belonged to a process that is
   // gone. `interruptStaleDispatchTargets` never throws.
   interruptStaleDispatchTargets()
+  // ...and a media job (generate_image/video) the quit cut off: interrupted, its session told.
+  interruptStaleMediaJobs()
   // ...and one whose parent session no longer exists ends with it (ADR-105 §5). Only a
   // parent that can be PROVEN gone counts; `sweepOrphanDispatchTargets` never throws.
   sweepOrphanDispatchTargets()

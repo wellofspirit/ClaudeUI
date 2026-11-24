@@ -10,6 +10,7 @@ import { claudeProjectKeyFor } from './claude-transcript-locator'
 import {
   getSessionMeta,
   moveDispatchTargetParent,
+  moveMediaJobSession,
   moveSessionInbox,
   moveSessionMeta,
   renameUsageEventParent
@@ -163,6 +164,15 @@ export class SessionManager {
       logger.warn(
         'SessionManager',
         `moveDispatchTargetParent failed (dispatch targets may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    // Media jobs (generate_image/video) are owned by the durable id too.
+    try {
+      moveMediaJobSession(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveMediaJobSession failed (media jobs may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
       )
     }
     // A title set before the rekey (a session another session started is named

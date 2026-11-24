@@ -47,6 +47,7 @@ import { usageHubCommands, USAGE_HUB_CHANNELS } from './usage-hub-commands'
 import { openrouterCommands, OPENROUTER_CHANNELS } from './openrouter-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
+import { mediaCommands, MEDIA_CHANNELS } from './media-commands'
 import { sendPrompt } from './handlers-core'
 
 // `safeHandler` (the IpcResult envelope) and `handleIpc` (the desktop transport
@@ -287,7 +288,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     ...USAGE_HUB_CHANNELS,
     ...OPENROUTER_CHANNELS,
     ...HARNESS_CHANNELS,
-    ...VOICE_PACK_CHANNELS
+    ...VOICE_PACK_CHANNELS,
+    ...MEDIA_CHANNELS
   ])
 
   const manager = new SessionManager()
@@ -561,6 +563,11 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
 
   // The speech pack (ADR-101 §6): status is `chat`, install/cancel/remove `admin`.
   for (const cmd of voicePackCommands()) {
+    handleIpc(cmd)
+  }
+
+  // Media generation catalog (`config` query).
+  for (const cmd of mediaCommands()) {
     handleIpc(cmd)
   }
 

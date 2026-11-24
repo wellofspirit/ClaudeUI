@@ -25,6 +25,7 @@ import { setSessionGrouped } from '../services/session-links'
 import { dismissProposalFromClient, startProposalFromClient } from '../services/session-tools'
 import { watchSession, unwatchSession } from '../services/session-watcher'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
+import { mediaJobs } from '../services/media-jobs'
 import type {
   ApprovalDecision,
   AttachmentUpload,
@@ -173,6 +174,8 @@ export function sessionCommands(
       kind: 'command',
       sessionIdArg: 0,
       handler: async (routingId: string, toolUseId: string, isDispatch?: boolean) => {
+        // A media job's card (generate_image/video): the job service owns it, by call id.
+        if (mediaJobs.stop(routingId, toolUseId)) return { success: true }
         // A cross-engine dispatch card's toolUseId isn't gated on the dispatching
         // session's own backgroundTasks capability — route to the dispatcher
         // FIRST (ADR-033 M3), same precedent as the xeng: approval-response

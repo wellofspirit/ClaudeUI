@@ -3,6 +3,7 @@ import { getSessionMeta } from './db'
 import { withSessionCards } from './session-links'
 import { withProposalCards } from './session-proposals'
 import { withDispatchTasks } from './dispatch-task-history'
+import { withMediaTasks } from './media-task-history'
 import {
   listDirectories,
   loadSessionHistory as loadClaudeHistory,
@@ -113,9 +114,13 @@ export function readSessionHistory(
       const messages = withProposalCards(sessionId, withSessionCards(sessionId, result.messages))
       // ...and the cards of its X-Agents (ADR-105 §5), which the dispatcher emits and no
       // transcript holds; they join on the launching tool call, so the messages come first.
-      return withDispatchTasks(
+      // ...and its media jobs' cards (`generate_image`/`generate_video`), from the media ledger.
+      return withMediaTasks(
         sessionId,
-        messages === result.messages ? result : { ...result, messages }
+        withDispatchTasks(
+          sessionId,
+          messages === result.messages ? result : { ...result, messages }
+        )
       )
     })
 }

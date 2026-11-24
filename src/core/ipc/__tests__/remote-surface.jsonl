@@ -107,6 +107,7 @@
 {"channel":"mcp:status","capability":"config","kind":"query","sessionIdArg":0,"withConnection":false,"withProgress":false}
 {"channel":"mcp:toggle","capability":"config","kind":"command","sessionIdArg":0,"withConnection":false,"withProgress":false}
 {"channel":"mcp:toggle-disabled","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"media:list-models","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"mockup:read-html","capability":"fs-read","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"mockup:unwatch","capability":"fs-read","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"mockup:watch","capability":"fs-read","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}

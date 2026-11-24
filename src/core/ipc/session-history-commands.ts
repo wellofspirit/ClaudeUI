@@ -20,6 +20,7 @@ import {
 } from '../services/opencode-session-list'
 import { listPiSessionsGlobal, loadPiSessionHistory } from '../services/pi-session-list'
 import { withDispatchTasks } from '../services/dispatch-task-history'
+import { withMediaTasks } from '../services/media-task-history'
 import type { EngineId, LoadSessionHistoryOptions } from '../../shared/types'
 import type { ProgressReporter } from '../../shared/remote-protocol'
 import type { CommandRegistration } from './command-registry'
@@ -72,7 +73,10 @@ export function sessionHistoryCommands(): Array<Omit<CommandRegistration, 'trans
       capability: 'fs-read',
       kind: 'query',
       handler: async (sessionId: string) => {
-        return withDispatchTasks(sessionId, await loadOpencodeSessionHistory(sessionId))
+        return withMediaTasks(
+          sessionId,
+          withDispatchTasks(sessionId, await loadOpencodeSessionHistory(sessionId))
+        )
       }
     },
     {
@@ -88,7 +92,10 @@ export function sessionHistoryCommands(): Array<Omit<CommandRegistration, 'trans
       capability: 'fs-read',
       kind: 'query',
       handler: async (sessionId: string) => {
-        return withDispatchTasks(sessionId, await loadPiSessionHistory(sessionId))
+        return withMediaTasks(
+          sessionId,
+          withDispatchTasks(sessionId, await loadPiSessionHistory(sessionId))
+        )
       }
     },
     // Folder browser (the web client's picker; the desktop's file tree)

@@ -16,6 +16,10 @@
  *
  * The file keeps its name so the persisted path stays put across this change.
  *
+ * The same payload also lists image and video models. The refresh keeps those of the two providers
+ * media generation can call with a key (`openai`, `openrouter`) in a sibling file
+ * (`media-models.json`), read through getMediaModelRows() — one fetch, not two.
+ *
  * Cost unit: USD per 1 million tokens — 2.x decodes these same numbers into
  * `Money.USDPerMillionTokens` (`packages/core/src/models-dev.ts`), so cost.*
  * maps 1:1 to ModelPricing's *PerMTok fields.
@@ -30,6 +34,10 @@ import { envFlag } from './context-window'
 import { logger } from './logger'
 
 const PRICES_FILE = path.join(os.homedir(), '.claude', 'ui', 'opencode-prices.json')
+
+const MEDIA_MODELS_FILE = path.join(os.homedir(), '.claude', 'ui', 'media-models.json')
+/** The providers whose image/video models media generation can call with a vault key. */
+const MEDIA_PROVIDERS: ReadonlySet<string> = new Set(['openai', 'openrouter'])
 
 const MODELS_DEV_URL = 'https://models.dev/api.json'
 const FETCH_TIMEOUT_MS = 30_000
@@ -119,6 +127,87 @@ function buildEntries(payload: unknown): PricingEntry[] {
   return entries
 }
 
+/** One image or video model of a media provider, as models.dev lists it. */
+export interface MediaModelRow {
+  providerId: 'openai' | 'openrouter'
+  id: string
+  name: string
+  type: 'image' | 'video'
+  /** `modalities.input` includes `image`. */
+  acceptsImages: boolean
+  /** USD per million input / output tokens (or per unit, as the provider states), when listed. */
+  cost?: { input?: number; output?: number }
+  /** `release_date` as models.dev spells it (`2026-03-01`); orders "newest". */
+  releaseDate?: string
+}
+
+/**
+ * The non-deprecated `type: image|video` models of {@link MEDIA_PROVIDERS}. Skips what is not the
+ * expected shape, like buildEntries.
+ */
+function buildMediaRows(payload: unknown): MediaModelRow[] {
+  const rows: MediaModelRow[] = []
+  if (!isRecord(payload)) return rows
+  for (const providerId of MEDIA_PROVIDERS) {
+    const provider = payload[providerId]
+    if (!isRecord(provider) || !isRecord(provider.models)) continue
+    for (const [modelId, model] of Object.entries(provider.models)) {
+      if (!modelId || !isRecord(model)) continue
+      if (model.type !== 'image' && model.type !== 'video') continue
+      if (model.status === 'deprecated') continue
+      const input = isRecord(model.modalities) ? model.modalities.input : undefined
+      const cost = isRecord(model.cost) ? model.cost : undefined
+      const inCost = finiteNumber(cost?.input)
+      const outCost = finiteNumber(cost?.output)
+      rows.push({
+        providerId: providerId as MediaModelRow['providerId'],
+        id: modelId,
+        name: typeof model.name === 'string' && model.name ? model.name : modelId,
+        type: model.type,
+        acceptsImages: Array.isArray(input) && input.includes('image'),
+        ...(inCost !== null || outCost !== null
+          ? {
+              cost: {
+                ...(inCost !== null ? { input: inCost } : {}),
+                ...(outCost !== null ? { output: outCost } : {})
+              }
+            }
+          : {}),
+        ...(typeof model.release_date === 'string' ? { releaseDate: model.release_date } : {})
+      })
+    }
+  }
+  return rows
+}
+
+/** In-memory media rows; null until a refresh or a persisted read sets them. */
+let mediaRows: MediaModelRow[] | null = null
+
+function persistMediaRows(rows: MediaModelRow[]): void {
+  try {
+    writeJsonAtomic(MEDIA_MODELS_FILE, rows, { dirMode: 0o700 })
+  } catch (err) {
+    logger.warn('opencode-pricing', `Failed to persist media models: ${err}`)
+  }
+}
+
+/** The persisted rows, or null when the file is missing or not a row array. */
+function readPersistedMediaRows(): MediaModelRow[] | null {
+  try {
+    if (!fs.existsSync(MEDIA_MODELS_FILE)) return null
+    const parsed: unknown = JSON.parse(fs.readFileSync(MEDIA_MODELS_FILE, 'utf-8'))
+    return Array.isArray(parsed) ? (parsed as MediaModelRow[]) : null
+  } catch {
+    return null
+  }
+}
+
+/** The image and video models of `openai` and `openrouter` from the last catalog refresh (possibly empty). */
+export function getMediaModelRows(): MediaModelRow[] {
+  if (mediaRows === null) mediaRows = readPersistedMediaRows() ?? []
+  return mediaRows
+}
+
 /**
  * Fetch and parse the catalog. Returns null for a response we decline to use (a
  * non-200, an oversized body); throws whatever fetch or JSON.parse throws, which
@@ -191,6 +280,8 @@ export async function refreshPrices(): Promise<{ count: number; refreshedAt: num
     }
 
     persistEntries(entries)
+    mediaRows = buildMediaRows(payload)
+    persistMediaRows(mediaRows)
     registerSupplementalPricing(entries)
     logger.info('opencode-pricing', `Registered ${entries.length} models.dev pricing entries`)
     return { count: entries.length, refreshedAt }
@@ -257,6 +348,10 @@ export function loadPersistedPrices(): boolean {
     }
     registerSupplementalPricing(parsed)
     logger.info('opencode-pricing', `Loaded ${parsed.length} persisted pricing entries`)
+    // A price file from before media rows were kept: refetch once so the media catalog fills.
+    const persistedMedia = readPersistedMediaRows()
+    if (persistedMedia) mediaRows = persistedMedia
+    else persistedFileUsable = false
     return true
   } catch (err) {
     logger.warn('opencode-pricing', `Failed to load persisted prices: ${err}`)

@@ -82,6 +82,11 @@ import { invalidatePiModelCache, onPiCatalogRecovered } from '../pi/model-discov
 import { invalidateOpencodeModelCache } from '../opencode/model-discovery'
 import { createHostAnchor, type HostAnchor } from './host-anchor'
 import { createCoreStop, type CoreStop } from './core-stop'
+import { mediaJobs } from '../services/media-jobs'
+import { resolveAdditionalDirectories } from '../services/additional-directories'
+import { appSetting } from '../services/app-settings'
+import { mergedClaudeRulesFor } from '../pi/permission-engine'
+import { resolveMediaGeneration } from '../../shared/media-generation'
 import { serviceSession } from '../services/service-session'
 import { localVoiceServer } from '../voice/local-voice-server'
 import type { CommandConnection } from '../ipc/command-registry'
@@ -250,6 +255,37 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     // Its parent's disconnect (re-raise the cards it cleared) and deletion (end it).
     (observer) => addHostObserver(observer)
   )
+  // ClaudeUI-hosted image/video jobs outlive the call that started them: they reach their session through
+  // the manager and canonical state at each use (durable id, followed through re-keys), and end only when
+  // the session is removed (Disconnect, close, delete), never when its object is replaced.
+  mediaJobs.configure({
+    emit: emitEvent,
+    deliver: (sessionId, item) =>
+      deliverDispatchResult(sessionManager, dispatchFlush, sessionId, item),
+    session: (sessionId) => sessionManager.get(sessionId),
+    pathContext: (sessionId, cwd) => ({
+      cwd,
+      worktree: syncCore.getCanonicalState().worktreeInfoMap[sessionId] ?? null,
+      additionalDirectories: resolveAdditionalDirectories(
+        mergedClaudeRulesFor(cwd).additionalDirectories,
+        cwd
+      )
+    }),
+    settings: () => resolveMediaGeneration(appSetting('mediaGeneration'))
+  })
+  const releaseMediaRekeys = syncCore.onRekey((oldId, newId) => mediaJobs.rekey(oldId, newId))
+  const releaseMediaRemovals = addHostObserver((channel, args) => {
+    if (channel === 'session:removed' && typeof args[0] === 'string') {
+      mediaJobs.onSessionRemoved(args[0])
+    }
+  })
+  const stopMediaJobs = {
+    stop: (): void => {
+      releaseMediaRekeys()
+      releaseMediaRemovals()
+      mediaJobs.shutdown()
+    }
+  }
   const releaseDispatchParents = (): void => {
     releaseDispatchRekeys()
     dispatchFlush.stop()
@@ -556,6 +592,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     hostAnchor,
     usageHubClient,
     releaseDispatchParents,
+    mediaJobs: stopMediaJobs,
     serviceSession,
     opencodeServerManager,
     localVoiceServer,

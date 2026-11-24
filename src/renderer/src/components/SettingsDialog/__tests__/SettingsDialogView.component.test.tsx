@@ -90,7 +90,7 @@ afterEach(() => {
 })
 
 describe('the rail', () => {
-  it('lists the three rail groups and all 14 pages', () => {
+  it('lists the three rail groups and all 15 pages', () => {
     renderView()
     for (const label of ['App', 'Features', 'Harnesses']) {
       expect(screen.getByText(label)).toBeInTheDocument()

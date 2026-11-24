@@ -73,7 +73,13 @@ import { TunnelManager } from './tunnel-manager'
 import { E2ECrypto } from '../../shared/e2e-crypto'
 import { MOCKUP_HTTP_PREFIX, splitMockupHttpToken } from '../../shared/mockup-url'
 import { createProgressThrottle } from '../../shared/progress-throttle'
-import { SENT_FILE_ROUTE, parseSentFileQuery } from '../../shared/sent-file-url'
+import {
+  MEDIA_FILE_ROUTE,
+  MEDIA_JOB_ID_RE,
+  SENT_FILE_ROUTE,
+  parseSentFileQuery
+} from '../../shared/sent-file-url'
+import { resolveMediaFile, serveMediaFile } from './media-files'
 import { matchSentFilePath, sentFileDisposition } from '../sent-file-security'
 import { validateLocalFilePath } from '../shell-security'
 import { dbPasswordAuthProvider, safeHexEqual } from './remote-auth'
@@ -2250,6 +2256,9 @@ export class RemoteServer {
       // Synchronous since phase 4b: the allowlist is canonical state, read
       // in-process, so there is nothing left to await.
       this.serveSentFile(url, req, res)
+    } else if (url.pathname === MEDIA_FILE_ROUTE) {
+      // A saved image/video of a media job, by job id (ledger-known files only), with Range.
+      this.serveMediaFileRoute(url, req, res)
     } else if (url.pathname === `${IDE_BASE_PATH}/enter`) {
       // ADR-064. The entry route, ABOVE the general `/vscode` arm (it is the one
       // path under the prefix that must NOT demand the cookie — it is what mints
@@ -2601,6 +2610,48 @@ export class RemoteServer {
     const stream = fs.createReadStream(check.path)
     stream.on('error', () => res.destroy())
     stream.pipe(res)
+  }
+
+  /**
+   * `GET /media-file?job=<id>&token=<t>` — a saved image or video of a media job.
+   *
+   * Same gate as `/sent-file`: the scoped {@link fileToken} (constant-time), the lock-out consult without
+   * spending the budget. What it serves is not a path the client names: the job id selects a ledger row,
+   * and `resolveMediaFile` hands back that row's file only while it is still a regular file inside the
+   * roots of the session that made it. Everything but a token mismatch answers 404, so the route is not
+   * an existence oracle. GET/HEAD, one byte range.
+   */
+  private serveMediaFileRoute(url: URL, req: http.IncomingMessage, res: http.ServerResponse): void {
+    const refuse = (status: number, body: string, extra: Record<string, string> = {}): void => {
+      res.writeHead(status, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        ...extra,
+        ...this.securityHeaders(false)
+      })
+      res.end(body)
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      refuse(405, 'Method Not Allowed', { Allow: 'GET, HEAD' })
+      return
+    }
+    const throttleKey = this.throttleKey(req)
+    if (this.isAuthThrottled(throttleKey)) {
+      refuse(429, 'Too Many Requests')
+      return
+    }
+    if (!safeTokenEqual(this.fileToken, url.searchParams.get('token'))) {
+      logger.warn('remote-server', `Rejected /media-file from ${throttleKey}: bad token`)
+      refuse(403, 'Forbidden')
+      return
+    }
+    const jobId = url.searchParams.get('job') ?? ''
+    const file = MEDIA_JOB_ID_RE.test(jobId) ? resolveMediaFile(jobId) : null
+    if (!file) {
+      refuse(404, 'Not found')
+      return
+    }
+    serveMediaFile(req, res, file, this.securityHeaders(false))
   }
 
   /**

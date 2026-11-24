@@ -22,6 +22,8 @@
  * line, "Another Claude session sent a message:", aside), so a prompt that merely mentions the tag is not a note.
  */
 
+import { MEDIA_JOB_KEY_PREFIX } from './media-generation'
+
 export const SESSION_MESSAGE_TAG = 'session-message'
 export const CROSS_SESSION_MESSAGE_TAG = 'cross-session-message'
 
@@ -67,6 +69,14 @@ export function isAnyXAgentSender(key: string): boolean {
   return isXAgentSender(key) || isXAgentMessageSender(key)
 }
 
+/** The sentence after the closing tag of a {@link SESSION_MESSAGE_TAG} wrapper that carries a media job's outcome. */
+export const MEDIA_JOB_TRAILER =
+  'This is the outcome of an image or video job you started with generate_image or generate_video, not a message from the user.'
+
+export function isMediaJobSender(key: string): boolean {
+  return key.startsWith(MEDIA_JOB_KEY_PREFIX)
+}
+
 /**
  * Who a delivered item is from, as the wrapper names it: an X-Agent's result (origin
  * `dispatch-result`) always behind {@link X_AGENT_KEY_PREFIX}, whatever key the producer used.
@@ -75,7 +85,14 @@ export function wrapperSender(item: { origin: string; from: { key: string; title
   key: string
   title: string
 } {
-  if (item.origin !== 'dispatch-result' || isXAgentSender(item.from.key)) return item.from
+  // A media job's outcome rides the same origin but is not an X-Agent: its own prefix stays.
+  if (
+    item.origin !== 'dispatch-result' ||
+    isXAgentSender(item.from.key) ||
+    isMediaJobSender(item.from.key)
+  ) {
+    return item.from
+  }
   return { key: `${X_AGENT_KEY_PREFIX}${item.from.key}`, title: item.from.title }
 }
 
@@ -158,6 +175,7 @@ export function unescapeClosingTag(tag: string, body: string): string {
  * model does not read it as another Claude session's message.
  */
 export function envelopeName(from: { key: string; title: string }): string {
+  if (isMediaJobSender(from.key)) return sanitizeWrapperTitle(from.title || 'Media job')
   return sanitizeWrapperTitle(
     isAnyXAgentSender(from.key) ? `X-Agent ${xAgentBareName(from.title)}` : from.title
   )
@@ -177,6 +195,7 @@ export function buildCrossSessionEnvelope(
 /** The sentence that closes a wrapper, by who sent it. */
 function trailerFor(key: string): string {
   if (isXAgentSender(key)) return X_AGENT_RESULT_TRAILER
+  if (isMediaJobSender(key)) return MEDIA_JOB_TRAILER
   return isXAgentMessageSender(key) ? X_AGENT_MESSAGE_TRAILER : SESSION_MESSAGE_TRAILER
 }
 

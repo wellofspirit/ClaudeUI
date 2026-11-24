@@ -46,6 +46,15 @@ vi.mock('../../services/remote-server', () => ({
     setIdeService = vi.fn()
   }
 }))
+vi.mock('../../services/media-jobs', () => ({
+  mediaJobs: {
+    configure: vi.fn(),
+    rekey: vi.fn(),
+    onSessionRemoved: vi.fn(),
+    shutdown: vi.fn(),
+    stop: vi.fn(() => false)
+  }
+}))
 vi.mock('../../services/remote-dispatcher', () => ({ RemoteDispatcher: class {} }))
 vi.mock('../../services/tailscale-manager', () => ({ TailscaleManager: class {} }))
 vi.mock('../../services/terminal-service', () => ({ terminalService: { setRemoteSink: vi.fn() } }))

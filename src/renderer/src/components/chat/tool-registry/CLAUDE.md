@@ -8,7 +8,7 @@ Turns an engine's tool call into a neutral `ToolView` and picks the card that dr
 - `claude-tool-specs.ts`: `CLAUDE_TOOL_SPECS`, the card shape (`detail`, `findings` or `note`) of each Claude tool that has no kind of its own.
 - `kinds/`: one body per kind; `kinds/index.ts` holds `TOOL_RENDERERS`. `summary.ts` is the header text, `chips.ts` the header chips, `approval-action.ts` the approval card's tool label.
 - `src/shared/hosted-tools.ts`: `HOSTED_TOOLS`, one row per ClaudeUI-owned tool (Claude server, kind, label), its three spellings, and `hostedToolView` (the `diagram` and `mockup` views). `src/shared/pi-tool-kinds.ts`: `piToolKind`, pi's name to kind, which is `PiEngineToolMap.kindOf` and what the permission ladder reads. `src/shared/session-tools-description.ts` names the session tools.
-- Kinds: `command` shell; `fileEdit`, `fileWrite`, `fileRead` file tools; `search`; `web`; `image`; `diagram`, `mockup` hosted cards that draw the whole card; `mcp` any other MCP tool; `detail` field list; `findings` review rows; `unknown` fallback.
+- Kinds: `command` shell; `fileEdit`, `fileWrite`, `fileRead` file tools; `search`; `web`; `diagram`, `mockup`, `media` hosted cards that draw the whole card; `mcp` any other MCP tool; `detail` field list; `findings` review rows; `unknown` fallback.
 - Lifted kinds, absent from `TOOL_RENDERERS` and routed by `renderToolBlock` in `src/renderer/src/components/chat/MessageBubble.tsx`: `todo`, `task`, `plan`, `question`, `note`.
 
 ## Recipes

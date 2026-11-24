@@ -1,10 +1,19 @@
 /**
- * The provider for a source. Contract stub: slice A fills it with the ChatGPT plan,
- * OpenAI and OpenRouter clients.
+ * The provider for a source: the ChatGPT plan, OpenAI or OpenRouter client.
  */
 import type { MediaSource } from '../../../shared/media-generation'
+import { createChatgptPlanProvider } from './chatgpt-plan'
+import { createOpenAiImagesProvider } from './openai-images'
+import { createOpenRouterProvider } from './openrouter'
 import type { MediaProvider } from './types'
 
 export function mediaProviderFor(source: MediaSource): MediaProvider {
-  throw new Error(`media-providers: no provider for ${source} yet`)
+  switch (source) {
+    case 'chatgpt-plan':
+      return createChatgptPlanProvider()
+    case 'openai':
+      return createOpenAiImagesProvider()
+    case 'openrouter':
+      return createOpenRouterProvider()
+  }
 }
