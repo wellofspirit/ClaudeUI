@@ -17,7 +17,7 @@ import {
   SESSION_TOOLS_SERVER_NAME
 } from './session-tools-description'
 import { CLAUDE_MEDIA_MCP_SERVER, MEDIA_TOOL_NAMES } from './media-generation'
-import { mediaKindOfTool, mediaToolView } from './media-tool-view'
+import { mediaKindOfAnyName, mediaToolView } from './media-tool-view'
 import type { ToolKind, ToolView } from './tool-kinds'
 import type { ContentBlock } from './types'
 
@@ -156,7 +156,7 @@ export function hostedToolView(
     }
   }
   if (kind === 'media' && toolName) {
-    const media = mediaKindOfTool(toolName.replace(/^.*?(?:__|claudeui_)/, ''))
+    const media = mediaKindOfAnyName(toolName)
     if (media) return mediaToolView(media, input)
   }
   return null

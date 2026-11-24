@@ -141,4 +141,20 @@ describe('hostedToolKind / hostedToolName / hostedToolView', () => {
     ).toMatchObject({ kind: 'mockup', directory: 'm1' })
     expect(hostedToolView('command', {})).toBeNull()
   })
+
+  it('builds the media view from every engine spelling, Claude included', () => {
+    for (const name of [
+      'mcp__claude-ui-media__generate_image',
+      'claudeui_generate_image',
+      'generate_image'
+    ]) {
+      expect(hostedToolView('media', { prompt: 'p' }, undefined, name)).toMatchObject({
+        kind: 'media',
+        media: 'image'
+      })
+    }
+    expect(
+      hostedToolView('media', { prompt: 'p' }, undefined, 'mcp__claude-ui-media__generate_video')
+    ).toMatchObject({ kind: 'media', media: 'video' })
+  })
 })

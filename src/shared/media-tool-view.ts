@@ -20,8 +20,12 @@ export function mediaKindOfTool(bareName: string): MediaKind | null {
  * `claudeui_generate_image`, bare `generate_image`), is one of the two media tools.
  */
 export function isMediaToolName(toolName: string): boolean {
-  const bare = toolName.replace(/^mcp__claude-ui-media__/, '').replace(/^claudeui_/, '')
-  return mediaKindOfTool(bare) !== null
+  return mediaKindOfAnyName(toolName) !== null
+}
+
+/** The media kind of a tool name in any engine's spelling (see {@link isMediaToolName}). */
+export function mediaKindOfAnyName(toolName: string): MediaKind | null {
+  return mediaKindOfTool(toolName.replace(/^mcp__claude-ui-media__/, '').replace(/^claudeui_/, ''))
 }
 
 const text = (v: unknown): string | undefined =>
