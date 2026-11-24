@@ -26,8 +26,12 @@ const childEnv = {
   // Windows env keys are case-insensitive: any spelling must go.
   nodefaultcurrentdirectoryinexepath: '1'
 }
-const build = (opts: { quiet?: boolean; platform?: string } = {}) =>
-  targets({ quiet: opts.quiet ?? true, childEnv, platform: opts.platform ?? 'win32' })
+const build = (opts: { quiet?: boolean; platform?: string; env?: Record<string, string> } = {}) =>
+  targets({
+    quiet: opts.quiet ?? true,
+    childEnv: { ...childEnv, ...opts.env },
+    platform: opts.platform ?? 'win32'
+  })
 
 const memberLabels = (stage: any) => stage.parallel.map((m: any) => m.label)
 
@@ -121,9 +125,81 @@ describe('the other targets keep their shape', () => {
   })
 
   it('build:mac still overlays CSC_IDENTITY_AUTO_DISCOVERY on the child env', () => {
-    const builder = build()['build:mac'][1].steps[0]
+    const builder = build()['build:mac'][2].steps[0]
     expect(builder[2].env.CSC_IDENTITY_AUTO_DISCOVERY).toBe('false')
     expect(builder[2].env.PATH).toBe('/bin')
+  })
+})
+
+const stageLabels = (stages: any[]) => stages.map((s) => s.label ?? 'parallel')
+const cmd = (stage: any) => stage.steps.map((s: any[]) => `${s[0]} ${s[1].join(' ')}`)
+
+describe('stamp build-info', () => {
+  it.each([
+    ['build', ['parallel', 'stamp build-info']],
+    [
+      'build:mac',
+      ['parallel', 'stamp build-info', 'electron-builder --mac --dir', 'codesign', 'xattr -cr']
+    ],
+    ['build:win', ['parallel', 'stamp build-info', 'electron-builder --win --dir']],
+    ['build:linux', ['parallel', 'stamp build-info', 'electron-builder --linux']],
+    ['build:unpack', ['parallel', 'stamp build-info', 'electron-builder --dir']]
+  ])('%s stamps right after the prepare group', (name, labels) => {
+    const stages = build()[name]
+    expect(stageLabels(stages)).toEqual(labels)
+    expect(cmd(stages[1])).toEqual(['bun scripts/stamp-build-info.mjs --quiet'])
+  })
+
+  it('is not part of the ensure or update targets', () => {
+    for (const name of ['ensure', 'ensure-cli', 'update-cli', 'postinstall'])
+      expect(JSON.stringify(build()[name])).not.toContain('stamp-build-info')
+  })
+})
+
+describe('CLAUDEUI_BUILD_OUT', () => {
+  const OUT = '/stage/out'
+  const builders = ['build:mac', 'build:win', 'build:linux', 'build:unpack']
+
+  it.each(builders)('%s keeps the default output when unset', (name) => {
+    const all = JSON.stringify(build()[name])
+    expect(all).not.toContain('directories.output')
+  })
+
+  it('mac: codesign and xattr use dist/mac-arm64 when unset', () => {
+    const stages = build()['build:mac']
+    expect(cmd(stages[3])[0]).toBe('codesign --force --deep --sign - dist/mac-arm64/ClaudeUI.app')
+    expect(cmd(stages[4])[0]).toBe('xattr -cr dist/mac-arm64/ClaudeUI.app')
+  })
+
+  it.each(builders)('%s passes the output dir to electron-builder when set', (name) => {
+    const stages = build({ env: { CLAUDEUI_BUILD_OUT: OUT } })[name]
+    const builder = stages.find((s: any) => s.label?.startsWith('electron-builder'))
+    expect(builder.steps[0][1]).toContain(`-c.directories.output=${OUT}`)
+  })
+
+  it('mac: codesign and xattr follow the output dir', () => {
+    const stages = build({ env: { CLAUDEUI_BUILD_OUT: OUT + '/' } })['build:mac']
+    expect(stages[3].steps[0][1].at(-1)).toBe(`${OUT}/mac-arm64/ClaudeUI.app`)
+    expect(stages[4].steps[0][1]).toEqual(['-cr', `${OUT}/mac-arm64/ClaudeUI.app`])
+    expect(cmd(stages[3])[0]).not.toContain('dist/')
+  })
+
+  it('mac: signs with MAC_SIGN_IDENTITY when set, without a shell', () => {
+    const stages = build({ env: { MAC_SIGN_IDENTITY: 'ClaudeUI Dev' } })['build:mac']
+    expect(stages[3].steps[0][0]).toBe('codesign')
+    expect(stages[3].steps[0][1]).toContain('ClaudeUI Dev')
+  })
+
+  it('changes nothing else', () => {
+    // The variable also rides along in the child env overlays (it is part of childEnv).
+    const normalise = (v: unknown) =>
+      JSON.parse(
+        JSON.stringify(v)
+          .replaceAll(`,"-c.directories.output=${OUT}"`, '')
+          .replaceAll(`${OUT}/mac-arm64`, 'dist/mac-arm64'),
+        (k, val) => (k === 'CLAUDEUI_BUILD_OUT' ? undefined : val)
+      )
+    expect(normalise(build({ env: { CLAUDEUI_BUILD_OUT: OUT } }))).toEqual(normalise(build()))
   })
 })
 

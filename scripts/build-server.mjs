@@ -97,6 +97,19 @@ function copyDir(from, to) {
   }
 }
 
+/** Ships the build identity (`out/build-info.json`) beside the executable's `out/renderer`. */
+function copyBuildInfo(outDir) {
+  const src = path.join(ROOT, 'out', 'build-info.json')
+  if (!fs.existsSync(src)) {
+    console.warn(
+      'warning: out/build-info.json is missing (run scripts/stamp-build-info.mjs); the server will report an unknown version'
+    )
+    return
+  }
+  fs.mkdirSync(path.join(outDir, 'out'), { recursive: true })
+  fs.copyFileSync(src, path.join(outDir, 'out', 'build-info.json'))
+}
+
 function ensureWebBundle() {
   if (!fs.existsSync(WEB_SRC)) {
     fail(
@@ -193,6 +206,7 @@ function buildCompile(target) {
   // module header for why embedding needs a RemoteServer change.
   log('copying the web client → dist/server-bin/out/renderer')
   copyDir(WEB_SRC, path.join(out, 'out', 'renderer'))
+  copyBuildInfo(out)
 
   fs.writeFileSync(path.join(out, 'README.md'), READMES.compile, 'utf-8')
   log(`done → ${path.relative(ROOT, out)}`)

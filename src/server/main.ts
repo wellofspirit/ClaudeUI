@@ -61,7 +61,8 @@ import {
 } from '../core/host'
 import { logger } from '../core/services/logger'
 import { setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
-import { serverVoiceWorkerLauncher } from './voice-worker-launcher'
+import { isCompiledBunEntry, serverVoiceWorkerLauncher } from './voice-worker-launcher'
+import { resolveServerVersion } from './server-version'
 import { CliError, HELP_TEXT, parseServerArgs, type ServerOptions } from './cli'
 import { runFirstBootChain } from './first-boot'
 import { createShutdown } from './shutdown'
@@ -146,29 +147,10 @@ function resolveAppPath(): string {
   return fromSource
 }
 
-/**
- * The build this server is, for the usage hub's per-device facts (ADR-072 §5).
- *
- * There is no `app.getVersion()` here and no version baked into the bundle, so
- * it comes from the `package.json` beside the resolved app path when there is
- * one — which is the repository root for a `bun src/server/main.ts` run and the
- * distribution directory when one ships a manifest. Absent, the push says
- * `unknown`, which is honest: the alternative is inventing a number.
- */
-function resolveServerVersion(): string {
-  try {
-    const manifest = path.join(resolveAppPath(), 'package.json')
-    const parsed = JSON.parse(fs.readFileSync(manifest, 'utf-8')) as { version?: unknown }
-    return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : 'unknown'
-  } catch {
-    return 'unknown'
-  }
-}
-
 /** Wire every host adapter the headless deployment needs. */
 function installHostAdapters(): void {
   setHostPaths({ getAppPath: resolveAppPath })
-  setHostAppVersion(resolveServerVersion())
+  setHostAppVersion(resolveServerVersion(resolveAppPath(), isCompiledBunEntry(process.argv[1])))
 
   // A deployed server is not a dev build, so background usage/analytics writes
   // are ON. The desktop's dev-mode skip exists to stop a dev instance fighting

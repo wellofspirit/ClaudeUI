@@ -187,6 +187,10 @@ jobs:
         run: |
           bun run typecheck
           bunx electron-vite build
+          bun scripts/stamp-build-info.mjs
+        env:
+          CLAUDEUI_BUILD_KIND: release
+          CLAUDEUI_RELEASE_CHANNEL: pre-release
 
       - name: Package (macOS)
         if: matrix.platform == 'mac'
@@ -206,8 +210,8 @@ jobs:
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
         run: |
           if [ -z "$MAC_CERT_P12" ]; then
-            echo "MAC_CERT_P12 secret not set; falling back to ad-hoc signing."
-            exit 0
+            echo "MAC_CERT_P12 secret not set: a release must be signed with the certificate, because an ad-hoc update would fail every user's signature check." >&2
+            exit 1
           fi
           security create-keychain -p "" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
@@ -413,8 +417,12 @@ jobs:
       - name: Build server executable
         run: |
           bunx electron-vite build
+          bun scripts/stamp-build-info.mjs
           bun run build:server:compile
           ./dist/server-bin/claudeui-server --help > /dev/null
+        env:
+          CLAUDEUI_BUILD_KIND: release
+          CLAUDEUI_RELEASE_CHANNEL: pre-release
 
       # tar (not a bare upload): actions/upload-artifact strips the executable
       # bit, so modes survive only INSIDE the tarball, which is uploaded and
@@ -435,14 +443,27 @@ jobs:
   release:
     needs: [version, build, server]
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
+
+      # Hashes the assets and signs the manifest the in-app updater verifies.
+      # The key is visible to this step only.
+      - name: Sign update manifest
+        run: >
+          bun scripts/release/update-manifest.mjs --dir artifacts
+          --version ${{ needs.version.outputs.version }} --channel pre-release
+          --out-dir artifacts
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
 
       - name: Create pre-release
         # Pinned by commit: tags are movable. Re-vet before bumping.

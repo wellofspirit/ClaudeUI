@@ -94,6 +94,20 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
     }
   ]
 
+  // The build's identity (`out/build-info.json`, src/shared/build-info.ts), written
+  // after electron-vite so its `out/` exists, and before electron-builder packs
+  // it. It imports the shared TypeScript, so bun runs it.
+  const stampBuildInfo = [
+    { label: 'stamp build-info', steps: [['bun', ['scripts/stamp-build-info.mjs', ...Q]]] }
+  ]
+
+  // CLAUDEUI_BUILD_OUT (an absolute dir) redirects electron-builder's output,
+  // so a rebuild never lands in the running install or the tree's own `dist/`.
+  // Unset: the default `dist/`, exactly as before.
+  const buildOut = childEnv.CLAUDEUI_BUILD_OUT || ''
+  const outArg = buildOut ? [`-c.directories.output=${buildOut}`] : []
+  const macApp = `${buildOut ? buildOut.replace(/[\\/]+$/, '') : 'dist'}/mac-arm64/ClaudeUI.app`
+
   // The CLI and the two harnesses, installed together. The members share no
   // outputs except the harness store's `.staging` dir: the two installs
   // share its stale-entry sweep (`store-writer.ts` cleanStaleEntries, 1 h
@@ -124,15 +138,16 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
     // No typecheck: CI and the release workflows run `bun run typecheck` as their
     // own step. ensure-cli writes only vendor/claude-cli, which electron-vite
     // never reads, so the two run side by side.
-    build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }],
+    build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }, ...stampBuildInfo],
     'build:mac': [
       ...prepare({ typecheck: true }),
+      ...stampBuildInfo,
       {
         label: 'electron-builder --mac --dir',
         steps: [
           [
             'bunx',
-            ['electron-builder', '--mac', '--dir'],
+            ['electron-builder', '--mac', '--dir', ...outArg],
             { env: { ...childEnv, CSC_IDENTITY_AUTO_DISCOVERY: 'false' } }
           ]
         ]
@@ -140,39 +155,38 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
       {
         label: 'codesign',
         steps: [
-          [
-            'sh',
-            [
-              '-c',
-              'codesign --force --deep --sign "${MAC_SIGN_IDENTITY:--}" dist/mac-arm64/ClaudeUI.app'
-            ]
-          ]
+          // argv, not `sh -c`: the app path may come from CLAUDEUI_BUILD_OUT.
+          // No identity = ad-hoc (`-`), as `${MAC_SIGN_IDENTITY:--}` did.
+          ['codesign', ['--force', '--deep', '--sign', childEnv.MAC_SIGN_IDENTITY || '-', macApp]]
         ]
       },
       {
         label: 'xattr -cr',
-        steps: [['sh', ['-c', 'xattr -cr dist/mac-arm64/ClaudeUI.app']]]
+        steps: [['xattr', ['-cr', macApp]]]
       }
     ],
     'build:win': [
       ...prepare({ typecheck: true }),
+      ...stampBuildInfo,
       {
         label: 'electron-builder --win --dir',
-        steps: [['bunx', ['electron-builder', '--win', '--dir']]]
+        steps: [['bunx', ['electron-builder', '--win', '--dir', ...outArg]]]
       }
     ],
     'build:linux': [
       ...prepare({ typecheck: false }),
+      ...stampBuildInfo,
       {
         label: 'electron-builder --linux',
-        steps: [['bunx', ['electron-builder', '--linux']]]
+        steps: [['bunx', ['electron-builder', '--linux', ...outArg]]]
       }
     ],
     'build:unpack': [
       ...prepare({ typecheck: true }),
+      ...stampBuildInfo,
       {
         label: 'electron-builder --dir',
-        steps: [['bunx', ['electron-builder', '--dir']]]
+        steps: [['bunx', ['electron-builder', '--dir', ...outArg]]]
       }
     ],
     // `bun install` runs this (package.json#postinstall). Electron's binary
