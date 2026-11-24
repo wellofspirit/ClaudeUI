@@ -34,6 +34,7 @@ import { usageHubCommands } from './usage-hub-commands'
 import { openrouterCommands } from './openrouter-commands'
 import { harnessCommands } from './harness-commands'
 import { voicePackCommands } from './voice-pack-commands'
+import { appUpdateCommands } from './app-update-commands'
 import { mediaCommands } from './media-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
@@ -491,6 +492,17 @@ export function registerRemoteHandlers(
 
   // Media generation catalog: a `config` query, in the base remote grant set.
   for (const cmd of mediaCommands()) {
+    handleRemote(cmd)
+  }
+
+  // -------------------------------------------------------------------------
+  // ClaudeUI's own updates (auto-update design §3)
+  // -------------------------------------------------------------------------
+  //
+  // From the same declarations the desktop spreads. Every device may see the
+  // update state (`config`); checking, downloading, skipping and restarting
+  // into a new build are `admin`, so a base connection is refused them.
+  for (const cmd of appUpdateCommands()) {
     handleRemote(cmd)
   }
 

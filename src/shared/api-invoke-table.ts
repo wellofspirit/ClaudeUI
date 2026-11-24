@@ -87,6 +87,16 @@ export const API_INVOKES = {
   setMultiAccountEnabled: { channel: 'account:set-enabled', arity: 1, mode: 'invoke' },
   switchAccount: { channel: 'account:switch', arity: 1, mode: 'invoke' },
   getVersionInfo: { channel: 'app:version-info', arity: 0, mode: 'invoke' },
+  applyAppUpdate: { channel: 'app-update:apply', arity: 0, mode: 'invoke' },
+  checkAppUpdate: { channel: 'app-update:check', arity: 0, mode: 'invoke' },
+  downloadAppUpdate: { channel: 'app-update:download', arity: 0, mode: 'invoke' },
+  skipAppUpdate: {
+    channel: 'app-update:skip',
+    arity: 1,
+    mode: 'invoke',
+    wire: (a) => [{ version: a[0] }]
+  },
+  appUpdateState: { channel: 'app-update:state', arity: 0, mode: 'invoke' },
   cancelSignIn: { channel: 'auth:cancel', arity: 0, mode: 'invoke' },
   signIn: { channel: 'auth:sign-in', arity: 0, mode: 'invoke' },
   submitOAuthCode: { channel: 'auth:submit-code', arity: 1, mode: 'invoke' },

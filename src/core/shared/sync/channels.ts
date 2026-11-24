@@ -444,6 +444,11 @@ const SYNC_CHANNEL_SPECS = {
     canonical: false,
     why: 'An API key was stored or removed in the vault (setApiKey, adoptNativeKey, removeDefinition, disconnectProvider). A payload-free nudge: no provider id and no key, so there is nothing to leak to a remote client; the Usage Analytics tab re-reads `openrouter:status` (a boolean) to show or hide its OpenRouter tab. Replicated because the tab is on every device, and a key saved on the desktop must appear on the phone. Rings like `harness:changed`: a replay costs one status read. No snapshot field.'
   },
+  'app-update:changed': {
+    cls: 'replicated',
+    canonical: false,
+    why: "Auto-update design §3: ClaudeUI's own update state moved (a check started or ended, a download advanced or changed phase, a version was skipped, the update settings changed). A payload-free nudge like `usage-hub:changed`: `app-update:state` is the one shape, read with `config`, and download progress is in it (emitted at most once a second). Replicated because every device shows the Updates panel and an admin phone may drive the download the desktop shows. Rings: a replay costs one state read. No snapshot field."
+  },
   'provider:auth-resolved': {
     cls: 'replicated',
     // `canonical: true` because this flag means exactly "does `applyEvent` change

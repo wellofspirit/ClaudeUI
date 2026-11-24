@@ -609,7 +609,16 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // of the capture that hits the missing pack, and is not pinned.
   'voice:pack-install': 'admin',
   'voice:pack-install-cancel': 'admin',
-  'voice:pack-remove': 'admin'
+  'voice:pack-remove': 'admin',
+  // ClaudeUI's own updates (auto-update design §3), registered on BOTH
+  // transports: sending the host to GitHub, downloading a build onto it, hiding
+  // a release from its operator, and restarting it into a new build. Relabelled
+  // `config`, any authenticated connection could restart the host into whatever
+  // is staged. The read (`app-update:state`) declares `config` and is not pinned.
+  'app-update:check': 'admin',
+  'app-update:download': 'admin',
+  'app-update:skip': 'admin',
+  'app-update:apply': 'admin'
 }
 
 // ---------------------------------------------------------------------------

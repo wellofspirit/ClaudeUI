@@ -18,6 +18,9 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AccountsState, AccountRef, OAuthAccount } from '../shared/types'
+import type { BuildInfo, DevBuildInfo } from '../shared/build-info'
+import type { UpdateTarget } from '../shared/update-manifest'
+import type { AppUpdateEligibility } from '../shared/types/app-update'
 
 // ---------------------------------------------------------------------------
 // Window handle
@@ -163,6 +166,48 @@ export function setHostAppVersion(version: string | null): void {
 /** The host's version, or `unknown` when nothing published one (vitest, a script). */
 export function hostAppVersion(): string {
   return hostVersion ?? 'unknown'
+}
+
+// ---------------------------------------------------------------------------
+// ClaudeUI's own updates (auto-update design §3)
+// ---------------------------------------------------------------------------
+
+/**
+ * What differs per host for ClaudeUI's own updates. The core service
+ * (`services/app-update.ts`) finds, verifies and downloads a release; staging
+ * the archive and restarting into it are the host's. Unset (null), the service
+ * reports `supported: false` and does nothing: no checks, no timers, no files.
+ *
+ * Errors any method throws are shown to every client (`app-update:state` is a
+ * `config` read), so their messages must not carry local paths.
+ */
+export interface AppUpdateHost {
+  /** The running build's identity (`services/build-info.ts`). */
+  buildInfo(): BuildInfo | DevBuildInfo
+  /** This host's manifest asset key (e.g. `desktop-darwin-arm64`), or null when none fits. */
+  target(): UpdateTarget | null
+  /** Whether an update can be applied here (writable install, not translocated, ...). */
+  eligibility(): Promise<AppUpdateEligibility>
+  /** Absolute directory the archives are downloaded into (under `~/.claude/ui/updates`). */
+  downloadsDir(): string
+  /** Extract a verified archive and run the platform checks; the id names the result. */
+  stage(archivePath: string, version: string): Promise<{ stagedId: string }>
+  /** Whether an earlier `stage` result is still there and valid (after a restart). */
+  isStaged(stagedId: string, version: string): Promise<boolean>
+  /** Restart into the staged build. */
+  apply(stagedId: string, version: string): Promise<void>
+}
+
+let hostAppUpdateImpl: AppUpdateHost | null = null
+
+/** Publish the host's update seam (or clear it). Both hosts wire it before core starts. */
+export function setHostAppUpdate(host: AppUpdateHost | null): void {
+  hostAppUpdateImpl = host
+}
+
+/** The host's update seam, or null where this host cannot update itself. */
+export function hostAppUpdate(): AppUpdateHost | null {
+  return hostAppUpdateImpl
 }
 
 // ---------------------------------------------------------------------------

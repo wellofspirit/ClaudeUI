@@ -74,6 +74,8 @@ import { collectHarnessGarbage } from '../harness/install/gc'
 import { startHarnessUpdater } from '../harness/install/updater'
 import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
 import { startVoicePackEvents } from '../ipc/voice-pack-commands'
+import { startAppUpdateEvents } from '../ipc/app-update-commands'
+import { appUpdater } from '../services/app-update'
 import { sweepVoicePackStore } from '../voice/pack-installer'
 import { harnessWritable } from '../harness/resolve'
 import { watchHarnessArrivals } from '../harness/arrivals'
@@ -418,6 +420,14 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // desktop started. App-lifetime, like the harness events above.
   startVoicePackEvents(emitEvent)
 
+  // ClaudeUI's own updates (auto-update design §3): the view's changes go out as
+  // the payload-free `app-update:changed`, then the updater starts. After the
+  // canonical seed (`registerSessionIpc`), so it reads the saved channel and
+  // mode; it does nothing on a host that wired no `AppUpdateHost` seam, and its
+  // first check waits 30 s, off boot's critical path.
+  startAppUpdateEvents(emitEvent)
+  appUpdater.start()
+
   // pi's model catalog came back after some client was answered a degraded
   // empty one (a failed probe at boot, its backoff, invalidations overtaking
   // it): no client asks again on its own, so the composer would keep showing a
@@ -600,6 +610,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     automationManager,
     hostAnchor,
     usageHubClient,
+    appUpdater,
     releaseDispatchParents,
     mediaJobs: stopMediaJobs,
     serviceSession,

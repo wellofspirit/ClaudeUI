@@ -3,6 +3,11 @@
 {"channel":"account:get","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"account:set-enabled","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"account:switch","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"app-update:apply","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"app-update:check","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"app-update:download","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"app-update:skip","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"app-update:state","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"app:version-info","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"auth:cancel","capability":"config","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"auth:sign-in","capability":"config","kind":"command","sessionIdArg":null,"withConnection":true,"withProgress":false}

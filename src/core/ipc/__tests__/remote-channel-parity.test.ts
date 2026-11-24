@@ -78,6 +78,11 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    sibling `voice:pack-status` declares `chat`, because every connection that
  *    can hold the mic can hit the wall and must be able to read it, so it is
  *    absent here.
+ *  - `admin` (auto-update design §3, `app-update:*` writes) — sending the host to
+ *    GitHub, downloading a ClaudeUI build onto it, skipping a release for its
+ *    operator, and restarting it into the staged build. `app-update:state`
+ *    declares `config` (every device may see that an update exists), so it is
+ *    absent here.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -85,6 +90,10 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  * reachability nobody thought about.
  */
 const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
+  'app-update:apply',
+  'app-update:check',
+  'app-update:download',
+  'app-update:skip',
   'authcfg:apply',
   'authcfg:end',
   'authcfg:get',

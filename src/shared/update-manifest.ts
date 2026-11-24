@@ -8,6 +8,9 @@
 export const UPDATE_MANIFEST_FILE = 'update-manifest.json'
 export const UPDATE_MANIFEST_SIG_FILE = 'update-manifest.json.sig'
 
+/** The GitHub repository whose releases are the update feed (`owner/repo`). */
+export const UPDATE_FEED_REPO = 'wellofspirit/ClaudeUI'
+
 export const UPDATE_TARGETS = [
   'desktop-darwin-arm64',
   'desktop-win32-x64',
