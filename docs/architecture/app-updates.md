@@ -41,7 +41,8 @@ as-built map: modules, the files they write, the protocols between them, and the
   container, checks the marker and version (and on macOS `codesign --verify --deep --strict` plus the running app's
   designated requirement when it is certificate-signed), then renames it to the staging name.
 - **Restart.** `requestRelaunch` refuses unless eligible and nothing is in flight, takes the lock, writes the job,
-  spawns the helper and waits for `.ready` (5 s; otherwise it cancels and the app keeps running), collects the restore
+  spawns the helper and waits for `.ready` (5 s, 15 s on Windows; otherwise it cancels and the app keeps running;
+  on Windows an attached launcher starts the helper with `Start-Process` from `<t>.helper-args`), collects the restore
   record from the window, and confirms the quit. The helper waits for the old pid (Windows: and for processes running
   from the install), swaps when asked, launches the install with the same arguments (macOS: `open -n` plus an
   allowlist of identity, mode and proxy variables), and waits for a health record newer than the job. A swap without

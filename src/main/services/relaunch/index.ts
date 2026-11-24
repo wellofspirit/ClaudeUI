@@ -6,7 +6,9 @@
  */
 
 import { spawn } from 'node:child_process'
+import * as fs from 'node:fs'
 import type { HostRelaunch } from '../../../core/host'
+import { logger } from '../../../core/services/logger'
 import { parseRestoreRecord, type RestoreRecord } from '../../../shared/relaunch'
 import { helperEnv, type HelperCommand } from './helper-scripts'
 import type { RelaunchService, SpawnedHelper } from './relaunch-service'
@@ -34,21 +36,54 @@ export const desktopHostRelaunch: HostRelaunch = {
 }
 
 /**
- * Spawn the helper detached from this process: its own process group/session,
- * no stdio, cwd = the state dir (never the install: on Windows an open cwd
- * handle would block every rename), unref'd so it outlives the quit.
+ * Start the helper so it outlives this process: no stdio, cwd = the state dir
+ * (never the install: on Windows an open cwd handle would block every rename),
+ * unref'd. macOS: the helper itself, detached (its own session). Windows: the
+ * launcher, attached and hidden, never detached: a powershell.exe started
+ * detached has no console and exits 0 without running anything. The launcher
+ * starts the helper, which as our grandchild leaves libuv's kill-on-close job.
+ * A launcher that exits non-zero fails the spawn with what it wrote.
+ * `baseEnv`: the environment passed on (tests add their fakes' variables).
  */
-export function spawnDetachedHelper(command: HelperCommand, cwd: string): SpawnedHelper {
+export function spawnDetachedHelper(
+  command: HelperCommand,
+  cwd: string,
+  baseEnv: NodeJS.ProcessEnv = process.env
+): SpawnedHelper {
+  const { launcher } = command
   const child = spawn(command.file, command.args, {
-    detached: true,
+    detached: !launcher,
     stdio: 'ignore',
     windowsHide: true,
     cwd,
-    env: helperEnv(process.env, command)
+    env: helperEnv(baseEnv, command)
   })
-  const failed = new Promise<Error>((resolve) => child.once('error', resolve))
+  const failed = new Promise<Error>((resolve) => {
+    child.once('error', resolve)
+    if (launcher)
+      child.once('exit', (code, signal) => {
+        if (code !== 0) resolve(new Error(launchFailure(launcher.errorFile, code, signal)))
+      })
+  })
   child.unref()
-  return { pid: child.pid, failed }
+  if (!launcher) return { pid: child.pid, failed }
+  // By its handle: a no-op once it exited, never a pid that may name another process.
+  return { pid: child.pid, failed, stop: () => void child.kill() }
+}
+
+/**
+ * The Windows launcher failed. What it wrote (PowerShell's error, which names
+ * paths under the home) goes to the log only: the reason reaches every client.
+ */
+function launchFailure(errorFile: string, code: number | null, signal: string | null): string {
+  try {
+    const written = fs.readFileSync(errorFile, 'utf8').trim().slice(0, 2000)
+    if (written) logger.warn('relaunch', `the helper launcher failed: ${written}`)
+  } catch {
+    /* it wrote nothing */
+  }
+  const exit = code !== null ? `exit code ${code}` : `signal ${signal}`
+  return `the helper launcher failed (${exit}); the log says why`
 }
 
 /**

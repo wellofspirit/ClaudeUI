@@ -18,7 +18,7 @@
  *   sweep, `services/app-update/boot-cleanup.ts`, removes one once it is 7 days
  *   old and this boot runs from the install itself). A delete that fails (the
  *   gate never throws) is logged and the sweep goes on.
- * - job, log, result and ready files older than 30 days are unlinked.
+ * - job, log, result and ready files (and Windows' launcher files) older than 30 days are unlinked.
  */
 
 import * as fs from 'node:fs'
@@ -33,7 +33,8 @@ import { jobFiles, type RelaunchPlatform } from './paths'
 export const BACKUP_KEEP_MS = 7 * 24 * 60 * 60_000
 export const JOB_FILES_KEEP_MS = 30 * 24 * 60 * 60_000
 
-const JOB_FILE_RE = /^([0-9a-f]{32})\.(job\.json|job\.sh|log|result\.json|ready)$/
+const JOB_FILE_RE =
+  /^([0-9a-f]{32})\.(job\.json|job\.sh|helper-args|helper-pid|launch-error|log|result\.json|ready)$/
 
 interface JobEntry {
   job: RelaunchJob

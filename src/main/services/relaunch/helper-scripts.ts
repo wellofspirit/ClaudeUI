@@ -4,9 +4,16 @@
  * spliced into a script or a command line (design review ruling 9).
  *
  * Algorithm (both scripts; every step is appended, timestamped, to `<t>.log`):
- *   0. write `<t>.ready`. Every exit path writes `<t>.result.json` (temp +
- *      rename) and releases `lock/` (only when it is this job's).
+ *   0. the job must still be live: its result absent and `lock/owner.json` this
+ *      job's. Otherwise the app gave up on it (it writes the result and releases
+ *      the lock while it still runs), so log one line and exit touching nothing:
+ *      no launch, no result. Then write `<t>.ready`. Every later exit path writes
+ *      `<t>.result.json` (temp + rename) and releases `lock/` (only when it is
+ *      this job's).
  *   1. wait for the old pid (`waitPidSec`); timeout → `aborted`, nothing touched.
+ *      Then (and before that `aborted`) check step 0 again: a helper the app gave
+ *      up on after it wrote `<t>.ready` sees it here, before anything is touched
+ *      or launched (the app never quit for this job; a later quit is unrelated).
  *   2. Windows: wait `lockWaitSec` for processes running from the install to exit,
  *      stop the rest BY PID, wait `killWaitSec`; still there → launch the install
  *      unchanged, `aborted`.
@@ -25,6 +32,8 @@
  * by pid; never by name (`bun-claude` also runs agent sessions on this machine).
  * Nothing here deletes recursively: the helpers only rename.
  */
+
+import type { JobFiles } from './paths'
 
 /** `${D}{` in the bash text: a template literal would read `${` as an interpolation. */
 const D = '$'
@@ -49,6 +58,34 @@ MARKER_REL='Contents/Resources/claudeui-install.json'
 now_ms() { echo $(( $(date +%s) * 1000 )); }
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG" 2>/dev/null; }
 put() { printf '%s' "$2" > "$1.$$.tmp" && mv -f "$1.$$.tmp" "$1"; }
+# Why the job is no longer live, or nothing. The app gives up on a helper that
+# was not ready in time by writing the result and releasing the lock, while it
+# still runs: such a helper must touch nothing, or it would wait for the app's
+# next quit and act then.
+not_live() {
+  local owner
+  if [ -e "$S/$T.result.json" ] || [ -L "$S/$T.result.json" ]; then
+    echo "the job already has a result"
+    return
+  fi
+  owner=$(tr -d ' \n\r\t' 2>/dev/null < "$S/lock/owner.json")
+  if [ -z "$owner" ]; then
+    echo "the relaunch lock is not held"
+    return
+  fi
+  case "$owner" in *"\"token\":\"$T\""*) ;; *) echo "the relaunch lock names another job" ;; esac
+}
+# Leave, touching nothing: no launch, no result. DONE=1 keeps the exit trap
+# (installed after the first check) from launching anything.
+leave_if_not_live() {
+  local why
+  why=$(not_live)
+  [ -n "$why" ] || return 0
+  log "job no longer live: $why"
+  DONE=1
+  exit 0
+}
+leave_if_not_live
 jstr() {
   local s=$1
   s=${D}{s//\\/\\\\}
@@ -200,10 +237,14 @@ log "helper started: mode=$JOB_MODE pid=$JOB_PID install=$JOB_INSTALL"
 # 1. the old process must be gone before anything is touched
 deadline=$(( $(date +%s) + JOB_WAIT_PID_SEC ))
 while alive "$JOB_PID"; do
-  if [ "$(date +%s)" -ge "$deadline" ]; then finish aborted "ClaudeUI did not quit"; fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    leave_if_not_live
+    finish aborted "ClaudeUI did not quit"
+  fi
   sleep 0.2
 done
 log "process $JOB_PID exited"
+leave_if_not_live
 
 # 3-4. swap
 if [ "$JOB_MODE" = swap ]; then
@@ -265,9 +306,10 @@ finish failed "the new build did not report healthy within $JOB_HEALTH_SEC s, an
 `
 
 /**
- * Windows: run as `powershell.exe -EncodedCommand <this, compacted>` with the
- * job's path in `CLAUDEUI_RELAUNCH_JOB`. Kept small: the encoded form must stay
- * well under the 32 767-character command line ({@link POWERSHELL_ENCODED_LIMIT}).
+ * Windows: run as `powershell.exe <POWERSHELL_HELPER_ARGS>` (`-EncodedCommand
+ * <this, compacted>`) by the launcher below, with the job's path in
+ * `CLAUDEUI_RELAUNCH_JOB`. Kept small: the encoded form must stay well under the
+ * 32 767-character command line ({@link POWERSHELL_ENCODED_LIMIT}).
  */
 const POWERSHELL_SOURCE = String.raw`
 $ErrorActionPreference='Continue'
@@ -287,6 +329,14 @@ function NowMs{[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}
 function L($m){try{[IO.File]::AppendAllText("$S\$T.log",('{0} {1}{2}' -f [DateTime]::UtcNow.ToString('o'),$m,[Environment]::NewLine),$U8)}catch{}}
 # Read UTF-8 without locking out a writer's rename (share ReadWrite and Delete).
 function RT($p){$f=[IO.FileStream]::new($p,'Open','Read','ReadWrite, Delete');try{[IO.StreamReader]::new($f,$U8).ReadToEnd()}finally{$f.Dispose()}}
+# Why the job is no longer live, or nothing. The app gives up on a helper that
+# was not ready in time by writing the result and releasing the lock, while it
+# still runs: such a helper must touch nothing, or it would wait for the app's
+# next quit and act then. Every read in try/catch: the trap launches.
+function JobGone{if(Test-Path -LiteralPath "$S\$T.result.json"){return 'the job already has a result'};try{if(((RT "$S\lock\owner.json")|ConvertFrom-Json).token -cne $T){return 'the relaunch lock names another job'}}catch{return 'the relaunch lock is not held'};$null}
+# Leave touching nothing: no launch, no result (and Done set, should the trap run).
+function LeaveIfGone{$why=JobGone;if($why){L "job no longer live: $why";$script:Done=$true;exit 0}}
+LeaveIfGone
 function Put($f,$txt){$tmp="$f.$PID.tmp";[IO.File]::WriteAllText($tmp,[string]$txt,$U8);Move-Item -LiteralPath $tmp -Destination $f -Force}
 function Fin($st,$r){
 $o=[ordered]@{token=$T;status=$st;mode=$j.mode;fromVersion=$j.fromVersion;toVersion=$j.toVersion}
@@ -324,8 +374,9 @@ function Bad($r){L "preflight failed: $r";Go $I;Fin 'failed' $r}
 Put "$S\$T.ready" (NowMs)
 L "helper started: mode=$($j.mode) pid=$($j.pid) install=$I"
 $dl=(Get-Date).AddSeconds($to.waitPidSec)
-while(Old){if((Get-Date) -gt $dl){Fin 'aborted' 'ClaudeUI did not quit'};Start-Sleep -Milliseconds 200}
+while(Old){if((Get-Date) -gt $dl){LeaveIfGone;Fin 'aborted' 'ClaudeUI did not quit'};Start-Sleep -Milliseconds 200}
 L "process $($j.pid) exited"
+LeaveIfGone
 WaitGone $I $to.lockWaitSec
 $left=Under $I
 if($left.Count){
@@ -386,15 +437,69 @@ export function encodePowerShell(script: string): string {
   return Buffer.from(script, 'utf16le').toString('base64')
 }
 
+/** The helper's powershell.exe arguments; the app writes them to `<t>.helper-args`. */
+export const POWERSHELL_HELPER_ARGS: readonly string[] = [
+  '-NoProfile',
+  '-NonInteractive',
+  '-ExecutionPolicy',
+  'Bypass',
+  '-WindowStyle',
+  'Hidden',
+  '-EncodedCommand',
+  encodePowerShell(POWERSHELL_HELPER)
+]
+
+/** `<t>.helper-args`: the arguments as the one string `Start-Process -ArgumentList` takes. */
+export const POWERSHELL_HELPER_ARGS_LINE = POWERSHELL_HELPER_ARGS.join(' ')
+
+/**
+ * Windows, stage one: the app spawns this ATTACHED (`windowsHide`), because a
+ * powershell.exe spawned detached (libuv's DETACHED_PROCESS: no console at all)
+ * exits 0 without running its script. It starts the helper with Start-Process,
+ * which gives it a hidden console of its own; as the app's grandchild the helper
+ * is outside libuv's kill-on-close job (silent breakaway), so it outlives the
+ * quit. It writes the helper's pid to `<t>.helper-pid` (the app stops it by that
+ * pid when it never reports ready) and exits; on any error it writes why to
+ * `<t>.launch-error` and exits 1. Paths come from `CLAUDEUI_RELAUNCH_ARGS` (the
+ * args file); the helper inherits this environment, the job path included.
+ */
+const POWERSHELL_LAUNCHER_SOURCE = String.raw`
+$ErrorActionPreference='Stop'
+$U8=New-Object Text.UTF8Encoding $false
+$A=$env:CLAUDEUI_RELAUNCH_ARGS
+$B=$A -replace '\.helper-args$',''
+try{
+$line=[IO.File]::ReadAllText($A,[Text.Encoding]::UTF8)
+# The file sits on disk: start nothing but the fixed helper command line.
+if($line -cnotmatch '^-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand [A-Za-z0-9+/]+={0,2}$'){throw 'the helper arguments are not the fixed command line'}
+$p=Start-Process -FilePath ([Environment]::SystemDirectory+'\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $line -WindowStyle Hidden -WorkingDirectory ([IO.Path]::GetDirectoryName($A)) -PassThru
+[IO.File]::WriteAllText("$B.helper-pid",[string]$p.Id,$U8)
+exit 0
+}catch{
+try{[IO.File]::WriteAllText("$B.launch-error",[string]$_,$U8)}catch{}
+exit 1}`
+
+export const POWERSHELL_LAUNCHER = compactPowerShell(POWERSHELL_LAUNCHER_SOURCE)
+
 export const RELAUNCH_JOB_ENV = 'CLAUDEUI_RELAUNCH_JOB'
+export const RELAUNCH_ARGS_ENV = 'CLAUDEUI_RELAUNCH_ARGS'
+
+/** The job files a helper command names (`jobFiles` in `paths.ts`). */
+export type HelperFiles = Pick<JobFiles, 'json' | 'sh' | 'helperArgs' | 'helperPid' | 'launchError'>
 
 export interface HelperCommand {
   file: string
   args: string[]
-  /** Extra environment for the helper (Windows: the job path). */
+  /** Extra environment (Windows: the job path and the helper-args path). */
   env: Record<string, string>
   /** Variables removed from the inherited environment (matched case-insensitively). */
   unsetEnv: string[]
+  /**
+   * Windows: the command is the launcher, spawned attached; it exits once the
+   * helper runs, having written the helper's pid to `pidFile`, or why it could
+   * not to `errorFile`. Absent (macOS): the command is the helper, spawned detached.
+   */
+  launcher?: { pidFile: string; errorFile: string }
 }
 
 /**
@@ -412,10 +517,14 @@ export function helperEnv(
   return { ...out, ...command.env }
 }
 
-/** The helper's command for a platform; the job path is the only variable part. */
+/**
+ * The helper's command for a platform; the job's file paths are the only
+ * variable part. Windows: the launcher, which starts the helper with the
+ * arguments the app wrote to `<t>.helper-args` ({@link POWERSHELL_HELPER_ARGS_LINE}).
+ */
 export function helperCommand(
   platform: 'darwin' | 'win32' | 'linux',
-  files: { json: string; sh: string },
+  files: HelperFiles,
   systemRoot: string = process.env.SystemRoot ?? 'C:\\Windows'
 ): HelperCommand {
   if (platform === 'win32') {
@@ -424,17 +533,16 @@ export function helperCommand(
       args: [
         '-NoProfile',
         '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
         '-WindowStyle',
         'Hidden',
         '-EncodedCommand',
-        encodePowerShell(POWERSHELL_HELPER)
+        encodePowerShell(POWERSHELL_LAUNCHER)
       ],
-      env: { [RELAUNCH_JOB_ENV]: files.json },
+      env: { [RELAUNCH_JOB_ENV]: files.json, [RELAUNCH_ARGS_ENV]: files.helperArgs },
       // A module path from the parent (a PowerShell 7 session, a dev shell) must
       // not decide which modules Windows PowerShell autoloads for the helper.
-      unsetEnv: ['PSModulePath']
+      unsetEnv: ['PSModulePath'],
+      launcher: { pidFile: files.helperPid, errorFile: files.launchError }
     }
   }
   // `-p` (privileged): bash reads no BASH_ENV / ENV, honours no SHELLOPTS and

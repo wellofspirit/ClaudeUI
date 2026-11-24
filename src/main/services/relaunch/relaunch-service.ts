@@ -11,10 +11,12 @@
  *      directory, or whose own install marker does not carry `toVersion`; a
  *      `release` swap whose version is not newer than the running one (a
  *      `rebuild` may be equal or older: the user built it on purpose);
- *   2. take the lock, write the job, spawn the detached helper, and wait (≤ 5 s)
- *      for its ready file — the helper must be alive BEFORE anything is torn
- *      down (design review ruling 9). No ready file, or a spawn error: kill the
- *      helper by pid, release the lock, throw; the app keeps running;
+ *   2. take the lock, write the job, spawn the detached helper, and wait (≤ 5 s;
+ *      Windows ≤ 15 s: two PowerShell starts, each scanned by antivirus) for its
+ *      ready file — the helper must be alive BEFORE anything is torn down (design
+ *      review ruling 9). No ready file, or a spawn error: stop the helper (macOS:
+ *      by the spawned pid; Windows: the launcher by its handle, the helper by the
+ *      pid the launcher wrote), release the lock, throw; the app keeps running;
  *   3. collect the desktop's restore record (bounded 2 s; windowless: none);
  *   4. confirm the quit (no worktree prompt: worktrees are kept).
  *
@@ -62,9 +64,28 @@ export type RelaunchRequest =
 
 /** What spawning the helper produced: its pid, or the error. */
 export interface SpawnedHelper {
+  /** The spawned process: the helper, or on Windows the launcher that starts it. */
   pid?: number
-  /** Resolves with a spawn error (ENOENT, EACCES), never rejects. */
+  /** Resolves with a spawn error (ENOENT, EACCES) or a failed launcher; never rejects. */
   failed: Promise<Error>
+  /** Windows: stop the launcher if it still runs (by its handle, never by pid). */
+  stop?: () => void
+}
+
+/** How long the helper has to write its ready file. */
+export const READY_TIMEOUT_MS = 5000
+/** Windows: the launcher, then the helper, each a PowerShell start an antivirus may scan. */
+export const READY_TIMEOUT_WIN32_MS = 15_000
+
+/** The helper's pid as the Windows launcher wrote it, or null. */
+export function readHelperPid(file: string): number | null {
+  try {
+    const text = fs.readFileSync(file, 'utf8').trim()
+    const pid = /^[1-9][0-9]{0,9}$/.test(text) ? Number(text) : NaN
+    return Number.isSafeInteger(pid) ? pid : null
+  } catch {
+    return null
+  }
 }
 
 export interface RelaunchServiceDeps {
@@ -184,13 +205,17 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     void failed.then((err) => {
       spawnError = err
     })
-    const until = now() + (deps.readyTimeoutMs ?? 5000)
+    const timeoutMs =
+      deps.readyTimeoutMs ?? (platform === 'win32' ? READY_TIMEOUT_WIN32_MS : READY_TIMEOUT_MS)
+    const until = now() + timeoutMs
     while (now() < until) {
       if (spawnError) return spawnError
       if (fs.existsSync(file)) return null
       await sleep(50)
     }
-    return fs.existsSync(file) ? null : new Error('the relaunch helper did not start within 5 s')
+    return fs.existsSync(file)
+      ? null
+      : new Error(`the relaunch helper did not start within ${timeoutMs / 1000} s`)
   }
 
   async function requestRelaunch(request: RelaunchRequest): Promise<void> {
@@ -283,14 +308,25 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
       ...(request.mode === 'swap' ? { source: request.source } : {})
     }
 
-    const giveUp = async (err: Error, helperPid?: number): Promise<never> => {
-      if (helperPid !== undefined) {
-        try {
-          ;(deps.killPid ?? ((pid: number) => process.kill(pid)))(helperPid)
-        } catch {
-          /* already gone */
-        }
+    const killPid = (pid: number): void => {
+      try {
+        ;(deps.killPid ?? ((p: number) => process.kill(p)))(pid)
+      } catch {
+        /* already gone */
       }
+    }
+    /** Stop a helper that never came up (Windows: the launcher, then the helper it started). */
+    const stopHelper = (spawned: SpawnedHelper): void => {
+      if (platform !== 'win32') {
+        if (spawned.pid !== undefined) killPid(spawned.pid)
+        return
+      }
+      spawned.stop?.()
+      const pid = readHelperPid(files.helperPid)
+      if (pid !== null) killPid(pid)
+    }
+    const giveUp = async (err: Error, spawned?: SpawnedHelper): Promise<never> => {
+      if (spawned) stopHelper(spawned)
       try {
         await writeAtomicRetrying(
           files.result,
@@ -325,9 +361,9 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     } catch (err) {
       return giveUp(err instanceof Error ? err : new Error(String(err)))
     }
-    const helperPid = spawned.pid
     const notReady = await waitForReady(files.ready, spawned.failed)
-    if (notReady) return giveUp(notReady, helperPid)
+    if (notReady) return giveUp(notReady, spawned)
+    const helperPid = platform === 'win32' ? readHelperPid(files.helperPid) : spawned.pid
 
     const what = request.mode === 'swap' ? `swap to ${toVersion}, ${request.source}` : job.mode
     logger.info('relaunch', `relaunch ${token} (${what}) started; helper pid ${helperPid}`)

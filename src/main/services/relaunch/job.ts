@@ -12,7 +12,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { isShortCommit, type RelaunchMode } from '../../../shared/relaunch'
-import type { RelaunchPlatform } from './paths'
+import { POWERSHELL_HELPER_ARGS_LINE } from './helper-scripts'
+import type { JobFiles, RelaunchPlatform } from './paths'
 
 export interface RelaunchTimeouts {
   /** Wait for the old process to exit. Timeout: `aborted`, nothing touched. */
@@ -237,11 +238,18 @@ export async function writeAtomicRetrying(
   }
 }
 
-/** Write both renderings of the job. */
-export function writeJobFiles(files: { json: string; sh: string }, job: RelaunchJob): void {
+/**
+ * Write both renderings of the job, and on Windows the helper's fixed
+ * arguments, which the launcher hands to the powershell.exe it starts.
+ */
+export function writeJobFiles(
+  files: Pick<JobFiles, 'json' | 'sh' | 'helperArgs'>,
+  job: RelaunchJob
+): void {
   fs.mkdirSync(path.dirname(files.json), { recursive: true })
   writeAtomic(files.json, jobJsonText(job))
   writeAtomic(files.sh, jobShellText(job))
+  if (job.platform === 'win32') writeAtomic(files.helperArgs, POWERSHELL_HELPER_ARGS_LINE)
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>

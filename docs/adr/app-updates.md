@@ -40,8 +40,11 @@ offered an update. Rotating the key ships the new public key in a release signed
 ## Restarts go through a detached helper that waits for health and rolls back (ADR-120)
 
 - **Relaunch** (no new build) and **swap** (a staged build replaces the install) use one helper per platform
-  (`/bin/bash -p` on macOS, Windows PowerShell 5.1 via `-EncodedCommand`), spawned before the quit and required to
-  report ready within 5 s, or the restart is cancelled and the app keeps running. The quit goes through the quit
+  (`/bin/bash -p` on macOS, spawned detached; Windows PowerShell 5.1 via `-EncodedCommand`, started by a short
+  attached launcher with `Start-Process`, because a PowerShell started with no console runs nothing), spawned before
+  the quit and required to report ready within 5 s (15 s on Windows), or the restart is cancelled and the app keeps
+  running. A helper whose job is no longer live (a result exists or its lock is gone) exits without acting (changed
+  2026-11-25: the Windows two-stage launch and the stale-job check, found by the first Windows CI run). The quit goes through the quit
   coordinator without the worktree prompt. The helper waits for the old process (and on Windows for every process
   running from the install), renames the install aside and the staged build in, launches it, and waits up to 90 s for
   a health record that any boot of that install writes once its window loaded and the remote start settled. No health

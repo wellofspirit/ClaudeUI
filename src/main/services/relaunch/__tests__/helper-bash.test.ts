@@ -21,7 +21,7 @@ import {
   newToken,
   siblingPath
 } from '../paths'
-import { takeLock } from '../lock'
+import { releaseLock, takeLock } from '../lock'
 import { parseRelaunchResult, type RelaunchResult } from '../../../../shared/relaunch'
 import {
   alive,
@@ -32,6 +32,42 @@ import {
   waitFor,
   type FakeMode
 } from './fake-install'
+
+/** The result the app writes when it stops waiting for a helper. */
+const GAVE_UP = '{"status":"aborted","reason":"the relaunch helper did not start within 5 s"}'
+
+/**
+ * The ways a job stops being live, each with the reason the helper logs. The
+ * first is what the app does when it stops waiting: the result, then the lock.
+ */
+const GIVE_UPS = [
+  [
+    'the job already has a result',
+    (f: Fixture) => {
+      fs.writeFileSync(f.files.result, GAVE_UP)
+      releaseLock(f.state)
+    }
+  ],
+  ['the relaunch lock is not held', (f: Fixture) => releaseLock(f.state)],
+  [
+    'the relaunch lock names another job',
+    (f: Fixture) => {
+      releaseLock(f.state)
+      takeLock(f.state, { token: newToken(), pid: 1, at: Date.now() })
+    }
+  ]
+] as const
+
+/** Nothing renamed or launched, and no result beyond the app's own. */
+function expectUntouched(f: Fixture, reason: string): void {
+  expect(versionOf(f.install)).toBe('1.0.0')
+  expect(versionOf(f.staged)).toBe('2.0.0')
+  expect(fs.existsSync(f.backup)).toBe(false)
+  expect(launches(f.launchesFile)).toEqual([])
+  if (reason === 'the job already has a result')
+    expect(fs.readFileSync(f.files.result, 'utf8')).toBe(GAVE_UP)
+  else expect(fs.existsSync(f.files.result)).toBe(false)
+}
 
 const started: number[] = []
 afterAll(() => {
@@ -64,6 +100,8 @@ interface Fixture {
     pid?: number
     timeouts?: Partial<RelaunchTimeouts>
     launch?: string[]
+    /** After the job and lock are written, before the helper starts. */
+    beforeSpawn?: () => void
   }) => Promise<number>
   result: (timeoutMs?: number) => Promise<RelaunchResult>
 }
@@ -101,7 +139,12 @@ function fixture(opts: {
   )
 
   const run = async (
-    over: { pid?: number; timeouts?: Partial<RelaunchTimeouts>; launch?: string[] } = {}
+    over: {
+      pid?: number
+      timeouts?: Partial<RelaunchTimeouts>
+      launch?: string[]
+      beforeSpawn?: () => void
+    } = {}
   ) => {
     const timeouts: RelaunchTimeouts = {
       ...DEFAULT_TIMEOUTS,
@@ -132,6 +175,7 @@ function fixture(opts: {
     }
     takeLock(state, { token, pid: process.pid, at: Date.now() })
     writeJobFiles(files, job)
+    over.beforeSpawn?.()
     const cmd = helperCommand('darwin', files)
     const child = spawn(cmd.file, cmd.args, {
       detached: true,
@@ -177,7 +221,7 @@ describe
   .skipIf(process.platform === 'win32')
   .concurrent('bash relaunch helper', { timeout: 20_000 }, () => {
     it('runs the fixed script with the job path as its only argument', () => {
-      const cmd = helperCommand('darwin', { json: '/s/t.job.json', sh: '/s/t.job.sh' })
+      const cmd = helperCommand('darwin', jobFiles('/s', 't'))
       expect(cmd).toEqual({
         file: '/bin/bash',
         // -p: no BASH_ENV/ENV, no SHELLOPTS, no functions imported from the environment.
@@ -279,6 +323,50 @@ describe
       expect(launches(f.launchesFile)).toEqual([])
       old.kill('SIGKILL')
     })
+
+    // The app gives up on a helper not ready in time: it writes the result and
+    // releases the lock, while it still runs. A helper that starts after that
+    // must touch nothing, never wait for the app's next quit and act then.
+    it.each(GIVE_UPS)(
+      'a job no longer live (%s): exits at once, touching nothing',
+      async (reason, gaveUp) => {
+        const f = fixture({ mode: 'swap', staged: 'healthy' })
+        const old = spawn('/bin/sleep', ['30'], { stdio: 'ignore' })
+        started.push(old.pid!)
+        const pid = await f.run({
+          pid: old.pid,
+          timeouts: { waitPidSec: 30 },
+          beforeSpawn: () => gaveUp(f)
+        })
+        await waitFor(() => !alive(pid), 5000, 'the helper to exit')
+        expect(fs.existsSync(f.files.ready)).toBe(false)
+        expect(fs.readFileSync(f.files.log, 'utf8')).toContain(`job no longer live: ${reason}`)
+        expectUntouched(f, reason)
+        old.kill('SIGKILL')
+      }
+    )
+
+    // Given up on after it wrote `.ready` (it came up just too late): it sees
+    // that once the old process is gone, before touching or launching anything.
+    // The user's later quit is unrelated: relaunching then would be unrequested.
+    it.each(GIVE_UPS)(
+      'given up on after it was ready (%s): no launch, no rename once the old process exits',
+      async (reason, gaveUp) => {
+        const f = fixture({ mode: 'swap', staged: 'healthy' })
+        const old = spawn('/bin/sleep', ['30'], { stdio: 'ignore' })
+        started.push(old.pid!)
+        const pid = await f.run({ pid: old.pid, timeouts: { waitPidSec: 30 } })
+        await waitFor(() => fs.existsSync(f.files.ready), 3000, 'the ready file')
+        gaveUp(f)
+        old.kill('SIGKILL') // the user quits, later, for reasons of their own
+        await waitFor(() => !alive(pid), 5000, 'the helper to exit')
+        await new Promise((r) => setTimeout(r, 1000)) // a launch would show by now
+        const log = fs.readFileSync(f.files.log, 'utf8')
+        expect(log).toContain(`process ${old.pid} exited`)
+        expect(log).toContain(`job no longer live: ${reason}`)
+        expectUntouched(f, reason)
+      }
+    )
 
     it.each([
       ['missing', /staged build is missing/],

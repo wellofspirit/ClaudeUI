@@ -5,6 +5,9 @@
  *
  * State dir `~/.claude/ui/relaunch/`:
  *   `<t>.job.json` / `<t>.job.sh`  the job (PowerShell / bash read these)
+ *   `<t>.helper-args`              Windows: the helper's fixed powershell.exe arguments
+ *   `<t>.helper-pid`               Windows: the helper's pid, written by the launcher
+ *   `<t>.launch-error`             Windows: why the launcher could not start the helper
  *   `<t>.ready`                    the helper is alive (written first)
  *   `<t>.result.json`              the outcome (written last)
  *   `<t>.log`                      every helper step, timestamped
@@ -48,6 +51,10 @@ export function relaunchStateDir(home: string = os.homedir()): string {
 export interface JobFiles {
   json: string
   sh: string
+  /** Windows only: the launcher's files (`helper-scripts.ts`). */
+  helperArgs: string
+  helperPid: string
+  launchError: string
   ready: string
   result: string
   log: string
@@ -58,6 +65,9 @@ export function jobFiles(stateDir: string, token: string): JobFiles {
   return {
     json: at('job.json'),
     sh: at('job.sh'),
+    helperArgs: at('helper-args'),
+    helperPid: at('helper-pid'),
+    launchError: at('launch-error'),
     ready: at('ready'),
     result: at('result.json'),
     log: at('log')

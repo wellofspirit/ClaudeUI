@@ -9,6 +9,7 @@ vi.mock('../../../../core/services/logger', () => ({
 }))
 
 import { createRelaunchService, type RelaunchServiceDeps } from '../relaunch-service'
+import { POWERSHELL_HELPER_ARGS_LINE, type HelperCommand } from '../helper-scripts'
 import { createRestoreCollector } from '..'
 import { whenHealthy } from '../health-gate'
 import { readLock, takeLock } from '../lock'
@@ -418,6 +419,103 @@ describe.skipIf(onWindows)('requestRelaunch', () => {
     await svc.requestRelaunch({ mode: 'relaunch' })
     expect(fs.existsSync(restoreFile(state))).toBe(false)
     expect(confirmQuit).toHaveBeenCalledTimes(1)
+  })
+})
+
+// The Windows path through the service (probes and a fake spawn, no fake
+// install), so it runs on every host.
+describe('requestRelaunch on Windows: the launcher', () => {
+  const winService = (over: Partial<RelaunchServiceDeps> = {}) =>
+    service({
+      platform: 'win32',
+      execPath: 'C:\\Tools\\ClaudeUI\\ClaudeUI.exe',
+      probes: {
+        canWriteDir: () => true,
+        readFile: () =>
+          JSON.stringify({
+            schema: 1,
+            product: 'com.claudeui.app',
+            kind: 'desktop',
+            entries: ['ClaudeUI.exe', 'resources']
+          }),
+        readdir: () => ['ClaudeUI.exe', 'resources']
+      },
+      ...over
+    })
+  /** The job's files, from the job path the command carries. */
+  const filesOf = (cmd: HelperCommand) =>
+    jobFiles(state, path.basename(cmd.env.CLAUDEUI_RELAUNCH_JOB, '.job.json'))
+
+  it('spawns the launcher, with the helper arguments written beside the job', async () => {
+    const spawned: Array<[HelperCommand, string]> = []
+    const { svc, confirmQuit } = winService({
+      spawnHelper: (cmd, cwd) => {
+        spawned.push([cmd, cwd])
+        const files = filesOf(cmd)
+        fs.writeFileSync(files.helperPid, '4321')
+        fs.writeFileSync(files.ready, '1')
+        return { pid: 77, failed: new Promise(() => {}), stop: () => {} }
+      }
+    })
+    await svc.requestRelaunch({ mode: 'relaunch' })
+    expect(confirmQuit).toHaveBeenCalledTimes(1)
+    const [cmd, cwd] = spawned[0]
+    expect(cwd).toBe(state)
+    expect(cmd.launcher).toEqual({
+      pidFile: filesOf(cmd).helperPid,
+      errorFile: filesOf(cmd).launchError
+    })
+    expect(cmd.env.CLAUDEUI_RELAUNCH_ARGS).toBe(filesOf(cmd).helperArgs)
+    expect(fs.readFileSync(filesOf(cmd).helperArgs, 'utf8')).toBe(POWERSHELL_HELPER_ARGS_LINE)
+  })
+
+  it('never ready: stops the launcher by its handle and the helper by the pid it wrote', async () => {
+    const killPid = vi.fn()
+    const stop = vi.fn()
+    let writePid = true
+    const { svc, confirmQuit } = winService({
+      spawnHelper: (cmd) => {
+        if (writePid) fs.writeFileSync(filesOf(cmd).helperPid, '4321\r\n')
+        return { pid: 77, failed: new Promise(() => {}), stop }
+      },
+      killPid,
+      readyTimeoutMs: 300
+    })
+    await expect(svc.requestRelaunch({ mode: 'relaunch' })).rejects.toThrow(
+      /did not start within 0\.3 s/
+    )
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(killPid.mock.calls).toEqual([[4321]]) // never the launcher's pid
+    expect(readLock(state)).toBeNull()
+    // No pid file (the launcher never got that far): only the launcher is stopped.
+    writePid = false
+    await expect(svc.requestRelaunch({ mode: 'relaunch' })).rejects.toThrow(/did not start/)
+    expect(stop).toHaveBeenCalledTimes(2)
+    expect(killPid).toHaveBeenCalledTimes(1)
+    expect(confirmQuit).not.toHaveBeenCalled()
+  })
+
+  it('a failed launcher is reported straight away', async () => {
+    const failure = new Error('the helper launcher failed (exit code 1); the log says why')
+    const { svc, confirmQuit } = winService({
+      spawnHelper: () => ({ pid: 77, failed: Promise.resolve(failure), stop: () => {} })
+    })
+    const t0 = Date.now()
+    await expect(svc.requestRelaunch({ mode: 'relaunch' })).rejects.toThrow(/launcher failed/)
+    expect(Date.now() - t0).toBeLessThan(2000)
+    expect(confirmQuit).not.toHaveBeenCalled()
+    expect(readLock(state)).toBeNull()
+  })
+
+  it('waits 15 s for the helper on Windows (two PowerShell starts)', async () => {
+    let t = 1_800_000_000_000
+    const { svc } = winService({
+      spawnHelper: () => ({ pid: 77, failed: new Promise(() => {}) }),
+      killPid: () => {},
+      readyTimeoutMs: undefined,
+      now: () => (t += 1000)
+    })
+    await expect(svc.requestRelaunch({ mode: 'relaunch' })).rejects.toThrow(/within 15 s/)
   })
 })
 
