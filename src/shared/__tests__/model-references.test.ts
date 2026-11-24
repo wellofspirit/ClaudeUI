@@ -36,11 +36,17 @@ describe('findModelReferences', () => {
     )
     expect(refs).toEqual([
       {
+        kind: 'opencodeDefault',
+        engine: 'opencode',
+        title: 'opencode · Default model',
         model: 'openai/gpt-5.5',
         label: 'the opencode default model',
         where: 'Default model for opencode — Models & providers › Default models › opencode'
       },
       {
+        kind: 'opencodeSmall',
+        engine: 'opencode',
+        title: 'opencode · Small model',
         model: 'openai/gpt-5.6-luna',
         label: 'the opencode small model',
         where: 'Small model for opencode — Models & providers › Default models › opencode'
@@ -75,6 +81,9 @@ describe('findModelReferences', () => {
     )
     expect(refs).toEqual([
       {
+        kind: 'fallbackJudge',
+        engine: 'pi',
+        title: 'pi · Fallback judge',
         model: 'openai/gpt-5.6-luna',
         label: 'the pi auto-mode fallback judge model',
         where: 'Fallback judge for pi — Sessions & autonomy › Auto-mode judge › pi'
@@ -143,10 +152,32 @@ describe('findModelReferences', () => {
     )
     expect(refs).toEqual([
       {
+        kind: 'piDefault',
+        engine: 'pi',
+        title: 'pi · Default model',
         model: 'openai/gpt-5.5',
         label: 'the pi default model',
         where: 'Default model for pi — Models & providers › Default models › pi'
       }
+    ])
+  })
+
+  it('tags every reference with its kind, engine and row title', () => {
+    const refs = findModelReferences(
+      {
+        engines: {
+          claude: {
+            autoMode: { judgeModel: 'openai/gpt-5.5' },
+            dispatch: { defaultModel: 'openai/gpt-5.5', allowedModels: ['openai/gpt-5.6-luna'] }
+          }
+        }
+      },
+      GONE
+    )
+    expect(refs.map((r) => [r.kind, r.engine, r.title])).toEqual([
+      ['judge', 'claude', 'Claude · Auto-mode judge'],
+      ['dispatchDefault', 'claude', 'Claude · Dispatch default model'],
+      ['dispatchAllowed', 'claude', 'Claude · Allowed dispatch model']
     ])
   })
 

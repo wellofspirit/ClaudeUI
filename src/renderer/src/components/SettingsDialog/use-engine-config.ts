@@ -150,6 +150,28 @@ export function reloadEngineConfigObject(engineId: EngineId): Promise<void> {
     .catch(() => {})
 }
 
+/**
+ * Edit one engine's file from a FRESH read: `loadEngineConfig` → `mutate` →
+ * `saveEngineConfig`, never from the live entry's copy (which may predate a
+ * write made outside this store). Once the save has resolved, a live entry
+ * adopts the saved object and its subscribers are told. A failed read or save
+ * rejects and leaves the live entry as it was: a save that did not happen is
+ * not reported as one.
+ */
+export async function patchEngineConfigFile(
+  engineId: EngineId,
+  mutate: (fresh: EngineConfig) => EngineConfig
+): Promise<EngineConfig> {
+  const next = mutate(await window.api.loadEngineConfig(engineId))
+  await window.api.saveEngineConfig(engineId, next)
+  const entry = DISPATCH_STORES.get(engineId)
+  if (entry) {
+    entry.config = next
+    emitDispatchConfig(entry)
+  }
+  return next
+}
+
 /** Merge a patch into the engine's `dispatch` block and persist the whole file. */
 function updateDispatchConfig(engineId: EngineId, patch: Partial<DispatchConfig>): void {
   const current = DISPATCH_STORES.get(engineId)?.config

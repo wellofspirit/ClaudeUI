@@ -19,9 +19,12 @@
  *
  * THE ORPHAN GUARD, BEFORE THE CLICK. A model some setting of THIS engine
  * names (its default, its judge, its dispatch models — the scoped
- * `findModelReferences`) shows a lock and cannot be unticked; the tooltip says
- * where the setting lives. Any edit that would still orphan one is refused with
- * the reference sentence, as before.
+ * `findModelReferences`) shows a lock; the tooltip says where each setting
+ * lives. Clicking a locked row opens the replace dialog, which rewrites those
+ * settings and then performs the untick through `commit` (against the FRESH
+ * references: the render that opened the dialog is stale by then). A bulk Clear
+ * or vendor box keeps locked rows picked and says so in a fading notice. Any
+ * edit that would still orphan one is refused with the reference sentence.
  *
  * IT OWNS NO STATE OF RECORD. Each commit goes through `adapter.save`
  * (`models:set-provider-allowlist`), then the picker cache is dropped and the
@@ -34,22 +37,21 @@ import { engineMeta } from '../../../../shared/engine-meta'
 import {
   findModelReferences,
   formatModelReferences,
+  type ModelReference,
   type ModelReferenceSources
 } from '../../../../shared/model-references'
-import type {
-  EngineConfig,
-  EngineId,
-  EngineModelGroup,
-  OpencodeConfigSettings
-} from '../../../../shared/types'
+import type { EngineModelGroup } from '../../../../shared/types'
 import { Button, Segmented, SettingRow } from './settings-controls'
 import {
+  KeptLockedNotice,
   ModelCurationActions,
   ModelCurationList,
+  useKeptLockedNotice,
   type CurationFacet,
   type CurationModel,
   type CurationSort
 } from './ModelCurationList'
+import { loadReferenceSources, ReplaceModelReferencesDialog } from './ReplaceModelReferencesDialog'
 import { diagnosisText } from './provider-diagnosis'
 import { reloadEngineConfigObject } from './use-engine-config'
 
@@ -212,6 +214,14 @@ export function ModelCuration({
   const [sort, setSort] = useState<CurationSort>('newest')
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
+  /** The replace dialog's input while it is open: the locked ids it was opened for. */
+  const [replace, setReplace] = useState<string[] | null>(null)
+  const keptNotice = useKeptLockedNotice()
+  /**
+   * The untick a resolved dialog performs, from the LATEST render: its current
+   * selection, not the one at click time. Assigned below, once the writers exist.
+   */
+  const untick = useRef<(ids: string[], fresh: ModelReferenceSources) => void>(() => {})
   /** Saves run one at a time, in edit order (see `commit`). */
   const saveChain = useRef<Promise<void>>(Promise.resolve())
   /** Bumped per edit, per engine, so a failed save knows whether a later edit is queued. */
@@ -276,18 +286,9 @@ export function ModelCuration({
 
   useEffect(() => {
     let cancelled = false
-    void Promise.all([
-      window.api.loadOpencodeSettings().catch(() => ({}) as OpencodeConfigSettings),
-      window.api.getEngineModels().catch((): EngineModelGroup[] => []),
-      Promise.all(
-        (['claude', 'opencode', 'pi'] as EngineId[]).map(
-          async (id) =>
-            [id, await window.api.loadEngineConfig(id).catch(() => ({}) as EngineConfig)] as const
-        )
-      )
-    ]).then(([opencode, groups, configs]) => {
+    void loadReferenceSources().then(({ sources, groups }) => {
       if (cancelled) return
-      setSources({ opencode, engines: Object.fromEntries(configs) })
+      setSources(sources)
       setDiscovered(groups)
     })
     return () => {
@@ -317,10 +318,10 @@ export function ModelCuration({
     .filter((model) => model.value.startsWith(prefix))
     .map((model) => model.value.slice(prefix.length))
 
-  const locked: Record<string, string> = {}
+  const locked: Record<string, ModelReference[]> = {}
   for (const id of discoveredIds) {
-    const [ref] = findModelReferences(sources, [adapter.pickerValue(id)], adapter.engine)
-    if (ref) locked[id] = ref.where
+    const refs = findModelReferences(sources, [adapter.pickerValue(id)], adapter.engine)
+    if (refs.length > 0) locked[id] = refs
   }
 
   const setSelection = (next: string[] | undefined): void =>
@@ -339,10 +340,18 @@ export function ModelCuration({
    * and queued — so a failed save re-reads the selection instead, and only when
    * no later edit is behind it (that edit's own save decides the outcome).
    */
-  const commit = (next: string[] | null, nextToast: Toast | null = null): void => {
+  const commit = (
+    next: string[] | null,
+    nextToast: Toast | null = null,
+    sourcesOverride?: ModelReferenceSources
+  ): void => {
     const kept = new Set(next ?? allIds)
     const removed = next === null ? [] : discoveredIds.filter((id) => !kept.has(id))
-    const refs = findModelReferences(sources, removed.map(adapter.pickerValue), adapter.engine)
+    const refs = findModelReferences(
+      sourcesOverride ?? sources,
+      removed.map(adapter.pickerValue),
+      adapter.engine
+    )
     if (refs.length > 0) {
       setError(formatModelReferences(refs))
       return
@@ -381,27 +390,45 @@ export function ModelCuration({
   }
 
   /** A list edit. From All, it is the way into "Only the ones I pick". */
-  const edit = (next: string[]): void => {
+  const edit = (next: string[], sourcesOverride?: ModelReferenceSources): void => {
     // Same membership is no edit at all — on All models, writing it would
     // silently switch the provider to Only and hide every model added later.
     const current = new Set(selected)
     if (next.length === current.size && next.every((id) => current.has(id))) return
     if (!allMode) {
-      commit(next)
+      commit(next, null, sourcesOverride)
       return
     }
     const dropped = allIds.length - next.length
-    commit(next, {
-      engine: adapter.engine,
-      previous: undefined,
-      message:
-        next.length === 0
-          ? 'Switched to Only the ones I pick — none are picked.'
-          : dropped === 1
-            ? 'Switched to Only the ones I pick — everything but this model is picked.'
-            : `Switched to Only the ones I pick — everything but these ${dropped} models is picked.`
-    })
+    commit(
+      next,
+      {
+        engine: adapter.engine,
+        previous: undefined,
+        message:
+          next.length === 0
+            ? 'Switched to Only the ones I pick — none are picked.'
+            : dropped === 1
+              ? 'Switched to Only the ones I pick — everything but this model is picked.'
+              : `Switched to Only the ones I pick — everything but these ${dropped} models is picked.`
+      },
+      sourcesOverride
+    )
   }
+
+  untick.current = (ids, fresh) => {
+    const gone = new Set(ids)
+    edit(
+      selected.filter((id) => !gone.has(id)),
+      fresh
+    )
+  }
+
+  const openReplace = (ids: string[]): void => {
+    keptNotice.dismiss()
+    setReplace(ids)
+  }
+  const replaceRefs = (replace ?? []).flatMap((id) => locked[id] ?? [])
 
   const setMode = (mode: 'all' | 'pick'): void => {
     if (mode === 'all') {
@@ -543,10 +570,19 @@ export function ModelCuration({
               filter={filter}
               facets={facets}
               locked={locked}
+              onKeptLocked={keptNotice.show}
             />
           )
         }
       >
+        {keptNotice.ids.length > 0 && (
+          <KeptLockedNotice
+            testid={`${testid}.models`}
+            count={keptNotice.ids.length}
+            onReview={() => openReplace(keptNotice.ids)}
+            onHover={keptNotice.setHovered}
+          />
+        )}
         <ModelCurationList
           testid={`${testid}.models`}
           filterTestid={`${testid}.modelFilter`}
@@ -562,8 +598,26 @@ export function ModelCuration({
           sort={sort}
           onSortChange={setSort}
           locked={locked}
+          onLockedClick={openReplace}
+          onKeptLocked={keptNotice.show}
           allMode={allMode}
         />
+        {replace !== null && replaceRefs.length > 0 && (
+          <ReplaceModelReferencesDialog
+            references={replaceRefs}
+            removals={{ [adapter.engine]: replace.map(adapter.pickerValue) }}
+            awaitPendingWrites={() => saveChain.current}
+            onCancel={() => setReplace(null)}
+            onResolved={async () => {
+              const ids = replace
+              const fresh = await loadReferenceSources()
+              setSources(fresh.sources)
+              setDiscovered(fresh.groups)
+              setReplace(null)
+              untick.current(ids, fresh.sources)
+            }}
+          />
+        )}
         {toast && toast.engine === adapter.engine && (
           <span
             role="status"

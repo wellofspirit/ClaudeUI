@@ -1240,7 +1240,7 @@ describe('MODELS IN THE PICKER', () => {
       .find((el) => el.dataset.id === 'moonshotai/kimi-k3')!
     expect(lock).toHaveAttribute(
       'title',
-      'Default model for opencode — Models & providers › Default models › opencode. Change that setting first.'
+      'Default model for opencode — Models & providers › Default models › opencode. Click to choose a replacement.'
     )
     await click(row('moonshotai/kimi-k3'))
     expect(row('moonshotai/kimi-k3')).toHaveAttribute('aria-checked', 'true')

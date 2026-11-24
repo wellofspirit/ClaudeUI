@@ -464,3 +464,136 @@ describe('ModelCuration — an open block follows a model reload', () => {
     harnessStore.resetForTests()
   })
 })
+
+// ── The way out of a lock: the replace dialog and the bulk notice ────────────
+
+describe('ModelCuration — locked rows', () => {
+  /** pi discovers prov/m-0..m-2; its default names m-1 and its dispatch default names m-1 too. */
+  function twoReferencesToM1(): void {
+    discovered = [
+      {
+        engineId: 'pi',
+        vendorId: 'prov',
+        vendorName: 'prov',
+        models: [0, 1, 2].map((i) => ({
+          value: `prov/m-${i}`,
+          displayName: `Model ${i}`,
+          description: '',
+          engineId: 'pi' as const
+        }))
+      }
+    ]
+    engineConfigs = {
+      pi: { piConfig: { defaultModel: 'prov/m-1' }, dispatch: { defaultModel: 'prov/m-1' } }
+    }
+    Object.assign((window as unknown as { api: Record<string, unknown> }).api, {
+      saveEngineConfig: async (id: string, cfg: EngineConfig) => {
+        engineConfigs[id] = structuredClone(cfg)
+      },
+      judgeModelSupport: async () => ({}),
+      listProviderAccounts: async () => ({ activeId: null, accounts: [] })
+    })
+  }
+
+  const dialogRows = (): HTMLElement[] =>
+    screen.queryAllByTestId('ReplaceModelReferencesDialog.row')
+
+  async function choose(rowId: string, value: string): Promise<void> {
+    const rowEl = dialogRows().find((r) => r.dataset.id === rowId)!
+    fireEvent.click(rowEl.querySelector('[data-testid="ModelPicker.trigger"]')!)
+    const option = screen
+      .getAllByTestId('ModelPicker.option')
+      .find((o) => o.getAttribute('data-value') === value)!
+    await act(async () => {
+      fireEvent.click(option)
+    })
+  }
+
+  it('lists EVERY setting that uses a model, not only the first', async () => {
+    twoReferencesToM1()
+    await mount(fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1']))
+    const title = screen.getByTestId('S.models.lock').getAttribute('title')!
+    expect(title).toContain('Default model for pi')
+    expect(title).toContain('Dispatch default for pi')
+  })
+
+  it('a click on a locked row opens the dialog with a row per reference, and nothing is written yet', async () => {
+    twoReferencesToM1()
+    const adapter = fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1'])
+    await mount(adapter)
+    await click(row('m-1'))
+    expect(dialogRows().map((r) => r.dataset.id)).toEqual(['dispatchDefault:pi', 'piDefault:pi'])
+    expect(adapter.saves).toEqual([])
+  })
+
+  it('Apply rewrites the settings, then unticks the model against the FRESH references', async () => {
+    twoReferencesToM1()
+    const adapter = fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1', 'm-2'])
+    await mount(adapter)
+    await click(row('m-1'))
+    await choose('piDefault:pi', 'prov/m-2')
+    await choose('dispatchDefault:pi', '')
+    await click(screen.getByTestId('ReplaceModelReferencesDialog.apply'))
+
+    expect(engineConfigs.pi).toEqual({
+      piConfig: { defaultModel: 'prov/m-2' },
+      dispatch: { defaultModel: undefined }
+    })
+    // The render that opened the dialog still saw both references: the untick got
+    // through only because the check ran against what the dialog had just written.
+    expect(adapter.saves).toEqual([['m-0', 'm-2']])
+    expect(screen.queryByTestId('ReplaceModelReferencesDialog')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('S.modelsError')).not.toBeInTheDocument()
+  })
+
+  it('Cancel leaves the selection and the settings as they were', async () => {
+    twoReferencesToM1()
+    const adapter = fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1'])
+    await mount(adapter)
+    await click(row('m-1'))
+    await click(screen.getByTestId('ReplaceModelReferencesDialog.cancel'))
+    expect(screen.queryByTestId('ReplaceModelReferencesDialog')).not.toBeInTheDocument()
+    expect(adapter.saves).toEqual([])
+    expect(row('m-1')).toHaveAttribute('aria-checked', 'true')
+  })
+
+  describe('bulk Clear', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('keeps the locked row, says so, and the notice fades after ~6s unless hovered', async () => {
+      twoReferencesToM1()
+      await mount(fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1']))
+      vi.useFakeTimers()
+      await click(screen.getByTestId('S.models.clearShown'))
+      const notice = screen.getByTestId('S.models.lockedNotice')
+      expect(notice).toHaveTextContent('1 kept: still in use.')
+
+      act(() => {
+        vi.advanceTimersByTime(5000)
+      })
+      expect(screen.getByTestId('S.models.lockedNotice')).toBeInTheDocument()
+      // Paused while the pointer is on it.
+      fireEvent.mouseEnter(notice)
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
+      expect(screen.getByTestId('S.models.lockedNotice')).toBeInTheDocument()
+      fireEvent.mouseLeave(notice)
+      act(() => {
+        vi.advanceTimersByTime(6000)
+      })
+      expect(screen.queryByTestId('S.models.lockedNotice')).not.toBeInTheDocument()
+    })
+
+    it('Review opens the dialog for the kept rows', async () => {
+      twoReferencesToM1()
+      await mount(fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1']))
+      await click(screen.getByTestId('S.models.clearShown'))
+      await click(screen.getByTestId('S.models.lockedNotice.review'))
+      expect(dialogRows()).toHaveLength(2)
+      expect(screen.queryByTestId('S.models.lockedNotice')).not.toBeInTheDocument()
+    })
+  })
+})

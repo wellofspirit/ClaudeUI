@@ -33,8 +33,10 @@ import {
   visibleModels,
   type CurationFacet,
   type CurationModel,
-  type CurationSort
+  type CurationSort,
+  type LockedModels
 } from '../ModelCurationList'
+import type { ModelReference } from '../../../../../shared/model-references'
 
 // ── Fixtures ─────────────────────────────────────────────────────────
 
@@ -118,7 +120,13 @@ let sets: string[][]
 
 beforeEach(() => {
   sets = []
+  lockedClicks = []
+  keptLocked = []
 })
+
+/** Every id set `onLockedClick` / `onKeptLocked` reported, in order. */
+let lockedClicks: string[][]
+let keptLocked: string[][]
 
 function Harness({
   models,
@@ -128,7 +136,7 @@ function Harness({
 }: {
   models: CurationModel[]
   initialSelected?: string[]
-  locked?: Record<string, string>
+  locked?: LockedModels
   allMode?: boolean
 }): React.JSX.Element {
   const [selected, setSelected] = useState(initialSelected)
@@ -149,6 +157,7 @@ function Harness({
         filter={filter}
         facets={facets}
         locked={locked}
+        onKeptLocked={(ids) => keptLocked.push(ids)}
       />
       <ModelCurationList
         testid="T"
@@ -163,6 +172,8 @@ function Harness({
         sort={sort}
         onSortChange={setSort}
         locked={locked}
+        onLockedClick={(ids) => lockedClicks.push(ids)}
+        onKeptLocked={(ids) => keptLocked.push(ids)}
         allMode={allMode}
       />
     </>
@@ -538,22 +549,32 @@ it('never writes on its own — mount, search, sort and expand are all reads', (
 
 // ── Locks and All mode (ADR-074 §2) ──────────────────────────────────
 
+const lockRef = (where: string): ModelReference => ({
+  kind: 'piDefault',
+  engine: 'pi',
+  title: 'pi · Default model',
+  model: 'm',
+  label: 'the pi default model',
+  where
+})
+const PI_DEFAULT_WHERE = 'Default model for pi — Models & providers › Default models › pi'
+
 describe('locked and allMode', () => {
-  const LOCKED = {
-    'moonshotai/kimi-k3': 'Default model for pi — Models & providers › Default models › pi'
-  }
+  const LOCKED: LockedModels = { 'moonshotai/kimi-k3': [lockRef(PI_DEFAULT_WHERE)] }
 
   it('a locked row shows where the setting lives and cannot be unticked', () => {
     render(<Harness models={CATALOG} initialSelected={SELECTED} locked={LOCKED} />)
     expect(byId('lock', 'moonshotai/kimi-k3')).toHaveAttribute(
       'title',
-      'Default model for pi — Models & providers › Default models › pi. Change that setting first.'
+      `${PI_DEFAULT_WHERE}. Click to choose a replacement.`
     )
     expect(byId('row', 'moonshotai/kimi-k3')).toHaveAttribute('data-locked', 'true')
     // Picked by hand, not by All models.
     expect(byId('row', 'moonshotai/kimi-k3')).not.toHaveAttribute('data-soft')
     fireEvent.click(byId('row', 'moonshotai/kimi-k3'))
     expect(sets).toEqual([])
+    // The click is handed to the caller, which offers the way out.
+    expect(lockedClicks).toEqual([['moonshotai/kimi-k3']])
     // Unlocked rows still toggle.
     fireEvent.click(byId('row', 'deepseek/v4-flash-0731'))
     expect(sets).toEqual([['moonshotai/kimi-k3']])
@@ -571,8 +592,12 @@ describe('locked and allMode', () => {
     expect(sets.at(-1)).toEqual(['moonshotai/kimi-k3', 'deepseek/v4-pro'])
     fireEvent.click(screen.getByTestId('T.clearShown'))
     expect(sets.at(-1)).toEqual(['moonshotai/kimi-k3'])
-    // Nothing left that Clear may take.
-    expect(screen.getByTestId('T.clearShown')).toBeDisabled()
+    // Only a locked row is left: Clear stays clickable so it can say why, and writes nothing.
+    const writes = sets.length
+    keptLocked.length = 0
+    fireEvent.click(screen.getByTestId('T.clearShown'))
+    expect(sets).toHaveLength(writes)
+    expect(keptLocked).toEqual([['moonshotai/kimi-k3']])
   })
 
   it('a vendor box that would change nothing reports nothing', () => {
@@ -581,18 +606,50 @@ describe('locked and allMode', () => {
       <Harness
         models={CATALOG}
         initialSelected={['moonshotai/kimi-k3', 'moonshotai/kimi-k2']}
-        locked={{ ...LOCKED, 'moonshotai/kimi-k2': 'Dispatch default for pi' }}
+        locked={{ ...LOCKED, 'moonshotai/kimi-k2': [lockRef('Dispatch default for pi')] }}
       />
     )
     fireEvent.click(byId('groupToggle', 'moonshotai'))
     expect(sets).toEqual([])
+    expect(keptLocked).toEqual([['moonshotai/kimi-k3', 'moonshotai/kimi-k2']])
+  })
+
+  it('reports the locked ids a vendor box or Clear kept', () => {
+    render(
+      <Harness
+        models={CATALOG}
+        initialSelected={['moonshotai/kimi-k3', 'moonshotai/kimi-k2']}
+        locked={LOCKED}
+      />
+    )
+    fireEvent.click(screen.getByTestId('T.clearShown'))
+    expect(keptLocked).toEqual([['moonshotai/kimi-k3']])
+  })
+
+  it('names EVERY setting that uses a model, in the tooltip and the description', () => {
+    const locked: LockedModels = {
+      'moonshotai/kimi-k3': [
+        lockRef(PI_DEFAULT_WHERE),
+        lockRef('Allowed dispatch model for pi — Cross-engine dispatch › Dispatch into › pi')
+      ]
+    }
+    render(<Harness models={CATALOG} initialSelected={SELECTED} locked={locked} />)
+    const both = `${PI_DEFAULT_WHERE}; Allowed dispatch model for pi — Cross-engine dispatch › Dispatch into › pi`
+    expect(byId('lock', 'moonshotai/kimi-k3')).toHaveAttribute(
+      'title',
+      `${both}. Click to choose a replacement.`
+    )
+    const described = byId('row', 'moonshotai/kimi-k3').getAttribute('aria-describedby')!
+    expect(document.getElementById(described)).toHaveTextContent(
+      `In use: ${both}. Click to choose a replacement.`
+    )
   })
 
   it('the lock reason describes the row for assistive tech, not only on hover', () => {
     render(<Harness models={CATALOG} initialSelected={SELECTED} locked={LOCKED} />)
     const described = byId('row', 'moonshotai/kimi-k3').getAttribute('aria-describedby')!
     expect(document.getElementById(described)).toHaveTextContent(
-      'In use: Default model for pi — Models & providers › Default models › pi. Change that setting first.'
+      'In use: Default model for pi — Models & providers › Default models › pi. Click to choose a replacement.'
     )
     expect(byId('row', 'deepseek/v4-flash-0731')).not.toHaveAttribute('aria-describedby')
   })
