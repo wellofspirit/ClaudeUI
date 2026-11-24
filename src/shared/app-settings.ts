@@ -19,6 +19,7 @@ import type { AutonomyMode, EffortLevel } from './model-capabilities'
 import type { AgentColorId, AgentTypeColorOverrides } from './agent-type-colors'
 import type { ContextPressureSetting } from './context-pressure'
 import type { WorktreeProjectChoice } from './worktree-start'
+import type { MediaGenerationSettings } from './media-generation'
 import { DEFAULT_AUTONOMY_MODE } from './permission-modes'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
@@ -165,6 +166,12 @@ export interface AppSettings {
    * tier of the model it runs on (`shared/model-tier.ts`). On by default.
    */
   agentModelTierColors: boolean
+  /**
+   * Media generation (ClaudeUI's hosted `generate_image` / `generate_video`). Absent from
+   * {@link DEFAULT_SETTINGS}: unset takes every default, and a partial value is filled field
+   * by field. Read only through `resolveMediaGeneration` (`shared/media-generation.ts`).
+   */
+  mediaGeneration?: Partial<MediaGenerationSettings>
 }
 
 /**

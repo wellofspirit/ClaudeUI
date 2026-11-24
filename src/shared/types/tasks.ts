@@ -1,5 +1,6 @@
 import type { AttachmentRef, ChatMessage, FileDiff, ToolResultImage } from './content'
 import type { StatusLineData } from './session'
+import type { MediaJobResult } from '../media-generation'
 
 export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
@@ -233,6 +234,8 @@ export interface TaskNotification {
    * as its body.
    */
   isBackgrounded?: boolean
+  /** A media job's outcome (`taskType: 'media'`), drawn by the media card. */
+  media?: MediaJobResult
 }
 
 export interface SubagentMessageData {
