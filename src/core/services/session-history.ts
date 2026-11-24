@@ -1627,6 +1627,12 @@ export async function loadSessionHistory(
             const handback = handbackPeerOrigin(obj.origin)
             const timestamp = rowTime(obj)
             if (handback) {
+              // Until (or unless) that happens it is a task's report, not a peer's message.
+              const block = note.content[0]
+              if (block.type === 'context_note') {
+                block.source = 'task'
+                if (handback.flagged) block.alert = true
+              }
               handbackPeers.push({
                 ...handback,
                 note,

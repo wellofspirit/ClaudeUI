@@ -2217,7 +2217,8 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
       runIndex,
       typeof msg.uuid === 'string' && msg.uuid ? msg.uuid : uuid(),
       taskNotificationNoteTitle({ taskId, status, summary: titleLine ?? '', outputFile, raw: '' }),
-      taskNotificationNoteText({ taskId, status, summary, usage })
+      taskNotificationNoteText({ taskId, status, summary, usage }),
+      Boolean(report.warning)
     )
   }
 
@@ -2231,14 +2232,15 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     runIndex: number,
     id: string,
     title: string,
-    text: string
+    text: string,
+    alert = false
   ): void {
     if (taskId) {
       const key = `${taskId}#${runIndex}`
       if (this.notedTaskRuns.has(key)) return
       this.notedTaskRuns.add(key)
     }
-    const note = agentNoteMessage({ id, title, text, timestamp: Date.now() })
+    const note = agentNoteMessage({ id, title, text, timestamp: Date.now(), alert })
     this.upsertMessage(note)
     this.send('session:message', note)
   }
@@ -2835,8 +2837,11 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     })
     if (status) {
       const block = note.content[0]
-      if (block.type === 'context_note')
+      if (block.type === 'context_note') {
         block.fragments.push({ text: status, label: 'delivery status' })
+        // A held delivery must stay visible whatever the hide toggles say.
+        block.alert = true
+      }
     }
     this.upsertMessage(note)
     this.send('session:message', note)

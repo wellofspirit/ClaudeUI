@@ -275,3 +275,20 @@ export function frameHandBack(opts: {
   const framed = `${handBackHeader(opts)}\n${indentLines(body)}`
   return opts.warning ? `${indentLines(sanitizeReport(opts.warning).text)}\n${framed}` : framed
 }
+
+/** The column-zero start of {@link handBackHeader}'s line. */
+const HAND_BACK_HEADER_LINE = /^\[X-Agent report\] The text below is the final report of X-Agent /m
+
+/**
+ * Whether `text` carries a {@link frameHandBack} frame with a `warning` above it. The warning is
+ * the only INDENTED text before the header line: a status line the caller puts first is not
+ * indented, and the report below the header cannot reach above it.
+ */
+export function handBackWarned(text: string): boolean {
+  const header = HAND_BACK_HEADER_LINE.exec(text)
+  if (!header) return false
+  return text
+    .slice(0, header.index)
+    .split('\n')
+    .some((line) => line.startsWith('  '))
+}

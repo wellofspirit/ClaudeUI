@@ -1251,7 +1251,8 @@ describe('non-user delivery (slice 1a)', () => {
         title: 'Message from Triage assistant',
         fragments: [
           { text: 'please look at ticket 12', label: 'from another session, not from you' }
-        ]
+        ],
+        source: 'session-message'
       }
     ])
     expect(payloads('session:message').some((m) => m.role === 'user')).toBe(false)
@@ -1288,7 +1289,8 @@ describe('non-user delivery (slice 1a)', () => {
         title: 'Report from X-Agent impl-e1',
         fragments: [
           { text: 'X-Agent impl-e1 finished: done', label: 'from an X-Agent, not from you' }
-        ]
+        ],
+        source: 'task'
       }
     ])
   })

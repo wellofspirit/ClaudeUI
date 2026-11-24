@@ -180,7 +180,8 @@ const NOTE = {
     {
       type: 'context_note',
       title: 'Agent "scan" completed',
-      fragments: [{ text: XML, label: 'from an agent, not from you' }]
+      fragments: [{ text: XML, label: 'from an agent, not from you' }],
+      source: 'task'
     }
   ]
 }
@@ -319,7 +320,8 @@ describe('ClaudeSession — the live agent note comes from system/task_notificat
                 text: 'Task a1b2c3: completed\nFound 3 files.\nUsage: 1200 tokens · 3 tool uses · 4s',
                 label: 'from an agent, not from you'
               }
-            ]
+            ],
+            source: 'task'
           }
         ]
       })

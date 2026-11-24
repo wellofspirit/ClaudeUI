@@ -138,6 +138,7 @@ describe('the rail', () => {
     expect(screen.getAllByTestId('SettingsDialog.railSub').map((el) => el.dataset.id)).toEqual([
       'tool-output',
       'thinking',
+      'notes',
       'voice',
       'git-actions'
     ])
@@ -285,6 +286,7 @@ describe('the rail accordion', () => {
     expect(screen.getAllByTestId('SettingsDialog.railSub').map((el) => el.dataset.id)).toEqual([
       'tool-output',
       'thinking',
+      'notes',
       'voice',
       'git-actions'
     ])

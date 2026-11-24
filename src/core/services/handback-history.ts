@@ -110,7 +110,8 @@ function noteWithReport(note: ChatMessage, entry: TaskNotification): ChatMessage
       summary,
       ...(entry.usage ? { usage: entry.usage } : {})
     }),
-    timestamp: note.timestamp
+    timestamp: note.timestamp,
+    alert: Boolean(entry.warning)
   })
 }
 

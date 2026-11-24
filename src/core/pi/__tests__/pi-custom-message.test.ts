@@ -37,7 +37,8 @@ describe('piCustomMessageToChat — session-message', () => {
         {
           type: 'context_note',
           title: 'Message from Triage assistant',
-          fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }]
+          fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }],
+          source: 'session-message'
         }
       ],
       timestamp: 5
@@ -55,5 +56,8 @@ describe('piCustomMessageToChat — session-message', () => {
     })
     expect(row?.content[0]).toMatchObject({ type: 'context_note', title: 'some-extension' })
     expect(JSON.stringify(row)).not.toContain('from another session')
+    // An extension's own message is never tagged, so no hide toggle reaches it.
+    expect(row?.content[0]).not.toHaveProperty('source')
+    expect(row?.content[0]).not.toHaveProperty('alert')
   })
 })

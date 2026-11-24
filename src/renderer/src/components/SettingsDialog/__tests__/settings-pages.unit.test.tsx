@@ -112,7 +112,7 @@ describe('PAGES structure', () => {
   it('each page lists its groups in the documented order', () => {
     const expected: Record<string, string[]> = {
       appearance: ['theme', 'layout', 'agents', 'diff', 'status-line', 'git-panel'],
-      chat: ['tool-output', 'thinking', 'voice', 'git-actions'],
+      chat: ['tool-output', 'thinking', 'notes', 'voice', 'git-actions'],
       sessions: [
         'worktrees',
         'autonomy',
@@ -391,7 +391,10 @@ describe('inventory guard', () => {
       // Worktrees: the global default for starting new sessions in one.
       'startInWorktree',
       // Claude Code's disableAutoMode, edited in its settings.json.
-      'claudeDisableAutoMode'
+      'claudeDisableAutoMode',
+      // Chat: hide task notifications / session messages rows.
+      'hideTaskNotifications',
+      'hideSessionMessages'
     ])
 
     expect([...reachable].sort()).toEqual([...fromSections, ...local].sort())

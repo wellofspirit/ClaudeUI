@@ -208,6 +208,16 @@ export function SettingsPanel(): React.JSX.Element {
             checked={settings.expandThinking}
             onChange={(v) => updateSettings({ expandThinking: v })}
           />
+          <SettingsToggle
+            label="Hide task notifications"
+            checked={settings.hideTaskNotifications}
+            onChange={(v) => updateSettings({ hideTaskNotifications: v })}
+          />
+          <SettingsToggle
+            label="Hide session messages"
+            checked={settings.hideSessionMessages}
+            onChange={(v) => updateSettings({ hideSessionMessages: v })}
+          />
           {/* All Settings button */}
           <button
             data-testid="SettingsPanel.allSettings"

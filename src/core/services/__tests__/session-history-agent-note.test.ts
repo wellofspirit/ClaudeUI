@@ -101,10 +101,20 @@ describe('loadSessionHistory — task notifications as agent notes (S4)', () => 
       ['u-note-b', 'system']
     ])
     expect(messages[1].content).toEqual([
-      { type: 'context_note', title: 'Agent "a" completed', fragments: [{ text: a, label: LABEL }] }
+      {
+        type: 'context_note',
+        title: 'Agent "a" completed',
+        fragments: [{ text: a, label: LABEL }],
+        source: 'task'
+      }
     ])
     expect(messages[2].content).toEqual([
-      { type: 'context_note', title: 'Agent "b" completed', fragments: [{ text: b, label: LABEL }] }
+      {
+        type: 'context_note',
+        title: 'Agent "b" completed',
+        fragments: [{ text: b, label: LABEL }],
+        source: 'task'
+      }
     ])
     // Unchanged: one entry per notification, deduped across enqueue + delivery.
     expect(taskNotifications.map((n) => n.taskId)).toEqual(['agentA', 'agentB'])
@@ -119,7 +129,12 @@ describe('loadSessionHistory — task notifications as agent notes (S4)', () => 
         id: 'u-legacy',
         role: 'system',
         content: [
-          { type: 'context_note', title: 'legacy done', fragments: [{ text: a, label: LABEL }] }
+          {
+            type: 'context_note',
+            title: 'legacy done',
+            fragments: [{ text: a, label: LABEL }],
+            source: 'task'
+          }
         ]
       })
     ])
@@ -176,7 +191,8 @@ describe('loadSessionHistory — peer messages as notes (slice 1a)', () => {
     {
       type: 'context_note',
       title: 'Message from Triage assistant',
-      fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }]
+      fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }],
+      source: 'session-message'
     }
   ]
 
