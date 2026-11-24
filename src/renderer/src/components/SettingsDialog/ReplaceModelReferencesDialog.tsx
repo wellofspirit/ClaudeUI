@@ -256,6 +256,22 @@ export function ReplaceModelReferencesDialog({
     return ref.kind === 'dispatchAllowed' && loaded && !wideningOf(ref.engine) ? '' : undefined
   }
 
+  /**
+   * Whether emptying THIS allowed entry would leave the list empty: the removals alone
+   * would, and no other allowed row of the engine is replacing its entry with a model.
+   */
+  const wideningAt = (index: number): boolean => {
+    const ref = references[index]
+    if (ref.kind !== 'dispatchAllowed' || !wideningOf(ref.engine)) return false
+    return !references.some(
+      (other, j) =>
+        j !== index &&
+        other.kind === 'dispatchAllowed' &&
+        other.engine === ref.engine &&
+        !!decisionOf(j)
+    )
+  }
+
   const judgeBusy = (e: EngineId): boolean =>
     supportOf(e).status === 'loading' && judgeModelsOf(e).length > 0
 
@@ -349,7 +365,7 @@ export function ReplaceModelReferencesDialog({
         role="dialog"
         aria-modal="true"
         aria-label="Replace models still in use"
-        className="relative bg-bg-primary border border-border rounded-xl shadow-2xl w-[520px] max-w-[calc(100%-2rem)] max-h-[90%] overflow-y-auto p-5 animate-fade-in"
+        className="relative flex flex-col bg-bg-primary border border-border rounded-xl shadow-2xl w-[520px] max-w-[calc(100%-2rem)] max-h-[90%] p-5 animate-fade-in"
       >
         <h3 className="text-[15px] font-medium text-text-primary mb-1">
           Replace models still in use
@@ -359,12 +375,16 @@ export function ReplaceModelReferencesDialog({
             ? 'A setting uses a model you are removing. Choose what it should use instead.'
             : 'These settings use models you are removing. Choose what each should use instead.'}
         </p>
-        <div className="divide-y divide-border/55 border border-border rounded-lg">
+        {/* Only the rows scroll: with many references the buttons must stay in view. */}
+        <div
+          data-testid={`${TID}.rows`}
+          className="min-h-0 overflow-y-auto divide-y divide-border/55 border border-border rounded-lg"
+        >
           {references.map((ref, index) => {
             const own = models[ref.engine] ?? []
             const shown = own.find((m) => m.value === ref.model)?.displayName || ref.model
             const decision = decisionOf(index)
-            const widening = ref.kind === 'dispatchAllowed' && wideningOf(ref.engine)
+            const widening = wideningAt(index)
             const label = emptyLabel(ref.kind, widening)
             const candidates = candidatesOf(ref)
             const rowId = `${ref.kind}:${ref.engine}`

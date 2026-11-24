@@ -546,6 +546,61 @@ describe('ModelCuration — locked rows', () => {
     expect(screen.queryByTestId('S.modelsError')).not.toBeInTheDocument()
   })
 
+  it('a partial Apply failure keeps every row and its own pick (the input is frozen at open)', async () => {
+    // opencode: m-1 is the judge (engines/opencode.json), m-2 the default (opencode.jsonc).
+    // The engine file is written first and succeeds; opencode.jsonc then fails. The reload
+    // that follows drops the judge reference from the lock map, which must not shift rows.
+    discovered = [
+      {
+        engineId: 'opencode',
+        vendorId: 'prov',
+        vendorName: 'prov',
+        models: [0, 1, 2, 3].map((i) => ({
+          value: `prov/m-${i}`,
+          displayName: `Model ${i}`,
+          description: '',
+          engineId: 'opencode' as const
+        }))
+      }
+    ]
+    engineConfigs = { opencode: { autoMode: { judgeModel: 'prov/m-1' } } }
+    Object.assign((window as unknown as { api: Record<string, unknown> }).api, {
+      loadOpencodeSettings: async () => ({ model: 'prov/m-2' }),
+      saveOpencodeSettings: async () => {
+        throw new Error('opencode.jsonc is read-only')
+      },
+      saveEngineConfig: async (id: string, cfg: EngineConfig) => {
+        engineConfigs[id] = structuredClone(cfg)
+      },
+      judgeModelSupport: async () => ({}),
+      listProviderAccounts: async () => ({ activeId: null, accounts: [] })
+    })
+    const adapter = fakeAdapter('opencode', catalogOf(4), ['m-0', 'm-1', 'm-2'])
+    await mount(adapter)
+    await click(screen.getByTestId('S.models.clearShown'))
+    await click(screen.getByTestId('S.models.lockedNotice.review'))
+    expect(dialogRows().map((r) => r.dataset.id)).toEqual([
+      'judge:opencode',
+      'opencodeDefault:opencode'
+    ])
+
+    await choose('judge:opencode', 'prov/m-0')
+    await choose('opencodeDefault:opencode', 'prov/m-3')
+    await click(screen.getByTestId('ReplaceModelReferencesDialog.apply'))
+
+    expect(engineConfigs.opencode.autoMode?.judgeModel).toBe('prov/m-0')
+    expect(screen.getByTestId('ReplaceModelReferencesDialog.error')).toHaveTextContent('read-only')
+    // Both rows, each still holding its OWN pick: a retry writes the default, not the judge's pick.
+    expect(dialogRows().map((r) => r.dataset.id)).toEqual([
+      'judge:opencode',
+      'opencodeDefault:opencode'
+    ])
+    const pickers = screen.getAllByTestId('ReplaceModelReferencesDialog.picker')
+    expect(pickers.map((p) => p.dataset.value)).toEqual(['prov/m-0', 'prov/m-3'])
+    // Clear already took m-0; the dialog's failure performed no untick.
+    expect(adapter.saves).toEqual([['m-1', 'm-2']])
+  })
+
   it('Cancel leaves the selection and the settings as they were', async () => {
     twoReferencesToM1()
     const adapter = fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1'])
@@ -581,6 +636,24 @@ describe('ModelCuration — locked rows', () => {
       })
       expect(screen.getByTestId('S.models.lockedNotice')).toBeInTheDocument()
       fireEvent.mouseLeave(notice)
+      act(() => {
+        vi.advanceTimersByTime(6000)
+      })
+      expect(screen.queryByTestId('S.models.lockedNotice')).not.toBeInTheDocument()
+    })
+
+    it('a Review clicked while hovered does not keep the NEXT notice from fading', async () => {
+      twoReferencesToM1()
+      await mount(fakeAdapter('pi', catalogOf(3), ['m-0', 'm-1']))
+      await click(screen.getByTestId('S.models.clearShown'))
+      // Review unmounts the notice under the pointer: no mouseleave ever arrives.
+      fireEvent.mouseEnter(screen.getByTestId('S.models.lockedNotice'))
+      await click(screen.getByTestId('S.models.lockedNotice.review'))
+      await click(screen.getByTestId('ReplaceModelReferencesDialog.cancel'))
+
+      vi.useFakeTimers()
+      await click(screen.getByTestId('S.models.clearShown'))
+      expect(screen.getByTestId('S.models.lockedNotice')).toBeInTheDocument()
       act(() => {
         vi.advanceTimersByTime(6000)
       })

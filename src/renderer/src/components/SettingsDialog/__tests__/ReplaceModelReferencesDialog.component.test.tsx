@@ -295,6 +295,29 @@ describe('ReplaceModelReferencesDialog', () => {
       expect(files.pi?.dispatch?.allowedModels).toBeUndefined()
     })
 
+    it('"Allow any model" reads as removal once another emptied entry keeps a replacement', async () => {
+      files = { pi: { dispatch: { allowedModels: [GONE, GONE2] } } }
+      modelsByEngine = { pi: [info('pi', GONE), info('pi', GONE2), info('pi', KEEP)] }
+      mount([GONE, GONE2], { pi: [GONE, GONE2] })
+      await ready()
+      const [first, second] = rows().filter((r) => r.dataset.id === 'dispatchAllowed:pi')
+      const emptyOptionText = (row: HTMLElement): string | null => {
+        fireEvent.click(within(row).getByTestId('ModelPicker.trigger'))
+        const text = screen
+          .getAllByTestId('ModelPicker.option')
+          .find((o) => o.getAttribute('data-value') === '')!.textContent
+        fireEvent.click(within(row).getByTestId('ModelPicker.trigger'))
+        return text
+      }
+      expect(emptyOptionText(second)).toContain('Allow any model')
+      await pick(first, KEEP)
+      // The list keeps KEEP, so emptying the second entry no longer allows "any".
+      expect(emptyOptionText(second)).toContain('Remove from the list')
+      await pick(second, '')
+      await clickApply()
+      expect(files.pi?.dispatch?.allowedModels).toEqual([KEEP])
+    })
+
     it('a replacement already in the list just removes the old entry (no duplicate)', async () => {
       files = { pi: { dispatch: { allowedModels: [GONE, KEEP] } } }
       modelsByEngine = { pi: [info('pi', GONE), info('pi', KEEP)] }

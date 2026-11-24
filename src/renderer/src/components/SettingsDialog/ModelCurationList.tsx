@@ -178,7 +178,13 @@ export function useKeptLockedNotice(): {
     const timer = setTimeout(() => setIds([]), KEPT_LOCKED_NOTICE_MS)
     return () => clearTimeout(timer)
   }, [ids, hovered])
-  return { ids, show: setIds, dismiss: () => setIds([]), setHovered }
+  // Showing or dismissing resets the hover: Review unmounts the notice under the pointer, so
+  // no mouseleave ever arrives, and a stale `hovered` would keep every later notice up.
+  const set = (next: string[]): void => {
+    setHovered(false)
+    setIds(next)
+  }
+  return { ids, show: set, dismiss: () => set([]), setHovered }
 }
 
 export function KeptLockedNotice({

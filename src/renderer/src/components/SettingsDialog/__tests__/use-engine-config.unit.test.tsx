@@ -61,6 +61,38 @@ describe('patchEngineConfigFile', () => {
     })
   })
 
+  it('a live entry whose first read is still in flight ends up holding the SAVED file', async () => {
+    const file = { current: { dispatch: { maxCostUsd: 1 } } as EngineConfig }
+    let releaseFirst: () => void = () => {}
+    let reads = 0
+    ;(window as unknown as { api: Record<string, unknown> }).api = {
+      loadEngineConfig: async () => {
+        const snapshot = structuredClone(file.current)
+        // The pane's first read is held until after the dialog's save.
+        if (reads++ === 0) await new Promise<void>((r) => (releaseFirst = r))
+        return snapshot
+      },
+      saveEngineConfig: async (_id: string, cfg: EngineConfig) => {
+        file.current = cfg
+      }
+    }
+    const { result } = renderHook(() => useEngineConfigObject('pi'))
+    expect(result.current.engineCfg).toBeNull()
+    await act(async () => {
+      await patchEngineConfigFile('pi', (fresh) => ({ ...fresh, autoMode: { judgeModel: 'x/y' } }))
+    })
+    // The late first read lands with the PRE-patch file; the re-read must win.
+    await act(async () => {
+      releaseFirst()
+    })
+    await waitFor(() =>
+      expect(result.current.engineCfg).toEqual({
+        dispatch: { maxCostUsd: 1 },
+        autoMode: { judgeModel: 'x/y' }
+      })
+    )
+  })
+
   it('a failed save rejects and leaves the live entry as it was', async () => {
     const file = { current: { dispatch: { maxCostUsd: 1 } } as EngineConfig }
     setApi(file, async () => {

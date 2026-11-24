@@ -88,6 +88,13 @@ function joinEffect(
   return `${label} changes from ${from.length} to ${to.length} models.`
 }
 
+/** What the replace dialog was opened with (see the `replace` state). */
+interface ReplaceInput {
+  ids: string[]
+  refs: ModelReference[]
+  removals: Partial<Record<EngineId, string[]>>
+}
+
 export function LinkedModelCuration({
   testid,
   providerName,
@@ -116,8 +123,13 @@ export function LinkedModelCuration({
   const [sources, setSources] = useState<ModelReferenceSources | null>(null)
   const [discovered, setDiscovered] = useState<EngineModelGroup[]>([])
   const [joinPick, setJoinPick] = useState<JoinPick | null>(null)
-  /** The replace dialog's input while it is open: the locked (canonical) ids it was opened for. */
-  const [replace, setReplace] = useState<string[] | null>(null)
+  /**
+   * The replace dialog's input while it is open, FROZEN at open: the (canonical) ids it was opened for,
+   * their references and the per-engine removals. Not recomputed per render: a partial
+   * Apply failure reloads the models, the lock map then drops the references already
+   * rewritten, and the dialog's rows (and the picks keyed to them) must not shift.
+   */
+  const [replace, setReplace] = useState<ReplaceInput | null>(null)
   const keptNotice = useKeptLockedNotice()
   /** The untick a resolved dialog performs, from the LATEST render (see `ModelCuration`). */
   const untick = useRef<(ids: string[], fresh: ModelReferenceSources) => void>(() => {})
@@ -550,17 +562,14 @@ export function LinkedModelCuration({
 
   const openReplace = (ids: string[]): void => {
     keptNotice.dismiss()
-    setReplace(ids)
-  }
-  const replaceRefs = (replace ?? []).flatMap((id) => locked[id] ?? [])
-  /** Per engine, the picker VALUES the untick removes — never one flat list. */
-  const replaceRemovals: Partial<Record<EngineId, string[]>> = {}
-  for (const e of ENGINES) {
-    const adapter = adapterOf(e)
-    if (adapter)
-      replaceRemovals[e] = (replace ?? []).map((id) =>
-        adapter.pickerValue(engineModelId(definition, e, id))
-      )
+    /** Per engine, the picker VALUES the untick removes — never one flat list. */
+    const removals: Partial<Record<EngineId, string[]>> = {}
+    for (const e of ENGINES) {
+      const adapter = adapterOf(e)
+      if (adapter)
+        removals[e] = ids.map((id) => adapter.pickerValue(engineModelId(definition, e, id)))
+    }
+    setReplace({ ids, refs: ids.flatMap((id) => locked[id] ?? []), removals })
   }
 
   const setMode = (mode: 'all' | 'pick'): void => {
@@ -680,14 +689,14 @@ export function LinkedModelCuration({
           allMode={allMode}
           rowMarks={marks}
         />
-        {replace !== null && replaceRefs.length > 0 && (
+        {replace !== null && replace.refs.length > 0 && (
           <ReplaceModelReferencesDialog
-            references={replaceRefs}
-            removals={replaceRemovals}
+            references={replace.refs}
+            removals={replace.removals}
             awaitPendingWrites={() => saveChain.current}
             onCancel={() => setReplace(null)}
             onResolved={async () => {
-              const ids = replace
+              const { ids } = replace
               const fresh = await loadReferenceSources()
               setSources(fresh.sources)
               setDiscovered(fresh.groups)

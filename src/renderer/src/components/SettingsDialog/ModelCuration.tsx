@@ -40,7 +40,7 @@ import {
   type ModelReference,
   type ModelReferenceSources
 } from '../../../../shared/model-references'
-import type { EngineModelGroup } from '../../../../shared/types'
+import type { EngineId, EngineModelGroup } from '../../../../shared/types'
 import { Button, Segmented, SettingRow } from './settings-controls'
 import {
   KeptLockedNotice,
@@ -179,6 +179,13 @@ export function curationCount(summary: CurationSummary | null): string {
   return summary.picked === null ? `all ${summary.total}` : `${summary.picked} of ${summary.total}`
 }
 
+/** What the replace dialog was opened with (see the `replace` state). */
+interface ReplaceInput {
+  ids: string[]
+  refs: ModelReference[]
+  removals: Partial<Record<EngineId, string[]>>
+}
+
 export function ModelCuration({
   testid,
   providerName,
@@ -214,8 +221,13 @@ export function ModelCuration({
   const [sort, setSort] = useState<CurationSort>('newest')
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
-  /** The replace dialog's input while it is open: the locked ids it was opened for. */
-  const [replace, setReplace] = useState<string[] | null>(null)
+  /**
+   * The replace dialog's input while it is open, FROZEN at open: the ids it was opened for,
+   * their references and the per-engine removals. Not recomputed per render: a partial
+   * Apply failure reloads the models, the lock map then drops the references already
+   * rewritten, and the dialog's rows (and the picks keyed to them) must not shift.
+   */
+  const [replace, setReplace] = useState<ReplaceInput | null>(null)
   const keptNotice = useKeptLockedNotice()
   /**
    * The untick a resolved dialog performs, from the LATEST render: its current
@@ -426,9 +438,12 @@ export function ModelCuration({
 
   const openReplace = (ids: string[]): void => {
     keptNotice.dismiss()
-    setReplace(ids)
+    setReplace({
+      ids,
+      refs: ids.flatMap((id) => locked[id] ?? []),
+      removals: { [adapter.engine]: ids.map(adapter.pickerValue) }
+    })
   }
-  const replaceRefs = (replace ?? []).flatMap((id) => locked[id] ?? [])
 
   const setMode = (mode: 'all' | 'pick'): void => {
     if (mode === 'all') {
@@ -602,14 +617,14 @@ export function ModelCuration({
           onKeptLocked={keptNotice.show}
           allMode={allMode}
         />
-        {replace !== null && replaceRefs.length > 0 && (
+        {replace !== null && replace.refs.length > 0 && (
           <ReplaceModelReferencesDialog
-            references={replaceRefs}
-            removals={{ [adapter.engine]: replace.map(adapter.pickerValue) }}
+            references={replace.refs}
+            removals={replace.removals}
             awaitPendingWrites={() => saveChain.current}
             onCancel={() => setReplace(null)}
             onResolved={async () => {
-              const ids = replace
+              const { ids } = replace
               const fresh = await loadReferenceSources()
               setSources(fresh.sources)
               setDiscovered(fresh.groups)
