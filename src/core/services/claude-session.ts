@@ -58,7 +58,7 @@ import { permissionDecisionBlock, readPermissionDecisionFrame } from './claude-p
 import { ANTHROPIC_AUTH_PROVIDER_ID } from '../auth/auth-providers'
 import { unwatchAllSubagents } from './subagent-watcher'
 import { loadEngineConfig, saveSlashCommands } from './ui-config'
-import { claudeBehaviorSettings } from '../sdk/args'
+import { claudeBehaviorSettings, claudeStopKeepsBackgroundAgents } from '../sdk/args'
 import { claudeSandboxFlags } from './claude-sandbox-settings'
 import { readDisabledMcpServers } from './claude-mcp'
 import { loadClaudeUiLegacyMcpServers } from './claude-mcp-files'
@@ -177,6 +177,8 @@ interface ApprovalResult {
 
 interface PendingApprovalEntry {
   resolve: (result: ApprovalResult) => void
+  /** The subagent asking (`canUseTool`'s `agentId`); absent for the main thread's own card. */
+  agentId?: string
 }
 
 /**
@@ -335,6 +337,14 @@ export class ClaudeSession extends BaseSession {
    */
   private readonly sentUuids = new BoundedSet()
   private wasInterrupted = false
+  /**
+   * Whether the running cli.js process was spawned declaring
+   * `perTaskStopAffordance` (engines/claude.json
+   * `claudeConfig.stopKeepsBackgroundAgents`). Kept per spawn, not re-read: cli.js
+   * binds the capability for the process's life, so `interrupt()` must follow what
+   * THIS process was told, not a setting changed since.
+   */
+  private stopSparesBackgroundAgents = false
   private pendingApprovals = new Map<string, PendingApprovalEntry>()
   private taskIdMap = new Map<string, string>() // agentId → the CURRENT run's toolUseId
   /**
@@ -954,6 +964,10 @@ export class ClaudeSession extends BaseSession {
 
       // The shared sandbox setting, read per spawn (a resume or respawn binds the file's value now).
       const sandbox = claudeSandboxFlags('session')
+      // The Claude engine's own switches, read once per spawn: a change binds the
+      // next session start/respawn.
+      const claudeConfig = loadEngineConfig('claude').claudeConfig
+      this.stopSparesBackgroundAgents = claudeStopKeepsBackgroundAgents(claudeConfig)
       const q = sdkQuery({
         prompt: channel as AsyncIterable<never>,
         options: {
@@ -1011,7 +1025,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
           // binds the next session start/respawn) beside the paths our own UI
           // tools write, which stay allowed without a card.
           settings: {
-            ...claudeBehaviorSettings(loadEngineConfig('claude').claudeConfig),
+            ...claudeBehaviorSettings(claudeConfig),
             permissions: {
               allow: [`Edit(${this.cwd}/.claude/ui/**)`, `Write(${this.cwd}/.claude/ui/**)`]
             }
@@ -1034,6 +1048,9 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
           allowedTools: ['mcp__claude-ui__*', 'mcp__claude-ui-mockup__*'],
           abortController: this.abortController,
           onInboundFrame: (frame) => this.toolUseOwners.noteFrame(frame),
+          // Stop spares running background agents: each keeps its own Stop
+          // (`stopTask`) on its card and in the Tasks panel.
+          perTaskStopAffordance: this.stopSparesBackgroundAgents,
           includePartialMessages: true,
           // The session's mode coerced for the model, with summarized display (Opus 4.7+ shows no
           // thinking text without it).
@@ -1137,7 +1154,7 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
 
             const { decision, answers, updatedPermissions } = await new Promise<ApprovalResult>(
               (resolve) => {
-                this.pendingApprovals.set(requestId, { resolve })
+                this.pendingApprovals.set(requestId, { resolve, agentId: opts.agentId })
 
                 opts.signal.addEventListener(
                   'abort',
@@ -1332,6 +1349,11 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
 
   /** The main agent is working: flip the idle session to running (status, turn clock, status line). */
   private beginMainTurn(): void {
+    // A Stop hides only the stopped turn's own teardown error (its `result` came
+    // before this idle → running flip). A turn cli.js starts by itself after it
+    // (a spared background agent's report waking the session) is a new turn whose
+    // errors must show; `run()` clears the flag for a user prompt the same way.
+    this.wasInterrupted = false
     this.isProcessing = true
     this.turnStartedAtMs = Date.now()
     this.sendStatus()
@@ -3379,12 +3401,21 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
     if (this.activeQuery) {
       this.wasInterrupted = true
 
-      // Deny pending approvals so the SDK's canUseTool callbacks unblock
+      // Deny pending approvals so the SDK's canUseTool callbacks unblock.
+      //
+      // Without `perTaskStopAffordance` the interrupt kills every agent, background
+      // ones included, so every card goes. With it (ADR-089's rule for pi,
+      // `rejectOwnPendingGates`), only the main thread's own cards (no `agentId`)
+      // are this Stop's to deny. A subagent's card is left to cli.js: an agent
+      // that dies with the turn (a foreground one) has its `canUseTool` signal
+      // aborted, and the abort listener there denies and dismisses the card; a
+      // background agent survives the Stop, and its card stays answerable.
       for (const [requestId, entry] of this.pendingApprovals) {
+        if (this.stopSparesBackgroundAgents && entry.agentId) continue
         entry.resolve({ decision: 'deny' })
         this.send('session:approval-dismiss', { requestId })
+        this.pendingApprovals.delete(requestId)
       }
-      this.pendingApprovals.clear()
 
       await this.activeQuery.interrupt()
     }

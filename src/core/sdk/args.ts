@@ -254,6 +254,18 @@ export function claudeBehaviorSettings(config: ClaudeEngineConfig | undefined): 
 }
 
 /**
+ * Whether a Claude session's Stop spares running background agents: the
+ * `perTaskStopAffordance` initialize capability (QueryOptions), not a
+ * `--settings` key, so it rides the query options rather than
+ * `claudeBehaviorSettings`. ClaudeUI's default is ON (absent means true);
+ * off, nothing is declared and cli.js's interrupt also kills them. Read at
+ * spawn like the switches above: cli.js binds it for the process's life.
+ */
+export function claudeStopKeepsBackgroundAgents(config: ClaudeEngineConfig | undefined): boolean {
+  return config?.stopKeepsBackgroundAgents !== false
+}
+
+/**
  * Port of the SDK's QV() helper. Folds `sandbox` into `settings`, then
  * returns a flat flag-bag ready for --<flag> <value> emission.
  */

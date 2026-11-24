@@ -1502,13 +1502,24 @@ function OpencodeRawConfigSection(): React.JSX.Element {
 
 // ── Claude › Session behaviour ───────────────────────────────────────
 
+type BehaviorKey = 'idleCompaction' | 'privacyEmailCheck' | 'stopKeepsBackgroundAgents'
+
+/** What an absent key means: ClaudeUI's defaults, not cli.js's (compaction is ON there). */
+const BEHAVIOR_DEFAULTS: Record<BehaviorKey, boolean> = {
+  idleCompaction: false,
+  privacyEmailCheck: true,
+  stopKeepsBackgroundAgents: true
+}
+
 /**
- * The two cli.js behaviours ClaudeUI owns a switch for (engines/claude.json
- * `claudeConfig`), delivered per spawn as `--settings` flag settings so the
- * user's own `~/.claude/settings.json` — shared with the terminal `claude` — is
- * never touched (`claudeBehaviorSettings`, sdk/args.ts).
+ * The three cli.js behaviours ClaudeUI owns a switch for (engines/claude.json
+ * `claudeConfig`), all read per spawn. Two are delivered as `--settings` flag
+ * settings so the user's own `~/.claude/settings.json` — shared with the
+ * terminal `claude` — is never touched (`claudeBehaviorSettings`, sdk/args.ts);
+ * the third is the `perTaskStopAffordance` initialize capability
+ * (`claudeStopKeepsBackgroundAgents`, same file).
  *
- * Both are ABSENT-means-default keys: switching a row back to its default
+ * All are ABSENT-means-default keys: switching a row back to its default
  * DELETES it rather than writing the default out, so the hand-editable file
  * says only what the user actually changed.
  */
@@ -1520,16 +1531,15 @@ function ClaudeSessionBehaviorSection({
   updateEngineConfig: (p: Partial<EngineConfig>) => void
 }): React.JSX.Element {
   const claudeConfig = engineConfig.claudeConfig ?? {}
-  // `idleCompaction` absent = OFF; `privacyEmailCheck` absent = ON.
-  const idleCompaction = claudeConfig.idleCompaction === true
-  const privacyEmailCheck = claudeConfig.privacyEmailCheck !== false
+  // Read as the host does (sdk/args.ts): only the non-default boolean flips a row.
+  const value = (key: BehaviorKey): boolean =>
+    BEHAVIOR_DEFAULTS[key] ? claudeConfig[key] !== false : claudeConfig[key] === true
 
   /** Write a key, or DELETE it when the new value is that key's default. */
-  const save = (key: 'idleCompaction' | 'privacyEmailCheck', value: boolean): void => {
+  const save = (key: BehaviorKey, v: boolean): void => {
     const next = { ...claudeConfig }
-    const isDefault = key === 'idleCompaction' ? value === false : value === true
-    if (isDefault) delete next[key]
-    else next[key] = value
+    if (v === BEHAVIOR_DEFAULTS[key]) delete next[key]
+    else next[key] = v
     updateEngineConfig({ claudeConfig: next })
   }
 
@@ -1540,20 +1550,32 @@ function ClaudeSessionBehaviorSection({
         label="Compact idle conversations"
         description="Claude Code summarises a long conversation (200K+ tokens) left idle. Off keeps the full history. Applies to sessions started after the change."
         keyText="engines/claude.json · claudeConfig.idleCompaction"
-        checked={idleCompaction}
+        checked={value('idleCompaction')}
         onChange={(v) => save('idleCompaction', v)}
         modified={claudeConfig.idleCompaction !== undefined}
-        onReset={() => save('idleCompaction', false)}
+        onReset={() => save('idleCompaction', BEHAVIOR_DEFAULTS.idleCompaction)}
       />
       <SettingsToggle
         testid="ClaudeSessionBehaviorSection.privacyEmailCheck"
         label="Ask before sending your email address"
         description="Claude Code asks before a shell, web, file-write or MCP call that would send your account email address off this machine or use it as a client identity. Applies to sessions started after the change."
         keyText="engines/claude.json · claudeConfig.privacyEmailCheck"
-        checked={privacyEmailCheck}
+        checked={value('privacyEmailCheck')}
         onChange={(v) => save('privacyEmailCheck', v)}
         modified={claudeConfig.privacyEmailCheck !== undefined}
-        onReset={() => save('privacyEmailCheck', true)}
+        onReset={() => save('privacyEmailCheck', BEHAVIOR_DEFAULTS.privacyEmailCheck)}
+      />
+      <SettingsToggle
+        testid="ClaudeSessionBehaviorSection.stopKeepsBackgroundAgents"
+        label="Stop keeps background agents running"
+        description="Stop and Esc end only the current turn. Agents running in the background keep going, and each keeps its own Stop on its card and in the Tasks panel. Off: Stop also stops every running background agent (Claude Code's default). Applies to sessions started after the change."
+        keyText="engines/claude.json · claudeConfig.stopKeepsBackgroundAgents"
+        checked={value('stopKeepsBackgroundAgents')}
+        onChange={(v) => save('stopKeepsBackgroundAgents', v)}
+        modified={claudeConfig.stopKeepsBackgroundAgents !== undefined}
+        onReset={() =>
+          save('stopKeepsBackgroundAgents', BEHAVIOR_DEFAULTS.stopKeepsBackgroundAgents)
+        }
       />
     </div>
   )
@@ -2559,7 +2581,7 @@ export const SECTIONS: Section[] = [
         key: 'claudeSessionBehavior',
         label: 'Session behaviour',
         keywords:
-          'idle compaction compact summarise summarize summary 200k long conversation history email privacy address account web shell file write mcp send leave machine',
+          'idle compaction compact summarise summarize summary 200k long conversation history email privacy address account web shell file write mcp send leave machine stop esc escape interrupt background agents kill spare',
         render: (_s, _u, e, ue) => (
           <ClaudeSessionBehaviorSection engineConfig={e} updateEngineConfig={ue} />
         )

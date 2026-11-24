@@ -9,10 +9,17 @@
  * here too.
  *
  * The second suite covers `claudeBehaviorSettings` and the `--settings` JSON it
- * rides in (`claude-session.ts` and the dispatcher merge it in).
+ * rides in (`claude-session.ts` and the dispatcher merge it in); the last,
+ * `claudeStopKeepsBackgroundAgents`, the switch that rides the initialize
+ * capability instead.
  */
 import { describe, it, expect } from 'vitest'
-import { PRIVACY_PLUGIN_ID, buildArgs, claudeBehaviorSettings } from '../args'
+import {
+  PRIVACY_PLUGIN_ID,
+  buildArgs,
+  claudeBehaviorSettings,
+  claudeStopKeepsBackgroundAgents
+} from '../args'
 import type { QueryOptions } from '../types'
 
 const flagCount = (args: string[]): number =>
@@ -134,5 +141,23 @@ describe('buildArgs — the sandbox flag block', () => {
   it('with no block, no sandbox key reaches cli.js', () => {
     const args = buildArgs({ settings: claudeBehaviorSettings(undefined) } as QueryOptions)
     expect(emittedSettings(args)).not.toHaveProperty('sandbox')
+  })
+})
+
+/**
+ * engines/claude.json `claudeConfig.stopKeepsBackgroundAgents`: ClaudeUI's default
+ * is ON (absent means true), so only an explicit `false` leaves cli.js's
+ * fail-closed interrupt (it also kills running background agents) in place.
+ */
+describe('claudeStopKeepsBackgroundAgents — the Stop-spares-background-agents switch', () => {
+  it('is ON when the key is absent, or there is no config at all', () => {
+    expect(claudeStopKeepsBackgroundAgents(undefined)).toBe(true)
+    expect(claudeStopKeepsBackgroundAgents({})).toBe(true)
+    expect(claudeStopKeepsBackgroundAgents({ defaultModel: 'opus' })).toBe(true)
+  })
+
+  it('follows an explicit value', () => {
+    expect(claudeStopKeepsBackgroundAgents({ stopKeepsBackgroundAgents: true })).toBe(true)
+    expect(claudeStopKeepsBackgroundAgents({ stopKeepsBackgroundAgents: false })).toBe(false)
   })
 })

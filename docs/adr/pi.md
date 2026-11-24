@@ -280,8 +280,9 @@ validated as a uuid v4 before any path is built.
   stop that agent and ALL its descendants, abort the child and retract its open approval cards. `interrupt()` (the
   composer Stop) stops no agent and denies only the session's own pending cards: every card keeps its own Stop
   (opencode, ADR-111 §4; the root has no foreground runs, and a child's foreground run belongs to that child's turn).
-  Claude Code as ClaudeUI spawns it today does the opposite: without the `perTaskStopAffordance` initialize capability
-  an interrupt kills background agents (`docs/protocol-cc/11-cancellation.md`). `cancel()` and the parent's process exit dispose
+  A Claude session's Stop spares background agents the same way by default (it still ends foreground ones with the
+  turn): ClaudeUI declares Claude Code's `perTaskStopAffordance` unless the setting is off
+  (`docs/protocol-cc/11-cancellation.md`). `cancel()` and the parent's process exit dispose
   everything with no delivery (the parent exiting kills its children without telling the model). An abandoned `agent`
   exchange (pi still running but no longer polling it) stops its child; the bridge's `execute` takes no abort signal,
   so an interrupt during the spawn still returns the launch text, and a spawner's exit disposes its bridge instead (see
