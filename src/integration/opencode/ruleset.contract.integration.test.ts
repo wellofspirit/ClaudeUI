@@ -25,6 +25,7 @@ import {
 import { childSessionRuleset } from '../../core/opencode/subagent-permissions'
 import {
   NOTES_FILE,
+  OPAQUE_COMMAND,
   SHELL_COMMAND,
   messageText,
   type FixtureProvider
@@ -120,6 +121,48 @@ describeV2('opencode 2.x contract: compiled session rulesets', () => {
     ])
     // Non-fatal: the model got the rejection as its tool result and the turn went on.
     expect(r.fixture.mentioning(tag)).toHaveLength(2)
+    expect(end.type).toBe('session.execution.succeeded')
+  })
+
+  it('(b2) an opaque command (2.4.0) asks `external_directory *` and then `shell` with the full text', async () => {
+    const r = rig()
+    const id = await create(r, session('default').rules)
+    const from = r.feed.mark()
+    await r.api.ok('session.prompt', {
+      params: { sessionID: id },
+      body: { text: `[shellopaque] ${nonce('opaque')}` }
+    })
+    const first = await r.feed.waitFor('permission.asked', { sessionID: id, after: from })
+    expect(first.data).toMatchObject({ action: 'external_directory', resources: ['*'] })
+    await r.api.ok('session.permission.reply', {
+      params: { sessionID: id, requestID: first.data.id },
+      body: { decision: 'once' }
+    })
+    const afterFirst = r.feed.mark()
+    const second = await r.feed.waitFor('permission.asked', { sessionID: id, after: afterFirst })
+    expect(second.data).toMatchObject({ action: 'shell', resources: [OPAQUE_COMMAND] })
+    await r.api.ok('session.permission.reply', {
+      params: { sessionID: id, requestID: second.data.id },
+      body: { decision: 'reject' }
+    })
+    await r.feed.waitForTurnEnd(id, from)
+  })
+
+  it('(b3) an UNRELATED user Bash deny still refuses an opaque command (upstream refuses on any shell deny)', async () => {
+    const r = rig()
+    const id = await create(r, session('default', { deny: ['Bash(rm:*)'] }).rules)
+    const tag = nonce('opaque-deny')
+    const { end, from } = await r.turn(id, `[shellopaque] ${tag}`)
+    const failed = r.feed.select('session.tool.failed', { sessionID: id, after: from })
+    // Not `permission.rejected`: any `shell` deny makes the scanner's failure fatal
+    // (`shell/permissions.ts` `UnverifiableError`), and nothing runs.
+    expect(failed.map((event) => event.data.error)).toEqual([
+      {
+        type: 'unknown',
+        message: expect.stringContaining('Portable shell scanner cannot analyze command')
+      }
+    ])
+    expect(r.feed.select('permission.asked', { sessionID: id, after: from })).toHaveLength(0)
     expect(end.type).toBe('session.execution.succeeded')
   })
 

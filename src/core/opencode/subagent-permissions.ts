@@ -25,6 +25,7 @@ import {
   type V2Rule
 } from './permission-v2'
 import type { Permission_Ruleset } from './protocol-v2/openapi'
+import { foldsResourceCase } from '../../shared/opencode-wildcard'
 import { wildcardMatch } from './wildcard'
 
 /** Either glob matches the other (`lsphub_find_refs` vs `lsphub_*` overlap). */
@@ -164,11 +165,12 @@ export function evaluateChildCall(
   resource: string,
   platform?: NodeJS.Platform
 ): OpencodeAction {
+  const fold = foldsResourceCase(platform ?? process.platform, action)
   for (let i = agentRules.length - 1; i >= 0; i--) {
     const rule = agentRules[i]
     if (
       wildcardMatch(action, rule.action, platform) &&
-      wildcardMatch(resource, rule.resource, platform)
+      wildcardMatch(resource, rule.resource, platform, fold)
     )
       return rule.effect
   }

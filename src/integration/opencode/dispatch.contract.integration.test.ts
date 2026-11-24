@@ -363,7 +363,8 @@ describeV2('opencode 2.x contract: the dispatcher with an opencode target', () =
     // The launch turn said `TOOL_RESULT_SEEN: The subagent is working in the background…`; the
     // child read the file and ended; its report woke the target, whose answer (the fixture echoes
     // what it was given) is the run's result.
-    expect(result.text).toContain('echo: <subagent')
+    // 2.4.0 wraps the report as `<background-result kind="subagent" …>` (`<subagent …>` before).
+    expect(result.text).toContain('echo: <background-result kind="subagent"')
     expect(result.text).toContain('state="completed"')
     expect(result.text).not.toContain('working in the background')
     expect(of('session:task-notification').at(-1)).toMatchObject({

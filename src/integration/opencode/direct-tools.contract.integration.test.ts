@@ -6,9 +6,9 @@
  * tools instead (`packages/core/src/tool.ts` `snapshot`: "Without Code Mode its tools would be
  * unreachable, so expose them as direct tools instead.", 2.2.0+). Most of them run a call with
  * NO permission check of their own (`packages/core/src/tool/plugin/opencode.ts` at v2.2.5), and
- * the artifact/automation families join them when the user turns those features on. This rig
- * turns automations on (`experimental.automations`, 2.3.2's rename of `schedules`,
- * `tool/plugin/automation.ts`), so the family is there to be hidden.
+ * the artifact family joins them when the user turns that feature on. The automations are on
+ * by default since 2.4.0 (`tool/plugin/automation.ts`, top-level ids `automation_*`), so the
+ * family is there to be hidden without any config.
  *
  * So the control below is "hide Code Mode only": the model is OFFERED those tools. ClaudeUI's
  * compiled ruleset must instead deny the families wholly, which is what makes the engine hide
@@ -55,15 +55,17 @@ const UNCHECKED = [
 ] as const
 
 /**
- * 2.3.2's automations (`tool/plugin/automation.ts`, namespace `opencode`): registered only
- * while the user's config turns the feature on, and none asks a permission of its own.
+ * 2.4.0's automations (`tool/plugin/automation.ts`, top-level ids, on by default), and the
+ * MCP-event lister (`opencode_list_mcp_events`, always registered; its only use is an
+ * automation's MCP-event trigger). None asks a permission of its own.
  */
 const AUTOMATION = [
-  'opencode_automation_create',
-  'opencode_automation_list',
-  'opencode_automation_pause',
-  'opencode_automation_resume',
-  'opencode_automation_delete'
+  'automation_create',
+  'automation_list',
+  'automation_pause',
+  'automation_resume',
+  'automation_delete',
+  'opencode_list_mcp_events'
 ] as const
 
 /** Code Mode hidden, nothing else: the state the 2.2.0 change exposes the tools in. */
@@ -72,9 +74,7 @@ const HIDE_CODE_MODE: readonly Permission_Rule[] = [
 ]
 
 describeV2('opencode 2.x contract: the direct opencode_* tools', () => {
-  const rig = useRig('direct-tools', {
-    config: (fixture) => ({ ...fixtureConfig(fixture), experimental: { automations: true } })
-  })
+  const rig = useRig('direct-tools', { config: (fixture) => fixtureConfig(fixture) })
 
   it('hiding Code Mode alone offers them to the model (the 2.2.0 fact this slice rules on)', async () => {
     const r = rig()
@@ -85,7 +85,7 @@ describeV2('opencode 2.x contract: the direct opencode_* tools', () => {
     // Code Mode itself is gone; its tools are not.
     expect(tools).not.toContain('execute')
     for (const tool of UNCHECKED) expect(tools, tool).toContain(tool)
-    // The flag is on in this rig: the automation tools are offered too.
+    // On by default since 2.4.0: the automation tools are offered too.
     for (const tool of AUTOMATION) expect(tools, tool).toContain(tool)
     // `worktree_remove` asks `edit`, so it is offered whatever the families say.
     expect(tools).toContain('opencode_worktree_remove')
@@ -112,9 +112,9 @@ describeV2('opencode 2.x contract: the direct opencode_* tools', () => {
       const tools = offered(r, tag)
       for (const tool of UNCHECKED) expect(tools, tool).not.toContain(tool)
       for (const tool of AUTOMATION) expect(tools, tool).not.toContain(tool)
-      // The artifact family is not registered in this rig (feature off), nor are 2.2.x's
-      // schedules (renamed): a session that could reach them would still be denied
-      // (permission-v2.test pins that).
+      // The artifact family is not registered in this rig (feature off), nor are the old
+      // schedules / `opencode_automation_*` ids: a session that could reach them would still be
+      // denied (permission-v2.test pins that).
       // What must stay available is the read-only lookup the model needs to name a model.
       expect(tools).toContain('opencode_models')
     }

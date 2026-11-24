@@ -126,7 +126,8 @@ imported from `auth.json` (`credential-store.ts`).
     `OpencodeApiError` shows the message and ClaudeUI branches on the status only.
   - Small: a child's `<subagent state="running">` now comes from a snapshot of its outstanding
     work (`recovery.outstanding`, `session/subagent-completion.ts`) instead of the body text; the
-    report's text is unchanged. Config gains `experimental.automations`/`video_generate` (an HTTP
+    report's text is unchanged (2.4.0 wraps it as `<background-result kind="subagent" sessionID="…"
+state="…" description="…">`; `content.ts` `subagentReport` reads both). Config gains `experimental.automations`/`video_generate` (an HTTP
     API, no model tool)/`full_codemode` (opt-in only, never by `all_flags`; with it `shell`,
     `edit`, `write` and `patch` become Code Mode tools — direct again, since ClaudeUI hides
     `execute` — and `webfetch` is not registered at all) and `compaction.background`;
@@ -309,7 +310,8 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
 - Rules are `{action, resource, effect}`, last match wins, no match = `ask`. Actions: `shell`
   (Claude `Bash`), `subagent` (`Task`), `edit` (also write/patch/apply_patch/multiedit), `read`,
   `glob`, `grep`, `webfetch`, `websearch`, `skill`, `question`, `external_directory`, `execute`
-  (Code Mode), `opencode_<namespace>_<tool>` (the opencode built-ins), `experimental_image_generate`,
+  (Code Mode), `opencode_<namespace>_<tool>` (the opencode built-ins), `generate_image` / `generate_video`
+  (2.4.0; `experimental_image_generate` before),
   MCP tools as `<server>_<tool>`. Dead 1.x keys are dropped (`list`, `todowrite`,
   `doom_loop`, `lsp`, `batch`, …).
 - A whole-category deny (`resource:"*"`) last for its action HIDES the tool from the model.
@@ -320,26 +322,45 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   `worktree_create`, `worktree_list`, `models`; `worktree_remove` asks `edit`; `session_move`
   asks `external_directory` for a destination outside the project). So in EVERY mode
   ClaudeUI wholly denies `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*`,
-  `opencode_automation_*` and `opencode_schedule_*` (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`,
+  `opencode_automation_*` and `opencode_schedule_*`, plus (2.4.0) the EXACT ids `automation_create|list|pause|resume|delete`,
+  `machine_list` and `opencode_list_mcp_events` (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`,
   next to the Code Mode deny and moved last by `wireOrder`, so no user allow re-opens them) — the
   model must not rename or move the session, create or remove worktrees, publish artifacts or set
   up automations on its own. `opencode_models`, `opencode_list_mcp_resources` and
   `opencode_read_mcp_resource` stay available (they read), and the artifact/automation families
   exist only when the user enables those features (2.3.2 renamed `schedule` to `automation`; the
-  schedule rule stays for an older server). The `/automation` command stays in the slash menu, as
+  schedule rule stays for an older server). 2.4.0 moved the automation tools out of the `opencode`
+  namespace (`automation_*`) and turned them ON by default (config `automations`, default true); the
+  new ids are denied by exact id, never `automation_*` / `machine_*` globs, because an MCP tool is
+  `<server>_<tool>` and a glob would hide every tool of a user MCP server named `automation` or
+  `machine`. `opencode_watch_mcp_event` is gone; `opencode_list_mcp_events` (always registered, only
+  useful for an automation's MCP-event trigger) is hidden with them. The `/automation` command stays in the slash menu, as
   `/schedule` did: it only prompts the model, which has no automation tool to call.
 - `experimental_image_generate` (`tool/plugin/image-generate.ts`, on by default since 2.2.2) is a
   paid model call the model can start without the user asking for an image: it asks in default,
-  acceptEdits and auto, like `webfetch`, and is wholly denied (hidden) in plan mode.
+  acceptEdits and auto, like `webfetch`, and is wholly denied (hidden) in plan mode. 2.4.0 renamed
+  it `generate_image` (also asks `webfetch` for URL inputs and `edit` for `path`) and added
+  `generate_video` (registered only while a video model is available); the old name is mapped ONLY
+  in config files (`v1/config/migrate.ts` `renamedTool`), never in session rules, so a session rule
+  naming it is inert on 2.4.x. ClaudeUI sends the same rules for all three names. A Claude agent
+  with a `tools:` list always gets `generate_image` / `generate_video` denied (`claude-agent-shim.ts`).
+  Built-ins and MCP tools share one id space (`<server>_<tool>`), so a user MCP tool whose id equals
+  a built-in (`generate_image` from a server named `generate`, `automation_list` from `automation`)
+  is gated as that built-in; the hidden ids are exact, never globs, to keep the rest of such a server.
 - The shell PERMISSION resources come from 2.2.x's portable scanner (`core/src/shell/scan.ts`,
   `parse.ts` `scan`), not tree-sitter (2.1.2). An ordinary heredoc, `$(…)` and a compound command
   ARE analysed: a heredoc is ONE resource, the whole command text (body included); `$(…)` yields
   the outer statement AND the substitution as separate resources (`echo $(date +%Y)` →
   `echo $(date +%Y)` and `date +%Y`); `{ …; }`, `( … )` and `if … fi` yield their inner
-  statements. A command the scanner calls opaque (`alias x=y`: `dynamic-execution`; an
-  unterminated quote) FAILS the call before any ask with `{"type":"unknown","message":"Portable
-shell scanner cannot analyze command: <reason>"}` — fail closed, nothing runs, and ClaudeUI's
-  ladder never sees it.
+  statements. Up to 2.3.x a command the scanner calls opaque (`alias x=y`: `dynamic-execution`; an
+  unterminated quote) FAILED the call before any ask with `{"type":"unknown","message":"Portable
+shell scanner cannot analyze command: <reason>"}`. 2.4.0 (`shell/permissions.ts`) asks
+  `external_directory *` plus `shell <full command>` instead (the user is asked twice, accepted);
+  if ANY `shell` deny rule exists, even an unrelated one, the call still fails with the same
+  `unknown` error (`UnverifiableError`), no ask raised. Contract cases `(b2)`/`(b3)` in
+  `ruleset.contract.integration.test.ts` use an unterminated quote, opaque to both the bash and the
+  PowerShell scanner. A foreground subagent result is no longer wrapped at all: subagents always run
+  in the background and only the `<background-result kind="subagent">` report carries the envelope.
 - Per-session rules ride `POST /api/session {permissions}` and `PATCH` (which REPLACES). The
   session ruleset ClaudeUI sends only tightens: mode gates (asks) → the user's compiled rules (no
   allows under auto; no mutating allows in plan) → plan enforcement → `{execute,*,deny}` and the

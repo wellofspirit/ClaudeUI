@@ -121,6 +121,8 @@ describeV2('opencode 2.x contract: turns, interrupt, history', () => {
     })
     expect(child).toHaveLength(1)
     const childID = child[0].data.sessionID
+    // 2.4.1 starts the child after the parent's launch round: its run ends after the parent's.
+    await feed.waitFor('session.execution.succeeded', { sessionID: childID, after: from })
     expect(
       feed.select('session.execution.succeeded', { sessionID: childID, after: from })
     ).toHaveLength(1)

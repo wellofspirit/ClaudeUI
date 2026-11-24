@@ -742,6 +742,8 @@ describe('opencode target — lifecycle', () => {
       { action: 'webfetch', resource: '*', effect: 'ask' },
       // A paid model call, gated like webfetch (2.2.2+ offers it by default).
       { action: 'experimental_image_generate', resource: '*', effect: 'ask' },
+      { action: 'generate_image', resource: '*', effect: 'ask' },
+      { action: 'generate_video', resource: '*', effect: 'ask' },
       { action: 'external_directory', resource: '*', effect: 'ask' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'ask' },
       { action: 'claudeui_session_*', resource: '*', effect: 'ask' },
@@ -752,6 +754,13 @@ describe('opencode target — lifecycle', () => {
       { action: 'opencode_artifact_*', resource: '*', effect: 'deny' },
       { action: 'opencode_automation_*', resource: '*', effect: 'deny' },
       { action: 'opencode_schedule_*', resource: '*', effect: 'deny' },
+      { action: 'automation_create', resource: '*', effect: 'deny' },
+      { action: 'automation_list', resource: '*', effect: 'deny' },
+      { action: 'automation_pause', resource: '*', effect: 'deny' },
+      { action: 'automation_resume', resource: '*', effect: 'deny' },
+      { action: 'automation_delete', resource: '*', effect: 'deny' },
+      { action: 'opencode_list_mcp_events', resource: '*', effect: 'deny' },
+      { action: 'machine_list', resource: '*', effect: 'deny' },
       { action: 'console_watch_*', resource: '*', effect: 'deny' },
       // Without `requireHandBack` (the dispatcher's own suites) a target is an ordinary session of the server.
       { action: 'claudeui_hand_back', resource: '*', effect: 'deny' },

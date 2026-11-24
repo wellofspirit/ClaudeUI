@@ -311,9 +311,10 @@ export const HAND_BACK_ALLOW_RULE: V2Rule = rule(`${CLAUDEUI_MCP_SERVER}_hand_ba
  * `<server>_<tool>` (`tool/mcp.ts` `name`), so every MCP action contains `_` —
  * whichever server, whenever it connected. The direct built-ins that contain
  * `_` are `external_directory` (re-stated by {@link autoModeGates}), ClaudeUI's
- * own `claudeui_*` tools (re-allowed) and the `opencode_*` direct tools, which
- * {@link DIRECT_TOOL_DENY_RULES} denies after this catch-all (wholly, so they
- * are hidden).
+ * own `claudeui_*` tools (re-allowed), the `opencode_*` direct tools and (2.4.0+)
+ * `automation_*`, `machine_list`, `generate_image`, `generate_video`: the first three
+ * {@link DIRECT_TOOL_DENY_RULES} denies after this catch-all (wholly, so they are hidden);
+ * the media tools keep the catch-all's ask.
  */
 export const AUTO_MCP_CATCH_ALL: V2Rule = rule('*_*', 'ask')
 
@@ -349,7 +350,11 @@ export const EXECUTE_DENY_RULE: V2Rule = rule('execute', 'deny')
  * `all_flags`. An automation prompts this or another session of the project or a new
  * child, or runs a Code Mode action without a model, on a timer or an MCP event, so the
  * model must not create one behind the user's back. The schedule rule stays for a server
- * older than 2.3.2.
+ * older than 2.3.2. 2.4.0 moved them to the top-level ids `automation_{create,list,pause,
+ * resume,delete}` (`tool/plugin/automation.ts`), ON by default (config `automations`),
+ * and added `opencode_list_mcp_events` (replacing `opencode_watch_mcp_event`) and the flagged
+ * `machine_list`: denied by exact id, the old `opencode_automation_*` glob stays for an older
+ * server.
  *
  * Console watches (`plugin/provider/opencode-watches.ts`, namespace `console_watch`:
  * `console_watch_watch`, `_unwatch`, `_watches`, `_events`; `experimental.console_watches` or `all_flags`
@@ -362,6 +367,18 @@ export const DIRECT_TOOL_DENY_RULES: readonly V2Rule[] = [
   rule('opencode_artifact_*', 'deny'),
   rule('opencode_automation_*', 'deny'),
   rule('opencode_schedule_*', 'deny'),
+  // 2.4.0 moved the automation tools out of the `opencode` namespace, and they are on by
+  // default. EXACT ids, never `automation_*` / `machine_*`: an MCP tool is `<server>_<tool>`,
+  // so a glob would hide every tool of a user MCP server named `automation` or `machine`.
+  rule('automation_create', 'deny'),
+  rule('automation_list', 'deny'),
+  rule('automation_pause', 'deny'),
+  rule('automation_resume', 'deny'),
+  rule('automation_delete', 'deny'),
+  // Its only use is an automation's MCP-event trigger (always registered, asks its own action).
+  rule('opencode_list_mcp_events', 'deny'),
+  // The experimental machines tool (flag `machines`, off in releases).
+  rule('machine_list', 'deny'),
   rule('console_watch_*', 'deny')
 ]
 
@@ -402,7 +419,9 @@ export function modeGates(
   const shellWeb = [
     rule('shell', 'ask'),
     rule('webfetch', 'ask'),
-    rule('experimental_image_generate', 'ask')
+    rule('experimental_image_generate', 'ask'),
+    rule('generate_image', 'ask'),
+    rule('generate_video', 'ask')
   ]
   const external = externalDirectoryGates(opts.externalDirAllows)
   switch (mode) {
@@ -423,6 +442,8 @@ export function modeGates(
         rule('edit', 'ask'),
         rule('webfetch', 'ask'),
         rule('experimental_image_generate', 'ask'),
+        rule('generate_image', 'ask'),
+        rule('generate_video', 'ask'),
         ...external
       ]
     default:
@@ -431,6 +452,8 @@ export function modeGates(
         rule('edit', 'ask'),
         rule('webfetch', 'ask'),
         rule('experimental_image_generate', 'ask'),
+        rule('generate_image', 'ask'),
+        rule('generate_video', 'ask'),
         ...external
       ]
   }
@@ -471,6 +494,8 @@ export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule
     rule('shell', 'ask'),
     rule('webfetch', 'ask'),
     rule('experimental_image_generate', 'ask'),
+    rule('generate_image', 'ask'),
+    rule('generate_video', 'ask'),
     rule('websearch', 'ask'),
     rule('skill', 'ask'),
     rule('subagent', 'ask'),
@@ -494,6 +519,8 @@ export function planEnforcement(): V2Rule[] {
     rule('subagent', 'deny', 'general'),
     rule('edit', 'deny'),
     rule('experimental_image_generate', 'deny'),
+    rule('generate_image', 'deny'),
+    rule('generate_video', 'deny'),
     ...WORKTREE_TOOLS_DENY_RULES
   ]
 }

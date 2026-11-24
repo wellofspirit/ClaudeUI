@@ -18,8 +18,9 @@
  * | mcp__s__t / mcp__s / mcp__s__*  | s_t                   | s_t / s_*           | `*` (sanitized `[^a-zA-Z0-9_-]` → `_`, `tool/mcp.ts`)                    |
  * | additionalDirectories           | (any file tool)       | external_directory  | `<dir>/*` of the target's directory, absolute (`file-access.ts`)         |
  * | (none)                          | question              | question            | `*`                                                                       |
- * | (none)                          | opencode.<session\|worktree\|artifact\|automation\|schedule>.* | opencode_<tool> | `*` — wholly denied and hidden (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`); `worktree_remove` asks `edit`; `automation` is 2.3.2's rename of `schedule` |
- * | (none)                          | experimental_image_generate | experimental_image_generate | `providerID/modelID` (the model the call will bill)                  |
+ * | (none)                          | opencode.<session\|worktree\|artifact\|automation\|schedule>.* | opencode_<tool> | `*` — wholly denied and hidden (`permission-v2.ts` `DIRECT_TOOL_DENY_RULES`); `worktree_remove` asks `edit`; `automation` is 2.3.2's rename of `schedule`, moved out of the namespace in 2.4.0 |
+ * | (none)                          | experimental_image_generate (≤2.3.x), generate_image, generate_video (2.4.0+) | same | `providerID/modelID` (the model the call will bill); both also ask `webfetch` / `edit` for their URL / path inputs |
+ * | (none)                          | automation_{create,list,pause,resume,delete}, machine_list, opencode_list_mcp_events (2.4.0+) | same | `*` — wholly denied and hidden by EXACT id (`DIRECT_TOOL_DENY_RULES`), never a glob |
  * | (none)                          | execute (Code Mode)   | (never asserted)    | visibility only — `whollyDisabled("execute")`                             |
  * | (none)                          | list/read_mcp_resource| opencode_list_mcp_resources / opencode_read_mcp_resource | server names / `server:uri` |
  *
@@ -106,7 +107,10 @@ export function v2ActionForV1Key(key: string): string | null {
  * emitted — an allow on `opencode_*` would also grant
  * `opencode_read_mcp_resource`. At v2.2.5 (`tool/plugin/opencode.ts`,
  * `artifact.ts`, `schedule.ts`, `image-generate.ts`); `automation.ts` at v2.3.2
- * (the schedules renamed; the schedule ids stay for an older server).
+ * (the schedules renamed; the schedule ids stay for an older server); at v2.4.1
+ * `automation.ts` (top-level `automation_*`), `video-generate.ts`, `image-generate.ts`
+ * (`generate_image`), `machine.ts`, `opencode.ts` (`opencode_list_mcp_events`,
+ * `opencode_session_interrupt|search|read`).
  */
 export const V2_BUILTIN_ACTIONS: readonly string[] = [
   'shell',
@@ -149,7 +153,20 @@ export const V2_BUILTIN_ACTIONS: readonly string[] = [
   'console_watch_unwatch',
   'console_watch_watches',
   'console_watch_events',
-  'experimental_image_generate'
+  'experimental_image_generate',
+  'generate_image',
+  'generate_video',
+  'automation_create',
+  'automation_list',
+  'automation_pause',
+  'automation_resume',
+  'automation_delete',
+  'opencode_list_mcp_events',
+  'opencode_watch_mcp_event',
+  'opencode_session_interrupt',
+  'opencode_session_search',
+  'opencode_session_read',
+  'machine_list'
 ]
 
 /** True when some built-in action satisfies `matches` (e.g. a glob test). */

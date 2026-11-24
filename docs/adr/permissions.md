@@ -68,7 +68,7 @@ mode's gates outranks them. Today's mapping (`modeGates` in `permission-v2.ts`; 
   subagent's own narrowing survives. Order: mode gates, then the user's rules (compiled allow, then ask, then deny, so
   deny > ask > allow as in Claude), then plan enforcement, hidden-tool denies, the dispatch and session-tool asks.
 - `default` (also `ask`, `bypassPermissions`, and `auto` with the judge off): shell, edit, webfetch (and
-  `experimental_image_generate`) ask; reads and the `task`/`subagent` tool stay unasked, so no subagent-spawn prompt.
+  `experimental_image_generate`, `generate_image`, `generate_video`) ask; reads and the `task`/`subagent` tool stay unasked, so no subagent-spawn prompt.
   MCP tools also run unasked outside auto unless a user rule says otherwise (the agent's own baseline leaves them
   unasked; ADR-085 §3 kept that), whereas pi's default base asks for MCP: a decided difference, not a parity bug.
 - `acceptEdits`/`autoEdit`: shell and webfetch ask; edits ask only for agent-control paths (ADR-084 §3).

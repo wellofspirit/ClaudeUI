@@ -16,7 +16,8 @@
  * `claudeui-xeng` plugin's child-agent floor, ADR-097 §3): last match wins, no
  * match = ask. Only ever TIGHTENS: deny and ask rules only, never an allow, and
  * a deny with no exact Claude-form equivalent becomes a whole-category deny —
- * never dropped. An ask with no equivalent is kept when it maps to a category,
+ * never dropped, except a built-in with no Claude-form category (2.4.0's `generate_image` /
+ * `generate_video`): every target still asks for it. An ask with no equivalent is kept when it maps to a category,
  * and `external_directory` asks are not mapped (every target already gates
  * access outside its workspace: its scope is the user's additional
  * directories plus its dispatcher's directory, ADR-108 as amended).

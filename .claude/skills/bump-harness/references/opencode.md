@@ -46,6 +46,12 @@ and nothing to patch. This list is what past bumps forgot.
 
 ## Known rulings (not bugs)
 
+- (2.4.1) The automation tools moved out of the `opencode` namespace (`automation_*`, on by default)
+  and the image tool is `generate_image`: config files map the old name (`renamedTool`), session
+  rules do not, so a rule naming `experimental_image_generate` is inert. Hide direct tools by
+  EXACT id, never `<word>_*` (an MCP server may carry that name).
+- (2.4.1) ChatGPT (`chatgpt-browser`) model gating comes from the models.dev `openai-codex` list
+  (`plugin/provider/openai.ts`), not a fixed set: check `GET /api/model?types=image` live.
 - Quitting ClaudeUI removes the opencode ChatGPT login ClaudeUI itself wrote (ADR-097 §5); a
   different token the user added stays.
 - A new session starts on the last-picked model.

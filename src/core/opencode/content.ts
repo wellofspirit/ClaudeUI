@@ -221,12 +221,14 @@ export function subagentChildSession(
   return text ? SESSION_ID_IN_TEXT.exec(text)?.[1] : undefined
 }
 
-const SUBAGENT_REPORT = /^<subagent sessionID="(ses_[A-Za-z0-9]+)" state="([a-z]+)"/
+const SUBAGENT_REPORT =
+  /^<(?:subagent|background-result kind="subagent") sessionID="(ses_[A-Za-z0-9]+)" state="([a-z]+)"/
 
 /**
- * A child's `<subagent sessionID="…" state="…" description="…">` report to its
- * parent, from the synthetic item's text (`session/subagent-completion.ts`
- * `deliver`). `running` is the model-facing tag of a round that ended while the
+ * A child's report to its parent, from the synthetic item's text
+ * (`session/subagent-completion.ts` `deliver`): `<subagent sessionID="…" state="…"
+ * description="…">` up to 2.3.x, `<background-result kind="subagent" sessionID="…"
+ * state="…" description="…">` since 2.4.0 (`session/background-result.ts`). `running` is the model-facing tag of a round that ended while the
  * child's own background work still runs; the item's `metadata.state` keeps the
  * round's real status, so the text is what tells. Undefined for any other text.
  */

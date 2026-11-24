@@ -1,10 +1,10 @@
 {
-  "version": "2.3.2",
-  "commit": "c0ad18b402eb2827fc1ee71c171b1177b3fc02d1",
+  "version": "2.4.1",
+  "commit": "6f0514052a3c859894ad01bb14cc14dda1e44b96",
   "sources": {
     "packages/protocol/src/groups/event.ts": "cdf88186681b233031bdc70dd478e660680ca0334f82f98d131900c81aae7048",
     "packages/schema/src/event.ts": "f39ab332fe69fcb85adeda95bcf4af608e13fc7e32d9dca5887fc35c51390fa9",
-    "packages/schema/src/event-manifest.ts": "9d84f64d729cde0bba1eaa75e1d6f5a2830191e9ef27cfb6d238e3e240e6d432",
+    "packages/schema/src/event-manifest.ts": "6a3b5dca03381bcf599b7efebb771b4b00153935b9bb428940a51528fa14576d",
     "packages/schema/src/session-event.ts": "a9e47b7d8071c2da806c3c15c6c9abbf516935b5fe44de9925419698279f794c",
     "packages/schema/src/session-inbox.ts": "b3de56bc3c5465150ce96138a69016bd04c28348555b7549699f9eb821728d74",
     "packages/schema/src/session-error.ts": "ed037377ed49240267e3627bd469facec80df2cd8d3446151002de45d05b6edf",
@@ -12,7 +12,7 @@
     "packages/schema/src/form.ts": "432caf3dc6f73b02cfa797b2d693dfd503add34575e883202709972e4a39b93a",
     "packages/schema/src/credential.ts": "1c321f9982cd47f4dc82689d3dd4001796255e4b4325c77db5043c110dab8b3b",
     "packages/schema/src/provider.ts": "7b88bcb3a36f53d952078f5a531f5360ee30bccda00a9d9ed7da261fefcbfdc4",
-    "packages/schema/src/model.ts": "b1879fe3a02f196d0e446db4b8c93b6d4ef39c387ccd6e1f9292030e10c132f5",
+    "packages/schema/src/model.ts": "10b4ccc43f1598eaa100cc5d6e9ce9474ebf5a29cf92ab7772be578a09b88303",
     "packages/schema/src/agent.ts": "2438abf1f8bbcc8ebad533b81035d739db4117b9df739a906d0113e851c0737e",
     "packages/schema/src/command.ts": "6091f667ccf353e2ec7ac93902cd2c58b951236823f9411fb88174f9494932ab",
     "packages/schema/src/skill.ts": "da003f8a6fd607569adb11e789c08eede92b044faa87648c422e69b47e281b4c",

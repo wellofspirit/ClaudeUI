@@ -96,12 +96,13 @@ tools as `<server>_<tool>`. Dead 1.x keys are dropped.
   in every mode.
 - **Direct tools are denied in every mode (opencode 2.2.x):** hiding `execute` makes Code Mode tools direct, and most
   run with no permission check, so `opencode_session_*`, `opencode_worktree_*`, `opencode_artifact_*`,
-  `opencode_automation_*` and `opencode_schedule_*` are wholly denied (`DIRECT_TOOL_DENY_RULES`, moved last so no user
+  `opencode_automation_*` and `opencode_schedule_*` (2.4.0: the exact ids `automation_*`, `machine_list`,
+  `opencode_list_mcp_events`) are wholly denied (`DIRECT_TOOL_DENY_RULES`, moved last so no user
   allow re-opens them; changed 2026-11-23: opencode 2.3.2 renamed schedules to automations, which can also start
   children and model-less Code Mode runs; the schedule rule stays for an older server). The
   plugin refuses `opencode_worktree_remove` (its permission id is `edit`). `opencode_models` and the MCP-resource tools
   stay available; a server-level MCP deny or ask also covers that server's `opencode_*_mcp_resource` calls.
-  `experimental_image_generate` is a paid call the model can start unasked: gated like `webfetch` (ask), denied in plan.
+  `experimental_image_generate` (2.4.0: `generate_image`, `generate_video`) is a paid call the model can start unasked: gated like `webfetch` (ask), denied in plan.
 - **`external_directory` asks in every mode, stated by ClaudeUI.** Since opencode 2.0.25 no agent asks for it by default.
   The mode gates carry `{external_directory,*,ask}`, followed by allows for opencode's own directories (`own-dirs.ts`:
   data tool-output and shell dirs, config, tmp from `GET /api/info` plus its `realpath`, and the plan agent's
