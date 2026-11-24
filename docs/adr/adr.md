@@ -9,7 +9,7 @@ record, headed by its title and ADR numbers; a superseded or removed one is a li
 `ADR-054 decision 6`) is under the same label inside the section.
 
 Adding or changing a decision: ADR-026, "Decision records" (`development-workflow.md`). The highest
-number here is ADR-116; a new decision takes the next number that is free on every remote branch.
+number here is ADR-117; a new decision takes the next number that is free on every remote branch.
 
 Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git history keeps them:
 `git log --diff-filter=D --name-only -- docs/adr` finds the commit that removed them.
@@ -57,7 +57,7 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
   Governs: `src/core/sync/`, `src/core/shared/sync/`, `src/core/services/sync-host.ts`, `src/core/services/blob-store.ts`, `src/core/services/remote-server.ts`, `src/core/ipc/command-registry.ts`, `src/main/services/sync-port.ts`, `src/renderer/src/sync/`, `src/renderer/src/stores/replica.ts`, `src/web/connection.ts`
 - [terminals-and-worktrees.md](terminals-and-worktrees.md) — Terminals, git worktrees and cleanup. ADRs 002, 003, 060, 062, 112, 114.
   Governs: `src/renderer/src/components/terminal/`, `src/renderer/src/hooks/useTerminalColdCleanup.ts`, `src/core/services/pty-manager.ts`, `src/core/services/terminal-service.ts`, `src/core/ipc/terminal.ipc.ts`, `src/core/services/worktree.ts`, `src/core/services/worktree-detect.ts`, `src/core/services/worktree-fs.ts`, `src/core/services/worktree-holders.ts`, `src/core/services/worktree-root.ts`, `src/core/services/worktree-setup.ts`, `src/main/quit-coordinator.ts`, `src/main/services/quit-worktree-removal.ts`, `src/renderer/src/lib/worktree-start.ts`, `src/shared/worktree-start.ts`, `src/shared/worktree-fold.ts`, `src/shared/claude-project-delete.ts`
-- [ui.md](ui.md) — User interface. ADRs 012, 043, 048, 049, 075, 093, 094, 095.
+- [ui.md](ui.md) — User interface. ADRs 012, 043, 048, 049, 075, 093, 094, 095, 117.
   Governs: `src/renderer/src/components/`, `src/renderer/src/hooks/`, `src/renderer/src/assets/`, `src/web/`, `src/shared/agent-type-colors.ts`, `src/shared/sent-file-url.ts`, `src/core/sent-file-security.ts`, `src/core/shell-security.ts`, `eslint.config.mjs`
 - [voice.md](voice.md) — Voice input. ADRs 098, 101.
   Governs: `src/renderer/src/lib/voice/`, `src/core/voice/`, `src/core/services/voice-relay.ts`, `src/core/services/voice-stream-client.ts`, `src/core/ipc/voice-pack-commands.ts`, `src/shared/voice-pack.ts`, `src/main/voice-worker-launcher.ts`, `scripts/extract-cli.mjs`
@@ -182,4 +182,5 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
 - ADR-114 · current · [New sessions can start in a worktree, created at the first send](terminals-and-worktrees.md#new-sessions-can-start-in-a-worktree-created-at-the-first-send-adr-114) in `terminals-and-worktrees.md`
 - ADR-115 · current · [Claude skills and commands are offered in pi and opencode under Claude's names](shared-catalogs.md#claude-skills-and-commands-are-offered-in-pi-and-opencode-under-claudes-names-adr-115) in `shared-catalogs.md`
 - ADR-116 · current · [A Claude target runs under the Claude engine's sandbox and at a new session's effort](dispatch.md#a-claude-target-runs-under-the-claude-engines-sandbox-and-at-a-new-sessions-effort-adr-116) in `dispatch.md`
+- ADR-117 · current · [Task and session notes hide by their source tag; alerts always show](ui.md#task-and-session-notes-hide-by-their-source-tag-alerts-always-show-adr-117) in `ui.md`
 <!-- prettier-ignore-end -->

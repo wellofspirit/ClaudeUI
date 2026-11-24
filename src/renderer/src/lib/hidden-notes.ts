@@ -6,8 +6,8 @@ export interface HiddenNoteOptions {
 }
 
 /**
- * A `context_note` the user's view toggles hide. Display-only: an untagged note
- * (no `source`) and an `alert` note are never hidden.
+ * A `context_note` the user's view toggles hide (ADR-117). Display-only: an
+ * untagged note (no `source`) and an `alert` note are never hidden.
  */
 export function isHiddenNote(block: ContentBlock, opts: HiddenNoteOptions): boolean {
   if (block.type !== 'context_note' || block.alert) return false
