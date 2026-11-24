@@ -96,6 +96,9 @@ export function resolveMediaGeneration(saved: unknown): MediaGenerationSettings 
   }
 }
 
+/** Every kind, in the order the tools are listed. */
+export const MEDIA_KINDS: readonly MediaKind[] = ['image', 'video']
+
 /** The tool names, per engine spelling. */
 export const MEDIA_TOOL_NAMES = {
   image: 'generate_image',

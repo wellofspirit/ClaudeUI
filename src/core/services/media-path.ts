@@ -158,19 +158,36 @@ export function resolveMediaOutput(
   return error ? { ok: false, error } : { ok: true, path: file, agentGiven }
 }
 
+/** Does anything (a link included, even a dangling one) sit at `file`? */
+function lexists(file: string): boolean {
+  try {
+    fs.lstatSync(file)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * The path a finished job is saved under: the provisional one with the extension of what the provider
- * returned, checked again (the extension changed the name, and a minute has passed).
+ * returned, checked again (the extension changed the name, and a minute has passed). When the agent named
+ * the file and the extension had to change, the new name is one the agent did not name: an existing file
+ * there is never replaced, the job saves beside it as `<stem>.<jobId>.<ext>` (the notice carries the path).
  */
 export function finalOutputPath(
   ctx: MediaPathContext,
   provisional: string,
   mime: string,
   kind: MediaKind,
-  agentGiven: boolean
+  agentGiven: boolean,
+  jobId: string
 ): PathResult<{ path: string }> {
   const parsed = path.parse(provisional)
-  const file = path.join(parsed.dir, parsed.name + extForMime(mime, kind))
+  const ext = extForMime(mime, kind)
+  let file = path.join(parsed.dir, parsed.name + ext)
+  if (agentGiven && file !== provisional && lexists(file)) {
+    file = path.join(parsed.dir, `${parsed.name}.${safeSegment(jobId)}${ext}`)
+  }
   const error = checkOutput(ctx, file, kind, agentGiven)
   return error ? { ok: false, error } : { ok: true, path: file }
 }

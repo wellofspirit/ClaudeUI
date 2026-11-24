@@ -108,6 +108,37 @@ describe('listMediaModels', () => {
     expect(c.models.find((m) => m.ref === 'openrouter/acme/img')?.free).toBe(true)
   })
 
+  it('flags free only for a :free id or a cost known to be 0 on both sides', async () => {
+    const row = (id: string, cost?: { input?: number; output?: number }): MediaModelRow => ({
+      providerId: 'openrouter',
+      id,
+      name: id,
+      type: 'image',
+      acceptsImages: false,
+      ...(cost ? { cost } : {})
+    })
+    const d: MediaCatalogDeps = {
+      ...deps({ keys: ['openrouter'] }),
+      mediaRows: () => [
+        row('a:free'),
+        row('both-zero', { input: 0, output: 0 }),
+        row('output-only', { output: 0 }),
+        row('input-only', { input: 0 }),
+        row('priced', { input: 0, output: 1 })
+      ]
+    }
+    const free = Object.fromEntries(
+      (await listMediaModels(d)).models.map((m) => [m.name, m.free === true])
+    )
+    expect(free).toEqual({
+      'a:free': true,
+      'both-zero': true,
+      'output-only': false,
+      'input-only': false,
+      priced: false
+    })
+  })
+
   it('treats a key of a switched-off shared provider as not connected', async () => {
     const c = await listMediaModels(
       deps({ keys: ['openai', 'openrouter'], disabled: ['openrouter'] })
@@ -179,8 +210,19 @@ describe('resolveMediaModel', () => {
     })
   })
 
-  it('an explicit model beats the setting, must be listed, and is checked for images', async () => {
+  it('Off wins over an explicit model', async () => {
     const d = deps({ chatgpt: true, keys: ['openai'], setting: { imageModel: 'off' } })
+    expect(await resolveMediaModel('image', 'openai/gpt-image-old', false, d)).toEqual({
+      error: expect.stringContaining('turned off in Settings')
+    })
+  })
+
+  it('an explicit model beats a chosen setting, must be listed, and is checked for images', async () => {
+    const d = deps({
+      chatgpt: true,
+      keys: ['openai'],
+      setting: { imageModel: 'chatgpt-plan' }
+    })
     expect(await resolveMediaModel('image', 'openai/gpt-image-old', false, d)).toMatchObject({
       ref: 'openai/gpt-image-old'
     })

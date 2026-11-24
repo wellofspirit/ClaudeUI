@@ -75,13 +75,13 @@ import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { createCollabServer } from './collab-tool'
+import { mediaKindsEnabled } from './media-availability'
 import { createMediaServer } from './media-tool'
 import { MEDIA_PLAN_MODE_REFUSAL } from './media-tool-handler'
-import { appSetting } from './app-settings'
 import {
   CLAUDE_MEDIA_MCP_SERVER,
   CLAUDE_MEDIA_TOOL_PREFIX,
-  resolveMediaGeneration
+  MEDIA_KINDS
 } from '../../shared/media-generation'
 import { currentWorkdir } from './session-workdir'
 import { syncCore } from './sync-host'
@@ -933,20 +933,27 @@ export class ClaudeSession extends BaseSession {
         : null
 
       // Media generation: its own server too (outside `allowedTools`, so a call is asked), only while
-      // the Claude toggle is on; read per spawn, so a change applies at the next one.
-      const mediaServer = resolveMediaGeneration(appSetting('mediaGeneration')).engines.claude
-        ? createMediaServer({
-            engineId: this.engineId,
-            getRoutingId: () => this.routingId,
-            getWorkingDirectory: () =>
-              currentWorkdir(
-                this.cwd,
-                syncCore.getCanonicalState().worktreeInfoMap[this.routingId]
-              ),
-            getAutonomyMode: () => this.permissionMode,
-            callOwner: (toolUseId) => this.toolUseOwners.ownerOf(toolUseId)
-          })
-        : null
+      // the Claude toggle is on, per kind that is not Off (Off registers nothing); read per spawn,
+      // so a change applies at the next one.
+      // No await here: the query must be reached in the same tick (H17), so only the toggle and Off are
+      // read; a kind with no connected model answers the call with the job service's own error.
+      const mediaEnabled = mediaKindsEnabled('claude')
+      const mediaKinds = MEDIA_KINDS.filter((kind) => mediaEnabled[kind])
+      const mediaServer =
+        mediaKinds.length > 0
+          ? createMediaServer({
+              kinds: mediaKinds,
+              engineId: this.engineId,
+              getRoutingId: () => this.routingId,
+              getWorkingDirectory: () =>
+                currentWorkdir(
+                  this.cwd,
+                  syncCore.getCanonicalState().worktreeInfoMap[this.routingId]
+                ),
+              getAutonomyMode: () => this.permissionMode,
+              callOwner: (toolUseId) => this.toolUseOwners.ownerOf(toolUseId)
+            })
+          : null
 
       // The session tools (slice 1c): their own server for the same reason —
       // outside the auto-allowed `claude-ui` prefix, every call through canUseTool

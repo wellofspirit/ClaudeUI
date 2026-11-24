@@ -509,9 +509,12 @@ describe('CredentialSync route policy', () => {
         return state.current
       })
       const onCredentialStored = vi.fn()
-      const sync = new CredentialSync({ vault, onCredentialStored })
+      const onSignInChanged = vi.fn()
+      const sync = new CredentialSync({ vault, onCredentialStored, onSignInChanged })
       await sync.completeLogin()
       expect(onCredentialStored).toHaveBeenCalledTimes(1)
+      // The media offer re-reads the sign-in state on the same edge.
+      expect(onSignInChanged).toHaveBeenCalledTimes(1)
       sync.stop()
     }
 

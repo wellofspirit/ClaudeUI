@@ -30,7 +30,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   })
 
   it('is version 25 (the extension throws without bridge credentials)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('28')
+    expect(PI_BRIDGE_VERSION).toBe('29')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -259,7 +259,7 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_HOSTED_TOOLS',
   'CLAUDEUI_PI_DISPATCH_ENABLED',
   'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
-  'CLAUDEUI_PI_MEDIA_ENABLED',
+  'CLAUDEUI_PI_MEDIA_KINDS',
   'CLAUDEUI_PI_PLAN_TOOLS',
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
@@ -2082,11 +2082,11 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hand_back (bridge v18, ADR-105 §3)', (
   })
 })
 
-describe('PI_BRIDGE_EXTENSION_SOURCE — media tools (bridge v28)', () => {
+describe('PI_BRIDGE_EXTENSION_SOURCE — media tools (bridge v29)', () => {
   const MEDIA_ON = {
     ...BRIDGE_CREDS,
     CLAUDEUI_PI_HOSTED_TOOLS: '1',
-    CLAUDEUI_PI_MEDIA_ENABLED: '1'
+    CLAUDEUI_PI_MEDIA_KINDS: 'image,video'
   }
 
   it('registers generate_image and generate_video only behind their own gate, inside the hosted block', () => {
@@ -2095,13 +2095,26 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — media tools (bridge v28)', () => {
       expect(names).toContain('generate_image')
       expect(names).toContain('generate_video')
     })
-    withEnv({ ...MEDIA_ON, CLAUDEUI_PI_MEDIA_ENABLED: undefined }, () => {
+    withEnv({ ...MEDIA_ON, CLAUDEUI_PI_MEDIA_KINDS: undefined }, () => {
       const names = [...runExtension().tools.keys()]
       expect(names).not.toContain('generate_image')
       expect(names).not.toContain('generate_video')
     })
     withEnv({ ...MEDIA_ON, CLAUDEUI_PI_HOSTED_TOOLS: undefined }, () => {
       expect([...runExtension().tools.keys()]).not.toContain('generate_image')
+    })
+  })
+
+  it('registers only the kinds listed: Off for one kind leaves no tool for it', () => {
+    withEnv({ ...MEDIA_ON, CLAUDEUI_PI_MEDIA_KINDS: 'image' }, () => {
+      const names = [...runExtension().tools.keys()]
+      expect(names).toContain('generate_image')
+      expect(names).not.toContain('generate_video')
+    })
+    withEnv({ ...MEDIA_ON, CLAUDEUI_PI_MEDIA_KINDS: 'video' }, () => {
+      const names = [...runExtension().tools.keys()]
+      expect(names).not.toContain('generate_image')
+      expect(names).toContain('generate_video')
     })
   })
 

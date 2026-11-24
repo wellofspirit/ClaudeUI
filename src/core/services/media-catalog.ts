@@ -72,7 +72,7 @@ const defaultDeps: MediaCatalogDeps = {
 
 function isFree(row: MediaModelRow): boolean {
   if (row.id.endsWith(':free')) return true
-  return row.cost !== undefined && (row.cost.input ?? 0) === 0 && (row.cost.output ?? 0) === 0
+  return row.cost?.input === 0 && row.cost?.output === 0
 }
 
 /** Newest first: release date, then id for a stable order. */
@@ -159,8 +159,8 @@ const NOT_CONNECTED: Record<MediaKind, string> = {
 }
 
 /**
- * The model a job runs on: `explicit` (the tool's `model` argument) when given and
- * available, else the setting, else Automatic. `{ error }` names why none fits
+ * The model a job runs on: Off in the setting refuses everything (even an explicit model); else
+ * `explicit` (the tool's `model` argument) when given and available, else the setting, else Automatic. `{ error }` names why none fits
  * (nothing connected, the setting is Off, an unknown or unavailable model, no model
  * that takes input images when `needsImages`).
  */
@@ -186,6 +186,13 @@ export async function resolveMediaModel(
         }
       : resolved(e)
 
+  const settings = resolveMediaGeneration(deps.setting())
+  const choice = kind === 'image' ? settings.imageModel : settings.videoModel
+  if (choice === 'off') {
+    return {
+      error: `${kind === 'image' ? 'Image' : 'Video'} generation is turned off in Settings.`
+    }
+  }
   const wanted = explicit?.trim()
   if (wanted) {
     const hit = ofKind.find((e) => e.model.ref === wanted)
@@ -194,13 +201,6 @@ export async function resolveMediaModel(
       : { error: `Model "${wanted}" is not available for ${kind} generation; leave model unset.` }
   }
 
-  const settings = resolveMediaGeneration(deps.setting())
-  const choice = kind === 'image' ? settings.imageModel : settings.videoModel
-  if (choice === 'off') {
-    return {
-      error: `${kind === 'image' ? 'Image' : 'Video'} generation is turned off in Settings.`
-    }
-  }
   if (choice !== 'auto') {
     const hit = ofKind.find((e) => e.model.ref === choice)
     return hit

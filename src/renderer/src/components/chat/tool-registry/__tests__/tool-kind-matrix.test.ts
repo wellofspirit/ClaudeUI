@@ -202,10 +202,10 @@ describe('tool kinds and labels, every known name on every engine', () => {
       "hand_back": - | unknown | unknown | unknown | unknown
       "mcp__claude-ui-media__generate_image": media | media | media | media | media
       "claudeui_generate_image": - | unknown | media | unknown | unknown
-      "generate_image": - | unknown | unknown | media | media
+      "generate_image": - | unknown | media | media | media
       "mcp__claude-ui-media__generate_video": media | media | media | media | media
       "claudeui_generate_video": - | unknown | media | unknown | unknown
-      "generate_video": - | unknown | unknown | media | media
+      "generate_video": - | unknown | media | media | media
       "mcp__claude-ui-sessions__session_list": mcp | mcp | mcp | mcp | mcp
       "claudeui_session_list": - | unknown | mcp | unknown | unknown
       "session_list": - | unknown | unknown | mcp | mcp

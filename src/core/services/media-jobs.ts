@@ -51,6 +51,7 @@ import {
 } from './media-job-ledger'
 import {
   finalOutputPath,
+  mediaRoots,
   readMediaInput,
   resolveMediaOutput,
   writeMediaFile,
@@ -229,7 +230,9 @@ export class MediaJobService {
       deps.ledger.create({
         id,
         sessionId: job.sessionId,
-        cwd: ctx.cwd,
+        // The working directory the job resolved to (a worktree, not the spawn cwd): the file route and
+        // a cold load check the saved file against the roots of THIS directory.
+        cwd: mediaRoots(ctx).workdir,
         toolUseId: job.toolUseId,
         kind: job.kind,
         status: willRunAtOnce ? 'running' : 'queued',
@@ -397,7 +400,8 @@ export class MediaJobService {
         job.provisionalPath,
         generated.mime,
         job.kind,
-        job.agentGiven
+        job.agentGiven,
+        job.id
       )
       if (!target.ok) throw new MediaProviderError(target.error)
       writeMediaFile(job.ctx, target.path, generated.bytes)

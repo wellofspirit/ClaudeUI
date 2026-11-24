@@ -163,6 +163,20 @@ describe('a ChatGPT disconnect takes out only what ClaudeUI put in (S7e)', () =>
     await expect(h.vault.listAccounts(CHATGPT_PROVIDER_ID)).resolves.toEqual([])
   })
 
+  it('rings onSignInChanged once, and a listener that throws does not fail the disconnect', async () => {
+    const h = setup()
+    await h.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))
+    const sync = h.boot()
+    const onSignInChanged = vi.fn(() => {
+      throw new Error('listener bug')
+    })
+    sync.configure({ onSignInChanged })
+
+    await expect(sync.disconnectChatgpt()).resolves.toBeUndefined()
+
+    expect(onSignInChanged).toHaveBeenCalledTimes(1)
+  })
+
   it('both hold ClaudeUI’s copy: both go', async () => {
     const h = setup()
     await h.vault.upsertAccount(CHATGPT_PROVIDER_ID, cred('fake-ours', 'ws-a'))

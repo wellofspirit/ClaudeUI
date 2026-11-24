@@ -144,10 +144,12 @@ import {
   type SessionToolCaller
 } from '../services/session-tools'
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
-import { appSetting } from '../services/app-settings'
 import { mediaJobs } from '../services/media-jobs'
 import { MEDIA_PLAN_MODE_REFUSAL, runMediaTool } from '../services/media-tool-handler'
-import { CLAUDE_MEDIA_TOOL_PREFIX, resolveMediaGeneration } from '../../shared/media-generation'
+import { mediaOffered } from '../services/media-availability'
+import { currentWorkdir } from '../services/session-workdir'
+import { syncCore } from '../services/sync-host'
+import { CLAUDE_MEDIA_TOOL_PREFIX, MEDIA_KINDS } from '../../shared/media-generation'
 import { mediaKindOfTool } from '../../shared/media-tool-view'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (ADR-081).
@@ -1112,6 +1114,8 @@ export class PiSession extends BaseSession {
       // The model is told where its scratch space is, as Claude Code's is; no scratchpad, no flag.
       args.push(...scratchpadPromptArgs(this.scratchpadDir))
 
+      const mediaOfferedNow = this.capabilities.hostedMcp ? await mediaOffered('pi') : null
+      const mediaKinds = MEDIA_KINDS.filter((kind) => mediaOfferedNow?.[kind])
       client = new PiRpcClient(launch, {
         cwd: this.cwd,
         args,
@@ -1124,11 +1128,9 @@ export class PiSession extends BaseSession {
           // Likewise the Claude skill catalog (`/skills`, listed at before_agent_start).
           CLAUDEUI_PI_SKILLS: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
-          // Media generation (bridge v28): the pi toggle, read per spawn (a change applies at the next one).
-          ...(this.capabilities.hostedMcp &&
-          resolveMediaGeneration(appSetting('mediaGeneration')).engines.pi
-            ? { CLAUDEUI_PI_MEDIA_ENABLED: '1' }
-            : {}),
+          // Media generation (bridge v29): the kinds offered now (toggle on, a model resolves), read per
+          // spawn (a change applies at the next one); none, no variable, no tool.
+          ...(mediaKinds.length > 0 ? { CLAUDEUI_PI_MEDIA_KINDS: mediaKinds.join(',') } : {}),
           // The session tools (bridge v15), on the same two conditions as the hosted
           // tools above plus the host having wired the service.
           ...(this.capabilities.hostedMcp && sessionToolsAvailable()
@@ -3447,7 +3449,8 @@ export class PiSession extends BaseSession {
     }
     const reply = await runMediaTool((args) => mediaJobs.start(args), {
       routingId: this.routingId,
-      cwd: this.cwd,
+      // Where the session works now (a worktree it entered), as Claude's media server reads it.
+      cwd: currentWorkdir(this.cwd, syncCore.getCanonicalState().worktreeInfoMap[this.routingId]),
       engineId: this.engineId,
       toolUseId: toolCallId,
       kind,

@@ -335,6 +335,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
       emitEvent('provider:auth-resolved', [
         { providerId: CHATGPT_PROVIDER_ID, ...(accountId ? { accountId } : {}) }
       ]),
+    // ChatGPT signed in or out: opencode's media tools are offered on a usable source, so its live
+    // sessions re-apply their ruleset (Claude and pi read the offer at their next spawn).
+    onSignInChanged: () => sessionManager.notifyMediaSettingsChanged(),
     // Nothing is fed into a harness that does not run, and a removal from one
     // is a direct file edit (ADR-082 §8, S7d); the arrival wiring below catches
     // it up. Here, not in the desktop registrar, so the headless server
@@ -350,7 +353,11 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // the Usage Analytics tab learns whether it has an OpenRouter tab (the service
   // stays free of the sync layer, like the CredentialSync hooks above).
   sharedProviderService.configure({
-    onApiKeyChanged: () => emitEvent('provider:credentials-changed', [])
+    onApiKeyChanged: () => {
+      emitEvent('provider:credentials-changed', [])
+      // An OpenAI or OpenRouter key came or went: the media offer follows it (see `onSignInChanged`).
+      sessionManager.notifyMediaSettingsChanged()
+    }
   })
 
   // opencode 2.x credentials (ADR-097 §5). ClaudeUI's record of the slots it

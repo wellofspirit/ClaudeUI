@@ -11,8 +11,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
 import { clearSyncSubscribersForTests } from '../sync-host'
 
-const { mockQuery, mediaSetting, startSpy } = vi.hoisted(() => ({
+const { mockQuery, mediaSetting, startSpy, offered } = vi.hoisted(() => ({
   mockQuery: vi.fn(),
+  offered: { value: { image: true, video: true } },
   mediaSetting: { value: undefined as unknown },
   startSpy: vi.fn()
 }))
@@ -34,6 +35,8 @@ vi.mock('../cross-engine-dispatcher', () => ({
   crossEngineDispatcher: { dispatch: vi.fn(), resolveApproval: vi.fn(), disposeFor: vi.fn() },
   crossEngineDispatchAvailable: (): boolean => true
 }))
+// What `mediaKindsEnabled` says: the toggle and Off per kind (its own suite covers the rules).
+vi.mock('../media-availability', () => ({ mediaKindsEnabled: () => offered.value }))
 vi.mock('../media-jobs', () => ({ mediaJobs: { start: startSpy } }))
 vi.mock('../app-settings', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../app-settings')>()
@@ -131,6 +134,7 @@ const IMAGE = 'mcp__claude-ui-media__generate_image'
 beforeEach(() => {
   vi.clearAllMocks()
   mediaSetting.value = undefined
+  offered.value = { image: true, video: true }
   mockQuery.mockImplementation(() => fakeQuery())
   startSpy.mockResolvedValue({
     ok: true,
@@ -151,8 +155,16 @@ describe('claude-ui-media registration', () => {
     expect(options.allowedTools.join(' ')).not.toContain('media')
   })
 
-  it('is not offered while the Claude toggle is off', async () => {
-    mediaSetting.value = { engines: { claude: false } }
+  it('registers only the kind that is offered: Off for video leaves no generate_video', async () => {
+    offered.value = { image: true, video: false }
+    const { options } = await boot()
+    expect(options.mcpServers['claude-ui-media'].tools.map((t) => t.name)).toEqual([
+      'generate_image'
+    ])
+  })
+
+  it('is not offered while the Claude toggle is off or both kinds are Off', async () => {
+    offered.value = { image: false, video: false }
     const { options } = await boot()
     expect(options.mcpServers['claude-ui-media']).toBeUndefined()
   })

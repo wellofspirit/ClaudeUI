@@ -111,18 +111,37 @@ describe('the output path', () => {
     expect(out('old.mp4', 'video')).toMatchObject({ ok: true })
   })
 
-  it('the final path takes the extension of the returned mime and is checked again', () => {
+  it('the final path takes the extension of the returned mime', () => {
     const first = out('pic.png')
     if (!first.ok) throw new Error('setup')
-    expect(finalOutputPath(ctx, first.path, 'image/webp', 'image', true)).toEqual({
+    expect(finalOutputPath(ctx, first.path, 'image/webp', 'image', true, 'j1')).toEqual({
       ok: true,
       path: path.join(cwd, 'pic.webp')
     })
-    // The renamed target now exists as a non-media file: refused.
-    fs.writeFileSync(path.join(cwd, 'pic.webp'), 'x')
-    fs.mkdirSync(path.join(cwd, 'pic.jpg'))
-    expect(finalOutputPath(ctx, first.path, 'image/jpeg', 'image', true)).toMatchObject({
-      ok: false
+    // The requested extension is kept as it is, and an existing file there is the agent's to replace.
+    fs.writeFileSync(path.join(cwd, 'pic.png'), PNG)
+    expect(finalOutputPath(ctx, first.path, 'image/png', 'image', true, 'j1')).toEqual({
+      ok: true,
+      path: path.join(cwd, 'pic.png')
+    })
+  })
+
+  it('a changed extension never lands on an existing file the agent did not name', () => {
+    // Requested hero.jpg; hero.png exists; the provider returns PNG.
+    fs.writeFileSync(path.join(cwd, 'hero.png'), 'precious')
+    fs.mkdirSync(path.join(cwd, 'dir.webp'))
+    const first = out('hero.jpg')
+    if (!first.ok) throw new Error('setup')
+    expect(finalOutputPath(ctx, first.path, 'image/png', 'image', true, 'job7')).toEqual({
+      ok: true,
+      path: path.join(cwd, 'hero.job7.png')
+    })
+    expect(fs.readFileSync(path.join(cwd, 'hero.png'), 'utf8')).toBe('precious')
+    const dirReq = out('dir.png')
+    if (!dirReq.ok) throw new Error('setup')
+    expect(finalOutputPath(ctx, dirReq.path, 'image/webp', 'image', true, 'job8')).toEqual({
+      ok: true,
+      path: path.join(cwd, 'dir.job8.webp')
     })
   })
 })

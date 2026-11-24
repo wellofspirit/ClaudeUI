@@ -34,6 +34,8 @@ export interface MediaServerContext {
   getAutonomyMode: () => string
   /** Who made the call (`ToolUseOwners.ownerOf`): only the root agent's call is a background job. */
   callOwner: (toolUseId: string | undefined) => Promise<ToolCallOwner>
+  /** The kinds registered: only those offered at spawn (toggle on and a model resolves; Off registers nothing). */
+  kinds: readonly MediaKind[]
   /** Default: the job service. */
   start?: MediaStartFn
 }
@@ -76,6 +78,6 @@ export function createMediaServer(ctx: MediaServerContext): SdkMcpServer {
   return createSdkMcpServer({
     name: CLAUDE_MEDIA_MCP_SERVER,
     version: '1.0.0',
-    tools: [mediaTool('image'), mediaTool('video')]
+    tools: ctx.kinds.map(mediaTool)
   })
 }

@@ -30,6 +30,7 @@ import {
   type MediaJobRow
 } from '../media-job-ledger'
 import { blobStore } from '../blob-store'
+import { resolveMediaFile } from '../media-files'
 import { resolveMediaGeneration } from '../../../shared/media-generation'
 
 const PNG = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(32)])
@@ -194,6 +195,48 @@ describe('start', () => {
 })
 
 describe('a run', () => {
+  it('a changed extension leaves an existing file the agent did not name alone', async () => {
+    fs.writeFileSync(path.join(cwd, 'hero.png'), 'precious')
+    const res = await service.start(call({ input: { prompt: 'a cat', path: 'hero.jpg' } }))
+    if (!res.ok) throw new Error('setup')
+    await vi.waitFor(() => expect(pending).toHaveLength(1))
+    pending[0].resolve({ mime: 'image/png' })
+    await settle()
+    expect(fs.readFileSync(path.join(cwd, 'hero.png'), 'utf8')).toBe('precious')
+    const saved = path.join(cwd, `hero.${res.jobId}.png`)
+    expect(fs.readFileSync(saved)).toEqual(PNG)
+    expect(ledger.rows.get(res.jobId)).toMatchObject({ status: 'completed', path: saved })
+  })
+
+  it('a job in a worktree outside the spawn cwd records that directory and is still served', async () => {
+    const worktree = path.join(dir, 'wt')
+    fs.mkdirSync(worktree)
+    service.configure({
+      emit: (() => {}) as never,
+      deliver: async () => ({ result: 'delivered' }) as never,
+      session: () => undefined,
+      pathContext: (_id, c) => ({
+        cwd: c,
+        worktree: { worktreePath: worktree } as never
+      }),
+      settings: () => settings,
+      ledger,
+      now: () => Date.now(),
+      newId: () => 'wtjob0000001'
+    })
+    const res = await service.start(call())
+    if (!res.ok) throw new Error('setup')
+    await vi.waitFor(() => expect(pending).toHaveLength(1))
+    pending[0].resolve({})
+    await settle()
+    const row = ledger.rows.get(res.jobId)!
+    expect(row.cwd).toBe(worktree)
+    expect(row.path.startsWith(worktree)).toBe(true)
+    expect(resolveMediaFile(res.jobId, { ledger, additionalDirectories: () => [] })).toMatchObject({
+      path: row.path
+    })
+  })
+
   it('writes the file under the returned format, keeps a blob, records it, and tells the session', async () => {
     const res = await service.start(call({ input: { prompt: 'a cat', path: 'art/cat.png' } }))
     if (!res.ok) throw new Error('setup')
@@ -255,13 +298,12 @@ describe('a run', () => {
   })
 
   it('does not save a file that would now land on a non-media file', async () => {
-    fs.mkdirSync(path.join(cwd, 'pic.png'))
     const res = await service.start(call({ input: { prompt: 'x', path: 'pic2.png' } }))
     if (!res.ok) throw new Error('setup')
     await vi.waitFor(() => expect(pending).toHaveLength(1))
-    // The agent's png became a jpeg, whose name is a directory by now.
-    fs.mkdirSync(path.join(cwd, 'pic2.jpg'))
-    pending[0].resolve({ mime: 'image/jpeg' })
+    // The agent's name became a directory while the provider worked.
+    fs.mkdirSync(path.join(cwd, 'pic2.png'))
+    pending[0].resolve({ mime: 'image/png' })
     await settle()
     expect(ledger.rows.get(res.jobId)?.status).toBe('failed')
   })

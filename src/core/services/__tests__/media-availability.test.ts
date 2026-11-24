@@ -12,11 +12,15 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../app-settings', () => ({ appSetting: mocks.setting }))
 vi.mock('../media-catalog', () => ({ resolveMediaModel: mocks.resolve }))
 
-import { mediaOffered } from '../media-availability'
+import { mediaKindsEnabled, mediaOffered } from '../media-availability'
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.setting.mockReturnValue({ engines: { claude: true, pi: false, opencode: true } })
+  mocks.setting.mockReturnValue({
+    engines: { claude: true, pi: false, opencode: true },
+    imageModel: 'auto',
+    videoModel: 'auto'
+  })
   mocks.resolve.mockResolvedValue({ ref: 'x' })
 })
 
@@ -37,5 +41,29 @@ describe('mediaOffered', () => {
       return { ref: 'x' }
     })
     expect(await mediaOffered('opencode')).toEqual({ image: false, video: true })
+  })
+})
+
+describe('Off means not offered', () => {
+  it('a kind set to Off is hidden without asking the catalog, whatever is connected', async () => {
+    mocks.setting.mockReturnValue({
+      engines: { claude: true, pi: true, opencode: true },
+      imageModel: 'auto',
+      videoModel: 'off'
+    })
+    expect(await mediaOffered('pi')).toEqual({ image: true, video: false })
+    expect(mocks.resolve).toHaveBeenCalledTimes(1)
+    expect(mocks.resolve).toHaveBeenCalledWith('image', undefined, false)
+  })
+
+  it('mediaKindsEnabled is the I/O-free part: the toggle and Off', () => {
+    mocks.setting.mockReturnValue({
+      engines: { claude: true, pi: false, opencode: true },
+      imageModel: 'off',
+      videoModel: 'openrouter/acme/vid'
+    })
+    expect(mediaKindsEnabled('claude')).toEqual({ image: false, video: true })
+    expect(mediaKindsEnabled('pi')).toEqual({ image: false, video: false })
+    expect(mocks.resolve).not.toHaveBeenCalled()
   })
 })

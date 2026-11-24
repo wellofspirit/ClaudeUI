@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from 'vitest'
 import { subscribeWindowToSync } from '../../../test/helpers/sync-subscriber-window'
-import { clearSyncSubscribersForTests } from '../../services/sync-host'
+import { clearSyncSubscribersForTests, syncCore } from '../../services/sync-host'
 import { EventEmitter } from 'node:events'
 import { mkdtemp, rmdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -370,7 +370,12 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
 // Media generation: the job service is a spy, the pi toggle a variable.
 const mediaDouble = vi.hoisted(() => ({
   start: vi.fn(),
+  offered: { value: { image: true, video: true } },
   setting: { value: undefined as unknown }
+}))
+// What `mediaOffered` says (toggle on and a model resolves, per kind); its own suite covers the rules.
+vi.mock('../../services/media-availability', () => ({
+  mediaOffered: async () => mediaDouble.offered.value
 }))
 vi.mock('../../services/media-jobs', () => ({ mediaJobs: { start: mediaDouble.start } }))
 vi.mock('../../services/app-settings', async (importOriginal) => {
@@ -700,6 +705,7 @@ beforeEach(() => {
     content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }]
   })
   mediaDouble.setting.value = undefined
+  mediaDouble.offered.value = { image: true, video: true }
   mediaDouble.start.mockReset().mockResolvedValue({
     ok: true,
     jobId: 'j1',
@@ -897,7 +903,7 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: '),
           CLAUDEUI_PI_SEND_MESSAGE: '1',
           // Media generation: pi's toggle is on by default.
-          CLAUDEUI_PI_MEDIA_ENABLED: '1'
+          CLAUDEUI_PI_MEDIA_KINDS: 'image,video'
         }
       }
     )
@@ -10308,15 +10314,42 @@ describe('PiSession — media generation (generate_image / generate_video)', () 
       expect(s.rules).toEqual([{ toolName: 'mcp__claude-ui-media__generate_video' }])
   })
 
-  it('is offered to the bridge only while the pi toggle is on (read at spawn)', async () => {
+  it('offers the bridge only the kinds that are offered at spawn; none, no variable', async () => {
     const on = new PiSession('rid-media-env-1', new MockWindow() as never, '/cwd', {})
     await on.run('hi')
-    expect(lastSpawnOpts().env.CLAUDEUI_PI_MEDIA_ENABLED).toBe('1')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_MEDIA_KINDS).toBe('image,video')
 
-    mediaDouble.setting.value = { engines: { pi: false } }
-    const off = new PiSession('rid-media-env-2', new MockWindow() as never, '/cwd', {})
+    mediaDouble.offered.value = { image: true, video: false }
+    const imageOnly = new PiSession('rid-media-env-2', new MockWindow() as never, '/cwd', {})
+    await imageOnly.run('hi')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_MEDIA_KINDS).toBe('image')
+
+    mediaDouble.offered.value = { image: false, video: false }
+    const off = new PiSession('rid-media-env-3', new MockWindow() as never, '/cwd', {})
     await off.run('hi')
-    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_MEDIA_ENABLED')
+    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_MEDIA_KINDS')
+  })
+
+  it('a call starts its job in the directory the session works in now (a worktree it entered)', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-media-wt', win as never, '/cwd', {})
+    await session.run('hi')
+    await approve(win, session, 'call_wt', 'generate_image', { prompt: 'x' })
+    const spy = vi.spyOn(syncCore, 'getCanonicalState').mockReturnValue({
+      worktreeInfoMap: { 'rid-media-wt': { worktreePath: '/wt/feature' } }
+    } as never)
+    const existsBefore = mockExistsSync.getMockImplementation()
+    mockExistsSync.mockImplementation(() => true) // the worktree directory exists
+    try {
+      await hostedTool('generate_image', { prompt: 'x' }, 'call_wt')
+    } finally {
+      spy.mockRestore()
+      if (existsBefore) mockExistsSync.mockImplementation(existsBefore)
+      else mockExistsSync.mockReset()
+    }
+    expect(mediaDouble.start).toHaveBeenCalledWith(
+      expect.objectContaining({ routingId: 'rid-media-wt', cwd: '/wt/feature' })
+    )
   })
 
   it('asks in default mode; an approved root call starts a BACKGROUND job under the routing id and cwd', async () => {
