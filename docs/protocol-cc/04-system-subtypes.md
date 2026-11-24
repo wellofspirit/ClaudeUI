@@ -482,6 +482,24 @@ down, and every id stays the call's own:
 
 ClaudeUI's use of this is ADR-073 §7.
 
+**Nested agents: who waits (probed 2026-11-24, 2.1.330, Haiku 5.5, `bypassPermissions` and `auto`).** main spawned
+background agent A; A spawned B and was told to end its turn at once.
+
+- A subagent's Agent call is **foreground by default**: with no `run_in_background`, B's `task_started` has
+  `spawn_depth: 2` and `is_backgrounded: false`, A blocks in the call, and B's report comes back as A's `tool_result`
+  (wrapped in the `[Subagent hand-back]` frame). The top-level agent's Agent calls are background (as ClaudeUI spawns
+  cli.js).
+- With `run_in_background: true` from A, B starts `is_backgrounded: true`, A ends its turn and its completed
+  `task_notification` fires while B still runs (7 s vs 34 s), and B's report goes to **main**; A is not resumed. A
+  subagent is not kept open for its background agents.
+- Hand-back: in `auto` every subagent reports through `SubagentHandback`; one that ends with plain text gets
+  `[handback-send-enforce] Your report has not been delivered. Call SubagentHandback(...)` and complies. Outside
+  `auto` no subagent calls it: the final text is the report, still wrapped in the `[Subagent hand-back]` frame.
+- 2.1.330's Bash refuses a command that starts with `sleep 25` ("To wait for a condition, use Monitor ..."): a probe
+  needs another long-running command.
+
+pi follows the same split (ADR-089 D2).
+
 ### A RESUMED agent emits a second `task_started` (probed 2026-09-21, 2.1.268)
 
 "Non-existent → existing" above describes the first run only. `SendMessage` to an agent that has

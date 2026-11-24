@@ -177,3 +177,18 @@ Net effect: every Promise tied to the query resolves/rejects. No leaks. The cons
 | `child.kill('SIGKILL')`   | Killed instantly               | Force killed | Never — we have no path that issues this                   |
 
 The happy path for most interactions is `interrupt()` for mid-turn cancellation and `endSession()` for cleanup. SIGTERM is the last-resort safety net.
+
+### What an interrupt does to background agents (2.1.330)
+
+`interrupt()` also stops running background agents and workflows unless the consumer declared the
+`perTaskStopAffordance` capability at `initialize`. The schema text (2.1.330): "When declared, an interrupt on an
+open-input (interactive stream-json) session spares running background agents/workflows (Stop only aborts the turn)
+... ABSENCE also fails closed: the interrupt kills background tasks, since the user would otherwise have no way to stop
+a runaway one. First-attached-client-wins on multi-client sessions." A one-shot run (string prompt, `-p`) kills them at
+the held-result release either way. Foreground agents (`is_backgrounded: false`) end with the aborted turn regardless.
+Background Bash is not among the tasks this stops.
+
+ClaudeUI declares no `perTaskStopAffordance` today (`src/core/sdk/query.ts` initialize), so a Stop on a Claude session
+kills every running background agent, and a process restart (Disconnect, the idle timeout, a respawn) does too.
+Whether to declare it (ClaudeUI renders a per-card Stop wired to `stop_task`) is an open decision. pi and opencode
+sessions spare background agents on the composer Stop (ADR-089, ADR-111 §4).
