@@ -352,6 +352,16 @@ describe('loadSessionHistory — a native subagent hand-back (L3)', () => {
     expect(messages.map((m) => m.id)).toEqual(['u-peer', 'u-note'])
     expect(titleOf(messages[0])).toBe('worker · another Claude session')
     expect(noteText(messages[1])).toBe(plain)
+    // Still a subagent's report, so the task toggle (not the session one) governs it.
+    expect(messages[0].content[0]).toMatchObject({ source: 'task' })
+    expect(messages[0].content[0]).not.toHaveProperty('alert')
+  })
+
+  it('an unpaired FLAGGED hand-back peer row stays visible whatever the hide toggles say', async () => {
+    writeTranscript([peerRow('u-peer', 'agentOther', nativeFrame(REPORT), { flagged: true })])
+    const { messages } = await loadSessionHistory(SESSION_ID, PROJECT_KEY)
+    expect(messages.map((m) => m.id)).toEqual(['u-peer'])
+    expect(messages[0].content[0]).toMatchObject({ source: 'task', alert: true })
   })
 
   it('a plain peer message from the same agent is not a hand-back and stays a note', async () => {

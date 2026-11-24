@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, act } from '@testing-library/react'
 import { useSessionStore } from '../../../../stores/session-store'
 import { bootTestApp, type TestApp } from '@test/helpers/boot-test-app'
+import { mirrorStoreIntoReplica } from '@test/helpers/replica-seed'
 import type { ChatMessage, ContentBlock } from '../../../../../../shared/types'
 import { ContextNoteBlock } from '../../ContextNoteBlock'
 
@@ -89,6 +90,8 @@ describe('ChatPanel — hidden context notes', () => {
       activeSessionId: ROUTE,
       sessions: { ...state.sessions, [ROUTE]: { ...state.sessions[ROUTE], messages: MESSAGES } }
     }))
+    // `messages` and `settings` are sealed: without this a projection reverts them.
+    mirrorStoreIntoReplica()
   })
 
   afterEach(() => {
@@ -109,6 +112,7 @@ describe('ChatPanel — hidden context notes', () => {
   }): void =>
     act(() => {
       useSessionStore.setState((s) => ({ settings: { ...s.settings, ...patch } }))
+      mirrorStoreIntoReplica()
     })
 
   it('shows every note by default', async () => {
@@ -144,6 +148,7 @@ describe('ChatPanel — hidden context notes', () => {
         [ROUTE]: { ...state.sessions[ROUTE], messages: [noteMsg('only', { source: 'task' })] }
       }
     }))
+    mirrorStoreIntoReplica()
     await act(async () => {
       render(<ChatPanel />)
     })

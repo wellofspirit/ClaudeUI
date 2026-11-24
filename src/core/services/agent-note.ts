@@ -11,6 +11,7 @@
  * (session-history.ts), so a row renders the same everywhere.
  */
 import type { ChatMessage } from '../../shared/types'
+import { handBackWarned } from '../../shared/handback-frame'
 import {
   CROSS_SESSION_MESSAGE_TAG,
   SESSION_MESSAGE_TAG,
@@ -115,7 +116,9 @@ export function sessionMessageNote(input: {
     timestamp: input.timestamp,
     label: result ? X_AGENT_RESULT_FRAGMENT_LABEL : SESSION_MESSAGE_FRAGMENT_LABEL,
     // An X-Agent's report or message is a task's output, not a peer's message.
-    source: result ? 'task' : 'session-message'
+    source: result ? 'task' : 'session-message',
+    // A report the auto-mode review flagged keeps its warning in view.
+    alert: result && handBackWarned(input.text)
   })
 }
 
