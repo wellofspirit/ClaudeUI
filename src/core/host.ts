@@ -18,6 +18,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AccountsState, AccountRef, OAuthAccount } from '../shared/types'
+import type { RelaunchAvailability, RelaunchResult } from '../shared/relaunch'
 
 // ---------------------------------------------------------------------------
 // Window handle
@@ -163,6 +164,62 @@ export function setHostAppVersion(version: string | null): void {
 /** The host's version, or `unknown` when nothing published one (vitest, a script). */
 export function hostAppVersion(): string {
   return hostVersion ?? 'unknown'
+}
+
+// ---------------------------------------------------------------------------
+// The build id (remote clients reload when it changes)
+// ---------------------------------------------------------------------------
+
+let hostBuild: string | null = null
+
+/**
+ * Publish this host's build id (`buildId(readBuildInfo(...))` in
+ * `src/shared/build-info.ts`), or null for a dev run. The remote server sends it
+ * in every successful `auth-response`, so a web client that reconnects to a
+ * different build reloads its page instead of running old JavaScript against a
+ * new host.
+ */
+export function setHostBuildId(id: string | null): void {
+  hostBuild = id
+}
+
+/** The host's build id, or null (a dev host, or nothing published). */
+export function hostBuildId(): string | null {
+  return hostBuild
+}
+
+// ---------------------------------------------------------------------------
+// Relaunch (quit, and have a detached helper start this host again)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the `app:relaunch*` commands need from the host. The desktop wires its
+ * relaunch service (`src/main/services/relaunch/`); the headless server sets
+ * `null` until it has a monitor that can restart it (S5), so the commands answer
+ * "not available" there rather than quitting a server nobody can start again.
+ */
+export interface HostRelaunch {
+  /** Whether a relaunch can start now, and why not. */
+  availability(): RelaunchAvailability
+  /**
+   * Start a relaunch: resolves once the helper is running and the quit is under
+   * way; throws a clear error when refused (the host keeps running).
+   */
+  relaunch(): Promise<void>
+  /** The newest relaunch result for this install, or null. */
+  lastResult(): RelaunchResult | null
+}
+
+let hostRelaunchImpl: HostRelaunch | null = null
+
+/** Publish the host's relaunch (or clear it). Wired in `boot-core`; the server sets null. */
+export function setHostRelaunch(relaunch: HostRelaunch | null): void {
+  hostRelaunchImpl = relaunch
+}
+
+/** The host's relaunch, or null when this host cannot relaunch itself. */
+export function hostRelaunch(): HostRelaunch | null {
+  return hostRelaunchImpl
 }
 
 // ---------------------------------------------------------------------------

@@ -30,7 +30,11 @@
 import { app, dialog, ipcMain, Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { installDesktopTransport } from './ipc/desktop-transport'
-import { startCoreServices, type CoreServices } from '../core/boot/core-services'
+import {
+  startCoreServices,
+  type CoreServices,
+  type RemoteStartOutcome
+} from '../core/boot/core-services'
 import type { RemoteConfigPatch } from '../core/boot/host-anchor'
 import { RemoteServer } from '../core/services/remote-server'
 import { RemoteDispatcher } from '../core/services/remote-dispatcher'
@@ -46,8 +50,10 @@ import {
   setHostIsPackaged,
   setHostMockup,
   setHostOAuthLoopback,
-  setHostPicker
+  setHostPicker,
+  setHostRelaunch
 } from '../core/host'
+import { desktopHostRelaunch } from './services/relaunch'
 import { routeHttpMockup, serveMockup } from './services/mockup-protocol'
 import type { SessionManager } from '../core/services/session-manager'
 import type { AutomationManager } from '../core/services/automation-manager'
@@ -59,6 +65,8 @@ export interface CoreBoot {
   remoteServer: RemoteServer
   remoteDispatcher: RemoteDispatcher
   automationManager: AutomationManager
+  /** How the boot's remote start attempt ended (the relaunch health record waits for it). */
+  remoteStartSettled: Promise<RemoteStartOutcome>
   /** The quit's first phase: needs the services alive, the coordinator bounds it. */
   prepareStop: CoreServices['prepareStop']
   /** The host-neutral teardown, run inside the confirmed before-quit. */
@@ -144,6 +152,9 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // client's own loopback and the code comes back by paste-back or device code,
   // so binding the fixed port would only make concurrent sign-ins collide.
   setHostOAuthLoopback(true)
+  // Relaunch (`app:relaunch*`): the desktop's relaunch service, configured by
+  // index.ts once the quit coordinator exists (unavailable until then).
+  setHostRelaunch(desktopHostRelaunch)
 
   // The desktop-auth dependencies the `auth:*` / `account:*` / `vendor-auth:*`
   // family needs on BOTH transports. `engineAuthRegistry` is populated by the
@@ -235,6 +246,7 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
     remoteServer: core.remoteServer,
     remoteDispatcher: core.remoteDispatcher,
     automationManager: core.automationManager,
+    remoteStartSettled: core.remoteStartSettled,
     prepareStop: core.prepareStop,
     stop: core.stop
   }

@@ -598,6 +598,16 @@ const HOST_LOCAL_CHANNEL_SPECS = {
     cls: 'host-local',
     canonical: false,
     why: 'Host lifecycle handshake with the owning renderer.'
+  },
+  'app:collect-restore': {
+    cls: 'host-local',
+    canonical: false,
+    why: "Relaunch handshake: main asks the desktop window for its open session and drafts (answered by `app:restore-state`). A remote client keeps its own across the restart's reload."
+  },
+  'app:relaunch-requested': {
+    cls: 'host-local',
+    canonical: false,
+    why: "The app menu's Relaunch item: the desktop window runs the confirm flow. Window chrome, like the menu itself."
   }
 } satisfies Record<string, HostLocalChannelSpec>
 

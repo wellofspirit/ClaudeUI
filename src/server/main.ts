@@ -54,11 +54,15 @@ import { setSqliteDriver, type SqliteDriver } from '../core/services/sqlite-driv
 import {
   setHostAppVersion,
   setHostAuth,
+  setHostBuildId,
   setHostIsPackaged,
   setHostOAuthLoopback,
   setHostPaths,
-  setHostPicker
+  setHostPicker,
+  setHostRelaunch
 } from '../core/host'
+import { readBuildInfo } from '../core/services/build-info'
+import { buildId } from '../shared/build-info'
 import { logger } from '../core/services/logger'
 import { setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
 import { isCompiledBunEntry, serverVoiceWorkerLauncher } from './voice-worker-launcher'
@@ -151,6 +155,10 @@ function resolveAppPath(): string {
 function installHostAdapters(): void {
   setHostPaths({ getAppPath: resolveAppPath })
   setHostAppVersion(resolveServerVersion(resolveAppPath(), isCompiledBunEntry(process.argv[1])))
+  // The build id a web client compares across reconnects (it reloads on a
+  // change). A source run is a dev build and reports none.
+  const build = readBuildInfo(resolveAppPath(), isCompiledBunEntry(process.argv[1]))
+  setHostBuildId(build.kind === 'dev' ? null : buildId(build))
 
   // A deployed server is not a dev build, so background usage/analytics writes
   // are ON. The desktop's dev-mode skip exists to stop a dev instance fighting
@@ -164,6 +172,11 @@ function installHostAdapters(): void {
   // the same answer a cancelled dialog gives — so this is left UNSET on
   // purpose rather than stubbed, and the call documents that.
   setHostPicker(null)
+
+  // No relaunch: nothing would start this process again once it quit (the
+  // monitor that can is S5). The `app:relaunch*` commands answer "this host
+  // cannot relaunch itself" with nothing wired; null is stated so the choice reads.
+  setHostRelaunch(null)
 
   // HostAuth: DATA/STATUS-ONLY, and here it is the honest empty implementation.
   // `accountState()` and `buildClaudeAccountRef()` already tolerate a null host

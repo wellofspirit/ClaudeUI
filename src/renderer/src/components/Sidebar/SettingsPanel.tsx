@@ -5,6 +5,7 @@ import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
 import { settingsTargetFromEvent, type SettingsTarget } from '../SettingsDialog/settings-target'
 import { UsageRing } from './UsagePanel'
 import { HarnessUpdateButton, useHarnessUpdateIndicator } from './HarnessUpdateButton'
+import { RelaunchMenuItem } from './RelaunchMenuItem'
 
 // Lazy: the modal tree + qrcode must not ride the eager App chunk — the mount
 // below is desktop-only, so on the web client THIS modal is unreachable. Its
@@ -218,6 +219,8 @@ export function SettingsPanel(): React.JSX.Element {
             checked={settings.hideSessionMessages}
             onChange={(v) => updateSettings({ hideSessionMessages: v })}
           />
+          {/* Relaunch ClaudeUI: shown when the host can relaunch and this client holds admin. */}
+          <RelaunchMenuItem onChosen={() => setOpen(false)} />
           {/* All Settings button */}
           <button
             data-testid="SettingsPanel.allSettings"

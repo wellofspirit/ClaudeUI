@@ -19,6 +19,7 @@ import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
+import { RelaunchConfirm } from './RelaunchConfirm'
 import { RemoteServeBanner } from './RemoteServeBanner'
 import { SettingsDialog } from './SettingsDialog'
 import { SignInDialog } from './auth/SignInDialog'
@@ -414,6 +415,7 @@ export function SessionView(): React.JSX.Element {
         </div>
       </div>
       <QuitWorktreeModal />
+      <RelaunchConfirm />
       {/* Mobile terminal — a fullscreen takeover, hosted here (outside the
           zoomed app root, like every other mobile takeover) so `position: fixed`
           and the visual-viewport height it sets are measured in real pixels.

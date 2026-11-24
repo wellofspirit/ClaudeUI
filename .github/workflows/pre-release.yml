@@ -199,6 +199,12 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
+      # The install marker (src/shared/install-marker.ts) the relaunch helper and
+      # the deletion gate check. Before signing, so the signature seals it.
+      - name: Stamp install marker (macOS)
+        if: matrix.platform == 'mac'
+        run: bun scripts/stamp-install-marker.mjs "${{ matrix.build_dir }}/ClaudeUI.app" --platform mac
+
       # Signs with the self-signed "ClaudeUI Dev" identity when the MAC_CERT_*
       # secrets are configured, so TCC grants (mic, App Management, ...) keyed on
       # identifier + certificate root survive updates. Falls back to ad-hoc when
@@ -249,6 +255,12 @@ jobs:
         if: matrix.platform == 'win'
         run: |
           bunx electron-builder --win --dir
+
+      # Lists the packaged folder's top-level names, so it runs after packaging
+      # and before the zip.
+      - name: Stamp install marker (Windows)
+        if: matrix.platform == 'win'
+        run: bun scripts/stamp-install-marker.mjs "${{ matrix.build_dir }}" --platform win
 
       - name: Zip build output (macOS)
         if: matrix.platform == 'mac'

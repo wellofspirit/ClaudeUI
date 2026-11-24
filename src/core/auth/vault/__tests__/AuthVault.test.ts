@@ -8,7 +8,7 @@ vi.mock('node:os', async () => {
   const actual = await vi.importActual<typeof import('node:os')>('node:os')
   return { ...actual, homedir: () => home.value, default: { ...actual, homedir: () => home.value } }
 })
-import { AuthVault, vaultPath } from '../AuthVault'
+import { AuthVault, NEWER_VAULT_ERROR, vaultPath } from '../AuthVault'
 import { CredentialSync, type ChatgptFeedTarget } from '../CredentialSync'
 import { fakeOpencodeTarget } from './fixtures/fake-opencode-target'
 import type { VaultCredential } from '../chatgpt-oauth'
@@ -510,5 +510,52 @@ describe('AuthVault default login flow — host loopback seam (F2)', () => {
     expect(await canListenLoopback(port)).toBe(false)
     vault.cancelLogin()
     await vi.waitFor(async () => expect(await canListenLoopback(port)).toBe(true))
+  })
+})
+
+describe('AuthVault — a vault from a newer ClaudeUI (v > 3)', () => {
+  const credential: VaultCredential = { type: 'oauth', access: 'a', refresh: 'r', expires: 1 }
+  const writeNewer = (): string => {
+    mkdirSync(dirname(vaultPath()), { recursive: true })
+    const text = JSON.stringify({ v: 4, accounts: { chatgpt: { activeId: 'x', list: [] } } })
+    writeFileSync(vaultPath(), text)
+    return text
+  }
+
+  it('reads as empty', async () => {
+    writeNewer()
+    const vault = new AuthVault()
+    await expect(vault.load()).resolves.toBeNull()
+    await expect(vault.listAccounts('chatgpt')).resolves.toEqual([])
+    await expect(vault.hasApiKey('openrouter')).resolves.toBe(false)
+    await expect(vault.isDisconnected('chatgpt')).resolves.toBe(false)
+  })
+
+  it('refuses every write and clear, and leaves the file byte-for-byte', async () => {
+    const before = writeNewer()
+    const vault = new AuthVault()
+    const writes: Array<() => Promise<unknown>> = [
+      () => vault.save(credential),
+      () => vault.saveCredential('custom', { type: 'api_key', key: 'k' }),
+      () => vault.upsertAccount('chatgpt', credential),
+      () => vault.removeCredential('chatgpt'),
+      () => vault.setDisconnected('chatgpt', true),
+      () => vault.clear()
+    ]
+    for (const write of writes) await expect(write()).rejects.toThrow(NEWER_VAULT_ERROR)
+    expect(readFileSync(vaultPath(), 'utf8')).toBe(before)
+  })
+
+  it('a malformed vault keeps today’s behaviour (read as empty, overwritten by a write)', async () => {
+    mkdirSync(dirname(vaultPath()), { recursive: true })
+    writeFileSync(vaultPath(), '{not json')
+    const vault = new AuthVault()
+    await expect(vault.load()).resolves.toBeNull()
+    await vault.saveCredential('custom', { type: 'api_key', key: 'k' })
+    expect(JSON.parse(readFileSync(vaultPath(), 'utf8')).v).toBe(3)
+    // A non-numeric `v` is malformed, not newer.
+    writeFileSync(vaultPath(), JSON.stringify({ v: '4' }))
+    await vault.saveCredential('custom', { type: 'api_key', key: 'k' })
+    expect(JSON.parse(readFileSync(vaultPath(), 'utf8')).v).toBe(3)
   })
 })

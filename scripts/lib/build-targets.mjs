@@ -106,7 +106,30 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
   // Unset: the default `dist/`, exactly as before.
   const buildOut = childEnv.CLAUDEUI_BUILD_OUT || ''
   const outArg = buildOut ? [`-c.directories.output=${buildOut}`] : []
-  const macApp = `${buildOut ? buildOut.replace(/[\\/]+$/, '') : 'dist'}/mac-arm64/ClaudeUI.app`
+  const outDir = buildOut ? buildOut.replace(/[\\/]+$/, '') : 'dist'
+  const macApp = `${outDir}/mac-arm64/ClaudeUI.app`
+  const winDir = `${outDir}/win-unpacked`
+
+  // The install marker (`src/shared/install-marker.ts`): what lets the relaunch
+  // helper and the deletion gate prove a folder is a ClaudeUI install. Written
+  // after electron-builder (Windows lists the packaged folder's top-level names)
+  // and, on macOS, before codesign so the signature seals it. It imports the
+  // shared TypeScript, so bun runs it.
+  const stampInstallMarker = (packaged, markerPlatform) => [
+    {
+      label: 'stamp install-marker',
+      steps: [
+        ['bun', ['scripts/stamp-install-marker.mjs', packaged, '--platform', markerPlatform, ...Q]]
+      ]
+    }
+  ]
+  // `build:unpack` packages for the host: a marker where the host has a layout.
+  const hostMarker =
+    platform === 'darwin'
+      ? stampInstallMarker(macApp, 'mac')
+      : platform === 'win32'
+        ? stampInstallMarker(winDir, 'win')
+        : []
 
   // The CLI and the two harnesses, installed together. The members share no
   // outputs except the harness store's `.staging` dir: the two installs
@@ -152,6 +175,7 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
           ]
         ]
       },
+      ...stampInstallMarker(macApp, 'mac'),
       {
         label: 'codesign',
         steps: [
@@ -171,7 +195,8 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
       {
         label: 'electron-builder --win --dir',
         steps: [['bunx', ['electron-builder', '--win', '--dir', ...outArg]]]
-      }
+      },
+      ...stampInstallMarker(winDir, 'win')
     ],
     'build:linux': [
       ...prepare({ typecheck: false }),
@@ -187,7 +212,8 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
       {
         label: 'electron-builder --dir',
         steps: [['bunx', ['electron-builder', '--dir', ...outArg]]]
-      }
+      },
+      ...hostMarker
     ],
     // `bun install` runs this (package.json#postinstall). Electron's binary
     // first (a failure stops the run), then the native rebuild (a failure is

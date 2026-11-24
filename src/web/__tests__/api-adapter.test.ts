@@ -954,6 +954,8 @@ const QUIT_HANDSHAKE =
   'no remote registration — the quit handshake is the host shell talking to itself'
 const NO_MAIN_LOG_FILE =
   'a `log:*` send, not an invoke — no main-process log file here, so both relays hit the console'
+const RELAUNCH_RESTORE =
+  "no remote registration — the relaunch's restore record is the desktop window's; a web client stashes its own in sessionStorage (build-reload.ts)"
 
 const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   pickFolder: HOST_PHYSICAL,
@@ -990,7 +992,12 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   reloadPlugin: NO_REMOTE_CHANNEL,
   getPluginViews: NO_REMOTE_CHANNEL,
   getPluginPreloadPath: NO_REMOTE_CHANNEL,
-  onPluginViewsChanged: NO_REMOTE_CHANNEL
+  onPluginViewsChanged: NO_REMOTE_CHANNEL,
+  takeRestore: RELAUNCH_RESTORE,
+  restoreState: RELAUNCH_RESTORE,
+  onCollectRestore: RELAUNCH_RESTORE,
+  onRelaunchRequested:
+    'no remote registration — the app menu is the desktop host’s own window chrome'
 }
 
 describe('web api-adapter — the local surface is an explicit list', () => {

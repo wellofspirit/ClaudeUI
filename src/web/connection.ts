@@ -3,6 +3,7 @@ import { E2ECrypto } from '../shared/e2e-crypto'
 import { SyncClient, type SyncListener } from '../core/shared/sync/sync-client'
 import { base64ToText, textToBase64 } from '../shared/base64-text'
 import { splitSyncFullJson } from '../core/shared/sync/sync-full-chunks'
+import { createBuildIdWatcher } from './build-reload'
 import {
   INVOKE_CHUNK_CHARS,
   PASSKEY_FAILED_ERROR,
@@ -480,6 +481,12 @@ export class RemoteConnection {
   private credentialsChangedWaiters: (() => void)[] = []
   /** Resumption-token notice — see {@link RemoteConnection.setResumeTokenHandler}. */
   private onResumeToken: ((token: string | null) => void) | null = null
+  /** Host build change — see {@link RemoteConnection.setHostBuildChangeHandler}. */
+  private onHostBuildChange: ((from: string, to: string) => void) | null = null
+  /** The first host build id this page saw; a different one later means a new build. */
+  private readonly buildWatch = createBuildIdWatcher((from, to) =>
+    this.onHostBuildChange?.(from, to)
+  )
 
   constructor(url: string, credential: RemoteCredential, e2eKeyHex?: string) {
     // Convert http(s) URL to ws(s), strip path and fragment
@@ -778,6 +785,16 @@ export class RemoteConnection {
    */
   setResumeTokenHandler(cb: ((token: string | null) => void) | null): void {
     this.onResumeToken = cb
+  }
+
+  /**
+   * The host came back on a different build (relaunch arc): the first
+   * `auth-response` that reports a build id other than the first one this page
+   * saw. Fired once. The page owns what happens next (`web/main.tsx`: stash the
+   * open session and drafts, reload), as it owns every other persistence.
+   */
+  setHostBuildChangeHandler(cb: ((from: string, to: string) => void) | null): void {
+    this.onHostBuildChange = cb
   }
 
   /**
@@ -1580,6 +1597,8 @@ export class RemoteConnection {
           this.authMethodValue = msg.method
           this.authDisabledValue = msg.authDisabled === true
           this.webauthnCapableOriginValue = msg.webauthnCapableOrigin === true
+          // Before anything else reacts to this accept: a new build means a reload.
+          this.buildWatch.observe(msg.buildId)
           // ADR-063: a ceremony just minted one. Kept on the credential so THIS
           // instance's own reconnects present it without waiting for the page to
           // route it back through `setCredential`, and reported so the page can

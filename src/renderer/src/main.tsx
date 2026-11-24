@@ -9,6 +9,7 @@ import { startReplica, hydrateReplica } from './stores/replica'
 import { finishHydrate } from './lib/session-history-load'
 import { startDesktopSync } from './sync/desktop-transport'
 import { installVerifierHooks } from './utils/verifier-hooks'
+import { restoreAfterRelaunch } from './lib/restore-state'
 import { startProjectionAudit } from './utils/projection-audit'
 
 // Global error handlers — forward uncaught renderer errors to the main process log file
@@ -44,10 +45,13 @@ startReplica()
 // audit that only starts with React would miss the first turn, which is exactly
 // where the loss was seen.
 startProjectionAudit()
+let markFirstSync: () => void = () => {}
+const firstSync = new Promise<void>((resolve) => (markFirstSync = resolve))
 startDesktopSync((snapshot, isResync) => {
   // A snapshot does not always carry a transcript (ADR-087 §2); read what it left
   // out from disk now rather than waiting for a click that will never come.
   finishHydrate(hydrateReplica(snapshot, isResync))
+  if (!isResync) markFirstSync()
 })
 
 // Real-app harness hooks — a no-op unless this launch opted in (see
@@ -57,7 +61,12 @@ startDesktopSync((snapshot, isResync) => {
 installVerifierHooks()
 
 // Hydrate persisted config from ~/.claude/ui/config.json, then render
-hydrateConfigFromDisk().finally(() => {
+const configHydrated = hydrateConfigFromDisk()
+// After a relaunch: reopen the session this window had open and put its unsent
+// drafts back (the record main kept beside the relaunch job; one-shot), once
+// the first snapshot has landed and the config is read.
+void Promise.all([firstSync, configHydrated.catch(() => {})]).then(() => restoreAfterRelaunch())
+configHydrated.finally(() => {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <ErrorBoundary>

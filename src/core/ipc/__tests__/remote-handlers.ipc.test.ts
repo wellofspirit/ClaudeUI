@@ -2214,7 +2214,8 @@ const NOT_GRANTED_AT_CONNECT: Record<string, Capability> = {
   'harness:answer-upgrade-prompt': 'admin',
   'voice:pack-install': 'admin',
   'voice:pack-install-cancel': 'admin',
-  'voice:pack-remove': 'admin'
+  'voice:pack-remove': 'admin',
+  'app:relaunch': 'admin'
 }
 
 /** Table keys whose capability is `capability`, or that start with `prefix`. */

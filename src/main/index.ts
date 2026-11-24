@@ -11,6 +11,7 @@ import {
   powerMonitor
 } from 'electron'
 import { join } from 'path'
+import { homedir } from 'os'
 import { pathToFileURL } from 'url'
 import { execFileSync } from 'child_process'
 import contextMenu from 'electron-context-menu'
@@ -20,6 +21,16 @@ import { copyMarkdown } from './copy-markdown'
 // access which fails when Node resolves require('electron') to node_modules/electron
 // (which exports a path string) instead of Electron's built-in module.
 const is = { dev: !app.isPackaged }
+
+// A packaged Windows app must not hold its install folder as its working
+// directory: the cwd handle has no FILE_SHARE_DELETE, so a relaunch helper could
+// never rename the folder (design review ruling 2). Before anything else runs.
+if (process.platform === 'win32' && app.isPackaged) {
+  const from = process.cwd()
+  process.chdir(homedir())
+  // `logger` is a (hoisted) import, so it is already usable here.
+  logger.info('main', `working directory moved from ${from} to ${process.cwd()}`)
+}
 const electronApp = {
   setAppUserModelId(id: string): void {
     if (process.platform === 'win32') app.setAppUserModelId(is.dev ? process.execPath : id)
@@ -81,7 +92,18 @@ import {
   type AppOrigin
 } from '../core/shell-security'
 import { readImagePreview } from '../core/sent-file-security'
-import { setHostAppVersion, setHostPaths } from '../core/host'
+import { setHostAppVersion, setHostBuildId, setHostPaths } from '../core/host'
+import { readBuildInfo } from '../core/services/build-info'
+import { buildId } from '../shared/build-info'
+import {
+  configureRelaunch,
+  createRestoreCollector,
+  relaunchService,
+  spawnDetachedHelper
+} from './services/relaunch'
+import { createRelaunchService } from './services/relaunch/relaunch-service'
+import { whenHealthy } from './services/relaunch/health-gate'
+import { relaunchStateDir, relaunchTokenFromArgv } from './services/relaunch/paths'
 import { setSqliteDriver } from '../core/services/sqlite-driver'
 import { verifierHooksEnabled, VERIFIER_HOOKS_SWITCH } from '../shared/verifier-hooks'
 import { betterSqlite3Driver } from '../core/services/sqlite/better-sqlite3-driver'
@@ -247,6 +269,13 @@ if (gotSingleInstanceLock && process.platform === 'darwin') {
       process.env.PATH = `${extra}:${process.env.PATH ?? ''}`
     }
   }
+}
+
+{
+  // Which relaunch job started this process, if any (logged only: health does
+  // not depend on it).
+  const token = relaunchTokenFromArgv(process.argv)
+  if (token) logger.info('main', `started by relaunch job ${token}`)
 }
 
 // Process-lifetime state.
@@ -677,6 +706,42 @@ app.whenReady().then(() => {
   // with each push so the hub's machine list can say which build a device is on,
   // and `app.getVersion()` is reachable from main alone.
   setHostAppVersion(appVersion)
+  // The build id remote clients compare across reconnects (a change reloads the
+  // page). `bun run dev` is a dev build and reports none.
+  const buildInfo = readBuildInfo(app.getAppPath(), app.isPackaged)
+  const hostBuild = buildInfo.kind === 'dev' ? null : buildId(buildInfo)
+  setHostBuildId(hostBuild)
+
+  // ── Relaunch (quit, and a detached helper starts this app again) ──
+  // Created before the menu, which offers it when it is available. The quit
+  // coordinator and the window are read when a relaunch happens, not now.
+  const restoreCollector = createRestoreCollector(() => {
+    if (!currentWindow || currentWindow.isDestroyed()) return false
+    currentWindow.webContents.send('app:collect-restore')
+    return true
+  })
+  configureRelaunch(
+    createRelaunchService({
+      platform: process.platform,
+      packaged: app.isPackaged,
+      execPath: process.execPath,
+      pid: process.pid,
+      runningVersion: rawVersion,
+      buildId: hostBuild,
+      stateDir: relaunchStateDir(homedir()),
+      collectRestore: () => restoreCollector.collect(),
+      // A restart keeps the worktrees: confirming here skips the renderer's
+      // worktree prompt, which only a user-initiated quit should show.
+      confirmQuit: () => quitCoordinator?.confirm(),
+      spawnHelper: spawnDetachedHelper
+    })
+  )
+  ipcMain.handle('app:restore-state', (_e, record: unknown) => restoreCollector.deliver(record))
+  ipcMain.handle('app:take-restore', () => relaunchService()?.takeRestore() ?? null)
+  // Offered on eligibility alone: a relaunch in flight (or one that just ran and
+  // left its lock) must not hide the item for the session; a click then is
+  // refused with the reason, in the same dialog.
+  const relaunchOffered = relaunchService()?.eligible().available === true
   ipcMain.handle('app:version-info', () => versionInfo())
   // Override the remote `app:version-info` source with the display-form version
   // (the channel itself is registered by core, so this is order-independent), so
@@ -695,6 +760,17 @@ app.whenReady().then(() => {
               submenu: [
                 { role: 'about' as const },
                 { type: 'separator' as const },
+                // The window runs the confirm flow (what a restart interrupts),
+                // the same one the sidebar's settings menu opens.
+                {
+                  label: 'Relaunch ClaudeUI',
+                  visible: relaunchOffered,
+                  click: () => {
+                    if (currentWindow && !currentWindow.isDestroyed())
+                      currentWindow.webContents.send('app:relaunch-requested')
+                  }
+                },
+                { type: 'separator' as const, visible: relaunchOffered },
                 { role: 'services' as const },
                 { type: 'separator' as const },
                 { role: 'hide' as const },
@@ -804,16 +880,36 @@ app.whenReady().then(() => {
   ipcMain.handle('app:quit-cancel', () => quitCoordinator?.cancel())
   ipcMain.handle('app:quit-prompting', () => quitCoordinator?.promptShown())
 
+  // Health (every packaged boot): core is up; once the first window loaded
+  // (windowless: now) and the remote start attempt settled (listening or
+  // refused, bounded), record this install as healthy and reconcile older
+  // relaunch jobs. A relaunch helper waits for exactly this.
+  const reportHealthWhen = (windowLoaded: Promise<void>): void => {
+    if (!app.isPackaged) return
+    void whenHealthy({
+      windowLoaded,
+      remoteStart: core?.remoteStartSettled ?? Promise.resolve('not-started')
+    }).then(() => relaunchService()?.reportHealthy())
+  }
+
   if (noWindowMode) {
     logger.info(
       'main',
       'CLAUDEUI_NO_WINDOW — running windowless: no BrowserWindow, no plugins, no log-viewer window. ' +
         'Remote clients are the only clients.'
     )
+    reportHealthWhen(Promise.resolve())
     return
   }
 
   createWindow()
+  const firstWindow = currentWindow
+  reportHealthWhen(
+    new Promise<void>((resolve) => {
+      if (!firstWindow || firstWindow.isDestroyed()) return
+      firstWindow.webContents.once('did-finish-load', () => resolve())
+    })
+  )
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the

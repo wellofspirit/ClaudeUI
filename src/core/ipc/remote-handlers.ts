@@ -36,6 +36,7 @@ import { harnessCommands } from './harness-commands'
 import { voicePackCommands } from './voice-pack-commands'
 import { mediaCommands } from './media-commands'
 import { remoteViewCommands, type RemoteStatusHost } from './remote-view-commands'
+import { appRelaunchCommands, defaultAppRelaunchDeps } from './app-relaunch-commands'
 import { authCommands, type AuthCommandDeps } from './auth-commands'
 import { AUTOMATION_COMMANDS } from './automation-commands'
 import {
@@ -667,6 +668,13 @@ export function registerRemoteHandlers(
   // channel to call — it is not a hidden button and not a capability refusal.
   // Adding one here would break that; don't.
   for (const cmd of remoteViewCommands(enrollTokens ?? null)) {
+    handleRemote(cmd)
+  }
+
+  // Relaunch (`app-relaunch-commands.ts`): the `admin` restart plus the three
+  // `config` reads that tell a client whether to offer it and what it ends.
+  // From the same declarations the desktop spreads (`registerAppRelaunchIpc`).
+  for (const cmd of appRelaunchCommands(defaultAppRelaunchDeps(enrollTokens ?? null))) {
     handleRemote(cmd)
   }
 

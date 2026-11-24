@@ -493,6 +493,11 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'app:quit-cancel': 'host',
   'app:quit-prompting': 'host',
   'app:open-in-vscode': 'host',
+  // The relaunch's restore record: the desktop window's own session and drafts,
+  // handed to main before the quit and taken back once by the next window. Raw
+  // `ipcMain.handle` in main/index.ts; a remote client has its own reload path.
+  'app:restore-state': 'host',
+  'app:take-restore': 'host',
   // Raw shell — reachable over remote as of phase 2, but ONLY behind the
   // desktop opt-in toggle + a stepped-up, decaying `shell` grant (ADR-052
   // decision 6). The pin still does its job: `shell` is not in
@@ -609,7 +614,13 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // of the capture that hits the missing pack, and is not pinned.
   'voice:pack-install': 'admin',
   'voice:pack-install-cancel': 'admin',
-  'voice:pack-remove': 'admin'
+  'voice:pack-remove': 'admin',
+  // Restarting the host (the relaunch arc), registered on BOTH transports: it
+  // ends every turn, terminal and remote connection on the host. Relabelled
+  // `config`, any authenticated connection could bounce the host at will. The
+  // three reads beside it (`app:relaunch-availability`, `app:restart-impact`,
+  // `app:last-relaunch`) declare `config` and are not pinned.
+  'app:relaunch': 'admin'
 }
 
 // ---------------------------------------------------------------------------

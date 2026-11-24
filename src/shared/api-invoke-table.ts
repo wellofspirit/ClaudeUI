@@ -82,6 +82,10 @@ function whenNonEmpty(value: unknown): unknown[] {
 /** Pass-through members that are the same call in the desktop and the web client. */
 export const API_INVOKES = {
   addAccount: { channel: 'account:add', arity: 0, mode: 'invoke' },
+  lastRelaunch: { channel: 'app:last-relaunch', arity: 0, mode: 'invoke' },
+  relaunchApp: { channel: 'app:relaunch', arity: 0, mode: 'invoke' },
+  relaunchAvailability: { channel: 'app:relaunch-availability', arity: 0, mode: 'invoke' },
+  restartImpact: { channel: 'app:restart-impact', arity: 0, mode: 'invoke' },
   deleteAccount: { channel: 'account:delete', arity: 1, mode: 'invoke' },
   getAccounts: { channel: 'account:get', arity: 0, mode: 'invoke' },
   setMultiAccountEnabled: { channel: 'account:set-enabled', arity: 1, mode: 'invoke' },
@@ -453,6 +457,8 @@ export const API_EVENTS = {
  */
 export const DESKTOP_INVOKES = {
   openInVSCode: { channel: 'app:open-in-vscode', arity: 1, mode: 'invoke' },
+  restoreState: { channel: 'app:restore-state', arity: 1, mode: 'invoke' },
+  takeRestore: { channel: 'app:take-restore', arity: 0, mode: 'invoke' },
   cancelQuit: { channel: 'app:quit-cancel', arity: 0, mode: 'invoke' },
   confirmQuit: { channel: 'app:quit-confirm', arity: 1, mode: 'invoke', wire: (a) => [a[0] ?? []] },
   ackQuitPrompt: { channel: 'app:quit-prompting', arity: 0, mode: 'invoke' },
@@ -504,6 +510,10 @@ export const DESKTOP_INVOKES = {
 
 /** Host-local events only the desktop transport serves (see {@link DESKTOP_INVOKES}). */
 export const DESKTOP_EVENTS = {
+  // The relaunch's host-local handshake (`app:restore-state` answers the first) and
+  // the app menu's "Relaunch ClaudeUI".
+  onCollectRestore: 'app:collect-restore',
+  onRelaunchRequested: 'app:relaunch-requested',
   onPluginViewsChanged: 'plugin:views-changed',
   onRemoteStatus: 'remote:status',
   onTerminalData: 'terminal:data',

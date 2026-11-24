@@ -24,6 +24,29 @@ export function vaultPath(): string {
   return path.join(claudeUiDir(), 'auth-vault.json')
 }
 export const CHATGPT_PROVIDER_ID = 'chatgpt'
+
+/** The newest vault format this code reads and writes (`VaultFileV3`). */
+export const KNOWN_VAULT_VERSION = 3
+/**
+ * Why every write refuses while the vault on disk is from a newer ClaudeUI. A
+ * rollback (or a manual downgrade) must not wipe accounts it cannot read: the
+ * old code reads such a vault as empty, and its next write or clear would
+ * otherwise replace or unlink the newer file (design review ruling 5).
+ */
+export const NEWER_VAULT_ERROR =
+  'The credential store was written by a newer version of ClaudeUI; update ClaudeUI to change accounts'
+
+/** Is the vault on disk a parsed object whose `v` is a number newer than this code knows? */
+function vaultIsFromNewerVersion(): boolean {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(vaultPath(), 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+    const v = (parsed as { v?: unknown }).v
+    return typeof v === 'number' && v > KNOWN_VAULT_VERSION
+  } catch {
+    return false // absent or malformed: today's behaviour
+  }
+}
 export type VaultApiKeyRecord = { type: 'api_key'; key: string }
 export type VaultCredentialRecord = VaultCredential | VaultApiKeyRecord
 
@@ -330,6 +353,7 @@ export class AuthVault {
     await this.writeOrClear(state)
   }
   async clear(): Promise<void> {
+    if (vaultIsFromNewerVersion()) throw new Error(NEWER_VAULT_ERROR)
     try {
       fs.unlinkSync(vaultPath())
     } catch (err) {
@@ -473,6 +497,9 @@ export class AuthVault {
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(vaultPath(), 'utf8'))
       if (!parsed || typeof parsed !== 'object') return emptyVault()
+      // A newer ClaudeUI's vault reads as empty (and every write refuses, see `write`).
+      const v = (parsed as { v?: unknown }).v
+      if (typeof v === 'number' && v > KNOWN_VAULT_VERSION) return emptyVault()
       if ((parsed as { v?: unknown }).v === 3) return parseV3(parsed)
       if ((parsed as { v?: unknown }).v === 2) return migrateV2(parseV2(parsed), this.now())
       const legacy = parsed as { v?: unknown; encrypted?: unknown; data?: unknown }
@@ -504,6 +531,7 @@ export class AuthVault {
     this.write(state)
   }
   private write(file: VaultFileV3): void {
+    if (vaultIsFromNewerVersion()) throw new Error(NEWER_VAULT_ERROR)
     fs.mkdirSync(claudeUiDir(), { recursive: true, mode: 0o700 })
     if (process.platform !== 'win32') fs.chmodSync(claudeUiDir(), 0o700)
     const target = vaultPath()

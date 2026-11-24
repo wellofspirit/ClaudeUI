@@ -41,13 +41,16 @@ vi.mock('../../ipc/automation.ipc', () => ({ registerAutomationIpc: vi.fn(() => 
 vi.mock('../../ipc/webauthn.ipc', () => ({ registerWebauthnIpc: vi.fn() }))
 vi.mock('../../ipc/authcfg.ipc', () => ({ registerAuthcfgIpc: vi.fn() }))
 vi.mock('../../ipc/remote-view-commands', () => ({ registerRemoteViewIpc: vi.fn() }))
+vi.mock('../../ipc/app-relaunch-commands', () => ({ registerAppRelaunchIpc: vi.fn() }))
 vi.mock('../../ipc/ide-commands', () => ({ registerIdeIpc: vi.fn() }))
 vi.mock('../../ipc/remote-handlers', () => ({ registerRemoteHandlers: vi.fn() }))
 vi.mock('../../ipc/command-registry', () => ({ hostConnection: vi.fn(() => ({})) }))
+const remoteMocks = vi.hoisted(() => ({ listening: false }))
 vi.mock('../../services/remote-server', () => ({
   RemoteServer: class {
     terminalSink = vi.fn()
     setIdeService = vi.fn()
+    isListening = vi.fn(() => remoteMocks.listening)
   }
 }))
 vi.mock('../../services/media-jobs', () => ({
@@ -122,6 +125,48 @@ vi.mock('../host-anchor', () => ({
 beforeEach(() => {
   vi.clearAllMocks()
   arrivalMocks.order.length = 0
+  remoteMocks.listening = false
+})
+
+describe('the boot remote start, as the relaunch health record sees it', () => {
+  async function boot(reconcile: () => Promise<void>, opts = { disabled: false, autostart: true }) {
+    const { createHostAnchor } = await import('../host-anchor')
+    vi.mocked(createHostAnchor).mockReturnValueOnce({
+      reconcileAndAutostart: vi.fn(reconcile)
+    } as never)
+    const { startCoreServices } = await import('../core-services')
+    return startCoreServices({
+      remoteAccessDisabled: opts.disabled,
+      authDeps: {} as never,
+      autostart: opts.autostart
+    }).remoteStartSettled
+  }
+
+  it('settles listening once the start bound the listener', async () => {
+    await expect(
+      boot(async () => {
+        remoteMocks.listening = true
+      })
+    ).resolves.toBe('listening')
+  })
+
+  it('settles failed when the start rejected (a port in use), never rejecting', async () => {
+    await expect(
+      boot(async () => {
+        throw new Error('EADDRINUSE')
+      })
+    ).resolves.toBe('failed')
+  })
+
+  it('settles not-started when nothing was configured to start, or remote is off', async () => {
+    await expect(boot(async () => {})).resolves.toBe('not-started')
+    await expect(boot(async () => {}, { disabled: true, autostart: true })).resolves.toBe(
+      'not-started'
+    )
+    await expect(boot(async () => {}, { disabled: false, autostart: false })).resolves.toBe(
+      'not-started'
+    )
+  })
 })
 
 describe('a harness arriving, at the boot seam', () => {

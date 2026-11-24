@@ -78,6 +78,10 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    sibling `voice:pack-status` declares `chat`, because every connection that
  *    can hold the mic can hit the wall and must be able to read it, so it is
  *    absent here.
+ *  - `admin` (the relaunch arc, `app:relaunch`) — restarting the host, which ends
+ *    every turn, terminal and remote connection on it. Its three reads
+ *    (`app:relaunch-availability`, `app:restart-impact`, `app:last-relaunch`)
+ *    declare `config`, so a client can ask whether to offer it, and are absent here.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -85,6 +89,7 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  * reachability nobody thought about.
  */
 const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
+  'app:relaunch',
   'authcfg:apply',
   'authcfg:end',
   'authcfg:get',

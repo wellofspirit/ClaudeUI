@@ -222,6 +222,13 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     cancelQuit: async () => {}, // No-op on web
     ackQuitPrompt: async () => {}, // No-op on web
 
+    // The relaunch's restore record is the desktop window's: a web client stashes
+    // its own in sessionStorage when the host's build changes (`build-reload.ts`).
+    takeRestore: async () => null,
+    restoreState: async () => {},
+    onCollectRestore: () => () => {},
+    onRelaunchRequested: () => () => {},
+
     openInVSCode: async () => {}, // No-op on web
 
     // Sent-file preview: no RPC — the src IS an authenticated same-origin URL

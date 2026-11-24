@@ -139,11 +139,24 @@ describe('stamp build-info', () => {
     ['build', ['parallel', 'stamp build-info']],
     [
       'build:mac',
-      ['parallel', 'stamp build-info', 'electron-builder --mac --dir', 'codesign', 'xattr -cr']
+      [
+        'parallel',
+        'stamp build-info',
+        'electron-builder --mac --dir',
+        'stamp install-marker',
+        'codesign',
+        'xattr -cr'
+      ]
     ],
-    ['build:win', ['parallel', 'stamp build-info', 'electron-builder --win --dir']],
+    [
+      'build:win',
+      ['parallel', 'stamp build-info', 'electron-builder --win --dir', 'stamp install-marker']
+    ],
     ['build:linux', ['parallel', 'stamp build-info', 'electron-builder --linux']],
-    ['build:unpack', ['parallel', 'stamp build-info', 'electron-builder --dir']]
+    [
+      'build:unpack',
+      ['parallel', 'stamp build-info', 'electron-builder --dir', 'stamp install-marker']
+    ]
   ])('%s stamps right after the prepare group', (name, labels) => {
     const stages = build()[name]
     expect(stageLabels(stages)).toEqual(labels)
@@ -167,8 +180,8 @@ describe('CLAUDEUI_BUILD_OUT', () => {
 
   it('mac: codesign and xattr use dist/mac-arm64 when unset', () => {
     const stages = build()['build:mac']
-    expect(cmd(stages[3])[0]).toBe('codesign --force --deep --sign - dist/mac-arm64/ClaudeUI.app')
-    expect(cmd(stages[4])[0]).toBe('xattr -cr dist/mac-arm64/ClaudeUI.app')
+    expect(cmd(stages[4])[0]).toBe('codesign --force --deep --sign - dist/mac-arm64/ClaudeUI.app')
+    expect(cmd(stages[5])[0]).toBe('xattr -cr dist/mac-arm64/ClaudeUI.app')
   })
 
   it.each(builders)('%s passes the output dir to electron-builder when set', (name) => {
@@ -179,15 +192,16 @@ describe('CLAUDEUI_BUILD_OUT', () => {
 
   it('mac: codesign and xattr follow the output dir', () => {
     const stages = build({ env: { CLAUDEUI_BUILD_OUT: OUT + '/' } })['build:mac']
-    expect(stages[3].steps[0][1].at(-1)).toBe(`${OUT}/mac-arm64/ClaudeUI.app`)
-    expect(stages[4].steps[0][1]).toEqual(['-cr', `${OUT}/mac-arm64/ClaudeUI.app`])
-    expect(cmd(stages[3])[0]).not.toContain('dist/')
+    expect(stages[3].steps[0][1][1]).toBe(`${OUT}/mac-arm64/ClaudeUI.app`)
+    expect(stages[4].steps[0][1].at(-1)).toBe(`${OUT}/mac-arm64/ClaudeUI.app`)
+    expect(stages[5].steps[0][1]).toEqual(['-cr', `${OUT}/mac-arm64/ClaudeUI.app`])
+    expect(cmd(stages[4])[0]).not.toContain('dist/')
   })
 
   it('mac: signs with MAC_SIGN_IDENTITY when set, without a shell', () => {
     const stages = build({ env: { MAC_SIGN_IDENTITY: 'ClaudeUI Dev' } })['build:mac']
-    expect(stages[3].steps[0][0]).toBe('codesign')
-    expect(stages[3].steps[0][1]).toContain('ClaudeUI Dev')
+    expect(stages[4].steps[0][0]).toBe('codesign')
+    expect(stages[4].steps[0][1]).toContain('ClaudeUI Dev')
   })
 
   it('changes nothing else', () => {
@@ -196,7 +210,8 @@ describe('CLAUDEUI_BUILD_OUT', () => {
       JSON.parse(
         JSON.stringify(v)
           .replaceAll(`,"-c.directories.output=${OUT}"`, '')
-          .replaceAll(`${OUT}/mac-arm64`, 'dist/mac-arm64'),
+          .replaceAll(`${OUT}/mac-arm64`, 'dist/mac-arm64')
+          .replaceAll(`${OUT}/win-unpacked`, 'dist/win-unpacked'),
         (k, val) => (k === 'CLAUDEUI_BUILD_OUT' ? undefined : val)
       )
     expect(normalise(build({ env: { CLAUDEUI_BUILD_OUT: OUT } }))).toEqual(normalise(build()))
@@ -249,5 +264,53 @@ describe('vendorOverrideRefusal', () => {
     expect(r.status).toBe(2)
     expect(r.stderr).toContain('refusing "build"')
     expect(r.stdout).not.toContain('[1/')
+  })
+})
+
+describe('stamp install-marker', () => {
+  const marker = (stages: any[]) => stages.find((s) => s.label === 'stamp install-marker')
+
+  it('mac stamps the .app after electron-builder and before codesign', () => {
+    const stages = build({ quiet: false })['build:mac']
+    const labels = stageLabels(stages)
+    expect(labels.indexOf('stamp install-marker')).toBe(
+      labels.indexOf('electron-builder --mac --dir') + 1
+    )
+    expect(labels.indexOf('stamp install-marker')).toBeLessThan(labels.indexOf('codesign'))
+    expect(cmd(marker(stages))).toEqual([
+      'bun scripts/stamp-install-marker.mjs dist/mac-arm64/ClaudeUI.app --platform mac'
+    ])
+  })
+
+  it('win stamps the unpacked folder last, after electron-builder', () => {
+    const stages = build()['build:win']
+    expect(stages.at(-1).label).toBe('stamp install-marker')
+    expect(cmd(marker(stages))).toEqual([
+      'bun scripts/stamp-install-marker.mjs dist/win-unpacked --platform win --quiet'
+    ])
+  })
+
+  it('build:unpack stamps for the host platform, and nothing on linux', () => {
+    expect(cmd(marker(build({ platform: 'win32' })['build:unpack']))[0]).toContain(
+      'dist/win-unpacked --platform win'
+    )
+    expect(cmd(marker(build({ platform: 'darwin' })['build:unpack']))[0]).toContain(
+      'dist/mac-arm64/ClaudeUI.app --platform mac'
+    )
+    expect(marker(build({ platform: 'linux' })['build:unpack'])).toBeUndefined()
+    expect(marker(build()['build:linux'])).toBeUndefined()
+  })
+
+  it('follows CLAUDEUI_BUILD_OUT', () => {
+    const env = { CLAUDEUI_BUILD_OUT: '/stage/out' }
+    expect(marker(build({ env })['build:win']).steps[0][1][1]).toBe('/stage/out/win-unpacked')
+    expect(marker(build({ env })['build:mac']).steps[0][1][1]).toBe(
+      '/stage/out/mac-arm64/ClaudeUI.app'
+    )
+  })
+
+  it('is not part of the ensure targets or the plain build', () => {
+    for (const name of ['build', 'ensure', 'ensure-cli', 'update-cli', 'postinstall'])
+      expect(JSON.stringify(build()[name])).not.toContain('stamp-install-marker')
   })
 })
