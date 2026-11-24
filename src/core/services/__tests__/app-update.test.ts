@@ -37,6 +37,7 @@ import {
   type TestKey
 } from './app-update-fixtures'
 import type { UpdateManifest } from '../../../shared/update-manifest'
+import type { AppUpdateRebuildProgress } from '../../../shared/types/app-update'
 
 vi.mock('../logger', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -967,5 +968,235 @@ describe('settingsChanged', () => {
       available: { version: '1.1.0' },
       download: { phase: 'idle' }
     })
+  })
+})
+
+// ── Local rebuild ─────────────────────────────────────────────────────────────
+
+describe('rebuild', () => {
+  const TREE = { name: 'main checkout', branch: 'main', commit: 'abc1234', dirty: 2 }
+  const TREE_ID = '0123456789abcdef'
+  const cancelled = (): Error => Object.assign(new Error('cancelled'), { name: 'RebuildCancelled' })
+
+  /** A host whose rebuild the test drives: progress, then done or failed. */
+  function rebuildHost(over: Partial<AppUpdateHost> = {}): {
+    patch: Partial<AppUpdateHost>
+    progress: (p: AppUpdateRebuildProgress) => void
+    finish: (v: { version: string; commit: string | null }) => void
+    fail: (err: unknown) => void
+  } {
+    let onProgress: (p: AppUpdateRebuildProgress) => void = () => {}
+    let finish: (v: { version: string; commit: string | null }) => void = () => {}
+    let fail: (err: unknown) => void = () => {}
+    const patch: Partial<AppUpdateHost> = {
+      rebuildAvailable: () => true,
+      trees: vi.fn(async () => [{ id: TREE_ID, ...TREE }]),
+      rebuild: vi.fn(async (_treeId: string, cb: (p: AppUpdateRebuildProgress) => void) => {
+        onProgress = cb
+        const done = new Promise<{ version: string; commit: string | null }>((res, rej) => {
+          finish = res
+          fail = rej
+        })
+        return { tree: TREE, done }
+      }),
+      cancelRebuild: vi.fn(async () => fail(cancelled())),
+      applyRebuild: vi.fn(async () => {}),
+      ...over
+    }
+    return {
+      patch,
+      progress: (p) => onProgress(p),
+      finish: (v) => finish(v),
+      fail: (e) => fail(e)
+    }
+  }
+
+  const STAGES: AppUpdateRebuildProgress['stages'] = [
+    { label: 'typecheck ‖ electron-vite build', state: 'running', elapsedMs: 10 },
+    { label: 'stamp build-info', state: 'pending' }
+  ]
+
+  it('a host without rebuilds shows none and lists no trees', async () => {
+    const r = rig()
+    expect(r.updater.view().rebuildAvailable).toBe(false)
+    expect('rebuild' in r.updater.view()).toBe(false)
+    await expect(r.updater.trees()).resolves.toEqual([])
+    await expect(r.updater.rebuild(TREE_ID)).rejects.toThrow(/cannot rebuild/)
+    expect(createAppUpdater({ host: () => null }).view().rebuildAvailable).toBe(false)
+  })
+
+  it('shows rebuildAvailable as the host says, and a host that throws as unavailable', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    expect(r.updater.view()).toMatchObject({ rebuildAvailable: true, rebuild: { phase: 'idle' } })
+    await expect(r.updater.trees()).resolves.toEqual([{ id: TREE_ID, ...TREE }])
+    const throwing = rig({
+      host: {
+        ...h.patch,
+        rebuildAvailable: () => {
+          throw new Error('boom')
+        }
+      }
+    })
+    expect(throwing.updater.view().rebuildAvailable).toBe(false)
+  })
+
+  it('refuses a malformed tree id without asking the host', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    for (const id of ['', '/Users/x/ClaudeUI', '0123', 'zzzzzzzzzzzzzzzz', 7 as never])
+      await expect(r.updater.rebuild(id)).rejects.toThrow(/Pick a source tree/)
+    expect(h.patch.rebuild).not.toHaveBeenCalled()
+  })
+
+  it('a pre-check refusal is thrown to the caller and leaves the view as it was', async () => {
+    const r = rig({
+      host: rebuildHost({
+        rebuild: vi.fn(async () => {
+          throw new Error(
+            `Dependencies changed: run bun install in ClaudeUI first (${os.homedir()})`
+          )
+        })
+      }).patch
+    })
+    await expect(r.updater.rebuild(TREE_ID)).rejects.toThrow('Dependencies changed')
+    await expect(r.updater.rebuild(TREE_ID)).rejects.not.toThrow(os.homedir())
+    expect(r.updater.view().rebuild).toEqual({ phase: 'idle' })
+  })
+
+  it('building → built: stages and the last line follow, then the version and commit', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    await r.updater.rebuild(TREE_ID)
+    expect(h.patch.rebuild).toHaveBeenCalledWith(TREE_ID, expect.any(Function))
+    expect(r.updater.view().rebuild).toMatchObject({
+      phase: 'building',
+      tree: TREE,
+      stages: [],
+      startedAt: new Date(START).toISOString()
+    })
+    h.progress({ stages: STAGES, lastLine: 'vite v6 building' })
+    expect(r.updater.view().rebuild).toMatchObject({
+      phase: 'building',
+      stages: STAGES,
+      lastLine: 'vite v6 building'
+    })
+    await expect(r.updater.rebuild(TREE_ID)).rejects.toThrow(/already running/)
+    h.finish({ version: '1.0.0', commit: 'abc1234' })
+    await r.updater.idle()
+    const view = r.updater.view().rebuild!
+    expect(view).toMatchObject({
+      phase: 'built',
+      tree: TREE,
+      built: { version: '1.0.0', commit: 'abc1234' }
+    })
+    expect(view.stages!.every((s) => s.state === 'done')).toBe(true)
+    expect(view.error).toBeUndefined()
+  })
+
+  it('emits a stage change at once and the last line at most once a second', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    await r.updater.rebuild(TREE_ID)
+    const before = r.changes()
+    h.progress({ stages: STAGES, lastLine: 'a' })
+    expect(r.changes()).toBe(before + 1)
+    h.progress({ stages: STAGES, lastLine: 'b' })
+    h.progress({ stages: STAGES, lastLine: 'c' })
+    expect(r.changes()).toBe(before + 1)
+    expect(r.updater.view().rebuild!.lastLine).toBe('c')
+    r.clock.t += 1_000
+    h.progress({ stages: STAGES, lastLine: 'd' })
+    expect(r.changes()).toBe(before + 2)
+    h.progress({
+      stages: [
+        { ...STAGES[0], state: 'done' },
+        { ...STAGES[1], state: 'running' }
+      ]
+    })
+    expect(r.changes()).toBe(before + 3)
+  })
+
+  it('a failed build shows the reason, keeping its stages and last line', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    await r.updater.rebuild(TREE_ID)
+    h.progress({ stages: STAGES, lastLine: 'error TS2322' })
+    h.fail(new Error('The build failed at typecheck (exit 1)'))
+    await r.updater.idle()
+    expect(r.updater.view().rebuild).toMatchObject({
+      phase: 'failed',
+      tree: TREE,
+      stages: STAGES,
+      lastLine: 'error TS2322',
+      error: 'The build failed at typecheck (exit 1)'
+    })
+    await expect(r.updater.apply('rebuild')).rejects.toThrow(/No rebuild is ready/)
+  })
+
+  it('cancel asks the host and goes back to idle; with nothing running it does nothing', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    await r.updater.cancelRebuild()
+    expect(h.patch.cancelRebuild).not.toHaveBeenCalled()
+    await r.updater.rebuild(TREE_ID)
+    await r.updater.cancelRebuild()
+    await r.updater.idle()
+    expect(h.patch.cancelRebuild).toHaveBeenCalledTimes(1)
+    expect(r.updater.view().rebuild).toEqual({ phase: 'idle' })
+  })
+
+  it('stop() stops a running rebuild (its process group would outlive the quit)', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    await r.updater.rebuild(TREE_ID)
+    r.updater.stop()
+    await r.updater.idle()
+    expect(h.patch.cancelRebuild).toHaveBeenCalledTimes(1)
+  })
+
+  it('stop() asks a host that can stop rebuilds for good, even with none building yet', async () => {
+    const stopRebuild = vi.fn(async () => {})
+    const h = rebuildHost({ stopRebuild })
+    const r = rig({ host: h.patch })
+    r.updater.stop()
+    expect(stopRebuild).toHaveBeenCalledTimes(1)
+    expect(h.patch.cancelRebuild).not.toHaveBeenCalled()
+    await expect(r.updater.rebuild(TREE_ID)).rejects.toThrow(/stopping/)
+  })
+
+  it("apply('rebuild') hands the built rebuild to the host; only once built, only when eligible", async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    await expect(r.updater.apply('rebuild')).rejects.toThrow(/No rebuild is ready/)
+    await r.updater.rebuild(TREE_ID)
+    await expect(r.updater.apply('rebuild')).rejects.toThrow(/No rebuild is ready/)
+    h.finish({ version: '1.0.0', commit: null })
+    await r.updater.idle()
+    r.host.eligibility.mockResolvedValueOnce({ ok: false, reason: 'read-only volume' })
+    await expect(r.updater.apply('rebuild')).rejects.toThrow('read-only volume')
+    expect(h.patch.applyRebuild).not.toHaveBeenCalled()
+    await r.updater.apply('rebuild')
+    expect(h.patch.applyRebuild).toHaveBeenCalledTimes(1)
+    expect(r.host.apply).not.toHaveBeenCalled()
+  })
+
+  it('apply refuses an unknown source', async () => {
+    const r = rig({ host: rebuildHost().patch })
+    await expect(r.updater.apply('elsewhere' as never)).rejects.toThrow(/Unknown update source/)
+  })
+
+  it('a rebuild started after a failed one replaces it', async () => {
+    const h = rebuildHost()
+    const r = rig({ host: h.patch })
+    await r.updater.rebuild(TREE_ID)
+    h.fail(new Error('first failed'))
+    await r.updater.idle()
+    await r.updater.rebuild(TREE_ID)
+    expect(r.updater.view().rebuild).toMatchObject({ phase: 'building' })
+    expect(r.updater.view().rebuild!.error).toBeUndefined()
+    h.finish({ version: '1.0.1', commit: 'def5678' })
+    await r.updater.idle()
+    expect(r.updater.view().rebuild).toMatchObject({ phase: 'built', built: { version: '1.0.1' } })
   })
 })

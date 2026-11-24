@@ -7,18 +7,25 @@
  *
  * - `app-update:state` declares `config`, a `query`: every device may see that
  *   an update exists (like `harness:state`). The view carries no local path.
- * - The four writes declare `admin`, as `harness:install` does: sending the
- *   host to GitHub, downloading a build onto it, hiding a release from its
- *   operator, and restarting it into a new build are close to remote code
- *   execution. A base remote connection never holds `admin`; a passkey or
- *   break-glass one does, and at the `strong` tier a write also needs the
- *   mutation window. The four are pinned in `PINNED_CAPABILITIES`.
+ * - The writes declare `admin`, as `harness:install` does: sending the host to
+ *   GitHub, downloading a build onto it, hiding a release from its operator,
+ *   restarting it into a new build, and building ClaudeUI from a source tree on
+ *   it (`app-update:rebuild` runs that tree's build scripts with the user's
+ *   rights) are close to remote code execution. A base remote connection never
+ *   holds `admin`; a passkey or break-glass one does, and at the `strong` tier a
+ *   write also needs the mutation window. Every write is pinned in
+ *   `PINNED_CAPABILITIES`.
+ * - `app-update:trees` is an `admin` query (pinned too): the checkouts on the
+ *   host, their branches and commits are the operator's business, and the list
+ *   is only ever read to pick a rebuild. It carries no path; a rebuild takes an
+ *   id the host recomputes from its own list, never a path from a client.
  *
  * ## Results
  *
- * The view (`AppUpdateView`), or `{ accepted: true }` for apply; never an `ok`
- * key (the preload and web `unwrap` would take it for their envelope). A
- * refusal (nothing to download, nothing staged, a malformed version) throws.
+ * The view (`AppUpdateView`), `{ accepted: true }` for apply, the tree list for
+ * trees; never an `ok` key (the preload and web `unwrap` would take it for their
+ * envelope). A refusal (nothing to download, nothing staged, a malformed
+ * version, a rebuild pre-check) throws.
  *
  * ## Events (`startAppUpdateEvents`)
  *
@@ -27,7 +34,12 @@
  * `app-update:state`.
  */
 import type { EmitEvent } from '../shared/sync/events'
-import type { AppUpdateApplyResult, AppUpdateView } from '../../shared/types/app-update'
+import type {
+  AppUpdateApplyResult,
+  AppUpdateApplySource,
+  AppUpdateTree,
+  AppUpdateView
+} from '../../shared/types/app-update'
 import { appUpdater, type AppUpdater } from '../services/app-update'
 import type { CommandRegistration } from './command-registry'
 
@@ -37,20 +49,41 @@ export const APP_UPDATE_CHANNELS = [
   'app-update:check',
   'app-update:download',
   'app-update:skip',
-  'app-update:apply'
+  'app-update:apply',
+  'app-update:trees',
+  'app-update:rebuild',
+  'app-update:cancel-rebuild'
 ] as const
 
 export interface AppUpdateCommandDeps {
   updater?: AppUpdater
 }
 
+function fieldOf(payload: unknown, key: string): unknown {
+  return typeof payload === 'object' && payload !== null
+    ? (payload as Record<string, unknown>)[key]
+    : undefined
+}
+
 function versionArg(payload: unknown): string {
-  const version =
-    typeof payload === 'object' && payload !== null
-      ? (payload as { version?: unknown }).version
-      : undefined
+  const version = fieldOf(payload, 'version')
   if (typeof version !== 'string') throw new Error('A version is required')
   return version
+}
+
+/** `{ source }` of an apply; absent (or a JSON null payload) is the release. */
+function sourceArg(payload: unknown): AppUpdateApplySource {
+  const source = fieldOf(payload, 'source')
+  if (source === undefined || source === null) return 'release'
+  if (source !== 'release' && source !== 'rebuild')
+    throw new Error('The update source is "release" or "rebuild"')
+  return source
+}
+
+function treeIdArg(payload: unknown): string {
+  const treeId = fieldOf(payload, 'treeId')
+  if (typeof treeId !== 'string' || treeId === '') throw new Error('A tree id is required')
+  return treeId
 }
 
 export function appUpdateCommands(
@@ -96,9 +129,34 @@ export function appUpdateCommands(
       channel: 'app-update:apply',
       capability: 'admin',
       kind: 'command',
-      handler: async (): Promise<AppUpdateApplyResult> => {
-        await updater.apply()
+      handler: async (payload?: unknown): Promise<AppUpdateApplyResult> => {
+        await updater.apply(sourceArg(payload))
         return { accepted: true }
+      }
+    },
+    {
+      channel: 'app-update:trees',
+      capability: 'admin',
+      kind: 'query',
+      handler: async (): Promise<AppUpdateTree[]> => updater.trees()
+    },
+    {
+      // Starts the build and answers at once; progress rides `app-update:changed`.
+      channel: 'app-update:rebuild',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (payload?: unknown): Promise<AppUpdateView> => {
+        await updater.rebuild(treeIdArg(payload))
+        return updater.view()
+      }
+    },
+    {
+      channel: 'app-update:cancel-rebuild',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (): Promise<AppUpdateView> => {
+        await updater.cancelRebuild()
+        return updater.view()
       }
     }
   ]

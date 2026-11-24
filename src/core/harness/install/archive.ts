@@ -415,6 +415,7 @@ const LOC_SIG = 0x04034b50
 const S_IFMT = 0o170000
 const S_IFREG = 0o100000
 const S_IFDIR = 0o040000
+const S_IFLNK = 0o120000
 
 async function readAt(handle: fsp.FileHandle, position: number, length: number): Promise<Buffer> {
   const buf = Buffer.alloc(length)
@@ -460,6 +461,107 @@ function parseCentralDirectory(cd: Buffer, count: number): ZipEntry[] {
   return entries
 }
 
+/** The central directory of an open zip, and the file's size. No zip64, no multi-disk. */
+async function readZipDirectory(
+  handle: fsp.FileHandle
+): Promise<{ entries: ZipEntry[]; fileSize: number }> {
+  const { size: fileSize } = await handle.stat()
+  const tailLen = Math.min(fileSize, 22 + 0xffff)
+  if (tailLen < 22) throw new ArchiveError('zip is truncated')
+  const tail = await readAt(handle, fileSize - tailLen, tailLen)
+  let eocd = -1
+  for (let i = tail.length - 22; i >= 0; i--) {
+    if (tail.readUInt32LE(i) === EOCD_SIG) {
+      eocd = i
+      break
+    }
+  }
+  if (eocd < 0) throw new ArchiveError('zip has no end of central directory')
+  const count = tail.readUInt16LE(eocd + 10)
+  const cdSize = tail.readUInt32LE(eocd + 12)
+  const cdOffset = tail.readUInt32LE(eocd + 16)
+  if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 8) !== count) {
+    throw new ArchiveError('multi-disk zips are not supported')
+  }
+  if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+    throw new ArchiveError('zip64 archives are not supported')
+  }
+  if (cdOffset + cdSize > fileSize) throw new ArchiveError('zip is truncated')
+  return { entries: parseCentralDirectory(await readAt(handle, cdOffset, cdSize), count), fileSize }
+}
+
+/** Where an entry's data starts (after its local header), checked against the file's size. */
+async function entryDataStart(
+  handle: fsp.FileHandle,
+  entry: ZipEntry,
+  fileSize: number,
+  label: string
+): Promise<number> {
+  const local = await readAt(handle, entry.localOffset, 30)
+  if (local.readUInt32LE(0) !== LOC_SIG) throw new ArchiveError(`zip entry ${label} is corrupt`)
+  const start = entry.localOffset + 30 + local.readUInt16LE(26) + local.readUInt16LE(28)
+  if (start + entry.compSize > fileSize) throw new ArchiveError('zip is truncated')
+  return start
+}
+
+/** One entry of a zip as {@link listZipEntries} reports it, names exactly as stored. */
+export interface ZipListing {
+  name: string
+  /** From the Unix mode bits (an entry made elsewhere: `dir` by a trailing slash, else `file`). */
+  type: 'file' | 'dir' | 'symlink' | 'other'
+  size: number
+  /** A symlink's target (its data), when `type` is `symlink`. */
+  linkTarget?: string
+}
+
+/** The longest symlink target {@link listZipEntries} reads. */
+const MAX_LINK_TARGET = 4096
+
+/**
+ * List a zip's entries without extracting anything, for a caller that hands the
+ * archive to another tool (macOS `ditto`, which keeps links) and must vet it
+ * first. Names are NOT checked here; a symlink's target is read (stored or
+ * deflated, at most 4 KiB). Throws `ArchiveError` on a zip it cannot read.
+ */
+export async function listZipEntries(file: string): Promise<ZipListing[]> {
+  const handle = await fsp.open(file, 'r')
+  try {
+    const { entries, fileSize } = await readZipDirectory(handle)
+    const out: ZipListing[] = []
+    for (const entry of entries) {
+      const mode = entry.unixMode & S_IFMT
+      const type: ZipListing['type'] =
+        mode === S_IFLNK
+          ? 'symlink'
+          : mode === S_IFDIR || (mode === 0 && /[\\/]$/.test(entry.name))
+            ? 'dir'
+            : mode === S_IFREG || mode === 0
+              ? 'file'
+              : 'other'
+      if (type !== 'symlink') {
+        out.push({ name: entry.name, type, size: entry.size })
+        continue
+      }
+      if (entry.flags & 1) throw new ArchiveError(`zip entry ${entry.name} is encrypted`)
+      if (entry.method !== 0 && entry.method !== 8) {
+        throw new ArchiveError(`zip entry ${entry.name} uses unsupported compression`)
+      }
+      if (entry.size > MAX_LINK_TARGET || entry.compSize > MAX_LINK_TARGET * 2) {
+        throw new ArchiveError(`zip entry ${entry.name} has an oversized link target`)
+      }
+      const start = await entryDataStart(handle, entry, fileSize, entry.name)
+      const chunks: Buffer[] = []
+      for await (const chunk of zipData(file, start, entry)) chunks.push(chunk)
+      const data = Buffer.concat(chunks)
+      if (data.length !== entry.size) throw new ArchiveError(`zip entry ${entry.name} is corrupt`)
+      out.push({ name: entry.name, type, size: entry.size, linkTarget: data.toString('utf8') })
+    }
+    return out
+  } finally {
+    await handle.close()
+  }
+}
+
 /** Extract a `.zip` file into `destDir` (which must exist). Stored and deflated entries only; no zip64. */
 export async function extractZip(
   file: string,
@@ -469,29 +571,7 @@ export async function extractZip(
   const ctx = context(destDir, opts)
   const handle = await fsp.open(file, 'r')
   try {
-    const { size: fileSize } = await handle.stat()
-    const tailLen = Math.min(fileSize, 22 + 0xffff)
-    if (tailLen < 22) throw new ArchiveError('zip is truncated')
-    const tail = await readAt(handle, fileSize - tailLen, tailLen)
-    let eocd = -1
-    for (let i = tail.length - 22; i >= 0; i--) {
-      if (tail.readUInt32LE(i) === EOCD_SIG) {
-        eocd = i
-        break
-      }
-    }
-    if (eocd < 0) throw new ArchiveError('zip has no end of central directory')
-    const count = tail.readUInt16LE(eocd + 10)
-    const cdSize = tail.readUInt32LE(eocd + 12)
-    const cdOffset = tail.readUInt32LE(eocd + 16)
-    if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 8) !== count) {
-      throw new ArchiveError('multi-disk zips are not supported')
-    }
-    if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
-      throw new ArchiveError('zip64 archives are not supported')
-    }
-    if (cdOffset + cdSize > fileSize) throw new ArchiveError('zip is truncated')
-    const entries = parseCentralDirectory(await readAt(handle, cdOffset, cdSize), count)
+    const { entries, fileSize } = await readZipDirectory(handle)
 
     let total = 0
     for (const entry of entries) {
@@ -520,10 +600,7 @@ export async function extractZip(
         ctx.files.push({ entryPath: rel, dest: null, size: entry.size, sha256: null })
         continue
       }
-      const local = await readAt(handle, entry.localOffset, 30)
-      if (local.readUInt32LE(0) !== LOC_SIG) throw new ArchiveError(`zip entry ${rel} is corrupt`)
-      const start = entry.localOffset + 30 + local.readUInt16LE(26) + local.readUInt16LE(28)
-      if (start + entry.compSize > fileSize) throw new ArchiveError('zip is truncated')
+      const start = await entryDataStart(handle, entry, fileSize, rel)
       await writeFile(ctx, rel, entry.size, entry.unixMode, zipData(file, start, entry))
     }
   } finally {

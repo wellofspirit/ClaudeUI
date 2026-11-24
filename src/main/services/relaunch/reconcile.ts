@@ -13,9 +13,11 @@
  *   paths are left alone;
  * - backups: the newest `updated` job's backup is kept for 7 days (the manual
  *   way back); older `updated` jobs' backups, and any older than 7 days, are
- *   removed through the gate. A `failed` job's backup is never removed: it may
- *   be the copy the user is running from. A delete that fails (the gate never
- *   throws) is logged and the sweep goes on.
+ *   removed through the gate. A `failed` job's backup is never removed here: it
+ *   may be the copy the user is running from (the desktop update host's boot
+ *   sweep, `services/app-update/boot-cleanup.ts`, removes one once it is 7 days
+ *   old and this boot runs from the install itself). A delete that fails (the
+ *   gate never throws) is logged and the sweep goes on.
  * - job, log, result and ready files older than 30 days are unlinked.
  */
 

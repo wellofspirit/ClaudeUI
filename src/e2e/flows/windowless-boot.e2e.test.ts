@@ -245,7 +245,8 @@ vi.mock('../../core/services/media-jobs', () => ({
   }
 }))
 // ClaudeUI's own updates: a leaf that would reach GitHub once a host seam exists
-// (none is wired today, so the real one is inert); mocked like the other network leaves.
+// (boot-core wires one for packaged builds only, and this boot is unpackaged, so
+// the real one is inert); mocked like the other network leaves.
 vi.mock('../../core/services/app-update', () => ({
   appUpdater: {
     start: vi.fn(),

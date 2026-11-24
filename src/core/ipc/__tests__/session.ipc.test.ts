@@ -1046,6 +1046,24 @@ describe('session.ipc', () => {
       // No extra windows in harness, but call should succeed.
       await expect(harness.call('config:save-settings', { theme: 'dark' })).resolves.toBeUndefined()
     })
+
+    it('config:save-settings keeps the host-owned appUpdateSourcePath whatever a client sends', async () => {
+      // A rebuild runs code from that checkout and `config` is a base remote grant.
+      const { saveSettings } = await import('../../services/ui-config')
+      const saved = (): Record<string, unknown> =>
+        vi.mocked(saveSettings).mock.calls.at(-1)![0] as Record<string, unknown>
+      await harness.call('config:save-settings', { theme: 'dark', appUpdateSourcePath: '/evil' })
+      expect(saved()).not.toHaveProperty('appUpdateSourcePath')
+      expect(saved().theme).toBe('dark')
+      const real = syncCore.getCanonicalState()
+      vi.spyOn(syncCore, 'getCanonicalState').mockImplementationOnce(() => ({
+        ...real,
+        settings: { ...real.settings, appUpdateSourcePath: '/work/ClaudeUI' }
+      }))
+      await harness.call('config:save-settings', { theme: 'light', appUpdateSourcePath: '/evil' })
+      expect(saved().appUpdateSourcePath).toBe('/work/ClaudeUI')
+      expect(saved().theme).toBe('light')
+    })
   })
 
   // -------------------------------------------------------------------------

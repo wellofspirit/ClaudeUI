@@ -121,8 +121,13 @@ export function sanitiseVersion(version: string): string {
   return clean === '' ? 'unknown' : clean
 }
 
-/** The kinds of sibling the relaunch machinery creates beside an install. */
-export type SiblingKind = 'old' | 'failed' | 'update'
+/**
+ * The kinds of sibling the relaunch and update machinery create beside an
+ * install: a backup (`old`), a build that failed to start (`failed`), a staged
+ * build (`update`), and, on macOS, the folder a release archive is unpacked
+ * into before its `ClaudeUI.app` becomes the staged build (`extract`).
+ */
+export type SiblingKind = 'old' | 'failed' | 'update' | 'extract'
 
 /** `.<base>.<kind>-<version>-<t8>` beside the install. */
 export function siblingPath(

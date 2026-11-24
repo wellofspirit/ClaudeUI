@@ -21,7 +21,12 @@ import type { AccountsState, AccountRef, OAuthAccount } from '../shared/types'
 import type { RelaunchAvailability, RelaunchResult } from '../shared/relaunch'
 import type { BuildInfo, DevBuildInfo } from '../shared/build-info'
 import type { UpdateTarget } from '../shared/update-manifest'
-import type { AppUpdateEligibility } from '../shared/types/app-update'
+import type {
+  AppUpdateEligibility,
+  AppUpdateRebuildProgress,
+  AppUpdateTree,
+  AppUpdateTreeSummary
+} from '../shared/types/app-update'
 
 // ---------------------------------------------------------------------------
 // Window handle
@@ -253,6 +258,35 @@ export interface AppUpdateHost {
   isStaged(stagedId: string, version: string): Promise<boolean>
   /** Restart into the staged build. */
   apply(stagedId: string, version: string): Promise<void>
+
+  // ── Local rebuild (optional: the desktop only) ──────────────────────────────
+
+  /** Whether a source checkout to rebuild from is known (cheap; read on every view). */
+  rebuildAvailable?(): boolean
+  /** The checkouts the host itself lists (never a client-supplied path); no paths in the result. */
+  trees?(): Promise<AppUpdateTree[]>
+  /**
+   * Rebuild from the tree `treeId` names. Resolves once the pre-checks passed and
+   * the build started (rejects with the reason one refused it); `done` settles
+   * when the build is staged (the version and commit it carries) or failed. A
+   * cancelled build rejects `done` with an error named `RebuildCancelled`.
+   */
+  rebuild?(
+    treeId: string,
+    onProgress: (progress: AppUpdateRebuildProgress) => void
+  ): Promise<{
+    tree: AppUpdateTreeSummary
+    done: Promise<{ version: string; commit: string | null }>
+  }>
+  /** Stop a running rebuild by its process group (nothing staged); a no-op when none runs. */
+  cancelRebuild?(): Promise<void>
+  /**
+   * Quitting: stop a running rebuild and refuse every later one, including one
+   * still in its pre-checks (it would otherwise spawn a build that outlives the app).
+   */
+  stopRebuild?(): Promise<void>
+  /** Restart into the build the last rebuild staged. */
+  applyRebuild?(): Promise<void>
 }
 
 let hostAppUpdateImpl: AppUpdateHost | null = null

@@ -105,7 +105,9 @@ export function checkEligibility(args: {
   if (!probes.canWriteDir(parent))
     return {
       ok: false,
-      reason: `Can't update here: ${parent} is not writable. Download the new version manually`
+      // No path: every client reads this reason (`app:relaunch-availability`,
+      // `app-update:state` are `config`), and a home path names the user.
+      reason: `Can't update here: the folder that holds ClaudeUI is not writable. Download the new version manually`
     }
   const marker = readInstallMarker(installPath, platform, probes.readFile)
   if (!marker)

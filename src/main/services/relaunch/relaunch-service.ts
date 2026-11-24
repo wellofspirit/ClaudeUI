@@ -3,10 +3,14 @@
  * `src/main/index.ts` wires the Electron parts in).
  *
  * `requestRelaunch` is the one way in, for `relaunch` (S1, any admin client) and
- * `swap` (tests now, S4 later):
+ * `swap` (the update host: a staged release or a local rebuild):
  *   1. refuse: not packaged; not eligible; one already in flight; the lock held
- *      and not stale; a swap whose staged dir is not the install's sibling or
- *      whose version is not newer than the running one;
+ *      and not stale; something else the host is doing (`busy`: a rebuild); a
+ *      swap whose staged dir is not the install's sibling named
+ *      `.<base>.update-…` (never a backup or a failed build), is not a real
+ *      directory, or whose own install marker does not carry `toVersion`; a
+ *      `release` swap whose version is not newer than the running one (a
+ *      `rebuild` may be equal or older: the user built it on purpose);
  *   2. take the lock, write the job, spawn the detached helper, and wait (≤ 5 s)
  *      for its ready file — the helper must be alive BEFORE anything is torn
  *      down (design review ruling 9). No ready file, or a spawn error: kill the
@@ -21,8 +25,8 @@ import * as fs from 'node:fs'
 import { compareVersions } from '../../../core/harness/store'
 import { logger } from '../../../core/services/logger'
 import type { RelaunchAvailability, RelaunchResult, RestoreRecord } from '../../../shared/relaunch'
-import { checkEligibility, type EligibilityProbes } from './eligibility'
-import { ownedNamePattern } from './delete-gate'
+import { checkEligibility, readInstallMarker, type EligibilityProbes } from './eligibility'
+import { stagedNamePattern } from './delete-gate'
 import { helperCommand, type HelperCommand } from './helper-scripts'
 import {
   DEFAULT_TIMEOUTS,
@@ -48,8 +52,11 @@ import {
 import { reconcileJobs, lastResultFor } from './reconcile'
 import { takeRestore, writeHealth, writeRestore } from './records'
 
+/** Where a swap's staged build came from: a downloaded release, or a local rebuild. */
+export type SwapSource = 'release' | 'rebuild'
+
 export type RelaunchRequest =
-  { mode: 'relaunch' } | { mode: 'swap'; stagedPath: string; toVersion: string }
+  { mode: 'relaunch' } | { mode: 'swap'; stagedPath: string; toVersion: string; source: SwapSource }
 
 /** What spawning the helper produced: its pid, or the error. */
 export interface SpawnedHelper {
@@ -80,6 +87,8 @@ export interface RelaunchServiceDeps {
   collectTimeoutMs?: number
   /** The health, result and restore writes (tests inject a failing rename). */
   writeOptions?: RetryingWriteOptions
+  /** Why the host cannot restart now for another reason (a rebuild running), or null. */
+  busy?: () => string | null
 }
 
 export interface RelaunchService {
@@ -92,6 +101,8 @@ export interface RelaunchService {
    */
   eligible(): RelaunchAvailability
   requestRelaunch(request: RelaunchRequest): Promise<void>
+  /** A relaunch is in flight (this process's, or another's live lock): what a rebuild waits out. */
+  relaunchInProgress(): boolean
   lastResult(): RelaunchResult | null
   /** Write this boot's health record, then reconcile older jobs. Never rejects. */
   reportHealthy(): Promise<void>
@@ -142,13 +153,24 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     return cachedEligibility.value
   }
 
-  /** Every reason this host cannot start a relaunch now, or null. */
-  function refusal(e: ReturnType<typeof checkEligibility>): string | null {
-    if (!e.ok) return e.reason
+  /** A relaunch in flight, or null. */
+  function inProgress(): string | null {
     if (inFlight && !hasResult(inFlight)) return 'A relaunch is already in progress'
     const lock = readLock(stateDir)
     if (lock && !isLockStale(lock, now(), hasResult)) return 'Another relaunch is in progress'
     return null
+  }
+
+  /** Every reason this host cannot start a relaunch now, or null. */
+  function refusal(e: ReturnType<typeof checkEligibility>): string | null {
+    if (!e.ok) return e.reason
+    const running = inProgress()
+    if (running) return running
+    try {
+      return deps.busy?.() ?? null
+    } catch (err) {
+      return `ClaudeUI could not tell whether it is busy: ${String(err)}`
+    }
   }
 
   async function waitForReady(file: string, failed: Promise<Error>): Promise<Error | null> {
@@ -183,12 +205,28 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
       if (
         !sibling ||
         samePath(stagedPath, install, deps.platform) ||
-        !ownedNamePattern(p.basename(install), caseInsensitivePaths(deps.platform)).test(
+        !stagedNamePattern(p.basename(install), caseInsensitivePaths(deps.platform)).test(
           p.basename(stagedPath)
         )
       )
         throw new Error('The staged build must sit beside the install')
-      if (compareVersions(toVersion, fromVersion) <= 0)
+      let real = false
+      try {
+        const stat = fs.lstatSync(stagedPath)
+        real = !stat.isSymbolicLink() && stat.isDirectory()
+      } catch {
+        /* missing */
+      }
+      if (!real) throw new Error('The staged build is missing')
+      const marker = readInstallMarker(stagedPath, platform)
+      if (!marker) throw new Error('The staged build has no ClaudeUI install marker')
+      if (marker.version !== toVersion)
+        throw new Error(
+          `The staged build is ${marker.version ?? 'of an unknown version'}, not ${toVersion}`
+        )
+      if (request.source !== 'release' && request.source !== 'rebuild')
+        throw new Error('A swap names where its build came from')
+      if (request.source === 'release' && compareVersions(toVersion, fromVersion) <= 0)
         throw new Error(
           `The staged build (${toVersion}) is not newer than this one (${fromVersion})`
         )
@@ -273,7 +311,8 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     const notReady = await waitForReady(files.ready, spawned.failed)
     if (notReady) return giveUp(notReady, helperPid)
 
-    logger.info('relaunch', `relaunch ${token} (${job.mode}) started; helper pid ${helperPid}`)
+    const what = request.mode === 'swap' ? `swap to ${toVersion}, ${request.source}` : job.mode
+    logger.info('relaunch', `relaunch ${token} (${what}) started; helper pid ${helperPid}`)
     const record = await bounded(deps.collectRestore(), deps.collectTimeoutMs ?? 2000, null)
     if (record) {
       try {
@@ -295,6 +334,9 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
       return e.ok ? { available: true } : { available: false, reason: e.reason }
     },
     requestRelaunch,
+    relaunchInProgress(): boolean {
+      return inProgress() !== null
+    },
     lastResult(): RelaunchResult | null {
       return installKey ? lastResultFor(stateDir, installKey) : null
     },

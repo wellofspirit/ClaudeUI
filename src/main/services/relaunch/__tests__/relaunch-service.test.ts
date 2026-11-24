@@ -164,18 +164,44 @@ describe('requestRelaunch', () => {
     const token = newToken()
     const elsewhere = makeFakeApp(path.join(root, 'sub', 'X.app'), '2.0.0', 'healthy')
     await expect(
-      svc.requestRelaunch({ mode: 'swap', stagedPath: elsewhere, toVersion: '2.0.0' })
+      svc.requestRelaunch({
+        mode: 'swap',
+        stagedPath: elsewhere,
+        toVersion: '2.0.0',
+        source: 'release'
+      })
     ).rejects.toThrow(/beside the install/)
-    const staged = siblingPath(install, 'update', '1.0.0', token, 'darwin')
+    const staged = makeFakeApp(
+      siblingPath(install, 'update', '1.0.0', token, 'darwin'),
+      '1.0.0',
+      'healthy'
+    )
     await expect(
-      svc.requestRelaunch({ mode: 'swap', stagedPath: staged, toVersion: '1.0.0' })
+      svc.requestRelaunch({
+        mode: 'swap',
+        stagedPath: staged,
+        toVersion: '1.0.0',
+        source: 'release'
+      })
     ).rejects.toThrow(/not newer/)
     expect(fs.existsSync(path.join(state, 'lock'))).toBe(false)
-    const good = siblingPath(install, 'update', '2.0.0', token, 'darwin')
+    const good = makeFakeApp(
+      siblingPath(install, 'update', '2.0.0', token, 'darwin'),
+      '2.0.0',
+      'healthy'
+    )
     // darwin compares names case-insensitively (APFS): a differently cased name is ours.
+    // Only where the volume agrees (a case-sensitive test volume has no such folder).
     const shouted = path.join(path.dirname(good), path.basename(good).toUpperCase())
-    await svc.requestRelaunch({ mode: 'swap', stagedPath: shouted, toVersion: '2.0.0' })
-    fs.rmSync(path.join(state, 'lock'), { recursive: true })
+    if (fs.existsSync(shouted)) {
+      await svc.requestRelaunch({
+        mode: 'swap',
+        stagedPath: shouted,
+        toVersion: '2.0.0',
+        source: 'release'
+      })
+      fs.rmSync(path.join(state, 'lock'), { recursive: true })
+    }
     const second = createRelaunchService({
       platform: 'darwin',
       packaged: true,
@@ -191,13 +217,165 @@ describe('requestRelaunch', () => {
         return { pid: undefined, failed: new Promise(() => {}) }
       }
     })
-    await second.requestRelaunch({ mode: 'swap', stagedPath: good, toVersion: '2.0.0' })
+    await second.requestRelaunch({
+      mode: 'swap',
+      stagedPath: good,
+      toVersion: '2.0.0',
+      source: 'release'
+    })
     const lock = readLock(state)!
     const job = parseJob(
       JSON.parse(fs.readFileSync(jobFiles(state, lock.owner!.token).json, 'utf8'))
     )!
     expect(job.stagedPath).toBe(good)
     expect(job.backupPath).toBe(backupPathFor(install, '1.0.0', lock.owner!.token, 'darwin'))
+  })
+
+  describe('swap hardening', () => {
+    const token = 'abcdef0123456789abcdef0123456789'
+    const swap = (
+      stagedPath: string,
+      toVersion: string,
+      source: 'release' | 'rebuild' = 'release'
+    ): { mode: 'swap'; stagedPath: string; toVersion: string; source: 'release' | 'rebuild' } => ({
+      mode: 'swap',
+      stagedPath,
+      toVersion,
+      source
+    })
+
+    it.each(['old', 'failed', 'extract'] as const)(
+      'refuses a %s sibling: only a staged (update) name is swapped in',
+      async (kind) => {
+        const { svc, confirmQuit } = service()
+        const dir = makeFakeApp(
+          siblingPath(install, kind, '2.0.0', token, 'darwin'),
+          '2.0.0',
+          'healthy'
+        )
+        await expect(svc.requestRelaunch(swap(dir, '2.0.0'))).rejects.toThrow(/beside the install/)
+        expect(confirmQuit).not.toHaveBeenCalled()
+        expect(readLock(state)).toBeNull()
+      }
+    )
+
+    it('refuses a staged build whose own marker is another version, or none', async () => {
+      const { svc } = service()
+      const other = makeFakeApp(
+        siblingPath(install, 'update', '2.0.0', token, 'darwin'),
+        '2.0.0',
+        'healthy',
+        { markerVersion: '2.0.1' }
+      )
+      await expect(svc.requestRelaunch(swap(other, '2.0.0'))).rejects.toThrow(
+        /is 2\.0\.1, not 2\.0\.0/
+      )
+      const unversioned = makeFakeApp(
+        siblingPath(install, 'update', '3.0.0', token, 'darwin'),
+        '3.0.0',
+        'healthy',
+        { markerVersion: null }
+      )
+      await expect(svc.requestRelaunch(swap(unversioned, '3.0.0'))).rejects.toThrow(
+        /unknown version/
+      )
+      const unmarked = makeFakeApp(
+        siblingPath(install, 'update', '4.0.0', token, 'darwin'),
+        '4.0.0',
+        'healthy',
+        { marker: false }
+      )
+      await expect(svc.requestRelaunch(swap(unmarked, '4.0.0'))).rejects.toThrow(
+        /no ClaudeUI install marker/
+      )
+      await expect(
+        svc.requestRelaunch(swap(siblingPath(install, 'update', '5.0.0', token, 'darwin'), '5.0.0'))
+      ).rejects.toThrow(/missing/)
+      expect(readLock(state)).toBeNull()
+    })
+
+    it.skipIf(process.platform === 'win32')('refuses a staged name that is a symlink', async () => {
+      const { svc } = service()
+      const target = makeFakeApp(path.join(root, 'elsewhere', 'ClaudeUI.app'), '2.0.0', 'healthy')
+      const link = siblingPath(install, 'update', '2.0.0', token, 'darwin')
+      fs.symlinkSync(target, link)
+      await expect(svc.requestRelaunch(swap(link, '2.0.0'))).rejects.toThrow(/missing/)
+    })
+
+    it('a release must be newer than the running version', async () => {
+      const { svc } = service()
+      const same = makeFakeApp(
+        siblingPath(install, 'update', '1.0.0', token, 'darwin'),
+        '1.0.0',
+        'healthy'
+      )
+      await expect(svc.requestRelaunch(swap(same, '1.0.0'))).rejects.toThrow(/not newer/)
+      const older = makeFakeApp(
+        siblingPath(install, 'update', '0.9.0', token, 'darwin'),
+        '0.9.0',
+        'healthy'
+      )
+      await expect(svc.requestRelaunch(swap(older, '0.9.0'))).rejects.toThrow(/not newer/)
+    })
+
+    it('a rebuild may be the same version (or older): the user built it on purpose', async () => {
+      const { svc, confirmQuit } = service()
+      const same = makeFakeApp(
+        siblingPath(install, 'update', '1.0.0', token, 'darwin'),
+        '1.0.0',
+        'healthy'
+      )
+      await svc.requestRelaunch(swap(same, '1.0.0', 'rebuild'))
+      expect(confirmQuit).toHaveBeenCalledTimes(1)
+      const lock = readLock(state)!
+      const job = parseJob(
+        JSON.parse(fs.readFileSync(jobFiles(state, lock.owner!.token).json, 'utf8'))
+      )!
+      expect(job).toMatchObject({ mode: 'swap', stagedPath: same, toVersion: '1.0.0' })
+      fs.rmSync(path.join(state, 'lock'), { recursive: true })
+      const older = makeFakeApp(
+        siblingPath(install, 'update', '0.9.0', token, 'darwin'),
+        '0.9.0',
+        'healthy'
+      )
+      await service().svc.requestRelaunch(swap(older, '0.9.0', 'rebuild'))
+    })
+
+    it('refuses a swap without a source', async () => {
+      const { svc } = service()
+      const good = makeFakeApp(
+        siblingPath(install, 'update', '2.0.0', token, 'darwin'),
+        '2.0.0',
+        'healthy'
+      )
+      await expect(
+        svc.requestRelaunch({ mode: 'swap', stagedPath: good, toVersion: '2.0.0' } as never)
+      ).rejects.toThrow(/where its build came from/)
+    })
+  })
+
+  it('busy (a rebuild running) refuses every relaunch, and says why', async () => {
+    let busy: string | null = 'A rebuild is running; wait for it or cancel it'
+    const { svc, confirmQuit } = service({ busy: () => busy })
+    expect(svc.availability()).toEqual({ available: false, reason: busy })
+    expect(svc.eligible()).toEqual({ available: true })
+    await expect(svc.requestRelaunch({ mode: 'relaunch' })).rejects.toThrow(/rebuild is running/)
+    expect(confirmQuit).not.toHaveBeenCalled()
+    expect(readLock(state)).toBeNull()
+    busy = null
+    await svc.requestRelaunch({ mode: 'relaunch' })
+    expect(confirmQuit).toHaveBeenCalledTimes(1)
+  })
+
+  it('relaunchInProgress: false at rest, true while one is in flight or another holds the lock', async () => {
+    const { svc } = service()
+    expect(svc.relaunchInProgress()).toBe(false)
+    await svc.requestRelaunch({ mode: 'relaunch' })
+    expect(svc.relaunchInProgress()).toBe(true)
+    fs.rmSync(path.join(state, 'lock'), { recursive: true })
+    const other = service().svc
+    takeLock(state, { token: newToken(), pid: 1, at: Date.now() })
+    expect(other.relaunchInProgress()).toBe(true)
   })
 
   it('windowless or unanswered: no restore record, the quit still goes ahead', async () => {

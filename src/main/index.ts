@@ -104,6 +104,7 @@ import {
 import { createRelaunchService } from './services/relaunch/relaunch-service'
 import { whenHealthy } from './services/relaunch/health-gate'
 import { relaunchStateDir, relaunchTokenFromArgv } from './services/relaunch/paths'
+import { desktopAppUpdateHost } from './services/app-update-host'
 import { setSqliteDriver } from '../core/services/sqlite-driver'
 import { verifierHooksEnabled, VERIFIER_HOOKS_SWITCH } from '../shared/verifier-hooks'
 import { betterSqlite3Driver } from '../core/services/sqlite/better-sqlite3-driver'
@@ -733,7 +734,9 @@ app.whenReady().then(() => {
       // A restart keeps the worktrees: confirming here skips the renderer's
       // worktree prompt, which only a user-initiated quit should show.
       confirmQuit: () => quitCoordinator?.confirm(),
-      spawnHelper: spawnDetachedHelper
+      spawnHelper: spawnDetachedHelper,
+      // A rebuild in progress holds every restart off (and a restart, rebuilds).
+      busy: () => desktopAppUpdateHost()?.rebuildBusy() ?? null
     })
   )
   ipcMain.handle('app:restore-state', (_e, record: unknown) => restoreCollector.deliver(record))
@@ -812,7 +815,7 @@ app.whenReady().then(() => {
   // ── Core, BEFORE any window decision (SyncCore phase 4d) ───────────
   // Sessions, canonical state, the remote HTTP+WS server, watchers, seeds. None
   // of it needs a window; `createWindow()` below only attaches to it.
-  core = bootCore({ remoteAccessDisabled })
+  core = bootCore({ remoteAccessDisabled, singleInstance: enforceSingleInstance })
 
   // System resume / unlock (ADR-097 §5 rule 2): refresh timers may have slept
   // through their deadline, and opencode's ChatGPT row must have time left
@@ -889,7 +892,10 @@ app.whenReady().then(() => {
     void whenHealthy({
       windowLoaded,
       remoteStart: core?.remoteStartSettled ?? Promise.resolve('not-started')
-    }).then(() => relaunchService()?.reportHealthy())
+    })
+      .then(() => relaunchService()?.reportHealthy())
+      // After reconciliation: staging leftovers, old failed builds, rebuild output.
+      .then(() => desktopAppUpdateHost()?.bootCleanup())
   }
 
   if (noWindowMode) {

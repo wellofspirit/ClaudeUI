@@ -2221,7 +2221,10 @@ const NOT_GRANTED_AT_CONNECT: Record<string, Capability> = {
   'app-update:check': 'admin',
   'app-update:download': 'admin',
   'app-update:skip': 'admin',
-  'app-update:apply': 'admin'
+  'app-update:apply': 'admin',
+  'app-update:trees': 'admin',
+  'app-update:rebuild': 'admin',
+  'app-update:cancel-rebuild': 'admin'
 }
 
 /** Table keys whose capability is `capability`, or that start with `prefix`. */

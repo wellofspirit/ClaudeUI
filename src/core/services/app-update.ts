@@ -40,8 +40,20 @@
  * running build. `skip(version)` hides that version (and stops its download);
  * a newer one is offered normally. `apply()` needs a staged download.
  *
+ * ## Rebuild (desktop)
+ *
+ * A host that can rebuild ClaudeUI from source (`AppUpdateHost.rebuild`, the
+ * desktop's `services/rebuild/`) lists its own checkouts (`trees()`, no paths)
+ * and builds the one an id names. One rebuild at a time; a pre-check that
+ * refuses throws to the caller and leaves the view as it was. The view's
+ * `rebuild` follows it: `building` (stages, last line), `built` (the version
+ * and commit staged beside the install), `failed` (the reason), or `idle`
+ * after a cancel. `apply('rebuild')` restarts into the built one. In memory
+ * only: after a restart the host's boot sweep removes an unapplied rebuild.
+ *
  * Every change goes to `onChanged` listeners (the `app-update:changed` nudge);
- * download progress at most once a second. The view carries no local path.
+ * download progress and a rebuild's last line at most once a second. The view
+ * carries no local path.
  */
 import * as fs from 'node:fs'
 import * as fsp from 'node:fs/promises'
@@ -56,9 +68,13 @@ import {
   type UpdateAsset
 } from '../../shared/update-manifest'
 import type {
+  AppUpdateApplySource,
   AppUpdateChannelSetting,
   AppUpdateEligibility,
   AppUpdateMode,
+  AppUpdateRebuildProgress,
+  AppUpdateRebuildView,
+  AppUpdateTree,
   AppUpdateView
 } from '../../shared/types/app-update'
 import { hostAppUpdate, type AppUpdateHost } from '../host'
@@ -165,8 +181,17 @@ export interface AppUpdater {
   download(): Promise<void>
   /** Hide `version` until a newer one; stops its download. Throws on a malformed version. */
   skip(version: string): Promise<void>
-  /** Restart into the staged update. Throws unless one is staged and still newer. */
-  apply(): Promise<void>
+  /**
+   * Restart into the staged release (default: throws unless one is staged and
+   * still newer), or into the built rebuild (`'rebuild'`: throws unless one is built).
+   */
+  apply(source?: AppUpdateApplySource): Promise<void>
+  /** The checkouts the host can rebuild (no paths); empty where it cannot rebuild. */
+  trees(): Promise<AppUpdateTree[]>
+  /** Start a rebuild of the tree `treeId` names (resolves once started). Throws with the refusal. */
+  rebuild(treeId: string): Promise<void>
+  /** Stop a running rebuild; a no-op when none runs. */
+  cancelRebuild(): Promise<void>
   /** The view, after asking the host again whether an update can be applied. */
   state(): Promise<AppUpdateView>
   /** The view from memory. */
@@ -174,7 +199,7 @@ export interface AppUpdater {
   /** The app settings changed (from `applySettings`); a no-op before `start()`. */
   settingsChanged(): void
   onChanged(fn: () => void): () => void
-  /** Resolves once no restore, check or download is in flight (tests). */
+  /** Resolves once no restore, check, download or rebuild is in flight (tests). */
   idle(): Promise<void>
 }
 
@@ -306,6 +331,13 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
   let downloading: Promise<void> | null = null
   let downloadAbort: AbortController | null = null
   let lastProgressEmit = 0
+
+  let rebuildState: AppUpdateRebuildView = { phase: 'idle' }
+  let rebuildStarting = false
+  let rebuildGeneration = 0
+  let rebuildPending: Promise<void> | null = null
+  let latestRebuildProgress: AppUpdateRebuildProgress | null = null
+  let lastRebuildEmit = 0
 
   function emit(): void {
     for (const fn of listeners) {
@@ -701,6 +733,121 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       downloadAbort?.abort()
   }
 
+  // ── Rebuild ─────────────────────────────────────────────────────────────────
+
+  function stageKey(p: AppUpdateRebuildProgress | null | undefined): string {
+    return (p?.stages ?? []).map((st) => `${st.label}\u0000${st.state}`).join('\u0001')
+  }
+
+  function onRebuildProgress(progress: AppUpdateRebuildProgress): void {
+    const previous = latestRebuildProgress
+    latestRebuildProgress = progress
+    if (rebuildState.phase !== 'building') return
+    rebuildState = {
+      ...rebuildState,
+      stages: progress.stages.map((st) => ({ ...st })),
+      ...(progress.lastLine !== undefined ? { lastLine: progress.lastLine } : {})
+    }
+    const t = now()
+    if (
+      stageKey(previous) !== stageKey(progress) ||
+      t - lastRebuildEmit >= PROGRESS_EMIT_INTERVAL_MS
+    ) {
+      lastRebuildEmit = t
+      emit()
+    }
+  }
+
+  async function startRebuild(treeId: string): Promise<void> {
+    if (stopped) throw new Error('Updates are stopping')
+    if (typeof treeId !== 'string' || !/^[0-9a-f]{16}$/.test(treeId))
+      throw new Error('Pick a source tree to rebuild')
+    const h = host()
+    if (!h || typeof h.rebuild !== 'function') throw new Error('This build cannot rebuild itself')
+    if (rebuildState.phase === 'building' || rebuildStarting)
+      throw new Error('A rebuild is already running')
+    rebuildStarting = true
+    latestRebuildProgress = null
+    let started: Awaited<ReturnType<NonNullable<AppUpdateHost['rebuild']>>>
+    try {
+      started = await h.rebuild(treeId, onRebuildProgress)
+    } catch (err) {
+      throw new Error(describeError(err, []), { cause: err })
+    } finally {
+      rebuildStarting = false
+    }
+    const generation = ++rebuildGeneration
+    const tree = { ...started.tree }
+    const startedAt = new Date(now()).toISOString()
+    // Progress the host reported while it was starting (the callback wrote it).
+    const early = latestRebuildProgress as AppUpdateRebuildProgress | null
+    rebuildState = {
+      phase: 'building',
+      tree,
+      startedAt,
+      stages: (early?.stages ?? []).map((st) => ({ ...st })),
+      ...(early?.lastLine !== undefined ? { lastLine: early.lastLine } : {})
+    }
+    lastRebuildEmit = now()
+    logger.info(LOG, `rebuilding ${tree.name} (${tree.branch ?? 'detached'} ${tree.commit ?? ''})`)
+    emit()
+    rebuildPending = started.done.then(
+      (built) => {
+        if (generation !== rebuildGeneration) return
+        rebuildState = {
+          phase: 'built',
+          tree,
+          startedAt,
+          stages: (rebuildState.stages ?? []).map((st) => ({
+            ...st,
+            state: 'done' as const
+          })),
+          built: { version: built.version, commit: built.commit }
+        }
+        logger.info(LOG, `rebuilt ${built.version} from ${tree.name}; ready to apply`)
+        emit()
+      },
+      (err: unknown) => {
+        if (generation !== rebuildGeneration) return
+        if ((err as { name?: unknown } | null)?.name === 'RebuildCancelled') {
+          rebuildState = { phase: 'idle' }
+          logger.info(LOG, 'rebuild cancelled')
+        } else {
+          const error = describeError(err, [])
+          rebuildState = {
+            phase: 'failed',
+            tree,
+            startedAt,
+            ...(rebuildState.stages ? { stages: rebuildState.stages } : {}),
+            ...(rebuildState.lastLine !== undefined ? { lastLine: rebuildState.lastLine } : {}),
+            error
+          }
+          logger.warn(LOG, `rebuild failed: ${error}`)
+        }
+        emit()
+      }
+    )
+    void rebuildPending.finally(() => {
+      if (generation === rebuildGeneration) rebuildPending = null
+    })
+  }
+
+  async function cancelRebuild(): Promise<void> {
+    if (rebuildState.phase !== 'building') return
+    const h = host()
+    if (!h || typeof h.cancelRebuild !== 'function') return
+    await h.cancelRebuild()
+  }
+
+  function copyRebuild(r: AppUpdateRebuildView): AppUpdateRebuildView {
+    return {
+      ...r,
+      ...(r.tree ? { tree: { ...r.tree } } : {}),
+      ...(r.stages ? { stages: r.stages.map((st) => ({ ...st })) } : {}),
+      ...(r.built ? { built: { ...r.built } } : {})
+    }
+  }
+
   // ── The view ────────────────────────────────────────────────────────────────
 
   function view(): AppUpdateView {
@@ -722,6 +869,15 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
     // No seam, no state file: not even read.
     const shown = h ? visibleAvailable() : undefined
     const skippedVersion = h ? saved().skippedVersion : undefined
+    const canRebuild = h !== null && typeof h.rebuild === 'function'
+    let rebuildAvailable = false
+    if (canRebuild) {
+      try {
+        rebuildAvailable = h.rebuildAvailable ? h.rebuildAvailable() : true
+      } catch (err) {
+        logger.warn(LOG, 'the update host could not tell whether it can rebuild', err)
+      }
+    }
     return {
       supported: h !== null,
       current,
@@ -751,7 +907,9 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
           }
         : {}),
       ...(skippedVersion ? { skippedVersion } : {}),
-      download: { ...download }
+      download: { ...download },
+      ...(canRebuild ? { rebuild: copyRebuild(rebuildState) } : {}),
+      rebuildAvailable
     }
   }
 
@@ -783,6 +941,11 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       stopped = true
       disarm()
       downloadAbort?.abort()
+      // A rebuild runs in its own process group: it would outlive the quit. The
+      // host also refuses one still in its pre-checks from spawning.
+      const h = host()
+      const stopping = h?.stopRebuild ? h.stopRebuild() : cancelRebuild()
+      stopping.catch((err) => logger.warn(LOG, 'could not stop the rebuild', err))
     },
 
     check,
@@ -818,9 +981,19 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       emit()
     },
 
-    async apply() {
+    async apply(source: AppUpdateApplySource = 'release') {
       const h = host()
       if (!h) throw new Error('This build cannot update itself')
+      if (source === 'rebuild') {
+        if (typeof h.applyRebuild !== 'function' || rebuildState.phase !== 'built')
+          throw new Error('No rebuild is ready to apply')
+        const e = await refreshEligibility()
+        if (!e.ok) throw new Error(e.reason)
+        logger.info(LOG, `applying the rebuild (${rebuildState.built?.version ?? '?'})`)
+        await h.applyRebuild()
+        return
+      }
+      if (source !== 'release') throw new Error(`Unknown update source: ${String(source)}`)
       const staged = saved().staged
       if (download.phase !== 'staged' || !staged || staged.version !== download.version)
         throw new Error('No update is staged to apply')
@@ -832,6 +1005,16 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       logger.info(LOG, `applying ${staged.version}`)
       await h.apply(staged.stagedId, staged.version)
     },
+
+    async trees() {
+      const h = host()
+      if (!h || typeof h.trees !== 'function') return []
+      return h.trees()
+    },
+
+    rebuild: startRebuild,
+
+    cancelRebuild,
 
     async state() {
       if (host()) await refreshEligibility()
@@ -880,7 +1063,7 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
 
     async idle() {
       for (;;) {
-        const pending = restoring ?? checking ?? downloading
+        const pending = restoring ?? checking ?? downloading ?? rebuildPending
         if (!pending) break
         await pending
       }

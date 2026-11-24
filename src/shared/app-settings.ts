@@ -188,6 +188,15 @@ export interface AppSettings {
    * on a click, `off` never checks. Nothing installs or restarts without a click.
    */
   appUpdateMode: AppUpdateMode
+  /**
+   * The ClaudeUI checkout a desktop rebuild lists its worktrees from (an absolute path).
+   * Absent from {@link DEFAULT_SETTINGS}: unset means the build's own `sourcePath` for a
+   * local build, and no rebuild for a release build; the desktop update host owns that rule
+   * (`src/main/services/rebuild/trees.ts`). Host-owned: `config:save-settings` keeps the
+   * value the host already has, because a rebuild runs code from this tree and `config` is a
+   * base remote grant (`saveUiSettings` in `core/ipc/handlers-core.ts`).
+   */
+  appUpdateSourcePath?: string
 }
 
 /**

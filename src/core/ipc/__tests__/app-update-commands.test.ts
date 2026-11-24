@@ -6,8 +6,9 @@
  * (the updater itself is `core/services/__tests__/app-update.test.ts`).
  *
  * What this file guards:
- *  - the capability split: the state read is `config`, the four writes `admin`,
- *    pinned so no edit can relabel one;
+ *  - the capability split: the state read is `config`; the writes and the tree
+ *    list (rebuilds run a tree's build scripts) are `admin`, pinned so no edit
+ *    can relabel one;
  *  - a base remote connection reads the state and is refused every write, an
  *    admin one is served, and a write is audited under its capability;
  *  - arguments, results, and that none carries an `ok` key;
@@ -43,10 +44,31 @@ const VIEW: AppUpdateView = {
   eligibility: { ok: true },
   settings: { channel: 'auto', effectiveChannel: 'stable', mode: 'auto' },
   check: { running: false },
-  download: { phase: 'idle' }
+  download: { phase: 'idle' },
+  rebuild: { phase: 'idle' },
+  rebuildAvailable: true
 }
 
-const WRITES = ['app-update:check', 'app-update:download', 'app-update:skip', 'app-update:apply']
+const TREES = [
+  { id: '0123456789abcdef', name: 'main checkout', branch: 'main', commit: 'abc1234', dirty: 0 }
+]
+
+const WRITES = [
+  'app-update:check',
+  'app-update:download',
+  'app-update:skip',
+  'app-update:apply',
+  'app-update:rebuild',
+  'app-update:cancel-rebuild'
+]
+/** Every admin channel: the writes and the tree list. */
+const ADMIN = [...WRITES, 'app-update:trees']
+
+/** Arguments each channel accepts. */
+const ARGS: Record<string, unknown[]> = {
+  'app-update:skip': [{ version: '1.1.0' }],
+  'app-update:rebuild': [{ treeId: TREES[0].id }]
+}
 
 /** A scriptable updater: the commands only call these. */
 function fakeUpdater(overrides: Partial<AppUpdater> = {}): AppUpdater & { fire: () => void } {
@@ -58,6 +80,9 @@ function fakeUpdater(overrides: Partial<AppUpdater> = {}): AppUpdater & { fire: 
     download: vi.fn(async () => {}),
     skip: vi.fn(async () => {}),
     apply: vi.fn(async () => {}),
+    trees: vi.fn(async () => TREES),
+    rebuild: vi.fn(async () => {}),
+    cancelRebuild: vi.fn(async () => {}),
     state: vi.fn(async () => VIEW),
     view: vi.fn(() => VIEW),
     settingsChanged: vi.fn(),
@@ -88,7 +113,7 @@ function registryOf(updater: AppUpdater = fakeUpdater()): CommandRegistry {
 beforeEach(() => appendAuditLog.mockClear())
 
 describe('capabilities', () => {
-  it('declares the state a `config` query and the four writes `admin` commands, on both transports', () => {
+  it('declares the state a `config` query, the trees an `admin` query and the writes `admin` commands, on both transports', () => {
     const registry = registryOf()
     expect(
       Object.fromEntries(APP_UPDATE_CHANNELS.map((c) => [c, registry.declaration(c)]))
@@ -97,13 +122,19 @@ describe('capabilities', () => {
       'app-update:check': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'app-update:download': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'app-update:skip': expect.objectContaining({ capability: 'admin', kind: 'command' }),
-      'app-update:apply': expect.objectContaining({ capability: 'admin', kind: 'command' })
+      'app-update:apply': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'app-update:trees': expect.objectContaining({ capability: 'admin', kind: 'query' }),
+      'app-update:rebuild': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'app-update:cancel-rebuild': expect.objectContaining({
+        capability: 'admin',
+        kind: 'command'
+      })
     })
     expect(registry.channels('remote')).toEqual([...APP_UPDATE_CHANNELS].sort())
     expect(registry.channels('desktop')).toEqual([...APP_UPDATE_CHANNELS].sort())
   })
 
-  it.each(WRITES)('pins %s at `admin`: registering it as `config` or `chat` throws', (channel) => {
+  it.each(ADMIN)('pins %s at `admin`: registering it as `config` or `chat` throws', (channel) => {
     expect(PINNED_CAPABILITIES[channel]).toBe('admin')
     const cmd = appUpdateCommands({ updater: fakeUpdater() }).find((c) => c.channel === channel)!
     for (const capability of ['chat', 'config'] as const) {
@@ -113,20 +144,23 @@ describe('capabilities', () => {
     }
   })
 
-  it('lets a base remote connection read the state and refuses it every write', async () => {
+  it('lets a base remote connection read the state and refuses it every admin channel', async () => {
     const updater = fakeUpdater()
     const registry = registryOf(updater)
     const base = makeRemoteConnection('none', null, AUTH_OFF_GRANTS)
     await expect(registry.dispatch('app-update:state', 'remote', [], base)).resolves.toEqual(VIEW)
-    for (const channel of WRITES) {
-      await expect(
-        registry.dispatch(channel, 'remote', [{ version: '1.1.0' }], base)
-      ).rejects.toThrow(/Permission denied/)
+    for (const channel of ADMIN) {
+      await expect(registry.dispatch(channel, 'remote', ARGS[channel] ?? [], base)).rejects.toThrow(
+        /Permission denied/
+      )
     }
     expect(updater.check).not.toHaveBeenCalled()
     expect(updater.download).not.toHaveBeenCalled()
     expect(updater.skip).not.toHaveBeenCalled()
     expect(updater.apply).not.toHaveBeenCalled()
+    expect(updater.trees).not.toHaveBeenCalled()
+    expect(updater.rebuild).not.toHaveBeenCalled()
+    expect(updater.cancelRebuild).not.toHaveBeenCalled()
   })
 
   it('serves an admin connection, and audits the write under its capability', async () => {
@@ -140,6 +174,13 @@ describe('capabilities', () => {
     expect(appendAuditLog).toHaveBeenCalledWith(
       expect.objectContaining({ channel: 'app-update:apply', capability: 'admin' })
     )
+    await expect(
+      registry.dispatch('app-update:rebuild', 'remote', ARGS['app-update:rebuild'], admin)
+    ).resolves.toEqual(VIEW)
+    expect(appendAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'app-update:rebuild', capability: 'admin' })
+    )
+    await expect(registry.dispatch('app-update:trees', 'remote', [], admin)).resolves.toEqual(TREES)
   })
 })
 
@@ -159,6 +200,45 @@ describe('results', () => {
     expect(updater.download).toHaveBeenCalledTimes(1)
     await expect(call(registry, 'app-update:skip', [{ version: '1.1.0' }])).resolves.toEqual(VIEW)
     expect(updater.skip).toHaveBeenCalledWith('1.1.0')
+  })
+
+  it('apply takes a source: none (or a JSON null) is the release, `rebuild` the rebuild', async () => {
+    const updater = fakeUpdater()
+    const registry = registryOf(updater)
+    for (const args of [[], [null], [{}], [{ source: null }], [{ source: 'release' }]]) {
+      await expect(call(registry, 'app-update:apply', args)).resolves.toEqual({ accepted: true })
+    }
+    expect(vi.mocked(updater.apply).mock.calls.map(([source]) => source)).toEqual(
+      Array(5).fill('release')
+    )
+    await call(registry, 'app-update:apply', [{ source: 'rebuild' }])
+    expect(updater.apply).toHaveBeenLastCalledWith('rebuild')
+    await expect(call(registry, 'app-update:apply', [{ source: 'elsewhere' }])).rejects.toThrow(
+      /"release" or "rebuild"/
+    )
+  })
+
+  it('answers the tree list as the updater gives it, and the view after rebuild and cancel', async () => {
+    const updater = fakeUpdater()
+    const registry = registryOf(updater)
+    await expect(call(registry, 'app-update:trees')).resolves.toEqual(TREES)
+    await expect(call(registry, 'app-update:rebuild', [{ treeId: TREES[0].id }])).resolves.toEqual(
+      VIEW
+    )
+    expect(updater.rebuild).toHaveBeenCalledWith(TREES[0].id)
+    await expect(call(registry, 'app-update:cancel-rebuild')).resolves.toEqual(VIEW)
+    expect(updater.cancelRebuild).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a rebuild without a tree id; a path is just an id the updater will not find', async () => {
+    const updater = fakeUpdater()
+    const registry = registryOf(updater)
+    for (const args of [[], [null], [{}], [{ treeId: 7 }], [{ treeId: '' }]]) {
+      await expect(call(registry, 'app-update:rebuild', args)).rejects.toThrow(
+        /tree id is required/
+      )
+    }
+    expect(updater.rebuild).not.toHaveBeenCalled()
   })
 
   it('refuses a skip without a version string', async () => {
@@ -188,8 +268,10 @@ describe('results', () => {
   it('never carries an `ok` key (the transports would take it for their envelope)', async () => {
     const registry = registryOf()
     for (const channel of APP_UPDATE_CHANNELS) {
-      const result = await call(registry, channel, [{ version: '1.1.0' }])
+      const result = await call(registry, channel, ARGS[channel] ?? [])
       expect(Object.keys(result as object), channel).not.toContain('ok')
+      if (Array.isArray(result))
+        for (const item of result) expect(Object.keys(item), channel).not.toContain('ok')
     }
   })
 })

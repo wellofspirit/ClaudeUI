@@ -54,9 +54,63 @@ export interface AppUpdateView {
     total?: number
     error?: string
   }
+  /** A local rebuild from source (desktop hosts that can rebuild); absent where none can run. */
+  rebuild?: AppUpdateRebuildView
+  /** The host can rebuild ClaudeUI from a source checkout it knows (no tree list needed to tell). */
+  rebuildAvailable: boolean
 }
+
+/** Where to restart from: the staged release (default) or the built rebuild. */
+export type AppUpdateApplySource = 'release' | 'rebuild'
 
 /** `app-update:apply`: the host accepted the restart (an error is thrown otherwise). */
 export interface AppUpdateApplyResult {
   accepted: true
+}
+
+// ── Local rebuild ─────────────────────────────────────────────────────────────
+
+export type AppUpdateRebuildPhase = 'idle' | 'building' | 'built' | 'failed'
+
+/** A ClaudeUI checkout or worktree the host can rebuild, as every client sees it (no path). */
+export interface AppUpdateTreeSummary {
+  /** The worktree's folder name, or "main checkout" for the repository's main worktree. */
+  name: string
+  /** Null when HEAD is detached. */
+  branch: string | null
+  /** Short commit of HEAD; null when git could not tell. */
+  commit: string | null
+  /** Uncommitted changes (`git status --porcelain` lines, untracked included). */
+  dirty: number
+}
+
+/** `app-update:trees`: one entry per tree. `id` is what `app-update:rebuild` takes. */
+export interface AppUpdateTree extends AppUpdateTreeSummary {
+  id: string
+}
+
+export interface AppUpdateRebuildStage {
+  /** As `scripts/build.mjs` prints it (`[i/N] <label>`); parallel members joined with ` ‖ `. */
+  label: string
+  state: 'done' | 'running' | 'pending'
+  elapsedMs?: number
+}
+
+/** What a running rebuild reports as it goes (host → service). */
+export interface AppUpdateRebuildProgress {
+  stages: AppUpdateRebuildStage[]
+  /** The build's last output line, local paths replaced. */
+  lastLine?: string
+}
+
+export interface AppUpdateRebuildView {
+  phase: AppUpdateRebuildPhase
+  tree?: AppUpdateTreeSummary
+  stages?: AppUpdateRebuildStage[]
+  lastLine?: string
+  /** ISO time the build started. */
+  startedAt?: string
+  /** `built`: the version and commit the staged rebuild carries. */
+  built?: { version: string; commit: string | null }
+  error?: string
 }

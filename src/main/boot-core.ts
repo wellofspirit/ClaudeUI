@@ -54,7 +54,9 @@ import {
   setHostPicker,
   setHostRelaunch
 } from '../core/host'
-import { desktopHostRelaunch } from './services/relaunch'
+import { desktopHostRelaunch, relaunchService } from './services/relaunch'
+import { createDesktopAppUpdateHost, setDesktopAppUpdateHost } from './services/app-update-host'
+import { appSetting } from '../core/services/app-settings'
 import { routeHttpMockup, serveMockup } from './services/mockup-protocol'
 import type { SessionManager } from '../core/services/session-manager'
 import type { AutomationManager } from '../core/services/automation-manager'
@@ -82,6 +84,11 @@ export interface BootCoreOptions {
    * reconcile, autostart or force-reserve. See index.ts's comment.
    */
   remoteAccessDisabled: boolean
+  /**
+   * Single-instance enforcement is on (`index.ts`): the update host's boot sweep
+   * runs only then (another copy could be running from a folder it would remove).
+   */
+  singleInstance?: boolean
 }
 
 /** The `remote:*` channels, cleared before re-registering (idempotent boot). */
@@ -102,7 +109,7 @@ const HOST_ANCHOR_CHANNELS = [
  * Boot the window-independent half of the app. Call ONCE, from
  * `app.whenReady()`, before deciding whether to make a window.
  */
-export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
+export function bootCore({ remoteAccessDisabled, singleInstance }: BootCoreOptions): CoreBoot {
   // The desktop transport adapter. Installed FIRST, before any registrar runs —
   // a channel registered while no binder is installed would land in the registry
   // with no `ipcMain` handler behind it, and the renderer would see "no handler
@@ -156,10 +163,23 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // Relaunch (`app:relaunch*`): the desktop's relaunch service, configured by
   // index.ts once the quit coordinator exists (unavailable until then).
   setHostRelaunch(desktopHostRelaunch)
-  // ClaudeUI's own updates: no desktop seam yet (staging, the codesign check and
-  // the restart come with the desktop update source), so the update service
-  // reports `supported: false` and makes no request. Stated so the choice reads.
-  setHostAppUpdate(null)
+  // ClaudeUI's own updates: a packaged build stages releases and local rebuilds
+  // beside its install and restarts into them through the relaunch service.
+  // `bun run dev` has no install to update (electron-vite owns it): null, so the
+  // update service reports `supported: false` and makes no request.
+  const appUpdateHost = app.isPackaged
+    ? createDesktopAppUpdateHost({
+        platform: process.platform,
+        arch: process.arch,
+        execPath: process.execPath,
+        appPath: app.getAppPath(),
+        relaunch: relaunchService,
+        sourceSetting: () => appSetting('appUpdateSourcePath'),
+        singleInstance: singleInstance === true
+      })
+    : null
+  setDesktopAppUpdateHost(appUpdateHost)
+  setHostAppUpdate(appUpdateHost)
 
   // The desktop-auth dependencies the `auth:*` / `account:*` / `vendor-auth:*`
   // family needs on BOTH transports. `engineAuthRegistry` is populated by the

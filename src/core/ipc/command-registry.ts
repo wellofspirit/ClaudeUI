@@ -629,7 +629,15 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'app-update:check': 'admin',
   'app-update:download': 'admin',
   'app-update:skip': 'admin',
-  'app-update:apply': 'admin'
+  'app-update:apply': 'admin',
+  // A local rebuild runs a source tree's build scripts on the host with the
+  // user's rights; cancelling it stops that tree's process group. The tree list
+  // names the operator's checkouts, branches and commits and is only read to
+  // pick a rebuild. Relabelled `config`, any authenticated connection could
+  // build and stage whatever a listed tree holds.
+  'app-update:trees': 'admin',
+  'app-update:rebuild': 'admin',
+  'app-update:cancel-rebuild': 'admin'
 }
 
 // ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ import {
   loadVendorConfig
 } from '../services/ui-config'
 import type { UISessionConfig, UISettings } from '../services/ui-config'
+import { appSetting } from '../services/app-settings'
 import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
 import { blobStore, internAttachments } from '../services/blob-store'
@@ -1082,6 +1083,12 @@ export function saveUiSettings(incomingSettings: UISettings): void {
   if (settings.contextPressure !== undefined) {
     settings.contextPressure = normalizeContextPressure(settings.contextPressure)
   }
+  // Host-owned: the checkout a desktop rebuild runs code from. `config` is a base
+  // remote grant, so no client sets it through here: the value the host already
+  // has (settings.json, hand-edited) is kept whatever the client sent.
+  const sourcePath = appSetting('appUpdateSourcePath')
+  if (typeof sourcePath === 'string') settings.appUpdateSourcePath = sourcePath
+  else delete settings.appUpdateSourcePath
   saveSettings(settings)
   // Re-apply proxy/endpoint/model from the engine/vendor stores (source of truth is there). Not an
   // app-settings effect, which is why it is not in `applySettings`.

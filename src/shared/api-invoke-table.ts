@@ -91,7 +91,15 @@ export const API_INVOKES = {
   setMultiAccountEnabled: { channel: 'account:set-enabled', arity: 1, mode: 'invoke' },
   switchAccount: { channel: 'account:switch', arity: 1, mode: 'invoke' },
   getVersionInfo: { channel: 'app:version-info', arity: 0, mode: 'invoke' },
-  applyAppUpdate: { channel: 'app-update:apply', arity: 0, mode: 'invoke' },
+  applyAppUpdate: { channel: 'app-update:apply', arity: 1, mode: 'invoke' },
+  appUpdateTrees: { channel: 'app-update:trees', arity: 0, mode: 'invoke' },
+  rebuildApp: {
+    channel: 'app-update:rebuild',
+    arity: 1,
+    mode: 'invoke',
+    wire: (a) => [{ treeId: a[0] }]
+  },
+  cancelAppRebuild: { channel: 'app-update:cancel-rebuild', arity: 0, mode: 'invoke' },
   checkAppUpdate: { channel: 'app-update:check', arity: 0, mode: 'invoke' },
   downloadAppUpdate: { channel: 'app-update:download', arity: 0, mode: 'invoke' },
   skipAppUpdate: {

@@ -13,6 +13,8 @@
  * stage and fail at the end instead.
  */
 
+import { posix, win32 } from 'node:path'
+
 /**
  * Why a `build*` target must not run while CLAUDEUI_CLI_VENDOR_DIR is set, or
  * null when it may. Packaging always copies `vendor/claude-cli`
@@ -30,6 +32,30 @@ export function vendorOverrideRefusal(target, env) {
     `build.mjs: refusing "${target}" with CLAUDEUI_CLI_VENDOR_DIR set: packaging always reads ` +
     'vendor/claude-cli (electron-builder.yml), not the override. Unset the variable and retry.'
   )
+}
+
+/**
+ * Why `build:stage` must not run as asked, or null when it may (any other
+ * target: null). It is the local rebuild's target (the desktop app runs it in a
+ * source tree, `src/main/services/rebuild/rebuild.ts`): its output must go to
+ * the folder the app names, never the tree's own `dist/` (which the running app
+ * may live in), so CLAUDEUI_BUILD_OUT is required and absolute; and it packages
+ * for the host, which must be one with an install layout (macOS or Windows).
+ *
+ * @param {string} target
+ * @param {NodeJS.ProcessEnv} env
+ * @param {string} [platform]
+ */
+export function stageTargetRefusal(target, env, platform = process.platform) {
+  if (target !== 'build:stage') return null
+  const out = env.CLAUDEUI_BUILD_OUT ?? ''
+  if (out === '')
+    return 'build.mjs: refusing "build:stage" without CLAUDEUI_BUILD_OUT (the absolute folder to build into)'
+  if (!(platform === 'win32' ? win32 : posix).isAbsolute(out))
+    return `build.mjs: refusing "build:stage": CLAUDEUI_BUILD_OUT must be an absolute folder (got "${out}")`
+  if (platform !== 'darwin' && platform !== 'win32')
+    return `build.mjs: refusing "build:stage" on ${platform}: it packages macOS and Windows desktop builds only`
+  return null
 }
 
 /**
@@ -131,6 +157,42 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
         ? stampInstallMarker(winDir, 'win')
         : []
 
+  // Packaging an unpacked desktop build for macOS / Windows, after build-info:
+  // electron-builder, the install marker, and on macOS the signature (ad-hoc
+  // unless MAC_SIGN_IDENTITY) and the quarantine attributes cleared.
+  const macPackage = [
+    {
+      label: 'electron-builder --mac --dir',
+      steps: [
+        [
+          'bunx',
+          ['electron-builder', '--mac', '--dir', ...outArg],
+          { env: { ...childEnv, CSC_IDENTITY_AUTO_DISCOVERY: 'false' } }
+        ]
+      ]
+    },
+    ...stampInstallMarker(macApp, 'mac'),
+    {
+      label: 'codesign',
+      steps: [
+        // argv, not `sh -c`: the app path may come from CLAUDEUI_BUILD_OUT.
+        // No identity = ad-hoc (`-`), as `${MAC_SIGN_IDENTITY:--}` did.
+        ['codesign', ['--force', '--deep', '--sign', childEnv.MAC_SIGN_IDENTITY || '-', macApp]]
+      ]
+    },
+    {
+      label: 'xattr -cr',
+      steps: [['xattr', ['-cr', macApp]]]
+    }
+  ]
+  const winPackage = [
+    {
+      label: 'electron-builder --win --dir',
+      steps: [['bunx', ['electron-builder', '--win', '--dir', ...outArg]]]
+    },
+    ...stampInstallMarker(winDir, 'win')
+  ]
+
   // The CLI and the two harnesses, installed together. The members share no
   // outputs except the harness store's `.staging` dir: the two installs
   // share its stale-entry sweep (`store-writer.ts` cleanStaleEntries, 1 h
@@ -162,41 +224,18 @@ export function targets({ quiet, childEnv, platform = process.platform }) {
     // own step. ensure-cli writes only vendor/claude-cli, which electron-vite
     // never reads, so the two run side by side.
     build: [{ parallel: [...ensureCli(false), ...electronViteBuild] }, ...stampBuildInfo],
-    'build:mac': [
-      ...prepare({ typecheck: true }),
+    'build:mac': [...prepare({ typecheck: true }), ...stampBuildInfo, ...macPackage],
+    'build:win': [...prepare({ typecheck: true }), ...stampBuildInfo, ...winPackage],
+    // The local rebuild (design review ruling 6): what `build:mac` / `build:win`
+    // do for the host, WITHOUT ensure-cli. In a worktree `vendor/claude-cli` is
+    // the main checkout's (a link), and ensure-cli would rewrite it under every
+    // other tree; the app checks instead that the tree's `claudeCliVersion`
+    // matches what `vendor/claude-cli` holds. Output only into
+    // CLAUDEUI_BUILD_OUT (`stageTargetRefusal` makes it required).
+    'build:stage': [
+      { parallel: [...typecheckStages, ...electronViteBuild] },
       ...stampBuildInfo,
-      {
-        label: 'electron-builder --mac --dir',
-        steps: [
-          [
-            'bunx',
-            ['electron-builder', '--mac', '--dir', ...outArg],
-            { env: { ...childEnv, CSC_IDENTITY_AUTO_DISCOVERY: 'false' } }
-          ]
-        ]
-      },
-      ...stampInstallMarker(macApp, 'mac'),
-      {
-        label: 'codesign',
-        steps: [
-          // argv, not `sh -c`: the app path may come from CLAUDEUI_BUILD_OUT.
-          // No identity = ad-hoc (`-`), as `${MAC_SIGN_IDENTITY:--}` did.
-          ['codesign', ['--force', '--deep', '--sign', childEnv.MAC_SIGN_IDENTITY || '-', macApp]]
-        ]
-      },
-      {
-        label: 'xattr -cr',
-        steps: [['xattr', ['-cr', macApp]]]
-      }
-    ],
-    'build:win': [
-      ...prepare({ typecheck: true }),
-      ...stampBuildInfo,
-      {
-        label: 'electron-builder --win --dir',
-        steps: [['bunx', ['electron-builder', '--win', '--dir', ...outArg]]]
-      },
-      ...stampInstallMarker(winDir, 'win')
+      ...(platform === 'darwin' ? macPackage : platform === 'win32' ? winPackage : [])
     ],
     'build:linux': [
       ...prepare({ typecheck: false }),

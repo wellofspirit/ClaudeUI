@@ -32,7 +32,8 @@ export function makeFakeApp(
   dir: string,
   version: string,
   mode: FakeMode,
-  opts: { marker?: boolean } = {}
+  /** `markerVersion`: the version the install marker carries (default `version`; null: none). */
+  opts: { marker?: boolean; markerVersion?: string | null } = {}
 ): string {
   const res = path.join(dir, 'Contents', 'Resources')
   fs.mkdirSync(path.join(dir, 'Contents', 'MacOS'), { recursive: true })
@@ -45,7 +46,13 @@ export function makeFakeApp(
   if (opts.marker !== false)
     fs.writeFileSync(
       path.join(res, 'claudeui-install.json'),
-      JSON.stringify({ schema: 1, product: INSTALL_MARKER_PRODUCT, kind: 'desktop', entries: [] })
+      JSON.stringify({
+        schema: 1,
+        product: INSTALL_MARKER_PRODUCT,
+        kind: 'desktop',
+        entries: [],
+        ...(opts.markerVersion === null ? {} : { version: opts.markerVersion ?? version })
+      })
     )
   return dir
 }
