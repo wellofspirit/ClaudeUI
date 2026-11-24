@@ -22,6 +22,7 @@ import type { WorktreeInfo } from '../../shared/types'
 import { expandHome } from './additional-directories'
 import { withinOrEqual } from './session-tools'
 import { currentWorkdir } from './session-workdir'
+import { realOrResolved } from './worktree-root'
 
 /** Largest input image a job reads. */
 export const MEDIA_INPUT_MAX_BYTES = 20 * 1024 * 1024
@@ -103,7 +104,13 @@ function checkOutput(
   if (!isInsideMediaRoots(ctx, file)) {
     return `The path ${file} is not inside your working directory or the user's additional directories.`
   }
-  if (agentGiven && isAgentControlTarget(file, mediaRoots(ctx).workdir)) {
+  // Canonical spellings (8.3 names expanded, links resolved up to the nearest existing ancestor):
+  // the matcher treats an 8.3 component as a possible alias of a control folder, so a short-named
+  // temp or profile path (`C:\Users\RUNNER~1\...`) would otherwise read as agent configuration.
+  if (
+    agentGiven &&
+    isAgentControlTarget(realOrResolved(file), realOrResolved(mediaRoots(ctx).workdir))
+  ) {
     return `The path ${file} is an agent configuration location; choose another path.`
   }
   let existing: fs.Stats | null = null

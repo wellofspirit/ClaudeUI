@@ -61,7 +61,7 @@ function addRow(over: Partial<MediaJobRow> & { id: string }): ActiveMediaJob {
 }
 
 beforeEach(() => {
-  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'media-files-')))
+  root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'media-files-')))
   cwd = path.join(root, 'work')
   outside = path.join(root, 'outside')
   fs.mkdirSync(cwd)

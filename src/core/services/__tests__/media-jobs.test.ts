@@ -73,7 +73,7 @@ let pending: Pending[]
 let ids: number
 
 beforeEach(() => {
-  dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'media-jobs-')))
+  dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'media-jobs-')))
   cwd = path.join(dir, 'work')
   fs.mkdirSync(cwd)
   ledger = fakeLedger()
