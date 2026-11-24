@@ -165,6 +165,17 @@ export interface ClaudeEngineConfig {
    */
   privacyEmailCheck?: boolean
   /**
+   * Whether a Stop (the composer's Stop, Esc) on a Claude session ends only the
+   * turn and leaves running background agents and workflows alone. ClaudeUI's
+   * default is ON: absent means true. When on, the spawn declares cli.js's
+   * `perTaskStopAffordance` initialize capability (ClaudeUI renders a per-task
+   * Stop wired to `stop_task`); off, nothing is declared and cli.js's own
+   * default stands: an interrupt also kills every running background task
+   * (docs/protocol-cc/11-cancellation.md). cli.js binds the capability for the
+   * process's life, so a change applies on the next spawn.
+   */
+  stopKeepsBackgroundAgents?: boolean
+  /**
    * UI memory, not a setting: the sandbox's allowed-domain list as it was when "restrict network"
    * was last turned off. The shared settings file holds no list while the restriction is off;
    * the Claude page shows this one dimmed and sends it when the restriction is turned on again.

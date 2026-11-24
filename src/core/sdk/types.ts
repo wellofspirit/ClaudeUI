@@ -779,6 +779,15 @@ export interface QueryOptions {
    * consumers don't expect the extra line type.
    */
   enableAuthStatus?: boolean
+  /**
+   * Declare cli.js's `perTaskStopAffordance` initialize capability: this
+   * consumer renders a per-task Stop wired to the `stop_task` control request,
+   * so an `interrupt` on this (open-input) session ends only the turn and
+   * spares running background agents and workflows. Absent, cli.js fails
+   * closed: an interrupt also kills them. Bound for the process's life
+   * (first-attached-client-wins); docs/protocol-cc/11-cancellation.md.
+   */
+  perTaskStopAffordance?: boolean
   /** Override the default child_process.spawn with a custom launcher. */
   spawnClaudeCodeProcess?: SpawnClaudeCodeProcess
 

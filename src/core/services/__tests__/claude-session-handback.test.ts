@@ -633,6 +633,39 @@ describe('ClaudeSession — a hand-back that will start an extra turn marks the 
     await done
   })
 
+  it('after a Stop, the stopped turn’s teardown error stays hidden but an error ending a turn cli.js starts by itself is shown', async () => {
+    const ctl = controllableHandle()
+    mockQuery.mockImplementation(() => ctl.handle)
+    const { win, sent } = makeWin()
+    const session = new ClaudeSession('rid-stop-wake', win, '/tmp/proj', {})
+    liveSessions.push(session)
+    const done = session.run('go')
+    await vi.waitFor(() => expect(mockQuery).toHaveBeenCalled())
+    const errors = (): unknown[] => sent.filter(([c]) => c === 'session:error')
+
+    ctl.push(init(), requesting(), mainText('working'))
+    await vi.waitFor(() => expect(session.status.state).toBe('running'))
+    await session.interrupt()
+    // The stopped turn tears down with an error result: not a real failure.
+    ctl.push(errorResult())
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(1))
+    expect(errors()).toHaveLength(0)
+
+    // A background agent the Stop spared finishes; cli.js continues by itself,
+    // and that turn fails: the user must see it.
+    ctl.push(
+      ended({ summary: 'done' }),
+      init(),
+      requesting(),
+      mainText('continuing'),
+      errorResult()
+    )
+    await vi.waitFor(() => expect(results(sent)).toHaveLength(2))
+    expect(errors()).toHaveLength(1)
+    ctl.end()
+    await done
+  })
+
   it('L4: a subagent’s round start does not flip an idle session', async () => {
     const ctl = controllableHandle()
     mockQuery.mockImplementation(() => ctl.handle)

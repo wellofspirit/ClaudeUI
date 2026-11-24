@@ -364,6 +364,9 @@ export function query(input: QueryInput): QueryHandle {
     // the extra stream type.
     initPayload.enableAuthStatus = true
   }
+  // Declared only when asked for: absence is cli.js's fail-closed default (an
+  // interrupt also kills running background agents), never `false` on the wire.
+  if (options.perTaskStopAffordance) initPayload.perTaskStopAffordance = true
 
   const sp = options.systemPrompt
   if (typeof sp === 'string') {
