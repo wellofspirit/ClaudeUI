@@ -5,7 +5,7 @@
  *
  * - the newest result for this install is what `app:last-relaunch` reports
  *   ({@link lastResultFor}, read per query so a result the helper writes after
- *   this boot's health record is seen);
+ *   this boot's health record is seen), with the job's builds and source;
  * - a job without a result whose lock is no longer live was abandoned (its
  *   helper died), and so is one whose helper was `interrupted` after the swap:
  *   when the running version is its `toVersion` the swap landed, so it is
@@ -68,12 +68,23 @@ export function jobsFor(stateDir: string, installKey: string): JobEntry[] {
   return out
 }
 
-/** The newest result for this install, or null. */
+/**
+ * The newest result for this install, or null, with what only the job knows
+ * merged in (the builds and the swap's source: the helper's result carries
+ * neither). A field the result itself carries wins.
+ */
 export function lastResultFor(stateDir: string, installKey: string): RelaunchResult | null {
-  let newest: RelaunchResult | null = null
-  for (const { result } of jobsFor(stateDir, installKey))
-    if (result && (!newest || result.at > newest.at)) newest = result
-  return newest
+  let newest: JobEntry | null = null
+  for (const entry of jobsFor(stateDir, installKey))
+    if (entry.result && (!newest || entry.result.at > newest.result!.at)) newest = entry
+  if (!newest?.result) return null
+  const { job, result } = newest
+  return {
+    ...(job.fromBuild ? { fromBuild: job.fromBuild } : {}),
+    ...(job.toBuild ? { toBuild: job.toBuild } : {}),
+    ...(job.source ? { source: job.source } : {}),
+    ...result
+  }
 }
 
 export interface ReconcileArgs {

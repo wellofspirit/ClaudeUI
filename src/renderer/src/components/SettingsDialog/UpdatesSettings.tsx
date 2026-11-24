@@ -21,7 +21,7 @@ import type {
   AppUpdateView
 } from '../../../../shared/types/app-update'
 import { updatesStore, useUpdatesStore } from '../Updates/app-update-store'
-import { buildLine } from '../Updates/utils'
+import { buildLine, buildVersion } from '../Updates/utils'
 import { useConnectionHoldsAdmin } from './connection-admin'
 import { Button, Segmented, SettingRow, TextField } from './settings-controls'
 
@@ -53,7 +53,8 @@ function checkedText(view: AppUpdateView): string {
 function versionDescription(view: AppUpdateView): string | undefined {
   if (view.current.kind === 'dev') return 'A development run checks for no updates.'
   if (!view.supported) return 'This build does not update itself: download releases manually.'
-  if (view.current.kind === 'local') return view.current.version ?? undefined
+  // `Local build · e4f1a2c · uncommitted changes`: where the version on the right came from.
+  if (view.current.kind === 'local') return buildLine(view.current)
   return undefined
 }
 
@@ -160,7 +161,7 @@ export function UpdatesSettings({ settings }: { settings: AppSettings }): React.
           data-testid="UpdatesSettings.versionText"
           className="text-[12px] text-text-secondary font-mono tabular-nums whitespace-nowrap"
         >
-          {buildLine(view.current)}
+          {buildVersion(view.current) ?? 'Development run'}
         </span>
       </SettingRow>
       <SettingRow

@@ -9,7 +9,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import type { HarnessInstallProgress } from '../../../../../shared/harness-types'
 import type { AppUpdateView } from '../../../../../shared/types/app-update'
 import { UpdatesButtonView, UpdatesPanelView, type UpdatesPanelViewProps } from '../View'
-import { appSection, harnessUpdateRows, type UpdatesButtonModel } from '../utils'
+import { appSection, footerVersion, harnessUpdateRows, type UpdatesButtonModel } from '../utils'
 import {
   CHECKED,
   TREES,
@@ -53,7 +53,7 @@ function renderPanel(
     harnessRows: rowsOf(),
     installRows: [],
     harnessMode: 'ask',
-    version: view?.current.version ?? null,
+    version: footerVersion(view),
     canRelaunch: true,
     errors: [],
     onCheck: vi.fn(),
@@ -246,6 +246,8 @@ describe('C · local build', () => {
     expect(screen.getByTestId('UpdatesPanel.built')).toHaveTextContent(
       'Built from e4f1a2c, with uncommitted changes.'
     )
+    // The footer names the build by its tag and distance, not the package version.
+    expect(screen.getByTestId('UpdatesPanel.version')).toHaveTextContent('3.9.1-pre.13 +5')
     expect(byId('UpdatesPanel.choice', 'rebuild')).toHaveAttribute('aria-checked', 'true')
     expect(byId('UpdatesPanel.choice', 'rebuild')).toHaveTextContent(
       'Builds the tree as it is. Pull first to get pre.14.'
@@ -253,10 +255,11 @@ describe('C · local build', () => {
     expect(byId('UpdatesPanel.choice', 'release')).toHaveTextContent(
       'Replaces this build with pre.14 (228 MB). Your source is untouched.'
     )
-    // The tree this build came from is picked first.
+    // The tree whose HEAD is the build's commit is picked first: its short
+    // `e4f1a2c` against the build's full SHA, though the main checkout is listed first.
     // A themed menu, not a native select (no-native-select guard).
     const picker = screen.getByTestId('UpdatesPanel.tree')
-    expect(picker).toHaveAttribute('data-value', TREES[0].id)
+    expect(picker).toHaveAttribute('data-value', TREES[1].id)
     expect(screen.getByTestId('UpdatesPanel.tree.trigger')).toHaveTextContent(
       'Worktree: auto-update · 3 uncommitted'
     )
@@ -265,14 +268,28 @@ describe('C · local build', () => {
     expect(byId('UpdatesPanel.choice', 'rebuild')).toHaveAttribute('aria-checked', 'true')
     const options = screen.getAllByTestId('UpdatesPanel.tree.option')
     expect(options.map((o) => o.textContent)).toEqual([
-      'Worktree: auto-update · 3 uncommitted',
-      'Main checkout: pre-release'
+      'Main checkout: pre-release',
+      'Worktree: auto-update · 3 uncommitted'
     ])
-    fireEvent.click(options[1])
-    expect(picker).toHaveAttribute('data-value', TREES[1].id)
+    fireEvent.click(options[0])
+    expect(picker).toHaveAttribute('data-value', TREES[0].id)
     expect(screen.queryByTestId('UpdatesPanel.tree.menu')).toBeNull()
     fireEvent.click(byId('UpdatesPanel.primary', 'rebuild'))
-    expect(props.appActions.onRebuild).toHaveBeenCalledWith(TREES[1].id)
+    expect(props.appActions.onRebuild).toHaveBeenCalledWith(TREES[0].id)
+  })
+
+  it('no tree at the build’s commit: the one the host says the build came from, else the first', () => {
+    const moved = TREES.map((t) => ({
+      ...t,
+      commit: t.name === 'main checkout' ? 'abc1234' : '7777777'
+    }))
+    const { unmount } = renderPanel(localView(), { trees: moved })
+    expect(screen.getByTestId('UpdatesPanel.tree')).toHaveAttribute('data-value', TREES[0].id)
+    unmount()
+    renderPanel(localView(), {
+      trees: moved.map((t) => (t.id === TREES[1].id ? { ...t, buildSource: true as const } : t))
+    })
+    expect(screen.getByTestId('UpdatesPanel.tree')).toHaveAttribute('data-value', TREES[1].id)
   })
 
   it('the primary button follows the radio', () => {
@@ -333,11 +350,21 @@ describe('D · working', () => {
     expect(appRow()).toHaveAttribute('data-state', 'building')
     expect(screen.getByTestId('UpdatesPanel.elapsed')).toHaveTextContent('3:42')
     expect(appRow()).toHaveTextContent('Building from worktree auto-update')
-    expect(screen.getAllByTestId('UpdatesPanel.stage').map((s) => s.dataset.state)).toEqual([
-      'done',
-      'done',
-      'running'
+    // build.mjs's labels, named for people; the label itself stays as the title.
+    expect(
+      screen.getAllByTestId('UpdatesPanel.stage').map((s) => [s.dataset.state, s.textContent])
+    ).toEqual([
+      ['done', 'Typecheck and build0:21'],
+      ['done', 'Stamp the build0:01'],
+      ['running', 'Package0:47'],
+      ['pending', 'Mark the install'],
+      ['pending', 'Sign'],
+      ['pending', 'Clear quarantine']
     ])
+    expect(screen.getAllByTestId('UpdatesPanel.stage')[2]).toHaveAttribute(
+      'title',
+      'electron-builder --mac --dir'
+    )
     expect(screen.getByTestId('UpdatesPanel.lastLine')).toHaveTextContent(
       'packaging platform=win32'
     )

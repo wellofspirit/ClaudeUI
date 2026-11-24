@@ -32,8 +32,11 @@ export function makeFakeApp(
   dir: string,
   version: string,
   mode: FakeMode,
-  /** `markerVersion`: the version the install marker carries (default `version`; null: none). */
-  opts: { marker?: boolean; markerVersion?: string | null } = {}
+  /**
+   * `markerVersion`: the version the install marker carries (default `version`; null: none).
+   * `buildId`: the marker's build id (none by default).
+   */
+  opts: { marker?: boolean; markerVersion?: string | null; buildId?: string } = {}
 ): string {
   const res = path.join(dir, 'Contents', 'Resources')
   fs.mkdirSync(path.join(dir, 'Contents', 'MacOS'), { recursive: true })
@@ -51,7 +54,8 @@ export function makeFakeApp(
         product: INSTALL_MARKER_PRODUCT,
         kind: 'desktop',
         entries: [],
-        ...(opts.markerVersion === null ? {} : { version: opts.markerVersion ?? version })
+        ...(opts.markerVersion === null ? {} : { version: opts.markerVersion ?? version }),
+        ...(opts.buildId ? { buildId: opts.buildId } : {})
       })
     )
   return dir

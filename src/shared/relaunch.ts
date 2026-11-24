@@ -45,6 +45,15 @@ export interface RelaunchResult {
   at: number
   /** Set by boot reconciliation: the helper died, but the swap had landed. */
   recovered?: boolean
+  /**
+   * From the job, not the helper (`lastResultFor` merges them in): the short
+   * commits of the build that ran before and of the one asked for (from the
+   * install markers' build ids), and where a swap's build came from. They name
+   * the builds when the two versions are equal (a rebuild).
+   */
+  fromBuild?: string
+  toBuild?: string
+  source?: 'release' | 'rebuild'
 }
 
 /**
@@ -129,7 +138,16 @@ export function parseRelaunchResult(raw: unknown): RelaunchResult | null {
   }
   if (typeof reason === 'string' && reason !== '') result.reason = reason
   if (recovered === true) result.recovered = true
+  const { fromBuild, toBuild, source } = raw
+  if (isShortCommit(fromBuild)) result.fromBuild = fromBuild
+  if (isShortCommit(toBuild)) result.toBuild = toBuild
+  if (source === 'release' || source === 'rebuild') result.source = source
   return result
+}
+
+/** A short commit as a job or result names a build: 7 to 40 hex characters. */
+export function isShortCommit(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{7,40}$/i.test(value)
 }
 
 /** A health record from disk, or null when it is not one. */

@@ -199,6 +199,23 @@ describe('job files', () => {
     expect(jobShellText(job())).toContain("JOB_MODE='swap'")
   })
 
+  it('the builds and the source round-trip; malformed ones are dropped, not the job', () => {
+    const withFacts = {
+      ...job(),
+      fromBuild: 'abc1234',
+      toBuild: 'def5678',
+      source: 'rebuild' as const
+    }
+    const files = jobFiles(dir, withFacts.token)
+    writeJobFiles(files, withFacts)
+    expect(parseJob(JSON.parse(fs.readFileSync(files.json, 'utf8')))).toEqual(withFacts)
+    // The helper's shell rendering carries none of them.
+    expect(jobShellText(withFacts)).not.toMatch(/abc1234|def5678|rebuild/)
+    expect(parseJob({ ...job(), fromBuild: '../x', toBuild: 7, source: 'elsewhere' })).toEqual(
+      job()
+    )
+  })
+
   it('parseJob refuses what is not a job', () => {
     expect(parseJob({ ...job(), token: 'x' })).toBeNull()
     expect(parseJob({ ...job(), mode: 'rm' })).toBeNull()

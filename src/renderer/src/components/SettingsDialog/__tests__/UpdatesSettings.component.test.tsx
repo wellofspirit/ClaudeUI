@@ -78,13 +78,14 @@ describe('the Updates page', () => {
     ])
   })
 
-  it('reads the release build’s version, and a local build as build, commit and changes', async () => {
+  it('reads the release build’s version, and a local build as tag and distance, with its commit', async () => {
     await mount(appView())
     expect(screen.getByTestId('UpdatesSettings.versionText')).toHaveTextContent('3.9.1-pre.13')
     cleanup()
     updatesStore.resetForTests()
     await mount(localView())
-    expect(screen.getByTestId('UpdatesSettings.versionText')).toHaveTextContent(
+    expect(screen.getByTestId('UpdatesSettings.versionText')).toHaveTextContent('3.9.1-pre.13 +5')
+    expect(screen.getByTestId('UpdatesSettings.version')).toHaveTextContent(
       'Local build · e4f1a2c · uncommitted changes'
     )
   })

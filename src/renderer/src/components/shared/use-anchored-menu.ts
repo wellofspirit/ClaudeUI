@@ -113,12 +113,18 @@ export function useAnchoredMenu({
   anchorRef,
   menuRef,
   placement,
+  matchWidth = false,
   onClose
 }: {
   open: boolean
   anchorRef: React.RefObject<HTMLElement | null>
   menuRef: React.RefObject<HTMLElement | null>
   placement: 'up' | 'down'
+  /**
+   * The menu is exactly the anchor's width rather than at least it: for a menu
+   * inside a narrow popover, which it must not spill out of (its rows wrap).
+   */
+  matchWidth?: boolean
   onClose: () => void
 }): AnchoredMenu | null {
   const [anchored, setAnchored] = useState<AnchoredMenu | null>(null)
@@ -165,13 +171,23 @@ export function useAnchoredMenu({
       if (menu) {
         menu.style.left = `${left}px`
         menu.style.minWidth = `${minWidth}px`
+        if (matchWidth) menu.style.width = `${minWidth}px`
         menu.style.top = inset.top === undefined ? '' : `${inset.top}px`
         menu.style.bottom = inset.bottom === undefined ? '' : `${inset.bottom}px`
         const overflow = menu.getBoundingClientRect().right / f.scale - (f.vw - EDGE)
         if (overflow > 0) left -= overflow
       }
 
-      setAnchored({ style: { position: 'fixed', left, minWidth, ...inset }, side })
+      setAnchored({
+        style: {
+          position: 'fixed',
+          left,
+          minWidth,
+          ...(matchWidth ? { width: minWidth, maxWidth: minWidth } : {}),
+          ...inset
+        },
+        side
+      })
     }
 
     measure()
@@ -200,7 +216,7 @@ export function useAnchoredMenu({
       document.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('resize', measure)
     }
-  }, [open, placement, anchorRef, menuRef])
+  }, [open, placement, matchWidth, anchorRef, menuRef])
 
   return open ? anchored : null
 }

@@ -9,19 +9,25 @@ import {
   appLaterKey,
   appSection,
   buildLine,
+  buildVersion,
   checkedAgo,
+  defaultTree,
+  footerVersion,
   formatElapsed,
   harnessUpdateRows,
   impactLines,
   isLater,
   otherInstallRows,
   rebuildLaterKey,
+  sameCommit,
   shortVersion,
+  stageName,
   treeLabel,
   updatesButtonModel,
   type HarnessRowsInput
 } from '../utils'
 import {
+  BUILD_COMMIT,
   CHECKED,
   TREES,
   appView,
@@ -62,9 +68,82 @@ describe('versions', () => {
 
   it('labels a tree by worktree or main checkout, with its uncommitted count', () => {
     expect(TREES.map(treeLabel)).toEqual([
-      'Worktree: auto-update · 3 uncommitted',
-      'Main checkout: pre-release'
+      'Main checkout: pre-release',
+      'Worktree: auto-update · 3 uncommitted'
     ])
+  })
+
+  it('names what this build is: a release by its version, a local build by tag and distance', () => {
+    expect(buildVersion(appView().current)).toBe('3.9.1-pre.13')
+    expect(buildVersion(localView().current)).toBe('3.9.1-pre.13 +5')
+    const local = localView().current
+    expect(buildVersion({ ...local, ahead: 0 })).toBe('3.9.1-pre.13')
+    // No tag: the package version.
+    expect(buildVersion({ ...local, comparisonVersion: null })).toBe('3.9.0')
+    expect(buildVersion({ kind: 'dev', version: null, comparisonVersion: null })).toBeNull()
+    expect(footerVersion(localView())).toBe('3.9.1-pre.13 +5')
+    expect(
+      footerVersion(appView({ current: { kind: 'dev', version: null, comparisonVersion: null } }))
+    ).toBe('dev')
+  })
+})
+
+describe('the default tree', () => {
+  it('matches commits by prefix either way, case-insensitively, from 7 characters', () => {
+    expect(sameCommit('e4f1a2c', BUILD_COMMIT)).toBe(true)
+    expect(sameCommit(BUILD_COMMIT, 'E4F1A2C')).toBe(true)
+    expect(sameCommit('e4f1a2', BUILD_COMMIT)).toBe(false)
+    expect(sameCommit('e4f1a2d', BUILD_COMMIT)).toBe(false)
+    expect(sameCommit(null, BUILD_COMMIT)).toBe(false)
+  })
+
+  it('the tree at the build’s commit; else the one the host marks as the build’s source; else the first', () => {
+    // The main checkout is listed first; the build's 40-char SHA picks the worktree.
+    expect(defaultTree(TREES, BUILD_COMMIT)?.id).toBe(TREES[1].id)
+    const moved = TREES.map((t) => ({ ...t, commit: t.id === TREES[1].id ? '7777777' : t.commit }))
+    expect(defaultTree(moved, BUILD_COMMIT)?.id).toBe(TREES[0].id)
+    const marked = moved.map((t) =>
+      t.id === TREES[1].id ? { ...t, buildSource: true as const } : t
+    )
+    expect(defaultTree(marked, BUILD_COMMIT)?.id).toBe(TREES[1].id)
+    expect(defaultTree([], BUILD_COMMIT)).toBeNull()
+    expect(defaultTree(null, BUILD_COMMIT)).toBeNull()
+  })
+})
+
+// The labels `scripts/build.mjs` prints for `build:stage` come from this table.
+const buildTargets: any = await import('../../../../../../scripts/lib/build-targets.mjs')
+
+describe('rebuild stage names', () => {
+  const printed = (platform: string): string[] =>
+    buildTargets
+      .targets({ quiet: true, childEnv: { CLAUDEUI_BUILD_OUT: '/tmp/out' }, platform })
+      ['build:stage'].map((stage: { label?: string; parallel?: Array<{ label: string }> }) =>
+        stage.parallel ? stage.parallel.map((m) => m.label).join(' ‖ ') : stage.label
+      )
+
+  it.each([
+    [
+      'darwin',
+      [
+        'Typecheck and build',
+        'Stamp the build',
+        'Package',
+        'Mark the install',
+        'Sign',
+        'Clear quarantine'
+      ]
+    ],
+    ['win32', ['Typecheck and build', 'Stamp the build', 'Package', 'Mark the install']]
+  ])('names every build:stage label on %s', (platform, names) => {
+    expect(printed(platform).map(stageName)).toEqual(names)
+  })
+
+  it('passes an unknown label through', () => {
+    expect(stageName('Stage 7')).toBe('Stage 7')
+    expect(stageName('typecheck:node ‖ ensure-cli ‖ electron-vite build')).toBe(
+      'Typecheck and build'
+    )
   })
 })
 
@@ -143,7 +222,7 @@ describe('appSection', () => {
       kind: 'local',
       localBuild: true,
       from: 'pre.13 +5',
-      commit: 'e4f1a2c',
+      commit: BUILD_COMMIT,
       dirty: true,
       canRebuild: true,
       skipLabel: 'pre.14',

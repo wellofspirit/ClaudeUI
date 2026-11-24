@@ -4,10 +4,12 @@
  * panel must fit a 360 px container at every `uiFontScale` without a
  * horizontal overflow, and on the desktop, at its 344 px, no `from → to` line
  * may truncate (the version pair is the one thing on a row that must read in
- * full). Mockup states A (release), C (local build) and D (working).
+ * full). Mockup states A (release), C (local build) and D (working). And the
+ * tree picker's open menu stays inside the panel, its rows wrapping rather
+ * than cutting off a long worktree name or the uncommitted count.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render } from '@testing-library/react'
 import type { AppUpdateView } from '../../../../../shared/types/app-update'
 import type { HarnessInstallProgress } from '../../../../../shared/harness-types'
 import { UpdatesPanelView, type UpdatesPanelViewProps } from '../View'
@@ -15,10 +17,12 @@ import { appSection, harnessUpdateRows } from '../utils'
 import { CHECKED, TREES, buildingView, harnessView, localView, stagedView } from './fixtures'
 import {
   FONT_SCALES,
+  PROFILE,
   ZoomFrame,
   allByTestId,
   byTestId,
   hasNoHorizontalOverflow,
+  isOneLine,
   rectOf,
   settle
 } from '@test/helpers/mobile-layout'
@@ -180,6 +184,69 @@ describe('on the desktop', () => {
         expect(hasNoHorizontalOverflow(line), line.textContent ?? '').toBe(true)
         expect(insideX(line, panel)).toBe(true)
       }
+    })
+  }
+})
+
+describe('the tree picker', () => {
+  // Real worktree names run long; the uncommitted count must still read.
+  const LONG_TREES = [
+    ...TREES.map((t) => ({ ...t, dirty: 2 })),
+    {
+      id: 'aaaaaaaaaaaaaaaa',
+      name: 'claude-stop-keeps-background-agents-running',
+      branch: 'feat/claude-stop-keeps-background-agents-running',
+      commit: '1111111',
+      dirty: 12
+    }
+  ]
+
+  // The phone drawer as MobileSidebarDrawer draws it: 280 px, at most 85% of the screen.
+  const drawerWidth = (scale: number): number =>
+    Math.min(280, Math.floor((PROFILE.width / scale) * 0.85))
+
+  const cases: Array<[string, boolean, number]> = [
+    ['on the desktop', false, 1],
+    ...FONT_SCALES.map((scale): [string, boolean, number] => [
+      `in the phone drawer at uiFontScale ${scale}`,
+      true,
+      scale
+    ])
+  ]
+
+  for (const [label, narrow, scale] of cases) {
+    it(`${label}: the open menu stays inside the panel, and nothing is cut off`, async () => {
+      const { container } = render(
+        <ZoomFrame scale={scale} width="100%">
+          <div style={{ width: narrow ? undefined : 860 }}>
+            <Footer width={narrow ? drawerWidth(scale) : 240}>
+              <UpdatesPanelView {...props(localView(), [], narrow)} trees={LONG_TREES} />
+            </Footer>
+          </div>
+        </ZoomFrame>
+      )
+      await settle()
+      const panel = byTestId(container, 'UpdatesPanel')
+      const trigger = byTestId(container, 'UpdatesPanel.tree.trigger')
+      expect(hasNoHorizontalOverflow(trigger), 'the trigger').toBe(true)
+      expect(insideX(trigger, panel)).toBe(true)
+      fireEvent.click(trigger)
+      await settle()
+      const menu = byTestId(container, 'UpdatesPanel.tree.menu')
+      expect(insideX(menu, panel), 'the menu stays inside the panel').toBe(true)
+      // As wide as its trigger: aligned to both of its edges.
+      expect(Math.abs(rectOf(menu).left - rectOf(trigger).left)).toBeLessThan(1)
+      expect(Math.abs(rectOf(menu).right - rectOf(trigger).right)).toBeLessThan(1)
+      const options = allByTestId(menu, 'UpdatesPanel.tree.option')
+      expect(options).toHaveLength(LONG_TREES.length)
+      for (const option of options) {
+        expect(hasNoHorizontalOverflow(option), option.textContent ?? '').toBe(true)
+        expect(getComputedStyle(option).textOverflow).not.toBe('ellipsis')
+      }
+      // The long one wraps rather than truncating, and keeps its count.
+      const long = options.find((o) => o.dataset.id === 'aaaaaaaaaaaaaaaa')!
+      expect(long.textContent).toContain('12 uncommitted')
+      expect(isOneLine(long)).toBe(false)
     })
   }
 })

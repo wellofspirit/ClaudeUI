@@ -97,6 +97,8 @@ export interface AppUpdateTreeSummary {
 /** `app-update:trees`: one entry per tree. `id` is what `app-update:rebuild` takes. */
 export interface AppUpdateTree extends AppUpdateTreeSummary {
   id: string
+  /** This tree is the checkout the running local build was built from (its `sourcePath`). */
+  buildSource?: true
 }
 
 export interface AppUpdateRebuildStage {

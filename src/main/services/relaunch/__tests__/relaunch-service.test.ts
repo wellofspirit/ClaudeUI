@@ -341,6 +341,36 @@ describe('requestRelaunch', () => {
       await service().svc.requestRelaunch(swap(older, '0.9.0', 'rebuild'))
     })
 
+    it('the job names both builds and the source, for the notice; a plain relaunch names one', async () => {
+      const { svc } = service()
+      const staged = makeFakeApp(
+        siblingPath(install, 'update', '1.0.0', token, 'darwin'),
+        '1.0.0',
+        'healthy',
+        { buildId: 'DEF5678abcdef@2026-11-25T00:00:00.000Z' }
+      )
+      await svc.requestRelaunch(swap(staged, '1.0.0', 'rebuild'))
+      const readJob = (): RelaunchJob =>
+        parseJob(
+          JSON.parse(fs.readFileSync(jobFiles(state, readLock(state)!.owner!.token).json, 'utf8'))
+        )!
+      // The running install's marker has no build id: this process's own is used.
+      expect(readJob()).toMatchObject({
+        fromBuild: 'abc1234',
+        toBuild: 'def5678',
+        source: 'rebuild'
+      })
+      // The helper's shell rendering stays as it was (the scripts never read these).
+      const sh = fs.readFileSync(jobFiles(state, readLock(state)!.owner!.token).sh, 'utf8')
+      expect(sh).not.toMatch(/BUILD|SOURCE/)
+      fs.rmSync(path.join(state, 'lock'), { recursive: true })
+
+      await service().svc.requestRelaunch({ mode: 'relaunch' })
+      const plain = readJob()
+      expect(plain).toMatchObject({ mode: 'relaunch', fromBuild: 'abc1234', toBuild: 'abc1234' })
+      expect(plain.source).toBeUndefined()
+    })
+
     it('refuses a swap without a source', async () => {
       const { svc } = service()
       const good = makeFakeApp(
@@ -552,6 +582,8 @@ describe('reconcileJobs', () => {
     toVersion?: string
     backup?: boolean
     installKey?: string
+    facts?: Pick<RelaunchJob, 'fromBuild' | 'toBuild' | 'source'>
+    resultExtra?: Record<string, unknown>
   }): { token: string; backup: string } {
     const token = newToken()
     const backup = backupPathFor(install, '0.9.0', token, 'darwin')
@@ -572,7 +604,8 @@ describe('reconcileJobs', () => {
       toVersion: opts.toVersion ?? '1.0.0',
       startedAt: (opts.resultAt ?? NOW) - 1000,
       launch: [],
-      timeouts: DEFAULT_TIMEOUTS
+      timeouts: DEFAULT_TIMEOUTS,
+      ...opts.facts
     }
     fs.mkdirSync(state, { recursive: true })
     writeJobFiles(jobFiles(state, token), job)
@@ -585,7 +618,8 @@ describe('reconcileJobs', () => {
           mode: 'swap',
           fromVersion: '0.9.0',
           toVersion: job.toVersion,
-          at: opts.resultAt ?? NOW
+          at: opts.resultAt ?? NOW,
+          ...opts.resultExtra
         })
       )
     return { token, backup }
@@ -695,6 +729,37 @@ describe('reconcileJobs', () => {
     takeLock(state, { token: j.token, pid: 1, at: NOW - 1000 })
     expect((await run()).recovered).toEqual([])
     expect(fs.existsSync(jobFiles(state, j.token).result)).toBe(false)
+  })
+
+  it('the reported result carries the job’s builds and source; a field the result has wins', async () => {
+    const j = addJob({
+      status: 'updated',
+      toVersion: '0.9.0',
+      facts: { fromBuild: 'abc1234', toBuild: 'def5678', source: 'rebuild' }
+    })
+    expect(lastResultFor(state, key())).toMatchObject({
+      token: j.token,
+      status: 'updated',
+      fromBuild: 'abc1234',
+      toBuild: 'def5678',
+      source: 'rebuild'
+    })
+    const k = addJob({
+      status: 'rolled-back' as never,
+      resultAt: NOW + 1,
+      facts: { fromBuild: 'abc1234', toBuild: 'def5678' },
+      resultExtra: { toBuild: '9999999' }
+    })
+    expect(lastResultFor(state, key())).toMatchObject({
+      token: k.token,
+      fromBuild: 'abc1234',
+      toBuild: '9999999'
+    })
+    // A job without them (an older build wrote it) reports none.
+    addJob({ status: 'ok', resultAt: NOW + 2 })
+    const plain = lastResultFor(state, key())!
+    expect(plain.fromBuild).toBeUndefined()
+    expect(plain.source).toBeUndefined()
   })
 
   it('unlinks job files older than 30 days, and the newest result wins', async () => {

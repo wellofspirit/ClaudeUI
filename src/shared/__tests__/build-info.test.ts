@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildCommitOf,
   buildId,
   comparisonVersion,
   parseBuildInfo,
@@ -103,4 +104,18 @@ describe('buildId', () => {
     expect(buildId({ ...release, git: { ...git, commit: null } })).toBe(
       '3.9.1-pre.14@2026-11-24T10:00:00.000Z'
     ))
+})
+
+describe('buildCommitOf', () => {
+  it('names the short commit a build id leads with, lower case', () => {
+    expect(buildCommitOf('e4f1a2c@2026-11-24T00:00:00.000Z')).toBe('e4f1a2c')
+    expect(buildCommitOf('E4F1A2C9D0@2026-11-24T00:00:00.000Z')).toBe('e4f1a2c')
+  })
+
+  it('names none for a build without git, or no id', () => {
+    expect(buildCommitOf('3.9.0@2026-11-24T00:00:00.000Z')).toBeUndefined()
+    expect(buildCommitOf(null)).toBeUndefined()
+    expect(buildCommitOf(undefined)).toBeUndefined()
+    expect(buildCommitOf('')).toBeUndefined()
+  })
 })

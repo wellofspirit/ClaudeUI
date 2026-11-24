@@ -109,6 +109,16 @@ export function comparisonVersion(info: BuildInfo | DevBuildInfo): string | null
   return tag.startsWith('v') ? tag.slice(1) : tag
 }
 
+/**
+ * The short commit a build id (`buildId`, also in the install marker) names,
+ * or undefined when it names none (a build without git, whose id leads with
+ * its version).
+ */
+export function buildCommitOf(id: string | null | undefined): string | undefined {
+  const head = typeof id === 'string' ? id.split('@')[0] : ''
+  return /^[0-9a-f]{7,40}$/i.test(head) ? head.slice(0, 7).toLowerCase() : undefined
+}
+
 /** Stable id that changes whenever the build does (a remote client reloads on a change). */
 export function buildId(info: BuildInfo): string {
   const who = info.git.commit ? info.git.commit.slice(0, 7) : info.version

@@ -28,8 +28,10 @@ import {
   buildingFrom,
   bytesText,
   checkedAgo,
+  defaultTree,
   formatElapsed,
   impactLines,
+  stageName,
   treeLabel,
   type AppRelease,
   type AppSection,
@@ -647,7 +649,7 @@ function LocalRow({
     rebuildIntent || !release ? 'rebuild' : app.canRebuild ? 'rebuild' : 'release'
   )
   const picked: 'rebuild' | 'release' = choice === 'release' && release ? 'release' : 'rebuild'
-  const preferred = trees?.find((t) => app.commit && t.commit === app.commit) ?? trees?.[0]
+  const preferred = defaultTree(trees, app.commit)
   const [treeId, setTreeId] = useState<string | null>(null)
   const tree = trees?.find((t) => t.id === treeId) ?? preferred ?? null
   const versionWord = release ? (app.skipLabel ?? release.version) : null
@@ -709,7 +711,8 @@ function LocalRow({
                     : [{ value: '', label: trees ? 'No checkout found' : 'Loading…' }]
                 }
                 onChange={setTreeId}
-                triggerClassName="w-full min-w-0 h-6 bg-bg-secondary border border-border rounded-md text-text-primary text-[11px] px-1.5 outline-none focus:border-accent/50 transition-colors"
+                fitTrigger
+                triggerClassName="w-full min-w-0 min-h-6 py-[3px] bg-bg-secondary border border-border rounded-md text-text-primary text-[11px] leading-4 px-1.5 outline-none focus:border-accent/50 transition-colors"
               />
             </div>
           )}
@@ -833,6 +836,7 @@ function BuildingRow({
           {app.stages.map((st) => (
             <div
               key={st.label}
+              title={st.label}
               data-testid="UpdatesPanel.stage"
               data-state={st.state}
               className="flex items-center gap-1.5 min-w-0"
@@ -857,7 +861,7 @@ function BuildingRow({
               <span
                 className={`min-w-0 truncate ${st.state === 'running' ? 'text-text-primary' : 'text-text-secondary'}`}
               >
-                {st.label}
+                {stageName(st.label)}
               </span>
               {st.elapsedMs !== undefined && (
                 <span className="ml-auto shrink-0 font-mono text-text-muted tabular-nums">

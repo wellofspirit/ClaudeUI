@@ -245,16 +245,18 @@ describe('a local build', () => {
     fireEvent.click(button())
     await waitFor(() => expect(calls['app-update:trees']).toHaveLength(1))
     const picker = await screen.findByTestId('UpdatesPanel.tree')
-    await waitFor(() => expect(picker).toHaveAttribute('data-value', TREES[0].id))
+    // The worktree at the build's commit, though the main checkout is listed first.
+    await waitFor(() => expect(picker).toHaveAttribute('data-value', TREES[1].id))
+    expect(screen.getByTestId('UpdatesPanel.version')).toHaveTextContent('3.9.1-pre.13 +5')
     fireEvent.click(screen.getByTestId('UpdatesPanel.tree.trigger'))
     const main = screen
       .getAllByTestId('UpdatesPanel.tree.option')
-      .find((o) => o.dataset.id === TREES[1].id)!
+      .find((o) => o.dataset.id === TREES[0].id)!
     fireEvent.click(main)
     // Picking a tree inside the panel does not close it (the menu lives inside it).
     expect(screen.getByTestId('UpdatesPanel')).toBeInTheDocument()
     fireEvent.click(byId('UpdatesPanel.primary', 'rebuild'))
-    await waitFor(() => expect(calls['app-update:rebuild']).toEqual([[{ treeId: TREES[1].id }]]))
+    await waitFor(() => expect(calls['app-update:rebuild']).toEqual([[{ treeId: TREES[0].id }]]))
   })
 })
 

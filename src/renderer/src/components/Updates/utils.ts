@@ -75,10 +75,25 @@ export function buildLine(current: AppUpdateView['current']): string {
   return parts.join(' · ')
 }
 
-/** The footer's version: the build's own version string, or `dev`. */
+/**
+ * What this build is, as a version: a release's own version; a local build's
+ * base tag (without the `v`) and how far past it, `3.9.1-pre.14 +22`, or its
+ * package version when it has no tag; null for a dev run (each caller says
+ * that its own way). Settings › Updates, the panel's footer and the relaunch
+ * notices all read this one.
+ */
+export function buildVersion(current: AppUpdateView['current']): string | null {
+  if (current.kind === 'dev') return null
+  if (current.kind === 'release') return current.version
+  const base = current.comparisonVersion
+  if (!base) return current.version
+  return current.ahead ? `${base} +${current.ahead}` : base
+}
+
+/** The footer's version: {@link buildVersion}, or `dev`. */
 export function footerVersion(view: AppUpdateView | null): string | null {
   if (!view) return null
-  return view.current.version ?? (view.current.kind === 'dev' ? 'dev' : null)
+  return buildVersion(view.current) ?? (view.current.kind === 'dev' ? 'dev' : null)
 }
 
 // ── The ClaudeUI row ──────────────────────────────────────────────────
@@ -274,6 +289,50 @@ export function treeLabel(tree: AppUpdateTree): string {
       ? `Main checkout: ${tree.branch ?? tree.commit ?? 'detached'}`
       : `Worktree: ${tree.name}`
   return tree.dirty > 0 ? `${head} · ${tree.dirty} uncommitted` : head
+}
+
+/**
+ * Two commits are the same: either is a prefix of the other (a tree's short
+ * HEAD against a build's full SHA), case-insensitively, at 7 characters or more.
+ */
+export function sameCommit(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false
+  const x = a.toLowerCase()
+  const y = b.toLowerCase()
+  if (Math.min(x.length, y.length) < 7) return false
+  return x.startsWith(y) || y.startsWith(x)
+}
+
+/**
+ * The tree a rebuild picks first: the one whose HEAD is the running build's
+ * commit; else the checkout the host says the build came from; else the first.
+ */
+export function defaultTree(
+  trees: readonly AppUpdateTree[] | null | undefined,
+  buildCommit: string | null | undefined
+): AppUpdateTree | null {
+  if (!trees || trees.length === 0) return null
+  return (
+    trees.find((t) => sameCommit(t.commit, buildCommit)) ??
+    trees.find((t) => t.buildSource === true) ??
+    trees[0]
+  )
+}
+
+/**
+ * A rebuild stage as the panel names it. `scripts/build.mjs` prints the
+ * `build:stage` labels of `scripts/lib/build-targets.mjs` (a parallel group's
+ * members joined with ` ‖ `); anything else passes through.
+ */
+export function stageName(label: string): string {
+  if (label.split(' ‖ ').some((member) => member.trim().startsWith('electron-vite')))
+    return 'Typecheck and build'
+  if (label === 'stamp build-info') return 'Stamp the build'
+  if (label.startsWith('electron-builder')) return 'Package'
+  if (label === 'stamp install-marker') return 'Mark the install'
+  if (label === 'codesign') return 'Sign'
+  if (label === 'xattr -cr') return 'Clear quarantine'
+  return label
 }
 
 /** "Building from worktree auto-update", "Building from the main checkout". */

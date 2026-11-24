@@ -239,7 +239,19 @@ export function createDesktopAppUpdateHost(deps: DesktopAppUpdateDeps): DesktopA
     async trees() {
       const repo = sourceRepo()
       if (!rebuilder || !repo || !desktopTarget(deps.platform, deps.arch)) return []
-      return (await listTrees(repo, { exec, log })).map(publicTree)
+      // The checkout this local build came from, so the panel picks it first
+      // when no tree's HEAD is the build's commit any more.
+      const info = buildInfo()
+      const own =
+        info.kind === 'local' &&
+        typeof info.sourcePath === 'string' &&
+        path.isAbsolute(info.sourcePath)
+          ? keyOf(info.sourcePath)
+          : null
+      return (await listTrees(repo, { exec, log })).map((t) => ({
+        ...publicTree(t),
+        ...(own !== null && keyOf(t.path) === own ? { buildSource: true as const } : {})
+      }))
     },
 
     async rebuild(treeId, onProgress) {

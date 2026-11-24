@@ -312,6 +312,36 @@ describe('rebuilds', () => {
     await expect(host().h.trees!()).resolves.toEqual([])
   })
 
+  it('marks the tree a local build came from, by its path, still without the path', async () => {
+    const repo = path.join(root, 'ClaudeUI')
+    const wt = path.join(repo, '.claude', 'worktrees', 'feature')
+    for (const dir of [repo, wt]) {
+      fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true })
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'claudui' }))
+      fs.writeFileSync(path.join(dir, 'scripts', 'build.mjs'), '')
+    }
+    const git: Exec = async (_file, args) =>
+      args.includes('worktree')
+        ? {
+            code: 0,
+            stdout:
+              `worktree ${repo}\nHEAD abcdef1234567\nbranch refs/heads/main\n\n` +
+              `worktree ${wt}\nHEAD 1234567abcdef\nbranch refs/heads/feature\n\n`,
+            stderr: ''
+          }
+        : { code: 0, stdout: '', stderr: '' }
+    const { h } = host({ sourceSetting: () => repo, exec: git, buildInfo: () => local(wt) })
+    const trees = await h.trees!()
+    expect(trees.map((t) => [t.name, t.buildSource])).toEqual([
+      ['main checkout', undefined],
+      ['feature', true]
+    ])
+    expect(JSON.stringify(trees)).not.toContain(root)
+    // A release build marks none.
+    const { h: release } = host({ sourceSetting: () => repo, exec: git })
+    expect((await release.trees!()).some((t) => t.buildSource)).toBe(false)
+  })
+
   it('applyRebuild: nothing built is refused; a built one goes to the relaunch service as a rebuild swap', async () => {
     const { h: idle } = host()
     await expect(idle.applyRebuild!()).rejects.toThrow(/No rebuild is ready/)

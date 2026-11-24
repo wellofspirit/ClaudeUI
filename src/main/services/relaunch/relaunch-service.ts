@@ -24,6 +24,7 @@
 import * as fs from 'node:fs'
 import { compareVersions } from '../../../core/harness/store'
 import { logger } from '../../../core/services/logger'
+import { buildCommitOf } from '../../../shared/build-info'
 import type { RelaunchAvailability, RelaunchResult, RestoreRecord } from '../../../shared/relaunch'
 import { checkEligibility, readInstallMarker, type EligibilityProbes } from './eligibility'
 import { stagedNamePattern } from './delete-gate'
@@ -203,6 +204,11 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     const fromVersion = deps.runningVersion
     let toVersion = fromVersion
     let stagedPath = ''
+    // The builds, for the notice when the versions are equal (a rebuild): the
+    // install's marker, else this process's own build id.
+    const fromBuild =
+      buildCommitOf(readInstallMarker(install, platform)?.buildId) ?? buildCommitOf(deps.buildId)
+    let toBuild = fromBuild
     if (request.mode === 'swap') {
       stagedPath = p.resolve(request.stagedPath)
       toVersion = request.toVersion
@@ -229,6 +235,7 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
         throw new Error(
           `The staged build is ${marker.version ?? 'of an unknown version'}, not ${toVersion}`
         )
+      toBuild = buildCommitOf(marker.buildId)
       if (request.source !== 'release' && request.source !== 'rebuild')
         throw new Error('A swap names where its build came from')
       if (request.source === 'release' && compareVersions(toVersion, fromVersion) <= 0)
@@ -270,7 +277,10 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
         args: relaunchArgs(deps.argv ?? []),
         env: deps.env ?? {}
       }),
-      timeouts: DEFAULT_TIMEOUTS
+      timeouts: DEFAULT_TIMEOUTS,
+      ...(fromBuild ? { fromBuild } : {}),
+      ...(toBuild ? { toBuild } : {}),
+      ...(request.mode === 'swap' ? { source: request.source } : {})
     }
 
     const giveUp = async (err: Error, helperPid?: number): Promise<never> => {

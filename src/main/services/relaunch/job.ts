@@ -11,7 +11,7 @@
 
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import type { RelaunchMode } from '../../../shared/relaunch'
+import { isShortCommit, type RelaunchMode } from '../../../shared/relaunch'
 import type { RelaunchPlatform } from './paths'
 
 export interface RelaunchTimeouts {
@@ -60,15 +60,28 @@ export interface RelaunchJob {
   /** The launch argv; `{app}` is replaced by the folder being launched. */
   launch: string[]
   timeouts: RelaunchTimeouts
+  /**
+   * For the app only (the helper scripts never read them): the short commits
+   * of the running build and of the one asked for, from the install markers'
+   * build ids, and where a swap's build came from. `lastResultFor` merges them
+   * into the result the helper writes, so the notice can name the builds when
+   * the two versions are equal.
+   */
+  fromBuild?: string
+  toBuild?: string
+  source?: 'release' | 'rebuild'
 }
 
 /**
- * The variables a macOS relaunch carries over: `open` starts the app with the
- * login session's environment, not the helper's, so a ClaudeUI started with
- * another profile (HOME, CLAUDE_CONFIG_DIR), a mode switch or a proxy would come
- * back without it. An allowlist, because the job files sit on disk: nothing
- * credential-shaped beyond what a proxy URL itself carries. Windows needs none
- * (`Start-Process` inherits the helper's environment, which is the app's).
+ * The variables a macOS relaunch carries over with `open --env`. What `open -n`
+ * hands the new app differs by macOS version: recent ones (verified on 27.2)
+ * pass the caller's whole environment, older ones start the app with the login
+ * session's. This allowlist is what guarantees, on every version, that a
+ * ClaudeUI started with another profile (HOME, CLAUDE_CONFIG_DIR), a mode
+ * switch or a proxy comes back with it. An allowlist, because the job files sit
+ * on disk: nothing credential-shaped beyond what a proxy URL itself carries.
+ * Windows needs none (`Start-Process` inherits the helper's environment, which
+ * is the app's).
  */
 export const RELAUNCH_ENV_KEYS: readonly string[] = [
   'HOME',
@@ -262,7 +275,15 @@ export function parseJob(raw: unknown): RelaunchJob | null {
     if (typeof t[k] !== 'number') return null
     timeouts[k] = t[k] as number
   }
+  const source: RelaunchJob['source'] =
+    raw.source === 'release' || raw.source === 'rebuild' ? raw.source : undefined
+  const facts: Pick<RelaunchJob, 'fromBuild' | 'toBuild' | 'source'> = {
+    ...(isShortCommit(raw.fromBuild) ? { fromBuild: raw.fromBuild } : {}),
+    ...(isShortCommit(raw.toBuild) ? { toBuild: raw.toBuild } : {}),
+    ...(source ? { source } : {})
+  }
   return {
+    ...facts,
     schema: 1,
     token,
     pid: raw.pid,
