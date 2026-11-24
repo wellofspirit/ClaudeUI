@@ -19,6 +19,7 @@ import { totalCosts } from '../../shared/cost-rule'
 import { piCostInputs, piCostReport, resolvePiCosts, type PiCostInputs } from './message-cost'
 import { peekPiModelContextWindow } from './model-discovery'
 import type { PiSessionEntry } from './pi-protocol'
+import { EFFORT_LEVELS } from '../../shared/model-capabilities'
 
 /** What a walk of a session file's active branch recovers. */
 export interface PiHistorySeed {
@@ -104,7 +105,11 @@ export function piLastModelRef(entries: PiSessionEntry[]): ModelRef | null {
  */
 export function piLastReasoning(entries: PiSessionEntry[]): { effort: string } | null {
   const { lastThinkingLevel } = piHistorySeed(entries)
-  return lastThinkingLevel ? { effort: lastThinkingLevel } : null
+  // pi also writes 'off' / 'minimal', which are not ClaudeUI efforts: they would make
+  // the spawn skip the model's saved effort, so they restore as the default.
+  return lastThinkingLevel && (EFFORT_LEVELS as readonly string[]).includes(lastThinkingLevel)
+    ? { effort: lastThinkingLevel }
+    : null
 }
 
 /**

@@ -591,13 +591,50 @@ describe('a cold load restores the reasoning level the engine stored (opencode, 
 
   it('an evicted entry that holds its own level keeps it', async () => {
     evictedEntry(['tail-1'], { effort: 'low' })
-    useSessionStore.setState({ sessionEngines: { sess: { engineId: 'pi', model: PI } } })
+    useSessionStore.setState({
+      sessionEngines: { sess: { engineId: 'pi', model: PI, effort: 'high' } }
+    })
     read('pi', { lastModel: PI, lastReasoning: { effort: 'high' } })
     await loadSessionIntoStore(
       { ...INFO, engineId: 'pi' },
       { isCurrent: () => true, replace: replaceOnClick(store().sessions['sess']) }
     )
     expect(store().sessions['sess'].effort).toBe('low')
+  })
+
+  it('an evicted entry the user reset to the default stays at the default', async () => {
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'high' } })
+    await open('opencode')
+    expect(store().sessions['sess'].reasoningVariant).toBe('high')
+
+    store().setReasoningVariant(null, 'sess')
+    markViewEvicted(['sess'])
+    await loadSessionIntoStore(
+      { ...INFO, engineId: 'opencode' },
+      { isCurrent: () => true, replace: replaceOnClick(store().sessions['sess']) }
+    )
+    expect(store().sessions['sess'].reasoningVariant).toBeNull()
+  })
+
+  it('a model change drops the restored level from the persisted entry', async () => {
+    read('opencode', { lastModel: OC, lastReasoning: { reasoningVariant: 'high' } })
+    await open('opencode')
+    useSessionStore.setState({ activeSessionId: 'sess' })
+    store().setSelectedModel('openai/gpt-other')
+    expect(store().sessionEngines['sess'].model?.modelId).toBe('gpt-other')
+    expect(store().sessionEngines['sess'].reasoningVariant).toBeUndefined()
+    expect(store().sessionEngines['sess'].effort).toBeUndefined()
+  })
+
+  it('drops an effort the model catalog no longer lists', async () => {
+    useSessionStore.setState({
+      availableModels: [
+        { value: 'openai/gpt-x', engineId: 'pi', supportedEffortLevels: ['low', 'medium'] }
+      ] as never
+    })
+    read('pi', { lastModel: PI, lastReasoning: { effort: 'max' } })
+    await open('pi')
+    expect(store().sessions['sess'].effort).toBeNull()
   })
 
   it('drops a variant the model catalog no longer lists', async () => {

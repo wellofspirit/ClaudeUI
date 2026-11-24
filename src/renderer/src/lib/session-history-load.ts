@@ -71,6 +71,13 @@ export interface HistoryLoadOptions {
 }
 
 /**
+ * Sessions whose sidebar placeholder was the first entry they ever had here: their
+ * read is the FIRST load, the only one that restores the reasoning level. Consumed
+ * by the commit; a retry after a declined or failed read still counts as first.
+ */
+const firstLoads = new Set<string>()
+
+/**
  * Seed `sessionEngines` for a session reopened from another engine's own store,
  * before `loadHistoricalSession` reads it back.
  *
@@ -128,6 +135,8 @@ function seedHistoricalEngine(
  */
 export function beginTranscriptPlaceholder(info: SessionInfo): void {
   if (info.engineId === 'opencode' || info.engineId === 'pi') {
+    // No entry yet: this is the session's first load, which restores its reasoning level.
+    if (!useSessionStore.getState().sessions[info.sessionId]) firstLoads.add(info.sessionId)
     seedHistoricalEngine(info.sessionId, info.engineId, null)
   }
   useSessionStore.getState().beginTranscriptLoad(info)
@@ -231,6 +240,7 @@ export async function loadSessionIntoStore(
     // Seed sessionEngines BEFORE loadHistoricalSession so it reads the right
     // engine (and model) — it is the one that restores both onto the session.
     seedHistoricalEngine(routingId, engineId, lastModel, lastReasoning)
+    const firstLoad = firstLoads.delete(routingId) || !store().sessions[routingId]
     store().loadHistoricalSession(
       routingId,
       messages,
@@ -240,7 +250,8 @@ export async function loadSessionIntoStore(
       statusLine,
       undefined,
       undefined,
-      loaded && 'activeTasks' in loaded ? loaded.activeTasks : undefined
+      loaded && 'activeTasks' in loaded ? loaded.activeTasks : undefined,
+      firstLoad
     )
     if (info.title && info.title !== 'Untitled') store().setCustomTitle(routingId, info.title)
     return 'loaded'
@@ -397,6 +408,7 @@ const loadsInFlight = new Map<string, Promise<void>>()
 /** Test seam: forget every load in flight (module state outlives a test). */
 export function resetHistoryLoadForTests(): void {
   loadsInFlight.clear()
+  firstLoads.clear()
 }
 
 /** Is a transcript load for `routingId` already running? A second click must not start another. */
