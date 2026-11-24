@@ -648,7 +648,9 @@ describeV2('opencode 2.x contract (S7): discovery right after a server boots', (
       release: () => {}
     }))
     const groups = await discoverOpencodeModels()
-    expect(firstModels).toBeGreaterThan(0)
+    // 2.4.1 may answer a cold location EMPTY on its first read (2.1 to 2.3 served the bundled
+    // snapshot at once); discovery's empty-retry is what makes the catalog arrive.
+    expect(firstModels).toBeDefined()
     const values = groups.flatMap((group) => group.models.map((m) => m.value))
     expect(values).toContain('fixture/fixture-model')
     expect(peekOpencodeModels()).not.toBeNull()

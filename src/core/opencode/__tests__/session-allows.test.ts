@@ -67,4 +67,13 @@ describe('OpencodeSessionAllows (ADR-085 S2)', () => {
     expect(allows.covers('webfetch', ['https://x.test'], 'linux')).toBe(false)
     expect(allows.covers('external_directory', ['/tmp/*'], 'linux')).toBe(false)
   })
+
+  it('darwin folds the pattern case for external_directory|read|edit only', () => {
+    const allows = new OpencodeSessionAllows()
+    allows.add('read', ['/Users/Me/*'])
+    allows.add('shell', ['Git *'])
+    expect(allows.covers('read', ['/users/me/x'], 'darwin')).toBe(true)
+    expect(allows.covers('read', ['/users/me/x'], 'linux')).toBe(false)
+    expect(allows.covers('shell', ['git status'], 'darwin')).toBe(false)
+  })
 })

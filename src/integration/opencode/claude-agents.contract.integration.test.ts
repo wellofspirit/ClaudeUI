@@ -154,7 +154,17 @@ describeV2('opencode 2.x contract: injected Claude agents (ADR-103)', () => {
     // claudeui_* is ClaudeUI's hosted MCP server: a tools list that does not name it gets none of it.
     // Its two MCP resource actions are denied with it (opencode checks the configured server name).
     const own = [
-      ...['edit', 'subagent', 'skill', 'question', 'claudeui_*'].map((action) => ({
+      // 2.4.0: a `tools:` list can never name the media tools, so they are always denied
+      // (sorted after `claudeui_*`).
+      ...[
+        'edit',
+        'subagent',
+        'skill',
+        'question',
+        'claudeui_*',
+        'generate_image',
+        'generate_video'
+      ].map((action) => ({
         action,
         resource: '*',
         effect: 'deny'

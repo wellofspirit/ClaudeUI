@@ -207,3 +207,11 @@ describe('2.x subagent children — childSessionRuleset / agentWhollyDenies', ()
     expect(session).toEqual(copy)
   })
 })
+
+describe('evaluateChildCall darwin resource fold', () => {
+  const rules = [{ action: 'read', resource: '/Users/Me/*', effect: 'deny' as const }]
+  it('folds the resource on darwin only', () => {
+    expect(evaluateChildCall(rules, 'read', '/users/me/x', 'darwin')).toBe('deny')
+    expect(evaluateChildCall(rules, 'read', '/users/me/x', 'linux')).toBe('ask')
+  })
+})

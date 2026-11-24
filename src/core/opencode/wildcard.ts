@@ -1,5 +1,8 @@
 import type { OpencodeAction, OpencodePermissionRule } from './permission-compiler'
-import { wildcardMatch as sharedWildcardMatch } from '../../shared/opencode-wildcard'
+import {
+  foldsResourceCase,
+  wildcardMatch as sharedWildcardMatch
+} from '../../shared/opencode-wildcard'
 
 /**
  * Host-side port of opencode's permission matcher, used by the ask-rule
@@ -25,14 +28,16 @@ import { wildcardMatch as sharedWildcardMatch } from '../../shared/opencode-wild
 /**
  * opencode's `Wildcard.match` (`shared/opencode-wildcard.ts`, which the
  * renderer uses too and so takes the platform explicitly) on THIS process's
- * platform by default.
+ * platform by default. `ignoreCase` is the darwin resource fold
+ * ({@link foldsResourceCase}); callers pass it for a resource match only.
  */
 export function wildcardMatch(
   str: string,
   pattern: string,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  ignoreCase = false
 ): boolean {
-  return sharedWildcardMatch(str, pattern, platform)
+  return sharedWildcardMatch(str, pattern, platform, ignoreCase)
 }
 
 /**
@@ -61,11 +66,12 @@ export function lastMatchingRule(
   rules: readonly OpencodePermissionRule[],
   platform: NodeJS.Platform = process.platform
 ): OpencodePermissionRule | undefined {
+  const fold = foldsResourceCase(platform, permission)
   for (let i = rules.length - 1; i >= 0; i--) {
     const rule = rules[i]
     if (
       wildcardMatch(permission, rule.permission, platform) &&
-      wildcardMatch(pattern, rule.pattern, platform)
+      wildcardMatch(pattern, rule.pattern, platform, fold)
     ) {
       return rule
     }
@@ -137,11 +143,12 @@ export function lastMatchingV2Rule<R extends V2RuleShape>(
   rules: readonly R[],
   platform: NodeJS.Platform = process.platform
 ): R | undefined {
+  const fold = foldsResourceCase(platform, action)
   for (let i = rules.length - 1; i >= 0; i--) {
     const rule = rules[i]
     if (
       wildcardMatch(action, rule.action, platform) &&
-      wildcardMatch(resource, rule.resource, platform)
+      wildcardMatch(resource, rule.resource, platform, fold)
     ) {
       return rule
     }

@@ -99,6 +99,14 @@ const denyServer = (
   { action: 'opencode_read_mcp_resource', resource: `${raw}:*`, effect: 'deny' }
 ]
 
+// A `tools:` entry cannot name the 2.4.0 media tools, so a restricted agent always loses them.
+const MEDIA = ['generate_image', 'generate_video']
+/** The hosted server's denies in the order the rules are sorted: `claudeui_*`, the media tools, the resource actions. */
+const hostedDenies = (): Array<{ action: string; resource: string; effect: 'deny' }> => {
+  const [tools, ...resources] = denyServer('claudeui')
+  return [tools, ...MEDIA.map(deny), ...resources]
+}
+
 describe('claudeAgentDenyRules', () => {
   const rules = (
     tools: 'inherit' | string[],
@@ -112,14 +120,14 @@ describe('claudeAgentDenyRules', () => {
     // orch-reader: Read, Grep, Glob, Bash, WebFetch, WebSearch
     expect(rules(ORCH_READER_TOOLS.split(', '))).toEqual([
       ...['edit', 'subagent', 'skill', 'question'].map(deny),
-      ...denyServer('claudeui')
+      ...hostedDenies()
     ])
     // The order is fixed (V2_TOOL_ACTIONS, question, MCP ids), whatever the file's order.
     expect(rules(['Skill', 'Read'])).toEqual([
       ...['shell', 'edit', 'glob', 'grep', 'webfetch', 'websearch', 'subagent', 'question'].map(
         deny
       ),
-      ...denyServer('claudeui')
+      ...hostedDenies()
     ])
   })
 
@@ -147,7 +155,7 @@ describe('claudeAgentDenyRules', () => {
   it('maps Claude tool names case-insensitively; Write and Edit and friends are all the edit action', () => {
     expect(rules(['bash', 'READ', 'notebookedit', 'Task'])).toEqual([
       ...['glob', 'grep', 'webfetch', 'websearch', 'skill', 'question'].map(deny),
-      ...denyServer('claudeui')
+      ...hostedDenies()
     ])
     expect(rules(['Write'])).not.toContainEqual(deny('edit'))
     expect(rules(['Agent'])).not.toContainEqual(deny('subagent'))
@@ -168,7 +176,7 @@ describe('claudeAgentDenyRules', () => {
         'skill',
         'question'
       ].map(deny),
-      ...denyServer('claudeui')
+      ...hostedDenies()
     ])
   })
 
@@ -208,6 +216,7 @@ describe('claudeAgentDenyRules', () => {
     const mcp = out.filter((r) => !['read', 'edit'].includes(r.action) && r.action.includes('_'))
     expect(mcp).toEqual([
       deny('claudeui_*'),
+      ...MEDIA.map(deny),
       deny('my_docs_*'),
       { action: 'opencode_list_mcp_resources', resource: 'claudeui', effect: 'deny' },
       { action: 'opencode_list_mcp_resources', resource: 'my.docs', effect: 'deny' },
@@ -304,10 +313,7 @@ describe('loadClaudeAgentsForOpencode', () => {
         description: 'Collects evidence.',
         mode: 'subagent',
         system: `${CLAUDE_AGENT_PREAMBLE}\n\nYou read.`,
-        permissions: [
-          ...['edit', 'subagent', 'skill', 'question'].map(deny),
-          ...denyServer('claudeui')
-        ]
+        permissions: [...['edit', 'subagent', 'skill', 'question'].map(deny), ...hostedDenies()]
       }
     })
     // The Claude model alias is not an opencode model: none is emitted.

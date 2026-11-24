@@ -260,7 +260,7 @@ describe('patchOpencodeNativeRaw (opencode 2.x schema, ADR-097 S8)', () => {
       background_compaction: true,
       subagent_depth: 2
     })
-    // It cannot be set again, only removed; its successors are 2.3.2 keys.
+    // It cannot be set again, only removed; its successors are 2.3.2 keys (`automations` moved to the top level in 2.4.0).
     expect(() =>
       patchOpencodeNativeRaw([{ path: ['experimental', 'shell_timeout_background'], value: false }])
     ).toThrow(/no such config key/)
@@ -268,11 +268,12 @@ describe('patchOpencodeNativeRaw (opencode 2.x schema, ADR-097 S8)', () => {
       { path: ['experimental', 'shell_timeout_background'] },
       { path: ['experimental', 'background_compaction'] },
       { path: ['compaction', 'background'], value: false },
-      { path: ['experimental', 'automations'], value: false }
+      { path: ['automations'], value: false }
     ])
     expect(jsoncParse(fs.readFileSync(p, 'utf8'))).toEqual({
-      experimental: { subagent_depth: 2, automations: false },
-      compaction: { background: false }
+      experimental: { subagent_depth: 2 },
+      compaction: { background: false },
+      automations: false
     })
   })
 

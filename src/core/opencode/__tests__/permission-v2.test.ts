@@ -459,6 +459,8 @@ describe('modeGates', () => {
       r('edit', 'ask'),
       r('webfetch', 'ask'),
       r('experimental_image_generate', 'ask'),
+      r('generate_image', 'ask'),
+      r('generate_video', 'ask'),
       r('external_directory', 'ask')
     ]
     for (const mode of ['default', 'ask', 'bypassPermissions', 'whatever'])
@@ -472,6 +474,8 @@ describe('modeGates', () => {
       r('shell', 'ask'),
       r('webfetch', 'ask'),
       r('experimental_image_generate', 'ask'),
+      r('generate_image', 'ask'),
+      r('generate_video', 'ask'),
       ...agentControlEditPatterns().map((p) => r('edit', 'ask', p)),
       r('external_directory', 'ask')
     ])
@@ -492,6 +496,8 @@ describe('modeGates', () => {
       r('shell', 'ask'),
       r('webfetch', 'ask'),
       r('experimental_image_generate', 'ask'),
+      r('generate_image', 'ask'),
+      r('generate_video', 'ask'),
       r('external_directory', 'ask')
     ])
   })
@@ -502,6 +508,8 @@ describe('modeGates', () => {
       r('shell', 'ask'),
       r('webfetch', 'ask'),
       r('experimental_image_generate', 'ask'),
+      r('generate_image', 'ask'),
+      r('generate_video', 'ask'),
       r('websearch', 'ask'),
       r('skill', 'ask'),
       r('subagent', 'ask'),
@@ -559,6 +567,8 @@ describe('buildSessionRuleset', () => {
       r('edit', 'ask'),
       r('webfetch', 'ask'),
       r('experimental_image_generate', 'ask'),
+      r('generate_image', 'ask'),
+      r('generate_video', 'ask'),
       r('external_directory', 'ask'),
       r('shell', 'allow', 'npm test'),
       DISPATCH_ASK_RULE,
@@ -957,6 +967,15 @@ describe('the direct opencode_* tools (reachable since 2.2.0)', () => {
     'opencode_schedule_pause',
     'opencode_schedule_resume',
     'opencode_schedule_delete',
+    // 2.4.0 moved the automations to top-level ids (on by default), dropped
+    // `opencode_watch_mcp_event` for `opencode_list_mcp_events` and added `machine_list`.
+    'automation_create',
+    'automation_list',
+    'automation_pause',
+    'automation_resume',
+    'automation_delete',
+    'opencode_list_mcp_events',
+    'machine_list',
     // Console watches wake the session on outside events with nothing from the user.
     'console_watch_watch',
     'console_watch_unwatch',
@@ -1115,6 +1134,76 @@ describe('experimental_image_generate (a paid model call, gated like webfetch)',
         )
       ).toBe(mode === 'plan' ? 'deny' : 'ask')
     }
+  })
+})
+
+// 2.4.0 renamed `experimental_image_generate` to `generate_image` (config files only map the old
+// name, so a session rule naming it is inert) and added `generate_video`: same gating for all three.
+describe('generate_image / generate_video (2.4.0 media tools, gated like the old image tool)', () => {
+  const build = (mode: string, autoMode?: boolean) =>
+    buildSessionRuleset({
+      mode,
+      autoMode: autoMode ?? mode === 'auto',
+      permissions: perms({}),
+      mcpServers: ['claudeui'],
+      home: HOME
+    }).rules
+
+  it.each([
+    ['default', false],
+    ['acceptEdits', false],
+    ['auto', true],
+    ['auto', false],
+    ['bypassPermissions', false]
+  ] as const)('%s (autoMode %s): asks and stays visible', (mode, autoMode) => {
+    for (const tool of ['generate_image', 'generate_video']) {
+      expect(evaluateV2Call(build(mode, autoMode), tool, ['openai/gpt-image-2'], 'linux')).toBe(
+        'ask'
+      )
+      expect(v2ToolHidden(build(mode, autoMode), tool, 'linux')).toBe(false)
+    }
+  })
+
+  it('plan: denied and hidden', () => {
+    for (const tool of ['generate_image', 'generate_video']) {
+      expect(evaluateV2Call(build('plan'), tool, ['openai/gpt-image-2'], 'linux')).toBe('deny')
+      expect(v2ToolHidden(build('plan'), tool, 'linux')).toBe(true)
+    }
+  })
+
+  it('both are built-in actions, so a server-level MCP allow cannot grant them', () => {
+    expect(V2_BUILTIN_ACTIONS).toEqual(expect.arrayContaining(['generate_image', 'generate_video']))
+  })
+})
+
+describe('2.4.0 direct tools are hidden by exact id, never by glob', () => {
+  it('a user MCP server named `automation` or `machine` keeps its own tools visible', () => {
+    for (const mode of ['default', 'auto', 'plan']) {
+      const { rules } = buildSessionRuleset({
+        mode,
+        autoMode: mode === 'auto',
+        permissions: perms({}),
+        mcpServers: ['claudeui', 'automation', 'machine'],
+        home: HOME
+      })
+      for (const tool of ['automation_search', 'automation_run', 'machine_status'])
+        expect(v2ToolHidden(rules, tool, 'linux')).toBe(false)
+      expect(v2ToolHidden(rules, 'automation_create', 'linux')).toBe(true)
+      expect(v2ToolHidden(rules, 'machine_list', 'linux')).toBe(true)
+    }
+  })
+
+  it('a server-level allow for a server named `automation` is not emitted (collision guard)', () => {
+    const { rules } = buildSessionRuleset({
+      mode: 'default',
+      autoMode: false,
+      permissions: perms({ allow: ['mcp__automation'] }),
+      mcpServers: ['claudeui', 'automation'],
+      home: HOME
+    })
+    expect(rules.some((x) => x.effect === 'allow' && x.action.startsWith('automation_'))).toBe(
+      false
+    )
   })
 })
 

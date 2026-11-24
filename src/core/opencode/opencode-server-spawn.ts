@@ -106,13 +106,14 @@ export function buildServerEnv(
   // opencode's own `.claude/skills` reader is off: the claudeui-xeng plugin serves the shared
   // Claude skill catalog under Claude's names instead (cli/src/server-process.ts `claude`).
   env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS = '1'
-  // 2.2.6 reads OPENCODE_FLAGS (packages/core/src/flag.ts); `all` would switch on
-  // every registered flag but the opt-in-only ones (at 2.3.2: todo, media_blob,
-  // automations, artifacts, video_generate, console_watches, mcp_events;
-  // `full_codemode` needs its own name: packages/schema/src/config/flag.ts) in our
-  // server, and a bare `schedules` still turns automations on (an alias). Users opt
-  // in through their config instead (`experimental.<key>`, or
-  // `experimental.all_flags`), so an inherited value must not widen that.
+  // 2.2.6 reads OPENCODE_FLAGS (packages/core/src/flag.ts). A flag is on by default in local
+  // and dev builds and off in releases, except the opt-in-only ones (at 2.4.1: todo,
+  // opencode_api); `all` would switch on every other registered flag (media_blob, artifacts,
+  // console_watches, machines, model_speeds, home_memory, project_overlay, sqlite_fts, ...:
+  // packages/schema/src/config/flag.ts) in our server. Users opt in through their config
+  // instead (`experimental.<key>`, or `experimental.all_flags`), so an inherited value must
+  // not widen that. (Automations are not a flag since 2.4.0: they are on by default, and
+  // ClaudeUI hides their tools by permission.)
   // OPENCODE_DISABLE_CLAUDE_CODE_PROMPT stays unset on purpose: 2.3.2+ reads
   // CLAUDE.md where a directory has no AGENTS.md, and `~/.claude/CLAUDE.md` when the
   // global AGENTS.md is missing (config/plugin/instruction.ts), as a Claude session

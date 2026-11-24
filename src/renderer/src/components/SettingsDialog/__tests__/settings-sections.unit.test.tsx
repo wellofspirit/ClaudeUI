@@ -85,6 +85,7 @@ describe('opencode raw-config key partition', () => {
       (k) => !(k in CONFIG_POINTER_KEYS) && !CONFIG_HIDDEN_KEYS.has(k)
     )
     expect(editable.toSorted()).toEqual([
+      'automations', // 2.4.0 top-level on/off; no pane (ClaudeUI hides the tools by permission)
       'commands',
       'enterprise',
       'policies',

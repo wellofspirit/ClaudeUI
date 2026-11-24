@@ -262,6 +262,10 @@ export function claudeAgentDenyRules(
     }
     for (const action of V2_TOOL_ACTIONS) if (!named.has(action)) denyRule(action)
     if (!keepQuestion) denyRule('question')
+    // A `tools:` entry cannot name the media tools (2.4.0 `generate_image`, `generate_video`,
+    // paid model calls), so a restricted agent never gets them.
+    denyRule('generate_image')
+    denyRule('generate_video')
     // ClaudeUI's own hosted server is always injected (`buildOpencodeConfig`), so it is
     // one more live server: a tools list that does not name it gets no `claudeui_*`.
     for (const server of liveServers) {

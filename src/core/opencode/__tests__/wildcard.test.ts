@@ -12,7 +12,9 @@ import {
   wildcardMatch,
   evaluateOpencodeRules,
   lastMatchingRule,
-  matchesUserAskRule
+  matchesUserAskRule,
+  evaluateV2Call,
+  v2ToolHidden
 } from '../wildcard'
 import type { OpencodePermissionRule } from '../permission-compiler'
 
@@ -130,5 +132,44 @@ describe('lastMatchingRule', () => {
       rule('bash', 'git push *', 'deny')
     )
     expect(lastMatchingRule('bash', 'ls', [], 'linux')).toBeUndefined()
+  })
+})
+
+// 2.4.x `permission.ts` `ignoresCase`: darwin folds the RESOURCE of external_directory|read|edit only.
+describe('darwin resource case-fold', () => {
+  const rules = [
+    { action: 'external_directory', resource: '/Users/Me/*', effect: 'allow' as const },
+    { action: 'read', resource: '/Users/Me/*', effect: 'allow' as const },
+    { action: 'edit', resource: '/Users/Me/*', effect: 'deny' as const },
+    { action: 'shell', resource: 'Git *', effect: 'allow' as const }
+  ]
+  const verdict = (action: string, resource: string, platform: NodeJS.Platform) =>
+    evaluateV2Call(rules, action, [resource], platform)
+
+  it('folds the resource on darwin for the three actions', () => {
+    expect(verdict('external_directory', '/users/me/x', 'darwin')).toBe('allow')
+    expect(verdict('read', '/users/me/x', 'darwin')).toBe('allow')
+    expect(verdict('edit', '/users/me/x', 'darwin')).toBe('deny')
+  })
+
+  it('leaves other actions and the action match case-sensitive on darwin', () => {
+    expect(verdict('shell', 'git status', 'darwin')).toBe('ask')
+    expect(evaluateV2Call(rules, 'READ', ['/Users/Me/x'], 'darwin')).toBe('ask')
+    expect(
+      v2ToolHidden([{ action: 'Edit', resource: '*', effect: 'deny' }], 'edit', 'darwin')
+    ).toBe(false)
+  })
+
+  it('linux stays case-sensitive; win32 folds everything', () => {
+    expect(verdict('read', '/users/me/x', 'linux')).toBe('ask')
+    expect(verdict('shell', 'git status', 'linux')).toBe('ask')
+    expect(verdict('read', '/users/me/x', 'win32')).toBe('allow')
+    expect(verdict('shell', 'git status', 'win32')).toBe('allow')
+  })
+
+  it('the 1.x evaluator folds the same way', () => {
+    const v1 = [{ permission: 'read', pattern: '/Users/Me/*', action: 'deny' as const }]
+    expect(evaluateOpencodeRules('read', '/users/me/x', v1, 'darwin')).toBe('deny')
+    expect(evaluateOpencodeRules('read', '/users/me/x', v1, 'linux')).toBeUndefined()
   })
 })

@@ -258,11 +258,12 @@ describeV2('opencode 2.x contract: a host session.move (wire facts)', () => {
       body: { permissions: [ALLOW_ALL] }
     })
     const sub = await r.turn(id, `[subread] ${nonce('wire-sub')}`)
-    const child = r.feed
-      .select('session.tool.success', { after: sub.from })
-      .find((e) => e.data.sessionID !== id)
-    expect(child, 'the child read').toBeDefined()
-    const childContent = JSON.stringify(child!.data.content)
+    // The child runs after the parent's launch round (2.4.1), so wait for its read.
+    const child = await r.feed.waitFor('session.tool.success', {
+      after: sub.from,
+      where: (e) => e.data.sessionID !== id
+    })
+    const childContent = JSON.stringify(child.data.content)
     expect(childContent).toContain('alpha wt')
     expect(childContent).not.toContain('alpha repo')
   }, 90_000)

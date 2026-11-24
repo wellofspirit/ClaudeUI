@@ -9,6 +9,7 @@
  * Markers (last user text):
  *   [tool]      shell tool call; after the tool result, echo the result
  *   [toolwrite] shell tool call that WRITES `judged.txt` (not read-only: auto mode judges it)
+ *   [shellopaque] shell tool call of `OPAQUE_COMMAND` (2.4.0: asks `external_directory` `*`, then `shell` with the full text)
  *   [worktreeremove] `opencode_worktree_remove` call on an absolute path with `force`
  *               (a path that need not exist: ClaudeUI's plugin refuses the call first)
  *   [mcp]       call the first tool named `*_echo`; then echo the result
@@ -115,6 +116,8 @@ export const HAND_BACK_REPORT = 'contract report from the target'
 export const SHELL_COMMAND = 'echo contract-tool-ran'
 /** `[shellbg]`'s command: long enough that the child's round ends before it. */
 export const SHELL_BG_COMMAND = 'sleep 3; echo contract-bg-done'
+/** `[shellopaque]`'s command: an unterminated quote is opaque to both the bash and the PowerShell scanner (`shell/scan.ts`; 2.3.x failed it before any ask). */
+export const OPAQUE_COMMAND = 'echo "contract-opaque'
 /** `[toolwrite]`'s command: a redirect into the workspace, which the read-only gate never vouches for. */
 export const WRITE_COMMAND = 'echo judged > judged.txt'
 export const REASONING_TEXT = 'thinking it over'
@@ -310,6 +313,12 @@ export async function startFixtureProvider(
           res,
           tools.find((tool) => tool === 'shell'),
           { command: WRITE_COMMAND, description: 'contract write' }
+        )
+      if (text.includes('[shellopaque]'))
+        return streamToolCall(
+          res,
+          tools.find((tool) => tool === 'shell'),
+          { command: OPAQUE_COMMAND, description: 'contract opaque' }
         )
       if (text.includes('[worktreeremove]'))
         return streamToolCall(

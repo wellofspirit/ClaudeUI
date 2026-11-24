@@ -1,3 +1,4 @@
+import { foldsResourceCase } from '../../shared/opencode-wildcard'
 import { wildcardMatch } from './wildcard'
 
 /**
@@ -72,7 +73,8 @@ export class OpencodeSessionAllows {
     }
     if (stored.length === 0) return false
     const list = patterns && patterns.length > 0 ? patterns : ['*']
-    return list.every((pattern) => stored.some((s) => wildcardMatch(pattern, s, platform)))
+    const fold = foldsResourceCase(platform, permission)
+    return list.every((pattern) => stored.some((s) => wildcardMatch(pattern, s, platform, fold)))
   }
 
   /** How many patterns are remembered, across every permission. */
