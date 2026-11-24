@@ -842,7 +842,9 @@ function BuildingRow({
               className="flex items-center gap-1.5 min-w-0"
             >
               <span
-                className={`shrink-0 inline-flex w-3 justify-center ${
+                // overflow-hidden: the running stage's spinner rotates, and a rotated
+                // square's box is wider than the square (its circle still fits).
+                className={`shrink-0 inline-flex w-3 justify-center overflow-hidden ${
                   st.state === 'done'
                     ? 'text-success'
                     : st.state === 'running'
