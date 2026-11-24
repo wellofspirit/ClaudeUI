@@ -156,15 +156,15 @@ core schema, aliases refused, duplicate keys refused; non-regular files, files o
 directory are skipped; every fs error is a diagnostic. Claude tool names map (`Read`->`read`, `Glob`->`find`,
 `Agent`/`Task`->`agent`, ...); a non-tool entry is dropped. Directories are scanned flat (Claude Code recurses).
 Supported fields: `name`, `description`, `tools`, `disallowedTools`, `model`, `harness.pi.model`, `thinking` /
-`effort`, `permissionMode`, `background`. `mcpServers`, `skills`, `color`, `memory`, `isolation`, `maxTurns` and
-`omitClaudeMd` are ignored.
+`effort`, `permissionMode`. `background` (every run is background, D2), `mcpServers`, `skills`, `color`, `memory`,
+`isolation`, `maxTurns` and `omitClaudeMd` are ignored.
 
 ### The tools (`agent`, `send_message`, `task_stop`, `list_models`)
 
 The bridge registers `agent` when `CLAUDEUI_PI_AGENT_TOOL === '1'` (plus bridge url/token, independent of the hosted
 flag): a fixed preamble plus the registry listing (`CLAUDEUI_PI_AGENT_LISTING`, one line per agent, capped; agents
-with `tools: []` are omitted). Parameters: `description`, `prompt`, `subagent_type`, `model`, `name`,
-`run_in_background`. `task_stop` and `list_models` ride in the same block (only an agent that may launch agents may
+with `tools: []` are omitted). Parameters: `description`, `prompt`, `subagent_type`, `model`, `name` (no
+`run_in_background`: a stray one is ignored). `task_stop` and `list_models` ride in the same block (only an agent that may launch agents may
 stop or list models); `send_message` (`to`, `message`, `summary`) is gated on `CLAUDEUI_PI_SEND_MESSAGE === '1'` so
 every child has it. Each executes over `/hosted-tool` behind a one-shot grant. The bridge also registers the
 `cui-deliver` command whenever url/token are set.
@@ -203,11 +203,14 @@ run's judge sees its earlier actions.
   tool: the bridge token is in the child's env, so an approved shell command could POST `/tool-call` and
   `/hosted-tool` directly. The child gate denies `agent` for a scope that cannot spawn ("This agent cannot launch
   agents", no grant) and `run()` refuses a parent that cannot spawn.
-- Background by default (the integration test cites this as D2): `background = definition.background === true ||
-run_in_background !== false`. A background call returns once the child started, with Claude Code's async-launched
-  text; the run continues and notifies its owner when it ends. The renderer reads a card as background from the
-  RESULT (the host's launch text, `PI_ASYNC_LAUNCHED_PREFIX`); a foreground report opening with that prefix gets a fixed
-  `Agent report:` header so it cannot pose as one.
+- Every run is background (the integration test cites this as D2; changed 2026-11-24: the foreground path,
+  `run_in_background`, a definition's `background:` and Send to background are gone, as in Claude Code as ClaudeUI
+  spawns it and opencode since 2.3). An `agent` call returns once the child started, with Claude Code's
+  async-launched text; the run continues and notifies its owner when it ends. A child's launch text says the report
+  reaches it only while it still runs (else the main session) and asks it to name the agents it launched in its own
+  report. The renderer reads a card as background from the RESULT (the host's launch text,
+  `PI_ASYNC_LAUNCHED_PREFIX`), and as background before a result exists; an older file's foreground report still reads
+  as a report.
 
 ### D3 A definition's `permissionMode` only narrows
 
@@ -264,20 +267,19 @@ validated as a uuid v4 before any path is built.
 
 ### Lifecycle, Stop, recursion
 
-- `session:task-started { taskType: 'local_agent', taskId: agentId, runIndex, startedAt, isBackgrounded }` is emitted
-  under the agent's ORIGIN call id for every run (a resume re-arms the same card with `runIndex + 1`, ADR-073 §5),
-  `session:task-progress` from each usage, then `session:task-notification`: for a foreground run BEFORE the tool
-  returns (else the parent's turn can end while `activeTasks` still holds the agent), for a background run before the
-  model delivery. A foreground result ends with `agentId: ... (use send_message ...)` and a `<usage>` line.
+- `session:task-started { taskType: 'local_agent', taskId: agentId, runIndex, startedAt, isBackgrounded: true }` is
+  emitted under the agent's ORIGIN call id for every run (a resume re-arms the same card with `runIndex + 1`, ADR-073
+  §5), `session:task-progress` from each usage, then `session:task-notification` before the model delivery. pi never
+  sends `isBackgrounded: false` and implements no `backgroundTask`, so no card offers Send to background.
 - **Stop.** `PiSession.stopTask(toolUseId)` (the card's Stop; `capabilities.backgroundTasks` is true) and `task_stop`
-  stop that agent and ALL its descendants, abort the child and retract its open approval cards. `interrupt()` stops
-  only FOREGROUND children and their foreground descendants and denies only the session's own pending cards (Claude
-  Code's Esc spares background agents). `cancel()` and the parent's process exit dispose everything with no delivery
-  (the parent exiting kills background children without telling the model). An abandoned `agent` exchange stops its
-  child. A run past its continuation cannot be stopped; `stoppedBy` is recorded only for a run that ended stopped. A
-  stopped child streams no `[error: ...]` row (ADR-090, `engine-model.md`).
-- **Send to background.** A foreground run sends `isBackgrounded: false`, so the card offers it; `backgroundTask`
-  flips the run, re-emits task-started (`true`) and releases the waiting call with the async-launched text.
+  stop that agent and ALL its descendants, abort the child and retract its open approval cards. `interrupt()` (the
+  composer Stop) stops no agent and denies only the session's own pending cards: every card keeps its own Stop (Claude
+  Code's Esc spares background agents; opencode, ADR-111 §4). `cancel()` and the parent's process exit dispose
+  everything with no delivery (the parent exiting kills its children without telling the model). An abandoned `agent`
+  exchange stops its child; pi abandons one only when it exits (the bridge's `execute` takes no abort signal, so an
+  interrupt during the spawn still returns the launch text). A run past its continuation cannot be stopped; `stoppedBy`
+  is recorded only for a run that ended stopped. A stopped child streams no `[error: ...]` row (ADR-090,
+  `engine-model.md`).
 - **Recursion.** A child's `hostedToolHandler` handles `agent` (the manager with the child as parent),
   `send_message` and `task_stop`, each behind its own grant; a grandchild streams under its own call id with its
   task-started at top level.
@@ -312,11 +314,13 @@ validated as a uuid v4 before any path is built.
   `completed|failed|killed`, `summary`, `result` capped at 100,000 characters, `usage`), built from host state.
   Completed and failed wake the owner; a stop (the card's Stop, `task_stop`) is passive; a dispose stop is UI-only.
 - **Owner routing** (Claude Code parity): the spawning child while its run is live (started, not stopped or draining,
-  not past its continuation); otherwise the root session, the summary naming the spawner.
+  not past its continuation); otherwise the root session, the summary naming the spawner. A child therefore cannot
+  wait for an agent it launched: if it ends its turn first, that agent's report goes to the root (Claude Code
+  parity; waiting for or resuming the spawner, opencode's behaviour, is a backlog item).
 - **Records, `send_message`, resume, names.** Every agent leaves a record (definition snapshot, model, depth, spawner,
   run index, status, `stoppedBy`, session dir). `send_message` resolves `to` by exact id, then exact name. `main` from a
-  BACKGROUND child is delivered to the session; a foreground child's channel is its report, and a foreground child
-  messaging its own launcher (or the session sending to `main`) is refused. A running agent gets a delivery ("queued
+  child is delivered to the session, and a child may message its own launcher; the session sending to `main` is
+  refused. A running agent gets a delivery ("queued
   for delivery ... at its next tool round"); otherwise it is RESUMED: a new process with the record's flags on the same
   session file and the parent's cwd, started by `PiChildRunner.resumeWithDelivery` from the host's structured payload,
   always in the background, notifying the original owner with the new run index. An agent that may not launch agents
@@ -345,7 +349,7 @@ validated as a uuid v4 before any path is built.
 - **Child auth failures fail.** `PiChildRunner` settles a mapper `auth-required` like any turn error (a 401/403 child
   once reported "completed"), under the same draining rule.
 - **Identity.** Every launch appends to `system-prompt.md` the agent's id and name, who launched it, the handle that
-  reaches its launcher (usable only while it runs in the background) and how `<agent-message>` replies work.
+  reaches its launcher and how `<agent-message>` replies work.
 - **Models.** The `agent` call's `model`, else the definition's (`inherit` excepted), resolves against the
   authenticated, allowlisted catalog (`getPiAllowedModelCatalog`, `pi-agent-model.ts`): exact `provider/id` (then
   case-insensitive) -> bare id (the parent's provider first; still ambiguous -> an error naming <= 10 candidates) ->

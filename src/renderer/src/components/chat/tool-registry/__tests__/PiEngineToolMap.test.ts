@@ -338,10 +338,11 @@ describe('PiEngineToolMap.normalize — hosted tools (M4a+b)', () => {
       name: 'scout',
       background: true
     })
-    // ADR-089 S3: background is the default; only an explicit false is foreground.
+    // Every pi agent runs in the background: before a result the card is background, whatever
+    // the model put in the input (the host ignores a stray run_in_background).
     expect(
       PiEngineToolMap.normalize('task', { description: 'd', prompt: 'p', run_in_background: false })
-    ).toMatchObject({ kind: 'task', background: false })
+    ).toMatchObject({ kind: 'task', background: true })
     // Without description it is not the agent shape (the generic fallback stays).
     expect(PiEngineToolMap.normalize('task', { prompt: 'do X' })).toMatchObject({ description: '' })
   })
@@ -488,16 +489,19 @@ describe('PiEngineToolMap — agent background comes from the RESULT once there 
     expect(stateOf(bg, true, true).isRunning).toBe(false)
   })
 
-  it('a definition that forced background (input said false) reads background on reload', () => {
+  it('a launch whose input said false reads background on reload (the result decides)', () => {
     const view = PiEngineToolMap.normalize('task', { ...input, run_in_background: false }, launched)
     expect(view).toMatchObject({ background: true })
   })
 
-  it('a foreground report is not background; before a result the input decides', () => {
+  it('an OLD foreground report in history is not background (the result decides); before a result every card is background', () => {
     expect(PiEngineToolMap.normalize('task', input, result('the report'))).toMatchObject({
       background: false
     })
     expect(PiEngineToolMap.normalize('task', input)).toMatchObject({ background: true })
+    expect(PiEngineToolMap.normalize('task', { ...input, run_in_background: false })).toMatchObject(
+      { background: true }
+    )
   })
 })
 

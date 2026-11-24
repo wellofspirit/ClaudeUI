@@ -1294,7 +1294,7 @@ describe('loadPiSessionHistory — host-run subagents (ADR-089)', () => {
     expect(history.messages.some((m) => m.role === 'user')).toBe(true)
   })
 
-  it('H1 (ADR-089 S3): taskNotifications from the parent file AND a child file (details only); a background launch with none reads unfinished', async () => {
+  it('H1 (ADR-089 S3): taskNotifications from the parent file AND a child file (details only); a background launch with none reads unfinished, an OLD foreground result with none does not', async () => {
     const note = (id: string, parentId: string, agentId: string, toolUseId: string) => ({
       type: 'custom_message',
       id,
@@ -1338,7 +1338,11 @@ describe('loadPiSessionHistory — host-run subagents (ADR-089)', () => {
       ...agentCall('call-A', AGENT_A, 'u1', 1),
       note('n1', 'result-entry-1', AGENT_A, 'call-A'),
       bgCall,
-      bgLaunch
+      bgLaunch,
+      // An old foreground result (before every run was background): its own
+      // details are terminal (`status: 'completed'`, no `background`), and no
+      // notification ever followed it. It must not read unfinished.
+      ...agentCall('call-old-fg', '44444444-4444-4444-8444-444444444444', 'result-entry-5', 6)
     ])
     writeChild(AGENT_A, [
       header(AGENT_A),

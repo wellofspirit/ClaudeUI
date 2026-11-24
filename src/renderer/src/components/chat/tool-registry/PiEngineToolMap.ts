@@ -159,7 +159,8 @@ function piNormalize(
           runInBackground: inp.run_in_background
         })
       // Host-run subagents (ADR-089) — the `agent` tool: { description,
-      // prompt, subagent_type?, name?, model?, run_in_background? }. Keyed on the shape (prompt +
+      // prompt, subagent_type?, name?, model? } (an old call's
+      // run_in_background is not read). Keyed on the shape (prompt +
       // description, none of engine/agent/tasks): piNormalize never sees the
       // tool name. Checked BEFORE the legacy `subagent` shapes below.
       if (
@@ -189,10 +190,11 @@ function piNormalize(
           // Once a result exists it decides (ADR-089 S3): only the host's
           // launch acknowledgement means a background run. A call refused
           // before any spawn (validation, start failure, a deny) is settled,
-          // not "running" forever, and a definition that forced background
-          // reads as one on reload. Until then the input says: background is
-          // the default (D2), only an explicit false is foreground.
-          background: result ? isPiAsyncLaunchResult(result) : inp.run_in_background !== false
+          // not "running" forever, and an old foreground report in history
+          // still reads as a report. Until then the card is background: every
+          // pi agent runs in the background, and the host ignores whatever
+          // the model put in the input.
+          background: result ? isPiAsyncLaunchResult(result) : true
         }
       }
       // Legacy `subagent` tool (M5b transcripts; pi's upstream example).
