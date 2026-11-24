@@ -619,7 +619,7 @@ describeV2('opencode 2.x contract (S7): discovery right after a server boots', (
   const rig = useRig('s7-discovery')
   afterAll(() => setOpencodeDiscoveryConnect(null))
 
-  it('(d) a cold location answers the bundled catalog on its first read; discovery never caches it empty', async () => {
+  it('(d) discovery delivers the catalog after a cold boot and never caches it empty', async () => {
     // Started BEFORE the restart: the server is genuinely inside its warm-up.
     const startedAt = Date.now()
     await rig().restart()
@@ -629,9 +629,9 @@ describeV2('opencode 2.x contract (S7): discovery right after a server boots', (
       authHeader: `Basic ${Buffer.from(`opencode:${rig().server.password}`).toString('base64')}`,
       directory: rig().cwd
     })
-    // 2.1 serves its bundled models.dev snapshot from the FIRST read of a cold
-    // location; 2.0.x answered EMPTY until the catalog loaded (measured 0 on
-    // 2.0.24). The empty-retry stays for genuinely cold or offline servers.
+    // The first read of a cold location may be EMPTY (2.0.x measured 0 on 2.0.24; 2.1 to 2.3
+    // served the bundled models.dev snapshot at once; 2.4.1 is empty again): discovery's
+    // empty-retry is what makes the catalog arrive.
     const cold = rig().home.workspace(nonce('cold'))
     let firstModels: number | undefined
     setOpencodeDiscoveryConnect(async () => ({
@@ -648,8 +648,6 @@ describeV2('opencode 2.x contract (S7): discovery right after a server boots', (
       release: () => {}
     }))
     const groups = await discoverOpencodeModels()
-    // 2.4.1 may answer a cold location EMPTY on its first read (2.1 to 2.3 served the bundled
-    // snapshot at once); discovery's empty-retry is what makes the catalog arrive.
     expect(firstModels).toBeDefined()
     const values = groups.flatMap((group) => group.models.map((m) => m.value))
     expect(values).toContain('fixture/fixture-model')

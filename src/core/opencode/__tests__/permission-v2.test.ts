@@ -1140,14 +1140,18 @@ describe('experimental_image_generate (a paid model call, gated like webfetch)',
 // 2.4.0 renamed `experimental_image_generate` to `generate_image` (config files only map the old
 // name, so a session rule naming it is inert) and added `generate_video`: same gating for all three.
 describe('generate_image / generate_video (2.4.0 media tools, gated like the old image tool)', () => {
-  const build = (mode: string, autoMode?: boolean) =>
-    buildSessionRuleset({
+  // The build agent's `{*: allow}` baseline goes first, as on the server: without it an
+  // unmatched call already evaluates to `ask`, and the ask case could not fail.
+  const build = (mode: string, autoMode?: boolean) => [
+    r('*', 'allow'),
+    ...buildSessionRuleset({
       mode,
       autoMode: autoMode ?? mode === 'auto',
       permissions: perms({}),
       mcpServers: ['claudeui'],
       home: HOME
     }).rules
+  ]
 
   it.each([
     ['default', false],

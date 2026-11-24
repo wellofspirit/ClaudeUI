@@ -344,6 +344,9 @@ ended`, `session.reasoning.started/ended`, `session.tool.input.started/ended`,
   in config files (`v1/config/migrate.ts` `renamedTool`), never in session rules, so a session rule
   naming it is inert on 2.4.x. ClaudeUI sends the same rules for all three names. A Claude agent
   with a `tools:` list always gets `generate_image` / `generate_video` denied (`claude-agent-shim.ts`).
+  Built-ins and MCP tools share one id space (`<server>_<tool>`), so a user MCP tool whose id equals
+  a built-in (`generate_image` from a server named `generate`, `automation_list` from `automation`)
+  is gated as that built-in; the hidden ids are exact, never globs, to keep the rest of such a server.
 - The shell PERMISSION resources come from 2.2.x's portable scanner (`core/src/shell/scan.ts`,
   `parse.ts` `scan`), not tree-sitter (2.1.2). An ordinary heredoc, `$(…)` and a compound command
   ARE analysed: a heredoc is ONE resource, the whole command text (body included); `$(…)` yields
