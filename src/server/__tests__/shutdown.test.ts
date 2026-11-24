@@ -12,7 +12,7 @@ function setup(prepareStop: () => Promise<void>, stop: () => void = () => {}) {
       calls.push('stop')
       stop()
     },
-    exit: () => calls.push('exit'),
+    exit: (code) => calls.push(code === 0 ? 'exit' : `exit ${code}`),
     log: () => {}
   })
   return { calls, handle }
@@ -78,5 +78,36 @@ describe('createShutdown', () => {
     handle('SIGTERM')
     await vi.advanceTimersByTimeAsync(500)
     expect(calls).toEqual(['prepareStop', 'stop', 'exit'])
+  })
+
+  it('exits with the code the first caller asked for (a restart: 75)', async () => {
+    const { calls, handle } = setup(() => Promise.resolve())
+    handle('relaunch requested', 75)
+    handle('SIGTERM')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(calls).toEqual(['prepareStop', 'stop', 'exit 75'])
+  })
+
+  it('holds the process for a non-zero code, and not for 0', async () => {
+    const unref = vi.fn()
+    const real = globalThis.setTimeout
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      ms?: number
+    ) => {
+      const timer = real(fn, ms)
+      return Object.assign(timer, { unref: () => (unref(ms), timer) })
+    }) as typeof setTimeout)
+    try {
+      setup(() => Promise.resolve()).handle('SIGTERM')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(unref).toHaveBeenCalledWith(500)
+      unref.mockClear()
+      setup(() => Promise.resolve()).handle('restart', 75)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(unref).not.toHaveBeenCalledWith(500)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

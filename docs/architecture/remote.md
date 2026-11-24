@@ -223,6 +223,87 @@ one host-local thing the server still does with a window, when there is one, is 
 present at all and starts this listener from its own arguments — see
 [sync-core.md](sync-core.md) §Topology.
 
+## `claudeui-server`: the monitor, versions and self-update
+
+`claudeui-server serve` (the default command) does not run the server itself: it starts a
+small **monitor** (`src/server/monitor.ts`) that opens no database and boots no service, and
+runs the real server as its child, `serve --worker` plus the same flags. The monitor is
+what makes a relaunch or an update from the web client possible: the worker asks for a
+restart by exiting with code **75**, and the monitor starts a worker again. Every other
+exit passes through — the monitor exits with the worker's code (and re-raises a signal
+that killed it), so a supervisor sees the server's own outcome. More than 3 restarts
+within 60 s with no worker reporting healthy in between end the monitor with exit 1 (a
+healthy worker resets the count). `--disable-auth` reaches the first worker only: the
+policy it sets is persisted, and a worker restarted later must not undo a change made in
+Settings since; `--port`, `--bind` and `--tls` reach every worker. `--no-monitor` runs the
+server in-process, as before: relaunch and self-update are then unavailable, and updates
+are only announced. `show-link`, `set-password` and `voice-worker` never start a monitor.
+
+**Layout.** The folder you installed is the root; the monitor always runs from it and is
+replaced only by a reinstall.
+
+```
+<root>/claudeui-server[.exe]     the monitor, and the flat install's worker
+<root>/claudeui-install.json     the server install marker (kind: server)
+<root>/versions/<v>/             one whole server folder per staged release
+<root>/current                   the version the monitor runs; absent → the flat install
+<root>/pending                   a worker's update request { token, from, to }
+```
+
+`current` is used only when it names a release, `versions/<v>` is a valid server folder of
+that version, and `<v>` is newer than the monitor's own build; otherwise the monitor removes
+it and runs the flat install. So an install with no `versions/` adopts the layout on its
+first update, and a reinstall of a newer release over the root wins over an older staged
+one. Run from source (`bun src/server/main.ts`) the monitor always runs the same source.
+
+**Updates** (the core service is `src/core/services/app-update.ts`; the server's half is
+`src/server/worker-host.ts` and `src/server/server-versions.ts`). A verified release archive
+is extracted into `versions/.partial-<v>-<t8>/` (which first gets a `.claudeui-staging` file
+proving it is the stager's), its root folder stripped, the executables marked executable; it
+must carry a server marker naming `<v>` and this platform's executable, and is then renamed
+to `versions/<v>` (on Windows, retried for about 30 s while antivirus holds the new files;
+after that the partial is left for the next staging, which sweeps leftover partials first). Applying writes `pending` and restarts
+(exit 75). The monitor writes `current = <v>`, starts the new worker and waits up to 90 s
+for its health record (`~/.claude/ui/relaunch/health/<key>.json`, written once its listener
+is bound). Healthy: result `updated`, `pending` removed, and every release folder but the
+running one and the previous one removed. Not healthy in time, or the worker exits first:
+it is stopped by pid, `current` goes back to what ran before (removed for the flat install),
+that worker starts again, result `rolled-back`. Results are
+`~/.claude/ui/relaunch/server-<token>.result.json`, read back by `app:last-relaunch`. A
+monitor stopped during that window leaves `current` and `pending` in place, and the next
+start reopens the window; so does a rollback that cannot restore `current` (the monitor
+keeps `pending`, and never applies that request again in the same run). The only recursive
+delete is one gate (`removeServerVersionDir`): a direct child of `versions/` with our name,
+a real directory (never a link), holding a server marker (or, for a `.partial-*`, the
+stager's `.claudeui-staging` file), and not the version `current` or `pending` names.
+Nothing at the root is ever deleted but `current` and `pending`. An update needs a
+supervised worker, a compiled build, a writable root and a root marker (an install older
+than the marker reinstalls once to enable updates).
+
+**Running it under a supervisor.** The monitor is the service's main process; restarts for
+updates happen inside it, so the supervisor only restarts on failure.
+
+- **systemd:** `ExecStart=/opt/claudeui-server/claudeui-server --bind 0.0.0.0`,
+  `Restart=on-failure`, `KillMode=mixed` (SIGTERM to the monitor, which forwards it to the
+  worker), `TimeoutStopSec=15`. The service user must own the install folder for updates.
+- **launchd:** a LaunchAgent/Daemon with `ProgramArguments` pointing at the root executable
+  and `KeepAlive` → `SuccessfulExit = false`.
+- **NSSM (Windows):** the application is the root `claudeui-server.exe`; keep the console
+  stop method first (Ctrl+C reaches the worker on the shared console; the monitor waits 8 s
+  for it, then ends it by pid) and give it at least 15 s before the next method.
+- **Containers** (detected by `/.dockerenv`, `/run/.containerenv`,
+  `KUBERNETES_SERVICE_HOST`, or docker/kubepods/containerd in `/proc/1/cgroup`): updates
+  are announced, not installed. Update the image instead.
+- **Windows Firewall:** an application rule is per executable path, and an updated worker
+  runs from `versions\<v>\claudeui-server.exe`, so allow the **port** instead, e.g.
+  `New-NetFirewallRule -DisplayName "ClaudeUI server" -Direction Inbound -Protocol TCP -LocalPort 8443 -Action Allow`.
+- **macOS Application Firewall** (when it is on): it also approves executables one by one
+  (by path and code signature), so an updated worker at `versions/<v>/claudeui-server` is a
+  new application to it. Approve it
+  (`sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add <path>`, then `--unblockapp <path>`),
+  or leave the application firewall off for this host and filter the port with `pf`
+  instead. The Updates panel shows a notice about both firewalls on macOS and Windows.
+
 ## Remote IDE: probed facts about `code serve-web` (ADR-064)
 
 Probed against VS Code 1.135.0 (2026-08-31); the remote IDE design leans on these.

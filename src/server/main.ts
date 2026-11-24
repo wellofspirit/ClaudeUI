@@ -15,7 +15,10 @@
  *
  * Steps 2, 4 and 5 are for the commands that SERVE. `set-password` is the one
  * subcommand that does not: it stops after step 1 plus a single DB write, and the
- * branch that enforces that carries the reasoning.
+ * branch that enforces that carries the reasoning. And `serve` itself, unless it
+ * is `--worker` or `--no-monitor`, does none of them: it hands over to the
+ * monitor (`monitor.ts`), which runs this executable again as its `--worker`
+ * child and restarts it for a relaunch or an update (`worker-host.ts`).
  *
  * ## Runtime detection lives HERE, deliberately
  *
@@ -68,9 +71,22 @@ import { logger } from '../core/services/logger'
 import { setVoiceWorkerLauncher } from '../core/voice/local-voice-server'
 import { isCompiledBunEntry, serverVoiceWorkerLauncher } from './voice-worker-launcher'
 import { resolveServerVersion } from './server-version'
-import { CliError, HELP_TEXT, parseServerArgs, type ServerOptions } from './cli'
+import { CliError, HELP_TEXT, parseServerArgs, runsMonitor, type ServerOptions } from './cli'
 import { runFirstBootChain } from './first-boot'
 import { createShutdown } from './shutdown'
+import { installKeyFor, serverStateDir } from './server-records'
+import {
+  clearMonitorEnv,
+  createRestarter,
+  createServerAppUpdateHost,
+  createServerHostRelaunch,
+  reportWorkerHealthy,
+  supervisionOf,
+  tieToMonitor,
+  type MonitorTie,
+  type Restarter,
+  type Supervision
+} from './worker-host'
 import { PASSWORD_SET_CONFIRMATION, readNewPassword, stdinSecretIo } from './set-password'
 
 /** stdout, one line at a time — the console chain's only side effect. */
@@ -152,14 +168,27 @@ function resolveAppPath(): string {
   return fromSource
 }
 
+/** What `serve` needs after the adapters are wired: the monitor tie, the restart, the health record. */
+interface WorkerWiring {
+  supervision: Supervision
+  restarter: Restarter
+  /** Null without a monitor. */
+  tie: MonitorTie | null
+  version: string
+  buildId: string | null
+}
+
 /** Wire every host adapter the headless deployment needs. */
-function installHostAdapters(): void {
+function installHostAdapters(options: ServerOptions): WorkerWiring {
+  const compiled = isCompiledBunEntry(process.argv[1])
   setHostPaths({ getAppPath: resolveAppPath })
-  setHostAppVersion(resolveServerVersion(resolveAppPath(), isCompiledBunEntry(process.argv[1])))
+  const version = resolveServerVersion(resolveAppPath(), compiled)
+  setHostAppVersion(version)
   // The build id a web client compares across reconnects (it reloads on a
   // change). A source run is a dev build and reports none.
-  const build = readBuildInfo(resolveAppPath(), isCompiledBunEntry(process.argv[1]))
-  setHostBuildId(build.kind === 'dev' ? null : buildId(build))
+  const build = readBuildInfo(resolveAppPath(), compiled)
+  const id = build.kind === 'dev' ? null : buildId(build)
+  setHostBuildId(id)
 
   // A deployed server is not a dev build, so background usage/analytics writes
   // are ON. The desktop's dev-mode skip exists to stop a dev instance fighting
@@ -174,10 +203,33 @@ function installHostAdapters(): void {
   // purpose rather than stubbed, and the call documents that.
   setHostPicker(null)
 
-  // No relaunch: nothing would start this process again once it quit (the
-  // monitor that can is S5). The `app:relaunch*` commands answer "this host
-  // cannot relaunch itself" with nothing wired; null is stated so the choice reads.
-  setHostRelaunch(null)
+  // Relaunch and self-update (`worker-host.ts`): only a `serve` worker its
+  // monitor started can be restarted, so without one the relaunch answers why
+  // not, and an update is announced but never installed. The monitor's variables
+  // are read once and cleared, so a shell or engine this worker starts never
+  // passes for a supervised worker. Self-update needs a compiled build (the
+  // versions/ layout holds executables); a source run keeps no update seam.
+  const supervision = supervisionOf(
+    options,
+    process.env,
+    compiled ? path.dirname(process.execPath) : resolveAppPath()
+  )
+  clearMonitorEnv(process.env)
+  // Tied to the monitor from here on: if it goes while this worker still boots,
+  // there is nothing to stop gracefully yet, so the worker just exits (the tie
+  // switches to the graceful shutdown once that exists, in `main`).
+  const tie = supervision.supervised ? tieToMonitor(process.stdin, () => process.exit(0)) : null
+  const restarter = createRestarter(supervision)
+  const serving = options.command === 'serve'
+  setHostRelaunch(
+    serving
+      ? createServerHostRelaunch({
+          restarter,
+          stateDir: serverStateDir(),
+          installKey: installKeyFor(supervision.root, process.platform)
+        })
+      : null
+  )
 
   // HostAuth: DATA/STATUS-ONLY, and here it is the honest empty implementation.
   // `accountState()` and `buildClaudeAccountRef()` already tolerate a null host
@@ -194,10 +246,20 @@ function installHostAdapters(): void {
   // sign-ins collide. `null` is the fallback anyway; stated so the choice reads.
   setHostOAuthLoopback(null)
 
-  // ClaudeUI's own updates: no server seam yet (the monitor process and the
-  // versioned layout come with the server update source), so the update service
-  // reports `supported: false` and makes no request. Stated so the choice reads.
-  setHostAppUpdate(null)
+  setHostAppUpdate(
+    serving && compiled
+      ? createServerAppUpdateHost({
+          supervision,
+          restarter,
+          platform: process.platform,
+          arch: process.arch,
+          execPath: process.execPath,
+          buildInfo: () => readBuildInfo(resolveAppPath(), true),
+          log: (message) => logger.info('server-update', message)
+        })
+      : null
+  )
+  return { supervision, restarter, tie, version, buildId: id }
 }
 
 /** Apply the bootstrap flags that must land BEFORE the listener starts. */
@@ -215,7 +277,9 @@ function applyBootstrapSettings(
   // disconnect-every-client reaction are one implementation. That writer also
   // logs the startup-grade warning on the transition; the banner below repeats
   // it on EVERY start, because a warning that only fires on the day you flipped
-  // the switch is not a warning about the state you are running in.
+  // the switch is not a warning about the state you are running in. The policy
+  // is persisted, so the monitor passes the flag to its first worker only: a
+  // worker it restarts later must not undo a change made in Settings since.
   if (options.disableAuth) patch.authPolicy = 'off'
 
   if (Object.keys(patch).length > 0) anchor.setConfig(patch)
@@ -246,6 +310,16 @@ async function main(): Promise<void> {
   if (options.command === 'voice-worker') {
     const { runVoiceWorker } = await import('../core/voice/worker/main')
     await runVoiceWorker({ argv: options.workerArgs })
+    return
+  }
+
+  // The monitor (`monitor.ts`): `serve` without `--worker` / `--no-monitor`. Like
+  // the voice worker it runs before any database, adapter or service graph — it
+  // opens none, and only starts the real server (this executable again, with
+  // `--worker`) as its child and restarts it on request.
+  if (runsMonitor(options)) {
+    const { runMonitor } = await import('./monitor')
+    runMonitor(process.argv.slice(2))
     return
   }
 
@@ -303,7 +377,7 @@ async function main(): Promise<void> {
     return
   }
 
-  installHostAdapters()
+  const worker = installHostAdapters(options)
   // opencode / pi voice input runs in a worker that is this executable
   // again (ADR-101 §4); declared here, as the SQLite driver is, because the
   // launch command depends on how THIS entrypoint was started.
@@ -395,15 +469,37 @@ async function main(): Promise<void> {
   )
 
   // Graceful shutdown: the host-neutral stop is core's; the exit is not
-  // gated on peers that may never close their sockets (see host-anchor).
-  const shutdown = createShutdown({
-    prepareStop: core.prepareStop,
-    stop: core.stop,
-    exit: () => process.exit(0),
-    log: (message) => logger.info('server', message)
-  })
-  process.on('SIGINT', () => shutdown('SIGINT'))
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
+  // gated on peers that may never close their sockets (see host-anchor). A
+  // signal exits 0; a relaunch or an update exits RESTART_EXIT_CODE, through
+  // the restarter, which refuses a restart once any stop has begun.
+  const shutdown = worker.restarter.attach(
+    createShutdown({
+      prepareStop: core.prepareStop,
+      stop: core.stop,
+      exit: (code) => process.exit(code),
+      log: (message) => logger.info('server', message)
+    })
+  )
+  process.on('SIGINT', () => shutdown('SIGINT received'))
+  process.on('SIGTERM', () => shutdown('SIGTERM received'))
+
+  worker.tie?.onGone(() => shutdown('the monitor exited'))
+  if (worker.supervision.supervised) {
+    // Healthy (design review ruling 4): the listener is bound. The monitor is
+    // waiting on this record to end a restart's or an update's health window.
+    if (core.remoteServer.isListening())
+      reportWorkerHealthy({
+        supervision: worker.supervision,
+        stateDir: serverStateDir(),
+        platform: process.platform,
+        version: worker.version,
+        buildId: worker.buildId,
+        pid: process.pid,
+        now: Date.now(),
+        log: (message) => logger.warn('server', message)
+      })
+    else logger.warn('server', 'the listener is not bound; no health record written')
+  }
 }
 
 main().catch((err) => {

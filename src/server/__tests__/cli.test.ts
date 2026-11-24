@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { CliError, HELP_TEXT, parseServerArgs } from '../cli'
+import { CliError, HELP_TEXT, parseServerArgs, runsMonitor } from '../cli'
 import { MIN_PASSWORD_LENGTH } from '../../core/services/remote-auth'
 
 describe('parseServerArgs', () => {
@@ -18,7 +18,9 @@ describe('parseServerArgs', () => {
       port: undefined,
       bind: undefined,
       tls: undefined,
-      disableAuth: false
+      disableAuth: false,
+      worker: false,
+      noMonitor: false
     })
   })
 
@@ -44,6 +46,8 @@ describe('parseServerArgs', () => {
     expect(() => parseServerArgs(['set-password', '--port', '8080'])).toThrow(/takes no options/)
     expect(() => parseServerArgs(['set-password', '--bind', '0.0.0.0'])).toThrow(/takes no options/)
     expect(() => parseServerArgs(['set-password', '--tls'])).toThrow(/takes no options/)
+    expect(() => parseServerArgs(['set-password', '--no-monitor'])).toThrow(/takes no options/)
+    expect(() => parseServerArgs(['set-password', '--worker'])).toThrow(/takes no options/)
   })
 
   it('parses voice-worker and hands its arguments over UNPARSED (ADR-101)', () => {
@@ -164,6 +168,27 @@ describe('parseServerArgs', () => {
 
   it('rejects stray positionals', () => {
     expect(() => parseServerArgs(['serve', 'extra'])).toThrow(CliError)
+  })
+
+  it('runs serve as a monitor unless it is the worker or --no-monitor', () => {
+    expect(runsMonitor(parseServerArgs([]))).toBe(true)
+    expect(runsMonitor(parseServerArgs(['serve', '-p', '8080']))).toBe(true)
+    expect(parseServerArgs(['serve', '--worker'])).toMatchObject({ command: 'serve', worker: true })
+    expect(runsMonitor(parseServerArgs(['serve', '--worker', '--tls']))).toBe(false)
+    expect(parseServerArgs(['--no-monitor'])).toMatchObject({ command: 'serve', noMonitor: true })
+    expect(runsMonitor(parseServerArgs(['--no-monitor']))).toBe(false)
+  })
+
+  it('never starts a monitor for another command', () => {
+    expect(runsMonitor(parseServerArgs(['show-link']))).toBe(false)
+    expect(runsMonitor(parseServerArgs(['set-password']))).toBe(false)
+    expect(runsMonitor(parseServerArgs(['voice-worker', '--addon', 'x']))).toBe(false)
+    expect(runsMonitor(parseServerArgs(['--help']))).toBe(false)
+  })
+
+  it('documents --no-monitor but not the internal --worker', () => {
+    expect(HELP_TEXT).toContain('--no-monitor')
+    expect(HELP_TEXT).not.toContain('--worker')
   })
 
   it('documents every flag it accepts', () => {

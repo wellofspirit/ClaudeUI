@@ -8,15 +8,16 @@
  *
  * - `app:relaunch` is `admin`, a `command`: it ends every session's turn, every
  *   terminal and every remote connection on the host. Pinned in
- *   `PINNED_CAPABILITIES`. A host that cannot relaunch itself (the headless
- *   server until S5, a dev build, an ineligible install) refuses with a reason.
+ *   `PINNED_CAPABILITIES`. A host that cannot relaunch itself (a headless
+ *   server without its monitor, a dev build, an ineligible install) refuses
+ *   with a reason.
  * - `app:relaunch-availability`, `app:restart-impact` and `app:last-relaunch`
  *   are `config` queries: a client must be able to ask whether to offer the
  *   action, and what it would interrupt, without holding the grant. Unpinned,
  *   as `ide:availability` is (a pin to a grantable capability is no pin).
  *
  * The host side is the `HostRelaunch` seam (`src/core/host.ts`), set by the
- * desktop's `boot-core.ts` and explicitly null on the server.
+ * desktop's `boot-core.ts` and by the server's `main.ts` (`src/server/worker-host.ts`).
  */
 
 import { hostRelaunch, type HostRelaunch } from '../host'
