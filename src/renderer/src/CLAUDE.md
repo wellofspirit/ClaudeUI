@@ -23,7 +23,7 @@ The React UI. The desktop window and the web client (`src/web`) both run it, so 
 6. Renderer consumer: a `useSessionStore` selector on `settings` [nothing]. Search, the phone settings view and sync to other clients need no step.
 7. If `src/core` must honour it: read `appSetting('<key>')` from `src/core/services/app-settings.ts`. It is typed and returns the saved value or the default from step 1. A direct `loadSettings()` or canonical-state read fails [test: app-settings-readers.test.ts].
 8. If core must act when it changes (a timer, a level, a cache): add the effect to `applySettings` in `src/core/services/app-settings-apply.ts`. It runs at boot and after every change, whether a client saved or `settings.json` changed on disk [nothing: without it the new value is seen only where step 7 reads it].
-9. `saveUiSettings` in `src/core/ipc/handlers-core.ts` drops `sandbox`, `proxy`, `anthropicEndpoint` and `modelOverride` (engine and vendor owned, `docs/architecture/persistence.md`); a key with those names is lost on save.
+9. `saveUiSettings` in `src/core/ipc/handlers-core.ts` drops `sandbox`, `proxy`, `anthropicEndpoint` and `modelOverride` (engine and vendor owned, `docs/architecture/persistence.md`); a key with those names is lost on save. It also keeps the host's value of every `HOST_OWNED_SETTINGS` key (`src/shared/app-settings.ts`: update mode, channel, rebuild source), whatever a client sends: those change only through their `admin` commands (ADR-119).
 
 **A component test with two-tier test ids** (copy the closest exemplar's structure; files are `*.component.test.tsx` in `__tests__/`)
 

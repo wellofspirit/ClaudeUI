@@ -163,6 +163,10 @@ class UpdatesStore {
     this.offEvents?.()
     this.offEvents = null
     this.readSeq++
+    // Nothing shows the store any more (the sidebar collapsed): a pending
+    // "restart when staged" must not fire later, whenever it is shown again.
+    // The button still offers Restart to update once the build is staged.
+    if (this.state.restartWhenStaged) this.set({ restartWhenStaged: null })
   }
 
   /** Re-read `app-update:state`; only the newest read lands. */
@@ -220,9 +224,13 @@ class UpdatesStore {
 
   /** Open the panel; `rebuild` shows the ClaudeUI row with Rebuild picked; `check` checks too. */
   openPanel = (opts: { rebuild?: boolean; check?: boolean } = {}): void => {
+    const opening = !this.state.open
     this.set({
       open: true,
-      rebuildIntent: opts.rebuild === true || (this.state.open && this.state.rebuildIntent)
+      rebuildIntent: opts.rebuild === true || (this.state.open && this.state.rebuildIntent),
+      // Every open re-reads the host's trees: a worktree an agent just made, and
+      // the branches and dirty counts, must show without a reload (ADR-121).
+      ...(opening ? { trees: null, treesError: null } : {})
     })
     void this.readRelaunch()
     if (opts.check) void this.check()

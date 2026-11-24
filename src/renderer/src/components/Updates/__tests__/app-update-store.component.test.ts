@@ -38,6 +38,7 @@ const api = {
   restartImpact: vi.fn(async () => NO_IMPACT),
   applyAppUpdate: vi.fn(async () => ({ accepted: true as const })),
   relaunchApp: vi.fn(async () => ({ accepted: true as const })),
+  appUpdateTrees: vi.fn(async () => [] as never[]),
   checkHarnessUpdates: vi.fn(async () => ({}) as never),
   harnessState: vi.fn(async () => ({}) as never)
 }
@@ -190,6 +191,24 @@ describe('restarting', () => {
     expect(updatesStore.getState().restartWhenStaged).toBeNull()
   })
 
+  it('a pending Update & restart is dropped once nothing shows the store', async () => {
+    await subscribed()
+    api.downloadAppUpdate.mockResolvedValue(
+      appView({ download: { phase: 'downloading', version: '3.9.1-pre.14', received: 0 } })
+    )
+    await updatesStore.updateAndRestart()
+    expect(updatesStore.getState().restartWhenStaged).toBe('3.9.1-pre.14')
+    // The sidebar collapses (its footer was the only subscriber)…
+    unsubscribe?.()
+    unsubscribe = null
+    expect(updatesStore.getState().restartWhenStaged).toBeNull()
+    // …and showing it again later, with the build now staged, does not restart.
+    api.appUpdateState.mockResolvedValue(stagedView())
+    await subscribed()
+    await vi.waitFor(() => expect(updatesStore.getState().view?.download.phase).toBe('staged'))
+    expect(api.applyAppUpdate).not.toHaveBeenCalled()
+  })
+
   it('Update & restart stops waiting when the download fails', async () => {
     await subscribed()
     api.downloadAppUpdate.mockResolvedValue(
@@ -254,6 +273,18 @@ describe('writes', () => {
 })
 
 describe('the panel', () => {
+  it('every open forgets the tree list, so a new worktree shows without a reload', async () => {
+    await subscribed()
+    updatesStore.openPanel({ rebuild: true })
+    await updatesStore.loadTrees()
+    expect(updatesStore.getState().trees).toEqual([])
+    updatesStore.openPanel({ rebuild: true }) // already open: keeps what it has
+    expect(updatesStore.getState().trees).toEqual([])
+    updatesStore.closePanel()
+    updatesStore.openPanel({ rebuild: true })
+    expect(updatesStore.getState().trees).toBeNull()
+  })
+
   it('opens on the rebuild choice from the cog menu, and closing clears the confirm', async () => {
     await subscribed()
     updatesStore.openPanel({ rebuild: true })

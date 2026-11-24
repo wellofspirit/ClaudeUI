@@ -146,7 +146,7 @@ export function useUpdatesIndicator(): UpdatesIndicator {
     harnessRows,
     installRows,
     harnessMode: updates?.mode,
-    harnessRunning: h.updatePending || running,
+    harnessRunning: running,
     justFinished: donePhase !== 'none',
     finished
   })

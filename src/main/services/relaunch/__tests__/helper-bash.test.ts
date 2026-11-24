@@ -60,7 +60,11 @@ interface Fixture {
   staged: string
   backup: string
   failed: string
-  run: (over?: { pid?: number; timeouts?: Partial<RelaunchTimeouts> }) => Promise<number>
+  run: (over?: {
+    pid?: number
+    timeouts?: Partial<RelaunchTimeouts>
+    launch?: string[]
+  }) => Promise<number>
   result: (timeoutMs?: number) => Promise<RelaunchResult>
 }
 
@@ -96,7 +100,9 @@ function fixture(opts: {
     `[ "$0" = claudeui-relaunch ] && touch '${path.join(root, 'BASH_ENV_RAN')}'\n`
   )
 
-  const run = async (over: { pid?: number; timeouts?: Partial<RelaunchTimeouts> } = {}) => {
+  const run = async (
+    over: { pid?: number; timeouts?: Partial<RelaunchTimeouts>; launch?: string[] } = {}
+  ) => {
     const timeouts: RelaunchTimeouts = {
       ...DEFAULT_TIMEOUTS,
       waitPidSec: 5,
@@ -121,7 +127,7 @@ function fixture(opts: {
       fromVersion: '1.0.0',
       toVersion: opts.mode === 'swap' ? '2.0.0' : '1.0.0',
       startedAt: Date.now(),
-      launch: fakeLaunch,
+      launch: over.launch ?? fakeLaunch,
       timeouts
     }
     takeLock(state, { token, pid: process.pid, at: Date.now() })
@@ -198,6 +204,17 @@ describe.skipIf(process.platform === 'win32').concurrent('bash relaunch helper',
     expect(r).toMatchObject({ token: f.token, status: 'ok', mode: 'relaunch' })
     expect(launches(f.launchesFile).map((l) => l.version)).toEqual(['1.0.0'])
     expect(fs.readFileSync(f.files.log, 'utf8')).toContain('helper started')
+  })
+
+  it('the log names a carried variable but never its value (a proxy can hold a password)', async ({
+    expect
+  }) => {
+    const f = fixture({ mode: 'relaunch' })
+    await f.run({ launch: [...fakeLaunch, '--env', 'HTTPS_PROXY=http://u:s3cret@proxy:8080'] })
+    expect(await f.result()).toMatchObject({ status: 'ok' })
+    const log = fs.readFileSync(f.files.log, 'utf8')
+    expect(log).toContain('--env HTTPS_PROXY=...')
+    expect(log).not.toContain('s3cret')
   })
 
   it('relaunch: no health in time is no-health (nothing renamed)', async ({ expect }) => {

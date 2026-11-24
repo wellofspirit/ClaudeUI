@@ -156,7 +156,7 @@ coordinates per platform and the reviewed digests. It is the source of truth for
   harness with `from → to`, progress, failures and its own Update, Later (this client, until the next check) and
   Skip <version>; there is no Update all. Automatically never shows the count (changed 2026-11-25: the button no
   longer installs on click). Latest with Automatically is allowed, with the row note "Installs untested releases automatically".
-  A connection without `admin` sees the same state with actions disabled.
+  A connection without `admin` sees the same state without the actions, and a read-only line.
 
 ### §7 Remote devices
 

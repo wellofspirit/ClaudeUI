@@ -74,11 +74,9 @@ export interface HarnessStoreState {
   errors: Partial<Record<HarnessId, string>>
   /** A write was refused for want of `admin`. */
   denied: boolean
-  /** This client's Update all is in flight. */
-  updatePending: boolean
   /** This client's Check now is in flight. */
   checkPending: boolean
-  /** Update all, Check now or the update-mode save failed. */
+  /** Check now or the update-mode save failed. */
   updateError: string | null
   /** Update failures this client dismissed (`updateResultKey`). */
   dismissedUpdates: readonly string[]
@@ -104,7 +102,6 @@ const INITIAL: HarnessStoreState = {
   versions: {},
   errors: {},
   denied: false,
-  updatePending: false,
   checkPending: false,
   updateError: null,
   dismissedUpdates: [],
@@ -479,23 +476,6 @@ class HarnessStore {
       next = { status: 'error', id, reason: ipcErrorMessage(error) }
     }
     this.set({ versions: { ...this.state.versions, [id]: next } })
-  }
-
-  /**
-   * Install every available update (ADR-082 §6). Resolves when the host's run
-   * ends; the events and the snapshot carry the progress. A remote invoke that
-   * times out is a run still going on the host, not a failure.
-   */
-  updateAll = async (): Promise<void> => {
-    this.set({ updatePending: true, updateError: null })
-    try {
-      await window.api.updateHarnesses()
-    } catch (error) {
-      this.updateFailed(error)
-    } finally {
-      this.set({ updatePending: false })
-      void this.refresh()
-    }
   }
 
   /** "Check now": the host asks upstream for new versions. */

@@ -134,9 +134,14 @@ sub_app() {
   done
 }
 launch() {
-  local a args=()
+  local a args=() shown=() prev=""
   for a in "${D}{JOB_LAUNCH[@]}"; do sub_app "$a" "$1"; args+=("$SUB_OUT"); done
-  log "launch: ${D}{args[*]}"
+  # The log keeps only the NAME of each carried variable: a proxy URL can hold a password.
+  for a in "${D}{args[@]}"; do
+    if [ "$prev" = "--env" ]; then shown+=("${D}{a%%=*}=..."); else shown+=("$a"); fi
+    prev=$a
+  done
+  log "launch: ${D}{shown[*]}"
   ( cd "$HOME" 2>/dev/null || cd /; exec "${D}{args[@]}" ) </dev/null >/dev/null 2>&1 &
 }
 

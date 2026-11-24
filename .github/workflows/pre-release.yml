@@ -207,8 +207,9 @@ jobs:
 
       # Signs with the self-signed "ClaudeUI Dev" identity when the MAC_CERT_*
       # secrets are configured, so TCC grants (mic, App Management, ...) keyed on
-      # identifier + certificate root survive updates. Falls back to ad-hoc when
-      # the secrets are absent (forks), which re-prompts on every build.
+      # identifier + certificate root survive updates. Without the secrets the
+      # build fails (ADR-119): an ad-hoc update would fail every user's check of
+      # the running app's designated requirement.
       - name: Import signing identity (macOS)
         if: matrix.platform == 'mac'
         env:
