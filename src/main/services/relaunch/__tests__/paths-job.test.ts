@@ -20,6 +20,7 @@ import {
 import {
   DEFAULT_TIMEOUTS,
   defaultLaunch,
+  relaunchArgs,
   jobJsonText,
   jobShellText,
   parseJob,
@@ -216,6 +217,46 @@ describe('job files', () => {
     ])
     expect(defaultLaunch('win32', 'ClaudeUI.exe', 't')).toEqual([
       '{app}\\ClaudeUI.exe',
+      '--relaunch-token=t'
+    ])
+  })
+
+  it('starts the next instance the way this one started', () => {
+    const args = relaunchArgs([
+      '/A/ClaudeUI.app/Contents/MacOS/ClaudeUI',
+      '-psn_0_12345',
+      '--user-data-dir=/tmp/p q/electron',
+      '--relaunch-token=old',
+      '--claudeui-headless'
+    ])
+    expect(args).toEqual(['--user-data-dir=/tmp/p q/electron', '--claudeui-headless'])
+    const env = {
+      HOME: '/tmp/p q',
+      CLAUDEUI_DISABLE_REMOTE: '1',
+      HTTPS_PROXY: 'http://127.0.0.1:9',
+      OPENAI_API_KEY: 'sk-secret',
+      CLAUDEUI_PI_BRIDGE_TOKEN: 'secret'
+    }
+    expect(defaultLaunch('darwin', 'ClaudeUI', 't', { args, env })).toEqual([
+      'open',
+      '-n',
+      '--env',
+      'HOME=/tmp/p q',
+      '--env',
+      'CLAUDEUI_DISABLE_REMOTE=1',
+      '--env',
+      'HTTPS_PROXY=http://127.0.0.1:9',
+      '{app}',
+      '--args',
+      '--user-data-dir=/tmp/p q/electron',
+      '--claudeui-headless',
+      '--relaunch-token=t'
+    ])
+    // Windows inherits the environment; only the arguments are carried.
+    expect(defaultLaunch('win32', 'ClaudeUI.exe', 't', { args, env })).toEqual([
+      '{app}\\ClaudeUI.exe',
+      '--user-data-dir=/tmp/p q/electron',
+      '--claudeui-headless',
       '--relaunch-token=t'
     ])
   })

@@ -31,6 +31,7 @@ import { helperCommand, type HelperCommand } from './helper-scripts'
 import {
   DEFAULT_TIMEOUTS,
   defaultLaunch,
+  relaunchArgs,
   writeAtomicRetrying,
   writeJobFiles,
   type RetryingWriteOptions,
@@ -72,6 +73,10 @@ export interface RelaunchServiceDeps {
   pid: number
   /** `app.getVersion()`. */
   runningVersion: string
+  /** `process.argv`: the next instance starts with the same arguments. */
+  argv?: readonly string[]
+  /** `process.env`: on macOS an allowlist of it is carried over (`RELAUNCH_ENV_KEYS`). */
+  env?: Readonly<Record<string, string | undefined>>
   /** The build id the health record carries (null for a build without one). */
   buildId: string | null
   stateDir: string
@@ -261,7 +266,10 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
       fromVersion,
       toVersion,
       startedAt: now(),
-      launch: defaultLaunch(platform, exeName, token),
+      launch: defaultLaunch(platform, exeName, token, {
+        args: relaunchArgs(deps.argv ?? []),
+        env: deps.env ?? {}
+      }),
       timeouts: DEFAULT_TIMEOUTS
     }
 

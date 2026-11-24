@@ -62,16 +62,57 @@ export interface RelaunchJob {
   timeouts: RelaunchTimeouts
 }
 
+/**
+ * The variables a macOS relaunch carries over: `open` starts the app with the
+ * login session's environment, not the helper's, so a ClaudeUI started with
+ * another profile (HOME, CLAUDE_CONFIG_DIR), a mode switch or a proxy would come
+ * back without it. An allowlist, because the job files sit on disk: nothing
+ * credential-shaped beyond what a proxy URL itself carries. Windows needs none
+ * (`Start-Process` inherits the helper's environment, which is the app's).
+ */
+export const RELAUNCH_ENV_KEYS: readonly string[] = [
+  'HOME',
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDEUI_HARNESS_STORE',
+  'CLAUDEUI_ALLOW_MULTIPLE_INSTANCES',
+  'CLAUDEUI_DISABLE_REMOTE',
+  'CLAUDEUI_HEADLESS',
+  'CLAUDEUI_NO_WINDOW',
+  'CLAUDEUI_VERIFIER_HOOKS',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy'
+]
+
+/**
+ * The arguments this process was started with, to start the next one the same
+ * way: `argv` minus the executable, an earlier relaunch token and macOS's
+ * `-psn_…` process serial number.
+ */
+export function relaunchArgs(argv: readonly string[]): string[] {
+  return argv.slice(1).filter((a) => !a.startsWith('--relaunch-token=') && !a.startsWith('-psn_'))
+}
+
 /** The argv that starts an installed ClaudeUI; never client-supplied. */
 export function defaultLaunch(
   platform: RelaunchPlatform,
   exeName: string,
-  token: string
+  token: string,
+  carry: { args?: readonly string[]; env?: Readonly<Record<string, string | undefined>> } = {}
 ): string[] {
-  const flag = `--relaunch-token=${token}`
-  return platform === 'darwin'
-    ? ['open', '-n', LAUNCH_APP_PLACEHOLDER, '--args', flag]
-    : [`${LAUNCH_APP_PLACEHOLDER}\\${exeName}`, flag]
+  const args = [...(carry.args ?? []), `--relaunch-token=${token}`]
+  if (platform !== 'darwin') return [`${LAUNCH_APP_PLACEHOLDER}\\${exeName}`, ...args]
+  const env = carry.env ?? {}
+  const envFlags = RELAUNCH_ENV_KEYS.flatMap((k) => {
+    const v = env[k]
+    return v === undefined ? [] : ['--env', `${k}=${v}`]
+  })
+  return ['open', '-n', ...envFlags, LAUNCH_APP_PLACEHOLDER, '--args', ...args]
 }
 
 /** POSIX single-quote a value: `'` → `'\''`. Safe for any byte but NUL. */

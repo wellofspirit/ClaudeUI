@@ -728,6 +728,8 @@ app.whenReady().then(() => {
       execPath: process.execPath,
       pid: process.pid,
       runningVersion: rawVersion,
+      argv: process.argv,
+      env: process.env,
       buildId: hostBuild,
       stateDir: relaunchStateDir(homedir()),
       collectRestore: () => restoreCollector.collect(),
