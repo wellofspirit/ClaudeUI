@@ -197,9 +197,10 @@ export function hostBuildId(): string | null {
 
 /**
  * What the `app:relaunch*` commands need from the host. The desktop wires its
- * relaunch service (`src/main/services/relaunch/`); the headless server sets
- * `null` until it has a monitor that can restart it (S5), so the commands answer
- * "not available" there rather than quitting a server nobody can start again.
+ * relaunch service (`src/main/services/relaunch/`); the headless server's
+ * `serve` wires `src/server/worker-host.ts`, available only under its monitor
+ * (`src/server/monitor.ts`), so a server nobody could start again answers "not
+ * available" rather than quitting.
  */
 export interface HostRelaunch {
   /** Whether a relaunch can start now, and why not. */
@@ -215,7 +216,7 @@ export interface HostRelaunch {
 
 let hostRelaunchImpl: HostRelaunch | null = null
 
-/** Publish the host's relaunch (or clear it). Wired in `boot-core`; the server sets null. */
+/** Publish the host's relaunch (or clear it). Wired in `boot-core` and the server's `main.ts`. */
 export function setHostRelaunch(relaunch: HostRelaunch | null): void {
   hostRelaunchImpl = relaunch
 }

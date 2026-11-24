@@ -47,6 +47,19 @@ export interface RelaunchResult {
   recovered?: boolean
 }
 
+/**
+ * `relaunch/health/<installKey>.json`: written by a healthy boot of an install
+ * (a packaged desktop, or a server worker under its monitor) and awaited by
+ * whatever restarted it: the desktop's helper, the server's monitor.
+ */
+export interface HealthRecord {
+  version: string
+  buildId: string | null
+  pid: number
+  /** Epoch ms. */
+  at: number
+}
+
 /** `app:relaunch-availability`. */
 export interface RelaunchAvailability {
   available: boolean
@@ -117,4 +130,15 @@ export function parseRelaunchResult(raw: unknown): RelaunchResult | null {
   if (typeof reason === 'string' && reason !== '') result.reason = reason
   if (recovered === true) result.recovered = true
   return result
+}
+
+/** A health record from disk, or null when it is not one. */
+export function parseHealthRecord(raw: unknown): HealthRecord | null {
+  if (!isRecord(raw)) return null
+  const { version, buildId, pid, at } = raw
+  if (typeof version !== 'string' || version === '') return null
+  if (buildId !== null && typeof buildId !== 'string') return null
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return null
+  if (typeof at !== 'number' || !Number.isFinite(at)) return null
+  return { version, buildId, pid, at }
 }

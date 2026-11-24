@@ -437,6 +437,15 @@ describe('mode auto', () => {
     await expect(r.updater.download()).rejects.toThrow("Can't update here")
   })
 
+  it("carries an eligible host's notice into the view", async () => {
+    const notice = 'Windows Firewall rules are per executable path; allow the port instead'
+    const r = rig({
+      routes: github({ version: '1.1.0' }),
+      host: { eligibility: async () => ({ ok: true as const, notice }) }
+    })
+    expect((await r.updater.state()).eligibility).toEqual({ ok: true, notice })
+  })
+
   it('reports download progress at most once a second', async () => {
     const archive = archiveFor('1.1.0')
     const chunks = [archive.subarray(0, 100), archive.subarray(100, 200), archive.subarray(200)]

@@ -14,7 +14,12 @@ export type AppUpdateMode = 'auto' | 'ask' | 'off'
 export type AppUpdateDownloadPhase =
   'idle' | 'downloading' | 'verifying' | 'staging' | 'staged' | 'failed'
 
-export type AppUpdateEligibility = { ok: true } | { ok: false; reason: string }
+/**
+ * `notice`: a host that can update, with something the user should know first
+ * (the macOS and Windows server: their firewalls approve each executable, and an
+ * update runs from a new one).
+ */
+export type AppUpdateEligibility = { ok: true; notice?: string } | { ok: false; reason: string }
 
 export interface AppUpdateView {
   /** A host seam and an update target exist (desktop and server builds that can update). */

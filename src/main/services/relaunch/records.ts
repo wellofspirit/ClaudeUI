@@ -10,17 +10,11 @@
  */
 
 import * as fs from 'node:fs'
-import { parseRestoreRecord, type RestoreRecord } from '../../../shared/relaunch'
+import { parseRestoreRecord, type HealthRecord, type RestoreRecord } from '../../../shared/relaunch'
 import { writeAtomicRetrying, type RetryingWriteOptions } from './job'
 import { healthDir, healthFile, restoreFile } from './paths'
 
-export interface HealthRecord {
-  version: string
-  buildId: string | null
-  pid: number
-  /** Epoch ms. */
-  at: number
-}
+export type { HealthRecord } from '../../../shared/relaunch'
 
 export async function writeHealth(
   stateDir: string,
