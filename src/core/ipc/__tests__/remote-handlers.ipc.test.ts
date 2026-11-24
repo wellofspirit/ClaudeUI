@@ -1993,6 +1993,28 @@ describe('registerRemoteHandlers', () => {
       expect(getMockupSecuritySettings().allowHttp).toBe(false)
     })
 
+    it('a connection without admin cannot change the host-owned update mode or channel', async () => {
+      const base = makeRemoteConnection('none', null, AUTH_OFF_GRANTS)
+      await dispatcher.handle(
+        makeRequest('config:save-settings', {
+          theme: 'dark',
+          appUpdateMode: 'auto',
+          appUpdateChannel: 'pre-release',
+          appUpdateSourcePath: '/evil'
+        }),
+        base
+      )
+      const persisted = uiConfigMocks.saveSettings.mock.calls[0][0]
+      expect(persisted).toEqual({ theme: 'dark' })
+      // Their one writer is an admin command, refused before it runs.
+      await expect(
+        dispatcher.handle(makeRequest('app-update:set-settings', { mode: 'auto' }), base)
+      ).rejects.toThrow(
+        /Permission denied: "app-update:set-settings" requires the "admin" capability/
+      )
+      expect(uiConfigMocks.saveSettings).toHaveBeenCalledTimes(1)
+    })
+
     it('persists a key this build does not know, unchanged (a newer build wrote it)', async () => {
       const future = { fromANewerBuild: { nested: [1, 2] }, theme: 'dark' }
       await dispatcher.handle(makeRequest('config:save-settings', future), remoteConn)
@@ -2213,6 +2235,7 @@ const NOT_GRANTED_AT_CONNECT: Record<string, Capability> = {
   'harness:set-update-mode': 'admin',
   'harness:update-all': 'admin',
   'harness:check-updates': 'admin',
+  'harness:skip-update': 'admin',
   'harness:answer-upgrade-prompt': 'admin',
   'voice:pack-install': 'admin',
   'voice:pack-install-cancel': 'admin',
@@ -2224,7 +2247,9 @@ const NOT_GRANTED_AT_CONNECT: Record<string, Capability> = {
   'app-update:apply': 'admin',
   'app-update:trees': 'admin',
   'app-update:rebuild': 'admin',
-  'app-update:cancel-rebuild': 'admin'
+  'app-update:cancel-rebuild': 'admin',
+  'app-update:set-source': 'admin',
+  'app-update:set-settings': 'admin'
 }
 
 /** Table keys whose capability is `capability`, or that start with `prefix`. */

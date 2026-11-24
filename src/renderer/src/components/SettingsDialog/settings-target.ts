@@ -18,6 +18,7 @@ export const SETTINGS_PAGE_IDS = [
   'chat',
   'sessions',
   'advanced',
+  'updates',
   'about',
   'models',
   'dispatch',

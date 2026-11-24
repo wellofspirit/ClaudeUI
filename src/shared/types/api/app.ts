@@ -30,4 +30,6 @@ export interface AppAPI {
   onCollectRestore(cb: () => void): () => void
   /** The app menu's "Relaunch ClaudeUI" was chosen: run the confirm flow. Desktop only. */
   onRelaunchRequested(cb: () => void): () => void
+  /** The app menu's "Check for Updates…" was chosen: open the Updates panel. Desktop only. */
+  onCheckUpdatesRequested(cb: () => void): () => void
 }

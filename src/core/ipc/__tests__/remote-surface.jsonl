@@ -8,6 +8,8 @@
 {"channel":"app-update:check","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"app-update:download","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"app-update:rebuild","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"app-update:set-settings","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"app-update:set-source","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"app-update:skip","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"app-update:state","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"app-update:trees","capability":"admin","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
@@ -101,6 +103,7 @@
 {"channel":"harness:install-cancel","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"harness:set-selection","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"harness:set-update-mode","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
+{"channel":"harness:skip-update","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"harness:state","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"harness:update-all","capability":"admin","kind":"command","sessionIdArg":null,"withConnection":false,"withProgress":false}
 {"channel":"harness:versions","capability":"config","kind":"query","sessionIdArg":null,"withConnection":false,"withProgress":false}

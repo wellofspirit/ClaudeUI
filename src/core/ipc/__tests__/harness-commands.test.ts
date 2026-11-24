@@ -215,6 +215,7 @@ describe('capabilities (ADR-082 §7)', () => {
       'harness:set-update-mode': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'harness:update-all': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'harness:check-updates': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'harness:skip-update': expect.objectContaining({ capability: 'admin', kind: 'command' }),
       'harness:answer-upgrade-prompt': expect.objectContaining({
         capability: 'admin',
         kind: 'command'
@@ -245,6 +246,7 @@ describe('capabilities (ADR-082 §7)', () => {
       'harness:set-update-mode',
       'harness:update-all',
       'harness:check-updates',
+      'harness:skip-update',
       'harness:answer-upgrade-prompt'
     ]) {
       await expect(registry.dispatch(channel, 'remote', args, base)).rejects.toThrow(
@@ -273,6 +275,7 @@ describe('capabilities (ADR-082 §7)', () => {
     'harness:set-update-mode',
     'harness:update-all',
     'harness:check-updates',
+    'harness:skip-update',
     'harness:answer-upgrade-prompt'
   ])('pins %s: registering it as `config` throws', (channel) => {
     const registry = new CommandRegistry()
@@ -641,7 +644,8 @@ function fakeUpdates(view: Partial<HarnessUpdatesView> = {}) {
     view: vi.fn(() => full),
     check: vi.fn(async () => {}),
     updateAll: vi.fn(async () => []),
-    modeChanged: vi.fn()
+    modeChanged: vi.fn(),
+    skipChanged: vi.fn()
   }
 }
 
@@ -713,7 +717,8 @@ describe('updates', () => {
       view: () => updater.view(),
       check: () => updater.check('user'),
       updateAll: () => updater.updateAll(),
-      modeChanged: () => updater.modeChanged()
+      modeChanged: () => updater.modeChanged(),
+      skipChanged: (id: HarnessId) => updater.skipChanged(id)
     }
     const registry = registryOf(commands({ updates }))
 
@@ -739,6 +744,74 @@ describe('updates', () => {
       newer,
       OPENCODE.tested
     ])
+  })
+
+  it('harness:skip-update hides that version of that harness; a newer one is offered again', async () => {
+    fakeHarnessInstall(store, 'opencode', OPENCODE.tested)
+    writeSelections({ opencode: { source: 'managed', version: 'latest' } })
+    fs.writeFileSync(
+      harnessesConfigPath(),
+      JSON.stringify({
+        future: { keep: true },
+        selections: { opencode: { source: 'managed', version: 'latest' } }
+      })
+    )
+    let upstream = OC_NEWER
+    const install = vi.fn()
+    const updater = createHarnessUpdater({ latestVersion: async () => upstream, install })
+    const changed: HarnessId[][] = []
+    updater.onChanged((ids) => changed.push(ids))
+    const updates = {
+      view: () => updater.view(),
+      check: () => updater.check('user'),
+      updateAll: () => updater.updateAll(),
+      modeChanged: () => updater.modeChanged(),
+      skipChanged: (id: HarnessId) => updater.skipChanged(id)
+    }
+    const registry = registryOf(commands({ updates }))
+    await call(registry, 'harness:check-updates')
+    expect(updater.available().map((u) => u.to)).toEqual([OC_NEWER])
+
+    changed.length = 0
+    const view = (await call(registry, 'harness:skip-update', {
+      id: 'opencode',
+      version: OC_NEWER
+    })) as HarnessUpdatesView
+    expect(view.available).toEqual([])
+    expect(view.skipped).toEqual({ opencode: OC_NEWER })
+    // Clients hear it, and the file keeps its other keys.
+    expect(changed).toEqual([['opencode']])
+    expect(JSON.parse(fs.readFileSync(harnessesConfigPath(), 'utf-8'))).toMatchObject({
+      future: { keep: true },
+      skippedUpdates: { opencode: OC_NEWER }
+    })
+    // Automatically respects the skip.
+    updater.modeChanged()
+    await updater.idle()
+    expect(install).not.toHaveBeenCalled()
+
+    // A newer release is offered again.
+    upstream = OC_NEXT_MINOR
+    await call(registry, 'harness:check-updates')
+    expect(updater.available().map((u) => u.to)).toEqual([OC_NEXT_MINOR])
+  })
+
+  it('harness:skip-update refuses Claude Code, a channel name and a malformed version', async () => {
+    const updates = fakeUpdates()
+    const registry = registryOf(commands({ updates }))
+    await expect(
+      call(registry, 'harness:skip-update', { id: 'claude', version: '2.1.0' })
+    ).rejects.toThrow(/Claude Code updates with ClaudeUI/)
+    for (const version of ['latest', 'tested', '../1.0.0', 7, undefined]) {
+      await expect(call(registry, 'harness:skip-update', { id: 'pi', version })).rejects.toThrow(
+        /Invalid version to skip/
+      )
+    }
+    await expect(
+      call(registry, 'harness:skip-update', { id: 'nope', version: '1.0.0' })
+    ).rejects.toThrow(/Unknown harness/)
+    expect(updates.skipChanged).not.toHaveBeenCalled()
+    expect(fs.existsSync(harnessesConfigPath())).toBe(false)
   })
 
   it('harness:check-updates refreshes upstream even while background checks are disabled', async () => {
@@ -999,7 +1072,8 @@ describe('no result carries an `ok` key (the transports read it as their envelop
       await call(registry, 'harness:detect', {}),
       await call(registry, 'harness:set-update-mode', { mode: 'ask' }),
       await call(registry, 'harness:update-all'),
-      await call(registry, 'harness:check-updates')
+      await call(registry, 'harness:check-updates'),
+      await call(registry, 'harness:skip-update', { id: 'pi', version: '0.87.4' })
     ]
     result = { status: 'failed', id: 'opencode', version: OPENCODE.tested, reason: 'x' }
     answers.push(await call(registry, 'harness:install', { id: 'opencode', version: 'tested' }))

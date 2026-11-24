@@ -604,6 +604,8 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'harness:set-update-mode': 'admin',
   'harness:update-all': 'admin',
   'harness:check-updates': 'admin',
+  // Skipping a version hides it from the host's operator and from Automatically.
+  'harness:skip-update': 'admin',
   // The one-time upgrade sheet's answer (ADR-082 §8): shown only to an admin
   // connection, which installs from the same click. Relabelled `config`, any
   // connection could dismiss the offer for the host's operator.
@@ -630,6 +632,15 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'app-update:download': 'admin',
   'app-update:skip': 'admin',
   'app-update:apply': 'admin',
+  // The checkout rebuilds list their trees from: it decides which code a
+  // rebuild runs. Host-owned (`config:save-settings` keeps the host's value);
+  // relabelled `config`, any authenticated connection could point rebuilds at
+  // a tree of its choosing.
+  'app-update:set-source': 'admin',
+  // Whether the host downloads releases by itself, and which it offers (host-owned
+  // like the source). Relabelled `config`, any authenticated connection could
+  // switch the host to downloading builds unattended.
+  'app-update:set-settings': 'admin',
   // A local rebuild runs a source tree's build scripts on the host with the
   // user's rights; cancelling it stops that tree's process group. The tree list
   // names the operator's checkouts, branches and commits and is only read to

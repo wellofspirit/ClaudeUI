@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const appendAuditLog = vi.hoisted(() => vi.fn())
 vi.mock('../../services/db', () => ({ appendAuditLog }))
 
+import * as os from 'node:os'
 import type { AppUpdateView } from '../../../shared/types/app-update'
 import {
   AUTH_OFF_GRANTS,
@@ -33,7 +34,8 @@ import {
 import {
   APP_UPDATE_CHANNELS,
   appUpdateCommands,
-  startAppUpdateEvents
+  startAppUpdateEvents,
+  type AppUpdateCommandDeps
 } from '../app-update-commands'
 import { channelSpec } from '../../shared/sync/channels'
 import type { AppUpdater } from '../../services/app-update'
@@ -46,7 +48,8 @@ const VIEW: AppUpdateView = {
   check: { running: false },
   download: { phase: 'idle' },
   rebuild: { phase: 'idle' },
-  rebuildAvailable: true
+  rebuildAvailable: true,
+  sourceConfigured: false
 }
 
 const TREES = [
@@ -59,7 +62,9 @@ const WRITES = [
   'app-update:skip',
   'app-update:apply',
   'app-update:rebuild',
-  'app-update:cancel-rebuild'
+  'app-update:cancel-rebuild',
+  'app-update:set-source',
+  'app-update:set-settings'
 ]
 /** Every admin channel: the writes and the tree list. */
 const ADMIN = [...WRITES, 'app-update:trees']
@@ -67,7 +72,9 @@ const ADMIN = [...WRITES, 'app-update:trees']
 /** Arguments each channel accepts. */
 const ARGS: Record<string, unknown[]> = {
   'app-update:skip': [{ version: '1.1.0' }],
-  'app-update:rebuild': [{ treeId: TREES[0].id }]
+  'app-update:rebuild': [{ treeId: TREES[0].id }],
+  'app-update:set-source': [{ path: null }],
+  'app-update:set-settings': [{ mode: 'ask' }]
 }
 
 /** A scriptable updater: the commands only call these. */
@@ -100,9 +107,19 @@ function fakeUpdater(overrides: Partial<AppUpdater> = {}): AppUpdater & { fire: 
   }
 }
 
-function registryOf(updater: AppUpdater = fakeUpdater()): CommandRegistry {
+/** The settings plane's writer, as the commands call it (the real one is `saveHostOwnedSettings`). */
+const saveSettings = vi.fn()
+
+function registryOf(
+  updater: AppUpdater = fakeUpdater(),
+  checkSource?: AppUpdateCommandDeps['checkSource']
+): CommandRegistry {
   const registry = new CommandRegistry()
-  const cmds: Array<Omit<CommandRegistration, 'transport'>> = appUpdateCommands({ updater })
+  const cmds: Array<Omit<CommandRegistration, 'transport'>> = appUpdateCommands({
+    updater,
+    saveSettings,
+    ...(checkSource ? { checkSource } : {})
+  })
   for (const cmd of cmds) {
     registry.register({ ...cmd, transport: 'desktop' })
     registry.register({ ...cmd, transport: 'remote' })
@@ -110,7 +127,10 @@ function registryOf(updater: AppUpdater = fakeUpdater()): CommandRegistry {
   return registry
 }
 
-beforeEach(() => appendAuditLog.mockClear())
+beforeEach(() => {
+  appendAuditLog.mockClear()
+  saveSettings.mockReset()
+})
 
 describe('capabilities', () => {
   it('declares the state a `config` query, the trees an `admin` query and the writes `admin` commands, on both transports', () => {
@@ -128,7 +148,9 @@ describe('capabilities', () => {
       'app-update:cancel-rebuild': expect.objectContaining({
         capability: 'admin',
         kind: 'command'
-      })
+      }),
+      'app-update:set-source': expect.objectContaining({ capability: 'admin', kind: 'command' }),
+      'app-update:set-settings': expect.objectContaining({ capability: 'admin', kind: 'command' })
     })
     expect(registry.channels('remote')).toEqual([...APP_UPDATE_CHANNELS].sort())
     expect(registry.channels('desktop')).toEqual([...APP_UPDATE_CHANNELS].sort())
@@ -161,6 +183,8 @@ describe('capabilities', () => {
     expect(updater.trees).not.toHaveBeenCalled()
     expect(updater.rebuild).not.toHaveBeenCalled()
     expect(updater.cancelRebuild).not.toHaveBeenCalled()
+    expect(saveSettings).not.toHaveBeenCalled()
+    expect(updater.settingsChanged).not.toHaveBeenCalled()
   })
 
   it('serves an admin connection, and audits the write under its capability', async () => {
@@ -248,6 +272,114 @@ describe('results', () => {
       await expect(call(registry, 'app-update:skip', args)).rejects.toThrow(/version is required/)
     }
     expect(updater.skip).not.toHaveBeenCalled()
+  })
+
+  it('an explicit null version takes the skip back', async () => {
+    const updater = fakeUpdater()
+    const registry = registryOf(updater)
+    await expect(call(registry, 'app-update:skip', [{ version: null }])).resolves.toEqual(VIEW)
+    expect(updater.skip).toHaveBeenCalledWith(null)
+  })
+
+  describe('set-source', () => {
+    const ok = (p: string) => ({ ok: true as const, path: `${p}/resolved` })
+
+    it('saves a checked path and answers the view; null clears it', async () => {
+      const checkSource = vi.fn(ok)
+      const registry = registryOf(fakeUpdater(), checkSource)
+      await expect(
+        call(registry, 'app-update:set-source', [{ path: '/work/ClaudeUI' }])
+      ).resolves.toEqual(VIEW)
+      expect(checkSource).toHaveBeenCalledWith('/work/ClaudeUI')
+      expect(saveSettings).toHaveBeenLastCalledWith({
+        appUpdateSourcePath: '/work/ClaudeUI/resolved'
+      })
+      await call(registry, 'app-update:set-source', [{ path: null }])
+      expect(saveSettings).toHaveBeenLastCalledWith({ appUpdateSourcePath: null })
+    })
+
+    it('refuses what the check refuses, with its reason, and saves nothing', async () => {
+      const registry = registryOf(fakeUpdater(), () => ({
+        ok: false,
+        reason: 'Not a ClaudeUI checkout'
+      }))
+      await expect(call(registry, 'app-update:set-source', [{ path: '/tmp' }])).rejects.toThrow(
+        /Not a ClaudeUI checkout/
+      )
+      expect(saveSettings).not.toHaveBeenCalled()
+    })
+
+    it('refuses a path where the host cannot rebuild, but still lets the source be cleared', async () => {
+      const { rebuild: _none, ...noRebuild } = VIEW
+      const updater = fakeUpdater({ view: vi.fn(() => noRebuild as AppUpdateView) })
+      const registry = registryOf(updater, vi.fn(ok))
+      await expect(
+        call(registry, 'app-update:set-source', [{ path: '/work/ClaudeUI' }])
+      ).rejects.toThrow(/cannot rebuild/)
+      expect(saveSettings).not.toHaveBeenCalled()
+      await call(registry, 'app-update:set-source', [{ path: null }])
+      expect(saveSettings).toHaveBeenCalledWith({ appUpdateSourcePath: null })
+    })
+
+    it('refuses a payload without a path string or an explicit null', async () => {
+      const registry = registryOf(fakeUpdater(), vi.fn(ok))
+      for (const args of [[], [null], [{}], [{ path: 7 }]]) {
+        await expect(call(registry, 'app-update:set-source', args)).rejects.toThrow(
+          /path \(or null/
+        )
+      }
+      expect(saveSettings).not.toHaveBeenCalled()
+    })
+
+    it('uses the checkout rule by default: a relative path or a non-checkout is refused', async () => {
+      const registry = new CommandRegistry()
+      for (const cmd of appUpdateCommands({ updater: fakeUpdater(), saveSettings }))
+        registry.register({ ...cmd, transport: 'desktop' })
+      await expect(
+        call(registry, 'app-update:set-source', [{ path: 'relative/dir' }])
+      ).rejects.toThrow(/must be absolute/)
+      await expect(
+        call(registry, 'app-update:set-source', [{ path: os.tmpdir() }])
+      ).rejects.toThrow(/Not a ClaudeUI checkout/)
+      expect(saveSettings).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('set-settings', () => {
+    it('saves the mode and the channel, then tells the updater and answers the view', async () => {
+      const updater = fakeUpdater()
+      const registry = registryOf(updater)
+      await expect(
+        call(registry, 'app-update:set-settings', [{ mode: 'off', channel: 'stable' }])
+      ).resolves.toEqual(VIEW)
+      expect(saveSettings).toHaveBeenLastCalledWith({
+        appUpdateMode: 'off',
+        appUpdateChannel: 'stable'
+      })
+      expect(updater.settingsChanged).toHaveBeenCalledTimes(1)
+      // One of the two, the other left as it is (a JSON null is absent).
+      await call(registry, 'app-update:set-settings', [{ channel: 'pre-release', mode: null }])
+      expect(saveSettings).toHaveBeenLastCalledWith({ appUpdateChannel: 'pre-release' })
+    })
+
+    it('refuses an unknown value, an empty payload and a non-object, saving nothing', async () => {
+      const updater = fakeUpdater()
+      const registry = registryOf(updater)
+      const cases: Array<[unknown[], RegExp]> = [
+        [[{ mode: 'always' }], /update mode is/],
+        [[{ channel: 'nightly' }], /update channel is/],
+        [[{ mode: 'auto', channel: 7 }], /update channel is/],
+        [[{}], /Name a mode or a channel/],
+        [[{ mode: null }], /Name a mode or a channel/],
+        [[null], /\{ mode\?, channel\? \}/],
+        [['auto'], /\{ mode\?, channel\? \}/]
+      ]
+      for (const [args, message] of cases) {
+        await expect(call(registry, 'app-update:set-settings', args)).rejects.toThrow(message)
+      }
+      expect(saveSettings).not.toHaveBeenCalled()
+      expect(updater.settingsChanged).not.toHaveBeenCalled()
+    })
   })
 
   it('surfaces a refusal as an error, not a result', async () => {

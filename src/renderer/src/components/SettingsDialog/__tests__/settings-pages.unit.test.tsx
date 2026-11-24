@@ -55,12 +55,13 @@ function allItemsOf(group: SettingsGroup): Array<{ key: string; engine?: string 
 }
 
 describe('PAGES structure', () => {
-  it('has the 14 documented pages, in order', () => {
+  it('has the 15 documented pages, in order', () => {
     expect(PAGES.map((p) => p.id)).toEqual([
       'appearance',
       'chat',
       'sessions',
       'advanced',
+      'updates',
       'about',
       'models',
       'dispatch',
@@ -82,7 +83,14 @@ describe('PAGES structure', () => {
 
   it('rail membership matches ADR-065 / ADR-082 (App / Features / Harnesses)', () => {
     const byRail = (rail: string): string[] => PAGES.filter((p) => p.rail === rail).map((p) => p.id)
-    expect(byRail('app')).toEqual(['appearance', 'chat', 'sessions', 'advanced', 'about'])
+    expect(byRail('app')).toEqual([
+      'appearance',
+      'chat',
+      'sessions',
+      'advanced',
+      'updates',
+      'about'
+    ])
     expect(byRail('features')).toEqual(['models', 'dispatch', 'mockups', 'media', 'remote'])
     // ADR-082 §1: Installed first, then the per-harness pages.
     expect(byRail('engines')).toEqual(['harnesses', 'claude', 'opencode', 'pi'])
@@ -125,6 +133,7 @@ describe('PAGES structure', () => {
         'retention'
       ],
       advanced: ['logging', 'usage'],
+      updates: ['claudeui'],
       about: ['about'],
       models: [
         // ADR-074 §7: sign-in subscriptions first, then API providers — ONE
@@ -381,6 +390,8 @@ describe('inventory guard', () => {
       'usageHub',
       'harnessesInstalled',
       'harnessUpdates',
+      // ClaudeUI's own updates (auto-update S6): the Updates page.
+      'appUpdates',
       // ADR-094: one Agent colours item per harness page, and the dispatch tile.
       'claudeAgentColours',
       'opencodeAgentColours',

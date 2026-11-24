@@ -1064,6 +1064,40 @@ describe('session.ipc', () => {
       expect(saved().appUpdateSourcePath).toBe('/work/ClaudeUI')
       expect(saved().theme).toBe('light')
     })
+
+    it('config:save-settings keeps the host-owned update mode and channel whatever a client sends', async () => {
+      // `config` is a base remote grant; only `app-update:set-settings` (admin) writes these.
+      const { saveSettings } = await import('../../services/ui-config')
+      const saved = (): Record<string, unknown> =>
+        vi.mocked(saveSettings).mock.calls.at(-1)![0] as Record<string, unknown>
+      // Nothing saved on the host: the keys stay unset (following their defaults).
+      await harness.call('config:save-settings', {
+        theme: 'dark',
+        appUpdateMode: 'off',
+        appUpdateChannel: 'pre-release'
+      })
+      expect(saved().theme).toBe('dark')
+      expect(saved()).not.toHaveProperty('appUpdateMode')
+      expect(saved()).not.toHaveProperty('appUpdateChannel')
+      const real = syncCore.getCanonicalState()
+      const spy = vi.spyOn(syncCore, 'getCanonicalState').mockImplementation(() => ({
+        ...real,
+        settings: { ...real.settings, appUpdateMode: 'ask', appUpdateChannel: 'stable' }
+      }))
+      try {
+        // A client dropping the keys keeps them too.
+        await harness.call('config:save-settings', { theme: 'light' })
+        expect(saved()).toMatchObject({
+          theme: 'light',
+          appUpdateMode: 'ask',
+          appUpdateChannel: 'stable'
+        })
+        await harness.call('config:save-settings', { appUpdateMode: 'auto' })
+        expect(saved().appUpdateMode).toBe('ask')
+      } finally {
+        spy.mockRestore()
+      }
+    })
   })
 
   // -------------------------------------------------------------------------

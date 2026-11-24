@@ -12,11 +12,12 @@
  *   runs (`set-selection`) or running every program detection finds on the
  *   host (`detect`). The update commands (§6) are writes too: choosing whether
  *   binaries install themselves (`set-update-mode`), installing every update
- *   (`update-all`), and sending the host to upstream (`check-updates`). A base
- *   remote connection never holds `admin`; a passkey or break-glass one does,
- *   and at the `strong` tier a write also needs the mutation window
+ *   (`update-all`), sending the host to upstream (`check-updates`), and
+ *   hiding one version of a harness from the host's operator (`skip-update`).
+ *   A base remote connection never holds `admin`; a passkey or break-glass one
+ *   does, and at the `strong` tier a write also needs the mutation window
  *   (`classifyDispatch` → `mutation`). The desktop renderer's host connection
- *   holds every capability. The seven are pinned in `PINNED_CAPABILITIES`, so
+ *   holds every capability. Every write is pinned in `PINNED_CAPABILITIES`, so
  *   no later edit can relabel one `config`. So is the upgrade sheet's answer
  *   (`answer-upgrade-prompt`, ADR-082 §8): an admin connection is the one the
  *   sheet is shown to, and it installs from the same click.
@@ -73,6 +74,7 @@ import { availableVersions, latestVersion } from '../harness/install/upstream'
 import {
   checkHarnessUpdates,
   harnessUpdateModeChanged,
+  harnessUpdateSkipChanged,
   harnessUpdatesView,
   onHarnessUpdatesChanged,
   updateAllHarnesses
@@ -120,6 +122,7 @@ export const HARNESS_CHANNELS = [
   'harness:set-update-mode',
   'harness:update-all',
   'harness:check-updates',
+  'harness:skip-update',
   'harness:answer-upgrade-prompt'
 ] as const
 
@@ -373,6 +376,7 @@ export interface HarnessCommandDeps {
     check(): Promise<void>
     updateAll(): Promise<unknown>
     modeChanged(): void
+    skipChanged(id: HarnessId): void
   }
 }
 
@@ -380,7 +384,20 @@ const defaultUpdates: NonNullable<HarnessCommandDeps['updates']> = {
   view: harnessUpdatesView,
   check: () => checkHarnessUpdates('user'),
   updateAll: updateAllHarnesses,
-  modeChanged: harnessUpdateModeChanged
+  modeChanged: harnessUpdateModeChanged,
+  skipChanged: harnessUpdateSkipChanged
+}
+
+/** `{ id, version }` of a skip: a harness ClaudeUI updates, and an exact version. */
+function skipArgs(payload: unknown): { id: HarnessId; version: string } {
+  const id = harnessIdOf(payload)
+  if (id === 'claude')
+    throw new Error('Claude Code updates with ClaudeUI; it has no update to skip')
+  const version = isRecord(payload) ? payload.version : undefined
+  if (typeof version !== 'string' || !HARNESS_VERSION_RE.test(version)) {
+    throw new Error(`Invalid version to skip: ${JSON.stringify(version)}`)
+  }
+  return { id, version }
 }
 
 function updateModeArg(payload: unknown): HarnessUpdateMode {
@@ -595,6 +612,20 @@ export function harnessCommands(
       handler: async (): Promise<HarnessStateSnapshot> => {
         await updates.check()
         return harnessStateSnapshot(deps)
+      }
+    },
+    {
+      // "Skip <version>" in the Updates panel: that version of this harness is
+      // not offered again (nor installed by Automatically); a newer one is.
+      // One skipped version per harness; a new skip replaces the old.
+      channel: 'harness:skip-update',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (payload?: unknown): Promise<HarnessUpdatesView> => {
+        const { id, version } = skipArgs(payload)
+        saveHarnessesConfig({ skippedUpdates: { [id]: version } })
+        updates.skipChanged(id)
+        return updates.view()
       }
     },
     {

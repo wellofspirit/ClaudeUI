@@ -15,14 +15,14 @@
  */
 
 import { createHash } from 'node:crypto'
-import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { BuildInfo, DevBuildInfo } from '../../../shared/build-info'
 import type { AppUpdateTree } from '../../../shared/types/app-update'
 import type { Exec } from '../app-update/exec'
+import { CLAUDEUI_PACKAGE_NAME, isClaudeUiCheckout } from '../../../core/services/claudeui-checkout'
 
-/** The package name a ClaudeUI checkout carries (package.json). */
-export const CLAUDEUI_PACKAGE_NAME = 'claudui'
+// One rule with the admin setter of the rebuild source (`app-update:set-source`).
+export { CLAUDEUI_PACKAGE_NAME, isClaudeUiCheckout }
 
 export interface SourceTree extends AppUpdateTree {
   /** Host-side only: never in a view or a command result. */
@@ -71,19 +71,6 @@ export function parseWorktreePorcelain(text: string): PorcelainWorktree[] {
 /** The id a tree is named by: the first 16 hex of sha256 of its resolved path. */
 export function treeIdFor(treePath: string): string {
   return createHash('sha256').update(path.resolve(treePath), 'utf8').digest('hex').slice(0, 16)
-}
-
-/** A ClaudeUI checkout: `package.json` named `claudui` and `scripts/build.mjs` present. */
-export function isClaudeUiCheckout(dir: string): boolean {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as {
-      name?: unknown
-    }
-    if (pkg.name !== CLAUDEUI_PACKAGE_NAME) return false
-    return fs.statSync(path.join(dir, 'scripts', 'build.mjs')).isFile()
-  } catch {
-    return false
-  }
 }
 
 /**

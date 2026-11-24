@@ -997,6 +997,8 @@ const NOT_ON_THE_WIRE: Readonly<Record<string, string>> = {
   restoreState: RELAUNCH_RESTORE,
   onCollectRestore: RELAUNCH_RESTORE,
   onRelaunchRequested:
+    'no remote registration — the app menu is the desktop host’s own window chrome',
+  onCheckUpdatesRequested:
     'no remote registration — the app menu is the desktop host’s own window chrome'
 }
 

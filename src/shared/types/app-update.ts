@@ -63,6 +63,11 @@ export interface AppUpdateView {
   rebuild?: AppUpdateRebuildView
   /** The host can rebuild ClaudeUI from a source checkout it knows (no tree list needed to tell). */
   rebuildAvailable: boolean
+  /**
+   * The host-owned rebuild source (`appUpdateSourcePath`) is set. Never the
+   * path: an admin sets it with `app-update:set-source`.
+   */
+  sourceConfigured: boolean
 }
 
 /** Where to restart from: the staged release (default) or the built rebuild. */

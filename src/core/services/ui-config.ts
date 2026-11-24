@@ -8,6 +8,7 @@ import { allSessionMeta, setSessionMeta, importSessionEnginesOnce } from './db'
 import { isEngineId } from '../../shared/engine-label'
 import { assertSafeIdSegment, isPathInside } from './path-containment'
 import { normalizePiEngineConfig } from '../../shared/pi-model-allowlist'
+import { HOST_OWNED_SETTINGS, type HostOwnedSetting } from '../../shared/app-settings'
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude', 'ui')
 const SETTINGS_FILE = path.join(CONFIG_DIR, 'settings.json')
@@ -364,6 +365,26 @@ export function loadSettings(): UISettings {
 
 export function saveSettings(settings: UISettings): void {
   writeJson(SETTINGS_FILE, settings)
+}
+
+/**
+ * The one writer of the host-owned settings (`HOST_OWNED_SETTINGS`): a read-modify-write of
+ * settings.json, then the `config:settings-changed` a client save emits, so
+ * every replica and `applySettings` see it. A `null` value removes the key; a
+ * key the patch leaves out is kept.
+ */
+export function saveHostOwnedSettings(
+  patch: Partial<Record<HostOwnedSetting, string | null>>
+): void {
+  const settings: UISettings = { ...loadSettings() }
+  for (const key of HOST_OWNED_SETTINGS) {
+    if (!(key in patch)) continue
+    const value = patch[key]
+    if (value === null || value === undefined) delete settings[key]
+    else settings[key] = value
+  }
+  saveSettings(settings)
+  emitEvent('config:settings-changed', [settings])
 }
 
 export function loadSessionConfig(): UISessionConfig {

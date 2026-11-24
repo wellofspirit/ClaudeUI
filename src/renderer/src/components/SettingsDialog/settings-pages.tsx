@@ -38,6 +38,7 @@ import { notInstalledTitle, type EngineRuns } from './harness-view'
 import { UsageHubSettings } from './UsageHubSettings'
 import { HarnessesInstalled, HarnessesPageActions } from './HarnessesInstalled'
 import { HarnessUpdateSettings } from './HarnessUpdateSettings'
+import { UpdatesSettings } from './UpdatesSettings'
 import { AgentColoursSection, DispatchTileColourSection } from './AgentColours'
 import { ContextPressureSettings } from './ContextPressureSettings'
 import {
@@ -283,6 +284,21 @@ const HARNESS_UPDATES: SettingItem = {
   render: () => <HarnessUpdateSettings />
 }
 /**
+ * Settings › Updates (auto-update design §8): ClaudeUI's own updates. Page-local:
+ * channel, mode and the rebuild source are host-owned app settings that save
+ * through the update service's admin commands, never the generic settings save,
+ * and the rows around them (the build, Check now, the skipped version) are the
+ * service's own.
+ */
+const APP_UPDATES: SettingItem = {
+  key: 'appUpdates',
+  label: 'ClaudeUI updates',
+  keywords:
+    'update updates upgrade release version build channel stable pre-release prerelease download automatically ask me off check now skip skipped undo rebuild source checkout local build relaunch restart',
+  render: (s) => <UpdatesSettings settings={s} />
+}
+
+/**
  * ADR-094: one engine's agent types and their tile colours. Page-local, one item
  * per engine page: the types come from the host (`config:list-agent-types`), the
  * overrides are ClaudeUI's own `agentTypeColors` setting.
@@ -453,6 +469,7 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   USAGE_HUB,
   HARNESSES_INSTALLED,
   HARNESS_UPDATES,
+  APP_UPDATES,
   CLAUDE_AGENT_COLOURS,
   OPENCODE_AGENT_COLOURS,
   PI_AGENT_COLOURS,
@@ -505,6 +522,12 @@ const ICON_ADVANCED = icon(
   <>
     <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3" />
     <path d="M1 14h6M9 8h6M17 16h6" />
+  </>
+)
+const ICON_UPDATES = icon(
+  <>
+    <path d="M12 4v11m0 0-4-4m4 4 4-4" />
+    <path d="M5 20h14" />
   </>
 )
 const ICON_ABOUT = icon(
@@ -725,6 +748,16 @@ export const PAGES: SettingsPage[] = [
       { id: 'logging', label: 'Logging', items: itemsOf('logging') },
       { id: 'usage', label: 'Usage polling', items: itemsOf('usage') }
     ]
+  },
+  {
+    // ClaudeUI's own updates (auto-update design §8). Harness updates stay on
+    // Harnesses › Installed.
+    id: 'updates',
+    label: 'Updates',
+    rail: 'app',
+    icon: ICON_UPDATES,
+    description: 'Which ClaudeUI releases to get, and how they arrive.',
+    groups: [{ id: 'claudeui', label: 'ClaudeUI', items: [APP_UPDATES] }]
   },
   {
     // Its own page rather than Advanced's last group, on the owner's request

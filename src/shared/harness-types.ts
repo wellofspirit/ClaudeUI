@@ -47,6 +47,11 @@ export interface HarnessesConfig {
    * now, or silently because nothing needed offering. Absent until then.
    */
   upgradePrompt?: 'answered'
+  /**
+   * One skipped update version per harness ("Skip <version>" in the Updates
+   * panel): that version is not offered, a newer one is. Absent until a skip.
+   */
+  skippedUpdates?: Partial<Record<HarnessId, string>>
 }
 
 /** Where a resolved harness actually came from. */
@@ -371,9 +376,11 @@ export interface HarnessUpdaterStatus {
 /** `harness:state`'s `updates`, computed from main's memory: no network. */
 export interface HarnessUpdatesView {
   mode: HarnessUpdateMode
-  /** What an update run would install now. */
+  /** What an update run would install now (a skipped version is not offered). */
   available: HarnessUpdate[]
   status: HarnessUpdaterStatus
+  /** The version skipped per harness (`harness:skip-update`); absent from an older host. */
+  skipped?: Partial<Record<HarnessId, string>>
 }
 
 /** `harness:state`. Filesystem reads only: no probes, no network. */

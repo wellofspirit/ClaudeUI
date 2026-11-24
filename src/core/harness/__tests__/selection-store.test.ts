@@ -11,6 +11,7 @@ import * as path from 'node:path'
 import {
   defaultSelection,
   harnessSelection,
+  harnessSkippedUpdates,
   harnessUpdateMode,
   loadHarnessesConfig,
   saveHarnessesConfig,
@@ -209,6 +210,54 @@ describe('the upgrade prompt answer (ADR-082 §8)', () => {
     expect(() => saveHarnessesConfig({ upgradePrompt: 'later' as 'answered' }, file)).toThrow(
       /Invalid upgrade prompt state/
     )
+    expect(fs.existsSync(file)).toBe(false)
+  })
+})
+
+describe('skipped updates (the Updates panel)', () => {
+  it('reads none from a missing file, and drops unknown harnesses and unsafe versions', () => {
+    expect(harnessSkippedUpdates(loadHarnessesConfig(file))).toEqual({})
+    write(
+      JSON.stringify({
+        skippedUpdates: { opencode: '1.18.41', pi: '../evil', codex: '1.0.0', claude: 7 }
+      })
+    )
+    expect(loadHarnessesConfig(file)).toEqual({ skippedUpdates: { opencode: '1.18.41' } })
+    write(JSON.stringify({ skippedUpdates: { pi: 'latest' } }))
+    expect(loadHarnessesConfig(file)).toEqual({})
+  })
+
+  it('merges a skip per harness, keeping the other keys and the other skips', () => {
+    write(
+      JSON.stringify({
+        future: 1,
+        updates: 'auto',
+        skippedUpdates: { pi: '0.87.4', later: '9.9.9' }
+      })
+    )
+    saveHarnessesConfig({ skippedUpdates: { opencode: '1.18.41' } }, file)
+    saveHarnessesConfig({ skippedUpdates: { pi: '0.88.0' } }, file)
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8'))).toEqual({
+      future: 1,
+      updates: 'auto',
+      selections: {},
+      skippedUpdates: { pi: '0.88.0', later: '9.9.9', opencode: '1.18.41' }
+    })
+    expect(harnessSkippedUpdates(loadHarnessesConfig(file))).toEqual({
+      pi: '0.88.0',
+      opencode: '1.18.41'
+    })
+    // Other saves keep them.
+    saveHarnessesConfig({ updates: 'ask' }, file)
+    expect(loadHarnessesConfig(file).skippedUpdates).toEqual({ pi: '0.88.0', opencode: '1.18.41' })
+  })
+
+  it('refuses a skip that is not an exact version instead of writing it', () => {
+    for (const version of ['latest', '../1.0.0', '']) {
+      expect(() => saveHarnessesConfig({ skippedUpdates: { pi: version } }, file)).toThrow(
+        /Invalid skipped update/
+      )
+    }
     expect(fs.existsSync(file)).toBe(false)
   })
 })

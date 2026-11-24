@@ -613,6 +613,11 @@ const HOST_LOCAL_CHANNEL_SPECS = {
     cls: 'host-local',
     canonical: false,
     why: "The app menu's Relaunch item: the desktop window runs the confirm flow. Window chrome, like the menu itself."
+  },
+  'app:check-updates-requested': {
+    cls: 'host-local',
+    canonical: false,
+    why: "The app menu's Check for Updates item: the desktop window opens the Updates panel and checks. Window chrome, like the menu itself."
   }
 } satisfies Record<string, HostLocalChannelSpec>
 

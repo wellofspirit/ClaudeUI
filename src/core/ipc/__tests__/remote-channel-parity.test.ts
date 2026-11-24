@@ -88,7 +88,10 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    from a source tree on it (`app-update:rebuild` / `:cancel-rebuild`, with
  *    the `app-update:trees` query that lists the trees to pick from).
  *    `app-update:state` declares `config` (every device may see that an update
- *    exists), so it is absent here.
+ *    exists), so it is absent here. `app-update:set-source` names the checkout
+ *    rebuilds run code from; `app-update:set-settings` decides whether the host
+ *    downloads builds by itself; `harness:skip-update` hides a harness version from
+ *    the host's operator and from Automatically.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -101,6 +104,8 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'app-update:check',
   'app-update:download',
   'app-update:rebuild',
+  'app-update:set-settings',
+  'app-update:set-source',
   'app-update:skip',
   'app-update:trees',
   'app:relaunch',
@@ -117,6 +122,7 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'harness:install-cancel',
   'harness:set-selection',
   'harness:set-update-mode',
+  'harness:skip-update',
   'harness:update-all',
   'ide:mint-entry',
   'terminal:attach',

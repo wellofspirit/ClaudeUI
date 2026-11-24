@@ -38,7 +38,8 @@
  * written atomically; unreadable is empty). After a restart a staged entry is
  * kept while the host says it is still valid and it is still newer than the
  * running build. `skip(version)` hides that version (and stops its download);
- * a newer one is offered normally. `apply()` needs a staged download.
+ * a newer one is offered normally. `skip(null)` takes the skip back and checks
+ * again, so the version can be offered. `apply()` needs a staged download.
  *
  * ## Rebuild (desktop)
  *
@@ -50,6 +51,9 @@
  * and commit staged beside the install), `failed` (the reason), or `idle`
  * after a cancel. `apply('rebuild')` restarts into the built one. In memory
  * only: after a restart the host's boot sweep removes an unapplied rebuild.
+ * The view says whether a rebuild source is configured (`sourceConfigured`,
+ * the host-owned `appUpdateSourcePath` setting), never the path; a change of
+ * it nudges clients like any other change.
  *
  * Every change goes to `onChanged` listeners (the `app-update:changed` nudge);
  * download progress and a rebuild's last line at most once a second. The view
@@ -160,6 +164,8 @@ export interface AppUpdaterDeps {
   now?: () => number
   timers?: AppUpdaterTimers
   settings?: () => AppUpdateSettings
+  /** The `appUpdateSourcePath` setting (read at use). */
+  sourceSetting?: () => string | undefined
   statePath?: () => string
   keys?: readonly PinnedKey[]
   /** Bytes free for a non-root user at `dir`, or null when it cannot be told (the check is skipped). */
@@ -179,8 +185,11 @@ export interface AppUpdater {
   check(reason?: AppUpdateCheckReason): Promise<void>
   /** Start downloading the available update (resolves once it started). Throws when it cannot. */
   download(): Promise<void>
-  /** Hide `version` until a newer one; stops its download. Throws on a malformed version. */
-  skip(version: string): Promise<void>
+  /**
+   * Hide `version` until a newer one; stops its download. Throws on a malformed
+   * version. `null` takes the skip back and starts a check.
+   */
+  skip(version: string | null): Promise<void>
   /**
    * Restart into the staged release (default: throws unless one is staged and
    * still newer), or into the built rebuild (`'rebuild'`: throws unless one is built).
@@ -301,6 +310,7 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       channel: appSetting('appUpdateChannel'),
       mode: appSetting('appUpdateMode')
     }))
+  const sourceSettingOf = deps.sourceSetting ?? (() => appSetting('appUpdateSourcePath'))
   const statePath = deps.statePath ?? defaultAppUpdateStatePath
   const keys = deps.keys ?? UPDATE_PUBLIC_KEYS
   const freeBytes = deps.freeBytes ?? defaultFreeBytes
@@ -314,6 +324,7 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
   let intervalTimer: TimerHandle | null = null
   let settingsTimer: TimerHandle | null = null
   let lastSettingsKey: string | null = null
+  let lastSource: string | null = null
 
   let persisted: PersistedState | null = null
   let writing: Promise<void> = Promise.resolve()
@@ -365,6 +376,16 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       return normalizeSettings(settingsOf())
     } catch {
       return { channel: 'auto', mode: 'ask' }
+    }
+  }
+
+  /** The configured rebuild source, trimmed; '' when none. */
+  function sourceSetting(): string {
+    try {
+      const value = sourceSettingOf()
+      return typeof value === 'string' ? value.trim() : ''
+    } catch {
+      return ''
     }
   }
 
@@ -909,7 +930,8 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       ...(skippedVersion ? { skippedVersion } : {}),
       download: { ...download },
       ...(canRebuild ? { rebuild: copyRebuild(rebuildState) } : {}),
-      rebuildAvailable
+      rebuildAvailable,
+      sourceConfigured: sourceSetting() !== ''
     }
   }
 
@@ -925,6 +947,7 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
       if (started || stopped) return
       started = true
       lastSettingsKey = settingsKey()
+      lastSource = sourceSetting()
       if (!host()) {
         logger.info(LOG, 'this host cannot update itself; no update checks')
         return
@@ -963,6 +986,16 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
     },
 
     async skip(version) {
+      if (version === null) {
+        const { skippedVersion, ...rest } = saved()
+        if (skippedVersion === undefined) return
+        await persist(rest)
+        logger.info(LOG, `no longer skipping ${skippedVersion}`)
+        emit()
+        // The check that skipped it dropped the candidate: ask again.
+        void check('user')
+        return
+      }
       if (typeof version !== 'string' || !isReleaseVersion(version))
         throw new Error('A version to skip looks like 1.2.3 or 1.2.3-pre.4')
       const { staged, ...rest } = saved()
@@ -1025,8 +1058,16 @@ export function createAppUpdater(deps: AppUpdaterDeps = {}): AppUpdater {
 
     settingsChanged() {
       if (!started || stopped) return
+      // The rebuild source moved (`app-update:set-source`, a hand edit): the
+      // view's `sourceConfigured` and `rebuildAvailable` follow; nothing to check.
+      const source = sourceSetting()
+      const sourceMoved = source !== lastSource
+      lastSource = source
       const key = settingsKey()
-      if (key === lastSettingsKey) return
+      if (key === lastSettingsKey) {
+        if (sourceMoved) emit()
+        return
+      }
       lastSettingsKey = key
       const s = settings()
       if (channel() === 'stable') {

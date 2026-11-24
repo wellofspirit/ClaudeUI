@@ -183,6 +183,8 @@ interface Rig {
   timers: ReturnType<typeof fakeTimers>
   clock: { t: number }
   settings: AppUpdateSettings
+  /** The `appUpdateSourcePath` setting the updater reads. */
+  source: { value: string | undefined }
   changes: () => number
 }
 
@@ -200,12 +202,14 @@ function rig(
   const clock = { t: START }
   const settings: AppUpdateSettings = { channel: 'auto', mode: 'auto', ...opts.settings }
   const host = fakeHost(opts.info ?? releaseBuild('1.0.0'), opts.host ?? {})
+  const source: { value: string | undefined } = { value: undefined }
   const updater = createAppUpdater({
     host: () => (opts.host === null ? null : host),
     fetch: async () => f.fetch,
     now: () => clock.t,
     timers: timers.timers,
     settings: () => settings,
+    sourceSetting: () => source.value,
     statePath: () => statePath,
     keys: [KEY.key],
     freeBytes: async () => (opts.free === undefined ? 1e12 : opts.free)
@@ -220,6 +224,7 @@ function rig(
     timers,
     clock,
     settings,
+    source,
     changes: () => changes
   }
 }
@@ -808,6 +813,30 @@ describe('skip', () => {
     await expect(r.updater.skip('../../etc')).rejects.toThrow(/looks like 1\.2\.3/)
     expect(fs.existsSync(statePath)).toBe(false)
   })
+
+  it('null takes the skip back and checks again, so the version is offered', async () => {
+    const r = rig({ routes: github({ version: '1.1.0' }), settings: { mode: 'ask' } })
+    r.updater.start()
+    await r.updater.skip('1.1.0')
+    await r.updater.check('user')
+    expect(r.updater.view().available).toBeUndefined()
+
+    const changes = r.changes()
+    await r.updater.skip(null)
+    await r.updater.idle()
+    expect(r.changes()).toBeGreaterThan(changes)
+    expect(readState()).toEqual({ schema: 1 })
+    expect(r.updater.view()).toMatchObject({ available: { version: '1.1.0' } })
+    expect(r.updater.view().skippedVersion).toBeUndefined()
+  })
+
+  it('null with nothing skipped does nothing', async () => {
+    const r = rig()
+    r.updater.start()
+    await r.updater.skip(null)
+    expect(fs.existsSync(statePath)).toBe(false)
+    expect(r.calls).toEqual([])
+  })
 })
 
 describe('stop', () => {
@@ -932,6 +961,25 @@ describe('settingsChanged', () => {
     r.timers.fire(SETTINGS_CHECK_DELAY_MS)
     await r.updater.idle()
     expect(r.calls).toContain(RELEASES_URL)
+  })
+
+  it('the rebuild source moving nudges clients and checks nothing; the view says only whether one is set', () => {
+    const r = rig({ settings: { mode: 'ask' } })
+    r.updater.start()
+    expect(r.updater.view().sourceConfigured).toBe(false)
+    const changes = r.changes()
+    r.source.value = '/work/ClaudeUI'
+    r.updater.settingsChanged()
+    expect(r.changes()).toBe(changes + 1)
+    expect(r.updater.view().sourceConfigured).toBe(true)
+    expect(JSON.stringify(r.updater.view())).not.toContain('/work/ClaudeUI')
+    // No settings check was armed: only the boot timer and the interval.
+    expect(r.timers.live.size).toBe(2)
+    r.source.value = '/work/Other'
+    r.updater.settingsChanged()
+    expect(r.changes()).toBe(changes + 2)
+    r.updater.settingsChanged()
+    expect(r.changes()).toBe(changes + 2)
   })
 
   it('an unchanged setting does nothing', () => {

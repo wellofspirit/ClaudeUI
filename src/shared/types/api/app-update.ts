@@ -1,6 +1,8 @@
 import type {
   AppUpdateApplyResult,
   AppUpdateApplySource,
+  AppUpdateChannelSetting,
+  AppUpdateMode,
   AppUpdateTree,
   AppUpdateView
 } from '../app-update'
@@ -18,8 +20,11 @@ export interface AppUpdateAPI {
   checkAppUpdate(): Promise<AppUpdateView>
   /** Start downloading the available update; resolves at once with the view. Throws when none is available. */
   downloadAppUpdate(): Promise<AppUpdateView>
-  /** Hide `version` until a newer one is released (persisted on the host). */
-  skipAppUpdate(version: string): Promise<AppUpdateView>
+  /**
+   * Hide `version` until a newer one is released (persisted on the host);
+   * `null` takes the skip back, and the host checks again.
+   */
+  skipAppUpdate(version: string | null): Promise<AppUpdateView>
   /**
    * Restart into the staged release (`source` `release`, the default) or the
    * built rebuild (`rebuild`). Throws unless that build is staged.
@@ -35,4 +40,19 @@ export interface AppUpdateAPI {
   rebuildApp(treeId: string): Promise<AppUpdateView>
   /** Stop a running rebuild (nothing is staged). Resolves with the view. */
   cancelAppRebuild(): Promise<AppUpdateView>
+  /**
+   * Set the checkout rebuilds list their trees from (an absolute path to a
+   * ClaudeUI checkout), or clear it with `null`. Host-owned: only this admin
+   * command writes it. Throws with the reason a path is refused.
+   */
+  setAppUpdateSource(path: string | null): Promise<AppUpdateView>
+  /**
+   * Save the update mode and/or channel (host-owned: only this admin command
+   * writes them; `config:save-settings` keeps the host's values). Throws on an
+   * unknown value. Resolves with the view.
+   */
+  setAppUpdateSettings(settings: {
+    mode?: AppUpdateMode
+    channel?: AppUpdateChannelSetting
+  }): Promise<AppUpdateView>
 }

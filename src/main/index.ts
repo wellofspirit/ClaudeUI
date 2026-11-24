@@ -763,6 +763,15 @@ app.whenReady().then(() => {
               submenu: [
                 { role: 'about' as const },
                 { type: 'separator' as const },
+                // The window opens the Updates panel (ClaudeUI and the
+                // harnesses) and checks.
+                {
+                  label: 'Check for Updates…',
+                  click: () => {
+                    if (currentWindow && !currentWindow.isDestroyed())
+                      currentWindow.webContents.send('app:check-updates-requested')
+                  }
+                },
                 // The window runs the confirm flow (what a restart interrupts),
                 // the same one the sidebar's settings menu opens.
                 {
@@ -773,7 +782,7 @@ app.whenReady().then(() => {
                       currentWindow.webContents.send('app:relaunch-requested')
                   }
                 },
-                { type: 'separator' as const, visible: relaunchOffered },
+                { type: 'separator' as const },
                 { role: 'services' as const },
                 { type: 'separator' as const },
                 { role: 'hide' as const },

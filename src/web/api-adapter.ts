@@ -228,6 +228,7 @@ export function createWebSocketApi(connection: RemoteConnection): ClaudeAPI {
     restoreState: async () => {},
     onCollectRestore: () => () => {},
     onRelaunchRequested: () => () => {},
+    onCheckUpdatesRequested: () => () => {},
 
     openInVSCode: async () => {}, // No-op on web
 

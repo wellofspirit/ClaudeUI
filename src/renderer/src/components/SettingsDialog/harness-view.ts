@@ -1,7 +1,7 @@
 /**
  * The Installed page's reading of a `HarnessStateEntry` (ADR-082 §2): what a
  * row says and offers, as pure functions of the snapshot, so the rules are
- * tested without rendering and the sidebar's update button (S6) can reuse them.
+ * tested without rendering and the sidebar's Updates panel can reuse them.
  */
 import type {
   DetectedVerdict,
@@ -10,13 +10,12 @@ import type {
   HarnessSourceChoice,
   HarnessStateEntry,
   HarnessStateSnapshot,
-  HarnessUpdate,
   HarnessUpdateMode,
-  HarnessUpdateResult,
   HarnessUpdatesView,
   HarnessVersionsResult
 } from '../../../../shared/harness-types'
 import { HARNESS_IDS } from '../../../../shared/harness-types'
+import { compareVersions } from '../../../../shared/version-compare'
 
 export const HARNESS_LABEL: Record<HarnessId, string> = {
   claude: 'Claude Code',
@@ -107,9 +106,8 @@ export function choiceLabel(
 
 /**
  * Every exact version the dropdown offers: upstream's releases and the store's
- * installs (an install can be older than upstream's list reaches), newest first.
- * Versions here are validated `x.y.z[-pre]` strings, which a numeric collation
- * orders correctly.
+ * installs (an install can be older than upstream's list reaches), newest first,
+ * in semver order (a release above its pre-releases).
  */
 export function exactVersions(
   entry: HarnessStateEntry,
@@ -119,7 +117,7 @@ export function exactVersions(
   if (versions?.status === 'ok') for (const v of versions.available) all.add(v)
   const choice = managedChoice(entry)
   if (choice !== 'tested' && choice !== 'latest') all.add(choice)
-  return [...all].sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
+  return [...all].sort((a, b) => compareVersions(b, a))
 }
 
 /**
@@ -135,9 +133,6 @@ export function installNeeded(
   if (entry.resolved.source === 'env') return null
   return missingManagedVersion(entry, versions)
 }
-
-const compareVersions = (a: string, b: string): number =>
-  a.localeCompare(b, 'en', { numeric: true })
 
 /** The row's one description line (mockup design 1: `uiNote` or `sysNote`, for the active side only). */
 export interface HarnessRowLine {
@@ -290,7 +285,7 @@ export function progressText(p: HarnessInstallProgress): string {
   return PHASE_LABEL[p.phase]
 }
 
-// ── Updates (ADR-082 §6): the sidebar button, its panel, the row warning ──
+// ── Updates (ADR-082 §6): the Updates panel's harness rows, the row warning ──
 
 /**
  * A failure's key for dismissing it: one harness, one version, one run
@@ -301,16 +296,6 @@ export function updateResultKey(
   runAt: string | undefined
 ): string {
   return `${result.id}@${result.to}@${runAt ?? ''}`
-}
-
-/** Failures of the current or last run this client has not dismissed. */
-export function openUpdateFailures(
-  updates: HarnessUpdatesView,
-  dismissed: ReadonlySet<string>
-): HarnessUpdateResult[] {
-  return updates.status.results.filter(
-    (r) => r.status === 'failed' && !dismissed.has(updateResultKey(r, updates.status.lastRunAt))
-  )
 }
 
 /**
@@ -338,90 +323,6 @@ export function otherInstalls<T extends { id: HarnessId; version: string }>(
   installs: readonly T[]
 ): T[] {
   return updates ? installs.filter((p) => !isUpdateInstall(updates, p)) : [...installs]
-}
-
-/**
- * The footer button (mockup `04c3853c`): `running` while an update run or any
- * harness install is in flight (S7b: the upgrade sheet's installs show here,
- * not only in Settings), `failed` while an update failure or another install's
- * failure is not dismissed, `available` with a count in Ask me mode, `done`
- * for the few seconds after a run that installed everything or an install
- * that finished, else hidden. In Automatically mode the button only reports:
- * available updates alone do not show it.
- */
-export type UpdateButtonState = 'hidden' | 'available' | 'running' | 'failed' | 'done'
-
-export function updateButtonState(input: {
-  updates: HarnessUpdatesView | undefined
-  installs: readonly HarnessInstallProgress[]
-  /** This client's Update all is in flight. */
-  pending: boolean
-  dismissed: ReadonlySet<string>
-  /** A run just finished with every update installed, or an install just finished. */
-  justFinished: boolean
-}): UpdateButtonState {
-  const u = input.updates
-  if (!u) return 'hidden'
-  const installing = input.installs.some((p) => p.phase !== 'failed')
-  if (input.pending || u.status.running || installing) return 'running'
-  if (openUpdateFailures(u, input.dismissed).length > 0) return 'failed'
-  if (otherInstalls(u, input.installs).some((p) => p.phase === 'failed')) return 'failed'
-  if (u.mode === 'ask' && u.available.length > 0) return 'available'
-  if (input.justFinished) return 'done'
-  return 'hidden'
-}
-
-/** One harness in the update panel. */
-export interface UpdatePanelRow {
-  id: HarnessId
-  from: string
-  to: string
-  state: 'available' | 'waiting' | 'installing' | 'installed' | 'failed'
-  /** `installing`: the install's latest progress. */
-  progress?: HarnessInstallProgress
-  /** `failed`: why. */
-  reason?: string
-  /** `failed`: the key to dismiss it by. */
-  key?: string
-}
-
-/**
- * The panel's rows, in harness order: each result of the current or last run
- * (a dismissed failure is gone), then each available update not already
- * listed for the same version, as installing, waiting for its turn in a run,
- * or available.
- */
-export function updatePanelRows(
-  updates: HarnessUpdatesView,
-  installs: readonly HarnessInstallProgress[],
-  dismissed: ReadonlySet<string>
-): UpdatePanelRow[] {
-  const rows = new Map<HarnessId, UpdatePanelRow>()
-  const runAt = updates.status.lastRunAt
-  for (const r of updates.status.results) {
-    const key = updateResultKey(r, runAt)
-    if (r.status === 'failed' && dismissed.has(key)) continue
-    rows.set(r.id, {
-      id: r.id,
-      from: r.from,
-      to: r.to,
-      state: r.status,
-      ...(r.status === 'failed' ? { reason: r.reason ?? 'unknown error', key } : {})
-    })
-  }
-  for (const u of updates.available) {
-    const progress = installs.find(
-      (p) => p.id === u.id && p.version === u.to && p.phase !== 'failed'
-    )
-    const base = { id: u.id, from: u.from, to: u.to }
-    if (progress) {
-      rows.set(u.id, { ...base, state: 'installing', progress })
-      continue
-    }
-    if (rows.get(u.id)?.to === u.to) continue
-    rows.set(u.id, { ...base, state: updates.status.running ? 'waiting' : 'available' })
-  }
-  return HARNESS_IDS.filter((id) => rows.has(id)).map((id) => rows.get(id)!)
 }
 
 /** One install outside the update flow, in the update panel (S7b). */
@@ -462,11 +363,6 @@ export function installPanelRows(
   }
   const order = (id: HarnessId): number => HARNESS_IDS.indexOf(id)
   return rows.sort((a, b) => order(a.id) - order(b.id))
-}
-
-/** "opencode 1.18.41, pi 0.87.4": the button's tooltip and the panel's summary. */
-export function updateSummary(updates: readonly HarnessUpdate[]): string {
-  return updates.map((u) => `${HARNESS_LABEL[u.id]} ${u.from} → ${u.to}`).join(', ')
 }
 
 /**

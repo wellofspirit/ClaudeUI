@@ -19,6 +19,18 @@
  *   host, their branches and commits are the operator's business, and the list
  *   is only ever read to pick a rebuild. It carries no path; a rebuild takes an
  *   id the host recomputes from its own list, never a path from a client.
+ * - `app-update:set-source` (`admin`, pinned) is the one writer of the
+ *   host-owned `appUpdateSourcePath`, the checkout those trees are listed from
+ *   (`config:save-settings`, a base remote grant, keeps the host's value). It
+ *   takes an absolute path to a ClaudeUI checkout (`claudeui-checkout.ts`, the
+ *   rule the desktop's tree list uses), or `null` to clear it, and is refused
+ *   where the host cannot rebuild. The view says only whether a source is set.
+ * - `app-update:set-settings` (`admin`, pinned) is the one writer of the mode
+ *   and the channel (`appUpdateMode`, `appUpdateChannel`): whether the host
+ *   downloads releases by itself, and which it offers. Host-owned like the
+ *   source (`HOST_OWNED_SETTINGS`): `config:save-settings` keeps the host's
+ *   values. It saves through the same settings plane, then tells the updater.
+ * - `app-update:skip` with `{ version: null }` takes a skip back.
  *
  * ## Results
  *
@@ -37,10 +49,15 @@ import type { EmitEvent } from '../shared/sync/events'
 import type {
   AppUpdateApplyResult,
   AppUpdateApplySource,
+  AppUpdateChannelSetting,
+  AppUpdateMode,
   AppUpdateTree,
   AppUpdateView
 } from '../../shared/types/app-update'
 import { appUpdater, type AppUpdater } from '../services/app-update'
+import type { HostOwnedSetting } from '../../shared/app-settings'
+import { checkSourcePath, type SourcePathCheck } from '../services/claudeui-checkout'
+import { saveHostOwnedSettings } from '../services/ui-config'
 import type { CommandRegistration } from './command-registry'
 
 /** The channels declared here; `registerSessionIpc` unbinds them before re-registering. */
@@ -52,11 +69,17 @@ export const APP_UPDATE_CHANNELS = [
   'app-update:apply',
   'app-update:trees',
   'app-update:rebuild',
-  'app-update:cancel-rebuild'
+  'app-update:cancel-rebuild',
+  'app-update:set-source',
+  'app-update:set-settings'
 ] as const
 
 export interface AppUpdateCommandDeps {
   updater?: AppUpdater
+  /** Persist host-owned settings (`null` clears one); the settings plane by default. */
+  saveSettings?: (patch: Partial<Record<HostOwnedSetting, string | null>>) => void
+  /** Check a typed source path; `checkSourcePath` by default. */
+  checkSource?: (raw: string) => SourcePathCheck
 }
 
 function fieldOf(payload: unknown, key: string): unknown {
@@ -65,10 +88,44 @@ function fieldOf(payload: unknown, key: string): unknown {
     : undefined
 }
 
-function versionArg(payload: unknown): string {
+/** A version to skip, or an explicit `null` (`{ version: null }`) to take the skip back. */
+function skipVersionArg(payload: unknown): string | null {
   const version = fieldOf(payload, 'version')
+  if (version === null) return null
   if (typeof version !== 'string') throw new Error('A version is required')
   return version
+}
+
+const MODES: readonly AppUpdateMode[] = ['auto', 'ask', 'off']
+const CHANNELS: readonly AppUpdateChannelSetting[] = ['auto', 'stable', 'pre-release']
+
+/** `{ mode?, channel? }` of a set-settings: at least one, each a known value (null is absent). */
+function updateSettingsArg(payload: unknown): {
+  appUpdateMode?: AppUpdateMode
+  appUpdateChannel?: AppUpdateChannelSetting
+} {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload))
+    throw new Error('Update settings are { mode?, channel? }')
+  const mode = fieldOf(payload, 'mode') ?? undefined
+  const channel = fieldOf(payload, 'channel') ?? undefined
+  if (mode === undefined && channel === undefined)
+    throw new Error('Name a mode or a channel to save')
+  if (mode !== undefined && !MODES.includes(mode as AppUpdateMode))
+    throw new Error(`The update mode is ${MODES.map((m) => `"${m}"`).join(', ')}`)
+  if (channel !== undefined && !CHANNELS.includes(channel as AppUpdateChannelSetting))
+    throw new Error(`The update channel is ${CHANNELS.map((c) => `"${c}"`).join(', ')}`)
+  return {
+    ...(mode !== undefined ? { appUpdateMode: mode as AppUpdateMode } : {}),
+    ...(channel !== undefined ? { appUpdateChannel: channel as AppUpdateChannelSetting } : {})
+  }
+}
+
+/** `{ path }` of a set-source: a string, or an explicit `null` to clear the source. */
+function sourcePathArg(payload: unknown): string | null {
+  const sourcePath = fieldOf(payload, 'path')
+  if (sourcePath === null) return null
+  if (typeof sourcePath !== 'string') throw new Error('A path (or null to clear it) is required')
+  return sourcePath
 }
 
 /** `{ source }` of an apply; absent (or a JSON null payload) is the release. */
@@ -90,6 +147,11 @@ export function appUpdateCommands(
   deps: AppUpdateCommandDeps = {}
 ): Array<Omit<CommandRegistration, 'transport'>> {
   const updater = deps.updater ?? appUpdater
+  // Read at call time: specs that mock the config plane wholesale never reach it.
+  const saveSettings =
+    deps.saveSettings ??
+    ((patch: Partial<Record<HostOwnedSetting, string | null>>) => saveHostOwnedSettings(patch))
+  const checkSource = deps.checkSource ?? ((raw: string) => checkSourcePath(raw))
   return [
     {
       channel: 'app-update:state',
@@ -121,7 +183,7 @@ export function appUpdateCommands(
       capability: 'admin',
       kind: 'command',
       handler: async (payload?: unknown): Promise<AppUpdateView> => {
-        await updater.skip(versionArg(payload))
+        await updater.skip(skipVersionArg(payload))
         return updater.view()
       }
     },
@@ -156,6 +218,40 @@ export function appUpdateCommands(
       kind: 'command',
       handler: async (): Promise<AppUpdateView> => {
         await updater.cancelRebuild()
+        return updater.view()
+      }
+    },
+    {
+      // The settings plane emits `config:settings-changed`; `applySettings` then
+      // has the updater nudge `app-update:changed` (its `sourceConfigured` and
+      // `rebuildAvailable` moved).
+      channel: 'app-update:set-source',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (payload?: unknown): Promise<AppUpdateView> => {
+        const raw = sourcePathArg(payload)
+        if (raw === null) {
+          saveSettings({ appUpdateSourcePath: null })
+          return updater.view()
+        }
+        if (updater.view().rebuild === undefined)
+          throw new Error('This build cannot rebuild ClaudeUI from source')
+        const checked = checkSource(raw)
+        if (!checked.ok) throw new Error(checked.reason)
+        saveSettings({ appUpdateSourcePath: checked.path })
+        return updater.view()
+      }
+    },
+    {
+      // The settings plane emits `config:settings-changed`, whose observer runs
+      // `applySettings`; the call here makes the change land before the answer
+      // (a second call with nothing moved is a no-op).
+      channel: 'app-update:set-settings',
+      capability: 'admin',
+      kind: 'command',
+      handler: async (payload?: unknown): Promise<AppUpdateView> => {
+        saveSettings(updateSettingsArg(payload))
+        updater.settingsChanged()
         return updater.view()
       }
     }
