@@ -325,6 +325,11 @@ original incident) is caught early.
   fallback (an x64 ELF restored onto the arm runner would extract as if native).
 - Tarballs, not bare uploads, because `actions/upload-artifact` strips the executable bit; the mac zip carries it in
   the zip entry's unix mode (the release notes say to unpack with `unzip` or Finder). Windows has no bit to lose.
+- Every release also carries `update-manifest.json` and `update-manifest.json.sig` (ADR-119), written by the
+  `release` job in the `release` environment, the only step that sees `UPDATE_SIGNING_KEY`. Every build stamps
+  `out/build-info.json` (release builds with their channel), every packaged desktop build and server archive carries an
+  install marker (ADR-120, ADR-122), and a mac release build fails instead of signing ad-hoc when `MAC_CERT_P12` is
+  missing (changed 2026-11-25).
 - No artifact carries `vendor/opencode-cli` or `vendor/pi-cli` (ADR-082 §8): a fresh server has none until an admin
   installs them from Settings › Harnesses › Installed. `packaging.test.ts` holds this (it parses
   `electron-builder.yml` and the workflows). CI's `bun install` postinstall installs opencode and pi into the

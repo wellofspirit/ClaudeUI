@@ -144,13 +144,18 @@ coordinates per platform and the reviewed digests. It is the source of truth for
   `harness:check-updates` accepts an answer at most a minute old; a failed answer keeps the last good one. The
   update set is recomputed from memory on every `harness:state` read, with no network in the snapshot.
 - **Runs** are one at a time, one install after another; Update all during a run joins it. Automatically starts a
-  run when a check finds updates and when the setting is switched to it; Ask me installs nothing until Update all.
+  run when a check finds updates and when the setting is switched to it; Ask me installs nothing until the user
+  updates that harness from the Updates panel. **Skip <version>** (`harness:skip-update`, `admin`) persists
+  `skippedUpdates.<harness>` in `harnesses.json`; `computeUpdates` drops that target, Automatically included, until a
+  newer version appears (changed 2026-11-25: per-harness Update and Skip replace the button's one-click Update all).
   Selections never change (Latest and Tested already point at the new version); the old version stays until
   retention removes it.
-- **UI contract**: in Ask me a sidebar-footer button (left of Remote Access) shows a count badge, a spinner while
-  updating or while any harness install is in flight, a check that fades after five seconds, and amber after an
-  undismissed failure; its panel names each harness, `from → to`, progress and failures. Automatically never shows
-  the count. Latest with Automatically is allowed, with the row note "Installs untested releases automatically".
+- **UI contract**: the sidebar-footer Updates button (left of Remote Access; ADR-119) serves ClaudeUI and the
+  harnesses. It shows a count badge of items awaiting a decision, a spinner while anything installs, a check that
+  fades after five seconds, and amber after an undismissed failure. A click only opens the panel, which lists each
+  harness with `from → to`, progress, failures and its own Update, Later (this client, until the next check) and
+  Skip <version>; there is no Update all. Automatically never shows the count (changed 2026-11-25: the button no
+  longer installs on click). Latest with Automatically is allowed, with the row note "Installs untested releases automatically".
   A connection without `admin` sees the same state with actions disabled.
 
 ### §7 Remote devices
