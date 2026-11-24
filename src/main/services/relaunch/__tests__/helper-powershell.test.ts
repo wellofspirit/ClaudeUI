@@ -392,6 +392,19 @@ function makeWinFake(dir: string, version: string, mode: 'healthy' | 'silent'): 
 const versionOf = (dir: string): string =>
   fs.readFileSync(path.join(dir, 'resources', 'version.txt'), 'utf8').trim()
 
+/**
+ * A stand-in for the running app: a process that lives `seconds`. It is given a
+ * moment to age before the job is written, because the helper treats a pid whose
+ * process started after the job's `startedAt` as a reused pid (gone), and on
+ * Windows `Date.now()` can trail the kernel's precise creation time by a clock
+ * tick. The real app always started long before its relaunch job.
+ */
+async function spawnOldApp(seconds: number): Promise<ReturnType<typeof spawn>> {
+  const old = spawn('cmd.exe', ['/c', `ping -n ${seconds} 127.0.0.1 >nul`], { stdio: 'ignore' })
+  await new Promise((r) => setTimeout(r, 1500))
+  return old
+}
+
 describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windows)', () => {
   const cmdExe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe')
 
@@ -698,7 +711,7 @@ describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windo
     'a job no longer live (%s): exits at once, touching nothing',
     async (reason, gaveUp) => {
       const f = fixture('swap', 'healthy')
-      const old = spawn('cmd.exe', ['/c', 'ping -n 60 127.0.0.1 >nul'], { stdio: 'ignore' })
+      const old = await spawnOldApp(60)
       started.push(old.pid!)
       f.run({ pid: old.pid, timeouts: { waitPidSec: 60 }, beforeSpawn: () => gaveUp(f) })
       await f.helperExit()
@@ -718,7 +731,7 @@ describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windo
     'given up on after it was ready (%s): no launch, no rename once the old process exits',
     async (reason, gaveUp) => {
       const f = fixture('swap', 'healthy')
-      const old = spawn('cmd.exe', ['/c', 'ping -n 60 127.0.0.1 >nul'], { stdio: 'ignore' })
+      const old = await spawnOldApp(60)
       started.push(old.pid!)
       f.run({ pid: old.pid, timeouts: { waitPidSec: 60 } })
       await f.ready()
@@ -737,7 +750,7 @@ describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windo
 
   it('old process never exits: aborted, nothing touched', async () => {
     const f = fixture('swap', 'healthy')
-    const old = spawn('cmd.exe', ['/c', 'ping -n 30 127.0.0.1 >nul'], { stdio: 'ignore' })
+    const old = await spawnOldApp(30)
     started.push(old.pid!)
     f.run({ pid: old.pid, timeouts: { waitPidSec: 2 } })
     expect((await f.result()).status).toBe('aborted')
