@@ -105,6 +105,9 @@ export const MEDIA_TOOL_NAMES = {
 /** Claude's SDK MCP server for the media tools: its own, outside `allowedTools`, so calls are asked. */
 export const CLAUDE_MEDIA_MCP_SERVER = 'claude-ui-media'
 
+/** The prefix of the media tools' names as Claude spells them (`mcp__claude-ui-media__generate_image`). */
+export const CLAUDE_MEDIA_TOOL_PREFIX = `mcp__${CLAUDE_MEDIA_MCP_SERVER}__`
+
 /** The ChatGPT plan's usage, from the `x-codex-*` headers of its last response. */
 export interface MediaPlanUsage {
   usedPercent: number | null

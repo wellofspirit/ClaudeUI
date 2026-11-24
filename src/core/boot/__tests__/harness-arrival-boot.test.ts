@@ -64,6 +64,7 @@ vi.mock('../../services/vscode-web-service', () => ({
 vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     setServerStartedHook: vi.fn(),
+    setMediaStart: vi.fn(),
     setCallerSessionLookup: vi.fn(),
     setDispatchAgent: vi.fn(),
     setHandBack: vi.fn(),

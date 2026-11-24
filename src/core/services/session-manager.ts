@@ -70,6 +70,13 @@ export class SessionManager {
     this.sessions.forEach((session) => session.setInactivityTimeout(ms))
   }
 
+  /** The media settings changed: live opencode sessions re-apply their ruleset (our tools in or out, theirs back). */
+  notifyMediaSettingsChanged(): void {
+    this.sessions.forEach((session) => {
+      if (session.engineId === 'opencode') session.notifySettingsChanged?.().catch(() => {})
+    })
+  }
+
   create(
     routingId: string,
     /** Host handle for the session; `null` when windowless — phase 4d. */

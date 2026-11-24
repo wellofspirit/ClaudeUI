@@ -24,11 +24,13 @@ import {
   buildSessionRuleset,
   CLAUDEUI_MCP_SERVER,
   HAND_BACK_ALLOW_RULE,
+  mediaAction,
   SESSION_TOOLS_DENY_RULE,
   WORKTREE_TOOLS_DENY_RULES,
   wireOrder,
   type V2Rule
 } from '../opencode/permission-v2'
+import { MEDIA_TOOL_NAMES } from '../../shared/media-generation'
 import { ChildRulesetKeeper } from '../opencode/child-rulesets'
 import { resolveOpencodeOwnDirAllows } from '../opencode/own-dirs'
 import {
@@ -112,6 +114,13 @@ const TARGET_DISPATCH_DENY: V2Rule = {
   resource: '*',
   effect: 'deny'
 }
+
+/** A target is offered none of ClaudeUI's media tools (whole-category denies: hidden), like dispatch. */
+const TARGET_MEDIA_DENY: readonly V2Rule[] = Object.values(MEDIA_TOOL_NAMES).map((name) => ({
+  action: mediaAction(name),
+  resource: '*',
+  effect: 'deny'
+}))
 
 const TARGET_QUESTION_DENY: V2Rule = { action: 'question', resource: '*', effect: 'deny' }
 
@@ -1053,6 +1062,7 @@ export class OpencodeTargets {
       rules: wireOrder([
         ...built.rules,
         TARGET_DISPATCH_DENY,
+        ...TARGET_MEDIA_DENY,
         ...WORKTREE_TOOLS_DENY_RULES,
         ...targetSessionToolRules(canMessage, autoMode),
         TARGET_QUESTION_DENY,

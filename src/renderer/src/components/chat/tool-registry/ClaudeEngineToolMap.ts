@@ -112,7 +112,7 @@ function claudeNormalize(
   const inp = input ?? {}
 
   // ClaudeUI's own card kinds (diagram, mockup) read the same on every engine.
-  const hosted = hostedToolView(kind, inp, result)
+  const hosted = hostedToolView(kind, inp, result, toolName)
   if (hosted) return hosted
 
   switch (kind) {

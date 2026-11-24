@@ -367,6 +367,20 @@ vi.mock('../../services/cross-engine-dispatcher', () => ({
   },
   crossEngineDispatchAvailable: mockCrossEngineDispatchAvailable
 }))
+// Media generation: the job service is a spy, the pi toggle a variable.
+const mediaDouble = vi.hoisted(() => ({
+  start: vi.fn(),
+  setting: { value: undefined as unknown }
+}))
+vi.mock('../../services/media-jobs', () => ({ mediaJobs: { start: mediaDouble.start } }))
+vi.mock('../../services/app-settings', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/app-settings')>()
+  return {
+    ...actual,
+    appSetting: (key: string): unknown =>
+      key === 'mediaGeneration' ? mediaDouble.setting.value : actual.appSetting(key as never)
+  }
+})
 // The session tools (slice 2). The service behind them has its own suite; here the real
 // `sessionToolsGate` answers unless a test replaces it, while running a tool and the audit
 // row are spies (this file mocks fs/os, which the real service reads).
@@ -685,6 +699,13 @@ beforeEach(() => {
   mockShowMockupHandler.mockReset().mockResolvedValue({
     content: [{ type: 'text', text: 'Mockup displayed.\nDirectory: abc123' }]
   })
+  mediaDouble.setting.value = undefined
+  mediaDouble.start.mockReset().mockResolvedValue({
+    ok: true,
+    jobId: 'j1',
+    path: '/cwd/.claude/ui/media/j1.png',
+    modelLabel: 'ChatGPT Plan'
+  })
   mockDispatch.mockReset()
   mockDisposeFor.mockClear()
   mockStopDispatch.mockReset().mockReturnValue(true)
@@ -874,7 +895,9 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_PLAN_TOOLS: '1',
           CLAUDEUI_PI_AGENT_TOOL: '1',
           CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: '),
-          CLAUDEUI_PI_SEND_MESSAGE: '1'
+          CLAUDEUI_PI_SEND_MESSAGE: '1',
+          // Media generation: pi's toggle is on by default.
+          CLAUDEUI_PI_MEDIA_ENABLED: '1'
         }
       }
     )
@@ -10239,5 +10262,140 @@ describe('PiSession — scratchpad (ADR-110)', () => {
       expect(promptFileText()[0]).not.toContain('Scratchpad directory')
       session.dispose()
     })
+  })
+})
+
+describe('PiSession — media generation (generate_image / generate_video)', () => {
+  const approve = async (
+    win: MockWindow,
+    session: PiSession,
+    toolCallId: string,
+    toolName: string,
+    input: Record<string, unknown>
+  ): Promise<void> => {
+    const pending = gate(toolCallId, toolName, input)
+    await vi.waitFor(() => {
+      const approvals = sentPayloads(win, 'session:approval-request') as Array<{
+        toolUseId: string
+      }>
+      expect(approvals.some((a) => a.toolUseId === toolCallId)).toBe(true)
+    })
+    const approval = (
+      sentPayloads(win, 'session:approval-request') as Array<{
+        requestId: string
+        toolUseId: string
+      }>
+    ).find((a) => a.toolUseId === toolCallId)!
+    session.resolveApproval(approval.requestId, 'allow')
+    await pending
+  }
+
+  it('the approval card offers the persistent allow in all three scopes, as the Claude-spelling rule', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-media-sugg', win as never, '/cwd', {})
+    await session.run('hi')
+    void gate('call_sg', 'generate_video', { prompt: 'x' })
+    await vi.waitFor(() => expect(sentChannels(win)).toContain('session:approval-request'))
+    const [card] = sentPayloads(win, 'session:approval-request').slice(-1) as [
+      { suggestions: Array<{ destination: string; rules: unknown[] }> }
+    ]
+    expect(card.suggestions.map((s) => s.destination)).toEqual([
+      'userSettings',
+      'projectSettings',
+      'localSettings'
+    ])
+    for (const s of card.suggestions)
+      expect(s.rules).toEqual([{ toolName: 'mcp__claude-ui-media__generate_video' }])
+  })
+
+  it('is offered to the bridge only while the pi toggle is on (read at spawn)', async () => {
+    const on = new PiSession('rid-media-env-1', new MockWindow() as never, '/cwd', {})
+    await on.run('hi')
+    expect(lastSpawnOpts().env.CLAUDEUI_PI_MEDIA_ENABLED).toBe('1')
+
+    mediaDouble.setting.value = { engines: { pi: false } }
+    const off = new PiSession('rid-media-env-2', new MockWindow() as never, '/cwd', {})
+    await off.run('hi')
+    expect(lastSpawnOpts().env).not.toHaveProperty('CLAUDEUI_PI_MEDIA_ENABLED')
+  })
+
+  it('asks in default mode; an approved root call starts a BACKGROUND job under the routing id and cwd', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-media-1', win as never, '/cwd', {})
+    await session.run('hi')
+    const input = { prompt: 'a fox', images: ['a.png'], model: 'chatgpt-plan' }
+    await approve(win, session, 'call_m1', 'generate_image', input)
+
+    const result = await hostedTool('generate_image', input, 'call_m1')
+    expect(mediaDouble.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        routingId: 'rid-media-1',
+        cwd: '/cwd',
+        engineId: 'pi',
+        toolUseId: 'call_m1',
+        kind: 'image',
+        foreground: false,
+        input: { prompt: 'a fox', images: ['a.png'], model: 'chatgpt-plan' }
+      })
+    )
+    expect(result.isError).toBeFalsy()
+    expect(result.content[0].text).toBe(
+      'Image job j1 started with ChatGPT Plan; it will be saved to /cwd/.claude/ui/media/j1.png. ' +
+        'You will be notified when it finishes. Do not poll or re-request it.'
+    )
+  })
+
+  it('a call with no grant never reaches the job service', async () => {
+    const session = new PiSession('rid-media-2', new MockWindow() as never, '/cwd', {})
+    await session.run('hi')
+    const result = await hostedTool('generate_video', { prompt: 'x' }, 'call_forged')
+    expect(result.isError).toBe(true)
+    expect(mediaDouble.start).not.toHaveBeenCalled()
+  })
+
+  it('a host-run subagent grant runs in the FOREGROUND and returns the outcome', async () => {
+    const session = new PiSession('rid-media-3', new MockWindow() as never, '/cwd', {})
+    await session.run('hi')
+    mediaDouble.start.mockResolvedValue({
+      ok: true,
+      jobId: 'j2',
+      path: '/cwd/x.png',
+      modelLabel: 'ChatGPT Plan',
+      final: { status: 'completed', result: { path: '/cwd/x.png' } }
+    })
+    const grants = (
+      session as unknown as {
+        hostedGrants: { mint: (id: string, tool: string, owner?: 'root' | 'subagent') => boolean }
+      }
+    ).hostedGrants
+    grants.mint('call_sub', 'generate_image', 'subagent')
+    const result = await hostedTool('generate_image', { prompt: 'x' }, 'call_sub')
+    expect(mediaDouble.start).toHaveBeenCalledWith(expect.objectContaining({ foreground: true }))
+    expect(result.content[0].text).toContain('It is saved at /cwd/x.png')
+  })
+
+  it('refuses a call that arrives after the session switched to plan mode', async () => {
+    const win = new MockWindow()
+    const session = new PiSession('rid-media-4', win as never, '/cwd', {})
+    await session.run('hi')
+    await approve(win, session, 'call_m4', 'generate_image', { prompt: 'x' })
+    await session.setPermissionMode('plan')
+    const result = await hostedTool('generate_image', { prompt: 'x' }, 'call_m4')
+    expect(result.isError).toBe(true)
+    expect(mediaDouble.start).not.toHaveBeenCalled()
+  })
+
+  it('plan mode denies at the gate even with a user allow rule for the media tool', async () => {
+    mockLoadClaudePermissions.mockReturnValue({
+      allow: ['mcp__claude-ui-media__generate_image'],
+      deny: [],
+      ask: [],
+      additionalDirectories: []
+    })
+    const session = new PiSession('rid-media-5', new MockWindow() as never, '/cwd', {})
+    await session.setPermissionMode('plan')
+    await session.run('hi')
+    const decision = await gate('call_m5', 'generate_image', { prompt: 'x' })
+    expect(decision.behavior).toBe('deny')
   })
 })

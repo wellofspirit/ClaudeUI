@@ -125,6 +125,17 @@ describe('suggestOpencodeAllowRule (reverse: opencode approval → Claude sugges
   it('`*` pattern is treated as no specific pattern', () => {
     expect(suggestOpencodeAllowRule('read', ['*'])?.rules).toEqual([{ toolName: 'Read' }])
   })
+  it('the hosted media tools suggest the Claude-spelling whole-tool rule (no pattern, whatever the resource)', () => {
+    for (const kind of ['image', 'video']) {
+      expect(suggestOpencodeAllowRule(`claudeui_generate_${kind}`, ['*'])).toEqual({
+        type: 'addRules',
+        behavior: 'allow',
+        destination: 'localSettings',
+        rules: [{ toolName: `mcp__claude-ui-media__generate_${kind}` }]
+      })
+    }
+    expect(suggestOpencodeAllowRule('claudeui_dispatch_agent', ['*'])).toBeNull()
+  })
   it('unmapped category → null (no suggestion)', () => {
     expect(suggestOpencodeAllowRule('doom_loop', ['*'])).toBeNull()
   })

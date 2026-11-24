@@ -44,6 +44,7 @@ import { applyVoicePackStatus, refreshVoicePackStatus } from '../lib/voice/voice
 import { hasWakingTask } from '../lib/task-types'
 import { isCreatedWorktree } from '../../../shared/linked-worktree'
 import { sessionWorkdir } from '../lib/session-workdir'
+import { heldResultTitle } from '../lib/held-result-title'
 import { approvalActionName } from '../components/chat/tool-registry/approval-action'
 import type { SessionStatus } from '../../../shared/types'
 import { wireArgs } from '../../../core/shared/sync/events'
@@ -309,9 +310,7 @@ export function useClaudeEvents(): void {
         }
         notifyIfNeeded(
           routingId,
-          data?.name
-            ? `X-Agent ${data.name} finished — result waiting`
-            : 'An X-Agent finished — result waiting',
+          heldResultTitle(data?.name),
           'It is delivered with your next prompt, or when the session is live again',
           // N held X-Agents of one parent coalesce into one notification.
           `dispatch-result-held:${routingId}`

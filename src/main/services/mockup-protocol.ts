@@ -7,6 +7,7 @@ import {
   type MockupSecuritySettings
 } from '../../core/services/mockup-settings'
 import { isPathInside } from '../../core/services/path-containment'
+import { MEDIA_SCHEME_PRIVILEGES } from './media-protocol'
 
 export { MOCKUP_ASSET_SCHEME }
 
@@ -223,7 +224,8 @@ export function registerMockupAssetScheme(): void {
         supportFetchAPI: true,
         corsEnabled: true
       }
-    }
+    },
+    MEDIA_SCHEME_PRIVILEGES
   ])
 }
 

@@ -75,6 +75,14 @@ import { usageFetcher } from './usage-fetcher'
 import { createMermaidServer } from './mermaid-tool'
 import { createMockupServer } from './mockup-tool'
 import { createCollabServer } from './collab-tool'
+import { createMediaServer } from './media-tool'
+import { MEDIA_PLAN_MODE_REFUSAL } from './media-tool-handler'
+import { appSetting } from './app-settings'
+import {
+  CLAUDE_MEDIA_MCP_SERVER,
+  CLAUDE_MEDIA_TOOL_PREFIX,
+  resolveMediaGeneration
+} from '../../shared/media-generation'
 import { currentWorkdir } from './session-workdir'
 import { syncCore } from './sync-host'
 import { ToolUseOwners } from './tool-use-owners'
@@ -924,6 +932,22 @@ export class ClaudeSession extends BaseSession {
           })
         : null
 
+      // Media generation: its own server too (outside `allowedTools`, so a call is asked), only while
+      // the Claude toggle is on; read per spawn, so a change applies at the next one.
+      const mediaServer = resolveMediaGeneration(appSetting('mediaGeneration')).engines.claude
+        ? createMediaServer({
+            engineId: this.engineId,
+            getRoutingId: () => this.routingId,
+            getWorkingDirectory: () =>
+              currentWorkdir(
+                this.cwd,
+                syncCore.getCanonicalState().worktreeInfoMap[this.routingId]
+              ),
+            getAutonomyMode: () => this.permissionMode,
+            callOwner: (toolUseId) => this.toolUseOwners.ownerOf(toolUseId)
+          })
+        : null
+
       // The session tools (slice 1c): their own server for the same reason —
       // outside the auto-allowed `claude-ui` prefix, every call through canUseTool
       // and the session-tools gate. Registered only where the host has wired them
@@ -1026,6 +1050,10 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
               string,
               never
             >),
+            ...((mediaServer ? { [CLAUDE_MEDIA_MCP_SERVER]: mediaServer } : {}) as Record<
+              string,
+              never
+            >),
             // Same: never in allowedTools, never auto-allowed outside the gate.
             ...((sessionToolsServer
               ? { [SESSION_TOOLS_SERVER_NAME]: sessionToolsServer }
@@ -1084,6 +1112,13 @@ ${sessionToolsGuidance({ toolPrefix: SESSION_TOOLS_PREFIX })}`
             // Auto-allow our in-process UI tools (mermaid, etc.) — no user approval needed
             if (toolName.startsWith('mcp__claude-ui__')) {
               return { behavior: 'allow' as const, updatedInput: input }
+            }
+
+            // Media generation: plan mode hides it, even for a tool the user allowed by rule (the
+            // handler re-checks: cli.js skips this callback for an allowed tool). Otherwise the
+            // ordinary approval card below, with the normal suggestions.
+            if (toolName.startsWith(CLAUDE_MEDIA_TOOL_PREFIX) && this.permissionMode === 'plan') {
+              return { behavior: 'deny' as const, message: MEDIA_PLAN_MODE_REFUSAL }
             }
 
             // The session tools: the gate decides allow / ask / deny. 'ask' falls

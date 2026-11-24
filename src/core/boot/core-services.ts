@@ -230,6 +230,8 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   opencodeServerManager.setXAgentCaller((sessionId) =>
     crossEngineDispatcher.xAgentCallerFromOpencode(sessionId)
   )
+  // The hosted media tools (generate_image / generate_video) start jobs on the job service.
+  opencodeServerManager.setMediaStart((args) => mediaJobs.start(args))
   // A dispatch run outlives the call that launched it, so it reaches its dispatching
   // session through the manager and canonical state at each read, never through the
   // launching call's closures; its parent id follows re-keys.

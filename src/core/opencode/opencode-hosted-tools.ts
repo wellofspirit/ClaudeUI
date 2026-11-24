@@ -71,6 +71,14 @@ import type { SessionToolCaller, SessionToolResult } from '../services/session-t
 import type { SdkMcpTool, SdkToolExtra } from '../sdk/types'
 import type { ChatMessage, EngineId, EngineModelGroup } from '../../shared/types'
 import type { BlockedCallLedger } from '../automode/blocked-calls'
+import {
+  MEDIA_PLAN_MODE_REFUSAL,
+  mediaZodShape,
+  runMediaTool,
+  type MediaStartFn
+} from '../services/media-tool-handler'
+import { MEDIA_TOOL_NAMES } from '../../shared/media-generation'
+import { MEDIA_TOOL_DESCRIPTIONS } from '../../shared/media-tools-description'
 import type { CallerRestriction } from './caller-restriction'
 import type { WorktreeToolResult } from '../providers/ISession'
 // `import type` only: DispatchContext/DispatchRequest/DispatchResult are
@@ -343,6 +351,8 @@ export function createOpencodeHostedToolsServer(
     dispatch?: DispatchAgentFn
     /** The dispatch targets' report channel (ADR-105 §3); `hand_back` is not registered without it. */
     handBack?: HandBackFn
+    /** The media job service's start (media generation); the two tools are not registered without it. */
+    media?: MediaStartFn
     /** The session tools' service (slice 2); none registered without it. */
     sessionTools?: HostedSessionTools
     /** An X-Agent's session as a session-tools caller (`session_message` only, ADR-105 §4). */
@@ -659,6 +669,7 @@ export function createOpencodeHostedToolsServer(
     }
   )
 
+  if (deps.media) registerMediaTools(server, { ...deps, media: deps.media })
   if (deps.handBack) registerHandBack(server, deps.handBack)
   if (deps.sessionTools) registerSessionTools(server, deps)
   registerWorktreeTools(server, deps)
@@ -870,4 +881,105 @@ function registerWorktreeTools(
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => run('exit_worktree', extra, (handle) => handle.exitWorktree?.())
   )
+}
+
+/**
+ * `claudeui_generate_image` / `claudeui_generate_video` (media generation): always registered when
+ * the host wired the job service; the session ruleset hides them when the setting is off or no model is
+ * usable (`mediaToolRules`) and in plan mode. The root agent's call is a background job; a subagent
+ * child's call, or one with no call id, waits for the outcome (ADR-105 §2). The job is never tied to
+ * the call's abort signal.
+ */
+function registerMediaTools(
+  server: McpServer,
+  deps: {
+    lookupCallerSession?: CallerSessionLookup
+    resolveCallerRoot?: CallerRootResolver
+    media: MediaStartFn
+    onIdentityMismatch?: (identity: CallerIdentity) => void
+  }
+): void {
+  const refuse = (text: string) => ({
+    content: [{ type: 'text' as const, text }],
+    isError: true
+  })
+  for (const kind of ['image', 'video'] as const) {
+    const name = MEDIA_TOOL_NAMES[kind]
+    server.registerTool(
+      name,
+      {
+        description: MEDIA_TOOL_DESCRIPTIONS[kind],
+        inputSchema: z.looseObject({
+          ...mediaZodShape(kind),
+          // Internal, as on dispatch_agent: declared so the validator does not strip them.
+          __xeng_caller_session: z
+            .string()
+            .optional()
+            .describe(
+              'internal — set automatically by the ClaudeUI plugin; never set this yourself'
+            ),
+          __xeng_call_id: z
+            .string()
+            .optional()
+            .describe(
+              'internal — set automatically by the ClaudeUI plugin; never set this yourself'
+            )
+        })
+      },
+      async (
+        args: Record<string, unknown>,
+        extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+      ) => {
+        const { __xeng_caller_session, __xeng_call_id, ...input } = args as Record<
+          string,
+          unknown
+        > & { __xeng_caller_session?: string; __xeng_call_id?: string }
+        const identity = resolveCallerIdentity(
+          extra?._meta as Record<string, unknown> | undefined,
+          { __xeng_caller_session, __xeng_call_id }
+        )
+        if (identity.mismatch) deps.onIdentityMismatch?.(identity)
+        const callerId = identity.sessionId
+        if (!callerId) {
+          return refuse(
+            `${name} could not identify the calling session: the request carried neither ` +
+              `opencode's _meta["${OPENCODE_SESSION_META_KEY}"] nor the ClaudeUI caller-identity ` +
+              "plugin's stamp (claudeui-xeng) — ask the user to check their opencode configuration."
+          )
+        }
+        // The chat itself is the root caller; a subagent child resolves to the chat it descends from.
+        let routingId = callerId
+        let caller = deps.lookupCallerSession?.(callerId)
+        const callerIsRoot = !!caller
+        if (!caller && deps.resolveCallerRoot) {
+          const resolved = await deps.resolveCallerRoot(callerId).catch(() => undefined)
+          if (resolved && 'refused' in resolved) return refuse(resolved.refused)
+          if (resolved) {
+            routingId = resolved.root
+            caller = deps.lookupCallerSession?.(resolved.root)
+          }
+        }
+        if (!caller) {
+          return refuse(
+            `${name} could not find the calling session (${callerId}) — it may have ended.`
+          )
+        }
+        if (caller.getAutonomyMode() === 'plan') return refuse(MEDIA_PLAN_MODE_REFUSAL)
+        const reply = await runMediaTool(deps.media, {
+          routingId,
+          cwd: caller.workingDirectory || caller.cwd,
+          engineId: 'opencode',
+          toolUseId: identity.callId ?? null,
+          kind,
+          // A subagent child's call, or one with no call id (no card to follow), waits.
+          foreground: !callerIsRoot || !identity.callId,
+          input
+        })
+        return {
+          content: [{ type: 'text' as const, text: reply.text }],
+          ...(reply.isError ? { isError: true } : {})
+        }
+      }
+    )
+  }
 }

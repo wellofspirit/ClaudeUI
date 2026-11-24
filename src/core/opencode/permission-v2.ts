@@ -69,6 +69,12 @@
  *   `ask` the host judges per command (`host-precheck.ts`).
  */
 import type { ClaudePermissions } from '../../shared/types'
+import {
+  CLAUDE_MEDIA_MCP_SERVER,
+  MEDIA_TOOL_NAMES,
+  type MediaKind
+} from '../../shared/media-generation'
+import { mediaKindOfTool } from '../../shared/media-tool-view'
 import { agentControlEditPatterns } from '../automode/agent-control-paths'
 import { broadBashGlobs } from './broad-bash-globs'
 import type { AgentPermissionOverlay } from './opencode-server-config'
@@ -152,6 +158,18 @@ function compileTierV2(rules: readonly string[], effect: V2Effect, opts: Compile
     const parsed = parseClaudeRule(raw)
     if (!parsed) continue
     const mcp = parseMcpRuleTool(parsed.tool)
+    // The media tools' Claude spelling (`mcp__claude-ui-media__generate_image`, or the whole server) is
+    // the hosted tool's action on this engine (`claudeui_generate_image`): the same rule, all engines.
+    if (mcp?.server === CLAUDE_MEDIA_MCP_SERVER) {
+      const tools =
+        mcp.tool === undefined
+          ? Object.values(MEDIA_TOOL_NAMES)
+          : mediaKindOfTool(mcp.tool) !== null
+            ? [mcp.tool]
+            : []
+      for (const tool of tools) push(rule(mediaAction(tool), effect))
+      continue
+    }
     if (mcp) {
       const action = opencodeMcpKey(mcp.server, mcp.tool)
       // An ALLOW whose action matches a built-in action is never emitted —
@@ -263,6 +281,20 @@ export const CLAUDEUI_MCP_SERVER = 'claudeui'
  * rules, so no blanket user rule can allow it silently (ADR-033 M2).
  */
 export const DISPATCH_ASK_RULE: V2Rule = rule('claudeui_dispatch_agent', 'ask')
+
+/** The hosted media tool's action on this engine: `claudeui_generate_image` / `claudeui_generate_video`. */
+export const mediaAction = (bareTool: string): string => `${CLAUDEUI_MCP_SERVER}_${bareTool}`
+
+/**
+ * The hosted media tools (`generate_image` / `generate_video`, media generation) ask like any
+ * tool that bills a model call. In every mode but auto's classifier they are mode gates, BEFORE the
+ * user's rules, so a user's allow (`mcp__claude-ui-media__generate_image`, honoured on every
+ * engine) answers it. Auto mode's gates re-state them AFTER its `claudeui_*` allow
+ * ({@link autoModeGates}), so the judge (or the user's allow rule host-side) decides.
+ */
+export const MEDIA_ASK_RULES: readonly V2Rule[] = Object.values(MEDIA_TOOL_NAMES).map((name) =>
+  rule(mediaAction(name), 'ask')
+)
 
 /**
  * Every hosted session tool asks in every mode (session tools, slice 2), so opencode
@@ -421,7 +453,8 @@ export function modeGates(
     rule('webfetch', 'ask'),
     rule('experimental_image_generate', 'ask'),
     rule('generate_image', 'ask'),
-    rule('generate_video', 'ask')
+    rule('generate_video', 'ask'),
+    ...MEDIA_ASK_RULES
   ]
   const external = externalDirectoryGates(opts.externalDirAllows)
   switch (mode) {
@@ -444,6 +477,7 @@ export function modeGates(
         rule('experimental_image_generate', 'ask'),
         rule('generate_image', 'ask'),
         rule('generate_video', 'ask'),
+        ...MEDIA_ASK_RULES,
         ...external
       ]
     default:
@@ -454,6 +488,7 @@ export function modeGates(
         rule('experimental_image_generate', 'ask'),
         rule('generate_image', 'ask'),
         rule('generate_video', 'ask'),
+        ...MEDIA_ASK_RULES,
         ...external
       ]
   }
@@ -502,6 +537,7 @@ export function autoModeGates(externalDirAllows: readonly V2Rule[] = []): V2Rule
     rule('edit', 'ask'),
     AUTO_MCP_CATCH_ALL,
     rule(`${CLAUDEUI_MCP_SERVER}_*`, 'allow'),
+    ...MEDIA_ASK_RULES,
     ...externalDirectoryGates(externalDirAllows)
   ]
 }
@@ -566,6 +602,12 @@ export interface SessionRulesetInput {
    */
   handBackTarget?: boolean
   /**
+   * Which of ClaudeUI's own media tools are offered to this session (the engine toggle on and a
+   * usable model for that kind). Default: none, so a ruleset built without it hides ours and leaves
+   * opencode's own tools as they are. See {@link mediaToolRules}.
+   */
+  media?: Partial<Record<MediaKind, boolean>>
+  /**
    * The transition ruleset of a worktree move (D5): the user's deny/ask rules compiled for the
    * NEW base (`compileClaudeRulesV2(…, { cwd: newLocation, … })`, no allows). Merged into the
    * user's own rules ({@link withTransition}), so the trailing asks and whole-category denies stay last.
@@ -587,6 +629,26 @@ function withTransition(effective: V2Rule[], transition: readonly V2Rule[] = [])
     ...effective.filter((r) => r.effect === 'deny'),
     ...transition.filter((r) => r.effect === 'deny')
   ]
+}
+
+/**
+ * The whole-category denies of the media tools (hidden from the model, {@link wireOrder}):
+ * ClaudeUI's own `claudeui_generate_X` when it is off or unusable for that kind, and in plan mode
+ * whatever the user allowed; opencode's own `generate_X` only while ours is offered for that kind
+ * (otherwise their asks from the mode gates stand).
+ */
+export function mediaToolRules(
+  mode: string,
+  media: Partial<Record<MediaKind, boolean>> = {}
+): V2Rule[] {
+  const out: V2Rule[] = []
+  for (const kind of ['image', 'video'] as const) {
+    const name = MEDIA_TOOL_NAMES[kind]
+    const offered = media[kind] === true
+    if (mode === 'plan' || !offered) out.push(rule(mediaAction(name), 'deny'))
+    if (offered) out.push(rule(name, 'deny'))
+  }
+  return out
 }
 
 /** The compiled session ruleset and what the host keeps beside it. */
@@ -634,6 +696,7 @@ export function buildSessionRuleset(input: SessionRulesetInput): SessionRuleset 
     ...modeGates(input.mode, { autoMode, externalDirAllows: input.externalDirAllows }),
     ...withTransition(effective, input.transitionRules),
     ...(input.mode === 'plan' ? planEnforcement() : []),
+    ...mediaToolRules(input.mode, input.media),
     EXECUTE_DENY_RULE,
     ...DIRECT_TOOL_DENY_RULES,
     DISPATCH_ASK_RULE,

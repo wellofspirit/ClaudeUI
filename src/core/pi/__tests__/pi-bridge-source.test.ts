@@ -11,6 +11,8 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { PI_BRIDGE_EXTENSION_SOURCE, PI_BRIDGE_VERSION } from '../pi-bridge-source'
 import { piSessionToolsEnv } from '../../services/session-tool-specs'
 import { SESSION_TOOL_NAMES } from '../../../shared/session-tools-description'
+import { MEDIA_TOOL_NAMES } from '../../../shared/media-generation'
+import { MEDIA_TOOL_DESCRIPTIONS, mediaToolSchema } from '../../../shared/media-tools-description'
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
@@ -28,7 +30,7 @@ describe('PI_BRIDGE_EXTENSION_SOURCE', () => {
   })
 
   it('is version 25 (the extension throws without bridge credentials)', () => {
-    expect(PI_BRIDGE_VERSION).toBe('27')
+    expect(PI_BRIDGE_VERSION).toBe('28')
   })
 
   it("contains no import statements (zero module-resolution surface for pi's jiti loader)", () => {
@@ -257,6 +259,7 @@ const BRIDGE_ENV_VARS = [
   'CLAUDEUI_PI_HOSTED_TOOLS',
   'CLAUDEUI_PI_DISPATCH_ENABLED',
   'CLAUDEUI_PI_DISPATCH_DESCRIPTION',
+  'CLAUDEUI_PI_MEDIA_ENABLED',
   'CLAUDEUI_PI_PLAN_TOOLS',
   'CLAUDEUI_PI_AGENT_TOOL',
   'CLAUDEUI_PI_AGENT_LISTING',
@@ -2075,6 +2078,62 @@ describe('PI_BRIDGE_EXTENSION_SOURCE — hand_back (bridge v18, ADR-105 §3)', (
         properties: { report: { type: 'string', description: HAND_BACK_REPORT_PARAM } },
         required: ['report']
       })
+    })
+  })
+})
+
+describe('PI_BRIDGE_EXTENSION_SOURCE — media tools (bridge v28)', () => {
+  const MEDIA_ON = {
+    ...BRIDGE_CREDS,
+    CLAUDEUI_PI_HOSTED_TOOLS: '1',
+    CLAUDEUI_PI_MEDIA_ENABLED: '1'
+  }
+
+  it('registers generate_image and generate_video only behind their own gate, inside the hosted block', () => {
+    withEnv(MEDIA_ON, () => {
+      const names = [...runExtension().tools.keys()]
+      expect(names).toContain('generate_image')
+      expect(names).toContain('generate_video')
+    })
+    withEnv({ ...MEDIA_ON, CLAUDEUI_PI_MEDIA_ENABLED: undefined }, () => {
+      const names = [...runExtension().tools.keys()]
+      expect(names).not.toContain('generate_image')
+      expect(names).not.toContain('generate_video')
+    })
+    withEnv({ ...MEDIA_ON, CLAUDEUI_PI_HOSTED_TOOLS: undefined }, () => {
+      expect([...runExtension().tools.keys()]).not.toContain('generate_image')
+    })
+  })
+
+  it.each(['image', 'video'] as const)(
+    'the %s tool carries the shared description and JSON schema verbatim (the bridge cannot import them)',
+    (kind) => {
+      withEnv(MEDIA_ON, () => {
+        const tool = runExtension().tools.get(MEDIA_TOOL_NAMES[kind])!
+        expect(tool.description).toBe(MEDIA_TOOL_DESCRIPTIONS[kind])
+        expect(tool.parameters).toEqual(mediaToolSchema(kind))
+      })
+    }
+  )
+
+  it('posts the call to /hosted-tool under its bare name', async () => {
+    await withEnv(MEDIA_ON, async () => {
+      const calls: Array<{ url: string; body: { toolName: string; toolCallId: string } }> = []
+      const realFetch = globalThis.fetch
+      globalThis.fetch = (async (url: string, init: { body: string }) => {
+        calls.push({ url, body: JSON.parse(init.body) })
+        return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }] }), {
+          status: 200
+        })
+      }) as unknown as typeof fetch
+      try {
+        const tool = runExtension().tools.get('generate_image')!
+        await tool.execute('call_1', { prompt: 'a fox' })
+      } finally {
+        globalThis.fetch = realFetch
+      }
+      expect(calls[0].url).toContain('/hosted-tool')
+      expect(calls[0].body).toMatchObject({ toolName: 'generate_image', toolCallId: 'call_1' })
     })
   })
 })

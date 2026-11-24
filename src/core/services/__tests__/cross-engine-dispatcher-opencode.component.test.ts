@@ -744,9 +744,15 @@ describe('opencode target — lifecycle', () => {
       { action: 'experimental_image_generate', resource: '*', effect: 'ask' },
       { action: 'generate_image', resource: '*', effect: 'ask' },
       { action: 'generate_video', resource: '*', effect: 'ask' },
+      // ClaudeUI's own paid media tools: gated like opencode's (MEDIA_ASK_RULES).
+      { action: 'claudeui_generate_image', resource: '*', effect: 'ask' },
+      { action: 'claudeui_generate_video', resource: '*', effect: 'ask' },
       { action: 'external_directory', resource: '*', effect: 'ask' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'ask' },
       { action: 'claudeui_session_*', resource: '*', effect: 'ask' },
+      // mediaToolRules: no model offered to this ruleset (no media wiring in this suite) → hidden.
+      { action: 'claudeui_generate_image', resource: '*', effect: 'deny' },
+      { action: 'claudeui_generate_video', resource: '*', effect: 'deny' },
       { action: 'execute', resource: '*', effect: 'deny' },
       // The direct tools of 2.2.0+ (Code Mode's, offered directly while `execute` is hidden).
       { action: 'opencode_session_*', resource: '*', effect: 'deny' },
@@ -765,6 +771,9 @@ describe('opencode target — lifecycle', () => {
       // Without `requireHandBack` (the dispatcher's own suites) a target is an ordinary session of the server.
       { action: 'claudeui_hand_back', resource: '*', effect: 'deny' },
       { action: 'claudeui_dispatch_agent', resource: '*', effect: 'deny' },
+      // A target is offered none of ClaudeUI's media tools (TARGET_MEDIA_DENY).
+      { action: 'claudeui_generate_image', resource: '*', effect: 'deny' },
+      { action: 'claudeui_generate_video', resource: '*', effect: 'deny' },
       // The worktree tools move the chat's own session: hidden from a dispatch target.
       { action: 'claudeui_enter_worktree', resource: '*', effect: 'deny' },
       { action: 'claudeui_exit_worktree', resource: '*', effect: 'deny' },
@@ -778,6 +787,8 @@ describe('opencode target — lifecycle', () => {
     expect(v2ToolHidden(rules, 'claudeui_session_start', 'linux')).toBe(true)
     expect(evaluateV2Call(rules, 'claudeui_session_message', ['*'], 'linux')).toBe('deny')
     expect(v2ToolHidden(rules, 'claudeui_render_mermaid', 'linux')).toBe(false)
+    expect(v2ToolHidden(rules, 'claudeui_generate_image', 'linux')).toBe(true)
+    expect(v2ToolHidden(rules, 'claudeui_generate_video', 'linux')).toBe(true)
     // Unchanged rules at turn start → no PATCH; the prompt is an inbox item with a ClaudeUI id.
     expect(client.setSessionPermissions).not.toHaveBeenCalled()
     expect(client.prompt).toHaveBeenCalledWith('oc-sess-1', {

@@ -16,6 +16,8 @@ import path from 'node:path'
 import { homedir } from 'node:os'
 import type { ToolKind } from '../../shared/tool-kinds'
 import { piToolKind } from '../../shared/pi-tool-kinds'
+import { CLAUDE_MEDIA_TOOL_PREFIX } from '../../shared/media-generation'
+import { mediaKindOfTool } from '../../shared/media-tool-view'
 import {
   SESSION_TOOL_NAMES,
   SESSION_TOOLS_SERVER_NAME,
@@ -235,6 +237,9 @@ export const PI_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'send_message',
   'task_stop',
   'list_models',
+  // Media generation (bridge v28): normal gating, never auto-allowed; the allow mints the grant.
+  'generate_image',
+  'generate_video',
   // The session tools (bridge v15): their gate is PiSession's `sessionToolsGate` rung,
   // and the allow it gives mints the one-shot grant like any other hosted tool.
   ...SESSION_TOOL_NAMES
@@ -584,7 +589,18 @@ function ruleMatchesTool(
 ): boolean {
   const parsed = parseClaudeRule(rule)
   if (!parsed) return false
-  if (parsed.tool.startsWith(MCP_RULE_PREFIX)) return mcpRuleMatches(parsed, toolName, mcpRuleKey)
+  if (parsed.tool.startsWith(MCP_RULE_PREFIX)) {
+    if (mcpRuleMatches(parsed, toolName, mcpRuleKey)) return true
+    // ClaudeUI's media tools are called by their bare name on pi, but the user writes the rule in
+    // Claude's spelling (`mcp__claude-ui-media__generate_image`, or the server): match that too.
+    if (mediaKindOfTool(toolName) === null) return false
+    const claudeSpelling = CLAUDE_MEDIA_TOOL_PREFIX + toolName
+    return mcpRuleMatches(
+      parsed,
+      mcpRuleKey ? mcpRuleKey(claudeSpelling) : claudeSpelling,
+      mcpRuleKey
+    )
+  }
   // `Agent` / `Task` (Claude's two spellings of the sub-agent launcher): pi's own `agent` tool
   // and nothing else — not `dispatch_agent` (a different, cross-engine tool) and not a legacy
   // `subagent` call, though all of them share the `task` kind. The specifier is Claude's agent
@@ -1143,6 +1159,8 @@ export function planModeOutranksRules(
   input: Record<string, unknown>,
   scope?: PlanReadOnlyScope
 ): boolean {
+  // Media generation is hidden in plan mode: an allow rule or a session allow never lifts it.
+  if (kind === 'media') return true
   if (kind === 'fileEdit' || kind === 'fileWrite') return true
   if (kind === 'command') return !isPlanReadOnlyCommand({ toolName: 'bash', input }, scope)
   return false

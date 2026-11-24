@@ -117,6 +117,19 @@ describe('claudeui-xeng plugin (opencode 2.x directory plugin)', () => {
     expect(event.input).toEqual({ __xeng_caller_session: 'ses_1' })
   })
 
+  it('stamps the caller session and the call id into the media tools too', async () => {
+    const { hooks } = await load()
+    for (const tool of ['claudeui_generate_image', 'claudeui_generate_video']) {
+      const event: HookEvent = { tool, sessionID: 'ses_1', id: 'call_9', input: { prompt: 'p' } }
+      await hooks['execute.before'](event)
+      expect(event.input).toEqual({
+        prompt: 'p',
+        __xeng_caller_session: 'ses_1',
+        __xeng_call_id: 'call_9'
+      })
+    }
+  })
+
   it("leaves every other tool's input alone (incl. other hosted tools)", async () => {
     const { hooks } = await load()
     for (const tool of ['read', 'shell', 'claudeui_create_mockup', 'fx_dispatch_agent']) {
