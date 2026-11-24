@@ -72,6 +72,19 @@ import { ClaudeDefaultsSection } from './ClaudeDefaultsSection'
 import { OpencodeSchemaForm, type SchemaDefs, type SchemaNode } from './OpencodeSchemaForm'
 import { useDispatchConfig, useDispatchModels } from './use-engine-config'
 import {
+  DISPATCH_MODEL_DEFAULT_LABEL,
+  FALLBACK_JUDGE_EMPTY_LABEL,
+  JUDGE_MODEL_DEFAULT_LABEL,
+  OPENCODE_MODEL_DEFAULT_LABEL
+} from './model-default-labels'
+import {
+  FALLBACK_SAME_JUDGE_WARNING,
+  fallbackJudgePatch,
+  fallbackSameAsJudge as isFallbackSameAsJudge,
+  judgeCandidates,
+  useJudgeModelSupport
+} from './judge-model-rules'
+import {
   OpencodeSessionBehaviorSection,
   OpencodeToolOutputSection,
   OpencodeAttachmentsSection,
@@ -362,10 +375,6 @@ const TWO_STAGE_OPTIONS: { value: 'both' | 'fast' | 'thinking'; label: string }[
   { value: 'thinking', label: 'Thinking' }
 ]
 
-/** Label for the judge-model picker's "no explicit choice" row (judgeModel unset). */
-const JUDGE_MODEL_DEFAULT_LABEL = 'Same as session model (default)'
-/** Label for the fallback-judge picker's "no explicit choice" row (fallbackJudgeModel unset). */
-const FALLBACK_JUDGE_EMPTY_LABEL = 'None (ask me instead)'
 /** The fallback-judge row's sentence, the same for both engines. */
 const FALLBACK_JUDGE_NOTE =
   "Judges when the judge model can't answer (rate limit, outage). Leave empty to ask you instead."
@@ -377,12 +386,6 @@ const JUDGE_RESTING_POLL_MS = 60_000
 /** The Advanced account row's note while the fallback model has no second account to offer. */
 const FALLBACK_ACCOUNT_NOT_CHATGPT_NOTE =
   "The fallback model isn't a ChatGPT model, so there is only one account to use — this setting does nothing until you pick a ChatGPT fallback."
-const FALLBACK_SAME_JUDGE_WARNING =
-  'Same model on the same account as the judge — it would hit the same limit. Pick another model, or another account under Advanced.'
-/** Label for the dispatch default-model picker's "no explicit choice" row. */
-const DISPATCH_MODEL_DEFAULT_LABEL = '(not set)'
-/** Label for the opencode default/small model pickers' "no explicit choice" row. */
-const OPENCODE_MODEL_DEFAULT_LABEL = 'Default (use opencode default)'
 
 // The three classifier trust lists are NOT here any more: they are the same
 // values for every engine, so ADR-065 phase 4 moved them out of
@@ -437,7 +440,7 @@ function AutoModeSection({
   const [engineCfg, setEngineCfg] = useState<EngineConfig | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
   /** Per model value, whether ClaudeUI can call it as the judge; null = not known (yet). */
-  const [support, setSupport] = useState<Record<string, JudgeModelSupport> | null>(null)
+  const { support } = useJudgeModelSupport(engineId, models)
   /** The signed-in ChatGPT accounts, for the Advanced "fallback on a different account" setting. */
   const [accounts, setAccounts] = useState<SharedProviderAccountList | null>(null)
   /** The judge route's cooldown, tagged with the model it was asked about; null = not resting. */
@@ -490,21 +493,10 @@ function AutoModeSection({
       .loadEngineConfig(engineId)
       .then(setEngineCfg)
       .catch(() => setEngineCfg({}))
-    setSupport(null)
     window.api
       .getEngineModels(engineId)
       .then((groups) => {
-        const own = groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models)
-        setModels(own)
-        // An empty list says nothing about routes (discovery found nothing), so
-        // there is nothing to ask about.
-        if (own.length === 0) return
-        return window.api
-          .judgeModelSupport(
-            engineId,
-            own.map((m) => m.value)
-          )
-          .then(setSupport)
+        setModels(groups.filter((g) => g.engineId === engineId).flatMap((g) => g.models))
       })
       .catch(() => {})
   }, [engineId])
@@ -524,7 +516,7 @@ function AutoModeSection({
   const twoStageMode = auto.twoStageMode ?? 'both'
 
   // Only an explicit refusal hides a model; an unanswered value stays listed.
-  const judgeable = support ? models.filter((m) => support[m.value]?.ok !== false) : models
+  const judgeable = judgeCandidates(models, support)
   const judgeModelOptions = toModelDisplays(judgeable)
   // Selected from the FULL list, so a saved model that can't judge still shows
   // by name (its notice says why) rather than as an unknown value.
@@ -566,10 +558,13 @@ function AutoModeSection({
 
   // Same model on the same account as the judge would hit the very limit that sent the call
   // to the fallback. Another account (ChatGPT only) is the one thing that makes it a new route.
-  const fallbackSameAsJudge =
-    fallbackJudgeModel !== '' &&
-    fallbackJudgeModel === judgeModel &&
-    (!accountOn || !fallbackIsChatgpt || fallbackAccount === activeAccountId)
+  const fallbackSameAsJudge = isFallbackSameAsJudge({
+    judge: judgeModel,
+    fallback: fallbackJudgeModel,
+    fallbackAccount,
+    activeAccountId,
+    support
+  })
   const fallbackUsable =
     fallbackJudgeModel !== '' &&
     !fallbackSameAsJudge &&
@@ -653,16 +648,7 @@ function AutoModeSection({
                 emptyOption={{ label: FALLBACK_JUDGE_EMPTY_LABEL }}
                 models={judgeModelOptions}
                 selectedModel={selectedFallbackJudgeModel}
-                onSelectModel={(v) =>
-                  // A model known NOT to route through ChatGPT has one account: a saved
-                  // fallback account would only mislabel it, so it is cleared with it.
-                  update({
-                    fallbackJudgeModel: v || undefined,
-                    ...(!v || (support && support[v] && support[v].chatgpt !== true)
-                      ? { fallbackJudgeAccount: undefined }
-                      : {})
-                  })
-                }
+                onSelectModel={(v) => update(fallbackJudgePatch(v, support))}
               />
             </span>
           </SettingRow>

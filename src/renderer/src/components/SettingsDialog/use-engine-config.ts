@@ -75,6 +75,8 @@ function dispatchEntry(engineId: EngineId): DispatchStoreEntry {
 
   const adopt = (config: EngineConfig): void => {
     if (DISPATCH_STORES.get(engineId) !== entry) return
+    // A write adopted while this read was in flight (`patchEngineConfigFile`) is newer than it.
+    if (entry.config !== null) return
     entry.config = config
     emitDispatchConfig(entry)
   }
@@ -148,6 +150,30 @@ export function reloadEngineConfigObject(engineId: EngineId): Promise<void> {
       emitDispatchConfig(entry)
     })
     .catch(() => {})
+}
+
+/**
+ * Edit one engine's file from a FRESH read: `loadEngineConfig` → `mutate` →
+ * `saveEngineConfig`, never from the live entry's copy (which may predate a
+ * write made outside this store). Once the save has resolved, a live entry
+ * adopts the saved object and its subscribers are told. A failed read or save
+ * rejects and leaves the live entry as it was: a save that did not happen is
+ * not reported as one.
+ */
+export async function patchEngineConfigFile(
+  engineId: EngineId,
+  mutate: (fresh: EngineConfig) => EngineConfig
+): Promise<EngineConfig> {
+  const next = mutate(await window.api.loadEngineConfig(engineId))
+  await window.api.saveEngineConfig(engineId, next)
+  const entry = DISPATCH_STORES.get(engineId)
+  // Adopted even while the entry's first read is in flight: that read, landing later with
+  // the pre-patch file, is then dropped (see `adopt` in `dispatchEntry`).
+  if (entry) {
+    entry.config = next
+    emitDispatchConfig(entry)
+  }
+  return next
 }
 
 /** Merge a patch into the engine's `dispatch` block and persist the whole file. */

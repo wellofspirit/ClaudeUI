@@ -10,8 +10,9 @@
  * THE SHARED LIST is the union of both catalogs by canonical id, each row
  * marked `oc` / `pi` for the engines that offer it — a model only one engine
  * has stays in the list and simply does not reach the other. A lock is the
- * union of both engines' scoped references: a model either engine's settings
- * name cannot be unticked.
+ * union of both engines' scoped references (every one, not the first): a model
+ * either engine's settings name cannot be unticked until the replace dialog has
+ * rewritten them (ModelCuration's header says how the untick then runs).
  *
  * JOINING LISTS THAT DIFFER is an explicit choice (the join panel): opencode's
  * list, pi's, or both combined, each with what it does to the other engine.
@@ -25,6 +26,7 @@ import { engineMeta } from '../../../../shared/engine-meta'
 import {
   findModelReferences,
   formatModelReferences,
+  type ModelReference,
   type ModelReferenceSources
 } from '../../../../shared/model-references'
 import {
@@ -36,20 +38,18 @@ import type {
   SharedProviderCuration,
   SharedProviderDefinition
 } from '../../../../shared/shared-provider'
-import type {
-  EngineConfig,
-  EngineId,
-  EngineModelGroup,
-  OpencodeConfigSettings
-} from '../../../../shared/types'
+import type { EngineId, EngineModelGroup } from '../../../../shared/types'
 import { Button, ChoiceCards, RadioRow, Segmented, SettingRow } from './settings-controls'
 import {
+  KeptLockedNotice,
   ModelCurationActions,
   ModelCurationList,
+  useKeptLockedNotice,
   type CurationFacet,
   type CurationModel,
   type CurationSort
 } from './ModelCurationList'
+import { loadReferenceSources, ReplaceModelReferencesDialog } from './ReplaceModelReferencesDialog'
 import {
   LARGE_CATALOG,
   ModelCuration,
@@ -88,6 +88,13 @@ function joinEffect(
   return `${label} changes from ${from.length} to ${to.length} models.`
 }
 
+/** What the replace dialog was opened with (see the `replace` state). */
+interface ReplaceInput {
+  ids: string[]
+  refs: ModelReference[]
+  removals: Partial<Record<EngineId, string[]>>
+}
+
 export function LinkedModelCuration({
   testid,
   providerName,
@@ -116,6 +123,16 @@ export function LinkedModelCuration({
   const [sources, setSources] = useState<ModelReferenceSources | null>(null)
   const [discovered, setDiscovered] = useState<EngineModelGroup[]>([])
   const [joinPick, setJoinPick] = useState<JoinPick | null>(null)
+  /**
+   * The replace dialog's input while it is open, FROZEN at open: the (canonical) ids it was opened for,
+   * their references and the per-engine removals. Not recomputed per render: a partial
+   * Apply failure reloads the models, the lock map then drops the references already
+   * rewritten, and the dialog's rows (and the picks keyed to them) must not shift.
+   */
+  const [replace, setReplace] = useState<ReplaceInput | null>(null)
+  const keptNotice = useKeptLockedNotice()
+  /** The untick a resolved dialog performs, from the LATEST render (see `ModelCuration`). */
+  const untick = useRef<(ids: string[], fresh: ModelReferenceSources) => void>(() => {})
   const [filter, setFilter] = useState('')
   const [facets, setFacets] = useState<CurationFacet[]>([])
   const [sort, setSort] = useState<CurationSort>('newest')
@@ -205,18 +222,9 @@ export function LinkedModelCuration({
 
   useEffect(() => {
     let cancelled = false
-    void Promise.all([
-      window.api.loadOpencodeSettings().catch(() => ({}) as OpencodeConfigSettings),
-      window.api.getEngineModels().catch((): EngineModelGroup[] => []),
-      Promise.all(
-        (['claude', 'opencode', 'pi'] as EngineId[]).map(
-          async (id) =>
-            [id, await window.api.loadEngineConfig(id).catch(() => ({}) as EngineConfig)] as const
-        )
-      )
-    ]).then(([opencode, groups, configs]) => {
+    void loadReferenceSources().then(({ sources, groups }) => {
       if (cancelled) return
-      setSources({ opencode, engines: Object.fromEntries(configs) })
+      setSources(sources)
       setDiscovered(groups)
     })
     return () => {
@@ -273,8 +281,8 @@ export function LinkedModelCuration({
     return <SettingRow testid={`${testid}.models`} dataId="loading" description="Loading models…" />
   }
 
-  /** Model canonical id → where a setting of EITHER engine uses it. */
-  const locked: Record<string, string> = {}
+  /** Model canonical id → every setting of EITHER engine that uses it. */
+  const locked: Record<string, ModelReference[]> = {}
   for (const e of ENGINES) {
     const adapter = adapterOf(e)
     if (!adapter) continue
@@ -282,9 +290,11 @@ export function LinkedModelCuration({
     for (const group of discovered.filter((g) => g.engineId === e)) {
       for (const model of group.models) {
         if (!model.value.startsWith(prefix)) continue
-        const [ref] = findModelReferences(sources, [model.value], e)
-        if (ref)
-          locked[canonicalModelId(definition, e, model.value.slice(prefix.length))] ??= ref.where
+        const refs = findModelReferences(sources, [model.value], e)
+        if (refs.length > 0)
+          (locked[canonicalModelId(definition, e, model.value.slice(prefix.length))] ??= []).push(
+            ...refs
+          )
       }
     }
   }
@@ -316,14 +326,18 @@ export function LinkedModelCuration({
     })
   }
 
-  const setShared = (next: string[] | undefined, nextToast: typeof toast = null): void => {
+  const setShared = (
+    next: string[] | undefined,
+    nextToast: typeof toast = null,
+    sourcesOverride?: ModelReferenceSources
+  ): void => {
     const kept = new Set(next ?? unionIds)
     const removed = next === undefined ? [] : unionIds.filter((id) => !kept.has(id))
     const refs = ENGINES.flatMap((e) => {
       const adapter = adapterOf(e)
       return adapter
         ? findModelReferences(
-            sources,
+            sourcesOverride ?? sources,
             removed.map((id) => adapter.pickerValue(engineModelId(definition, e, id))),
             e
           )
@@ -515,23 +529,47 @@ export function LinkedModelCuration({
   const selected = effective.models ?? unionIds
   const picked = effective.models?.filter((id) => offered[id]).length ?? 0
 
-  const edit = (next: string[]): void => {
+  const edit = (next: string[], sourcesOverride?: ModelReferenceSources): void => {
     const current = new Set(selected)
     if (next.length === current.size && next.every((id) => current.has(id))) return
     if (!allMode) {
-      setShared(next)
+      setShared(next, null, sourcesOverride)
       return
     }
     const dropped = unionIds.length - next.length
-    setShared(next, {
-      previous: undefined,
-      message:
-        next.length === 0
-          ? 'Switched to Only the ones I pick — none are picked.'
-          : dropped === 1
-            ? 'Switched to Only the ones I pick — everything but this model is picked.'
-            : `Switched to Only the ones I pick — everything but these ${dropped} models is picked.`
-    })
+    setShared(
+      next,
+      {
+        previous: undefined,
+        message:
+          next.length === 0
+            ? 'Switched to Only the ones I pick — none are picked.'
+            : dropped === 1
+              ? 'Switched to Only the ones I pick — everything but this model is picked.'
+              : `Switched to Only the ones I pick — everything but these ${dropped} models is picked.`
+      },
+      sourcesOverride
+    )
+  }
+
+  untick.current = (ids, fresh) => {
+    const gone = new Set(ids)
+    edit(
+      selected.filter((id) => !gone.has(id)),
+      fresh
+    )
+  }
+
+  const openReplace = (ids: string[]): void => {
+    keptNotice.dismiss()
+    /** Per engine, the picker VALUES the untick removes — never one flat list. */
+    const removals: Partial<Record<EngineId, string[]>> = {}
+    for (const e of ENGINES) {
+      const adapter = adapterOf(e)
+      if (adapter)
+        removals[e] = ids.map((id) => adapter.pickerValue(engineModelId(definition, e, id)))
+    }
+    setReplace({ ids, refs: ids.flatMap((id) => locked[id] ?? []), removals })
   }
 
   const setMode = (mode: 'all' | 'pick'): void => {
@@ -618,10 +656,19 @@ export function LinkedModelCuration({
               filter={filter}
               facets={facets}
               locked={locked}
+              onKeptLocked={keptNotice.show}
             />
           )
         }
       >
+        {keptNotice.ids.length > 0 && (
+          <KeptLockedNotice
+            testid={`${testid}.models`}
+            count={keptNotice.ids.length}
+            onReview={() => openReplace(keptNotice.ids)}
+            onHover={keptNotice.setHovered}
+          />
+        )}
         <ModelCurationList
           testid={`${testid}.models`}
           filterTestid={`${testid}.modelFilter`}
@@ -637,9 +684,27 @@ export function LinkedModelCuration({
           sort={sort}
           onSortChange={setSort}
           locked={locked}
+          onLockedClick={openReplace}
+          onKeptLocked={keptNotice.show}
           allMode={allMode}
           rowMarks={marks}
         />
+        {replace !== null && replace.refs.length > 0 && (
+          <ReplaceModelReferencesDialog
+            references={replace.refs}
+            removals={replace.removals}
+            awaitPendingWrites={() => saveChain.current}
+            onCancel={() => setReplace(null)}
+            onResolved={async () => {
+              const { ids } = replace
+              const fresh = await loadReferenceSources()
+              setSources(fresh.sources)
+              setDiscovered(fresh.groups)
+              setReplace(null)
+              untick.current(ids, fresh.sources)
+            }}
+          />
+        )}
         {toast && (
           <span
             role="status"

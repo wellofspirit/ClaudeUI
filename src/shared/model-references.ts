@@ -28,8 +28,23 @@ export interface ModelReferenceSources {
   engines?: Partial<Record<EngineId, EngineConfig | null>>
 }
 
+/** Which setting holds a reference — what a replace flow writes back to. */
+export type ModelReferenceKind =
+  | 'opencodeDefault'
+  | 'opencodeSmall'
+  | 'judge'
+  | 'fallbackJudge'
+  | 'dispatchDefault'
+  | 'dispatchAllowed'
+  | 'piDefault'
+
 /** One configured reference to a model that is about to disappear. */
 export interface ModelReference {
+  kind: ModelReferenceKind
+  /** The engine whose file holds it (`opencode` for opencode's native default and small model). */
+  engine: EngineId
+  /** Short row title, e.g. "pi · Default model". */
+  title: string
   /** The configured model VALUE. */
   model: string
   /** Human-readable sentence naming what holds the reference. */
@@ -74,6 +89,9 @@ export function findModelReferences(
   const opencode = engine === undefined || engine === 'opencode' ? sources.opencode : undefined
   if (opencode?.model && removed.has(opencode.model)) {
     refs.push({
+      kind: 'opencodeDefault',
+      engine: 'opencode',
+      title: 'opencode · Default model',
       model: opencode.model,
       label: 'the opencode default model',
       where: `Default model for opencode — ${DEFAULT_MODELS} › opencode`
@@ -81,6 +99,9 @@ export function findModelReferences(
   }
   if (opencode?.smallModel && removed.has(opencode.smallModel)) {
     refs.push({
+      kind: 'opencodeSmall',
+      engine: 'opencode',
+      title: 'opencode · Small model',
       model: opencode.smallModel,
       label: 'the opencode small model',
       where: `Small model for opencode — ${DEFAULT_MODELS} › opencode`
@@ -95,6 +116,9 @@ export function findModelReferences(
     const judge = cfg.autoMode?.judgeModel
     if (judge && removed.has(judge)) {
       refs.push({
+        kind: 'judge',
+        engine: engineId,
+        title: `${name} · Auto-mode judge`,
         model: judge,
         label: `the ${name} auto-mode judge model`,
         where: `Auto-mode judge for ${name} — ${JUDGE} › ${name}`
@@ -103,6 +127,9 @@ export function findModelReferences(
     const fallbackJudge = cfg.autoMode?.fallbackJudgeModel?.trim()
     if (fallbackJudge && removed.has(fallbackJudge)) {
       refs.push({
+        kind: 'fallbackJudge',
+        engine: engineId,
+        title: `${name} · Fallback judge`,
         model: fallbackJudge,
         label: `the ${name} auto-mode fallback judge model`,
         where: `Fallback judge for ${name} — ${JUDGE} › ${name}`
@@ -111,6 +138,9 @@ export function findModelReferences(
     const dispatchDefault = cfg.dispatch?.defaultModel
     if (dispatchDefault && removed.has(dispatchDefault)) {
       refs.push({
+        kind: 'dispatchDefault',
+        engine: engineId,
+        title: `${name} · Dispatch default model`,
         model: dispatchDefault,
         label: `the ${name} dispatch default model`,
         where: `Dispatch default for ${name} — ${DISPATCH} › ${name}`
@@ -119,6 +149,9 @@ export function findModelReferences(
     for (const allowed of cfg.dispatch?.allowedModels ?? []) {
       if (removed.has(allowed)) {
         refs.push({
+          kind: 'dispatchAllowed',
+          engine: engineId,
+          title: `${name} · Allowed dispatch model`,
           model: allowed,
           label: `an allowed dispatch model for ${name}`,
           where: `Allowed dispatch model for ${name} — ${DISPATCH} › ${name}`
@@ -128,6 +161,9 @@ export function findModelReferences(
     const piDefault = cfg.piConfig?.defaultModel
     if (piDefault && removed.has(piDefault)) {
       refs.push({
+        kind: 'piDefault',
+        engine: engineId,
+        title: `${name} · Default model`,
         model: piDefault,
         label: `the ${name} default model`,
         where: `Default model for ${name} — ${DEFAULT_MODELS} › ${name}`

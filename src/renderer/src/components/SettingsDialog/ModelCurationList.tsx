@@ -41,7 +41,8 @@
  * what an edit from there means.
  */
 
-import { useId, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
+import type { ModelReference } from '../../../../shared/model-references'
 import { ChevronIcon } from '../shared/ChevronIcon'
 import { Button } from './settings-controls'
 
@@ -150,11 +151,75 @@ const union = (selected: string[], add: string[]): string[] => {
   return [...selected, ...add.filter((id) => !have.has(id))]
 }
 
+/** Model id → every setting that still names it. */
+export type LockedModels = Readonly<Record<string, readonly ModelReference[]>>
+
+/** Where each reference lives, for the lock's tooltip and description. */
+const lockText = (refs: readonly ModelReference[]): string => refs.map((r) => r.where).join('; ')
+
+/** How long the "kept: still in use" notice stays up, unless the pointer is on it. */
+export const KEPT_LOCKED_NOTICE_MS = 6000
+
+/**
+ * The bulk-op notice's state, owned by the container (it also owns the dialog
+ * the notice's Review opens): the ids a bulk Clear / vendor box kept, fading
+ * after {@link KEPT_LOCKED_NOTICE_MS} and paused while the pointer is on it.
+ */
+export function useKeptLockedNotice(): {
+  ids: string[]
+  show: (ids: string[]) => void
+  dismiss: () => void
+  setHovered: (hovered: boolean) => void
+} {
+  const [ids, setIds] = useState<string[]>([])
+  const [hovered, setHovered] = useState(false)
+  useEffect(() => {
+    if (ids.length === 0 || hovered) return
+    const timer = setTimeout(() => setIds([]), KEPT_LOCKED_NOTICE_MS)
+    return () => clearTimeout(timer)
+  }, [ids, hovered])
+  // Showing or dismissing resets the hover: Review unmounts the notice under the pointer, so
+  // no mouseleave ever arrives, and a stale `hovered` would keep every later notice up.
+  const set = (next: string[]): void => {
+    setHovered(false)
+    setIds(next)
+  }
+  return { ids, show: set, dismiss: () => set([]), setHovered }
+}
+
+export function KeptLockedNotice({
+  testid,
+  count,
+  onReview,
+  onHover
+}: {
+  testid: string
+  count: number
+  onReview: () => void
+  onHover: (hovered: boolean) => void
+}): React.JSX.Element {
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-testid={`${testid}.lockedNotice`}
+      onMouseEnter={() => onHover(true)}
+      onMouseLeave={() => onHover(false)}
+      className="mt-2 flex items-center gap-2 text-[12px] leading-4 text-text-secondary"
+    >
+      <span>{`${count} kept: still in use.`}</span>
+      <Button variant="link" testid={`${testid}.lockedNotice.review`} onClick={onReview}>
+        Review…
+      </Button>
+    </span>
+  )
+}
+
 /** `selected` without `drop`, except the locked ones — a lock outlives any bulk clear. */
 const withoutUnlocked = (
   selected: string[],
   drop: readonly string[],
-  locked: Readonly<Record<string, string>> | undefined
+  locked: LockedModels | undefined
 ): string[] => {
   const dropping = new Set(drop.filter((id) => locked?.[id] === undefined))
   return selected.filter((id) => !dropping.has(id))
@@ -175,7 +240,8 @@ export function ModelCurationActions({
   onSet,
   filter,
   facets,
-  locked
+  locked,
+  onKeptLocked
 }: {
   testid: string
   models: CurationModel[]
@@ -184,7 +250,9 @@ export function ModelCurationActions({
   filter: string
   facets: CurationFacet[]
   /** Models that stay picked through Clear (see the header). */
-  locked?: Readonly<Record<string, string>>
+  locked?: LockedModels
+  /** The locked ids a Clear left picked, so the caller can say so. */
+  onKeptLocked?: (ids: string[]) => void
 }): React.JSX.Element {
   const shown = visibleModels(models, selected, filter, facets)
   const shownIds = shown.map((model) => model.id)
@@ -205,8 +273,15 @@ export function ModelCurationActions({
       <Button
         variant="link"
         testid={`${testid}.clearShown`}
-        disabled={clearable.length === 0}
-        onClick={() => onSet(withoutUnlocked(selected, shownIds, locked))}
+        // Enabled while a locked row is picked too, when a caller can say why it stays: a
+        // disabled Clear over picked rows explained nothing.
+        disabled={clearable.length === 0 && (!onKeptLocked || selectedShown === 0)}
+        onClick={() => {
+          const kept = shownIds.filter((id) => selectedSet.has(id) && locked?.[id] !== undefined)
+          // Nothing to drop is no edit: on All models the writer would read it as one.
+          if (clearable.length > 0) onSet(withoutUnlocked(selected, shownIds, locked))
+          if (kept.length > 0) onKeptLocked?.(kept)
+        }}
       >
         Clear
       </Button>
@@ -301,6 +376,8 @@ export function ModelCurationList({
   onSortChange,
   filterTestid,
   locked,
+  onLockedClick,
+  onKeptLocked,
   allMode = false,
   rowMarks
 }: {
@@ -327,8 +404,12 @@ export function ModelCurationList({
    * not ours to rename.
    */
   filterTestid?: string
-  /** Model id → where the setting that uses it lives (the lock's tooltip). */
-  locked?: Readonly<Record<string, string>>
+  /** Model id → the settings that use it (the lock's tooltip). */
+  locked?: LockedModels
+  /** A click on a locked, picked row: the caller offers to replace what uses it. */
+  onLockedClick?: (ids: string[]) => void
+  /** The locked ids a vendor box left picked, so the caller can say so. */
+  onKeptLocked?: (ids: string[]) => void
   /** The provider is on "All models": rows render checked-but-soft. */
   allMode?: boolean
   /**
@@ -418,8 +499,12 @@ export function ModelCurationList({
   const toggleModel = (id: string): void => {
     if (selectedSet.has(id)) {
       // A lock is the orphan guard made visible: refused here, before the click
-      // could reach a writer that would refuse it anyway.
-      if (locked?.[id] !== undefined) return
+      // could reach a writer that would refuse it anyway. The caller turns the
+      // click into a way out (the replace dialog).
+      if (locked?.[id] !== undefined) {
+        onLockedClick?.([id])
+        return
+      }
       onSet(selected.filter((value) => value !== id))
     } else onSet([...selected, id])
   }
@@ -432,6 +517,10 @@ export function ModelCurationList({
 
   const toggleGroup = (group: Group): void => {
     const ids = group.shown.map((model) => model.id)
+    if (groupState(group) === 'on') {
+      const kept = ids.filter((id) => locked?.[id] !== undefined)
+      if (kept.length > 0) onKeptLocked?.(kept)
+    }
     const next =
       groupState(group) === 'on' ? withoutUnlocked(selected, ids, locked) : union(selected, ids)
     // A vendor whose shown models are all locked changes nothing — and "nothing"
@@ -521,7 +610,10 @@ export function ModelCurationList({
   function modelRow(model: CurationModel): React.JSX.Element {
     const on = selectedSet.has(model.id)
     const date = formatReleaseDate(model.releaseDate)
-    const lock = locked?.[model.id]
+    const refs = locked?.[model.id]
+    const lock = refs === undefined ? undefined : lockText(refs)
+    // With a way out (the replace dialog), the hint says so; without one, as before.
+    const lockHint = onLockedClick ? 'Click to choose a replacement.' : 'Change that setting first.'
     return (
       <button
         key={model.id}
@@ -552,7 +644,7 @@ export function ModelCurationList({
           <span
             data-testid={`${testid}.lock`}
             data-id={model.id}
-            title={`${lock}. Change that setting first.`}
+            title={`${lock}. ${lockHint}`}
             className="shrink-0 text-[11px] leading-4 text-text-muted cursor-help"
           >
             In use
@@ -561,7 +653,7 @@ export function ModelCurationList({
         {lock !== undefined && (
           // `hidden` keeps it out of the row's NAME; `aria-describedby` still reads it.
           <span id={lockId(model.id)} hidden>
-            {`In use: ${lock}. Change that setting first.`}
+            {`In use: ${lock}. ${lockHint}`}
           </span>
         )}
         {rowMarks?.(model)}

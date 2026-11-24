@@ -257,6 +257,76 @@ describe('LinkedModelCuration', () => {
     await click(row('b'))
     expect(setCuration).not.toHaveBeenCalled()
   })
+
+  it('a model both engines use lists both references; the dialog subtracts per engine, then unticks', async () => {
+    const group = (engineId: 'pi' | 'opencode', vendorId: string): EngineModelGroup => ({
+      engineId,
+      vendorId,
+      vendorName: 'ChatGPT',
+      models: ['a', 'b'].map((id) => ({
+        value: `${vendorId}/${id}`,
+        displayName: id,
+        description: '',
+        engineId
+      }))
+    })
+    discovered = [group('pi', 'openai-codex'), group('opencode', 'openai')]
+    engineConfigs = { pi: { piConfig: { defaultModel: 'openai-codex/b' } } }
+    let opencodeFile: Record<string, unknown> = { model: 'openai/b' }
+    Object.assign((window as unknown as { api: Record<string, unknown> }).api, {
+      loadOpencodeSettings: async () => structuredClone(opencodeFile),
+      saveOpencodeSettings: async (next: Record<string, unknown>) => {
+        opencodeFile = next
+      },
+      saveEngineConfig: async (id: string, cfg: EngineConfig) => {
+        engineConfigs[id] = structuredClone(cfg)
+      }
+    })
+    await mount(
+      chatgpt({ linked: true, models: ['a', 'b'] }),
+      fakeAdapter('opencode', [model('a'), model('b')], ['a', 'b']),
+      fakeAdapter('pi', [model('a'), model('b')], ['a', 'b'])
+    )
+    const title = screen.getByTestId('S.models.lock').getAttribute('title')!
+    expect(title).toContain('Default model for opencode')
+    expect(title).toContain('Default model for pi')
+
+    await click(row('b'))
+    const dialogRows = screen.getAllByTestId('ReplaceModelReferencesDialog.row')
+    expect(dialogRows.map((r) => r.dataset.id).sort()).toEqual([
+      'opencodeDefault:opencode',
+      'piDefault:pi'
+    ])
+    const optionsOf = (rowEl: HTMLElement): Array<string | null> => {
+      fireEvent.click(rowEl.querySelector('[data-testid="ModelPicker.trigger"]')!)
+      const values = screen
+        .getAllByTestId('ModelPicker.option')
+        .map((o) => o.getAttribute('data-value'))
+      fireEvent.click(rowEl.querySelector('[data-testid="ModelPicker.trigger"]')!)
+      return values
+    }
+    const rowOf = (id: string): HTMLElement => dialogRows.find((r) => r.dataset.id === id)!
+    expect(optionsOf(rowOf('piDefault:pi'))).toEqual(['', 'openai-codex/a'])
+    expect(optionsOf(rowOf('opencodeDefault:opencode'))).toEqual(['', 'openai/a'])
+
+    for (const [id, value] of [
+      ['piDefault:pi', 'openai-codex/a'],
+      ['opencodeDefault:opencode', 'openai/a']
+    ]) {
+      fireEvent.click(rowOf(id).querySelector('[data-testid="ModelPicker.trigger"]')!)
+      const option = screen
+        .getAllByTestId('ModelPicker.option')
+        .find((o) => o.getAttribute('data-value') === value)!
+      await act(async () => {
+        fireEvent.click(option)
+      })
+    }
+    await click(screen.getByTestId('ReplaceModelReferencesDialog.apply'))
+
+    expect(engineConfigs.pi?.piConfig?.defaultModel).toBe('openai-codex/a')
+    expect(opencodeFile).toEqual({ model: 'openai/a' })
+    expect(setCuration).toHaveBeenCalledWith('chatgpt', { linked: true, models: ['a'] })
+  })
 })
 
 describe('LinkedModelCuration — an open block follows a model reload', () => {
