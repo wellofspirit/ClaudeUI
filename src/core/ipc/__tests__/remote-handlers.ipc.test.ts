@@ -2178,6 +2178,8 @@ const AUTHCFG_CHANNELS = [...AUTHCFG_FREE_CHANNELS_PIN, ...AUTHCFG_WRITE_CHANNEL
  *   `ide:availability` is `config`, for the reason `terminal:availability` is.
  * - harness writes and speech-pack writes (`admin`): putting a program or the
  *   speech pack on the host. Their reads are `config` / `chat`.
+ * - ClaudeUI update writes (`admin`): downloading a build onto the host and
+ *   restarting it into one. The state read is `config`.
  *
  * A new line here is a decision that needs its reason: it makes another
  * capability reachable only to a stronger identity, and it must not declare
@@ -2215,7 +2217,11 @@ const NOT_GRANTED_AT_CONNECT: Record<string, Capability> = {
   'voice:pack-install': 'admin',
   'voice:pack-install-cancel': 'admin',
   'voice:pack-remove': 'admin',
-  'app:relaunch': 'admin'
+  'app:relaunch': 'admin',
+  'app-update:check': 'admin',
+  'app-update:download': 'admin',
+  'app-update:skip': 'admin',
+  'app-update:apply': 'admin'
 }
 
 /** Table keys whose capability is `capability`, or that start with `prefix`. */

@@ -46,6 +46,7 @@ import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { engineAuthRegistry } from './auth/EngineAuthRegistry'
 import { getHostWindow } from '../core/services/host-window'
 import {
+  setHostAppUpdate,
   setHostAuth,
   setHostIsPackaged,
   setHostMockup,
@@ -155,6 +156,10 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // Relaunch (`app:relaunch*`): the desktop's relaunch service, configured by
   // index.ts once the quit coordinator exists (unavailable until then).
   setHostRelaunch(desktopHostRelaunch)
+  // ClaudeUI's own updates: no desktop seam yet (staging, the codesign check and
+  // the restart come with the desktop update source), so the update service
+  // reports `supported: false` and makes no request. Stated so the choice reads.
+  setHostAppUpdate(null)
 
   // The desktop-auth dependencies the `auth:*` / `account:*` / `vendor-auth:*`
   // family needs on BOTH transports. `engineAuthRegistry` is populated by the

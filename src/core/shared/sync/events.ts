@@ -429,6 +429,12 @@ export interface SyncEventMap {
    */
   'provider:credentials-changed': () => void
   /**
+   * ClaudeUI's own update state moved (a check started or ended, a download
+   * advanced, at most once a second, or changed phase, a version was skipped,
+   * the update settings changed). Payload-free: `app-update:state` is the shape.
+   */
+  'app-update:changed': () => void
+  /**
    * A credential for `providerId` was successfully stored — the ONE resolution
    * signal (ADR-070 §2). Before it, nothing in the app meant "this provider's
    * credential is good now", so every auth surface invented its own clear

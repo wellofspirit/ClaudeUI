@@ -82,6 +82,11 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    every turn, terminal and remote connection on it. Its three reads
  *    (`app:relaunch-availability`, `app:restart-impact`, `app:last-relaunch`)
  *    declare `config`, so a client can ask whether to offer it, and are absent here.
+ *  - `admin` (auto-update design §3, `app-update:*` writes) — sending the host to
+ *    GitHub, downloading a ClaudeUI build onto it, skipping a release for its
+ *    operator, and restarting it into the staged build. `app-update:state`
+ *    declares `config` (every device may see that an update exists), so it is
+ *    absent here.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -89,6 +94,10 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  * reachability nobody thought about.
  */
 const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
+  'app-update:apply',
+  'app-update:check',
+  'app-update:download',
+  'app-update:skip',
   'app:relaunch',
   'authcfg:apply',
   'authcfg:end',

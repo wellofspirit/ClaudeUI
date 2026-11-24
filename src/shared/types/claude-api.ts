@@ -1,5 +1,6 @@
 import type { AccountAPI } from './api/account'
 import type { AppAPI } from './api/app'
+import type { AppUpdateAPI } from './api/app-update'
 import type { AutomationAPI } from './api/automation'
 import type { FileAPI } from './api/files'
 import type { GitAPI } from './api/git'
@@ -31,7 +32,8 @@ export interface ClaudeAPI
     MediaAPI,
     SharedProviderAPI,
     PluginAPI,
-    AppAPI {
+    AppAPI,
+    AppUpdateAPI {
   /** Relay a log message from the renderer to the main process logger */
   logRelay(level: string, source: string, message: string): void
   /** App + SDK version info for display in Settings */

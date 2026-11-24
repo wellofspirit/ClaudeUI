@@ -14,6 +14,8 @@ export interface CoreStopDeps {
   automationManager: { stopAll(): void }
   hostAnchor: { stop(): void }
   usageHubClient: { stop(): void }
+  /** ClaudeUI's own updates: the check timers and a running download. */
+  appUpdater: { stop(): void }
   releaseDispatchParents: () => void
   /** Media jobs: abort what runs (rows stay active for the next boot's sweep) and unhook the observers. */
   mediaJobs: { stop(): void }
@@ -52,6 +54,9 @@ export function createCoreStop(deps: CoreStopDeps): CoreStop {
       // push in flight is idempotent on the hub, so the worst a killed one
       // costs is a batch re-sent as duplicates on the next launch.
       deps.usageHubClient.stop()
+      // The update checks' timers, and a download in flight (its partial file is
+      // removed now or on the next attempt). Nothing installs on its own.
+      deps.appUpdater.stop()
       deps.releaseDispatchParents()
       deps.mediaJobs.stop()
       // Stop the service session (lightweight CLI subprocess for usage polling)

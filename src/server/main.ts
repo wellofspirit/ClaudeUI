@@ -52,6 +52,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { setSqliteDriver, type SqliteDriver } from '../core/services/sqlite-driver'
 import {
+  setHostAppUpdate,
   setHostAppVersion,
   setHostAuth,
   setHostBuildId,
@@ -192,6 +193,11 @@ function installHostAdapters(): void {
   // or device code, so binding the fixed port here would only make concurrent
   // sign-ins collide. `null` is the fallback anyway; stated so the choice reads.
   setHostOAuthLoopback(null)
+
+  // ClaudeUI's own updates: no server seam yet (the monitor process and the
+  // versioned layout come with the server update source), so the update service
+  // reports `supported: false` and makes no request. Stated so the choice reads.
+  setHostAppUpdate(null)
 }
 
 /** Apply the bootstrap flags that must land BEFORE the listener starts. */

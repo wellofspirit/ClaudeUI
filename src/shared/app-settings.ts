@@ -20,6 +20,7 @@ import type { AgentColorId, AgentTypeColorOverrides } from './agent-type-colors'
 import type { ContextPressureSetting } from './context-pressure'
 import type { WorktreeProjectChoice } from './worktree-start'
 import type { MediaGenerationSettings } from './media-generation'
+import type { AppUpdateChannelSetting, AppUpdateMode } from './types/app-update'
 import { DEFAULT_AUTONOMY_MODE } from './permission-modes'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
@@ -176,6 +177,17 @@ export interface AppSettings {
    * by field. Read only through `resolveMediaGeneration` (`shared/media-generation.ts`).
    */
   mediaGeneration?: Partial<MediaGenerationSettings>
+  /**
+   * Which ClaudeUI releases the host offers (`core/services/app-update.ts`). `auto` follows
+   * the running build: a release build's own channel; a local build is `pre-release` when
+   * its base tag is a pre-release, else `stable`. Switching to stable never downgrades.
+   */
+  appUpdateChannel: AppUpdateChannelSetting
+  /**
+   * ClaudeUI updates: `auto` downloads a verified release in the background, `ask` downloads
+   * on a click, `off` never checks. Nothing installs or restarts without a click.
+   */
+  appUpdateMode: AppUpdateMode
 }
 
 /**
@@ -224,7 +236,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   mockupConnectAllowlist: '',
   mockupAllowHttp: false,
   toolOutputMaxChars: 5000,
-  defaultAutonomyMode: DEFAULT_AUTONOMY_MODE
+  defaultAutonomyMode: DEFAULT_AUTONOMY_MODE,
+  appUpdateChannel: 'auto',
+  appUpdateMode: 'auto'
 }
 
 /**

@@ -17,6 +17,21 @@ export class DownloadError extends Error {
   override name = 'DownloadError'
 }
 
+/**
+ * A non-2xx answer (after redirects): the status and the response headers, so
+ * a caller can tell a rate limit (`retry-after`, `x-ratelimit-reset`) from a
+ * failure. The message is the same as a plain `DownloadError`'s.
+ */
+export class HttpStatusError extends DownloadError {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly headers: Headers
+  ) {
+    super(message)
+  }
+}
+
 /** Which hosts a request may start at, and which it may be redirected to. */
 export interface HostPolicy {
   hosts: readonly string[]
@@ -204,7 +219,11 @@ async function open(url: string, opts: RequestOptions): Promise<Opened> {
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => {})
-        throw new DownloadError(`${describeUrl(current)} answered HTTP ${response.status}`)
+        throw new HttpStatusError(
+          `${describeUrl(current)} answered HTTP ${response.status}`,
+          response.status,
+          response.headers
+        )
       }
       return {
         response,

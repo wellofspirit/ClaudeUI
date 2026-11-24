@@ -65,6 +65,14 @@ vi.mock('../../services/remote-server', () => ({
     setIdeService = vi.fn()
   }
 }))
+vi.mock('../../services/app-update', () => ({
+  appUpdater: {
+    start: vi.fn(),
+    stop: vi.fn(),
+    settingsChanged: vi.fn(),
+    onChanged: vi.fn(() => () => {})
+  }
+}))
 vi.mock('../../services/remote-dispatcher', () => ({ RemoteDispatcher: class {} }))
 vi.mock('../../services/tailscale-manager', () => ({ TailscaleManager: class {} }))
 vi.mock('../../services/terminal-service', () => ({ terminalService: { setRemoteSink: vi.fn() } }))

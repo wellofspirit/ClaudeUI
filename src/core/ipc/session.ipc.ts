@@ -48,6 +48,7 @@ import { openrouterCommands, OPENROUTER_CHANNELS } from './openrouter-commands'
 import { harnessCommands, HARNESS_CHANNELS } from './harness-commands'
 import { voicePackCommands, VOICE_PACK_CHANNELS } from './voice-pack-commands'
 import { mediaCommands, MEDIA_CHANNELS } from './media-commands'
+import { appUpdateCommands, APP_UPDATE_CHANNELS } from './app-update-commands'
 import { sendPrompt } from './handlers-core'
 
 // `safeHandler` (the IpcResult envelope) and `handleIpc` (the desktop transport
@@ -289,7 +290,8 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
     ...OPENROUTER_CHANNELS,
     ...HARNESS_CHANNELS,
     ...VOICE_PACK_CHANNELS,
-    ...MEDIA_CHANNELS
+    ...MEDIA_CHANNELS,
+    ...APP_UPDATE_CHANNELS
   ])
 
   const manager = new SessionManager()
@@ -568,6 +570,11 @@ export function registerSessionIpc(authDeps: AuthCommandDeps): SessionManager {
 
   // Media generation catalog (`config` query).
   for (const cmd of mediaCommands()) {
+    handleIpc(cmd)
+  }
+
+  // ClaudeUI's own updates: the state is a `config` query, every write `admin`.
+  for (const cmd of appUpdateCommands()) {
     handleIpc(cmd)
   }
 

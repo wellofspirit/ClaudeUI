@@ -620,7 +620,16 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // `config`, any authenticated connection could bounce the host at will. The
   // three reads beside it (`app:relaunch-availability`, `app:restart-impact`,
   // `app:last-relaunch`) declare `config` and are not pinned.
-  'app:relaunch': 'admin'
+  'app:relaunch': 'admin',
+  // ClaudeUI's own updates (auto-update design §3), registered on BOTH
+  // transports: sending the host to GitHub, downloading a build onto it, hiding
+  // a release from its operator, and restarting it into a new build. Relabelled
+  // `config`, any authenticated connection could restart the host into whatever
+  // is staged. The read (`app-update:state`) declares `config` and is not pinned.
+  'app-update:check': 'admin',
+  'app-update:download': 'admin',
+  'app-update:skip': 'admin',
+  'app-update:apply': 'admin'
 }
 
 // ---------------------------------------------------------------------------
