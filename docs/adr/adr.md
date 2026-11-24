@@ -9,7 +9,7 @@ record, headed by its title and ADR numbers; a superseded or removed one is a li
 `ADR-054 decision 6`) is under the same label inside the section.
 
 Adding or changing a decision: ADR-026, "Decision records" (`development-workflow.md`). The highest
-number here is ADR-117; a new decision takes the next number that is free on every remote branch.
+number here is ADR-118; a new decision takes the next number that is free on every remote branch.
 
 Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git history keeps them:
 `git log --diff-filter=D --name-only -- docs/adr` finds the commit that removed them.
@@ -35,6 +35,8 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
   Governs: `src/core/providers/`, `src/shared/model-capabilities.ts`, `src/shared/types/engine.ts`, `src/core/ipc/approval-response.ts`, `src/core/shared/`, `src/core/opencode/`, `src/core/pi/`, `src/core/services/claude-session.ts`, `src/renderer/src/hooks/`
 - [harness-installs.md](harness-installs.md) — Harness sources, installs and engine customization. ADRs 037, 082.
   Governs: `src/core/harness/`, `src/shared/harness-manifests/`, `src/shared/harness-types.ts`, `src/core/ipc/harness-commands.ts`, `src/core/shared-providers/`, `src/core/auth/vault/`, `src/renderer/src/components/SettingsDialog/`, `src/renderer/src/components/Sidebar/`, `scripts/ensure-harness.mjs`, `electron-builder.yml`
+- [media-generation.md](media-generation.md) — Media generation. ADRs 118.
+  Governs: `src/core/services/media-jobs.ts`, `src/core/services/media-path.ts`, `src/core/services/media-files.ts`, `src/core/services/media-job-ledger.ts`, `src/core/services/media-catalog.ts`, `src/core/services/media-tool.ts`, `src/core/services/media-providers/`, `src/core/ipc/media-commands.ts`, `src/shared/media-generation.ts`, `src/shared/media-tool-view.ts`, `src/shared/media-tools-description.ts`, `src/main/services/media-protocol.ts`, `src/renderer/src/components/chat/MediaCard.tsx`, `src/renderer/src/components/SettingsDialog/MediaGenerationSettings.tsx`
 - [metering.md](metering.md) — Metering and usage. ADRs 011, 034, 071, 072.
   Governs: `src/core/services/usage-hub/`, `src/core/services/usage-aggregation.ts`, `src/core/services/usage-windows.ts`, `src/core/services/usage-window-ledger.ts`, `src/core/services/usage-fetcher.ts`, `src/core/services/usage-provider.ts`, `src/core/services/usage-recorder.ts`, `src/core/services/usage-reconciler.ts`, `src/core/services/block-usage.ts`, `src/core/services/opencode-pricing.ts`, `src/shared/account-key.ts`, `src/shared/cost-rule.ts`, `src/shared/pricing.ts`, `src/core/auth/account-identity.ts`, `src/renderer/src/components/usage/`, `scripts/fake-usage-hub.ts`
 - [opencode.md](opencode.md) — opencode engine. ADRs 019, 024, 028, 029, 031, 032, 044, 047, 097, 111.
@@ -183,4 +185,5 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
 - ADR-115 · current · [Claude skills and commands are offered in pi and opencode under Claude's names](shared-catalogs.md#claude-skills-and-commands-are-offered-in-pi-and-opencode-under-claudes-names-adr-115) in `shared-catalogs.md`
 - ADR-116 · current · [A Claude target runs under the Claude engine's sandbox and at a new session's effort](dispatch.md#a-claude-target-runs-under-the-claude-engines-sandbox-and-at-a-new-sessions-effort-adr-116) in `dispatch.md`
 - ADR-117 · current · [Task and session notes hide by their source tag; alerts always show](ui.md#task-and-session-notes-hide-by-their-source-tag-alerts-always-show-adr-117) in `ui.md`
+- ADR-118 · current · [ClaudeUI hosts image and video generation for every engine, as background jobs](media-generation.md#claudeui-hosts-image-and-video-generation-for-every-engine-as-background-jobs-adr-118) in `media-generation.md`
 <!-- prettier-ignore-end -->

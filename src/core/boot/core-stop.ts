@@ -15,6 +15,8 @@ export interface CoreStopDeps {
   hostAnchor: { stop(): void }
   usageHubClient: { stop(): void }
   releaseDispatchParents: () => void
+  /** Media jobs: abort what runs (rows stay active for the next boot's sweep) and unhook the observers. */
+  mediaJobs: { stop(): void }
   serviceSession: { stop(): void }
   opencodeServerManager: { dispose(): void }
   localVoiceServer: { stop(): Promise<unknown> }
@@ -51,6 +53,7 @@ export function createCoreStop(deps: CoreStopDeps): CoreStop {
       // costs is a batch re-sent as duplicates on the next launch.
       deps.usageHubClient.stop()
       deps.releaseDispatchParents()
+      deps.mediaJobs.stop()
       // Stop the service session (lightweight CLI subprocess for usage polling)
       deps.serviceSession.stop()
       // Reap any shared opencode servers (Windows tree-kill) so opencode.exe

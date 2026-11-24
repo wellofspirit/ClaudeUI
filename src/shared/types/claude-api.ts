@@ -3,6 +3,7 @@ import type { AutomationAPI } from './api/automation'
 import type { FileAPI } from './api/files'
 import type { GitAPI } from './api/git'
 import type { McpAPI } from './api/mcp'
+import type { MediaAPI } from './api/media'
 import type { PiAuthStatus } from './auth'
 import type { PluginAPI } from './api/plugin'
 import type { RemoteAPI } from './api/remote'
@@ -26,6 +27,7 @@ export interface ClaudeAPI
     RemoteAPI,
     WebauthnAPI,
     VoiceAPI,
+    MediaAPI,
     SharedProviderAPI,
     PluginAPI {
   /** Relay a log message from the renderer to the main process logger */

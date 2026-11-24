@@ -187,8 +187,19 @@ export function suggestOpencodeAllowRule(
   patterns: string[] | undefined,
   destination = 'localSettings'
 ): PermissionSuggestion | null {
-  const toolName = CATEGORY_TO_TOOL[permission]
+  // ClaudeUI's hosted media tools (`claudeui_generate_image|video`): the Claude-spelling whole-tool rule,
+  // which the forward compiler maps back to the same action (and every other engine reads).
+  const media = /^claudeui_(generate_(?:image|video))$/.exec(permission)
+  const toolName = media ? `mcp__claude-ui-media__${media[1]}` : CATEGORY_TO_TOOL[permission]
   if (!toolName) return null
+  if (media) {
+    return {
+      type: 'addRules',
+      behavior: 'allow',
+      destination,
+      rules: [{ toolName }]
+    }
+  }
   const first = patterns?.find((p) => p && p !== '*')
   return {
     type: 'addRules',

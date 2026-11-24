@@ -30,6 +30,7 @@ import {
   externalDirectoryGates,
   HAND_BACK_ALLOW_RULE,
   HAND_BACK_DENY_RULE,
+  MEDIA_ASK_RULES,
   modeGates,
   planEnforcement,
   SESSION_TOOLS_ASK_RULE,
@@ -461,6 +462,7 @@ describe('modeGates', () => {
       r('experimental_image_generate', 'ask'),
       r('generate_image', 'ask'),
       r('generate_video', 'ask'),
+      ...MEDIA_ASK_RULES,
       r('external_directory', 'ask')
     ]
     for (const mode of ['default', 'ask', 'bypassPermissions', 'whatever'])
@@ -476,6 +478,7 @@ describe('modeGates', () => {
       r('experimental_image_generate', 'ask'),
       r('generate_image', 'ask'),
       r('generate_video', 'ask'),
+      ...MEDIA_ASK_RULES,
       ...agentControlEditPatterns().map((p) => r('edit', 'ask', p)),
       r('external_directory', 'ask')
     ])
@@ -498,6 +501,7 @@ describe('modeGates', () => {
       r('experimental_image_generate', 'ask'),
       r('generate_image', 'ask'),
       r('generate_video', 'ask'),
+      ...MEDIA_ASK_RULES,
       r('external_directory', 'ask')
     ])
   })
@@ -516,6 +520,7 @@ describe('modeGates', () => {
       r('edit', 'ask'),
       AUTO_MCP_CATCH_ALL,
       r('claudeui_*', 'allow'),
+      ...MEDIA_ASK_RULES,
       r('external_directory', 'ask'),
       ...own
     ])
@@ -569,10 +574,13 @@ describe('buildSessionRuleset', () => {
       r('experimental_image_generate', 'ask'),
       r('generate_image', 'ask'),
       r('generate_video', 'ask'),
+      ...MEDIA_ASK_RULES,
       r('external_directory', 'ask'),
       r('shell', 'allow', 'npm test'),
       DISPATCH_ASK_RULE,
       SESSION_TOOLS_ASK_RULE,
+      r('claudeui_generate_image', 'deny'),
+      r('claudeui_generate_video', 'deny'),
       EXECUTE_DENY_RULE,
       ...DIRECT_TOOL_DENY_RULES,
       HAND_BACK_DENY_RULE
@@ -1676,5 +1684,86 @@ describe('Windows absolute rules: `//c/x` is the canonical drive form (cli.js `h
         platform: 'win32'
       })
     ).toEqual([r('external_directory', 'allow', 'C:/shared/*')])
+  })
+})
+
+describe('ClaudeUI media tools on opencode (claudeui_generate_image / claudeui_generate_video)', () => {
+  const build = (
+    mode: string,
+    over: Partial<SessionRulesetInput> = {}
+  ): ReturnType<typeof buildSessionRuleset>['rules'] => [
+    r('*', 'allow'),
+    ...buildSessionRuleset({
+      mode,
+      autoMode: mode === 'auto',
+      permissions: perms({}),
+      mcpServers: ['claudeui'],
+      home: HOME,
+      media: { image: true, video: true },
+      ...over
+    }).rules
+  ]
+  const OURS = ['claudeui_generate_image', 'claudeui_generate_video']
+  const ask = (rules: V2Rule[], tool: string) => evaluateV2Call(rules, tool, ['*'], 'linux')
+
+  it.each(['default', 'acceptEdits', 'auto'])('%s: ours ask and stay visible', (mode) => {
+    for (const tool of OURS) {
+      expect(ask(build(mode), tool)).toBe('ask')
+      expect(v2ToolHidden(build(mode), tool, 'linux')).toBe(false)
+    }
+  })
+
+  it('plan: ours are denied and hidden, even with a user allow rule', () => {
+    const rules = build('plan', {
+      permissions: perms({
+        allow: ['mcp__claude-ui-media__generate_image', 'mcp__claude-ui-media']
+      })
+    })
+    for (const tool of OURS) {
+      expect(ask(rules, tool)).toBe('deny')
+      expect(v2ToolHidden(rules, tool, 'linux')).toBe(true)
+    }
+  })
+
+  it('a user allow in Claude spelling compiles to the hosted action and is honoured outside plan mode', () => {
+    const user = perms({ allow: ['mcp__claude-ui-media__generate_image'] })
+    expect(compileClaudeRulesV2(user, { home: HOME })).toEqual([
+      r('claudeui_generate_image', 'allow')
+    ])
+    for (const mode of ['default', 'acceptEdits']) {
+      const rules = build(mode, { permissions: user })
+      expect(ask(rules, 'claudeui_generate_image')).toBe('allow')
+      expect(ask(rules, 'claudeui_generate_video')).toBe('ask')
+    }
+    // A server-level allow covers both tools.
+    expect(
+      compileClaudeRulesV2(perms({ allow: ['mcp__claude-ui-media__*'] }), { home: HOME })
+    ).toEqual([r('claudeui_generate_image', 'allow'), r('claudeui_generate_video', 'allow')])
+  })
+
+  it('auto mode: a user allow does not skip the ask (the judge or the host allow-rule skip decides)', () => {
+    const rules = build('auto', {
+      permissions: perms({ allow: ['mcp__claude-ui-media__generate_image'] })
+    })
+    expect(ask(rules, 'claudeui_generate_image')).toBe('ask')
+  })
+
+  it('hides ours when off or unusable for that kind, per kind', () => {
+    const rules = build('default', { media: { image: true } })
+    expect(v2ToolHidden(rules, 'claudeui_generate_image', 'linux')).toBe(false)
+    expect(v2ToolHidden(rules, 'claudeui_generate_video', 'linux')).toBe(true)
+    expect(
+      v2ToolHidden(build('default', { media: undefined }), 'claudeui_generate_image', 'linux')
+    ).toBe(true)
+  })
+
+  it("hides opencode's own tool only while ours is offered for that kind", () => {
+    const rules = build('default', { media: { image: true } })
+    expect(v2ToolHidden(rules, 'generate_image', 'linux')).toBe(true)
+    expect(v2ToolHidden(rules, 'generate_video', 'linux')).toBe(false)
+    expect(ask(rules, 'generate_video')).toBe('ask')
+    const none = build('default', { media: {} })
+    expect(v2ToolHidden(none, 'generate_image', 'linux')).toBe(false)
+    expect(ask(none, 'generate_image')).toBe('ask')
   })
 })

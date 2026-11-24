@@ -37,6 +37,9 @@ describe('OpencodeEngineToolMap.kindOf', () => {
     ['plan_exit', 'plan'],
     // Hosted-tools MCP names — claudeui_ prefixed (opencode sanitizes server+tool name)
     ['claudeui_render_mermaid', 'diagram'],
+    // opencode's own 2.4 media tools (the user kept them): the media card
+    ['generate_image', 'media'],
+    ['generate_video', 'media'],
     ['claudeui_create_mockup', 'mockup'],
     ['claudeui_show_mockup', 'mockup'],
     // Cross-engine dispatch (ADR-033 M3) — opencode sanitizes the hosted
@@ -82,6 +85,20 @@ describe('OpencodeEngineToolMap.kindOf', () => {
 })
 
 describe('OpencodeEngineToolMap.normalize', () => {
+  it("opencode's own generate_image reads as the media view from its call", () => {
+    expect(
+      OpencodeEngineToolMap.normalize(
+        'media',
+        { prompt: 'a fox', path: 'fox.png' },
+        undefined,
+        'generate_image'
+      )
+    ).toMatchObject({ kind: 'media', media: 'image', prompt: 'a fox', path: 'fox.png' })
+    expect(
+      OpencodeEngineToolMap.normalize('media', { prompt: 'waves' }, undefined, 'generate_video')
+    ).toMatchObject({ kind: 'media', media: 'video', prompt: 'waves' })
+  })
+
   it('command: maps command + result output', () => {
     const result = {
       type: 'tool_result',

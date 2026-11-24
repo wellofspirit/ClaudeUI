@@ -274,6 +274,13 @@ export interface CredentialSyncDeps {
    */
   onCredentialStored?: (accountId: string | undefined) => void
   /**
+   * ChatGPT's signed-in state changed: a credential was stored, or ChatGPT was disconnected. Payload-free
+   * and best effort (a listener that throws is logged, never fails the sign-in or the disconnect). It lets
+   * what is offered on that state (the media tools' availability) re-read it; a refresh that finds the
+   * token revoked (`needsReauth`) does not ring it.
+   */
+  onSignInChanged?: () => void
+  /**
    * Whether an engine's harness runs (ADR-082 §8, "As built (S7d)"). One that
    * does not is neither fed, nor watched, nor read for a credential to adopt;
    * {@link CredentialSync.harnessArrived} catches it up. The boot seam wires
@@ -466,6 +473,7 @@ export class CredentialSync {
    */
   private activeKey: string = LEGACY_ACCOUNT_KEY
   private onCredentialStored: (accountId: string | undefined) => void
+  private onSignInChanged: () => void
   private harnessRuns: (engine: EngineKey) => boolean
   private fedTokens: FedTokenHistory
 
@@ -489,6 +497,7 @@ export class CredentialSync {
     this.getEnabledRoutes = deps.getEnabledRoutes ?? (() => ({ pi: true, opencode: true }))
     this.hasConfiguredRoutePolicy = deps.getEnabledRoutes !== undefined
     this.onCredentialStored = deps.onCredentialStored ?? ((): void => {})
+    this.onSignInChanged = deps.onSignInChanged ?? ((): void => {})
     this.harnessRuns = deps.harnessRuns ?? ((): boolean => true)
     this.fedTokens = deps.fedTokens ?? memoryFedTokenHistory()
   }
@@ -506,6 +515,7 @@ export class CredentialSync {
     opencode?: OpencodeChatgptTarget
     getEnabledRoutes?: () => ChatgptEnabledRoutes
     onCredentialStored?: (accountId: string | undefined) => void
+    onSignInChanged?: () => void
     harnessRuns?: (engine: EngineKey) => boolean
     fedTokens?: FedTokenHistory
   }): void {
@@ -516,6 +526,7 @@ export class CredentialSync {
       this.hasConfiguredRoutePolicy = true
     }
     if (targets.onCredentialStored) this.onCredentialStored = targets.onCredentialStored
+    if (targets.onSignInChanged) this.onSignInChanged = targets.onSignInChanged
     if (targets.harnessRuns) this.harnessRuns = targets.harnessRuns
     if (targets.fedTokens) this.fedTokens = targets.fedTokens
   }
@@ -929,6 +940,7 @@ export class CredentialSync {
         `onCredentialStored listener threw (login already succeeded): ${err instanceof Error ? err.message : String(err)}`
       )
     }
+    this.signInChanged()
     return cred
   }
 
@@ -1041,8 +1053,21 @@ export class CredentialSync {
       this.removeManagedCopy('disconnect', 'pi', managed).catch((err) => failures.push(err)),
       this.removeManagedCopy('disconnect', 'opencode', managed).catch((err) => failures.push(err))
     ])
+    this.signInChanged()
     if (failures.length)
       throw new AggregateError(failures, 'Failed to disconnect ChatGPT credentials')
+  }
+
+  /** Ring {@link CredentialSyncDeps.onSignInChanged}; a listener's failure never reaches the caller. */
+  private signInChanged(): void {
+    try {
+      this.onSignInChanged()
+    } catch (err) {
+      logger.warn(
+        'CredentialSync',
+        `onSignInChanged listener threw: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
   }
 
   /** Force an out-of-band refresh check right now, for EVERY stored account. Goes through the same per-account single-flight dedupe as the scheduled path. */
@@ -1136,12 +1161,14 @@ export class CredentialSync {
    * **The one method on this class that returns TOKEN MATERIAL.** Everything
    * else here is deliberately token-free (`getStatus`, and the
    * `provider-account:*` commands built on it); this exists because the
-   * auto-mode judge route and the ChatGPT usage-limits read call ChatGPT's
-   * backend directly with the vaulted access token (ADR-068 §1).
+   * auto-mode judge route, the ChatGPT usage-limits read and the media
+   * generation ChatGPT-plan client call ChatGPT's backend directly with the
+   * vaulted access token (ADR-068 §1).
    *
    * Nothing in it logs, and its result must never reach a log line, an IPC
-   * result or a snapshot. The callers are `automode/judge-route.ts` and
-   * `shared-providers/chatgpt-rate-limits.ts`.
+   * result or a snapshot. The callers are `automode/judge-route.ts`,
+   * `shared-providers/chatgpt-rate-limits.ts` and
+   * `services/media-providers/chatgpt-plan.ts`.
    *
    * `accountId` null means the ACTIVE account. Returns null when the vault holds
    * no credential for that account, or when the credential carries no workspace

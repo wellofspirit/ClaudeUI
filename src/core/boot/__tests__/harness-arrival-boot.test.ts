@@ -27,7 +27,11 @@ vi.mock('../../services/logger', () => ({
 }))
 
 const bootMocks = vi.hoisted(() => ({
-  sessionManager: { get: () => undefined, forEach: () => {} }
+  sessionManager: {
+    get: () => undefined,
+    forEach: () => {},
+    notifyMediaSettingsChanged: vi.fn()
+  }
 }))
 vi.mock('../../ipc/session.ipc', () => ({
   registerSessionIpc: vi.fn(() => bootMocks.sessionManager)
@@ -46,6 +50,15 @@ vi.mock('../../services/remote-server', () => ({
     setIdeService = vi.fn()
   }
 }))
+vi.mock('../../services/media-jobs', () => ({
+  mediaJobs: {
+    configure: vi.fn(),
+    rekey: vi.fn(),
+    onSessionRemoved: vi.fn(),
+    shutdown: vi.fn(),
+    stop: vi.fn(() => false)
+  }
+}))
 vi.mock('../../services/remote-dispatcher', () => ({ RemoteDispatcher: class {} }))
 vi.mock('../../services/tailscale-manager', () => ({ TailscaleManager: class {} }))
 vi.mock('../../services/terminal-service', () => ({ terminalService: { setRemoteSink: vi.fn() } }))
@@ -55,6 +68,7 @@ vi.mock('../../services/vscode-web-service', () => ({
 vi.mock('../../opencode/OpencodeServerManager', () => ({
   opencodeServerManager: {
     setServerStartedHook: vi.fn(),
+    setMediaStart: vi.fn(),
     setCallerSessionLookup: vi.fn(),
     setDispatchAgent: vi.fn(),
     setHandBack: vi.fn(),
@@ -202,6 +216,26 @@ describe('a harness arriving, at the boot seam', () => {
     syncHostMocks.emitEvent.mockClear()
     hooks!.onApiKeyChanged!()
     expect(syncHostMocks.emitEvent).toHaveBeenCalledWith('provider:credentials-changed', [])
+  })
+
+  it('re-applies live opencode sessions when an API key or the ChatGPT sign-in changes (the media offer)', async () => {
+    const { startCoreServices } = await import('../core-services')
+    startCoreServices({ remoteAccessDisabled: true, authDeps: {} as never, autostart: false })
+    const notify = bootMocks.sessionManager.notifyMediaSettingsChanged
+    notify.mockClear()
+    const keyHooks = arrivalMocks.sharedProviderService.configure.mock.calls.at(-1)?.[0] as {
+      onApiKeyChanged: () => void
+    }
+    keyHooks.onApiKeyChanged()
+    expect(notify).toHaveBeenCalledTimes(1)
+
+    const signIn = arrivalMocks.credentialSync.configure.mock.calls.find(
+      ([options]) =>
+        typeof (options as { onSignInChanged?: unknown }).onSignInChanged === 'function'
+    )?.[0] as { onSignInChanged: () => void } | undefined
+    expect(signIn).toBeDefined()
+    signIn!.onSignInChanged()
+    expect(notify).toHaveBeenCalledTimes(2)
   })
 })
 

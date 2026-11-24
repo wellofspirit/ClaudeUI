@@ -49,7 +49,8 @@ vi.mock('../db', () => ({
 const sinks = vi.hoisted(() => ({
   setIntervalSecs: vi.fn(),
   setDebounceSecs: vi.fn(),
-  setSessionTimeout: vi.fn()
+  setSessionTimeout: vi.fn(),
+  notifyMediaSettingsChanged: vi.fn()
 }))
 vi.mock('../usage-fetcher', () => ({ usageFetcher: { setIntervalSecs: sinks.setIntervalSecs } }))
 vi.mock('../block-usage', () => ({
@@ -74,7 +75,10 @@ async function boot(): Promise<{
   const { logger } = await import('../logger')
   uiConfig.startConfigWatcher()
   syncCore.setAppState({ settings: uiConfig.loadSettings() as Record<string, unknown> })
-  startApplyingSettings({ setSessionTimeout: sinks.setSessionTimeout })
+  startApplyingSettings({
+    setSessionTimeout: sinks.setSessionTimeout,
+    notifyMediaSettingsChanged: sinks.notifyMediaSettingsChanged
+  })
   return { mockup, logger: logger as unknown as { applyFilter: ReturnType<typeof vi.fn> } }
 }
 
@@ -143,6 +147,18 @@ describe('every core sink follows the settings, from whichever source', () => {
     expect(logger.applyFilter).toHaveBeenLastCalledWith('Proxy', 'debug')
     expect(sinks.setSessionTimeout).toHaveBeenLastCalledWith(300000)
     expect(mockup.getMockupSecuritySettings().allowHttp).toBe(true)
+  })
+
+  it('live opencode sessions are told of a mediaGeneration change only, not of boot or other settings', async () => {
+    writeFileSync(settingsFile, JSON.stringify({ mediaGeneration: { imageModel: 'a' } }))
+    await boot()
+    expect(sinks.notifyMediaSettingsChanged).not.toHaveBeenCalled()
+
+    writeFromOutside({ mediaGeneration: { imageModel: 'a' }, sessionTimeoutMins: 9 })
+    expect(sinks.notifyMediaSettingsChanged).not.toHaveBeenCalled()
+
+    writeFromOutside({ mediaGeneration: { imageModel: 'b' }, sessionTimeoutMins: 9 })
+    expect(sinks.notifyMediaSettingsChanged).toHaveBeenCalledTimes(1)
   })
 
   it('boot with no settings.json gives every sink the shared default (the usage poll is 120 s)', async () => {

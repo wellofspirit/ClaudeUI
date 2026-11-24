@@ -140,7 +140,12 @@ const oneMTokIn = {
 // Test setup
 // ---------------------------------------------------------------------------
 
-import { refreshPrices, refreshPricesIfStale, loadPersistedPrices } from '../opencode-pricing'
+import {
+  refreshPrices,
+  refreshPricesIfStale,
+  loadPersistedPrices,
+  getMediaModelRows
+} from '../opencode-pricing'
 import { equivalentCostUsd, registerSupplementalPricing } from '../../../shared/pricing'
 
 /** The SUT's PRICES_FILE, resolved under the mocked (temp) homedir. */
@@ -549,5 +554,58 @@ describe('opencode-pricing: refreshPricesIfStale', () => {
   it('never throws when the fetch fails', async () => {
     fetchMock.mockRejectedValue(new Error('offline'))
     await expect(refreshPricesIfStale()).resolves.toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// media rows — the same fetch, image/video models of openai and openrouter
+// ---------------------------------------------------------------------------
+
+describe('opencode-pricing: media model rows', () => {
+  const mediaCatalog = {
+    openai: {
+      models: {
+        'gpt-image-x': {
+          name: 'GPT Image X',
+          type: 'image',
+          release_date: '2026-05-01',
+          modalities: { input: ['text', 'image'], output: ['image'] },
+          cost: { input: 5, output: 40 }
+        },
+        'gpt-image-old': { name: 'Old', type: 'image', status: 'deprecated' },
+        'gpt-chat': { name: 'Chat', type: 'chat', cost: { input: 1, output: 2 } }
+      }
+    },
+    openrouter: {
+      models: {
+        'acme/video-1': {
+          name: 'Video 1',
+          type: 'video',
+          modalities: { input: ['text'], output: ['video'] }
+        }
+      }
+    },
+    // Not a media provider: its image models are not kept.
+    other: { models: { 'img-1': { name: 'Img', type: 'image', cost: { input: 1, output: 1 } } } }
+  }
+
+  it('keeps non-deprecated image/video rows of the two providers and persists them', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(mediaCatalog))
+    await refreshPrices()
+    const rows = getMediaModelRows()
+    expect(rows.map((r) => `${r.providerId}/${r.id}:${r.type}`).sort()).toEqual([
+      'openai/gpt-image-x:image',
+      'openrouter/acme/video-1:video'
+    ])
+    const image = rows.find((r) => r.id === 'gpt-image-x')
+    expect(image).toMatchObject({
+      name: 'GPT Image X',
+      acceptsImages: true,
+      releaseDate: '2026-05-01',
+      cost: { input: 5, output: 40 }
+    })
+    expect(rows.find((r) => r.id === 'acme/video-1')?.acceptsImages).toBe(false)
+    const file = path.join(TEMP_HOME, '.claude', 'ui', 'media-models.json')
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8'))).toHaveLength(2)
   })
 })

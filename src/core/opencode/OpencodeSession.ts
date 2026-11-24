@@ -107,6 +107,7 @@ import { equivalentCostUsd } from '../../shared/pricing'
 import { totalCosts, type TotalCosts } from '../../shared/cost-rule'
 import { opencodeCostInputs, resolveOpencodeCosts, type OpencodeCostInputs } from './message-cost'
 import { opencodeHistorySeed, type OpencodeHistoryTokens } from './history-status-line'
+import { mediaOffered } from '../services/media-availability'
 import { logger } from '../services/logger'
 import { applySessionMoved, vetDetectedWorktree } from '../services/worktree-detect'
 import { resolveRepoRoot, samePath } from '../services/worktree-root'
@@ -2747,14 +2748,16 @@ export class OpencodeSession extends BaseSession {
     const pending = this.pendingMove
     const transitionRules =
       pending && !samePath(pending, location) ? await this.transitionRulesFor(pending) : undefined
-    const [mcpServers, worktree, externalDirAllows] = await Promise.all([
+    const [mcpServers, worktree, externalDirAllows, media] = await Promise.all([
       this.resolveMcpServers(location),
       this.resolveWorktree(location),
-      this.resolveOwnDirAllows()
+      this.resolveOwnDirAllows(),
+      mediaOffered('opencode')
     ])
     return buildSessionRuleset({
       mode,
       autoMode,
+      media,
       permissions: this.mergedUserPermissions(location),
       mcpServers,
       cwd: location,

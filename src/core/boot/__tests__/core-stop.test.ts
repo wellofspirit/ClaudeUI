@@ -24,6 +24,7 @@ function harness(prepareQuit: () => Promise<void> = () => Promise.resolve()): {
       hostAnchor: { stop: rec('hostAnchor.stop') },
       usageHubClient: { stop: rec('usageHubClient.stop') },
       releaseDispatchParents: rec('releaseDispatchParents'),
+      mediaJobs: { stop: rec('mediaJobs.stop') },
       serviceSession: { stop: rec('serviceSession.stop') },
       opencodeServerManager: { dispose: rec('opencodeServerManager.dispose') },
       localVoiceServer: {
@@ -47,6 +48,7 @@ describe('createCoreStop', () => {
       'hostAnchor.stop',
       'usageHubClient.stop',
       'releaseDispatchParents',
+      'mediaJobs.stop',
       'serviceSession.stop',
       'opencodeServerManager.dispose',
       'localVoiceServer.stop'

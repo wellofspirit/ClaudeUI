@@ -21,7 +21,7 @@ export type ToolKind =
   | 'fileRead' //  read a file    — Claude Read · opencode read
   | 'search' //    glob/grep/list — Claude Glob/Grep · opencode glob/grep/list
   | 'web' //       fetch/search   — Claude WebFetch/WebSearch · opencode webfetch
-  | 'image' //     picture made   — no engine produces it today
+  | 'media' //     image / video  — ClaudeUI's hosted generate_image / generate_video
   | 'todo' //      checklist      — Claude TodoWrite  (lifted — routes to TodoToolBlock)
   | 'task' //      subagent       — Claude Task/Agent · opencode task
   | 'plan' //      plan approval  — Claude ExitPlanMode (lifted — routes to ExitPlanModeCard)
@@ -108,7 +108,19 @@ export type ToolView =
   // is the server's own `readOnlyHint`. All three are optional: an engine whose
   // MCP names are not splittable (opencode's `server_tool`) supplies none.
   | { kind: 'mcp'; input: unknown; server?: string; tool?: string; readOnly?: boolean }
-  | { kind: 'image'; prompt?: string; savedPath?: string }
+  /**
+   * A hosted media-generation call (`generate_image` / `generate_video`, built by
+   * `media-tool-view.ts`): what the call SAID. `model` is the ref the agent named (usually
+   * none: the setting decides), `images` the local paths it passed (source images, frames).
+   */
+  | {
+      kind: 'media'
+      media: 'image' | 'video'
+      prompt?: string
+      model?: string
+      path?: string
+      images?: string[]
+    }
   /**
    * A tool whose call is a handful of named facts — a schedule, a worktree, a
    * wake-up, a message and its recipient. `fields` is what the call SAID (its

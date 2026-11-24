@@ -16,6 +16,8 @@ import {
   SESSION_TOOL_NAMES,
   SESSION_TOOLS_SERVER_NAME
 } from './session-tools-description'
+import { CLAUDE_MEDIA_MCP_SERVER, MEDIA_TOOL_NAMES } from './media-generation'
+import { mediaKindOfAnyName, mediaToolView } from './media-tool-view'
 import type { ToolKind, ToolView } from './tool-kinds'
 import type { ContentBlock } from './types'
 
@@ -48,6 +50,17 @@ const HOSTED_TOOLS: Readonly<Record<string, HostedTool>> = {
   dispatch_agent: { claudeServer: 'claude-ui-collab', kind: 'task', label: DISPATCH_LABEL },
   // A dispatch target's report (ADR-105 §3), as Claude Code's own `SubagentHandback` is shown.
   hand_back: { claudeServer: 'claude-ui-handback', label: 'Hand back' },
+  // Media generation (ClaudeUI-hosted, background jobs): its own server so Claude asks for each call.
+  [MEDIA_TOOL_NAMES.image]: {
+    claudeServer: CLAUDE_MEDIA_MCP_SERVER,
+    kind: 'media',
+    label: 'Generate image'
+  },
+  [MEDIA_TOOL_NAMES.video]: {
+    claudeServer: CLAUDE_MEDIA_MCP_SERVER,
+    kind: 'media',
+    label: 'Generate video'
+  },
   ...Object.fromEntries(
     SESSION_TOOL_NAMES.map((name): [string, HostedTool] => [
       name,
@@ -119,13 +132,14 @@ function extractMockupDirectory(result?: ToolResultBlock): string | undefined {
 }
 
 /**
- * The `diagram` and `mockup` views, the same on every engine (their args match:
- * `{ source, title? }`, `{ directory? | html, title? }`); null for any other kind.
+ * The `diagram`, `mockup` and `media` views, the same on every engine (their args match:
+ * `{ source, title? }`, `{ directory? | html, title? }`, `{ prompt, images?, model?, path? }`); null for any other kind.
  */
 export function hostedToolView(
   kind: ToolKind,
   input: Record<string, unknown>,
-  result?: ToolResultBlock
+  result?: ToolResultBlock,
+  toolName?: string
 ): ToolView | null {
   if (kind === 'diagram') {
     return {
@@ -140,6 +154,10 @@ export function hostedToolView(
       directory: input.directory != null ? String(input.directory) : extractMockupDirectory(result),
       title: input.title != null ? String(input.title) : undefined
     }
+  }
+  if (kind === 'media' && toolName) {
+    const media = mediaKindOfAnyName(toolName)
+    if (media) return mediaToolView(media, input)
   }
   return null
 }

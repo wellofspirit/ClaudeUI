@@ -144,6 +144,13 @@ import {
   type SessionToolCaller
 } from '../services/session-tools'
 import type { MergedClaudeRules, PermissionVerdict } from './permission-engine'
+import { mediaJobs } from '../services/media-jobs'
+import { MEDIA_PLAN_MODE_REFUSAL, runMediaTool } from '../services/media-tool-handler'
+import { mediaOffered } from '../services/media-availability'
+import { currentWorkdir } from '../services/session-workdir'
+import { syncCore } from '../services/sync-host'
+import { CLAUDE_MEDIA_TOOL_PREFIX, MEDIA_KINDS } from '../../shared/media-generation'
+import { mediaKindOfTool } from '../../shared/media-tool-view'
 // Auto mode (`auto`/`full` autonomy) — the engine-neutral classifier core plus
 // ClaudeUI's own judge transport (ADR-081).
 import type { ClassifyResult, EnvironmentInfo } from '../automode/classifier'
@@ -1108,6 +1115,8 @@ export class PiSession extends BaseSession {
       // The model is told where its scratch space is, as Claude Code's is; no scratchpad, no flag.
       args.push(...scratchpadPromptArgs(this.scratchpadDir))
 
+      const mediaOfferedNow = this.capabilities.hostedMcp ? await mediaOffered('pi') : null
+      const mediaKinds = MEDIA_KINDS.filter((kind) => mediaOfferedNow?.[kind])
       client = new PiRpcClient(launch, {
         cwd: this.cwd,
         args,
@@ -1120,6 +1129,9 @@ export class PiSession extends BaseSession {
           // Likewise the Claude skill catalog (`/skills`, listed at before_agent_start).
           CLAUDEUI_PI_SKILLS: '1',
           ...(this.capabilities.hostedMcp ? { CLAUDEUI_PI_HOSTED_TOOLS: '1' } : {}),
+          // Media generation (bridge v29): the kinds offered now (toggle on, a model resolves), read per
+          // spawn (a change applies at the next one); none, no variable, no tool.
+          ...(mediaKinds.length > 0 ? { CLAUDEUI_PI_MEDIA_KINDS: mediaKinds.join(',') } : {}),
           // The session tools (bridge v15), on the same two conditions as the hosted
           // tools above plus the host having wired the service.
           ...(this.capabilities.hostedMcp && sessionToolsAvailable()
@@ -2903,7 +2915,11 @@ export class PiSession extends BaseSession {
     input: Record<string, unknown>,
     verdict?: PermissionVerdict
   ): PermissionSuggestion[] | undefined {
-    const claudeTool = PI_TOOL_TO_CLAUDE_TOOL[toolName]
+    // ClaudeUI's media tools: a whole-tool rule in the Claude spelling (the same rule every engine reads).
+    const mediaKind = mediaKindOfTool(toolName)
+    const claudeTool = mediaKind
+      ? `${CLAUDE_MEDIA_TOOL_PREFIX}${toolName}`
+      : PI_TOOL_TO_CLAUDE_TOOL[toolName]
     if (!claudeTool) return undefined
     if (verdict?.source === 'path-scope' || verdict?.pathSensitive) return undefined
     // A user ASK rule answered a file tool: the ask tier outranks every allow rule, so a saved allow
@@ -3410,11 +3426,47 @@ export class PiSession extends BaseSession {
       case 'list_models':
         return this.subagents.listModels(input)
 
+      case 'generate_image':
+      case 'generate_video':
+        return this.handleMediaTool(toolName, input, toolCallId, owner)
+
       default:
         // The session tools (slice 2): the root agent's, run by the shared service.
         if (isSessionToolName(toolName))
           return this.handleSessionTool(toolName, input, toolCallId, owner)
         return unknownHostedTool(toolName)
+    }
+  }
+
+  /**
+   * generate_image / generate_video: a background job for the root agent; a host-run subagent's call
+   * (its grant says so) waits for the outcome. The job is the job service's, never tied to this call.
+   */
+  private async handleMediaTool(
+    toolName: string,
+    input: Record<string, unknown>,
+    toolCallId: string,
+    owner: 'root' | 'subagent'
+  ): Promise<PiHostedToolResult> {
+    const kind = mediaKindOfTool(toolName)
+    if (!kind) return unknownHostedTool(toolName)
+    // The gate already denies in plan mode; a switch between its allow and this call is refused too.
+    if (this.getAutonomyMode() === 'plan') {
+      return { content: [{ type: 'text', text: MEDIA_PLAN_MODE_REFUSAL }], isError: true }
+    }
+    const reply = await runMediaTool((args) => mediaJobs.start(args), {
+      routingId: this.routingId,
+      // Where the session works now (a worktree it entered), as Claude's media server reads it.
+      cwd: currentWorkdir(this.cwd, syncCore.getCanonicalState().worktreeInfoMap[this.routingId]),
+      engineId: this.engineId,
+      toolUseId: toolCallId,
+      kind,
+      foreground: owner === 'subagent',
+      input
+    })
+    return {
+      content: [{ type: 'text', text: reply.text }],
+      ...(reply.isError ? { isError: true } : {})
     }
   }
 

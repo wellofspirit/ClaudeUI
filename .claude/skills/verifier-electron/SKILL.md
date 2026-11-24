@@ -595,6 +595,20 @@ globalThis.__rec.push(JSON.parse(JSON.stringify(a))); return h(ev, ...a) }) })`,
 - Stopping: `POST /quit`. If the driver died first, the app keeps running: find its listener or its children by
   port (`netstat -ano | grep :<port>`) and stop by PID (`taskkill //PID <n> //T //F` in Git Bash), never by name.
 
+## Owner sign-in into an isolated profile (real providers)
+
+When a drive needs a real sign-in (ChatGPT, Claude, an API key) the isolated profile has none, and copying
+token files by hand is not allowed. The owner signs in by hand in a VISIBLE isolated window:
+
+- Launch headed (drop `CLAUDEUI_HEADLESS` from the driver's env) and drop the dead-port proxies: real providers
+  need outbound network. Copy `~/.claude/ui/harnesses/{opencode,pi}` into the isolated harness store first.
+- Hand off through a file the orchestrator watches (e.g. `.work/<arc>/verify/WAITING_FOR_OWNER.txt`: the window
+  title and the exact clicks), then poll the app state for the connection (up to ~20 min) and continue.
+- ChatGPT sign-in: Settings › Models & providers › Subscriptions; API keys: "API providers".
+- Sign-ins survive a rebuild and relaunch on the same isolated profile.
+- pi and Claude rekey a session's id after the first turn: re-read `activeSessionId` before each
+  `window.api.respondApproval(id, requestId, 'allow')`.
+
 ## Caveats — what you can't (safely) drive
 
 - **New session** through the UI needs the native OS folder picker

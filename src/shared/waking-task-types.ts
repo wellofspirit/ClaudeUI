@@ -27,7 +27,9 @@ export const WAKING_TASK_TYPES: ReadonlySet<string> = new Set([
   'local_bash',
   'monitor_mcp',
   'monitor_ws',
-  'mcp_task'
+  'mcp_task',
+  // ClaudeUI-hosted image/video generation jobs (`MEDIA_TASK_TYPE`): their notice wakes the session
+  'media'
 ])
 
 /**

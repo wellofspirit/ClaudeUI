@@ -21,7 +21,7 @@ import * as zlib from 'node:zlib'
 import { connectRemoteClient, ephemeralPort } from '../../../test/helpers/ws-test-client'
 import { E2ECrypto } from '../../../shared/e2e-crypto'
 import type { ProgressReporter, WsServerMessage } from '../../../shared/remote-protocol'
-import { buildSentFileUrl } from '../../../shared/sent-file-url'
+import { buildMediaFileUrl, buildSentFileUrl } from '../../../shared/sent-file-url'
 import { buildMockupHttpUrl } from '../../../shared/mockup-url'
 
 // ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ import type { GitStatusData } from '../../../shared/types'
 import { computeStoredCredential } from '../remote-auth'
 import { TailscaleServeError, serveTargetForPort } from '../tailscale-manager'
 import type { ServeOccupancy } from '../tailscale-manager'
-import type { RemoteConfigRow } from '../db'
+import { closeDb, insertMediaJob, type MediaJobRow, type RemoteConfigRow } from '../db'
 import type { PasswordAuthProvider } from '../remote-auth'
 import type { TailscaleDetection } from '../../../shared/types'
 import { setHostPaths, setHostMockup } from '../../host'
@@ -5054,5 +5054,143 @@ describe('RemoteServer — chunked sync-full', () => {
     expect(lines[0]).toContain(`frameBytes=${rawLength}`)
     expect(lines[0]).toContain(`chunks=${frames.length}`)
     await client.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// `GET /media-file` — a saved image/video of a media job, by JOB id. Same scoped file token as
+// `/sent-file`; serves only the file the media ledger names for that id, with HTTP Range.
+// ---------------------------------------------------------------------------
+
+describe('RemoteServer — /media-file route', () => {
+  beforeEach(useAuthDisabled)
+  let server: RemoteServer
+  let port: number
+  let cwd: string
+  let outsideFile: string
+  const VIDEO = Buffer.from(Array.from({ length: 64 }, (_, i) => i))
+
+  function seedJob(id: string, filePath: string, over: Partial<MediaJobRow> = {}): void {
+    insertMediaJob(
+      {
+        id,
+        sessionId: 'media-session',
+        cwd,
+        toolUseId: 'tu-1',
+        kind: 'video',
+        status: 'completed',
+        modelRef: 'openrouter/x/y',
+        modelLabel: 'Y',
+        source: 'openrouter',
+        path: filePath,
+        mime: 'video/mp4',
+        bytes: VIDEO.length,
+        blobHash: null,
+        providerJobId: null,
+        error: null,
+        createdAt: 1,
+        startedAt: 1,
+        endedAt: 2,
+        costUsd: null,
+        usageJson: null,
+        ...over
+      },
+      null
+    )
+  }
+
+  async function fileToken(): Promise<string> {
+    const client = await connectRemoteClient({ url: `ws://127.0.0.1:${port}/` })
+    await client.ready
+    const token = await new Promise<string>((resolve) => {
+      const off = client.onMessage((msg) => {
+        if (msg.type === 'sync-full') {
+          off()
+          resolve((msg as { fileToken: string }).fileToken)
+        }
+      })
+      void client.send({ type: 'sync', lastSeq: 0 })
+    })
+    client.close()
+    return token
+  }
+
+  const url = (job: string, token: string): string =>
+    buildMediaFileUrl(`http://127.0.0.1:${port}`, job, { token })
+
+  beforeEach(async () => {
+    closeDb()
+    server = new RemoteServer(new RemoteDispatcher())
+    port = await ephemeralPort()
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'media-file-rs-'))
+    fs.writeFileSync(path.join(cwd, 'clip.mp4'), VIDEO)
+    outsideFile = path.join(os.tmpdir(), `media-file-outside-${process.pid}.mp4`)
+    fs.writeFileSync(outsideFile, 'secret')
+    seedJob('aaaaaaaaaaaa', path.join(cwd, 'clip.mp4'))
+    await server.start(port, '127.0.0.1')
+  })
+
+  afterEach(async () => {
+    try {
+      await server.stop()
+    } catch {
+      /* already stopped */
+    }
+    fs.rmSync(cwd, { recursive: true, force: true })
+    fs.rmSync(outsideFile, { force: true })
+  })
+
+  it('serves a ledger-known job’s file with its type, and Accept-Ranges', async () => {
+    const got = await httpGet(url('aaaaaaaaaaaa', await fileToken()))
+    expect(got.status).toBe(200)
+    expect(got.headers['content-type']).toBe('video/mp4')
+    expect(got.headers['accept-ranges']).toBe('bytes')
+    expect(got.raw).toEqual(VIDEO)
+  })
+
+  it('answers a Range with 206 and only those bytes (video seeking)', async () => {
+    const got = await httpGet(url('aaaaaaaaaaaa', await fileToken()), { Range: 'bytes=8-15' })
+    expect(got.status).toBe(206)
+    expect(got.headers['content-range']).toBe('bytes 8-15/64')
+    expect([...got.raw]).toEqual([8, 9, 10, 11, 12, 13, 14, 15])
+    const past = await httpGet(url('aaaaaaaaaaaa', await fileToken()), { Range: 'bytes=900-' })
+    expect(past.status).toBe(416)
+  })
+
+  it('rejects a missing or wrong token with 403, before looking at the job', async () => {
+    expect((await httpGet(`http://127.0.0.1:${port}/media-file?job=aaaaaaaaaaaa`)).status).toBe(403)
+    expect((await httpGet(url('aaaaaaaaaaaa', 'a'.repeat(64)))).status).toBe(403)
+    // The WS access path (no token at all) does not authorize the route either.
+    expect((await httpGet(`http://127.0.0.1:${port}/media-file`)).status).toBe(403)
+  })
+
+  it('404s an unknown job id and a malformed one', async () => {
+    const token = await fileToken()
+    expect((await httpGet(url('bbbbbbbbbbbb', token))).status).toBe(404)
+    expect((await httpGet(url('../../etc/passwd', token))).status).toBe(404)
+    expect((await httpGet(`http://127.0.0.1:${port}/media-file?token=${token}`)).status).toBe(404)
+  })
+
+  it('never serves a path: a ledger row pointing outside its session roots, or a job that did not finish, is a 404', async () => {
+    const token = await fileToken()
+    seedJob('cccccccccccc', outsideFile)
+    seedJob('dddddddddddd', path.join(cwd, 'clip.mp4'), { status: 'running' })
+    const escaped = await httpGet(url('cccccccccccc', token))
+    expect(escaped.status).toBe(404)
+    expect(escaped.body).not.toContain('secret')
+    expect((await httpGet(url('dddddddddddd', token))).status).toBe(404)
+  })
+
+  it('answers only GET and HEAD', async () => {
+    const token = await fileToken()
+    const res = await new Promise<number>((resolve, reject) => {
+      const req = http.request(url('aaaaaaaaaaaa', token), { method: 'POST' }, (r) => {
+        r.resume()
+        resolve(r.statusCode ?? 0)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    expect(res).toBe(405)
   })
 })

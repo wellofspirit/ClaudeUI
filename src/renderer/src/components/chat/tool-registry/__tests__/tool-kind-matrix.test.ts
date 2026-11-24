@@ -39,6 +39,8 @@ const HOSTED: [string, string][] = [
   ['show_mockup', 'claude-ui-mockup'],
   ['dispatch_agent', 'claude-ui-collab'],
   ['hand_back', 'claude-ui-handback'],
+  ['generate_image', 'claude-ui-media'],
+  ['generate_video', 'claude-ui-media'],
   ...SESSION_TOOLS.map((name): [string, string] => [name, 'claude-ui-sessions'])
 ]
 
@@ -198,6 +200,12 @@ describe('tool kinds and labels, every known name on every engine', () => {
       "mcp__claude-ui-handback__hand_back": mcp | mcp | mcp | mcp | mcp
       "claudeui_hand_back": - | unknown | unknown | unknown | unknown
       "hand_back": - | unknown | unknown | unknown | unknown
+      "mcp__claude-ui-media__generate_image": media | media | media | media | media
+      "claudeui_generate_image": - | unknown | media | unknown | unknown
+      "generate_image": - | unknown | media | media | media
+      "mcp__claude-ui-media__generate_video": media | media | media | media | media
+      "claudeui_generate_video": - | unknown | media | unknown | unknown
+      "generate_video": - | unknown | media | media | media
       "mcp__claude-ui-sessions__session_list": mcp | mcp | mcp | mcp | mcp
       "claudeui_session_list": - | unknown | mcp | unknown | unknown
       "session_list": - | unknown | unknown | mcp | mcp
@@ -357,6 +365,12 @@ describe('tool kinds and labels, every known name on every engine', () => {
       "mcp__claude-ui-handback__hand_back": Hand back | mcp__claude-ui-handback__hand_back | mcp__claude-ui-handback__hand_back
       "claudeui_hand_back": claudeui_hand_back | Hand back | claudeui_hand_back
       "hand_back": hand_back | hand_back | Hand back
+      "mcp__claude-ui-media__generate_image": Generate image | mcp__claude-ui-media__generate_image | mcp__claude-ui-media__generate_image
+      "claudeui_generate_image": claudeui_generate_image | Generate image | claudeui_generate_image
+      "generate_image": generate_image | generate_image | Generate image
+      "mcp__claude-ui-media__generate_video": Generate video | mcp__claude-ui-media__generate_video | mcp__claude-ui-media__generate_video
+      "claudeui_generate_video": claudeui_generate_video | Generate video | claudeui_generate_video
+      "generate_video": generate_video | generate_video | Generate video
       "mcp__claude-ui-sessions__session_list": Session · list | mcp__claude-ui-sessions__session_list | mcp__claude-ui-sessions__session_list
       "claudeui_session_list": claudeui_session_list | Session · list | claudeui_session_list
       "session_list": session_list | session_list | Session · list

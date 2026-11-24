@@ -40,6 +40,12 @@ import { HarnessesInstalled, HarnessesPageActions } from './HarnessesInstalled'
 import { HarnessUpdateSettings } from './HarnessUpdateSettings'
 import { AgentColoursSection, DispatchTileColourSection } from './AgentColours'
 import { ContextPressureSettings } from './ContextPressureSettings'
+import {
+  MediaEnginesSettings,
+  MediaJobsSettings,
+  MediaModelsSettings,
+  MediaOutputSettings
+} from './MediaGenerationSettings'
 
 export type { SettingsPageId, SettingsTarget } from './settings-target'
 
@@ -375,6 +381,36 @@ const START_IN_WORKTREE: SettingItem = {
   )
 }
 
+/**
+ * Media generation (ClaudeUI's hosted generate_image / generate_video): one app setting,
+ * `mediaGeneration`, edited by four page-local bodies (`MediaGenerationSettings.tsx`).
+ */
+const MEDIA_ENGINES: SettingItem = {
+  key: 'mediaEngines',
+  label: 'Offer the tools to',
+  keywords: 'media image video generate generation tools engines claude pi opencode enable',
+  render: (s, u) => <MediaEnginesSettings settings={s} update={u} />
+}
+const MEDIA_MODELS: SettingItem = {
+  key: 'mediaModels',
+  label: 'Image and video models',
+  keywords:
+    'media image video model quality low medium high chatgpt plan openai openrouter automatic off generate picture clip',
+  render: (s, u) => <MediaModelsSettings settings={s} update={u} />
+}
+const MEDIA_JOBS: SettingItem = {
+  key: 'mediaJobs',
+  label: 'Background jobs',
+  keywords: 'media image video jobs concurrency queue timeout give up plan usage limit',
+  render: (s, u) => <MediaJobsSettings settings={s} update={u} />
+}
+const MEDIA_OUTPUT: SettingItem = {
+  key: 'mediaOutput',
+  label: 'Save generated files to',
+  keywords: 'media image video output save folder directory generated workspace path',
+  render: (s, u) => <MediaOutputSettings settings={s} update={u} />
+}
+
 const HIDE_TASK_NOTIFICATIONS: SettingItem = {
   key: 'hideTaskNotifications',
   label: 'Hide task notifications',
@@ -425,6 +461,10 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SESSION_TOOLS,
   START_IN_WORKTREE,
   CLAUDE_DISABLE_AUTO_MODE,
+  MEDIA_ENGINES,
+  MEDIA_MODELS,
+  MEDIA_JOBS,
+  MEDIA_OUTPUT,
   HIDE_TASK_NOTIFICATIONS,
   HIDE_SESSION_MESSAGES
 ]
@@ -493,6 +533,13 @@ const ICON_MOCKUPS = icon(
     <rect x="3" y="3" width="18" height="18" rx="2" />
     <line x1="3" y1="9" x2="21" y2="9" />
     <line x1="9" y1="21" x2="9" y2="9" />
+  </>
+)
+const ICON_MEDIA = icon(
+  <>
+    <rect x="3" y="3" width="18" height="18" rx="2" />
+    <circle cx="8.5" cy="8.5" r="1.5" />
+    <path d="M21 15l-5-5L5 21" />
   </>
 )
 const ICON_REMOTE = icon(
@@ -831,6 +878,30 @@ export const PAGES: SettingsPage[] = [
     icon: ICON_MOCKUPS,
     description: 'Sandboxed HTML mockups the agent renders in the app.',
     groups: [{ id: 'network', label: 'Network', items: itemsOf('mockup') }]
+  },
+  {
+    id: 'media',
+    label: 'Media generation',
+    rail: 'features',
+    icon: ICON_MEDIA,
+    description:
+      "ClaudeUI's generate_image and generate_video tools, for every engine. Each call runs in the background: the agent can start several, keeps working, and is told when each one finishes.",
+    groups: [
+      { id: 'engines', label: 'Offer the tools to', items: [MEDIA_ENGINES] },
+      {
+        id: 'models',
+        label: 'Models',
+        note: "Used when the agent doesn't name one. Only what your connected sign-ins and API keys cover.",
+        items: [MEDIA_MODELS]
+      },
+      { id: 'jobs', label: 'Background jobs', items: [MEDIA_JOBS] },
+      {
+        id: 'output',
+        label: 'Output',
+        note: 'Each job asks before it starts, like any tool. Plan mode hides both tools. OpenRouter workspace guardrails can still refuse a listed model.',
+        items: [MEDIA_OUTPUT]
+      }
+    ]
   },
   {
     id: 'remote',

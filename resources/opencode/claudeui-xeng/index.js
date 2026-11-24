@@ -8,7 +8,7 @@
 // 1. Caller identity. `execute.before` may replace `event.input`; the tool runs
 //    with the replacement while events and history keep the model's input
 //    (packages/core/src/tool.ts). For ClaudeUI's hosted `dispatch_agent` it
-//    stamps the calling session and the tool-call id. The MCP host reads the
+//    stamps the calling session and the tool-call id (so do the media tools). The MCP host reads the
 //    caller session from the request's `_meta["ai.opencode/sessionID"]` first
 //    (opencode sends it on every tools/call); the stamp is the fallback, and the
 //    only source of the call id that keys live streaming to the tool card.
@@ -83,6 +83,8 @@
 
 const HOSTED_PREFIX = 'claudeui_'
 const DISPATCH_TOOL = 'claudeui_dispatch_agent'
+// Media generation: the same stamp, so a call's card (and a subagent's foreground wait) follows its id.
+const STAMPED_TOOLS = new Set([DISPATCH_TOOL, 'claudeui_generate_image', 'claudeui_generate_video'])
 const SUBAGENT_TOOL = 'subagent'
 const LIST_MODELS_TOOL = 'claudeui_list_models'
 const WORKTREE_REMOVE_TOOL = 'opencode_worktree_remove'
@@ -358,7 +360,7 @@ export default {
       if (!event) return
       if (event.tool === WORKTREE_REMOVE_TOOL) throw new Error(WORKTREE_REMOVE_MESSAGE)
       if (event.tool === SUBAGENT_TOOL) return gateSubagentModel(ctx, event, allowlist)
-      if (event.tool !== DISPATCH_TOOL) return
+      if (!STAMPED_TOOLS.has(event.tool)) return
       const input = event.input && typeof event.input === 'object' ? event.input : {}
       event.input = {
         ...input,

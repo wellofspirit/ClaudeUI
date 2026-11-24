@@ -231,6 +231,7 @@ export const API_INVOKES = {
   mcpServerStatus: { channel: 'mcp:status', arity: 1, mode: 'invoke' },
   mcpToggleServer: { channel: 'mcp:toggle', arity: 3, mode: 'unwrap' },
   mcpToggleDisabled: { channel: 'mcp:toggle-disabled', arity: 3, mode: 'invoke' },
+  listMediaModels: { channel: 'media:list-models', arity: 0, mode: 'invoke' },
   readMockupHtml: { channel: 'mockup:read-html', arity: 2, mode: 'unwrap' },
   unwatchMockup: { channel: 'mockup:unwatch', arity: 2, mode: 'invoke' },
   watchMockup: { channel: 'mockup:watch', arity: 2, mode: 'invoke' },

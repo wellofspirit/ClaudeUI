@@ -36,6 +36,7 @@ import type {
   HandBackFn
 } from '../opencode-hosted-tools'
 import { loadEngineConfig } from '../../services/ui-config'
+import { MEDIA_PLAN_MODE_REFUSAL, type MediaStartFn } from '../../services/media-tool-handler'
 import {
   DISPATCH_BACKGROUND_PARAM,
   DISPATCH_DESCRIPTION_PARAM,
@@ -1066,5 +1067,109 @@ describe('createOpencodeHostedToolsServer — list_models (ADR-111)', () => {
     )['list_models']
     const result = await tool.handler({ query: 3 })
     expect(result.isError).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// generate_image / generate_video (media generation)
+// ---------------------------------------------------------------------------
+
+describe('createOpencodeHostedToolsServer — media tools', () => {
+  type Deps = Parameters<typeof createOpencodeHostedToolsServer>[1]
+  type Tool = { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+  type Reply = { content: Array<{ text: string }>; isError?: boolean }
+  const startOk: MediaStartFn = async () => ({
+    ok: true,
+    jobId: 'job1',
+    path: '/proj/media/a.png',
+    modelLabel: 'M'
+  })
+  const toolsOf = (deps: Deps): Record<string, Tool> =>
+    (
+      createOpencodeHostedToolsServer(tmp, deps) as unknown as {
+        _registeredTools: Record<string, Tool>
+      }
+    )._registeredTools
+
+  it('registers both tools only when the job service is wired', () => {
+    expect(Object.keys(toolsOf({}))).not.toContain('generate_image')
+    expect(Object.keys(toolsOf({ media: startOk }))).toEqual(
+      expect.arrayContaining(['generate_image', 'generate_video'])
+    )
+  })
+
+  it('the stamped call id is the toolUseId; the root caller with a call id runs in the background', async () => {
+    const media = vi.fn<MediaStartFn>(startOk)
+    const handle = callerHandle()
+    const tool = toolsOf({
+      lookupCallerSession: (id) => (id === 'ses_1' ? handle : undefined),
+      media
+    })['generate_image']
+    const result = (await tool.handler(
+      { prompt: 'a fox', __xeng_caller_session: 'ses_1', __xeng_call_id: 'call_7' },
+      makeExtra()
+    )) as Reply
+    expect(media).toHaveBeenCalledTimes(1)
+    expect(media.mock.calls[0][0]).toEqual({
+      routingId: 'ses_1',
+      cwd: '/proj',
+      engineId: 'opencode',
+      toolUseId: 'call_7',
+      kind: 'image',
+      input: { prompt: 'a fox' },
+      foreground: false
+    })
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0].text).toContain('job1')
+  })
+
+  it('a subagent child resolves to its root and waits; so does a root call with no call id', async () => {
+    const media = vi.fn<MediaStartFn>(startOk)
+    const handle = callerHandle()
+    const tool = toolsOf({
+      lookupCallerSession: (id) => (id === 'ses_1' ? handle : undefined),
+      resolveCallerRoot: async (id) =>
+        id === 'ses_child' ? { root: 'ses_1', restriction: undefined } : undefined,
+      media
+    })['generate_video']
+    await tool.handler(
+      { prompt: 'p', __xeng_caller_session: 'ses_child', __xeng_call_id: 'c1' },
+      makeExtra()
+    )
+    expect(media.mock.calls[0][0]).toMatchObject({
+      routingId: 'ses_1',
+      kind: 'video',
+      toolUseId: 'c1',
+      foreground: true
+    })
+    await tool.handler({ prompt: 'p', __xeng_caller_session: 'ses_1' }, makeExtra())
+    expect(media.mock.calls[1][0]).toMatchObject({ toolUseId: null, foreground: true })
+  })
+
+  it('plan mode refuses without starting a job', async () => {
+    const media = vi.fn<MediaStartFn>(startOk)
+    const handle = { ...callerHandle(), getAutonomyMode: () => 'plan' }
+    const tool = toolsOf({ lookupCallerSession: () => handle, media })['generate_image']
+    const result = (await tool.handler(
+      { prompt: 'p', __xeng_caller_session: 'ses_1', __xeng_call_id: 'c' },
+      makeExtra()
+    )) as Reply
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toBe(MEDIA_PLAN_MODE_REFUSAL)
+    expect(media).not.toHaveBeenCalled()
+  })
+
+  it('an unidentified or unknown caller is an error and starts nothing', async () => {
+    const media = vi.fn<MediaStartFn>(startOk)
+    const tool = toolsOf({ lookupCallerSession: () => undefined, media })['generate_image']
+    const none = (await tool.handler({ prompt: 'p' }, makeExtra())) as Reply
+    expect(none.isError).toBe(true)
+    const gone = (await tool.handler(
+      { prompt: 'p', __xeng_caller_session: 'ses_x' },
+      makeExtra()
+    )) as Reply
+    expect(gone.isError).toBe(true)
+    expect(gone.content[0].text).toContain('could not find the calling session')
+    expect(media).not.toHaveBeenCalled()
   })
 })

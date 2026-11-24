@@ -60,6 +60,7 @@ import { LogViewer } from './services/log-viewer'
 import { logger } from '../core/services/logger'
 import { getCliVersion } from '../core/services/claude-session'
 import { registerMockupAssetScheme, registerMockupAssetHandler } from './services/mockup-protocol'
+import { registerMediaHandler } from './services/media-protocol'
 import { QuitCoordinator } from './quit-coordinator'
 import {
   createQuitRemovalDeps,
@@ -648,6 +649,8 @@ app.whenReady().then(() => {
 
   // Serve mockup HTML + sibling assets via mockup-asset:// (per-mockup sub-origin).
   registerMockupAssetHandler()
+  // Saved media files by job id (video playback), ledger-checked: media-protocol.ts.
+  registerMediaHandler()
 
   // ── About panel ────────────────────────────────────────────────────
   const rawVersion = app.getVersion() // from package.json "version"

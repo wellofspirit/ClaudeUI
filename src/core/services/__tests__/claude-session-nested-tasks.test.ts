@@ -25,7 +25,10 @@ vi.mock('../../sdk', async (importOriginal) => {
   }
 })
 vi.mock('../../opencode/OpencodeServerManager', () => ({
-  opencodeServerManager: { isBinaryAvailable: (): boolean => false }
+  opencodeServerManager: {
+    isBinaryAvailable: (): boolean => false,
+    setServerStartedHook: (): void => {}
+  }
 }))
 // Dispatch available, so the session hands its live transcript to the collab
 // server — the same `getMessages` a dispatched target's judge reads (ADR-088).

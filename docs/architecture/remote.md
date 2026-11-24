@@ -128,6 +128,12 @@ client never needs.
   (ADR-043), behind a third scoped token. The path must match an entry in that session's
   `sentFiles` **read from canonical state in-process** — no renderer round-trip, so a
   busy or absent window cannot break or widen it.
+- `GET /media-file?job=&token=` — the saved image or video of a media job
+  (`generate_image` / `generate_video`), by **job id**, behind the same scoped file token as
+  `/sent-file`. It serves only the file the media ledger (`media_job`) names for that id, and only
+  while it is still a regular file inside the roots of the session that made it
+  (`src/core/services/media-files.ts`); an unknown id, an unfinished job or a path outside the roots is
+  a plain 404, a bad token 403, GET/HEAD only, one HTTP Range (a `<video>` seeks).
 - `GET /remote/auth-info` — which auth methods this server accepts, plus the salt/KDF
   params a password proof needs. GET-only.
 - `GET /vscode/enter?it=` — spends a one-time IDE entry token (ADR-064) minted by

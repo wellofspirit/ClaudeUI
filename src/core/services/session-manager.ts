@@ -10,6 +10,7 @@ import { claudeProjectKeyFor } from './claude-transcript-locator'
 import {
   getSessionMeta,
   moveDispatchTargetParent,
+  moveMediaJobSession,
   moveSessionInbox,
   moveSessionMeta,
   renameUsageEventParent
@@ -67,6 +68,13 @@ export class SessionManager {
   setSessionTimeout(ms: number): void {
     this._sessionTimeoutMs = ms
     this.sessions.forEach((session) => session.setInactivityTimeout(ms))
+  }
+
+  /** The media settings changed: live opencode sessions re-apply their ruleset (our tools in or out, theirs back). */
+  notifyMediaSettingsChanged(): void {
+    this.sessions.forEach((session) => {
+      if (session.engineId === 'opencode') session.notifySettingsChanged?.().catch(() => {})
+    })
   }
 
   create(
@@ -163,6 +171,15 @@ export class SessionManager {
       logger.warn(
         'SessionManager',
         `moveDispatchTargetParent failed (dispatch targets may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    // Media jobs (generate_image/video) are owned by the durable id too.
+    try {
+      moveMediaJobSession(oldId, newId)
+    } catch (err) {
+      logger.warn(
+        'SessionManager',
+        `moveMediaJobSession failed (media jobs may stay under the old id): ${err instanceof Error ? err.message : String(err)}`
       )
     }
     // A title set before the rekey (a session another session started is named

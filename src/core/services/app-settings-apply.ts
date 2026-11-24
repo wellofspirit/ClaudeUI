@@ -4,6 +4,7 @@
  *   2. the token-analytics debounce (`blockUsageService`)
  *   3. the log level and filter (`logger`)
  *   4. the session idle timeout (the session manager)
+ *   5. the media-generation settings, which live opencode sessions re-apply (their ruleset offers our tools)
  *
  * A new core effect of a setting goes here and nowhere else. It runs once at boot
  * ({@link startApplyingSettings}) and on every `config:settings-changed`, whatever its
@@ -19,9 +20,12 @@ import { logger } from './logger'
 
 export interface SettingsHost {
   setSessionTimeout(ms: number): void
+  /** Re-apply the rules of every live opencode session (its media tools follow the media settings). */
+  notifyMediaSettingsChanged?(): void
 }
 
 let host: SettingsHost | null = null
+let lastMediaKey: string | undefined
 
 /** Every core side effect of the app settings, from canonical state. */
 export function applySettings(): void {
@@ -29,6 +33,11 @@ export function applySettings(): void {
   blockUsageService.setDebounceSecs(appSetting('analyticsRefreshSecs'))
   logger.applyFilter(appSetting('logFilter'), appSetting('logLevel'))
   host?.setSessionTimeout(appSetting('sessionTimeoutMins') * 60 * 1000)
+  // Media generation: Claude and pi read their toggle at the next spawn; opencode's ruleset is live.
+  const mediaKey = JSON.stringify(appSetting('mediaGeneration'))
+  const mediaChanged = lastMediaKey !== undefined && lastMediaKey !== mediaKey
+  lastMediaKey = mediaKey
+  if (mediaChanged) host?.notifyMediaSettingsChanged?.()
 }
 
 /** Boot: name the session manager, apply once. Called by `registerSessionIpc` after the canonical seed. */

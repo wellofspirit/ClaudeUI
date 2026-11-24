@@ -8,6 +8,7 @@ import { getAppPath } from '../host'
 import type { McpHttpHost } from './mcp-http-host'
 import { startMcpHttpHost } from './mcp-http-host'
 import { createOpencodeHostedToolsServer } from './opencode-hosted-tools'
+import type { MediaStartFn } from '../services/media-tool-handler'
 import type {
   CallerRootResolver,
   CallerSessionLookup,
@@ -431,6 +432,7 @@ export class OpencodeServerManager {
   private dispatchAgentFn: DispatchAgentFn | undefined
   private handBackFn: HandBackFn | undefined
   private xAgentCallerFn: XAgentCallerFn | undefined
+  private mediaStartFn: MediaStartFn | undefined
   private serverStartedHook: ((endpoint: Endpoint) => Promise<void>) | undefined
   /**
    * `agents.<name>.permissions` per cwd (ADR-097 §3). Default: the mode-less
@@ -480,6 +482,11 @@ export class OpencodeServerManager {
   /** Wire the dispatch targets' report channel behind the hosted `hand_back` (ADR-105 §3). */
   setHandBack(fn: HandBackFn): void {
     this.handBackFn = fn
+  }
+
+  /** Wire the media job service behind the hosted `generate_image` / `generate_video`. */
+  setMediaStart(fn: MediaStartFn): void {
+    this.mediaStartFn = fn
   }
 
   /** Wire the dispatch targets' caller identity behind their hosted `session_message` (ADR-105 §4). */
@@ -672,6 +679,7 @@ export class OpencodeServerManager {
         // this module's `opencodeServerManager`, so a static import would be a require-cycle.
         listModels: async () => (await import('./model-discovery')).discoverOpencodeModels(),
         dispatch: this.dispatchAgentFn && ((req, ctx) => this.dispatchAgentFn!(req, ctx)),
+        media: this.mediaStartFn && ((args) => this.mediaStartFn!(args)),
         handBack: this.handBackFn && ((id, report, callId) => this.handBackFn!(id, report, callId)),
         // The session tools (slice 2), when the host wired them (read per MCP session).
         ...(sessionToolsAvailable()

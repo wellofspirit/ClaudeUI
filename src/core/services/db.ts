@@ -1701,6 +1701,44 @@ export const MIGRATIONS: Migration[] = [
         if (exists(table)) db.exec(`DELETE FROM ${table}`)
       }
     }
+  },
+  {
+    // ClaudeUI-hosted image/video generation: one row per background job (`media-job-ledger.ts`).
+    // `session_id` is the durable id of the session that asked (it follows `SessionManager.rekey`);
+    // `owner_pid`/`owner_boot` name the instance running a `queued`/`running` job, as `dispatch_target`
+    // does, so the boot pass interrupts only the jobs of an owner that is gone. `path` is where the file
+    // was saved (provisional until the job ends), `blob_hash` the image's blob id for a cold load.
+    version: 42,
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS media_job (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          tool_use_id TEXT,
+          kind TEXT NOT NULL,
+          status TEXT NOT NULL,
+          model_ref TEXT NOT NULL,
+          model_label TEXT NOT NULL,
+          source TEXT NOT NULL,
+          path TEXT NOT NULL,
+          mime TEXT,
+          bytes INTEGER,
+          blob_hash TEXT,
+          provider_job_id TEXT,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          ended_at INTEGER,
+          cost_usd REAL,
+          usage_json TEXT,
+          owner_pid INTEGER,
+          owner_boot TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_media_job_session ON media_job (session_id);
+        CREATE INDEX IF NOT EXISTS idx_media_job_status ON media_job (status);
+      `)
+    }
   }
 ]
 
@@ -2817,6 +2855,247 @@ export function interruptDispatchTargets(ids: readonly string[], db: Db = getDb(
   )
   const changed: string[] = []
   for (const id of ids) if (Number(stmt.run(id).changes) > 0) changed.push(id)
+  return changed
+}
+
+// ── media_job (ClaudeUI-hosted image/video generation) ─────────────────────
+
+export type MediaJobStatus =
+  'queued' | 'running' | 'completed' | 'failed' | 'stopped' | 'interrupted'
+
+export interface MediaJobRow {
+  id: string
+  /** The durable id of the session that asked. */
+  sessionId: string
+  cwd: string
+  toolUseId: string | null
+  kind: 'image' | 'video'
+  status: MediaJobStatus
+  modelRef: string
+  modelLabel: string
+  source: 'chatgpt-plan' | 'openai' | 'openrouter'
+  path: string
+  mime: string | null
+  bytes: number | null
+  blobHash: string | null
+  providerJobId: string | null
+  error: string | null
+  createdAt: number
+  startedAt: number | null
+  endedAt: number | null
+  costUsd: number | null
+  usageJson: string | null
+}
+
+/** A `queued`/`running` row and the instance recorded as running it. */
+export type ActiveMediaJob = MediaJobRow & { owner: DispatchTargetOwner | null }
+
+interface MediaJobDbRow {
+  id: string
+  session_id: string
+  cwd: string
+  tool_use_id: string | null
+  kind: string
+  status: string
+  model_ref: string
+  model_label: string
+  source: string
+  path: string
+  mime: string | null
+  bytes: number | null
+  blob_hash: string | null
+  provider_job_id: string | null
+  error: string | null
+  created_at: number
+  started_at: number | null
+  ended_at: number | null
+  cost_usd: number | null
+  usage_json: string | null
+  owner_pid: number | null
+  owner_boot: string | null
+}
+
+const MEDIA_JOB_STATUSES: readonly string[] = [
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'stopped',
+  'interrupted'
+]
+
+function mediaJobRow(row: MediaJobDbRow): ActiveMediaJob {
+  const num = (v: number | null): number | null =>
+    v === null || v === undefined ? null : Number(v)
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    cwd: row.cwd,
+    toolUseId: row.tool_use_id,
+    kind: row.kind === 'video' ? 'video' : 'image',
+    status: MEDIA_JOB_STATUSES.includes(row.status) ? (row.status as MediaJobStatus) : 'failed',
+    modelRef: row.model_ref,
+    modelLabel: row.model_label,
+    source: row.source as MediaJobRow['source'],
+    path: row.path,
+    mime: row.mime,
+    bytes: num(row.bytes),
+    blobHash: row.blob_hash,
+    providerJobId: row.provider_job_id,
+    error: row.error,
+    createdAt: Number(row.created_at),
+    startedAt: num(row.started_at),
+    endedAt: num(row.ended_at),
+    costUsd: num(row.cost_usd),
+    usageJson: row.usage_json,
+    owner:
+      row.owner_pid !== null && row.owner_pid !== undefined && row.owner_boot
+        ? { pid: Number(row.owner_pid), boot: row.owner_boot }
+        : null
+  }
+}
+
+/** Insert a job row; `owner` is the instance that runs it (the row is `queued` or `running`). */
+export function insertMediaJob(
+  row: MediaJobRow,
+  owner: DispatchTargetOwner | null,
+  db: Db = getDb()
+): void {
+  db.prepare(
+    `INSERT INTO media_job
+       (id, session_id, cwd, tool_use_id, kind, status, model_ref, model_label, source, path, mime,
+        bytes, blob_hash, provider_job_id, error, created_at, started_at, ended_at, cost_usd,
+        usage_json, owner_pid, owner_boot)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    row.id,
+    row.sessionId,
+    row.cwd,
+    row.toolUseId,
+    row.kind,
+    row.status,
+    row.modelRef,
+    row.modelLabel,
+    row.source,
+    row.path,
+    row.mime,
+    row.bytes,
+    row.blobHash,
+    row.providerJobId,
+    row.error,
+    row.createdAt,
+    row.startedAt,
+    row.endedAt,
+    row.costUsd,
+    row.usageJson,
+    owner?.pid ?? null,
+    owner?.boot ?? null
+  )
+}
+
+export function getMediaJob(id: string, db: Db = getDb()): ActiveMediaJob | undefined {
+  const row = db.prepare('SELECT * FROM media_job WHERE id = ?').get(id) as
+    MediaJobDbRow | undefined
+  return row ? mediaJobRow(row) : undefined
+}
+
+/** The completed job whose result the blob store knows by this hash (a `blob:get` miss re-interns from it). */
+export function getMediaJobByBlobHash(hash: string, db: Db = getDb()): ActiveMediaJob | undefined {
+  const row = db
+    .prepare("SELECT * FROM media_job WHERE blob_hash = ? AND status = 'completed' LIMIT 1")
+    .get(hash) as MediaJobDbRow | undefined
+  return row ? mediaJobRow(row) : undefined
+}
+
+/** A session's jobs, oldest first. */
+export function mediaJobsBySession(sessionId: string, db: Db = getDb()): MediaJobRow[] {
+  return (
+    db
+      .prepare('SELECT * FROM media_job WHERE session_id = ? ORDER BY created_at, id')
+      .all(sessionId) as MediaJobDbRow[]
+  ).map(mediaJobRow)
+}
+
+/** Every job still `queued` or `running` (at boot: what the last process may have left behind). */
+export function activeMediaJobs(db: Db = getDb()): ActiveMediaJob[] {
+  return (
+    db
+      .prepare(
+        "SELECT * FROM media_job WHERE status IN ('queued', 'running') ORDER BY created_at, id"
+      )
+      .all() as MediaJobDbRow[]
+  ).map(mediaJobRow)
+}
+
+/** The mutable columns of a job row; an omitted key keeps its value. */
+export type MediaJobPatch = Partial<
+  Pick<
+    MediaJobRow,
+    | 'status'
+    | 'path'
+    | 'mime'
+    | 'bytes'
+    | 'blobHash'
+    | 'providerJobId'
+    | 'error'
+    | 'startedAt'
+    | 'endedAt'
+    | 'costUsd'
+    | 'usageJson'
+  >
+>
+
+const MEDIA_JOB_COLUMNS: Record<keyof MediaJobPatch, string> = {
+  status: 'status',
+  path: 'path',
+  mime: 'mime',
+  bytes: 'bytes',
+  blobHash: 'blob_hash',
+  providerJobId: 'provider_job_id',
+  error: 'error',
+  startedAt: 'started_at',
+  endedAt: 'ended_at',
+  costUsd: 'cost_usd',
+  usageJson: 'usage_json'
+}
+
+/**
+ * Update a job. A row that ended (anything but `queued`/`running`) keeps its status and owns nothing:
+ * the user's Stop or a boot sweep is never written over by a late provider answer. A status that ends
+ * the job clears the owner.
+ */
+export function updateMediaJob(id: string, patch: MediaJobPatch, db: Db = getDb()): void {
+  const sets: string[] = []
+  const values: unknown[] = []
+  for (const key of Object.keys(MEDIA_JOB_COLUMNS) as (keyof MediaJobPatch)[]) {
+    if (patch[key] === undefined) continue
+    sets.push(`${MEDIA_JOB_COLUMNS[key]} = ?`)
+    values.push(patch[key])
+  }
+  if (patch.status && patch.status !== 'queued' && patch.status !== 'running') {
+    sets.push('owner_pid = NULL', 'owner_boot = NULL')
+  }
+  if (sets.length === 0) return
+  db.prepare(
+    `UPDATE media_job SET ${sets.join(', ')} WHERE id = ? AND status IN ('queued', 'running')`
+  ).run(...values, id)
+}
+
+/** A session's durable id changed (`SessionManager.rekey`): its jobs follow. */
+export function moveMediaJobSession(oldId: string, newId: string, db: Db = getDb()): void {
+  if (oldId === newId) return
+  db.prepare('UPDATE media_job SET session_id = ? WHERE session_id = ?').run(newId, oldId)
+}
+
+/** Boot pass: these rows were active under an owner that is gone. Returns the ids that changed. */
+export function interruptMediaJobs(ids: readonly string[], db: Db = getDb()): string[] {
+  const stmt = db.prepare(
+    `UPDATE media_job SET status = 'interrupted', ended_at = ?, owner_pid = NULL, owner_boot = NULL
+      WHERE id = ? AND status IN ('queued', 'running')`
+  )
+  const changed: string[] = []
+  const now = Date.now()
+  for (const id of ids) if (Number(stmt.run(now, id).changes) > 0) changed.push(id)
   return changed
 }
 

@@ -21,7 +21,7 @@ import { DiagramBody } from './DiagramBody'
 import { MockupBody } from './MockupBody'
 import { WebBody } from './WebBody'
 import { McpBody } from './McpBody'
-import { ImageBody } from './ImageBody'
+import { MediaBody } from './MediaBody'
 
 /** Passive kinds the registry can render. Lifted kinds are routed elsewhere. */
 export type PassiveToolKind = Exclude<ToolKind, 'plan' | 'question' | 'todo' | 'task' | 'note'>
@@ -36,8 +36,8 @@ export const TOOL_RENDERERS: Record<PassiveToolKind, KindRenderer> = {
   mcp: { layout: 'standard', Body: McpBody },
   detail: { layout: 'standard', Body: DetailBody },
   findings: { layout: 'standard', Body: FindingsBody },
-  image: { layout: 'standard', Body: ImageBody },
   unknown: { layout: 'standard', Body: GenericBody },
+  media: { layout: 'custom', Body: MediaBody },
   diagram: { layout: 'custom', Body: DiagramBody },
   mockup: { layout: 'custom', Body: MockupBody }
 }

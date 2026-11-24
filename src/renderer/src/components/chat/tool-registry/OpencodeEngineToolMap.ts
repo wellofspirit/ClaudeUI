@@ -72,6 +72,12 @@ function opencodeKindOf(toolName: string): ToolKind {
       return 'question'
     case 'plan_exit':
       return 'plan'
+    // opencode 2.4's own media tools (kept when the user keeps them): the media card from the call and
+    // its result text; ClaudeUI's job events do not exist for them, so no live update. `hostedToolView`
+    // reads the bare name through `mediaToolView`.
+    case 'generate_image':
+    case 'generate_video':
+      return 'media'
     // skill/lsp/invalid → unknown (graceful; dedicated kinds are out of scope)
     default:
       return 'unknown'
@@ -87,7 +93,7 @@ function opencodeNormalize(
   const inp = input ?? {}
 
   // ClaudeUI's own card kinds (diagram, mockup) read the same on every engine.
-  const hosted = hostedToolView(kind, inp, result)
+  const hosted = hostedToolView(kind, inp, result, toolName)
   if (hosted) return hosted
 
   switch (kind) {

@@ -1070,12 +1070,14 @@ describe('EMPTY_RULES — frozen (A9)', () => {
 })
 
 describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
-  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent, agent, send_message and task_stop (ADR-089)', () => {
+  it('is the superset of PI_AUTO_ALLOW_HOSTED_TOOLS plus dispatch_agent, agent, send_message, task_stop (ADR-089) and the media tools', () => {
     expect([...PI_HOSTED_TOOL_NAMES].sort()).toEqual(
       [
         'agent',
         'create_mockup',
         'dispatch_agent',
+        'generate_image',
+        'generate_video',
         'list_models',
         'render_mermaid',
         'send_message',
@@ -1095,6 +1097,9 @@ describe('PI_HOSTED_TOOL_NAMES (A1)', () => {
     // The session tools (slice 2) get a grant too, and are never auto-allowed.
     for (const name of SESSION_TOOL_NAMES) expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has(name)).toBe(false)
     // `agent` (and S3b's two) get a one-shot grant like dispatch_agent, never auto-allow.
+    // Media generation bills a model call: granted after an allow, never auto-allowed.
+    expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('generate_image')).toBe(false)
+    expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('generate_video')).toBe(false)
     expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('agent')).toBe(false)
     expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('send_message')).toBe(false)
     expect(PI_AUTO_ALLOW_HOSTED_TOOLS.has('task_stop')).toBe(false)
@@ -3530,5 +3535,73 @@ describe('decide — path containment (H1, ctx.scope)', () => {
       }))
       expect(mergedClaudeRulesFor('/cwd').blockReadsOutsideWorkingDirectories).toBeUndefined()
     })
+  })
+})
+
+describe('decide — media generation tools (generate_image / generate_video)', () => {
+  const TOOLS = ['generate_image', 'generate_video']
+  const ctx = (mode: string, extra: Record<string, unknown> = {}) => ({
+    mode,
+    rules: rules(),
+    sessionAllows: NO_SESSION_ALLOWS,
+    mcpRuleKey: piMcpRuleKey,
+    ...extra
+  })
+
+  it('are the media kind', () => {
+    for (const name of TOOLS) expect(piToolKind(name)).toBe('media')
+  })
+
+  it.each(TOOLS)(
+    '%s asks in default and acceptEdits, goes to the judge in auto, runs in bypass',
+    (name) => {
+      expect(decide(name, { prompt: 'x' }, ctx('default'))).toBe('ask')
+      expect(decide(name, { prompt: 'x' }, ctx('acceptEdits'))).toBe('ask')
+      expect(decide(name, { prompt: 'x' }, ctx('full', { judge: true }))).toBe('ask')
+      expect(decide(name, { prompt: 'x' }, ctx('bypassPermissions'))).toBe('allow')
+    }
+  )
+
+  it.each(TOOLS)('%s is denied in plan mode', (name) => {
+    expect(decide(name, { prompt: 'x' }, ctx('plan'))).toBe('deny')
+  })
+
+  it.each(TOOLS)(
+    'a user allow rule in Claude spelling (%s) is honoured outside plan mode, and loses to plan mode',
+    (name) => {
+      const claudeSpelling = `mcp__claude-ui-media__${name}`
+      const allowed = (mode: string, extra: Record<string, unknown> = {}) =>
+        ctx(mode, { rules: rules({ allow: [claudeSpelling] }), ...extra })
+      expect(decide(name, { prompt: 'x' }, allowed('default'))).toBe('allow')
+      expect(decide(name, { prompt: 'x' }, allowed('acceptEdits'))).toBe('allow')
+      const verdict = decideWithSource(name, { prompt: 'x' }, allowed('plan'))
+      expect(verdict.decision).toBe('deny')
+      expect(verdict.source).toBe('mode-base')
+    }
+  )
+
+  it('a server-level allow rule covers both tools, a rule for the other tool covers neither', () => {
+    const serverAllow = ctx('default', { rules: rules({ allow: ['mcp__claude-ui-media'] }) })
+    for (const name of TOOLS) expect(decide(name, {}, serverAllow)).toBe('allow')
+    const imageOnly = ctx('default', {
+      rules: rules({ allow: ['mcp__claude-ui-media__generate_image'] })
+    })
+    expect(decide('generate_video', {}, imageOnly)).toBe('ask')
+  })
+
+  it('a user deny rule in Claude spelling denies', () => {
+    const denied = ctx('bypassPermissions', {
+      rules: rules({ deny: ['mcp__claude-ui-media__generate_image'] })
+    })
+    expect(decide('generate_image', {}, denied)).toBe('deny')
+  })
+
+  it('a rule for an unrelated MCP server does not reach the media tools', () => {
+    const other = ctx('default', { rules: rules({ allow: ['mcp__other__generate_image'] }) })
+    expect(decide('generate_image', {}, other)).toBe('ask')
+  })
+
+  it('planModeOutranksRules covers the media kind', () => {
+    expect(planModeOutranksRules('media', {})).toBe(true)
   })
 })

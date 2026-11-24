@@ -42,6 +42,7 @@ import type { UISessionConfig, UISettings } from '../services/ui-config'
 import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
 import { blobStore, internAttachments } from '../services/blob-store'
+import { reinternMediaBlob } from '../services/media-files'
 import { deleteSessionByEngine } from '../services/session-delete'
 import { crossEngineDispatcher } from '../services/cross-engine-dispatcher'
 import {
@@ -327,7 +328,9 @@ const BLOB_ID_RE = /^[0-9a-f]{64}$/
  */
 export function getBlob(blobId: unknown): { mediaType: string; base64Data: string } | null {
   if (typeof blobId !== 'string' || !BLOB_ID_RE.test(blobId)) return null
-  const blob = blobStore.get(blobId)
+  // A media result from an earlier run (the store is memory-only) is read back from its saved file.
+  const blob =
+    blobStore.get(blobId) ?? (reinternMediaBlob(blobId) ? blobStore.get(blobId) : undefined)
   return blob ? { mediaType: blob.mediaType, base64Data: blob.data.toString('base64') } : null
 }
 
