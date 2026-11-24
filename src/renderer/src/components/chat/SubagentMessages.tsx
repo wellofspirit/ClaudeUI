@@ -13,6 +13,7 @@ import { ImageGalleryProvider } from '../shared/ImageViewer'
 import { DiagramGalleryProvider } from './DiagramGallery'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ContextNoteBlock } from './ContextNoteBlock'
+import { isHiddenNote, type HiddenNoteOptions } from '../../lib/hidden-notes'
 import { TOOL_OUTPUT_SCOPE } from './ChatSearch/search-scope'
 
 interface Props {
@@ -162,6 +163,18 @@ export const SubagentMessages = memo(function SubagentMessages({
     return map
   }, [messages, pendingApprovals])
 
+  const hideTaskNotifications = useSessionStore((s) => s.settings.hideTaskNotifications)
+  const hideSessionMessages = useSessionStore((s) => s.settings.hideSessionMessages)
+  // A message made only of hidden notes renders no wrapper at all, so no empty gap
+  // is left in the flex column.
+  const visibleMessages = useMemo(() => {
+    const opts: HiddenNoteOptions = { hideTaskNotifications, hideSessionMessages }
+    if (!hideTaskNotifications && !hideSessionMessages) return messages
+    return messages.filter(
+      (msg) => msg.content.length === 0 || !msg.content.every((b) => isHiddenNote(b, opts))
+    )
+  }, [messages, hideTaskNotifications, hideSessionMessages])
+
   return (
     <div
       data-testid="SubagentMessages"
@@ -180,7 +193,7 @@ export const SubagentMessages = memo(function SubagentMessages({
           element. */}
       <ImageGalleryProvider messages={messages}>
         <DiagramGalleryProvider messages={messages}>
-          {messages.map((msg) => (
+          {visibleMessages.map((msg) => (
             <div
               key={msg.id}
               data-testid="SubagentMessage"
@@ -208,6 +221,7 @@ export const SubagentMessages = memo(function SubagentMessages({
                     />
                   )
                 }
+                if (isHiddenNote(block, { hideTaskNotifications, hideSessionMessages })) return null
                 return <ContentBlockView key={`${msg.id}-${i}`} block={block} />
               })}
             </div>

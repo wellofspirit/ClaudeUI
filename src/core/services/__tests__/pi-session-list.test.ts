@@ -1031,7 +1031,8 @@ describe('loadPiSessionHistory — custom_message entries', () => {
         {
           type: 'context_note',
           title: 'Agent "scout" completed',
-          fragments: [{ text: notification, label: 'from an agent, not from you' }]
+          fragments: [{ text: notification, label: 'from an agent, not from you' }],
+          source: 'task'
         }
       ],
       timestamp: Date.parse('2024-01-01T00:00:02.000Z')

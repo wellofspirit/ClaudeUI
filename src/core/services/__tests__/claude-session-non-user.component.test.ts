@@ -283,7 +283,8 @@ describe('ClaudeSession.deliverNonUser — an X-Agent result (origin dispatch-re
         title: 'Report from X-Agent impl-e1',
         fragments: [
           { text: 'X-Agent impl-e1 finished: done.', label: 'from an X-Agent, not from you' }
-        ]
+        ],
+        source: 'task'
       }
     ])
     // Still a note for the judge: never a `User:` line.
@@ -311,7 +312,8 @@ describe('ClaudeSession.deliverNonUser — the transcript', () => {
         title: 'Message from Triage assistant',
         fragments: [
           { text: 'please look at ticket 12', label: 'from another session, not from you' }
-        ]
+        ],
+        source: 'session-message'
       }
     ])
 
@@ -459,9 +461,12 @@ describe('a frame cli.js never reads goes back to the held inbox', () => {
     ])
     expect(fragments()[1].text).toContain('crossSessionInbound')
     expect(heldBodies(session)).toEqual([])
+    // A5: a held delivery is an alert; a hide toggle must not drop it.
+    expect(lastNote().content[0]).toMatchObject({ source: 'session-message', alert: true })
 
     hold('released')
     expect(fragments()).toHaveLength(1)
+    expect(lastNote().content[0]).not.toHaveProperty('alert')
 
     hold('held', { cause: 'mode-mismatch' })
     hold('dropped', { outcome: 'discarded' })
@@ -618,7 +623,8 @@ describe('a message another Claude Code process sent (native peer turn)', () => 
       {
         type: 'context_note',
         title: 'probe-A · another Claude session',
-        fragments: [{ text: 'ping', label: 'from another session, not from you' }]
+        fragments: [{ text: 'ping', label: 'from another session, not from you' }],
+        source: 'session-message'
       }
     ])
     expect(mockFindPeerRow).toHaveBeenCalledWith(expect.stringContaining('sid-native'), NATIVE_UUID)

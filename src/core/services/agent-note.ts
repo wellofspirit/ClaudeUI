@@ -35,6 +35,10 @@ export interface AgentNoteInput {
   timestamp: number
   /** Overrides {@link AGENT_NOTE_FRAGMENT_LABEL}. */
   label?: string
+  /** Which view toggle hides the row; default `'task'`. */
+  source?: 'task' | 'session-message'
+  /** A row that must never be hidden (a security warning, a held delivery). */
+  alert?: boolean
 }
 
 export function agentNoteMessage({
@@ -42,12 +46,22 @@ export function agentNoteMessage({
   title,
   text,
   timestamp,
-  label = AGENT_NOTE_FRAGMENT_LABEL
+  label = AGENT_NOTE_FRAGMENT_LABEL,
+  source = 'task',
+  alert
 }: AgentNoteInput): ChatMessage {
   return {
     id,
     role: 'system',
-    content: [{ type: 'context_note', title, fragments: [{ text, label }] }],
+    content: [
+      {
+        type: 'context_note',
+        title,
+        fragments: [{ text, label }],
+        source,
+        ...(alert ? { alert: true as const } : {})
+      }
+    ],
     timestamp
   }
 }
@@ -99,7 +113,9 @@ export function sessionMessageNote(input: {
     title: sessionMessageNoteTitle(input.fromTitle, input.native, input.fromKey),
     text: input.text,
     timestamp: input.timestamp,
-    label: result ? X_AGENT_RESULT_FRAGMENT_LABEL : SESSION_MESSAGE_FRAGMENT_LABEL
+    label: result ? X_AGENT_RESULT_FRAGMENT_LABEL : SESSION_MESSAGE_FRAGMENT_LABEL,
+    // An X-Agent's report or message is a task's output, not a peer's message.
+    source: result ? 'task' : 'session-message'
   })
 }
 

@@ -198,7 +198,8 @@ describe('loadSessionHistory — steers folded into a running turn', () => {
           {
             type: 'context_note',
             title: 'done',
-            fragments: [{ text: xml, label: 'from an agent, not from you' }]
+            fragments: [{ text: xml, label: 'from an agent, not from you' }],
+            source: 'task'
           }
         ]
       })

@@ -6,6 +6,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
+  agentNoteMessage,
   X_AGENT_RESULT_FRAGMENT_LABEL,
   SESSION_MESSAGE_FRAGMENT_LABEL,
   peerRowParts,
@@ -87,6 +88,40 @@ describe('sessionMessageNote', () => {
         })
       ).title
     ).toBe('evil · another Claude session')
+  })
+})
+
+describe('the hide-toggle tags (source, alert)', () => {
+  const block = (m: ChatMessage): Record<string, unknown> => m.content[0] as never
+  const note = (fromKey: string, native?: boolean): ChatMessage =>
+    sessionMessageNote({
+      id: 't',
+      fromTitle: 'x',
+      fromKey,
+      ...(native ? { native } : {}),
+      text: 'b',
+      timestamp: 1
+    })
+
+  it('A1: an agent note defaults to the task source and carries no alert key', () => {
+    const b = block(agentNoteMessage({ id: 'a', title: 't', text: 'x', timestamp: 1 }))
+    expect(b.source).toBe('task')
+    expect(b).not.toHaveProperty('alert')
+    expect(
+      block(agentNoteMessage({ id: 'a', title: 't', text: 'x', timestamp: 1, alert: false }))
+    ).not.toHaveProperty('alert')
+    expect(
+      block(agentNoteMessage({ id: 'a', title: 't', text: 'x', timestamp: 1, alert: true })).alert
+    ).toBe(true)
+  })
+
+  it('A2: a ClaudeUI session or a native peer is a session message; an X-Agent report or message is a task', () => {
+    expect(block(note('s-zzzzzz')).source).toBe('session-message')
+    expect(block(note('s-zzzzzz', true)).source).toBe('session-message')
+    expect(block(note('x-agent:s-abc234')).source).toBe('task')
+    expect(block(note('x-agent-message:s-abc234')).source).toBe('task')
+    // A native peer naming itself an X-Agent is still a peer.
+    expect(block(note('x-agent:s-abc234', true)).source).toBe('session-message')
   })
 })
 

@@ -204,6 +204,7 @@ describe('loadSessionHistory — a native subagent hand-back (L3)', () => {
       })
     ])
     expect(taskNotifications[0]).not.toHaveProperty('warning')
+    expect(messages[1].content[0]).not.toHaveProperty('alert')
     // The peer row is gone; the agent note stands, as live: report, not pointer or XML.
     expect(messages.map((m) => m.id)).toEqual(['u-prompt', 'u-note'])
     expect(titleOf(messages[1])).toBe('Agent "worker" finished')
@@ -282,6 +283,8 @@ describe('loadSessionHistory — a native subagent hand-back (L3)', () => {
       })
     )
     expect(messages.map((m) => m.id)).toEqual(['u-note'])
+    // A4: reloaded, the flagged note is an alert too.
+    expect(messages[0].content[0]).toMatchObject({ source: 'task', alert: true })
     expect(noteText(messages[0])).toContain(`Security warning: ${BLOCKED_WARNING}\n\n${REPORT}`)
   })
 

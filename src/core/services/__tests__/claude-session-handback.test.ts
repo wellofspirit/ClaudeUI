@@ -186,6 +186,8 @@ const ended = (extra: Record<string, unknown> = {}): Record<string, unknown> => 
   usage: { total_tokens: 1200, tool_uses: 1, duration_ms: 4000 },
   ...extra
 })
+const notesOf = (sent: Array<[string, string, unknown]>): ChatMessage[] =>
+  messagesSent(sent).filter((m) => m.role === 'system')
 const noteText = (sent: Array<[string, string, unknown]>): string => {
   const note = messagesSent(sent).find((m) => m.role === 'system')
   return (note?.content[0] as unknown as { fragments: Array<{ text: string }> }).fragments[0].text
@@ -209,6 +211,8 @@ describe('ClaudeSession — a SubagentHandback notification carries the report (
       `Task a1b2c3: completed\n${REPORT}\nUsage: 1200 tokens · 1 tool uses · 4s`
     )
     expect(noteText(sent)).not.toContain('is not repeated here')
+    // A3: an unflagged report is no alert.
+    expect(notesOf(sent)[0].content[0]).not.toHaveProperty('alert')
   })
 
   it('flagged: the security warning rides separately and heads the note', async () => {
@@ -218,6 +222,8 @@ describe('ClaudeSession — a SubagentHandback notification carries the report (
       ended({ handback: 'flagged', handback_report: { text: REPORT, warning } })
     ])
     expect(notifications(sent)[0]).toMatchObject({ handback: 'flagged', summary: REPORT, warning })
+    // A3: a flagged report's note is an alert, so no hide toggle drops it.
+    expect(notesOf(sent)[0].content[0]).toMatchObject({ source: 'task', alert: true })
     expect(noteText(sent)).toBe(
       `Task a1b2c3: completed\nSecurity warning: ${warning}\n\n${REPORT}\nUsage: 1200 tokens · 1 tool uses · 4s`
     )

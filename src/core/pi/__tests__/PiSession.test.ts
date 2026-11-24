@@ -7606,7 +7606,8 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       {
         type: 'context_note',
         title: 'Agent "scout" completed',
-        fragments: [{ text: p.text, label: 'from an agent, not from you' }]
+        fragments: [{ text: p.text, label: 'from an agent, not from you' }],
+        source: 'task'
       }
     ])
     expect(session.getMessages().filter((m) => m.role === 'user')).toHaveLength(usersBefore)
@@ -7891,7 +7892,8 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
         fragments: [
           // The row shows the body, not the wrapper the model reads.
           { text: 'please look at ticket 12', label: 'from another session, not from you' }
-        ]
+        ],
+        source: 'session-message'
       }
     ])
     expect(sentChannels(win)).not.toContain('session:user-message')
