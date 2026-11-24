@@ -664,6 +664,22 @@ describe('parseAgentFile', () => {
     })
   })
 
+  it('background: a boolean is kept (it forces background for a child call); anything else warns and is dropped', () => {
+    for (const value of [true, false]) {
+      const diagnostics: string[] = []
+      const def = parse(`name: a\ndescription: d\nbackground: ${value}`, diagnostics)
+      expect(def.background, String(value)).toBe(value)
+      expect(diagnostics, String(value)).toEqual([])
+    }
+    for (const value of ['sometimes', '[1, 2]', '1']) {
+      const diagnostics: string[] = []
+      const def = parse(`name: a\ndescription: d\nbackground: ${value}`, diagnostics)
+      expect('background' in def, value).toBe(false)
+      expect(diagnostics, value).toEqual(['/x/a.md: background is not a boolean; ignored'])
+    }
+    expect('background' in parse('name: a\ndescription: d')).toBe(false)
+  })
+
   it('rejects a bad name and an unterminated block', () => {
     expect(parseAgentFile(agentMd('name: "-bad"\ndescription: d'), 'user', undefined)).toEqual({
       error: 'missing or invalid name'

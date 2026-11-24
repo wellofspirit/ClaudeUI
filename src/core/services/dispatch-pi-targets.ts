@@ -234,6 +234,7 @@ export function buildPiTargetChildEnv(
     // ADR-089: a dispatch target never gets the host-run `agent` or
     // `send_message` tools (same leak argument as the three above).
     CLAUDEUI_PI_AGENT_TOOL: '',
+    CLAUDEUI_PI_AGENT_SUBAGENT: '',
     CLAUDEUI_PI_SEND_MESSAGE: '',
     // ADR-105 §3: the one tool a target is for — the report that ends its run.
     CLAUDEUI_PI_HAND_BACK: handBack ? '1' : '',

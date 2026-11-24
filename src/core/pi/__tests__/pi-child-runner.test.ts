@@ -610,7 +610,8 @@ describe('PiChildRunner deliveries (ADR-089 S3)', () => {
           {
             type: 'context_note',
             title: 'Agent "g" completed',
-            fragments: [{ text: p.text, label: 'from an agent, not from you' }]
+            fragments: [{ text: p.text, label: 'from an agent, not from you' }],
+            source: 'task'
           }
         ]
       })

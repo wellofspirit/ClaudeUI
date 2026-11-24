@@ -86,7 +86,8 @@ describe('convertOpencodeHistory', () => {
       {
         type: 'context_note',
         title: 'Message from Triage assistant',
-        fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }]
+        fragments: [{ text: 'ticket 12 is yours', label: 'from another session, not from you' }],
+        source: 'session-message'
       }
     ])
     expect(slimTranscript(messages)).toBe(

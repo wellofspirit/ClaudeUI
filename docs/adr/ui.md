@@ -4,7 +4,7 @@ Governs: `src/renderer/src/components/`, `src/renderer/src/hooks/`, `src/rendere
 
 Renderer rules shared by the desktop app and the web client (one UI build, ADR-099): the mobile surface pattern,
 the image viewer and tool-returned images, the zoom trap, Mermaid sanitisation, the Files widget for
-`SendUserFile`, find-in-chat markers, the agent type tile and the sidebar status dot. Every rule applies to both
+`SendUserFile`, find-in-chat markers, the agent type tile, the sidebar status dot and hiding task and session notes. Every rule applies to both
 surfaces unless its section says otherwise. Related decisions in other records: settings information
 architecture ADR-065 (persistence-and-settings.md); the agent roster and run identity ADR-073
 (agents-and-tasks.md); `data-testid` conventions ADR-027 (development-workflow.md); the mobile terminal ADR-060
@@ -395,3 +395,35 @@ on the main thread every frame. The ring and glow extend past the 14px dot slot:
 to it. No class may be called `ring` (Tailwind's `ring` utility draws a 3px box-shadow and silently changes the
 look). A missed terminal event leaves a record behind and the dot stays violet until the process disconnects; the
 agent pill has the same exposure, and the remedy is the record's, not the dot's.
+
+## Task and session notes hide by their source tag; alerts always show (ADR-117)
+
+A `context_note` row is context an engine put into the model's prompt that the user never typed. It is in the
+transcript, collapsed, and expandable to its fragments. Two display-only settings, `hideTaskNotifications` and
+`hideSessionMessages` (both default off, in the quick-settings panel and Settings › Chat), take some of these rows
+out of the view. The model, the auto-mode judge and the stored transcript are unaffected.
+
+**Rule: core decides what a row is; the renderer only filters.** The block carries
+`source?: 'task' | 'session-message'` and `alert?: true` (`src/shared/types/content.ts`), stamped where the row
+is built (`agentNoteMessage` and `sessionMessageNote` in `src/core/services/agent-note.ts`), so every engine,
+live and on reload, is tagged in one place. The renderer hides a row only when its `source` matches an enabled
+setting and it has no `alert` (`src/renderer/src/lib/hidden-notes.ts`).
+
+- `task`: the end of a background run (an agent, a background command, pi's agent notifications), an X-Agent's
+  report or mid-run message, and a Claude subagent's hand-back peer row that no notification absorbed.
+- `session-message`: a message another session sent into this one, delivered by ClaudeUI on any engine or by a
+  native Claude Code peer.
+- `alert`: a security warning (a flagged Claude hand-back, or an X-Agent report whose frame carries a warning
+  above its header, `handBackWarned` in `src/shared/handback-frame.ts`) or a delivery Claude Code held. The facts
+  come from structured state or host-written frame lines, never from model-authored text.
+- No `source`: never hidden. This covers a pi extension's own custom messages, hook context, and every row written
+  before the tags existed, so the default for anything unclassified is visible.
+
+The chat filters once, in `ChatPanel`'s message memo, and drops a system message left with no block, so a hidden
+row leaves no bubble, height estimate or search anchor; whether the chat is empty is still decided from the
+unfiltered list. Subagent transcripts apply the same settings. The automation run history is an audit view and
+is not filtered.
+
+Consequences: a new producer of an injected row chooses a `source` deliberately, or none to keep the row always
+visible; a new kind of row that must never be hidden by these settings sets `alert` in core rather than being
+special-cased in the renderer.

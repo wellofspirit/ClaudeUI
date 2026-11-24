@@ -254,8 +254,20 @@ export type ContentBlock =
    * typed — pi's `custom_message` entries, and (later) Claude's `attachment` family. Collapsed to a count by
    * default; every fragment is UNTRUSTED third-party text and is rendered
    * verbatim, never through the markdown pipeline.
+   *
+   * `source` says which view toggle may hide the row (`hideTaskNotifications`,
+   * `hideSessionMessages`); a row without one (an extension's or a hook's
+   * context) is never hidden. `alert` pins the row visible whatever the toggles
+   * say: a security warning, or a delivery Claude Code held. Both are optional,
+   * so a block written before them stays valid and simply always shows.
    */
-  | { type: 'context_note'; title: string; fragments: { text: string; label?: string }[] }
+  | {
+      type: 'context_note'
+      title: string
+      fragments: { text: string; label?: string }[]
+      source?: 'task' | 'session-message'
+      alert?: true
+    }
   /**
    * What a dispatched agent's engine reported about the run that no message of the agent
    * carries, shown in its card's transcript — today a Claude target's model switch

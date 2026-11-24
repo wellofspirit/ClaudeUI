@@ -1589,7 +1589,8 @@ describe('mapPiEvent — custom messages (ADR-089 S3)', () => {
                   text: '<task-notification>x</task-notification>',
                   label: 'from an agent, not from you'
                 }
-              ]
+              ],
+              source: 'task'
             }
           ],
           timestamp: expect.any(Number)

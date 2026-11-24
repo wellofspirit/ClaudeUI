@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useState, useMemo, useCallback } from 'react'
+import { withoutHiddenNotes } from '../../../lib/hidden-notes'
 import { overlayItemStreams } from '../../../../../core/shared/sync/item-stream'
 import {
   useActiveSession,
@@ -70,9 +71,17 @@ function persistFullscreenHintDismissed(): void {
 export function ChatPanel(): React.JSX.Element {
   const focusedData = useFocusedAgentData()
   const itemStreams = useActiveSession((s) => s.itemStreams)
-  const messages = useMemo(
+  const hideTaskNotifications = useSessionStore((s) => s.settings.hideTaskNotifications)
+  const hideSessionMessages = useSessionStore((s) => s.settings.hideSessionMessages)
+  const allMessages = useMemo(
     () => overlayItemStreams(focusedData.messages, itemStreams),
     [focusedData.messages, itemStreams]
+  )
+  // Display-only: the unfiltered list still decides `hasContent`, so a chat whose
+  // only rows are hidden notes does not fall into the empty/loading state.
+  const messages = useMemo(
+    () => withoutHiddenNotes(allMessages, { hideTaskNotifications, hideSessionMessages }),
+    [allMessages, hideTaskNotifications, hideSessionMessages]
   )
   // The item's OWN start clock rides the open (`ActiveItemStream.startedAt`), so
   // a thinking block that begins after a tool call times from the thought rather
@@ -155,7 +164,7 @@ export function ChatPanel(): React.JSX.Element {
       ? `${chatWidthPx}px`
       : `${chatWidthPercent}%`
   const chatZoom = chatFontScale / uiFontScale
-  const hasContent = messages.length > 0
+  const hasContent = allMessages.length > 0
 
   // What a never-rendered message is assumed to measure (`contain-intrinsic-size`,
   // see estimate-height.ts). The column is measured in the wrapper's own units from

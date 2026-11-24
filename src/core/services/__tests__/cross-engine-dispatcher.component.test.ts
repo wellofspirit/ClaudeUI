@@ -4638,6 +4638,8 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     expect(env.CLAUDEUI_PI_DISPATCH_DESCRIPTION).toBe('')
     // ADR-089: a dispatch target never gets the `agent` tool either.
     expect(env.CLAUDEUI_PI_AGENT_TOOL).toBe('')
+    // …nor its subagent shape (bridge v28), set '' so a parent shell's '1' cannot leak in.
+    expect(env.CLAUDEUI_PI_AGENT_SUBAGENT).toBe('')
     // ADR-089 S3b: nor `send_message`.
     expect(env.CLAUDEUI_PI_SEND_MESSAGE).toBe('')
     // Session tools (slice 2): nor the nine `session_*` tools.
@@ -4654,6 +4656,7 @@ describe('buildPiTargetChildEnv (ADR-033 M4c — recursion guard)', () => {
     expect(env.CLAUDEUI_PI_BRIDGE_TOKEN).toBe('test-token')
     // Exactly these keys — nothing else sneaks in either.
     expect(Object.keys(env).sort()).toEqual([
+      'CLAUDEUI_PI_AGENT_SUBAGENT',
       'CLAUDEUI_PI_AGENT_TOOL',
       'CLAUDEUI_PI_BRIDGE_TOKEN',
       'CLAUDEUI_PI_BRIDGE_URL',

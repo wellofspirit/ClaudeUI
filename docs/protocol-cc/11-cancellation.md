@@ -177,3 +177,27 @@ Net effect: every Promise tied to the query resolves/rejects. No leaks. The cons
 | `child.kill('SIGKILL')`   | Killed instantly               | Force killed | Never — we have no path that issues this                   |
 
 The happy path for most interactions is `interrupt()` for mid-turn cancellation and `endSession()` for cleanup. SIGTERM is the last-resort safety net.
+
+### What an interrupt does to background agents (2.1.330)
+
+`interrupt()` also stops running background agents and workflows unless the consumer declared the
+`perTaskStopAffordance` capability at `initialize`. The schema text (2.1.330): "When declared, an interrupt on an
+open-input (interactive stream-json) session spares running background agents/workflows (Stop only aborts the turn)
+... ABSENCE also fails closed: the interrupt kills background tasks, since the user would otherwise have no way to stop
+a runaway one. First-attached-client-wins on multi-client sessions." A one-shot run (string prompt, `-p`) kills them at
+the held-result release either way. Foreground agents (`is_backgrounded: false`) end with the aborted turn regardless.
+Background Bash is not among the tasks this stops.
+
+ClaudeUI declares it by default: `src/core/services/claude-session.ts` passes `perTaskStopAffordance` to
+`src/core/sdk/query.ts`'s initialize unless the Claude Code setting "Stop keeps background agents running"
+(`engines/claude.json` › `claudeConfig.stopKeepsBackgroundAgents`) is off, read at each spawn. So a Stop on a Claude
+session ends the turn and spares background agents (each keeps its card's Stop, wired to `stop_task`), as pi and
+opencode do (ADR-089, ADR-111 §4); with the setting off it kills them. With the capability, ClaudeUI's interrupt
+denies only the main thread's pending approvals: a subagent's card stays answerable, and one whose agent dies with the
+turn is closed by cli.js's abort of its `canUseTool` call. A process restart (Disconnect, the idle timeout, a respawn)
+still ends every agent.
+
+Probed 2026-11-24 on 2.1.330 (Haiku): main launched a background agent, then ran its own foreground command; an
+`interrupt` 12.5 s in stopped main's command in both runs. With `perTaskStopAffordance: true` the agent kept running
+and completed 24 s later, and main was told; with a plain `initialize` it was killed 20 ms after the interrupt
+(`task_updated {status: "killed"}`), its own command with it.

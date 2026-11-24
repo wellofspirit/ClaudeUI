@@ -74,6 +74,23 @@ describe('every pi child env zeroes CLAUDEUI_PI_SESSION_TOOLS', () => {
       )
   })
 
+  it("only a host-run subagent that may spawn gets the subagent `agent` shape (bridge v28); every other child env sets it to '' explicitly", () => {
+    expect(defaultChildEnv(BRIDGE)).toHaveProperty('CLAUDEUI_PI_AGENT_SUBAGENT', '')
+    expect(buildPiTargetChildEnv(BRIDGE)).toHaveProperty('CLAUDEUI_PI_AGENT_SUBAGENT', '')
+    expect(buildPiTargetChildEnv(BRIDGE, true, true)).toHaveProperty(
+      'CLAUDEUI_PI_AGENT_SUBAGENT',
+      ''
+    )
+    expect(buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: false, listing: 'x' })).toHaveProperty(
+      'CLAUDEUI_PI_AGENT_SUBAGENT',
+      ''
+    )
+    expect(buildPiSubagentChildEnv(BRIDGE, { childCanSpawn: true, listing: 'x' })).toHaveProperty(
+      'CLAUDEUI_PI_AGENT_SUBAGENT',
+      '1'
+    )
+  })
+
   it('a dispatch target that may message its dispatcher gets that one tool and nothing else (ADR-105 §4)', () => {
     const env = buildPiTargetChildEnv(BRIDGE, true, true)
     const tools = JSON.parse(env.CLAUDEUI_PI_SESSION_TOOLS as string) as Array<{ name: string }>

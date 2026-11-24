@@ -899,6 +899,8 @@ describe('PiSession.run — sends a prompt', () => {
           CLAUDEUI_PI_DISPATCH_ENABLED: '1',
           CLAUDEUI_PI_DISPATCH_DESCRIPTION: expect.stringContaining('DIFFERENT engine'),
           CLAUDEUI_PI_PLAN_TOOLS: '1',
+          // The root's `agent` shape (bridge v28): every call runs in the background.
+          CLAUDEUI_PI_AGENT_SUBAGENT: '',
           CLAUDEUI_PI_AGENT_TOOL: '1',
           CLAUDEUI_PI_AGENT_LISTING: expect.stringContaining('- general-purpose: '),
           CLAUDEUI_PI_SEND_MESSAGE: '1',
@@ -6697,6 +6699,32 @@ function makeFakeChildren(): { spawn: SpawnPiChildFn; children: FakeChildProc[] 
   return { spawn, children }
 }
 
+/**
+ * A host-run agent run's END: its `session:task-notification` on `win` (sent
+ * once the child is flushed and disposed, before the owner's delivery). Every
+ * run is a background run (ADR-089), so the `agent` call's own result only
+ * says the child STARTED: a test that needs the run over awaits this.
+ */
+function agentRunEnded(
+  win: MockWindow,
+  toolUseId: string
+): Promise<{ status: string; summary: string }> {
+  return vi.waitFor(
+    () => {
+      const note = (
+        sentPayloads(win, 'session:task-notification') as Array<{
+          toolUseId: string
+          status: string
+          summary: string
+        }>
+      ).find((n) => n.toolUseId === toolUseId)
+      if (!note) throw new Error(`agent ${toolUseId} has not ended`)
+      return note
+    },
+    { timeout: 2_000, interval: 2 }
+  )
+}
+
 function childAssistantToolCall(id: string, name: string, args: Record<string, unknown>): PiEvent {
   return {
     type: 'message_end',
@@ -6722,8 +6750,7 @@ function childAssistantToolCall(id: string, name: string, args: Record<string, u
 describe('PiSession — host-run subagents (ADR-089)', () => {
   const AGENT_INPUT = {
     description: 'Tidy the build',
-    prompt: 'CHILD-TASK-PROMPT: fix the build',
-    run_in_background: false
+    prompt: 'CHILD-TASK-PROMPT: fix the build'
   }
 
   function enableAutoMode(): void {
@@ -6747,12 +6774,21 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     return { session, kids }
   }
 
-  /** The parent's own `agent` call: its gate (must allow), then the hosted run, until the child is prompted. */
+  /**
+   * The parent's own `agent` call: its gate (must allow), then the hosted run,
+   * until the child is prompted. `result` is the call's own result — the
+   * launch acknowledgement, never the run's end; `ended()` awaits the end.
+   */
   async function launch(
+    win: MockWindow,
     kids: ReturnType<typeof makeFakeChildren>,
     callId: string,
     input: Record<string, unknown> = AGENT_INPUT
-  ): Promise<{ result: Promise<unknown>; child: FakeChildProc }> {
+  ): Promise<{
+    result: Promise<unknown>
+    child: FakeChildProc
+    ended: () => Promise<{ status: string; summary: string }>
+  }> {
     const before = kids.children.length
     const decision = await gate(callId, 'agent', input)
     expect(decision).toEqual({ behavior: 'allow' })
@@ -6760,7 +6796,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     await vi.waitFor(() => expect(kids.children.length).toBe(before + 1))
     const child = kids.children[before]
     await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
-    return { result, child }
+    return { result, child, ended: () => agentRunEnded(win, callId) }
   }
 
   it('T1: the parent spawn carries the agent tool + a listing of the built-ins, ONE -e, no M5b env', async () => {
@@ -6769,6 +6805,9 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const opts = lastSpawnOpts()
     expect(opts.args.filter((a) => a === '-e')).toHaveLength(1)
     expect(opts.env.CLAUDEUI_PI_AGENT_TOOL).toBe('1')
+    // The root shape (bridge v28): '' explicitly, never absent, so a ClaudeUI started from a
+    // subagent's shell (which carries '1') cannot hand its own session the subagent shape.
+    expect(opts.env).toHaveProperty('CLAUDEUI_PI_AGENT_SUBAGENT', '')
     for (const name of ['general-purpose', 'Explore', 'Plan']) {
       expect(opts.env.CLAUDEUI_PI_AGENT_LISTING).toContain(`- ${name}: `)
     }
@@ -6837,7 +6876,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     projectRules({})
     const win2 = new MockWindow()
     const { session: s2, kids } = await parent('rid-sub-h5-child', win2)
-    const { result, child } = await launch(kids, 'call-agent-h5')
+    const { child, ended } = await launch(win2, kids, 'call-agent-h5')
     await s2.notifySettingsChanged()
     projectRules({ deny: ['Agent'] })
     expect(
@@ -6848,7 +6887,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       })
     ).toEqual({ behavior: 'deny', reason: 'Denied by permission rule: Agent' })
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     s2.dispose()
   })
 
@@ -6889,7 +6928,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
   it('T4: a child call asks the human on the PARENT under default; after the parent switches to auto the next one is judged with the child header and D1 context', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-t4', win)
-    const { result, child } = await launch(kids, 'call-agent-4')
+    const { child, ended } = await launch(win, kids, 'call-agent-4')
 
     // Default: a card on the parent routing, keyed by the CHILD's own call id.
     const asked = child.opts.gateHandler({
@@ -6936,7 +6975,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(reviews.map((r) => r.toolUseId)).toContain('child-bash-2')
 
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -6945,7 +6984,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-t5', win, 'auto')
-    const { result, child } = await launch(kids, 'call-explore', {
+    const { child, ended } = await launch(win, kids, 'call-explore', {
       ...AGENT_INPUT,
       subagent_type: 'Explore'
     })
@@ -6964,7 +7003,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(read).toEqual(pinnedAllow('/cwd/a.ts'))
     expect(judgeCalls).toHaveLength(1)
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -6973,7 +7012,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const { session, kids } = await parent('rid-sub-t6', win)
     const transcriptBefore = session.getMessages().length
     const costBefore = session.status.totalCostUsd
-    const { result, child } = await launch(kids, 'call-agent-6')
+    const { result, child, ended } = await launch(win, kids, 'call-agent-6')
 
     child.push({ type: 'message_start', message: { role: 'assistant', content: [] } })
     child.push({
@@ -6992,6 +7031,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     })
     child.push(childAssistantToolCall('child-ls', 'ls', {}))
     child.push({ type: 'agent_settled' })
+    await ended()
     const r = (await result) as { content: Array<{ text: string }>; isError?: boolean }
 
     const opens = sentPayloads(win, 'session:item-open') as Array<{
@@ -7020,13 +7060,21 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       taskId: string
     }>
     expect(notes).toEqual([
-      expect.objectContaining({ status: 'completed', taskId: started[0].taskId })
+      expect.objectContaining({
+        status: 'completed',
+        taskId: started[0].taskId,
+        summary: 'child report 1'
+      })
     ])
+    // The call's own result is the launch acknowledgement; the report reaches
+    // the session as a notification delivery, with its usage.
     expect(r.isError).toBeUndefined()
     expect(r.content[0].text).toMatch(
-      /^child report 1\n\nagentId: [0-9a-f-]{36} \(use send_message/
+      /^Async agent launched successfully\.\nagentId: [0-9a-f-]{36} \(use send_message/
     )
-    expect(r.content[0].text).toMatch(/\n<usage>total_tokens: /)
+    await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    expect(parentDeliveries()[0].text).toContain('<result>child report 1</result>')
+    expect(parentDeliveries()[0].text).toMatch(/<usage><total_tokens>\d+<\/total_tokens>/)
 
     const childRows = mockRecordUsageEvent.mock.calls
       .map((c) => c[0] as Record<string, unknown>)
@@ -7043,15 +7091,16 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.dispose()
   })
 
-  it('T9: stopTask stops the running child — abort, "Agent stopped by user.", status stopped', async () => {
+  it('T9: stopTask stops the running child — abort, status stopped, "Agent stopped by user.", a passive delivery', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-t9', win)
-    const { result, child } = await launch(kids, 'call-agent-9')
+    const { child, ended } = await launch(win, kids, 'call-agent-9')
     expect(await session.stopTask('call-agent-9')).toEqual({ success: true })
     expect(child.commands().some((c) => c.type === 'abort')).toBe(true)
     child.push({ type: 'agent_settled' })
-    const r = (await result) as { content: Array<{ text: string }>; isError?: boolean }
-    expect(r).toMatchObject({ isError: true, content: [{ text: 'Agent stopped by user.' }] })
+    expect(await ended()).toMatchObject({ status: 'stopped', summary: 'Agent stopped by user.' })
+    await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    expect(parentDeliveries()[0]).toMatchObject({ wake: false, details: { stoppedBy: 'user' } })
     const notes = sentPayloads(win, 'session:task-notification') as Array<{ status: string }>
     expect(notes.map((n) => n.status)).toEqual(['stopped'])
     expect(await session.stopTask('call-agent-9')).toEqual({
@@ -7061,17 +7110,22 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.dispose()
   })
 
-  it('T10: interrupt() stops an in-flight child; cancel() disposes one; an abandoned agent exchange stops its child', async () => {
+  it('T10: interrupt() stops NO child (no abort; it runs on and its report reaches the session); an abandoned agent exchange stops its child; cancel() disposes one', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-t10', win)
 
-    const a = await launch(kids, 'call-int')
+    // A stray run_in_background: false once made this a foreground run, which the
+    // interrupt stopped.
+    const a = await launch(win, kids, 'call-int', { ...AGENT_INPUT, run_in_background: false })
     await session.interrupt()
-    expect(a.child.commands().some((c) => c.type === 'abort')).toBe(true)
+    expect(a.child.commands().some((c) => c.type === 'abort')).toBe(false)
     a.child.push({ type: 'agent_settled' })
-    expect(await a.result).toMatchObject({ isError: true, content: [{ text: 'Agent cancelled.' }] })
+    expect(await a.ended()).toMatchObject({ status: 'completed', summary: 'child report 1' })
+    await vi.waitFor(() =>
+      expect(parentDeliveries().map((p) => p.details.toolUseId)).toEqual(['call-int'])
+    )
 
-    const b = await launch(kids, 'call-abandon')
+    const b = await launch(win, kids, 'call-abandon')
     bridgeCaptured.onAbandoned!({
       route: 'hosted-tool',
       toolCallId: 'call-abandon',
@@ -7080,19 +7134,19 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     })
     expect(b.child.commands().some((c) => c.type === 'abort')).toBe(true)
     b.child.push({ type: 'agent_settled' })
-    expect(await b.result).toMatchObject({ isError: true })
+    expect(await b.ended()).toMatchObject({ status: 'stopped', summary: 'Agent cancelled.' })
 
-    const c = await launch(kids, 'call-cancel')
+    const c = await launch(win, kids, 'call-cancel')
     session.cancel()
     expect(c.child.client.dispose).toHaveBeenCalled()
-    expect(await c.result).toMatchObject({ isError: true, content: [{ text: 'Agent cancelled.' }] })
+    expect(await c.ended()).toMatchObject({ status: 'stopped', summary: 'Agent cancelled.' })
   })
 
   it('T12: a child agent call allowed by its gate mints the CHILD grant; without one the child bridge fails closed', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-t12', win)
-    const { result, child } = await launch(kids, 'call-agent-12')
-    const input = { description: 'nested', prompt: 'go deeper', run_in_background: false }
+    const { child, ended } = await launch(win, kids, 'call-agent-12')
+    const input = { description: 'nested', prompt: 'go deeper' }
 
     expect(
       await child.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'grand-x' })
@@ -7114,12 +7168,26 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     await vi.waitFor(() => expect(kids.children).toHaveLength(2))
     const gc = kids.children[1]
     await vi.waitFor(() => expect(gc.commands().some((c) => c.type === 'prompt')).toBe(true))
-    const started = sentPayloads(win, 'session:task-started') as Array<{ toolUseId: string }>
-    expect(started.map((s) => s.toolUseId)).toEqual(['call-agent-12', 'grand-z'])
+    const started = sentPayloads(win, 'session:task-started') as Array<{
+      toolUseId: string
+      isBackgrounded: boolean
+    }>
+    // A child's default call runs in the foreground (Claude Code 2.1.330 parity).
+    expect(started.map((s) => [s.toolUseId, s.isBackgrounded])).toEqual([
+      ['call-agent-12', true],
+      ['grand-z', false]
+    ])
     gc.push({ type: 'agent_settled' })
-    await grand
+    // Its report is the child's tool result, never a notification.
+    expect(((await grand) as { content: Array<{ text: string }> }).content[0].text).toMatch(
+      /^child report 2\n\nagentId: /
+    )
+    expect(childDeliveries(child)).toHaveLength(0)
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
+    await vi.waitFor(() =>
+      expect(parentDeliveries().map((p) => p.details.toolUseId)).toEqual(['call-agent-12'])
+    )
     session.dispose()
   })
   /** The pending card a child call raised on the parent, by the child's call id. */
@@ -7142,7 +7210,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
   it('R2: stopping a child retracts its pending card — approval-dismiss for its requestId, and the gate resolves deny', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-r2', win)
-    const { result, child } = await launch(kids, 'call-r2')
+    const { child, ended } = await launch(win, kids, 'call-r2')
     const asked = child.opts.gateHandler({
       toolCallId: 'child-ask',
       toolName: 'bash',
@@ -7155,7 +7223,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       requestId: card.requestId
     })
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -7164,7 +7232,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-f1', win, 'auto')
-    const { result, child } = await launch(kids, 'call-f1')
+    const { child, ended } = await launch(win, kids, 'call-f1')
     expect(judgeCalls).toHaveLength(1)
 
     let release!: () => void
@@ -7192,7 +7260,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(judgeCalls).toHaveLength(2)
     expect(sentChannels(win)).not.toContain('session:approval-request')
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -7237,7 +7305,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
         }
       )
       await session.run('PARENT-INTENT: please tidy the build')
-      const { result, child } = await launch(kids, `call-f2-${parentMode}`, {
+      const { child, ended } = await launch(win, kids, `call-f2-${parentMode}`, {
         ...AGENT_INPUT,
         subagent_type: 'widener'
       })
@@ -7255,7 +7323,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
         expect(sentChannels(win)).not.toContain('session:approval-request')
       }
       child.push({ type: 'agent_settled' })
-      await result
+      await ended()
       session.dispose()
     }
   })
@@ -7273,7 +7341,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-f5', win, 'auto')
-    const { result, child } = await launch(kids, 'call-f5')
+    const { child, ended } = await launch(win, kids, 'call-f5')
 
     // Two child blocks (the child's consecutive streak is 2), each confirmed
     // by a second sample (decision 3).
@@ -7362,19 +7430,19 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     ).toBe(false)
 
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
   it('F6: the parent process exiting disposes a running child', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-f6', win)
-    const { result, child } = await launch(kids, 'call-f6')
+    const { child, ended } = await launch(win, kids, 'call-f6')
     const exitCalls = mockOnExit.mock.calls
     const parentExit = exitCalls[exitCalls.length - 1][0] as () => void
     parentExit()
     expect(child.client.dispose).toHaveBeenCalled()
-    expect(await result).toMatchObject({ isError: true, content: [{ text: 'Agent cancelled.' }] })
+    expect(await ended()).toMatchObject({ status: 'stopped', summary: 'Agent cancelled.' })
     session.dispose()
   })
 
@@ -7383,7 +7451,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>']
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-f8', win, 'auto')
-    const { result, child } = await launch(kids, 'call-f8')
+    const { child, ended } = await launch(win, kids, 'call-f8')
     expect(judgeCalls).toHaveLength(1)
     judgeScript.replies = [
       '<block>yes</block><reason>no nesting</reason>',
@@ -7403,7 +7471,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     // The child's launch call (one) + this block's two samples (decision 3).
     expect(judgeCalls).toHaveLength(3)
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -7413,7 +7481,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>']
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-hold', win, 'auto')
-    const { result, child } = await launch(kids, 'call-hold')
+    const { child, ended } = await launch(win, kids, 'call-hold')
     judgeScript.replies = ['<block>yes</block><reason>no pushing</reason>']
     const decision = child.opts.gateHandler({
       toolCallId: 'ch-1',
@@ -7430,7 +7498,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.resolveApproval(card.requestId, 'allow')
     expect(await decision).toEqual({ behavior: 'allow' })
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -7452,7 +7520,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>']
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-p6-live', win, 'auto')
-    const { result, child } = await launch(kids, 'call-p6')
+    const { result, child } = await launch(win, kids, 'call-p6')
     judgeScript.replies = ['<block>yes</block><reason>no pushing</reason>']
     expect(
       await child.opts.gateHandler({
@@ -7506,7 +7574,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>']
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-p6-done', win, 'auto')
-    const { result, child } = await launch(kids, 'call-p6d')
+    const { child, ended } = await launch(win, kids, 'call-p6d')
     judgeScript.replies = ['<block>yes</block><reason>no pushing</reason>']
     await child.opts.gateHandler({
       toolCallId: 'p6d-1',
@@ -7514,7 +7582,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       input: { command: 'git push origin main' }
     })
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
 
     const nudge = session.approveBlocked('p6d-1')
     expect(nudge?.prompt).toBe(
@@ -7539,7 +7607,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>']
     const win = new MockWindow()
     const { session, kids } = await parent('rid-sub-order', win, 'auto')
-    const { result, child } = await launch(kids, 'call-order')
+    const { child, ended } = await launch(win, kids, 'call-order')
 
     // The child's blocked call lands on its trajectory…
     vi.setSystemTime(2_000_000)
@@ -7569,7 +7637,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(user.indexOf('User: QUEUED-CONSENT: really, go ahead')).toBeGreaterThan(blockedAt)
     expect(user.indexOf('User: DELIVERED-CONSENT: yes push it')).toBeGreaterThan(blockedAt)
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -7635,7 +7703,8 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       {
         type: 'context_note',
         title: 'Agent "scout" completed',
-        fragments: [{ text: p.text, label: 'from an agent, not from you' }]
+        fragments: [{ text: p.text, label: 'from an agent, not from you' }],
+        source: 'task'
       }
     ])
     expect(session.getMessages().filter((m) => m.role === 'user')).toHaveLength(usersBefore)
@@ -7658,7 +7727,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     judgeScript.replies = ['<block>no</block>'] // the parent's own agent call
     const win = new MockWindow()
     const { session, kids } = await parent('rid-s3-m3', win, 'auto')
-    const { result, child } = await launch(kids, 'call-m3')
+    const { child, ended } = await launch(win, kids, 'call-m3')
     const p = payload({ details: { agentId: 'ag-g', toolUseId: 'grand', status: 'completed' } })
     child.push(deliveredEvent(p) as unknown as Record<string, unknown>)
 
@@ -7681,7 +7750,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(judgeCalls[1].user).toContain('User: PARENT-INTENT')
     expect(judgeCalls[1].user).not.toContain('NOTIFY-SECRET')
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.dispose()
   })
 
@@ -7723,7 +7792,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       }
       return defaultRequestImpl(cmd)
     })
-    const { result, child } = await launch(kids, 'call-bg', BG_INPUT)
+    const { result, child } = await launch(win, kids, 'call-bg', BG_INPUT)
     expect(((await result) as { content: Array<{ text: string }> }).content[0].text).toMatch(
       /^Async agent launched successfully\./
     )
@@ -7920,7 +7989,8 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
         fragments: [
           // The row shows the body, not the wrapper the model reads.
           { text: 'please look at ticket 12', label: 'from another session, not from you' }
-        ]
+        ],
+        source: 'session-message'
       }
     ])
     expect(sentChannels(win)).not.toContain('session:user-message')
@@ -7966,55 +8036,87 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.dispose()
   })
 
-  it("B7: interrupt() stops only the foreground child — a background child's card survives and still resolves; the parent's own card is denied; cancel() disposes both with no delivery", async () => {
+  it("B7: interrupt() stops NO agent — a child's open card survives and still resolves, the parent's own card is denied, and a child's later notification still reaches the session; cancel() disposes the rest with no delivery", async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-s3-b7', win)
-    const fg = await launch(kids, 'call-fg')
-    const bg = await launch(kids, 'call-bg7', BG_INPUT)
-    await bg.result
+    // A stray run_in_background: false once made this a foreground run, which the
+    // interrupt stopped.
+    const first = await launch(win, kids, 'call-b7a', { ...AGENT_INPUT, run_in_background: false })
+    const second = await launch(win, kids, 'call-b7b', BG_INPUT)
 
-    const bgAsk = bg.child.opts.gateHandler({
-      toolCallId: 'bg-bash',
+    const childAsk = first.child.opts.gateHandler({
+      toolCallId: 'b7-bash',
       toolName: 'bash',
       input: { command: 'npm run build' }
     })
     const ownAsk = gate('own-bash', 'bash', { command: 'npm run build' })
-    const bgCard = await cardFor(win, 'bg-bash')
+    const childCard = await cardFor(win, 'b7-bash')
     await cardFor(win, 'own-bash')
 
     await session.interrupt()
-    expect(fg.child.commands().some((c) => c.type === 'abort')).toBe(true)
-    expect(bg.child.commands().some((c) => c.type === 'abort')).toBe(false)
+    for (const k of [first, second]) {
+      expect(k.child.commands().some((c) => c.type === 'abort')).toBe(false)
+    }
     expect(await ownAsk).toEqual({ behavior: 'deny', reason: 'Interrupted' })
     const dismissed = sentPayloads(win, 'session:approval-dismiss') as Array<{ requestId: string }>
-    expect(dismissed.map((d) => d.requestId)).not.toContain(bgCard.requestId)
-    session.resolveApproval(bgCard.requestId, 'allow')
-    expect(await bgAsk).toMatchObject({ behavior: 'allow' })
-    fg.child.push({ type: 'agent_settled' })
-    expect(await fg.result).toMatchObject({ isError: true })
+    expect(dismissed.map((d) => d.requestId)).not.toContain(childCard.requestId)
+    session.resolveApproval(childCard.requestId, 'allow')
+    expect(await childAsk).toMatchObject({ behavior: 'allow' })
+
+    // The first child finishes after the interrupt: its report still reaches the session.
+    first.child.push({ type: 'agent_settled' })
+    expect(await first.ended()).toMatchObject({ status: 'completed' })
+    await vi.waitFor(() =>
+      expect(parentDeliveries().map((p) => p.details.toolUseId)).toEqual(['call-b7a'])
+    )
+    expect(parentDeliveries()[0]).toMatchObject({ kind: 'task-notification', wake: true })
 
     // Observed at the manager → session seam: a dispose stop never asks the
     // session to deliver (after cancel() the session would drop it anyway).
     const deliver = vi.spyOn(session, 'deliverAgentMessage')
     session.cancel()
-    expect(bg.child.client.dispose).toHaveBeenCalled()
-    await vi.waitFor(() =>
-      expect(
-        (sentPayloads(win, 'session:task-notification') as Array<{ toolUseId: string }>).some(
-          (n) => n.toolUseId === 'call-bg7'
-        )
-      ).toBe(true)
-    )
+    expect(second.child.client.dispose).toHaveBeenCalled()
+    expect(await second.ended()).toMatchObject({ status: 'stopped', summary: 'Agent cancelled.' })
     await new Promise((r) => setTimeout(r, 20))
     expect(deliver).not.toHaveBeenCalled()
-    expect(parentDeliveries()).toHaveLength(0)
+    expect(parentDeliveries()).toHaveLength(1)
+  })
+
+  it("B7b: interrupt() leaves a child's FOREGROUND grandchild running (the child's turn, not the session's): no abort anywhere, and its report still returns to the child as its tool result", async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-s3-b7b', win)
+    const lead = await launch(win, kids, 'call-b7-lead', BG_INPUT)
+    const GRAND = 'grand-b7'
+    const input = { description: 'nested', prompt: 'go deeper' }
+    expect(
+      await lead.child.opts.gateHandler({ toolCallId: GRAND, toolName: 'agent', input })
+    ).toEqual({ behavior: 'allow' })
+    // A child's default call runs in the foreground: the child waits on it.
+    const grand = lead.child.opts.hostedToolHandler!({
+      toolName: 'agent',
+      input,
+      toolCallId: GRAND
+    }) as Promise<{ content: Array<{ text: string }> }>
+    await vi.waitFor(() => expect(kids.children).toHaveLength(2))
+    const gc = kids.children[1]
+    await vi.waitFor(() => expect(gc.commands().some((c) => c.type === 'prompt')).toBe(true))
+
+    await session.interrupt()
+    for (const k of kids.children) {
+      expect(k.commands().some((c) => c.type === 'abort')).toBe(false)
+    }
+    gc.push({ type: 'agent_settled' })
+    expect((await grand).content[0].text).toMatch(/^child report 2\n\nagentId: /)
+    lead.child.push({ type: 'agent_settled' })
+    expect(await lead.ended()).toMatchObject({ status: 'completed' })
+    session.dispose()
   })
 
   it('B8 (session): a user Stop of a background child → stopped notification, then a passive delivery', async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-s3-b8', win)
     settleParent()
-    const bg = await launch(kids, 'call-bg8', BG_INPUT)
+    const bg = await launch(win, kids, 'call-bg8', BG_INPUT)
     await bg.result
     expect(await session.stopTask('call-bg8')).toEqual({ success: true })
     bg.child.push({ type: 'agent_settled' })
@@ -8033,7 +8135,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-s3-b9', win)
     session.setInactivityTimeout(1_000)
-    const bg = await launch(kids, 'call-bg9', BG_INPUT)
+    const bg = await launch(win, kids, 'call-bg9', BG_INPUT)
     await bg.result
     vi.useFakeTimers()
     try {
@@ -8044,6 +8146,48 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
       await session.stopTask('call-bg9') // passive notification: the parent stays idle
       bg.child.push({ type: 'agent_settled' })
       await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+      expect(session.status.state).toBe('idle')
+      vi.advanceTimersByTime(1_500)
+      expect(mockDispose).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('B9b: a live grandchild whose spawner already finished holds the idle timer; once it ends, the timer is armed', async () => {
+    const win = new MockWindow()
+    const { session, kids } = await parent('rid-s3-b9b', win)
+    session.setInactivityTimeout(1_000)
+    const lead = await launch(win, kids, 'call-lead9', BG_INPUT)
+    // The child launches a grandchild through its own agent tool, in the background.
+    const input = { description: 'nested', prompt: 'go deeper', run_in_background: true }
+    expect(
+      await lead.child.opts.gateHandler({ toolCallId: 'grand-b9', toolName: 'agent', input })
+    ).toEqual({ behavior: 'allow' })
+    await lead.child.opts.hostedToolHandler!({ toolName: 'agent', input, toolCallId: 'grand-b9' })
+    await vi.waitFor(() => expect(kids.children).toHaveLength(2))
+    const grand = kids.children[1]
+    await vi.waitFor(() => expect(grand.commands().some((c) => c.type === 'prompt')).toBe(true))
+    // The spawner finishes (its report reaches the still-running parent): only the
+    // grandchild is live.
+    lead.child.push({ type: 'agent_settled' })
+    await lead.ended()
+    await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(1))
+    vi.useFakeTimers()
+    try {
+      settleParent()
+      expect(session.status.state).toBe('idle')
+      vi.advanceTimersByTime(5_000)
+      expect(mockDispose).not.toHaveBeenCalled()
+
+      await session.stopTask('grand-b9') // passive notification: the parent stays idle
+      grand.push({ type: 'agent_settled' })
+      await agentRunEnded(win, 'grand-b9')
+      await vi.waitFor(() => expect(parentDeliveries()).toHaveLength(2))
+      expect(parentDeliveries()[1]).toMatchObject({
+        wake: false,
+        details: { toolUseId: 'grand-b9' }
+      })
       expect(session.status.state).toBe('idle')
       vi.advanceTimersByTime(1_500)
       expect(mockDispose).toHaveBeenCalled()
@@ -8121,7 +8265,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.dispose()
   })
 
-  // ── ADR-089 S3b: messaging gates, Send to background, record rebuild ──────
+  // ── ADR-089 S3b: messaging gates, record rebuild ─────────────────────
 
   it('S7: send_message is allowed with no card in default and plan, judged once in auto; task_stop is allowed in auto with zero judge calls', async () => {
     for (const mode of ['default', 'plan']) {
@@ -8174,16 +8318,49 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.dispose()
   })
 
-  it('G1 (session): backgroundTask on a foreground agent card returns the async text to the waiting call', async () => {
+  it("G1 (session): backgroundTask on a child's FOREGROUND agent card returns the async text to the child's waiting call; a root agent card has no foreground run to send", async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-g1', win)
-    const { result, child } = await launch(kids, 'call-g1')
-    expect(await session.backgroundTask('call-g1')).toEqual({ success: true })
-    expect(((await result) as { content: Array<{ text: string }> }).content[0].text).toMatch(
-      /^Async agent launched successfully\./
+    const lead = await launch(win, kids, 'call-g1', BG_INPUT)
+    // Every root call runs in the background: nothing to send, and nothing changes.
+    expect(await session.backgroundTask('call-g1')).toEqual({
+      success: false,
+      error: 'No foreground agent is running for that card'
+    })
+    const GRAND = 'grand-g1'
+    const input = { description: 'nested', prompt: 'go deeper' }
+    expect(
+      await lead.child.opts.gateHandler({ toolCallId: GRAND, toolName: 'agent', input })
+    ).toEqual({ behavior: 'allow' })
+    // A child's default call runs in the foreground: the child waits on it.
+    const grand = lead.child.opts.hostedToolHandler!({
+      toolName: 'agent',
+      input,
+      toolCallId: GRAND
+    }) as Promise<{ content: Array<{ text: string }> }>
+    await vi.waitFor(() => expect(kids.children).toHaveLength(2))
+    const gc = kids.children[1]
+    await vi.waitFor(() => expect(gc.commands().some((c) => c.type === 'prompt')).toBe(true))
+    expect(await session.backgroundTask(GRAND)).toEqual({ success: true })
+    expect((await grand).content[0].text).toMatch(/^Async agent launched successfully\./)
+    const starts = (
+      sentPayloads(win, 'session:task-started') as Array<{
+        toolUseId: string
+        isBackgrounded: boolean
+      }>
+    ).filter((st) => st.toolUseId === GRAND)
+    expect(starts.map((st) => st.isBackgrounded)).toEqual([false, true])
+    expect(await session.backgroundTask(GRAND)).toMatchObject({ success: false })
+
+    gc.push({ type: 'agent_settled' })
+    // Its launcher still runs: the report is delivered to it, not to the session.
+    await vi.waitFor(() => expect(childDeliveries(lead.child)).toHaveLength(1))
+    expect(childDeliveries(lead.child)[0].details).toMatchObject({ toolUseId: GRAND })
+    lead.child.push(
+      deliveredEvent(childDeliveries(lead.child)[0]) as unknown as Record<string, unknown>
     )
-    expect(await session.backgroundTask('call-g1')).toMatchObject({ success: false })
-    child.push({ type: 'agent_settled' })
+    lead.child.push({ type: 'agent_settled' })
+    await lead.ended()
     session.dispose()
   })
 
@@ -8219,7 +8396,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     expect(refused.content[0].text).toContain('Unknown model "gpt-9"')
     expect(kids.children).toHaveLength(0)
 
-    const { child } = await launch(kids, 'ag-ok', { ...AGENT_INPUT, model: 'sonnet' })
+    const { child } = await launch(win, kids, 'ag-ok', { ...AGENT_INPUT, model: 'sonnet' })
     expect(child.commands().find((c) => c.type === 'set_model')).toMatchObject({
       provider: 'anthropic',
       modelId: 'claude-sonnet-4-5'
@@ -8355,7 +8532,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
   it("F4: a child's approval card names the agent whose action it is", async () => {
     const win = new MockWindow()
     const { session, kids } = await parent('rid-f4', win)
-    const { result, child } = await launch(kids, 'call-f4')
+    const { child, ended } = await launch(win, kids, 'call-f4')
     const asked = child.opts.gateHandler({
       toolCallId: 'f4-bash',
       toolName: 'bash',
@@ -8375,7 +8552,7 @@ describe('PiSession — host-run subagents (ADR-089)', () => {
     session.resolveApproval(card.requestId, 'deny')
     await asked
     child.push({ type: 'agent_settled' })
-    await result
+    await ended()
     session.cancel()
     await own
   })
@@ -9925,9 +10102,9 @@ describe('PiSession — path containment (H1), real temp project', () => {
         { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
       )
       await session.run('PARENT-INTENT')
-      const input = { description: 'Tidy', prompt: 'CHILD-TASK', run_in_background: false }
+      const input = { description: 'Tidy', prompt: 'CHILD-TASK' }
       expect((await gate('call-agent', 'agent', input)).behavior).toBe('allow')
-      const result = hostedTool('agent', input, 'call-agent')
+      void hostedTool('agent', input, 'call-agent')
       await vi.waitFor(() => expect(kids.children.length).toBe(1))
       const child = kids.children[0]
       await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
@@ -9936,7 +10113,7 @@ describe('PiSession — path containment (H1), real temp project', () => {
         child,
         done: async () => {
           child.push({ type: 'agent_settled' })
-          await result
+          await agentRunEnded(win, 'call-agent')
         }
       }
     }
@@ -10213,29 +10390,31 @@ describe('PiSession — scratchpad (ADR-110)', () => {
 
     async function runChild(
       session: PiSession,
+      win: MockWindow,
       kids: ReturnType<typeof makeFakeChildren>
     ): Promise<void> {
       await session.run('PARENT-INTENT')
-      const input = { description: 'Tidy', prompt: 'CHILD-TASK', run_in_background: false }
+      const input = { description: 'Tidy', prompt: 'CHILD-TASK' }
       expect((await gate('call-agent', 'agent', input)).behavior).toBe('allow')
-      const result = hostedTool('agent', input, 'call-agent')
+      void hostedTool('agent', input, 'call-agent')
       await vi.waitFor(() => expect(kids.children.length).toBe(1))
       const child = kids.children[0]
       await vi.waitFor(() => expect(child.commands().some((c) => c.type === 'prompt')).toBe(true))
       child.push({ type: 'agent_settled' })
-      await result
+      await agentRunEnded(win, 'call-agent')
     }
 
     it("a child's appended prompt carries the PARENT's scratchpad paragraph", async () => {
       vi.mocked(mockedWriteFileSync).mockClear()
       const kids = makeFakeChildren()
+      const win = new MockWindow()
       const session = open(
         'rid-e-child',
-        new MockWindow(),
+        win,
         { model: 'openai-codex/gpt-5.6-luna', permissionMode: 'default' },
         { spawnPiChild: kids.spawn, subagentsRoot: '/fake/subagents' }
       )
-      await runChild(session, kids)
+      await runChild(session, win, kids)
       const dir = expectedDir(flagValues(lastSpawnOpts().args, '--session-id')[0])
       const texts = promptFileText()
       expect(texts).toHaveLength(1)
@@ -10246,9 +10425,10 @@ describe('PiSession — scratchpad (ADR-110)', () => {
     it('without a scratchpad the child prompt has no such paragraph', async () => {
       vi.mocked(mockedWriteFileSync).mockClear()
       const kids = makeFakeChildren()
+      const win = new MockWindow()
       const session = open(
         'rid-e-child-none',
-        new MockWindow(),
+        win,
         { model: 'openai-codex/gpt-5.6-luna', permissionMode: 'default' },
         {
           spawnPiChild: kids.spawn,
@@ -10263,7 +10443,7 @@ describe('PiSession — scratchpad (ADR-110)', () => {
           })
         }
       )
-      await runChild(session, kids)
+      await runChild(session, win, kids)
       expect(promptFileText()).toHaveLength(1)
       expect(promptFileText()[0]).not.toContain('Scratchpad directory')
       session.dispose()

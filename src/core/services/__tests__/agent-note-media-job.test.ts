@@ -31,6 +31,17 @@ function noteOf(message: ChatMessage | null): { title: string; label: string | u
   return { title: block.title, label: block.fragments[0].label }
 }
 
+it('a media job notice is task output, so "Hide task notifications" hides it like an X-Agent report', () => {
+  const block = sessionMessageNote({
+    id: 'n0',
+    fromTitle: 'Image job finished',
+    fromKey: 'media-job:0123456789ab',
+    text: 'body',
+    timestamp: 1
+  })?.content[0]
+  expect(block && block.type === 'context_note' && block.source).toBe('task')
+})
+
 describe('the media job sender', () => {
   it('keeps its own key on a dispatch-result, where an X-Agent’s gets the x-agent: prefix', () => {
     expect(wrapperSender({ origin: 'dispatch-result', from: MEDIA })).toEqual(MEDIA)

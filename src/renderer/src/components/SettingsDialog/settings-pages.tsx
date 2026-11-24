@@ -24,7 +24,7 @@
 import type { EngineId } from '../../../../shared/types'
 import type { EngineCapabilities } from '../../../../shared/model-capabilities'
 import { engineMeta } from '../../../../shared/engine-meta'
-import { sessionToolsEnabled } from '../../../../shared/app-settings'
+import { DEFAULT_SETTINGS, sessionToolsEnabled } from '../../../../shared/app-settings'
 import { SECTIONS, type Section, type SettingItem } from './settings-sections'
 import {
   SettingRow,
@@ -411,6 +411,41 @@ const MEDIA_OUTPUT: SettingItem = {
   render: (s, u) => <MediaOutputSettings settings={s} update={u} />
 }
 
+const HIDE_TASK_NOTIFICATIONS: SettingItem = {
+  key: 'hideTaskNotifications',
+  label: 'Hide task notifications',
+  keywords:
+    'hide task notifications notes agent finished background command completed x-agent report chat rows',
+  render: (s, u) => (
+    <SettingsToggle
+      testid="SettingsHideTaskNotifications"
+      label="Hide task notifications"
+      description="Leave out the notes a finished agent, background command or X-Agent adds to the chat. The model still receives them; a note with a security warning always shows."
+      modified={s.hideTaskNotifications !== DEFAULT_SETTINGS.hideTaskNotifications}
+      onReset={() => u({ hideTaskNotifications: DEFAULT_SETTINGS.hideTaskNotifications })}
+      checked={s.hideTaskNotifications}
+      onChange={(v) => u({ hideTaskNotifications: v })}
+    />
+  )
+}
+
+const HIDE_SESSION_MESSAGES: SettingItem = {
+  key: 'hideSessionMessages',
+  label: 'Hide session messages',
+  keywords: 'hide session messages notes another session sent peer delivery chat rows',
+  render: (s, u) => (
+    <SettingsToggle
+      testid="SettingsHideSessionMessages"
+      label="Hide session messages"
+      description="Leave out messages another session sent into this one. The model still receives them; a message Claude Code held always shows."
+      modified={s.hideSessionMessages !== DEFAULT_SETTINGS.hideSessionMessages}
+      onReset={() => u({ hideSessionMessages: DEFAULT_SETTINGS.hideSessionMessages })}
+      checked={s.hideSessionMessages}
+      onChange={(v) => u({ hideSessionMessages: v })}
+    />
+  )
+}
+
 export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   SANDBOX_CROSS_LINK,
   OTHER_ENGINE_PERMISSIONS,
@@ -429,7 +464,9 @@ export const PAGE_LOCAL_ITEMS: readonly SettingItem[] = [
   MEDIA_ENGINES,
   MEDIA_MODELS,
   MEDIA_JOBS,
-  MEDIA_OUTPUT
+  MEDIA_OUTPUT,
+  HIDE_TASK_NOTIFICATIONS,
+  HIDE_SESSION_MESSAGES
 ]
 
 // ── Icons (14px, stroke 1.8 — the rail size on the boards) ───────────
@@ -606,6 +643,11 @@ export const PAGES: SettingsPage[] = [
         ])
       },
       { id: 'thinking', label: 'Thinking', items: itemsOf('tool-output', ['expandThinking']) },
+      {
+        id: 'notes',
+        label: 'Task and session notes',
+        items: [HIDE_TASK_NOTIFICATIONS, HIDE_SESSION_MESSAGES]
+      },
       { id: 'voice', label: 'Voice input', items: itemsOf('voice') },
       { id: 'git-actions', label: 'Git actions', items: itemsOf('git', ['gitCommitMode']) }
     ]

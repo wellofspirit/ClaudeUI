@@ -41,6 +41,10 @@ export interface AppSettings {
   expandReadResults: boolean
   hideToolInput: boolean
   expandThinking: boolean
+  /** Display-only: hide task-end / X-Agent context notes (never an alert). */
+  hideTaskNotifications: boolean
+  /** Display-only: hide notes for a message another session sent into this one. */
+  hideSessionMessages: boolean
   searchCaseSensitive: boolean
   /** Find-in-chat skips content marked as tool output (TOOL_OUTPUT_SCOPE). */
   searchExcludeToolOutput: boolean
@@ -189,6 +193,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   expandReadResults: false,
   hideToolInput: false,
   expandThinking: false,
+  hideTaskNotifications: false,
+  hideSessionMessages: false,
   searchCaseSensitive: false,
   searchExcludeToolOutput: false,
   diffViewSplit: false,
