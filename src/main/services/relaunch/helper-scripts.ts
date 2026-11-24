@@ -276,6 +276,8 @@ $U8=New-Object Text.UTF8Encoding $false
 # Unreadable job: stop before anything (the trap below covers the whole script).
 try{$j=[IO.File]::ReadAllText($env:CLAUDEUI_RELAUNCH_JOB,[Text.Encoding]::UTF8)|ConvertFrom-Json}catch{exit 70}
 if(-not $j.stateDir -or -not $j.token -or -not $j.installPath){exit 70}
+# Variable names are case-insensitive, and a function sees its callers' variables:
+# every name has ONE spelling in this script ($T0 and a later $t0 were one variable).
 $S=$j.stateDir;$T=$j.token;$to=$j.timeouts;$I=$j.installPath
 $T0=[DateTimeOffset]::FromUnixTimeMilliseconds([int64]$j.startedAt).LocalDateTime
 $PB='and the previous version could not be put back: it is running from '
@@ -285,7 +287,7 @@ function NowMs{[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}
 function L($m){try{[IO.File]::AppendAllText("$S\$T.log",('{0} {1}{2}' -f [DateTime]::UtcNow.ToString('o'),$m,[Environment]::NewLine),$U8)}catch{}}
 # Read UTF-8 without locking out a writer's rename (share ReadWrite and Delete).
 function RT($p){$f=[IO.FileStream]::new($p,'Open','Read','ReadWrite, Delete');try{[IO.StreamReader]::new($f,$U8).ReadToEnd()}finally{$f.Dispose()}}
-function Put($f,$t){$tmp="$f.$PID.tmp";[IO.File]::WriteAllText($tmp,[string]$t,$U8);Move-Item -LiteralPath $tmp -Destination $f -Force}
+function Put($f,$txt){$tmp="$f.$PID.tmp";[IO.File]::WriteAllText($tmp,[string]$txt,$U8);Move-Item -LiteralPath $tmp -Destination $f -Force}
 function Fin($st,$r){
 $o=[ordered]@{token=$T;status=$st;mode=$j.mode;fromVersion=$j.fromVersion;toVersion=$j.toVersion}
 if($r){$o.reason=[string]$r}
@@ -298,7 +300,7 @@ try{if(((RT $own)|ConvertFrom-Json).token -eq $T){Remove-Item -LiteralPath $own;
 exit 0
 }
 # The old process is gone, or its pid now names a process started after the job (reused).
-function Old{$p=Get-Process -Id $j.pid -ErrorAction SilentlyContinue;if(-not $p){return $false};$s=$p.StartTime;if($null -eq $s){return $false};$s -le $T0}
+function Old{$p=Get-Process -Id $j.pid -ErrorAction SilentlyContinue;if(-not $p){return $false};$born=$p.StartTime;if($null -eq $born){return $false};$born -le $T0}
 # Stopped part-way: put a moved-aside install back, never leave nothing running.
 trap{if(-not $script:Done){
 if($j.mode -eq 'swap' -and -not (Test-Path -LiteralPath $I) -and (Test-Path -LiteralPath $j.backupPath) -and (MoveDir $j.backupPath $I 10)){Go $I}elseif(-not (Old) -and (Test-Path -LiteralPath $I) -and -not (Under $I).Count){Go $I}
@@ -316,7 +318,7 @@ foreach($n in (Get-ChildItem -LiteralPath $d -Force -Name)){if($e -notcontains $
 $true}
 # Rename a folder, refusing an existing destination; tried $n times a second apart.
 # Not "Ren": a built-in alias (Rename-Item) would win over a function of that name.
-function MoveDir($a,$b,$n){for($i=1;;$i++){if(Test-Path -LiteralPath $b){L "refusing: $b exists";return $false};try{[IO.Directory]::Move($a,$b);L "renamed $a -> $b";return $true}catch{L "rename $a -> $b failed ($i): $($_.Exception.Message)";if($i -ge $n){return $false};Start-Sleep -Seconds 1}}}
+function MoveDir($a,$b,$n){for($k=1;;$k++){if(Test-Path -LiteralPath $b){L "refusing: $b exists";return $false};try{[IO.Directory]::Move($a,$b);L "renamed $a -> $b";return $true}catch{L "rename $a -> $b failed ($k): $($_.Exception.Message)";if($k -ge $n){return $false};Start-Sleep -Seconds 1}}}
 function Ok{try{$h=(RT "$S\health\$($j.installKey).json")|ConvertFrom-Json}catch{return $false};if([int64]$h.at -le [int64]$j.startedAt){return $false};if($j.mode -eq 'swap' -and $h.version -ne $j.toVersion){return $false};$true}
 function Bad($r){L "preflight failed: $r";Go $I;Fin 'failed' $r}
 Put "$S\$T.ready" (NowMs)
@@ -348,10 +350,10 @@ Go $j.backupPath;Fin 'failed' "the staged build could not be moved into place, $
 $swapAt=Get-Date;$script:Swapped=$true
 L 'swapped'}
 Go $I
-$t0=Get-Date;$retried=$false
+$waitFrom=Get-Date;$retried=$false
 while($true){
 if(Ok){if($j.mode -eq 'swap'){Fin 'updated'};Fin 'ok'}
-$el=((Get-Date)-$t0).TotalSeconds
+$el=((Get-Date)-$waitFrom).TotalSeconds
 if(-not $retried -and $el -ge $to.launchCheckSec){$retried=$true;if(-not (Under $I).Count){L 'nothing runs from the install; launching once more';Go $I}}
 if($el -ge $to.healthSec){break}
 Start-Sleep -Milliseconds 500}

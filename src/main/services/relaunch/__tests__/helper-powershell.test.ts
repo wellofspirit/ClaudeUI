@@ -7,7 +7,7 @@
  * so a running fake is a process whose executable is under the install.
  */
 import { afterAll, describe, expect, it } from 'vitest'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess, type SpawnSyncReturns } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -26,7 +26,8 @@ import {
   installKeyFor,
   jobFiles,
   newToken,
-  siblingPath
+  siblingPath,
+  type JobFiles
 } from '../paths'
 import { takeLock } from '../lock'
 import { parseRelaunchResult, type RelaunchResult } from '../../../../shared/relaunch'
@@ -116,6 +117,25 @@ describe('PowerShell helper shape', () => {
     expect(POWERSHELL_HELPER).toContain('while(Old){')
   })
 
+  // PowerShell variable names are case-insensitive, and a function sees its
+  // callers' variables (dynamic scope), so two spellings of one name are one
+  // variable anywhere in the script: `$t0=Get-Date` after the launch silently
+  // overwrote `$T0`, the job start the reused-pid check compares against.
+  it('every variable has one spelling (PowerShell names are case-insensitive)', () => {
+    const spellings = new Map<string, Set<string>>()
+    for (const m of POWERSHELL_HELPER.matchAll(
+      /\$(?:(?:script|global|local|private):)?(\w+)(:?)/gi
+    )) {
+      if (m[2] === ':') continue // `$env:NAME`: an environment variable, not a variable
+      const key = m[1].toLowerCase()
+      spellings.set(key, (spellings.get(key) ?? new Set<string>()).add(m[1]))
+    }
+    expect(spellings.size).toBeGreaterThan(20)
+    expect(spellings.has('t0')).toBe(true)
+    const clashes = [...spellings.values()].filter((s) => s.size > 1).map((s) => [...s].join('/'))
+    expect(clashes).toEqual([])
+  })
+
   it('neither script deletes recursively or stops a process by name', () => {
     expect(POWERSHELL_HELPER).not.toMatch(
       /-Recurse|Remove-Item\s+-LiteralPath\s+\$I|Stop-Process\s+-Name|taskkill/i
@@ -127,6 +147,7 @@ describe('PowerShell helper shape', () => {
 })
 
 const started: number[] = []
+const helpers: ChildProcess[] = []
 afterAll(() => {
   for (const pid of started) {
     try {
@@ -135,7 +156,62 @@ afterAll(() => {
       /* gone */
     }
   }
+  // A no-op for one that exited (its pid may name another process by now).
+  for (const child of helpers) child.kill()
 })
+
+/** How a helper run ended (null while it runs), and what it printed. */
+interface HelperRun {
+  status: string | null
+  exitedAt: number
+  stdout: string
+  stderr: string
+}
+
+/**
+ * Everything a helper run left behind, for a failure message (CI is the only
+ * Windows feedback): how the process ended, its output, whether it got as far
+ * as `<t>.ready`, its log, the result as written, and what the state dir holds.
+ */
+function helperDiagnostics(files: JobFiles, state: string, run: HelperRun): string {
+  const tail = (text: string, max = 4000): string =>
+    text === '' ? '(empty)' : text.length > max ? `...${text.slice(-max)}` : text
+  const errCode = (err: unknown): string =>
+    (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : String(err))
+  const content = (file: string): string => {
+    try {
+      return tail(fs.readFileSync(file, 'utf8'), 8000)
+    } catch (err) {
+      return `(${errCode(err)})`
+    }
+  }
+  let listing: string
+  try {
+    listing = fs.readdirSync(state).join(', ') || '(empty)'
+  } catch (err) {
+    listing = `(${errCode(err)})`
+  }
+  return [
+    `helper: ${run.status ?? 'still running'}`,
+    `stderr: ${tail(run.stderr)}`,
+    `stdout: ${tail(run.stdout)}`,
+    `${path.basename(files.ready)} exists: ${fs.existsSync(files.ready)}`,
+    `${path.basename(files.log)}: ${content(files.log)}`,
+    `${path.basename(files.result)}: ${content(files.result)}`,
+    `state dir: ${listing}`
+  ].join('\n')
+}
+
+/** A finished `spawnSync` as a {@link HelperRun}. */
+function syncRun(r: SpawnSyncReturns<string>): HelperRun {
+  const how = `exited with code ${r.status}${r.signal ? ` (signal ${r.signal})` : ''}`
+  return {
+    status: r.error ? `${r.error.message}; ${how}` : how,
+    exitedAt: Date.now(),
+    stdout: r.stdout ?? '',
+    stderr: r.stderr ?? ''
+  }
+}
 
 const FAKE_CMD = `@echo off
 set "app=%~1"
@@ -171,6 +247,91 @@ const versionOf = (dir: string): string =>
   fs.readFileSync(path.join(dir, 'resources', 'version.txt'), 'utf8').trim()
 
 describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windows)', () => {
+  const cmdExe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe')
+
+  // A syntax error makes powershell.exe print it and exit before the first
+  // line runs, which a detached helper with no output never shows.
+  it('the compacted helper parses in Windows PowerShell 5.1', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rl-ps-parse-'))
+    const file = path.join(dir, 'helper.ps1')
+    // With a BOM: Windows PowerShell reads a BOM-less file in the ANSI code page.
+    fs.writeFileSync(file, `\ufeff${POWERSHELL_HELPER}`, 'utf8')
+    const parse = [
+      '$e=$null;$t=$null',
+      '[void][System.Management.Automation.Language.Parser]::ParseFile($env:RL_PARSE_FILE,[ref]$t,[ref]$e)',
+      "if($e.Count){$e|%{$_.Extent.StartLineNumber.ToString()+': '+$_.Message+' | '+$_.Extent.StartScriptPosition.Line};exit 1}",
+      'exit 0'
+    ].join('\n')
+    const cmd = helperCommand('win32', { json: '', sh: '' })
+    const r = spawnSync(
+      cmd.file,
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodePowerShell(parse)],
+      {
+        env: helperEnv(process.env, { env: { RL_PARSE_FILE: file }, unsetEnv: cmd.unsetEnv }),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 60_000
+      }
+    )
+    fs.rmSync(dir, { recursive: true, force: true })
+    const out = syncRun(r)
+    expect(r.status, `${out.status}\nparse errors:\n${out.stdout}\nstderr:\n${out.stderr}`).toBe(0)
+  }, 90_000)
+
+  // The real encoded helper, run attached (not detached) with its output
+  // captured, so a helper that cannot run at all says why. The old pid is
+  // dead and the launch just exits: nothing reports healthy, so no-health.
+  it('runs to a result when attached, its output captured', () => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'rl-ps-sync-')))
+    const state = path.join(root, 'state')
+    const install = path.join(root, 'ClaudeUI')
+    fs.mkdirSync(state)
+    fs.mkdirSync(install)
+    const token = newToken()
+    const files = jobFiles(state, token)
+    const job: RelaunchJob = {
+      schema: 1,
+      token,
+      pid: spawnSync(cmdExe, ['/c', 'exit']).pid!,
+      platform: 'win32',
+      mode: 'relaunch',
+      installPath: install,
+      installKey: installKeyFor(install, 'win32'),
+      stateDir: state,
+      stagedPath: '',
+      backupPath: '',
+      failedPath: '',
+      fromVersion: '1.0.0',
+      toVersion: '1.0.0',
+      startedAt: Date.now(),
+      launch: [cmdExe, '/c', 'exit'],
+      timeouts: { waitPidSec: 5, lockWaitSec: 1, killWaitSec: 1, launchCheckSec: 1, healthSec: 2 }
+    }
+    takeLock(state, { token, pid: process.pid, at: Date.now() })
+    writeJobFiles(files, job)
+    const cmd = helperCommand('win32', files)
+    const r = spawnSync(cmd.file, cmd.args, {
+      cwd: state,
+      env: helperEnv(process.env, cmd),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 60_000
+    })
+    const why = helperDiagnostics(files, state, syncRun(r))
+    expect(fs.existsSync(files.result), `no result\n${why}`).toBe(true)
+    let result: RelaunchResult | null = null
+    try {
+      result = parseRelaunchResult(JSON.parse(fs.readFileSync(files.result, 'utf8')))
+    } catch {
+      /* the diagnostics show what was written */
+    }
+    expect(result?.status, why).toBe('no-health')
+    expect(r.status, why).toBe(0)
+    expect(fs.existsSync(path.join(state, 'lock')), why).toBe(false)
+  }, 90_000)
+
   function fixture(
     mode: 'relaunch' | 'swap',
     staged?: 'healthy' | 'silent',
@@ -193,6 +354,7 @@ describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windo
     const backup = backupPathFor(install, '1.0.0', token, 'win32')
     const failed = failedPathFor(install, '2.0.0', token, 'win32')
     const key = installKeyFor(install, 'win32')
+    let helper: HelperRun = { status: 'never spawned', exitedAt: 0, stdout: '', stderr: '' }
     const run = (over: { pid?: number; timeouts?: Partial<RelaunchTimeouts> } = {}): void => {
       const job: RelaunchJob = {
         schema: 1,
@@ -223,10 +385,12 @@ describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windo
       takeLock(state, { token, pid: process.pid, at: Date.now() })
       writeJobFiles(files, job)
       const cmd = helperCommand('win32', files)
+      // Detached and hidden as production spawns it, but with its output kept
+      // (production ignores it): a helper that writes no result says why.
       const child = spawn(cmd.file, cmd.args, {
         detached: true,
         windowsHide: true,
-        stdio: 'ignore',
+        stdio: ['ignore', 'pipe', 'pipe'],
         cwd: state,
         env: {
           ...helperEnv(process.env, cmd),
@@ -235,16 +399,40 @@ describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windo
           FAKE_KEY: key
         }
       })
+      const proc: HelperRun = { status: null, exitedAt: 0, stdout: '', stderr: '' }
+      helper = proc
+      helpers.push(child)
+      child.stdout?.setEncoding('utf8').on('data', (d: string) => (proc.stdout += d))
+      child.stderr?.setEncoding('utf8').on('data', (d: string) => (proc.stderr += d))
+      const ended = (status: string): void => {
+        proc.status ??= status
+        proc.exitedAt ||= Date.now()
+      }
+      child.once('exit', (code, signal) =>
+        ended(`exited with code ${code}${signal ? ` (signal ${signal})` : ''}`)
+      )
+      child.once('error', (err) => ended(`spawn error: ${err.message}`))
       child.unref()
     }
-    const result = async (): Promise<RelaunchResult> =>
-      waitFor(
-        () =>
-          fs.existsSync(files.result) &&
-          parseRelaunchResult(JSON.parse(fs.readFileSync(files.result, 'utf8'))),
-        60_000,
-        'the result'
-      )
+    const result = async (): Promise<RelaunchResult> => {
+      try {
+        return await waitFor(
+          () => {
+            if (fs.existsSync(files.result))
+              return parseRelaunchResult(JSON.parse(fs.readFileSync(files.result, 'utf8')))
+            // Gone for a while with nothing written: it never will.
+            if (helper.exitedAt && Date.now() - helper.exitedAt > 2000)
+              throw new Error('the helper exited without writing a result')
+            return null
+          },
+          60_000,
+          'the result'
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        throw new Error(`${message}\n${helperDiagnostics(files, state, helper)}`, { cause: err })
+      }
+    }
     return { root, state, install, stagedPath, backup, failed, files, run, result }
   }
 

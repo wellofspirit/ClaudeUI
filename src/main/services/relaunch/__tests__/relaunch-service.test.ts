@@ -38,9 +38,14 @@ let state: string
 let install: string
 let execPath: string
 
+// makeFakeApp copies /bin/bash: the suites that need a fake install run on
+// macOS and Linux only (helper-powershell.test.ts drives the Windows helper).
+const onWindows = process.platform === 'win32'
+
 beforeEach(() => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'relaunch-svc-')))
   state = path.join(root, 'state')
+  if (onWindows) return
   install = makeFakeApp(path.join(root, 'ClaudeUI.app'), '1.0.0', 'healthy')
   execPath = path.join(install, 'Contents', 'MacOS', 'ClaudeUI')
 })
@@ -71,7 +76,7 @@ function service(over: Partial<RelaunchServiceDeps> = {}) {
   return { svc, confirmQuit }
 }
 
-describe('requestRelaunch', () => {
+describe.skipIf(onWindows)('requestRelaunch', () => {
   it('writes the job, waits for the helper, saves the restore record and confirms the quit', async () => {
     const { svc, confirmQuit } = service()
     await svc.requestRelaunch({ mode: 'relaunch' })
@@ -416,7 +421,7 @@ describe('requestRelaunch', () => {
   })
 })
 
-describe('reportHealthy', () => {
+describe.skipIf(onWindows)('reportHealthy', () => {
   it('writes the health record the helper reads', async () => {
     const now = 1_800_000_000_000
     const { svc } = service({ now: () => now })
@@ -571,7 +576,7 @@ describe('health gate', () => {
   })
 })
 
-describe('reconcileJobs', () => {
+describe.skipIf(onWindows)('reconcileJobs', () => {
   const key = (): string => installKeyFor(install, 'darwin')
   const DAY = 24 * 60 * 60_000
   const NOW = Date.now()

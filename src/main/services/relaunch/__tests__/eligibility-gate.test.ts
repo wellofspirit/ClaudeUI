@@ -130,7 +130,10 @@ describe('lock', () => {
   })
 })
 
-describe('removeOwnedDir (the deletion gate)', () => {
+// The macOS layout, on the real filesystem: on a Windows host these paths
+// would go through path.posix, so it runs on macOS and Linux only. The Windows
+// layout has its own suite below.
+describe.skipIf(process.platform === 'win32')('removeOwnedDir (the deletion gate)', () => {
   let root: string
   let state: string
   let install: string
@@ -379,5 +382,150 @@ describe('removeOwnedDir (the deletion gate)', () => {
     const backup = makeOwned('.ClaudeUI.app.old-1.0.0-abcdef01')
     takeLock(state, { token, pid: 1, at: Date.now() })
     expect(removeOwnedDir(install, backup, opts()).removed).toBe(false)
+  })
+})
+
+// The gate runs on Windows in production: the Windows layout, on real NTFS.
+describe.skipIf(process.platform !== 'win32')('removeOwnedDir on Windows (NTFS)', () => {
+  let root: string
+  let state: string
+  let install: string
+  const token = 'abcdef0123456789abcdef0123456789'
+  const log = vi.fn()
+
+  /** A Windows desktop folder: the exe, `resources/`, and a marker listing both. */
+  const makeOwned = (name: string, withMarker = true): string => {
+    const dir = path.join(root, name)
+    fs.mkdirSync(path.join(dir, 'resources'), { recursive: true })
+    fs.writeFileSync(path.join(dir, 'ClaudeUI.exe'), 'x')
+    fs.writeFileSync(path.join(dir, 'resources', 'keep.txt'), 'x')
+    if (withMarker)
+      fs.writeFileSync(
+        path.join(dir, 'resources', 'claudeui-install.json'),
+        marker(['ClaudeUI.exe', 'resources'])
+      )
+    return dir
+  }
+
+  beforeEach(() => {
+    root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'relaunch-gate-win-')))
+    state = path.join(root, 'state')
+    fs.mkdirSync(state)
+    install = makeOwned('ClaudeUI')
+    log.mockClear()
+  })
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }))
+
+  const opts = (extra: object = {}): Parameters<typeof removeOwnedDir>[2] => ({
+    platform: 'win32',
+    stateDir: state,
+    log,
+    ...extra
+  })
+
+  it('removes an owned backup', () => {
+    const backup = makeOwned('.ClaudeUI.old-1.0.0-abcdef01')
+    expect(removeOwnedDir(install, backup, opts({ token }))).toEqual({ removed: true })
+    expect(fs.existsSync(backup)).toBe(false)
+    expect(fs.existsSync(path.join(install, 'resources', 'keep.txt'))).toBe(true)
+  })
+
+  it.each<[string, () => string, object, RegExp]>([
+    [
+      'wrong parent',
+      () => makeOwned(path.join('sub', '.ClaudeUI.old-1.0.0-abcdef01')),
+      {},
+      /not a sibling/
+    ],
+    [
+      'wrong token',
+      () => makeOwned('.ClaudeUI.old-1.0.0-abcdef01'),
+      { token: '0123456789abcdef0123456789abcdef' },
+      /token/
+    ],
+    ['no marker', () => makeOwned('.ClaudeUI.failed-2.0.0-abcdef01', false), {}, /marker/],
+    ['missing', () => path.join(root, '.ClaudeUI.old-1.0.0-abcdef01'), {}, /does not exist/],
+    [
+      // A junction needs no admin rights (a directory symlink does).
+      'a junction',
+      () => {
+        const link = path.join(root, '.ClaudeUI.old-1.0.0-abcdef01')
+        fs.symlinkSync(makeOwned('real-target'), link, 'junction')
+        return link
+      },
+      {},
+      /not a real directory/
+    ]
+  ])('refuses: %s', (_name, make, extra, reason) => {
+    const candidate = make()
+    const r = removeOwnedDir(install, candidate, opts(extra))
+    expect(r.removed).toBe(false)
+    if (!r.removed) expect(r.reason).toMatch(reason)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('deletion gate refused'))
+    expect(fs.existsSync(path.join(install, 'resources', 'keep.txt'))).toBe(true)
+    // What a junction points at is never touched.
+    if (fs.existsSync(path.join(root, 'real-target')))
+      expect(fs.existsSync(path.join(root, 'real-target', 'resources', 'keep.txt'))).toBe(true)
+  })
+
+  it('matches names and paths case-insensitively, token included', () => {
+    const backup = makeOwned('.claudeui.OLD-1.0.0-ABCDEF01')
+    const sameDirOtherCase = path.join(root.toUpperCase(), '.claudeui.OLD-1.0.0-ABCDEF01')
+    expect(removeOwnedDir(path.join(root, 'CLAUDEUI'), sameDirOtherCase, opts({ token }))).toEqual({
+      removed: true
+    })
+    expect(fs.existsSync(backup)).toBe(false)
+    expect(fs.existsSync(install)).toBe(true)
+  })
+
+  it('refuses while a live lock names it (in any case), and allows once the lock is stale', () => {
+    const backup = makeOwned('.ClaudeUI.old-1.0.0-abcdef01')
+    const job: RelaunchJob = {
+      schema: 1,
+      token,
+      pid: 1,
+      platform: 'win32',
+      mode: 'swap',
+      installPath: install,
+      installKey: '0123456789abcdef',
+      stateDir: state,
+      stagedPath: path.join(root, '.ClaudeUI.update-2.0.0-abcdef01'),
+      backupPath: backup.toUpperCase(),
+      failedPath: path.join(root, '.ClaudeUI.failed-2.0.0-abcdef01'),
+      fromVersion: '1.0.0',
+      toVersion: '2.0.0',
+      startedAt: Date.now(),
+      launch: [],
+      timeouts: DEFAULT_TIMEOUTS
+    }
+    writeJobFiles(jobFiles(state, token), job)
+    takeLock(state, { token, pid: 1, at: Date.now() })
+    expect(removeOwnedDir(install, backup, opts())).toEqual({
+      removed: false,
+      reason: 'a relaunch in progress names it'
+    })
+    expect(fs.existsSync(backup)).toBe(true)
+    fs.writeFileSync(jobFiles(state, token).result, '{}')
+    expect(removeOwnedDir(install, backup, opts())).toEqual({ removed: true })
+  })
+
+  it("an extract container is removed by its own token's staging record, never another's", () => {
+    const dir = path.join(root, '.ClaudeUI.extract-2.0.0-abcdef01')
+    fs.mkdirSync(path.join(dir, 'app', 'resources'), { recursive: true })
+    fs.writeFileSync(path.join(dir, 'app', 'ClaudeUI.exe'), 'x')
+    const record = (tok: string): void =>
+      fs.writeFileSync(
+        path.join(dir, STAGING_RECORD),
+        JSON.stringify({ token: tok, version: '2.0.0', at: Date.now() })
+      )
+    record('0123456789abcdef0123456789abcdef')
+    expect(removeOwnedDir(install, dir, opts())).toMatchObject({
+      removed: false,
+      reason: expect.stringMatching(/neither a marked ClaudeUI\.app nor a staging record/)
+    })
+    expect(fs.existsSync(path.join(dir, 'app', 'ClaudeUI.exe'))).toBe(true)
+    record(token)
+    expect(removeOwnedDir(install, dir, opts({ token }))).toEqual({ removed: true })
+    expect(fs.existsSync(dir)).toBe(false)
   })
 })

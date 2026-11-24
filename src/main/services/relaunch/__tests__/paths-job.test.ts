@@ -153,43 +153,53 @@ describe('job files', () => {
     timeouts: DEFAULT_TIMEOUTS
   })
 
-  it('shQuote survives bash for every awkward character', () => {
-    for (const value of [nasty, "'", "''", '$(id)', '`id`', ' ', '\n', '\\', '!']) {
-      const r = spawnSync('/bin/bash', ['-c', `v=${shQuote(value)}; printf %s "$v"`], {
-        encoding: 'utf8'
-      })
-      expect(r.stdout).toBe(value)
+  // The .sh job is the macOS helper's: these two need bash.
+  it.skipIf(process.platform === 'win32')(
+    'shQuote survives bash for every awkward character',
+    () => {
+      for (const value of [nasty, "'", "''", '$(id)', '`id`', ' ', '\n', '\\', '!']) {
+        const r = spawnSync('/bin/bash', ['-c', `v=${shQuote(value)}; printf %s "$v"`], {
+          encoding: 'utf8'
+        })
+        expect(r.stdout).toBe(value)
+      }
     }
+  )
+
+  it('shQuote refuses a NUL byte', () => {
     expect(() => shQuote('a\0b')).toThrow(/NUL/)
   })
 
-  it('the sh rendering sources back to the same values, without running anything', () => {
-    const files = jobFiles(dir, job().token)
-    writeJobFiles(files, job())
-    const marker = path.join(dir, 'ran')
-    const r = spawnSync(
-      '/bin/bash',
-      [
-        '-c',
-        'source "$1" && printf "%s\\0" "$JOB_INSTALL" "$JOB_STAGED" "$JOB_BACKUP" "$JOB_FAILED" "$JOB_PID" "$JOB_STARTED_AT" "${#JOB_LAUNCH[@]}" "${JOB_LAUNCH[4]}"',
-        'x',
-        files.sh
-      ],
-      { encoding: 'utf8', env: { HOME: marker } }
-    )
-    expect(r.status).toBe(0)
-    expect(r.stdout.split('\0').slice(0, 8)).toEqual([
-      nasty,
-      `${nasty}.staged`,
-      "/x/'old'",
-      '/x/$(rm -rf ~)',
-      '4242',
-      '1700000000123',
-      '5',
-      "--x='y'"
-    ])
-    expect(fs.existsSync(marker)).toBe(false)
-  })
+  it.skipIf(process.platform === 'win32')(
+    'the sh rendering sources back to the same values, without running anything',
+    () => {
+      const files = jobFiles(dir, job().token)
+      writeJobFiles(files, job())
+      const marker = path.join(dir, 'ran')
+      const r = spawnSync(
+        '/bin/bash',
+        [
+          '-c',
+          'source "$1" && printf "%s\\0" "$JOB_INSTALL" "$JOB_STAGED" "$JOB_BACKUP" "$JOB_FAILED" "$JOB_PID" "$JOB_STARTED_AT" "${#JOB_LAUNCH[@]}" "${JOB_LAUNCH[4]}"',
+          'x',
+          files.sh
+        ],
+        { encoding: 'utf8', env: { HOME: marker } }
+      )
+      expect(r.status).toBe(0)
+      expect(r.stdout.split('\0').slice(0, 8)).toEqual([
+        nasty,
+        `${nasty}.staged`,
+        "/x/'old'",
+        '/x/$(rm -rf ~)',
+        '4242',
+        '1700000000123',
+        '5',
+        "--x='y'"
+      ])
+      expect(fs.existsSync(marker)).toBe(false)
+    }
+  )
 
   it('the json rendering round-trips through parseJob', () => {
     const files = jobFiles(dir, job().token)
