@@ -47,6 +47,14 @@ as-built map: modules, the files they write, the protocols between them, and the
   from the install), swaps when asked, launches the install with the same arguments (macOS: `open -n` plus an
   allowlist of identity, mode and proxy variables), and waits for a health record newer than the job. A swap without
   health after 90 s is rolled back. Results are reconciled by the next boot of that install.
+- **Built in place.** When the install's marker `buildId` differs from the running process's (`bun run build:mac`
+  wrote into the folder ClaudeUI runs from), `app:relaunch-availability` carries `newBuild` (version, short commit,
+  build time) and a relaunch job names that build (`toVersion`, `toBuild`, `source: 'rebuild'`), so the notice reads
+  "Relaunched into the new build <commit>". There is no backup, so no rollback. On macOS a marker newer than
+  `_CodeSignature/CodeResources` is a build not yet signed (the build stamps the marker before `codesign`): a
+  relaunch, and a swap (whose backup would be that build), is refused until the seal lands, for at most 5 minutes
+  after the marker (`build:unpack` never signs). A swap names the install's build as `fromBuild` (what it backs up
+  and rolls back to); a relaunch names the running process's.
 - **Rebuild.** A tree from the host's list is built with `bun scripts/build.mjs build:stage` (no `ensure-cli`) into
   `updates/desktop/rebuild-<t8>`, copied through an extract container to the staging name, and applied as a swap with
   `source: 'rebuild'` (an equal or older version is allowed; no codesign identity check).
