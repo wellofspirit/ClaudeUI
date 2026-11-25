@@ -1,6 +1,7 @@
 import { useConnectionHoldsAdmin } from '../SettingsDialog/connection-admin'
 import { useRelaunchOffered } from '../Updates/use-relaunch-offered'
 import { updatesStore, useUpdatesStore } from '../Updates/app-update-store'
+import { newBuildName } from '../Updates/utils'
 
 const ITEM_CLASS =
   'w-full flex items-center justify-center gap-1.5 px-3 py-1.5 mt-1 text-[12px] text-text-muted hover:text-accent transition-colors cursor-default border-t border-border/30 pt-2'
@@ -32,9 +33,11 @@ function RestartGlyph(): React.JSX.Element {
 export function RelaunchMenuItem({ onChosen }: { onChosen: () => void }): React.JSX.Element | null {
   const offered = useRelaunchOffered()
   if (!offered) return null
+  const build = offered.newBuild
   return (
     <button
       data-testid="SettingsPanel.relaunch"
+      data-id={build ? 'new-build' : undefined}
       onClick={() => {
         onChosen()
         void updatesStore.requestRestart('relaunch')
@@ -42,7 +45,7 @@ export function RelaunchMenuItem({ onChosen }: { onChosen: () => void }): React.
       className={ITEM_CLASS}
     >
       <RestartGlyph />
-      Relaunch ClaudeUI
+      {build ? `Relaunch into ${newBuildName(build)}` : 'Relaunch ClaudeUI'}
     </button>
   )
 }

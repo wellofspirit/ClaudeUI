@@ -60,6 +60,14 @@ export function relaunchNoticeModel(
   switch (result.status) {
     case 'ok':
     case 'no-health':
+      // A relaunch into a build made in place (`source: 'rebuild'` on a relaunch).
+      if (result.mode === 'relaunch' && result.source === 'rebuild')
+        return {
+          tone: 'success',
+          text: sameVersion
+            ? `Relaunched into the new build${result.toBuild ? ` ${result.toBuild}` : ''}`
+            : `Relaunched into ${named(result.toVersion)}`
+        }
       return { tone: 'success', text: 'Relaunched' }
     case 'updated':
       if (sameVersion)

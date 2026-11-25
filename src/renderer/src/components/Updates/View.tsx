@@ -12,6 +12,7 @@
  */
 import { useState } from 'react'
 import type { AppUpdateTree } from '../../../../shared/types/app-update'
+import type { RebuiltInPlace } from '../../../../shared/relaunch'
 import type { HarnessUpdatesView } from '../../../../shared/harness-types'
 import { EngineLogo } from '../shared/EngineLogo'
 import { ProgressBar } from '../shared/ProgressBar'
@@ -31,6 +32,7 @@ import {
   defaultTree,
   formatElapsed,
   impactLines,
+  newBuildName,
   stageName,
   treeLabel,
   type AppRelease,
@@ -375,11 +377,14 @@ function RestartConfirmBox({
   confirm,
   busy,
   indent,
+  newBuild,
   onConfirm,
   onCancel
 }: {
   confirm: RestartConfirm
   busy: boolean
+  /** A relaunch starts this build, made in place over the running one. */
+  newBuild?: RebuiltInPlace
   /** Under a row's name (the row hosts it), or flush (above the footer). */
   indent: boolean
   onConfirm: () => void
@@ -389,6 +394,10 @@ function RestartConfirmBox({
     ? impactLines(confirm.impact)
     : ['What is running could not be read.']
   const relaunch = confirm.action !== 'update'
+  const inPlace = confirm.action === 'relaunch' ? newBuild : undefined
+  const allLines = inPlace
+    ? [...lines, 'The new build replaced this one in place: there is nothing to roll back to.']
+    : lines
   return (
     <div
       data-testid="UpdatesPanel.restartConfirm"
@@ -396,10 +405,14 @@ function RestartConfirmBox({
       className={`mt-2.5 ${indent ? 'ml-6' : ''} rounded-md border border-warning/25 bg-warning/5 px-2.5 py-2`}
     >
       <div className="text-text-primary font-medium mb-1">
-        {relaunch ? 'Relaunch ClaudeUI now?' : 'Restart ClaudeUI now?'}
+        {inPlace
+          ? `Relaunch into build ${newBuildName(inPlace)} now?`
+          : relaunch
+            ? 'Relaunch ClaudeUI now?'
+            : 'Restart ClaudeUI now?'}
       </div>
       <ul className="text-[11px] text-text-secondary leading-[17px] list-disc pl-4">
-        {lines.map((line) => (
+        {allLines.map((line) => (
           <li key={line}>{line}</li>
         ))}
       </ul>
@@ -1205,6 +1218,8 @@ export interface UpdatesPanelViewProps {
   harnessMode: HarnessUpdatesView['mode'] | undefined
   version: string | null
   canRelaunch: boolean
+  /** The install holds a build other than the running one (made in place). */
+  newBuild?: RebuiltInPlace
   errors: string[]
   onCheck: () => void
   onSettings: () => void
@@ -1224,6 +1239,7 @@ export function UpdatesPanelView(props: UpdatesPanelViewProps): React.JSX.Elemen
         confirm={confirm}
         busy={restarting}
         indent={indent}
+        newBuild={props.newBuild}
         onConfirm={props.onConfirm}
         onCancel={props.onCancelConfirm}
       />
@@ -1390,12 +1406,17 @@ export function UpdatesPanelView(props: UpdatesPanelViewProps): React.JSX.Elemen
           <Btn
             tone="link"
             testid="UpdatesPanel.relaunch"
-            title="Restart ClaudeUI without updating"
+            dataId={props.newBuild ? 'new-build' : undefined}
+            title={
+              props.newBuild
+                ? `Restart ClaudeUI into the build made in place (${props.newBuild.version}); it replaced this one, so there is nothing to roll back to`
+                : 'Restart ClaudeUI without updating'
+            }
             disabled={restarting}
             onClick={props.onRelaunch}
           >
             <RestartIcon />
-            Relaunch
+            {props.newBuild ? `Relaunch into ${newBuildName(props.newBuild)}` : 'Relaunch'}
           </Btn>
         )}
       </div>

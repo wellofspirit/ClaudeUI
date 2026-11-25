@@ -67,6 +67,17 @@ describe('RelaunchMenuItem', () => {
     await waitFor(() => expect(api.relaunchAvailability).toHaveBeenCalledTimes(2))
     expect(screen.queryByTestId('SettingsPanel.relaunch')).toBeNull()
   })
+
+  it('names a build made in place, which a relaunch starts', async () => {
+    api.relaunchAvailability.mockResolvedValueOnce({
+      available: true,
+      newBuild: { version: '3.9.2', commit: 'def5678' }
+    } as never)
+    render(<RelaunchMenuItem onChosen={() => {}} />)
+    const item = await screen.findByTestId('SettingsPanel.relaunch')
+    expect(item).toHaveTextContent('Relaunch into def5678')
+    expect(item).toHaveAttribute('data-id', 'new-build')
+  })
 })
 
 describe('RebuildMenuItem', () => {
