@@ -49,7 +49,8 @@ export interface RelaunchResult {
    * From the job, not the helper (`lastResultFor` merges them in): the short
    * commits of the build that ran before and of the one asked for (from the
    * install markers' build ids), and where a swap's build came from. They name
-   * the builds when the two versions are equal (a rebuild).
+   * the builds when the two versions are equal (a rebuild). A `relaunch` with
+   * source `rebuild` started a build that replaced the install in place.
    */
   fromBuild?: string
   toBuild?: string
@@ -69,10 +70,25 @@ export interface HealthRecord {
   at: number
 }
 
+/**
+ * A build on disk that is not the one running: the install was rebuilt in place
+ * (`bun run build:mac` into the folder ClaudeUI runs from). A relaunch starts it,
+ * and nothing is kept to roll back to. No path.
+ */
+export interface RebuiltInPlace {
+  version: string
+  /** Short commit; absent for a build without git. */
+  commit?: string
+  /** ISO time the build on disk was made. */
+  builtAt?: string
+}
+
 /** `app:relaunch-availability`. */
 export interface RelaunchAvailability {
   available: boolean
   reason?: string
+  /** Set while available: the install holds a build other than the running one. */
+  newBuild?: RebuiltInPlace
 }
 
 /** `app:restart-impact`: what a restart interrupts. */

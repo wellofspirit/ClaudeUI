@@ -20,14 +20,26 @@
  *   3. collect the desktop's restore record (bounded 2 s; windowless: none);
  *   4. confirm the quit (no worktree prompt: worktrees are kept).
  *
+ * Rebuilt in place: when the install's marker names a build other than this
+ * process's (`bun run build:mac` into the folder ClaudeUI runs from), a
+ * `relaunch` starts that build. Its job names it (`toVersion`, `toBuild`,
+ * source `rebuild`) so reconciliation and the notice see the build that runs
+ * next; there is no backup, so no rollback. `availability` reports it.
+ *
  * `reportHealthy` is every packaged boot's health record, then reconciliation.
  */
 
 import * as fs from 'node:fs'
 import { compareVersions } from '../../../core/harness/store'
 import { logger } from '../../../core/services/logger'
-import { buildCommitOf } from '../../../shared/build-info'
-import type { RelaunchAvailability, RelaunchResult, RestoreRecord } from '../../../shared/relaunch'
+import { buildCommitOf, builtAtOf } from '../../../shared/build-info'
+import { INSTALL_MARKER_SEGMENTS } from '../../../shared/install-marker'
+import type {
+  RebuiltInPlace,
+  RelaunchAvailability,
+  RelaunchResult,
+  RestoreRecord
+} from '../../../shared/relaunch'
 import { checkEligibility, readInstallMarker, type EligibilityProbes } from './eligibility'
 import { stagedNamePattern } from './delete-gate'
 import { helperCommand, type HelperCommand } from './helper-scripts'
@@ -71,6 +83,12 @@ export interface SpawnedHelper {
   /** Windows: stop the launcher if it still runs (by its handle, never by pid). */
   stop?: () => void
 }
+
+/**
+ * How long after its marker a build made in place may still be signing (macOS):
+ * `codesign --deep` of the bundle takes well under a minute.
+ */
+export const SIGNING_WINDOW_MS = 5 * 60_000
 
 /** How long the helper has to write its ready file. */
 export const READY_TIMEOUT_MS = 5000
@@ -180,6 +198,48 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     return cachedEligibility.value
   }
 
+  /**
+   * The build in the install when it is not this process's (rebuilt in place),
+   * read fresh: a build can land at any time. Null when either side has no id.
+   */
+  function rebuiltInPlace(install: string): RebuiltInPlace | null {
+    if (!deps.buildId) return null
+    const marker = readInstallMarker(install, platform)
+    if (!marker?.buildId || !marker.version || marker.buildId === deps.buildId) return null
+    const commit = buildCommitOf(marker.buildId)
+    const builtAt = builtAtOf(marker.buildId)
+    return {
+      version: marker.version,
+      ...(commit ? { commit } : {}),
+      ...(builtAt ? { builtAt } : {})
+    }
+  }
+
+  /**
+   * macOS: a build made in place is complete once codesign has run, and the
+   * build writes the marker before it signs (`scripts/lib/build-targets.mjs`),
+   * so a seal older than the marker (or none) is a build still being made.
+   * Only while the marker is recent: a build that is never signed
+   * (`build:unpack`, a failed codesign) must not hold every restart off for
+   * good. Windows writes the marker last: a marker there is a finished build.
+   */
+  function stillBuilding(install: string): boolean {
+    if (platform !== 'darwin') return false
+    const mtime = (...segments: string[]): number | null => {
+      try {
+        return fs.statSync(p.join(install, ...segments)).mtimeMs
+      } catch {
+        return null
+      }
+    }
+    const marker = mtime(...INSTALL_MARKER_SEGMENTS.mac)
+    const seal = mtime('Contents', '_CodeSignature', 'CodeResources')
+    return marker !== null && now() - marker < SIGNING_WINDOW_MS && (seal === null || seal < marker)
+  }
+
+  const STILL_BUILDING =
+    'A new build is still being written into this copy of ClaudeUI: relaunch when it finishes'
+
   /** A relaunch in flight, or null. */
   function inProgress(): string | null {
     if (inFlight && !hasResult(inFlight)) return 'A relaunch is already in progress'
@@ -229,12 +289,28 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     const fromVersion = deps.runningVersion
     let toVersion = fromVersion
     let stagedPath = ''
-    // The builds, for the notice when the versions are equal (a rebuild): the
-    // install's marker, else this process's own build id.
+    // The builds, for the notice when the versions are equal (a rebuild). A
+    // relaunch leaves this process's build: its own id first (a build made in
+    // place has already replaced the marker). A swap backs up, and rolls back
+    // to, what the install holds: the marker first.
+    const ownBuild = buildCommitOf(deps.buildId)
+    const installBuild = buildCommitOf(readInstallMarker(install, platform)?.buildId)
     const fromBuild =
-      buildCommitOf(readInstallMarker(install, platform)?.buildId) ?? buildCommitOf(deps.buildId)
+      request.mode === 'swap' ? (installBuild ?? ownBuild) : (ownBuild ?? installBuild)
     let toBuild = fromBuild
+    let source: SwapSource | undefined
+    if (request.mode === 'relaunch') {
+      const rebuilt = rebuiltInPlace(install)
+      if (rebuilt) {
+        if (stillBuilding(install)) throw new Error(STILL_BUILDING)
+        toVersion = rebuilt.version
+        toBuild = rebuilt.commit
+        source = 'rebuild'
+      }
+    }
     if (request.mode === 'swap') {
+      // A half-signed build made in place would become the backup a rollback restores.
+      if (rebuiltInPlace(install) && stillBuilding(install)) throw new Error(STILL_BUILDING)
       stagedPath = p.resolve(request.stagedPath)
       toVersion = request.toVersion
       const sibling = samePath(p.dirname(stagedPath), p.dirname(install), deps.platform)
@@ -263,6 +339,7 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
       toBuild = buildCommitOf(marker.buildId)
       if (request.source !== 'release' && request.source !== 'rebuild')
         throw new Error('A swap names where its build came from')
+      source = request.source
       if (request.source === 'release' && compareVersions(toVersion, fromVersion) <= 0)
         throw new Error(
           `The staged build (${toVersion}) is not newer than this one (${fromVersion})`
@@ -305,7 +382,7 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
       timeouts: DEFAULT_TIMEOUTS,
       ...(fromBuild ? { fromBuild } : {}),
       ...(toBuild ? { toBuild } : {}),
-      ...(request.mode === 'swap' ? { source: request.source } : {})
+      ...(source ? { source } : {})
     }
 
     const killPid = (pid: number): void => {
@@ -365,7 +442,12 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
     if (notReady) return giveUp(notReady, spawned)
     const helperPid = platform === 'win32' ? readHelperPid(files.helperPid) : spawned.pid
 
-    const what = request.mode === 'swap' ? `swap to ${toVersion}, ${request.source}` : job.mode
+    const what =
+      request.mode === 'swap'
+        ? `swap to ${toVersion}, ${request.source}`
+        : source
+          ? `relaunch into the build made in place, ${toBuild ?? toVersion}`
+          : job.mode
     logger.info('relaunch', `relaunch ${token} (${what}) started; helper pid ${helperPid}`)
     const record = await bounded(deps.collectRestore(), deps.collectTimeoutMs ?? 2000, null)
     if (record) {
@@ -380,8 +462,13 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
 
   return {
     availability(): RelaunchAvailability {
-      const reason = refusal(recentEligibility())
-      return reason ? { available: false, reason } : { available: true }
+      const e = recentEligibility()
+      const reason = refusal(e)
+      if (reason || !e.ok) return { available: false, reason: reason ?? 'Not eligible' }
+      const newBuild = rebuiltInPlace(e.installPath)
+      if (!newBuild) return { available: true }
+      if (stillBuilding(e.installPath)) return { available: false, reason: STILL_BUILDING }
+      return { available: true, newBuild }
     },
     eligible(): RelaunchAvailability {
       const e = recentEligibility()
