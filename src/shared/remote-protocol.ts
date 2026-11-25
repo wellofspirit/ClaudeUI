@@ -263,6 +263,19 @@ export interface WsAuthResponse {
    * it in a URL, never render it.
    */
   resumeToken?: string
+  /**
+   * Success only: the host's build id (`buildId` in `src/shared/build-info.ts`),
+   * absent for a dev host. A web client remembers the first it sees; a reconnect
+   * that reports a different one means the host was restarted on another build,
+   * so the page stashes its open session and drafts and reloads to pick up the
+   * matching client code (`src/web/build-reload.ts`).
+   *
+   * Here, on the authenticated accept, and deliberately NOT on
+   * {@link RemoteAuthInfo}: that endpoint is unauthenticated and must not carry
+   * version strings, and it is read once per page load, so it could not notice a
+   * restart behind a reconnect anyway.
+   */
+  buildId?: string
 }
 
 /**

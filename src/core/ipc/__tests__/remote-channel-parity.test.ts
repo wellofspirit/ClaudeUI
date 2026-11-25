@@ -78,6 +78,20 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  *    sibling `voice:pack-status` declares `chat`, because every connection that
  *    can hold the mic can hit the wall and must be able to read it, so it is
  *    absent here.
+ *  - `admin` (the relaunch arc, `app:relaunch`) — restarting the host, which ends
+ *    every turn, terminal and remote connection on it. Its three reads
+ *    (`app:relaunch-availability`, `app:restart-impact`, `app:last-relaunch`)
+ *    declare `config`, so a client can ask whether to offer it, and are absent here.
+ *  - `admin` (auto-update design §3, `app-update:*` writes) — sending the host to
+ *    GitHub, downloading a ClaudeUI build onto it, skipping a release for its
+ *    operator, restarting it into the staged build, and rebuilding ClaudeUI
+ *    from a source tree on it (`app-update:rebuild` / `:cancel-rebuild`, with
+ *    the `app-update:trees` query that lists the trees to pick from).
+ *    `app-update:state` declares `config` (every device may see that an update
+ *    exists), so it is absent here. `app-update:set-source` names the checkout
+ *    rebuilds run code from; `app-update:set-settings` decides whether the host
+ *    downloads builds by itself; `harness:skip-update` hides a harness version from
+ *    the host's operator and from Automatically.
  *
  * "Invoked but not grantable at connect time" is the POINT for all three, which
  * is why this list is an allowlist rather than an emptiness assertion: a new
@@ -85,6 +99,16 @@ const read = (rel: string): string => fs.readFileSync(path.join(REPO, rel), 'utf
  * reachability nobody thought about.
  */
 const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
+  'app-update:apply',
+  'app-update:cancel-rebuild',
+  'app-update:check',
+  'app-update:download',
+  'app-update:rebuild',
+  'app-update:set-settings',
+  'app-update:set-source',
+  'app-update:skip',
+  'app-update:trees',
+  'app:relaunch',
   'authcfg:apply',
   'authcfg:end',
   'authcfg:get',
@@ -98,6 +122,7 @@ const UNGRANTED_AT_CONNECT_REMOTE_CHANNELS = [
   'harness:install-cancel',
   'harness:set-selection',
   'harness:set-update-mode',
+  'harness:skip-update',
   'harness:update-all',
   'ide:mint-entry',
   'terminal:attach',

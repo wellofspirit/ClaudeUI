@@ -1992,7 +1992,8 @@ export interface SessionState {
   setEffort: (effort: string | null, routingId?: string) => void
   setThinkingMode: (mode: 'adaptive' | 'enabled' | 'disabled' | null, routingId?: string) => void
   setReasoningVariant: (variant: string | null, routingId?: string) => void
-  setDraftText: (text: string) => void
+  /** The active session's draft, or `routingId`'s (a relaunch putting drafts back); unknown ids no-op. */
+  setDraftText: (text: string, routingId?: string) => void
   /** Append unsent attachments to a specific session (keyed by routingId — see impl). */
   addDraftAttachments: (routingId: string, attachments: FileAttachment[]) => void
   /** Remove one unsent attachment from a session by attachment id. */
@@ -3231,9 +3232,9 @@ export const useSessionStore = create<SessionState>((set) => ({
     if (id) patchLocalSession(id, { reasoningVariant: variant })
   },
 
-  setDraftText: (text) =>
+  setDraftText: (text, routingId) =>
     set((state) => {
-      const id = state.activeSessionId
+      const id = routingId ?? state.activeSessionId
       if (!id) return {}
       return { sessions: updateSession(state.sessions, id, () => ({ draftText: text })) }
     }),

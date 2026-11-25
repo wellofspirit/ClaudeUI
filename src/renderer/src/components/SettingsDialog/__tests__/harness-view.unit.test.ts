@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import type {
-  HarnessInstallProgress,
   HarnessStateEntry,
   HarnessUpdatesView,
   HarnessVersionsResult
@@ -8,12 +7,7 @@ import type {
 import {
   autoLatestWarning,
   installPanelRows,
-  openUpdateFailures,
   otherInstalls,
-  updateButtonState,
-  updatePanelRows,
-  updateResultKey,
-  updateSummary,
   choiceLabel,
   exactVersions,
   missingManagedVersion,
@@ -96,6 +90,26 @@ describe('the version dropdown', () => {
     })
     // 0.87.10 sorts above 0.87.9: a numeric collation, not a string one.
     expect(exactVersions(entry, upstream)).toEqual(['0.88.0', '0.87.10', '0.87.9', '0.87.4'])
+  })
+
+  it('orders in semver: a release above its pre-releases', () => {
+    const entry = pi({
+      managed: [
+        { version: '3.9.1-pre.13', verified: 'publisher', installedAt: '2026-09-29T00:00:00.000Z' }
+      ]
+    })
+    const versions: HarnessVersionsResult = {
+      status: 'ok',
+      id: 'pi',
+      latest: '3.9.1',
+      available: ['3.9.1-pre.2', '3.9.1', '3.9.0']
+    }
+    expect(exactVersions(entry, versions)).toEqual([
+      '3.9.1',
+      '3.9.1-pre.13',
+      '3.9.1-pre.2',
+      '3.9.0'
+    ])
   })
 
   it('reads the ClaudeUI choice as the trigger shows it', () => {
@@ -308,8 +322,6 @@ describe('progress', () => {
 
 // ── Updates (ADR-082 §6) ──────────────────────────────────────────────
 
-const RUN = '2026-09-30T01:00:00.000Z'
-
 function updates(patch: Partial<HarnessUpdatesView> = {}): HarnessUpdatesView {
   return {
     mode: 'ask',
@@ -321,135 +333,6 @@ function updates(patch: Partial<HarnessUpdatesView> = {}): HarnessUpdatesView {
     ...patch
   }
 }
-
-const idle = { installs: [], pending: false, dismissed: new Set<string>(), justFinished: false }
-const failedPi = {
-  id: 'pi' as const,
-  from: '0.87.1',
-  to: '0.87.4',
-  status: 'failed' as const,
-  reason: 'checksum mismatch'
-}
-
-describe('updateButtonState', () => {
-  it('is hidden with nothing to show, and before the first read', () => {
-    expect(updateButtonState({ ...idle, updates: undefined })).toBe('hidden')
-    expect(updateButtonState({ ...idle, updates: updates({ available: [] }) })).toBe('hidden')
-  })
-
-  it('counts in Ask me; Automatically only reports, so available alone is hidden', () => {
-    expect(updateButtonState({ ...idle, updates: updates() })).toBe('available')
-    expect(updateButtonState({ ...idle, updates: updates({ mode: 'auto' }) })).toBe('hidden')
-  })
-
-  it('spins while a run is in flight, this client asked for one, or any install runs', () => {
-    const running = updates({ status: { running: true, lastRunAt: RUN, results: [] } })
-    expect(updateButtonState({ ...idle, updates: running })).toBe('running')
-    expect(updateButtonState({ ...idle, updates: updates(), pending: true })).toBe('running')
-    const installing: HarnessInstallProgress = { id: 'pi', version: '0.87.4', phase: 'downloading' }
-    expect(updateButtonState({ ...idle, updates: updates(), installs: [installing] })).toBe(
-      'running'
-    )
-    // Since S7b an install that is not an update (the upgrade sheet's) spins too.
-    const other: HarnessInstallProgress = {
-      id: 'opencode',
-      version: '1.18.32',
-      phase: 'downloading'
-    }
-    expect(
-      updateButtonState({ ...idle, updates: updates({ available: [] }), installs: [other] })
-    ).toBe('running')
-  })
-
-  it('is amber for a failed install outside the update flow, not for an update’s own', () => {
-    const failed: HarnessInstallProgress = {
-      id: 'opencode',
-      version: '1.18.32',
-      phase: 'failed',
-      reason: 'digest mismatch'
-    }
-    expect(
-      updateButtonState({ ...idle, updates: updates({ available: [] }), installs: [failed] })
-    ).toBe('failed')
-    // The update's failure is the run's result's business (and dismissable there).
-    const updateFailed: HarnessInstallProgress = { ...failed, id: 'pi', version: '0.87.4' }
-    expect(updateButtonState({ ...idle, updates: updates(), installs: [updateFailed] })).toBe(
-      'available'
-    )
-  })
-
-  it('is amber while a failure is not dismissed, then falls back to what else is true', () => {
-    const failed = updates({ status: { running: false, lastRunAt: RUN, results: [failedPi] } })
-    expect(updateButtonState({ ...idle, updates: failed })).toBe('failed')
-    const dismissed = new Set([updateResultKey(failedPi, RUN)])
-    expect(updateButtonState({ ...idle, updates: failed, dismissed })).toBe('available')
-    // A dismissal is for that run: a retry that fails again shows again.
-    const again = updates({ status: { running: false, lastRunAt: 'later', results: [failedPi] } })
-    expect(updateButtonState({ ...idle, updates: again, dismissed })).toBe('failed')
-    expect(openUpdateFailures(again, dismissed)).toEqual([failedPi])
-  })
-
-  it('shows the check only just after a run that installed everything', () => {
-    const done = updates({ available: [] })
-    expect(updateButtonState({ ...idle, updates: done, justFinished: true })).toBe('done')
-    expect(updateButtonState({ ...idle, updates: done })).toBe('hidden')
-  })
-})
-
-describe('updatePanelRows', () => {
-  it('lists results, then updates installing, waiting or available, in harness order', () => {
-    const view = updates({
-      available: [{ id: 'pi', from: '0.87.1', to: '0.87.4', choice: 'tested' }],
-      status: {
-        running: true,
-        lastRunAt: RUN,
-        results: [{ id: 'opencode', from: '1.18.40', to: '1.18.41', status: 'installed' }]
-      }
-    })
-    expect(updatePanelRows(view, [], new Set())).toEqual([
-      { id: 'opencode', from: '1.18.40', to: '1.18.41', state: 'installed' },
-      { id: 'pi', from: '0.87.1', to: '0.87.4', state: 'waiting' }
-    ])
-    const progress: HarnessInstallProgress = { id: 'pi', version: '0.87.4', phase: 'verifying' }
-    expect(updatePanelRows(view, [progress], new Set())[1]).toEqual({
-      id: 'pi',
-      from: '0.87.1',
-      to: '0.87.4',
-      state: 'installing',
-      progress
-    })
-    expect(updatePanelRows(updates(), [], new Set()).map((r) => r.state)).toEqual([
-      'available',
-      'available'
-    ])
-  })
-
-  it('keeps a failure (with its key) over the same version still available, until dismissed', () => {
-    const view = updates({
-      available: [{ id: 'pi', from: '0.87.1', to: '0.87.4', choice: 'tested' }],
-      status: { running: false, lastRunAt: RUN, results: [failedPi] }
-    })
-    expect(updatePanelRows(view, [], new Set())).toEqual([
-      {
-        id: 'pi',
-        from: '0.87.1',
-        to: '0.87.4',
-        state: 'failed',
-        reason: 'checksum mismatch',
-        key: updateResultKey(failedPi, RUN)
-      }
-    ])
-    expect(
-      updatePanelRows(view, [], new Set([updateResultKey(failedPi, RUN)])).map((r) => r.state)
-    ).toEqual(['available'])
-  })
-
-  it('summarises for the tooltip', () => {
-    expect(updateSummary(updates().available)).toBe(
-      'opencode 1.18.40 → 1.18.41, pi 0.87.1 → 0.87.4'
-    )
-  })
-})
 
 describe('autoLatestWarning', () => {
   const opencode = (version: string, source: 'managed' | 'system' = 'managed'): HarnessStateEntry =>

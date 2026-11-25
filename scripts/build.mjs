@@ -23,13 +23,14 @@
  * Targets mirror the package.json scripts: build, build:mac, build:win,
  * build:linux, build:unpack, ensure (the CLI and the two harnesses together),
  * postinstall, ensure-cli, update-cli, ensure-opencode, update-opencode,
- * ensure-pi, update-pi. The stage lists live in
+ * ensure-pi, update-pi; plus build:stage, the desktop app's local rebuild
+ * (no ensure-cli; needs CLAUDEUI_BUILD_OUT). The stage lists live in
  * `scripts/lib/build-targets.mjs`; `-h` prints them.
  */
 
 import { spawn } from 'node:child_process'
 
-import { targets, vendorOverrideRefusal } from './lib/build-targets.mjs'
+import { stageTargetRefusal, targets, vendorOverrideRefusal } from './lib/build-targets.mjs'
 
 const args = process.argv.slice(2)
 const verbose = args.includes('-v') || args.includes('--verbose')
@@ -73,7 +74,8 @@ if (!stages) {
   console.error(`build.mjs: unknown target "${target}" (run with -h for the target list)`)
   process.exit(2)
 }
-const refusal = vendorOverrideRefusal(target, process.env)
+const refusal =
+  vendorOverrideRefusal(target, process.env) ?? stageTargetRefusal(target, process.env)
 if (refusal) {
   console.error(refusal)
   process.exit(2)

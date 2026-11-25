@@ -344,3 +344,20 @@ describe('QuitCoordinator', () => {
     })
   })
 })
+
+describe('QuitCoordinator — confirm() from main (a relaunch)', () => {
+  it('quits without notifying the renderer when no before-quit came first', () => {
+    const notifyRenderer = vi.fn()
+    const teardownServices = vi.fn()
+    const quit = vi.fn()
+    const qc = new QuitCoordinator({ notifyRenderer, teardownServices, quit })
+    qc.confirm()
+    expect(quit).toHaveBeenCalledTimes(1)
+    // The quit's own before-quit then passes straight through: teardown, no veto.
+    const prevent = vi.fn()
+    qc.handleBeforeQuit(prevent)
+    expect(prevent).not.toHaveBeenCalled()
+    expect(teardownServices).toHaveBeenCalledTimes(1)
+    expect(notifyRenderer).not.toHaveBeenCalled()
+  })
+})

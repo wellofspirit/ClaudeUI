@@ -32,6 +32,7 @@ import {
   clearCachedResumeToken
 } from './resume-cache'
 import { decideAuthEntry, type PasswordParams } from './auth-entry'
+import { pageSessionStorage, reloadOnBuildChange, takeStashedRestore } from './build-reload'
 import type { FullStateSnapshot, RemoteAuthInfo, RemoteAuthMethod } from '../shared/remote-protocol'
 
 // The CHANNEL key and a one-time enrollment token ride the URL fragment.
@@ -66,6 +67,17 @@ connection.setInvokeGate(stepUpGate.intercept)
 
 const api = createWebSocketApi(connection)
 ;(window as unknown as { api: typeof api }).api = api
+// The host came back on another build (a relaunch onto a new version): this
+// page's code is the old build's, so keep the open session and drafts in
+// sessionStorage and reload; the fresh page puts them back after its first sync.
+connection.setHostBuildChangeHandler(
+  reloadOnBuildChange({
+    collect: async () => (await import('@renderer/lib/restore-state')).collectRestoreState(),
+    storage: pageSessionStorage(),
+    reload: () => window.location.reload(),
+    log: (message) => console.info(`[RemoteConnection] ${message}`)
+  })
+)
 // The keystroke path needs the gate without a refusal to react to: the server
 // drops a stale `term-input` frame SILENTLY (an error would be an oracle for
 // which terminals exist), so the read-only terminal has to prompt on the first
@@ -425,6 +437,15 @@ function RemoteApp(): React.JSX.Element {
       // A snapshot does not always carry a transcript (ADR-087 §2); read what it
       // left out from disk now.
       history.finishHydrate(outcome)
+      // First sync after a build-change reload: reopen the session and put the
+      // drafts back (the stash is one-shot).
+      if (!isResync) {
+        const stashed = takeStashedRestore(pageSessionStorage())
+        if (stashed)
+          void import('@renderer/lib/restore-state').then(({ applyRestoreState }) =>
+            applyRestoreState(stashed)
+          )
+      }
     })
     // ADR-068 §3 (Slice 6, fixed in Slice 7): the ChatGPT auth view the model
     // picker and the composer hint read is NOT in the snapshot — it comes from

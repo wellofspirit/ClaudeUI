@@ -57,6 +57,17 @@ export interface ServerOptions {
    */
   disableAuth: boolean
   /**
+   * `serve` only, internal: this process is the worker a monitor started
+   * (`src/server/monitor.ts`), not a monitor itself. Undocumented in the help: the
+   * monitor sets it, together with `CLAUDEUI_MONITOR` in the environment.
+   */
+  worker?: boolean
+  /**
+   * `serve` only: run the server directly, without the monitor parent. Relaunch and
+   * self-update are then unavailable (updates are notify-only).
+   */
+  noMonitor?: boolean
+  /**
    * `voice-worker` only: every argument after the subcommand, UNPARSED — they are
    * the worker's own (`--addon`, `--model`, `--threads`) and `runVoiceWorker`
    * parses them.
@@ -83,6 +94,11 @@ USAGE
 
 COMMANDS
   serve                Run the server (default when no command is given).
+                       A small monitor process starts first and runs the
+                       server as its child: it restarts the server for a
+                       relaunch or an update, rolls back an update that does
+                       not come up healthy, and exits with the server's exit
+                       code otherwise (see --no-monitor).
   show-link            Print the current access link and exit. Mints a fresh
                        one-time enrollment link when no credential is enrolled
                        yet — this is the recovery path for an expired link.
@@ -117,6 +133,11 @@ OPTIONS
                        Every client that can reach the port gets operator-level
                        access to this machine. Host-anchor only — a remote
                        client can never set this. Re-enable it from Settings.
+      --no-monitor     Run the server in this process, without the monitor
+                       that \`serve\` otherwise starts first. The monitor is
+                       what restarts the server after a relaunch or an update
+                       (and rolls a failed update back), so without it both
+                       are unavailable and updates are only announced.
   -h, --help           Show this help.
 
 CONFIGURATION
@@ -170,6 +191,8 @@ export function parseServerArgs(argv: readonly string[]): ServerOptions {
         bind: { type: 'string', short: 'b' },
         tls: { type: 'boolean' },
         'disable-auth': { type: 'boolean' },
+        'no-monitor': { type: 'boolean' },
+        worker: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' }
       }
     })
@@ -182,6 +205,8 @@ export function parseServerArgs(argv: readonly string[]): ServerOptions {
     bind?: string
     tls?: boolean
     'disable-auth'?: boolean
+    'no-monitor'?: boolean
+    worker?: boolean
     help?: boolean
   }
 
@@ -194,7 +219,7 @@ export function parseServerArgs(argv: readonly string[]): ServerOptions {
   // dropping `--disable-auth` from `set-password --disable-auth` would leave an
   // operator believing they had flipped the master switch.
   if (command === 'set-password') {
-    const stray = (['port', 'bind', 'tls', 'disable-auth'] as const).filter(
+    const stray = (['port', 'bind', 'tls', 'disable-auth', 'no-monitor', 'worker'] as const).filter(
       (key) => values[key] !== undefined
     )
     if (stray.length > 0) {
@@ -231,6 +256,17 @@ export function parseServerArgs(argv: readonly string[]): ServerOptions {
     // `undefined` (flag absent) is meaningfully different from `false` here —
     // see ServerOptions.tls.
     tls: values.tls,
-    disableAuth: values['disable-auth'] === true
+    disableAuth: values['disable-auth'] === true,
+    worker: values.worker === true,
+    noMonitor: values['no-monitor'] === true
   }
+}
+
+/**
+ * Whether this invocation starts the monitor (`src/server/monitor.ts`) rather than
+ * the server itself: only `serve`, and only without `--worker` (it IS the worker)
+ * or `--no-monitor`. Every other command runs in this process.
+ */
+export function runsMonitor(options: ServerOptions): boolean {
+  return options.command === 'serve' && options.worker !== true && options.noMonitor !== true
 }

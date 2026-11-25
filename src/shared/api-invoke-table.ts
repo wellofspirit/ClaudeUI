@@ -82,11 +82,40 @@ function whenNonEmpty(value: unknown): unknown[] {
 /** Pass-through members that are the same call in the desktop and the web client. */
 export const API_INVOKES = {
   addAccount: { channel: 'account:add', arity: 0, mode: 'invoke' },
+  lastRelaunch: { channel: 'app:last-relaunch', arity: 0, mode: 'invoke' },
+  relaunchApp: { channel: 'app:relaunch', arity: 0, mode: 'invoke' },
+  relaunchAvailability: { channel: 'app:relaunch-availability', arity: 0, mode: 'invoke' },
+  restartImpact: { channel: 'app:restart-impact', arity: 0, mode: 'invoke' },
   deleteAccount: { channel: 'account:delete', arity: 1, mode: 'invoke' },
   getAccounts: { channel: 'account:get', arity: 0, mode: 'invoke' },
   setMultiAccountEnabled: { channel: 'account:set-enabled', arity: 1, mode: 'invoke' },
   switchAccount: { channel: 'account:switch', arity: 1, mode: 'invoke' },
   getVersionInfo: { channel: 'app:version-info', arity: 0, mode: 'invoke' },
+  applyAppUpdate: { channel: 'app-update:apply', arity: 1, mode: 'invoke' },
+  appUpdateTrees: { channel: 'app-update:trees', arity: 0, mode: 'invoke' },
+  rebuildApp: {
+    channel: 'app-update:rebuild',
+    arity: 1,
+    mode: 'invoke',
+    wire: (a) => [{ treeId: a[0] }]
+  },
+  cancelAppRebuild: { channel: 'app-update:cancel-rebuild', arity: 0, mode: 'invoke' },
+  checkAppUpdate: { channel: 'app-update:check', arity: 0, mode: 'invoke' },
+  downloadAppUpdate: { channel: 'app-update:download', arity: 0, mode: 'invoke' },
+  skipAppUpdate: {
+    channel: 'app-update:skip',
+    arity: 1,
+    mode: 'invoke',
+    wire: (a) => [{ version: a[0] }]
+  },
+  appUpdateState: { channel: 'app-update:state', arity: 0, mode: 'invoke' },
+  setAppUpdateSettings: { channel: 'app-update:set-settings', arity: 1, mode: 'invoke' },
+  setAppUpdateSource: {
+    channel: 'app-update:set-source',
+    arity: 1,
+    mode: 'invoke',
+    wire: (a) => [{ path: a[0] }]
+  },
   cancelSignIn: { channel: 'auth:cancel', arity: 0, mode: 'invoke' },
   signIn: { channel: 'auth:sign-in', arity: 0, mode: 'invoke' },
   submitOAuthCode: { channel: 'auth:submit-code', arity: 1, mode: 'invoke' },
@@ -204,6 +233,12 @@ export const API_INVOKES = {
     wire: (a) => [{ mode: a[0] }]
   },
   harnessState: { channel: 'harness:state', arity: 0, mode: 'invoke' },
+  skipHarnessUpdate: {
+    channel: 'harness:skip-update',
+    arity: 2,
+    mode: 'invoke',
+    wire: (a) => [{ id: a[0], version: a[1] }]
+  },
   updateHarnesses: { channel: 'harness:update-all', arity: 0, mode: 'invoke' },
   harnessVersions: {
     channel: 'harness:versions',
@@ -453,6 +488,8 @@ export const API_EVENTS = {
  */
 export const DESKTOP_INVOKES = {
   openInVSCode: { channel: 'app:open-in-vscode', arity: 1, mode: 'invoke' },
+  restoreState: { channel: 'app:restore-state', arity: 1, mode: 'invoke' },
+  takeRestore: { channel: 'app:take-restore', arity: 0, mode: 'invoke' },
   cancelQuit: { channel: 'app:quit-cancel', arity: 0, mode: 'invoke' },
   confirmQuit: { channel: 'app:quit-confirm', arity: 1, mode: 'invoke', wire: (a) => [a[0] ?? []] },
   ackQuitPrompt: { channel: 'app:quit-prompting', arity: 0, mode: 'invoke' },
@@ -504,6 +541,11 @@ export const DESKTOP_INVOKES = {
 
 /** Host-local events only the desktop transport serves (see {@link DESKTOP_INVOKES}). */
 export const DESKTOP_EVENTS = {
+  // The relaunch's host-local handshake (`app:restore-state` answers the first) and
+  // the app menu's "Relaunch ClaudeUI" and "Check for Updates…".
+  onCollectRestore: 'app:collect-restore',
+  onRelaunchRequested: 'app:relaunch-requested',
+  onCheckUpdatesRequested: 'app:check-updates-requested',
   onPluginViewsChanged: 'plugin:views-changed',
   onRemoteStatus: 'remote:status',
   onTerminalData: 'terminal:data',

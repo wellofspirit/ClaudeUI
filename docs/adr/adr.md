@@ -9,7 +9,7 @@ record, headed by its title and ADR numbers; a superseded or removed one is a li
 `ADR-054 decision 6`) is under the same label inside the section.
 
 Adding or changing a decision: ADR-026, "Decision records" (`development-workflow.md`). The highest
-number here is ADR-118; a new decision takes the next number that is free on every remote branch.
+number here is ADR-122; a new decision takes the next number that is free on every remote branch.
 
 Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git history keeps them:
 `git log --diff-filter=D --name-only -- docs/adr` finds the commit that removed them.
@@ -19,6 +19,8 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
 <!-- prettier-ignore-start -->
 - [agents-and-tasks.md](agents-and-tasks.md) — Agents, task runs and the roster. ADRs 040, 073.
   Governs: `src/core/services/agent-identity.ts`, `src/core/services/subagent-watcher.ts`, `src/core/services/claude-session.ts`, `src/core/shared/sync/`, `src/renderer/src/components/agents/`, `src/renderer/src/components/TaskDetailPanel/`, `src/renderer/src/components/chat/task-state.ts`, `src/renderer/src/components/chat/TaskCard.tsx`
+- [app-updates.md](app-updates.md) — ClaudeUI's own updates, relaunch and rebuild. ADRs 119, 120, 121, 122.
+  Governs: `src/core/services/app-update.ts`, `src/core/services/app-update-feed.ts`, `src/core/services/build-info.ts`, `src/core/services/claudeui-checkout.ts`, `src/core/ipc/app-update-commands.ts`, `src/core/ipc/app-relaunch-commands.ts`, `src/main/services/relaunch/`, `src/main/services/app-update/`, `src/main/services/rebuild/`, `src/main/services/app-update-host.ts`, `src/server/monitor.ts`, `src/server/worker-host.ts`, `src/server/server-layout.ts`, `src/server/server-versions.ts`, `src/server/server-records.ts`, `src/shared/build-info.ts`, `src/shared/update-manifest.ts`, `src/shared/update-keys.ts`, `src/shared/install-marker.ts`, `src/shared/relaunch.ts`, `src/renderer/src/components/Updates/`, `scripts/stamp-build-info.mjs`, `scripts/stamp-install-marker.mjs`, `scripts/release/`
 - [auth-and-accounts.md](auth-and-accounts.md) — Authentication, accounts and the credential vault. ADRs 014, 015, 021, 036, 057, 068, 070, 080.
   Governs: `src/core/auth/`, `src/core/services/claude-host-token.ts`, `src/core/services/claude-refresh-guard.ts`, `src/core/services/api-error.ts`, `src/core/sdk/host-token.ts`, `src/core/sdk/securestorage-env.ts`, `src/core/sdk/args.ts`, `src/core/ipc/auth-commands.ts`, `src/core/shared-providers/`, `src/main/auth/`, `src/main/services/auth-manager.ts`, `src/main/services/account-manager.ts`, `src/main/services/claude-login-backend.ts`, `src/renderer/src/components/auth/`, `src/renderer/src/components/chat/AuthPill.tsx`
 - [auto-mode-judge.md](auto-mode-judge.md) — The auto-mode judge for opencode and pi. ADRs 023, 081, 083, 084, 091, 106, 107, 109.
@@ -186,4 +188,8 @@ Until 2026-11-12 each ADR was its own file, `docs/adr/adr-NNN_<slug>.md`. Git hi
 - ADR-116 · current · [A Claude target runs under the Claude engine's sandbox and at a new session's effort](dispatch.md#a-claude-target-runs-under-the-claude-engines-sandbox-and-at-a-new-sessions-effort-adr-116) in `dispatch.md`
 - ADR-117 · current · [Task and session notes hide by their source tag; alerts always show](ui.md#task-and-session-notes-hide-by-their-source-tag-alerts-always-show-adr-117) in `ui.md`
 - ADR-118 · current · [ClaudeUI hosts image and video generation for every engine, as background jobs](media-generation.md#claudeui-hosts-image-and-video-generation-for-every-engine-as-background-jobs-adr-118) in `media-generation.md`
+- ADR-119 · current · [ClaudeUI updates itself from signed GitHub releases](app-updates.md#claudeui-updates-itself-from-signed-github-releases-adr-119) in `app-updates.md`
+- ADR-120 · current · [Restarts go through a detached helper that waits for health and rolls back](app-updates.md#restarts-go-through-a-detached-helper-that-waits-for-health-and-rolls-back-adr-120) in `app-updates.md`
+- ADR-121 · current · [Rebuild & relaunch builds a host-listed source tree into the running install](app-updates.md#rebuild--relaunch-builds-a-host-listed-source-tree-into-the-running-install-adr-121) in `app-updates.md`
+- ADR-122 · current · [The headless server supervises itself and keeps one folder per version](app-updates.md#the-headless-server-supervises-itself-and-keeps-one-folder-per-version-adr-122) in `app-updates.md`
 <!-- prettier-ignore-end -->

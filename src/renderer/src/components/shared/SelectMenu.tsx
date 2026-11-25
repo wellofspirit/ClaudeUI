@@ -62,7 +62,8 @@ export function SelectMenu({
   ariaLabel,
   id,
   placement = 'down',
-  dataAttrs
+  dataAttrs,
+  fitTrigger = false
 }: {
   value: string
   options: SelectMenuOption[]
@@ -80,6 +81,12 @@ export function SelectMenu({
   placement?: 'up' | 'down'
   /** Extra `data-*` attributes for the root (e.g. `data-harness` on repeated instances). */
   dataAttrs?: Record<string, string>
+  /**
+   * The menu is exactly the trigger's width, never wider, and labels wrap
+   * instead of truncating, the trigger's too: for a picker inside a narrow
+   * popover (the Updates panel's tree picker) that the menu must not spill out of.
+   */
+  fitTrigger?: boolean
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
@@ -92,6 +99,7 @@ export function SelectMenu({
     anchorRef: triggerRef,
     menuRef,
     placement,
+    matchWidth: fitTrigger,
     onClose: () => setOpen(false)
   })
 
@@ -150,7 +158,9 @@ export function SelectMenu({
         }}
         className={`${triggerClassName ?? DEFAULT_TRIGGER_CLASS} flex items-center justify-between gap-1 text-left cursor-pointer disabled:cursor-not-allowed`}
       >
-        <span className="truncate">{label}</span>
+        <span className={fitTrigger ? 'min-w-0 whitespace-normal break-words' : 'truncate'}>
+          {label}
+        </span>
         <ChevronIcon open={open} className="text-text-muted" />
       </button>
       {open && (
@@ -162,7 +172,7 @@ export function SelectMenu({
           style={anchored?.style}
           // No `absolute`/`min-w-full`: the hook supplies position, offsets and
           // a min-width measured from the trigger.
-          className="w-max max-w-[22rem] max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-30"
+          className={`${fitTrigger ? '' : 'w-max max-w-[22rem]'} max-h-72 overflow-y-auto bg-bg-tertiary border border-border rounded-lg shadow-lg shadow-black/30 z-30`}
         >
           {options.map((opt, index) => {
             const active = opt.value === value
@@ -182,6 +192,8 @@ export function SelectMenu({
                   setOpen(false)
                 }}
                 className={`w-full flex items-center px-3 py-1.5 text-[12px] text-left transition-colors ${
+                  fitTrigger ? 'break-words' : ''
+                } ${
                   opt.disabled
                     ? 'text-text-muted opacity-40 cursor-not-allowed'
                     : active

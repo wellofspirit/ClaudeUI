@@ -39,6 +39,7 @@ import { registerAutomationIpc } from '../ipc/automation.ipc'
 import { registerWebauthnIpc } from '../ipc/webauthn.ipc'
 import { registerAuthcfgIpc } from '../ipc/authcfg.ipc'
 import { registerRemoteViewIpc } from '../ipc/remote-view-commands'
+import { registerAppRelaunchIpc } from '../ipc/app-relaunch-commands'
 import { registerIdeIpc } from '../ipc/ide-commands'
 import { registerRemoteHandlers } from '../ipc/remote-handlers'
 import { RemoteServer } from '../services/remote-server'
@@ -74,6 +75,8 @@ import { collectHarnessGarbage } from '../harness/install/gc'
 import { startHarnessUpdater } from '../harness/install/updater'
 import { evaluateUpgradePrompt, startHarnessEvents } from '../ipc/harness-commands'
 import { startVoicePackEvents } from '../ipc/voice-pack-commands'
+import { startAppUpdateEvents } from '../ipc/app-update-commands'
+import { appUpdater } from '../services/app-update'
 import { sweepVoicePackStore } from '../voice/pack-installer'
 import { harnessWritable } from '../harness/resolve'
 import { watchHarnessArrivals } from '../harness/arrivals'
@@ -95,6 +98,13 @@ import type { AuthCommandDeps } from '../ipc/auth-commands'
 import type { AutomationManager } from '../services/automation-manager'
 import type { SessionManager } from '../services/session-manager'
 
+/**
+ * How the boot's remote-server start attempt ended: `listening` (bound),
+ * `failed` (the start rejected: a port in use, a bind refused), or `not-started`
+ * (remote access disabled, no autostart, or autostart not configured).
+ */
+export type RemoteStartOutcome = 'listening' | 'failed' | 'not-started'
+
 /** What core hands back so a host layer can attach to it. */
 export interface CoreServices {
   sessionManager: SessionManager
@@ -111,6 +121,12 @@ export interface CoreServices {
   vscodeWebService: VscodeWebService
   /** Remote-server administration (start/stop/config/password/tailscale). */
   hostAnchor: HostAnchor
+  /**
+   * Settles when the boot's remote start attempt has (never rejects). A
+   * relaunched host's health record waits for it, so a restart driven from a
+   * phone comes back reachable (design review ruling 4).
+   */
+  remoteStartSettled: Promise<RemoteStartOutcome>
   /** Drop the dispatcher's rekey subscription. Idempotent; `stop` already calls it. */
   releaseDispatchParents: () => void
   /** The host-neutral shutdown: `prepareStop` while services live, then the sync `stop`. */
@@ -418,6 +434,14 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // desktop started. App-lifetime, like the harness events above.
   startVoicePackEvents(emitEvent)
 
+  // ClaudeUI's own updates (auto-update design §3): the view's changes go out as
+  // the payload-free `app-update:changed`, then the updater starts. After the
+  // canonical seed (`registerSessionIpc`), so it reads the saved channel and
+  // mode; it does nothing on a host that wired no `AppUpdateHost` seam, and its
+  // first check waits 30 s, off boot's critical path.
+  startAppUpdateEvents(emitEvent)
+  appUpdater.start()
+
   // pi's model catalog came back after some client was answered a degraded
   // empty one (a failed probe at boot, its backoff, invalidations overtaking
   // it): no client asks again on its own, so the composer would keep showing a
@@ -553,6 +577,9 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // because the server it reads does not exist until this point; the remote
   // half is spread from the same declaration in `registerRemoteHandlers`.
   registerRemoteViewIpc(remoteServer)
+  // Relaunch (`app:relaunch*`) on the desktop transport: registered here for the
+  // same reason, its restart-impact read counts the server's connected clients.
+  registerAppRelaunchIpc(remoteServer)
   // The remote-IDE channels on the desktop transport (ADR-064). Registered here
   // for the same reason the status view is — the server that classifies a
   // connection's origin does not exist until this point — and from the SAME
@@ -577,20 +604,24 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
   // reconcileServeRecord() cannot tell "leaked record from a previous run" from
   // "record owned by the live primary instance", so running it here would tear
   // down the primary app's serve entry.
+  let remoteStartSettled: Promise<RemoteStartOutcome> = Promise.resolve('not-started')
   if (remoteAccessDisabled) {
     logger.info(
       'main',
       'Remote access disabled for this instance (CLAUDEUI_DISABLE_REMOTE) — skipping serve reconciliation and autostart'
     )
   } else if (autostart) {
-    void (async () => {
+    remoteStartSettled = (async (): Promise<RemoteStartOutcome> => {
       try {
         await hostAnchor.reconcileAndAutostart()
+        // Not configured to autostart: reconciliation ran and nothing listens.
+        return remoteServer.isListening() ? 'listening' : 'not-started'
       } catch (err) {
         logger.error(
           'main',
           `Remote server autostart failed: ${err instanceof Error ? err.message : String(err)}`
         )
+        return 'failed'
       }
     })()
   }
@@ -600,6 +631,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     automationManager,
     hostAnchor,
     usageHubClient,
+    appUpdater,
     releaseDispatchParents,
     mediaJobs: stopMediaJobs,
     serviceSession,
@@ -617,6 +649,7 @@ export function startCoreServices(options: CoreServicesOptions): CoreServices {
     automationManager,
     vscodeWebService,
     hostAnchor,
+    remoteStartSettled,
     releaseDispatchParents,
     ...coreStop
   }

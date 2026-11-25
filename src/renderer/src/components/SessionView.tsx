@@ -19,6 +19,8 @@ import { useAutomationEvents } from '../hooks/useAutomationEvents'
 import { useTerminalColdCleanup } from '../hooks/useTerminalColdCleanup'
 import { useIsMobile, useVisualViewportHeight } from '../hooks/useIsMobile'
 import { QuitWorktreeModal } from './QuitWorktreeModal'
+import { RelaunchNotice } from './Updates/RelaunchNotice'
+import { updatesStore, useUpdatesPanelOpen } from './Updates/app-update-store'
 import { RemoteServeBanner } from './RemoteServeBanner'
 import { SettingsDialog } from './SettingsDialog'
 import { SignInDialog } from './auth/SignInDialog'
@@ -210,6 +212,29 @@ export function SessionView(): React.JSX.Element {
    * or toggle can leave the channel unowned or owned twice.
    */
   const ownsSettings = isMobile || sidebarCollapsed
+
+  // The macOS app menu's Check for Updates… and Relaunch ClaudeUI (desktop only;
+  // the web client's subscriptions are no-ops). Both run in the Updates panel,
+  // which lives in the sidebar footer: a panel opened while the sidebar is
+  // collapsed (or the phone drawer shut) brings the sidebar back, and closing
+  // the sidebar closes the panel, so a hidden panel never reopens by itself.
+  const updatesOpen = useUpdatesPanelOpen()
+  useEffect(() => {
+    const offs: Array<() => void> = []
+    if (typeof window.api.onCheckUpdatesRequested === 'function')
+      offs.push(window.api.onCheckUpdatesRequested(() => updatesStore.openPanel({ check: true })))
+    if (typeof window.api.onRelaunchRequested === 'function')
+      offs.push(window.api.onRelaunchRequested(() => void updatesStore.requestRestart('relaunch')))
+    return () => {
+      for (const off of offs) off()
+    }
+  }, [])
+  useEffect(() => {
+    if (updatesOpen) setSidebarCollapsed(false)
+  }, [updatesOpen])
+  useEffect(() => {
+    if (sidebarCollapsed) updatesStore.closePanel()
+  }, [sidebarCollapsed])
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
@@ -442,6 +467,8 @@ export function SessionView(): React.JSX.Element {
           mode is on, so the remote bookmark is dead. Fixed overlay, desktop-only
           — renders null on web and while serve is healthy. */}
       <RemoteServeBanner />
+      {/* After a relaunch or an update: how it went, once per result. */}
+      <RelaunchNotice />
     </SidebarContext.Provider>
   )
 }

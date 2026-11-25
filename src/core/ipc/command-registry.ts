@@ -493,6 +493,11 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'app:quit-cancel': 'host',
   'app:quit-prompting': 'host',
   'app:open-in-vscode': 'host',
+  // The relaunch's restore record: the desktop window's own session and drafts,
+  // handed to main before the quit and taken back once by the next window. Raw
+  // `ipcMain.handle` in main/index.ts; a remote client has its own reload path.
+  'app:restore-state': 'host',
+  'app:take-restore': 'host',
   // Raw shell — reachable over remote as of phase 2, but ONLY behind the
   // desktop opt-in toggle + a stepped-up, decaying `shell` grant (ADR-052
   // decision 6). The pin still does its job: `shell` is not in
@@ -599,6 +604,8 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   'harness:set-update-mode': 'admin',
   'harness:update-all': 'admin',
   'harness:check-updates': 'admin',
+  // Skipping a version hides it from the host's operator and from Automatically.
+  'harness:skip-update': 'admin',
   // The one-time upgrade sheet's answer (ADR-082 §8): shown only to an admin
   // connection, which installs from the same click. Relabelled `config`, any
   // connection could dismiss the offer for the host's operator.
@@ -609,7 +616,39 @@ export const PINNED_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // of the capture that hits the missing pack, and is not pinned.
   'voice:pack-install': 'admin',
   'voice:pack-install-cancel': 'admin',
-  'voice:pack-remove': 'admin'
+  'voice:pack-remove': 'admin',
+  // Restarting the host (the relaunch arc), registered on BOTH transports: it
+  // ends every turn, terminal and remote connection on the host. Relabelled
+  // `config`, any authenticated connection could bounce the host at will. The
+  // three reads beside it (`app:relaunch-availability`, `app:restart-impact`,
+  // `app:last-relaunch`) declare `config` and are not pinned.
+  'app:relaunch': 'admin',
+  // ClaudeUI's own updates (auto-update design §3), registered on BOTH
+  // transports: sending the host to GitHub, downloading a build onto it, hiding
+  // a release from its operator, and restarting it into a new build. Relabelled
+  // `config`, any authenticated connection could restart the host into whatever
+  // is staged. The read (`app-update:state`) declares `config` and is not pinned.
+  'app-update:check': 'admin',
+  'app-update:download': 'admin',
+  'app-update:skip': 'admin',
+  'app-update:apply': 'admin',
+  // The checkout rebuilds list their trees from: it decides which code a
+  // rebuild runs. Host-owned (`config:save-settings` keeps the host's value);
+  // relabelled `config`, any authenticated connection could point rebuilds at
+  // a tree of its choosing.
+  'app-update:set-source': 'admin',
+  // Whether the host downloads releases by itself, and which it offers (host-owned
+  // like the source). Relabelled `config`, any authenticated connection could
+  // switch the host to downloading builds unattended.
+  'app-update:set-settings': 'admin',
+  // A local rebuild runs a source tree's build scripts on the host with the
+  // user's rights; cancelling it stops that tree's process group. The tree list
+  // names the operator's checkouts, branches and commits and is only read to
+  // pick a rebuild. Relabelled `config`, any authenticated connection could
+  // build and stage whatever a listed tree holds.
+  'app-update:trees': 'admin',
+  'app-update:rebuild': 'admin',
+  'app-update:cancel-rebuild': 'admin'
 }
 
 // ---------------------------------------------------------------------------

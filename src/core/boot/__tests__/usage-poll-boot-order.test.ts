@@ -55,6 +55,7 @@ vi.mock('../../ipc/automation.ipc', () => ({ registerAutomationIpc: vi.fn(() => 
 vi.mock('../../ipc/webauthn.ipc', () => ({ registerWebauthnIpc: vi.fn() }))
 vi.mock('../../ipc/authcfg.ipc', () => ({ registerAuthcfgIpc: vi.fn() }))
 vi.mock('../../ipc/remote-view-commands', () => ({ registerRemoteViewIpc: vi.fn() }))
+vi.mock('../../ipc/app-relaunch-commands', () => ({ registerAppRelaunchIpc: vi.fn() }))
 vi.mock('../../ipc/ide-commands', () => ({ registerIdeIpc: vi.fn() }))
 vi.mock('../../ipc/remote-handlers', () => ({ registerRemoteHandlers: vi.fn() }))
 vi.mock('../../ipc/command-registry', () => ({ hostConnection: vi.fn(() => ({})) }))
@@ -62,6 +63,14 @@ vi.mock('../../services/remote-server', () => ({
   RemoteServer: class {
     terminalSink = vi.fn()
     setIdeService = vi.fn()
+  }
+}))
+vi.mock('../../services/app-update', () => ({
+  appUpdater: {
+    start: vi.fn(),
+    stop: vi.fn(),
+    settingsChanged: vi.fn(),
+    onChanged: vi.fn(() => () => {})
   }
 }))
 vi.mock('../../services/remote-dispatcher', () => ({ RemoteDispatcher: class {} }))

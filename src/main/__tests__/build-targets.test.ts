@@ -16,8 +16,10 @@ import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
+import { expectedStageLabels } from '../services/rebuild/progress'
+
 const mod: any = await import('../../../scripts/lib/build-targets.mjs')
-const { targets, vendorOverrideRefusal } = mod
+const { targets, vendorOverrideRefusal, stageTargetRefusal } = mod
 
 const childEnv = {
   PATH: '/bin',
@@ -26,8 +28,12 @@ const childEnv = {
   // Windows env keys are case-insensitive: any spelling must go.
   nodefaultcurrentdirectoryinexepath: '1'
 }
-const build = (opts: { quiet?: boolean; platform?: string } = {}) =>
-  targets({ quiet: opts.quiet ?? true, childEnv, platform: opts.platform ?? 'win32' })
+const build = (opts: { quiet?: boolean; platform?: string; env?: Record<string, string> } = {}) =>
+  targets({
+    quiet: opts.quiet ?? true,
+    childEnv: { ...childEnv, ...opts.env },
+    platform: opts.platform ?? 'win32'
+  })
 
 const memberLabels = (stage: any) => stage.parallel.map((m: any) => m.label)
 
@@ -106,6 +112,7 @@ describe('the other targets keep their shape', () => {
         'build',
         'build:linux',
         'build:mac',
+        'build:stage',
         'build:unpack',
         'build:win',
         'ensure',
@@ -121,9 +128,96 @@ describe('the other targets keep their shape', () => {
   })
 
   it('build:mac still overlays CSC_IDENTITY_AUTO_DISCOVERY on the child env', () => {
-    const builder = build()['build:mac'][1].steps[0]
+    const builder = build()['build:mac'][2].steps[0]
     expect(builder[2].env.CSC_IDENTITY_AUTO_DISCOVERY).toBe('false')
     expect(builder[2].env.PATH).toBe('/bin')
+  })
+})
+
+const stageLabels = (stages: any[]) => stages.map((s) => s.label ?? 'parallel')
+const cmd = (stage: any) => stage.steps.map((s: any[]) => `${s[0]} ${s[1].join(' ')}`)
+
+describe('stamp build-info', () => {
+  it.each([
+    ['build', ['parallel', 'stamp build-info']],
+    [
+      'build:mac',
+      [
+        'parallel',
+        'stamp build-info',
+        'electron-builder --mac --dir',
+        'stamp install-marker',
+        'codesign',
+        'xattr -cr'
+      ]
+    ],
+    [
+      'build:win',
+      ['parallel', 'stamp build-info', 'electron-builder --win --dir', 'stamp install-marker']
+    ],
+    ['build:linux', ['parallel', 'stamp build-info', 'electron-builder --linux']],
+    [
+      'build:unpack',
+      ['parallel', 'stamp build-info', 'electron-builder --dir', 'stamp install-marker']
+    ]
+  ])('%s stamps right after the prepare group', (name, labels) => {
+    const stages = build()[name]
+    expect(stageLabels(stages)).toEqual(labels)
+    expect(cmd(stages[1])).toEqual(['bun scripts/stamp-build-info.mjs --quiet'])
+  })
+
+  it('is not part of the ensure or update targets', () => {
+    for (const name of ['ensure', 'ensure-cli', 'update-cli', 'postinstall'])
+      expect(JSON.stringify(build()[name])).not.toContain('stamp-build-info')
+  })
+})
+
+describe('CLAUDEUI_BUILD_OUT', () => {
+  const OUT = '/stage/out'
+  const builders = ['build:mac', 'build:win', 'build:linux', 'build:unpack']
+
+  it.each(builders)('%s keeps the default output when unset', (name) => {
+    const all = JSON.stringify(build()[name])
+    expect(all).not.toContain('directories.output')
+  })
+
+  it('mac: codesign and xattr use dist/mac-arm64 when unset', () => {
+    const stages = build()['build:mac']
+    expect(cmd(stages[4])[0]).toBe('codesign --force --deep --sign - dist/mac-arm64/ClaudeUI.app')
+    expect(cmd(stages[5])[0]).toBe('xattr -cr dist/mac-arm64/ClaudeUI.app')
+  })
+
+  it.each(builders)('%s passes the output dir to electron-builder when set', (name) => {
+    const stages = build({ env: { CLAUDEUI_BUILD_OUT: OUT } })[name]
+    const builder = stages.find((s: any) => s.label?.startsWith('electron-builder'))
+    expect(builder.steps[0][1]).toContain(`-c.directories.output=${OUT}`)
+  })
+
+  it('mac: codesign and xattr follow the output dir', () => {
+    const stages = build({ env: { CLAUDEUI_BUILD_OUT: OUT + '/' } })['build:mac']
+    expect(stages[3].steps[0][1][1]).toBe(`${OUT}/mac-arm64/ClaudeUI.app`)
+    expect(stages[4].steps[0][1].at(-1)).toBe(`${OUT}/mac-arm64/ClaudeUI.app`)
+    expect(stages[5].steps[0][1]).toEqual(['-cr', `${OUT}/mac-arm64/ClaudeUI.app`])
+    expect(cmd(stages[4])[0]).not.toContain('dist/')
+  })
+
+  it('mac: signs with MAC_SIGN_IDENTITY when set, without a shell', () => {
+    const stages = build({ env: { MAC_SIGN_IDENTITY: 'ClaudeUI Dev' } })['build:mac']
+    expect(stages[4].steps[0][0]).toBe('codesign')
+    expect(stages[4].steps[0][1]).toContain('ClaudeUI Dev')
+  })
+
+  it('changes nothing else', () => {
+    // The variable also rides along in the child env overlays (it is part of childEnv).
+    const normalise = (v: unknown) =>
+      JSON.parse(
+        JSON.stringify(v)
+          .replaceAll(`,"-c.directories.output=${OUT}"`, '')
+          .replaceAll(`${OUT}/mac-arm64`, 'dist/mac-arm64')
+          .replaceAll(`${OUT}/win-unpacked`, 'dist/win-unpacked'),
+        (k, val) => (k === 'CLAUDEUI_BUILD_OUT' ? undefined : val)
+      )
+    expect(normalise(build({ env: { CLAUDEUI_BUILD_OUT: OUT } }))).toEqual(normalise(build()))
   })
 })
 
@@ -173,5 +267,180 @@ describe('vendorOverrideRefusal', () => {
     expect(r.status).toBe(2)
     expect(r.stderr).toContain('refusing "build"')
     expect(r.stdout).not.toContain('[1/')
+  })
+})
+
+describe('stamp install-marker', () => {
+  const marker = (stages: any[]) => stages.find((s) => s.label === 'stamp install-marker')
+
+  it('mac stamps the .app after electron-builder and before codesign', () => {
+    const stages = build({ quiet: false })['build:mac']
+    const labels = stageLabels(stages)
+    expect(labels.indexOf('stamp install-marker')).toBe(
+      labels.indexOf('electron-builder --mac --dir') + 1
+    )
+    expect(labels.indexOf('stamp install-marker')).toBeLessThan(labels.indexOf('codesign'))
+    expect(cmd(marker(stages))).toEqual([
+      'bun scripts/stamp-install-marker.mjs dist/mac-arm64/ClaudeUI.app --platform mac'
+    ])
+  })
+
+  it('win stamps the unpacked folder last, after electron-builder', () => {
+    const stages = build()['build:win']
+    expect(stages.at(-1).label).toBe('stamp install-marker')
+    expect(cmd(marker(stages))).toEqual([
+      'bun scripts/stamp-install-marker.mjs dist/win-unpacked --platform win --quiet'
+    ])
+  })
+
+  it('build:unpack stamps for the host platform, and nothing on linux', () => {
+    expect(cmd(marker(build({ platform: 'win32' })['build:unpack']))[0]).toContain(
+      'dist/win-unpacked --platform win'
+    )
+    expect(cmd(marker(build({ platform: 'darwin' })['build:unpack']))[0]).toContain(
+      'dist/mac-arm64/ClaudeUI.app --platform mac'
+    )
+    expect(marker(build({ platform: 'linux' })['build:unpack'])).toBeUndefined()
+    expect(marker(build()['build:linux'])).toBeUndefined()
+  })
+
+  it('follows CLAUDEUI_BUILD_OUT', () => {
+    const env = { CLAUDEUI_BUILD_OUT: '/stage/out' }
+    expect(marker(build({ env })['build:win']).steps[0][1][1]).toBe('/stage/out/win-unpacked')
+    expect(marker(build({ env })['build:mac']).steps[0][1][1]).toBe(
+      '/stage/out/mac-arm64/ClaudeUI.app'
+    )
+  })
+
+  it('is not part of the ensure targets or the plain build', () => {
+    for (const name of ['build', 'ensure', 'ensure-cli', 'update-cli', 'postinstall'])
+      expect(JSON.stringify(build()[name])).not.toContain('stamp-install-marker')
+  })
+})
+
+describe('build:stage (the local rebuild)', () => {
+  const OUT = '/stage/rebuild-0123abcd'
+  const stage = (platform: string, env: Record<string, string> = { CLAUDEUI_BUILD_OUT: OUT }) =>
+    build({ platform, env })['build:stage']
+  const printed = (stages: any[]) =>
+    stages.map((s) => (s.parallel ? memberLabels(s).join(' ‖ ') : s.label))
+
+  it('mac: typecheck ‖ electron-vite, stamp, package, marker, codesign, xattr', () => {
+    const stages = stage('darwin')
+    expect(stageLabels(stages)).toEqual([
+      'parallel',
+      'stamp build-info',
+      'electron-builder --mac --dir',
+      'stamp install-marker',
+      'codesign',
+      'xattr -cr'
+    ])
+    expect(memberLabels(stages[0])).toEqual([
+      'typecheck:node',
+      'typecheck:web',
+      'electron-vite build'
+    ])
+  })
+
+  it('win: typecheck ‖ electron-vite, stamp, package, marker', () => {
+    expect(stageLabels(stage('win32'))).toEqual([
+      'parallel',
+      'stamp build-info',
+      'electron-builder --win --dir',
+      'stamp install-marker'
+    ])
+  })
+
+  it.each(['darwin', 'win32'])(
+    '%s never runs ensure-cli (it would rewrite a shared vendor dir)',
+    (platform) => {
+      const all = JSON.stringify(stage(platform))
+      for (const s of ['ensure-cli', 'extract-cli', 'apply-all', 'rebundle-cli', 'boot-probe'])
+        expect(all).not.toContain(s)
+    }
+  )
+
+  it('builds only into CLAUDEUI_BUILD_OUT, and signs and stamps what it built there', () => {
+    const mac = stage('darwin')
+    expect(mac[2].steps[0][1]).toContain(`-c.directories.output=${OUT}`)
+    expect(mac[2].steps[0][2].env.CSC_IDENTITY_AUTO_DISCOVERY).toBe('false')
+    expect(cmd(mac[3])[0]).toContain(`${OUT}/mac-arm64/ClaudeUI.app --platform mac`)
+    expect(cmd(mac[4])[0]).toBe(`codesign --force --deep --sign - ${OUT}/mac-arm64/ClaudeUI.app`)
+    expect(cmd(mac[5])[0]).toBe(`xattr -cr ${OUT}/mac-arm64/ClaudeUI.app`)
+    const win = stage('win32')
+    expect(win[2].steps[0][1]).toContain(`-c.directories.output=${OUT}`)
+    expect(cmd(win[3])[0]).toContain(`${OUT}/win-unpacked --platform win`)
+  })
+
+  it('mac: signs with MAC_SIGN_IDENTITY when set (else ad-hoc)', () => {
+    const stages = stage('darwin', { CLAUDEUI_BUILD_OUT: OUT, MAC_SIGN_IDENTITY: 'ClaudeUI Dev' })
+    expect(stages[4].steps[0][1]).toEqual([
+      '--force',
+      '--deep',
+      '--sign',
+      'ClaudeUI Dev',
+      `${OUT}/mac-arm64/ClaudeUI.app`
+    ])
+  })
+
+  it('build:mac and build:win package exactly as build:stage does after their prepare', () => {
+    const env = { CLAUDEUI_BUILD_OUT: OUT }
+    expect(build({ platform: 'darwin', env })['build:mac'].slice(1)).toEqual(
+      stage('darwin').slice(1)
+    )
+    expect(build({ platform: 'win32', env })['build:win'].slice(1)).toEqual(stage('win32').slice(1))
+  })
+
+  it.each(['darwin', 'win32'] as const)(
+    '%s prints the stage labels the rebuild progress expects',
+    (platform) => {
+      expect(printed(stage(platform))).toEqual(expectedStageLabels(platform))
+    }
+  )
+
+  describe('stageTargetRefusal', () => {
+    it('refuses without CLAUDEUI_BUILD_OUT, or with a relative one', () => {
+      expect(stageTargetRefusal('build:stage', {}, 'darwin')).toContain('CLAUDEUI_BUILD_OUT')
+      expect(stageTargetRefusal('build:stage', { CLAUDEUI_BUILD_OUT: '' }, 'win32')).toContain(
+        'CLAUDEUI_BUILD_OUT'
+      )
+      expect(
+        stageTargetRefusal('build:stage', { CLAUDEUI_BUILD_OUT: 'dist/x' }, 'darwin')
+      ).toContain('absolute')
+    })
+
+    it('refuses a host with no desktop install layout', () => {
+      expect(stageTargetRefusal('build:stage', { CLAUDEUI_BUILD_OUT: OUT }, 'linux')).toContain(
+        'linux'
+      )
+    })
+
+    it('lets it run with an absolute output folder on macOS and Windows', () => {
+      expect(stageTargetRefusal('build:stage', { CLAUDEUI_BUILD_OUT: OUT }, 'darwin')).toBeNull()
+      expect(
+        stageTargetRefusal('build:stage', { CLAUDEUI_BUILD_OUT: 'C:\\stage\\out' }, 'win32')
+      ).toBeNull()
+    })
+
+    it.each(['build', 'build:mac', 'build:win', 'build:unpack', 'ensure-cli'])(
+      'has nothing to say about %s',
+      (target) => {
+        expect(stageTargetRefusal(target, {}, 'darwin')).toBeNull()
+      }
+    )
+
+    it('build.mjs exits 2 before running any stage', () => {
+      const env: Record<string, string | undefined> = { ...process.env }
+      delete env.CLAUDEUI_BUILD_OUT
+      delete env.CLAUDEUI_CLI_VENDOR_DIR
+      const r = spawnSync(
+        process.execPath,
+        [resolve(__dirname, '../../../scripts/build.mjs'), 'build:stage'],
+        { env, encoding: 'utf8', timeout: 30000 }
+      )
+      expect(r.status).toBe(2)
+      expect(r.stderr).toContain('refusing "build:stage"')
+      expect(r.stdout).not.toContain('[1/')
+    })
   })
 })

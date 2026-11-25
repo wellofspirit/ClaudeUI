@@ -14,7 +14,10 @@
  *   - System installs update themselves, and Claude Code's bundled copy moves
  *     only with ClaudeUI releases, so neither ever counts;
  *   - an empty store is not an update: a first install is not (the upgrade
- *     prompt and the Installed page handle first installs, arc 3).
+ *     prompt and the Installed page handle first installs, arc 3);
+ *   - a version the user skipped for that harness (`skippedUpdates` in
+ *     `harnesses.json`, the Updates panel's "Skip <version>") is not offered;
+ *     a newer one is, and Automatically never installs a skipped one.
  *
  * ## The service (`createHarnessUpdater`)
  *
@@ -29,7 +32,8 @@
  *   and an install or a selection change moves it at once.
  * - Automatically (`updates: 'auto'` in `harnesses.json`): a check that finds
  *   updates installs them itself, one at a time, through the S3 installer.
- *   Ask me: nothing installs until `updateAll` (the sidebar button).
+ *   Ask me: nothing installs until a client installs one (the Updates panel's
+ *   per-harness Update) or calls `updateAll`.
  * - One run at a time; `updateAll` during a run joins it. A run's results stay
  *   until the next run starts; a failure whose version was installed some other
  *   way is dropped from them.
@@ -55,7 +59,12 @@ import { HARNESS_IDS } from '../../../shared/harness-types'
 import { logger } from '../../services/logger'
 import { DISABLE_DETECTION_ENV } from '../detect/scheduler'
 import { harnessManifest } from '../manifests'
-import { HARNESS_VERSION_RE, harnessSelection, harnessUpdateMode } from '../selection-store'
+import {
+  HARNESS_VERSION_RE,
+  harnessSelection,
+  harnessSkippedUpdates,
+  harnessUpdateMode
+} from '../selection-store'
 import { compareVersions, installedVersions } from '../store'
 import { installHarness } from './installer'
 import { latestVersion as upstreamLatest, type UpstreamReadOptions } from './upstream'
@@ -78,6 +87,8 @@ export interface UpdateInputs {
   tested: Partial<Record<HarnessId, string>>
   /** Upstream's newest as last checked; missing or null when unknown. */
   latest: Partial<Record<HarnessId, string | null>>
+  /** The version the user skipped per harness; that exact target is not offered. */
+  skipped?: Partial<Record<HarnessId, string>>
 }
 
 function newest(versions: readonly string[] | undefined): string | null {
@@ -101,6 +112,8 @@ export function computeUpdates(inputs: UpdateInputs): HarnessUpdate[] {
     if (from === null) continue
     const to = choice === 'tested' ? inputs.tested[id] : inputs.latest[id]
     if (!to || !HARNESS_VERSION_RE.test(to)) continue
+    // Skipped: quiet until a newer version is the target.
+    if (inputs.skipped?.[id] === to) continue
     if (compareVersions(to, from) > 0) out.push({ id, from, to, choice })
   }
   return out
@@ -117,6 +130,8 @@ export interface HarnessUpdaterDeps {
   installed?: (id: HarnessId) => string[]
   tested?: (id: HarnessId) => string
   mode?: () => HarnessUpdateMode
+  /** The skipped version per harness (`harnesses.json`). */
+  skipped?: () => Partial<Record<HarnessId, string>>
   now?: () => Date
   intervalMs?: number
 }
@@ -131,6 +146,8 @@ export interface HarnessUpdater {
   updateAll(): Promise<HarnessUpdateResult[]>
   /** The mode was saved: tell clients, and in Automatically mode install what is available. */
   modeChanged(): void
+  /** A skipped version was saved for `id`: tell clients its update entry moved. */
+  skipChanged(id: HarnessId): void
   available(): HarnessUpdate[]
   status(): HarnessUpdaterStatus
   /** `harness:state`'s `updates`. Memory and the store only: no network. */
@@ -154,6 +171,7 @@ export function createHarnessUpdater(deps: HarnessUpdaterDeps = {}): HarnessUpda
   const installedOf = deps.installed ?? installedVersions
   const testedOf = deps.tested ?? ((id: HarnessId) => harnessManifest(id).tested)
   const modeOf = deps.mode ?? (() => harnessUpdateMode())
+  const skippedOf = deps.skipped ?? (() => harnessSkippedUpdates())
   const now = deps.now ?? (() => new Date())
   const intervalMs = deps.intervalMs ?? UPDATE_CHECK_INTERVAL_MS
 
@@ -179,7 +197,13 @@ export function createHarnessUpdater(deps: HarnessUpdaterDeps = {}): HarnessUpda
 
   function available(): HarnessUpdate[] {
     try {
-      const inputs: UpdateInputs = { selections: {}, installed: {}, tested: {}, latest: {} }
+      const inputs: UpdateInputs = {
+        selections: {},
+        installed: {},
+        tested: {},
+        latest: {},
+        skipped: skipped()
+      }
       for (const id of UPDATABLE) {
         inputs.selections[id] = selectionOf(id)
         inputs.installed[id] = installedOf(id)
@@ -215,6 +239,14 @@ export function createHarnessUpdater(deps: HarnessUpdaterDeps = {}): HarnessUpda
       return modeOf()
     } catch {
       return 'ask'
+    }
+  }
+
+  function skipped(): Partial<Record<HarnessId, string>> {
+    try {
+      return skippedOf()
+    } catch {
+      return {}
     }
   }
 
@@ -308,9 +340,12 @@ export function createHarnessUpdater(deps: HarnessUpdaterDeps = {}): HarnessUpda
       emit(UPDATABLE)
       if (mode() === 'auto') void run(available())
     },
+    skipChanged(id) {
+      emit([id])
+    },
     available,
     status,
-    view: () => ({ mode: mode(), available: available(), status: status() }),
+    view: () => ({ mode: mode(), available: available(), status: status(), skipped: skipped() }),
     onChanged(fn) {
       listeners.add(fn)
       return () => {
@@ -361,6 +396,11 @@ export function updateAllHarnesses(): Promise<HarnessUpdateResult[]> {
 /** After the update mode was saved. */
 export function harnessUpdateModeChanged(): void {
   updater.modeChanged()
+}
+
+/** After a skipped version was saved for `id`. */
+export function harnessUpdateSkipChanged(id: HarnessId): void {
+  updater.skipChanged(id)
 }
 
 /** `harness:state`'s `updates`. No network. */

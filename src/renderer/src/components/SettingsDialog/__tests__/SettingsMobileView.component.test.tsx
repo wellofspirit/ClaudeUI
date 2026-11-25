@@ -244,6 +244,7 @@ describe('SettingsDialog mobile fork', () => {
         'chat',
         'sessions',
         'advanced',
+        'updates',
         'about'
       ])
 

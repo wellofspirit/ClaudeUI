@@ -1,7 +1,8 @@
 /**
  * `~/.claude/ui/harnesses.json`: which source each harness runs from (ADR-082 §2),
- * whether harness updates install themselves (`updates`, §6), and whether the
- * one-time upgrade sheet was answered (`upgradePrompt`, §8).
+ * whether harness updates install themselves (`updates`, §6), the update version
+ * skipped per harness (`skippedUpdates`, the Updates panel's "Skip <version>"),
+ * and whether the one-time upgrade sheet was answered (`upgradePrompt`, §8).
  *
  * Main-owned. It is deliberately not a field of `engines/<id>.json`: that file
  * is replaced whole by `saveEngineConfig`, and renderer screens save their own
@@ -64,7 +65,18 @@ function isUpdateMode(value: unknown): value is HarnessUpdateMode {
   return value === 'auto' || value === 'ask'
 }
 
-/** The file's selections and update mode, validated. Never throws. */
+/** Known harnesses with an exact version; anything else is dropped. Undefined when none is left. */
+function sanitizeSkipped(value: unknown): Partial<Record<HarnessId, string>> | undefined {
+  if (!isRecord(value)) return undefined
+  const out: Partial<Record<HarnessId, string>> = {}
+  for (const [id, version] of Object.entries(value)) {
+    if (isHarnessId(id) && typeof version === 'string' && HARNESS_VERSION_RE.test(version))
+      out[id] = version
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** The file's selections, update mode and skipped updates, validated. Never throws. */
 export function loadHarnessesConfig(file = harnessesConfigPath()): HarnessesConfig {
   let parsed: unknown
   try {
@@ -73,9 +85,11 @@ export function loadHarnessesConfig(file = harnessesConfigPath()): HarnessesConf
     return {}
   }
   if (!isRecord(parsed)) return {}
+  const skipped = sanitizeSkipped(parsed.skippedUpdates)
   const config: HarnessesConfig = {
     ...(isUpdateMode(parsed.updates) ? { updates: parsed.updates } : {}),
-    ...(parsed.upgradePrompt === 'answered' ? { upgradePrompt: 'answered' as const } : {})
+    ...(parsed.upgradePrompt === 'answered' ? { upgradePrompt: 'answered' as const } : {}),
+    ...(skipped ? { skippedUpdates: skipped } : {})
   }
   if (!isRecord(parsed.selections)) return config
   const selections: Partial<Record<HarnessId, HarnessSelection>> = {}
@@ -105,16 +119,24 @@ export function harnessUpdateMode(
   return config.updates ?? 'ask'
 }
 
+/** The update version skipped per harness (the Updates panel's "Skip <version>"). */
+export function harnessSkippedUpdates(
+  config: HarnessesConfig = loadHarnessesConfig()
+): Partial<Record<HarnessId, string>> {
+  return { ...config.skippedUpdates }
+}
+
 /** Has the one-time upgrade sheet been answered (ADR-082 §8)? */
 export function upgradePromptAnswered(config: HarnessesConfig = loadHarnessesConfig()): boolean {
   return config.upgradePrompt === 'answered'
 }
 
 /**
- * Merge `update.selections` into the file, per harness, and set `updates` and
- * `upgradePrompt` when given. Top-level keys and selections for harnesses this
- * version does not know are kept. Throws on an invalid value, and rather than
- * overwrite a present-but-unreadable file, which is backed up first.
+ * Merge `update.selections` and `update.skippedUpdates` into the file, per
+ * harness, and set `updates` and `upgradePrompt` when given. Top-level keys,
+ * and selections and skips for harnesses this version does not know, are
+ * kept. Throws on an invalid value, and rather than overwrite a
+ * present-but-unreadable file, which is backed up first.
  */
 export function saveHarnessesConfig(update: HarnessesConfig, file = harnessesConfigPath()): void {
   if (update.updates !== undefined && !isUpdateMode(update.updates)) {
@@ -122,6 +144,11 @@ export function saveHarnessesConfig(update: HarnessesConfig, file = harnessesCon
   }
   if (update.upgradePrompt !== undefined && update.upgradePrompt !== 'answered') {
     throw new Error(`Invalid upgrade prompt state: ${JSON.stringify(update.upgradePrompt)}`)
+  }
+  for (const [id, version] of Object.entries(update.skippedUpdates ?? {})) {
+    if (!isHarnessId(id) || typeof version !== 'string' || !HARNESS_VERSION_RE.test(version)) {
+      throw new Error(`Invalid skipped update for ${id}: ${JSON.stringify(version)}`)
+    }
   }
   const current = readJsonFileForWrite(file)
   const selections = isRecord(current.selections) ? { ...current.selections } : {}
@@ -132,6 +159,10 @@ export function saveHarnessesConfig(update: HarnessesConfig, file = harnessesCon
     selections[id] = selection
   }
   const next: Record<string, unknown> = { ...current, selections }
+  if (update.skippedUpdates !== undefined) {
+    const skipped = isRecord(current.skippedUpdates) ? { ...current.skippedUpdates } : {}
+    next.skippedUpdates = { ...skipped, ...update.skippedUpdates }
+  }
   if (update.updates !== undefined) next.updates = update.updates
   if (update.upgradePrompt !== undefined) next.upgradePrompt = update.upgradePrompt
   writeFileAtomicSync(file, JSON.stringify(next, null, 2) + '\n', {

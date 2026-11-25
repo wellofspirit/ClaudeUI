@@ -98,6 +98,12 @@ src/
                          bootstrap chain)
     voice-worker-launcher.ts — `claudeui-server voice-worker`: the server relaunching itself
                          as the on-device voice worker (ADR-101)
+    monitor.ts         — the parent `serve` runs: starts the worker, restarts it on
+                         exit 75, updates and rolls back (remote.md §claudeui-server)
+    worker-host.ts     — the worker's relaunch and update seams, eligibility, health
+    server-layout.ts   — the root layout and the monitor protocol (`current`, `pending`)
+    server-records.ts  — health records and restart results in ~/.claude/ui/relaunch
+    server-versions.ts — staging into versions/, the deletion gate, the sweep
   preload/             — context bridges: window.api (ClaudeAPI, built from
                          shared/api-invoke-table.ts), plugin, log viewer
   renderer/src/

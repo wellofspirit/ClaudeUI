@@ -39,6 +39,8 @@ import {
   loadVendorConfig
 } from '../services/ui-config'
 import type { UISessionConfig, UISettings } from '../services/ui-config'
+import { savedAppSetting } from '../services/app-settings'
+import { HOST_OWNED_SETTINGS } from '../../shared/app-settings'
 import { logger } from '../services/logger'
 import { emitEvent, syncCore } from '../services/sync-host'
 import { blobStore, internAttachments } from '../services/blob-store'
@@ -1081,6 +1083,17 @@ export function saveUiSettings(incomingSettings: UISettings): void {
   // valid one, not stored (the watcher normalises on read as well).
   if (settings.contextPressure !== undefined) {
     settings.contextPressure = normalizeContextPressure(settings.contextPressure)
+  }
+  // Host-owned (`HOST_OWNED_SETTINGS`): the checkout a desktop rebuild runs code
+  // from, and which ClaudeUI releases the host offers and whether it downloads
+  // them. `config` is a base remote grant, so no client sets these through here:
+  // what the host has saved is kept whatever the client sent, and a key it never
+  // saved stays unset (so it keeps following its default). Only the admin
+  // commands `app-update:set-source` / `app-update:set-settings` write them.
+  for (const key of HOST_OWNED_SETTINGS) {
+    const value = savedAppSetting(key)
+    if (value !== undefined) settings[key] = value
+    else delete settings[key]
   }
   saveSettings(settings)
   // Re-apply proxy/endpoint/model from the engine/vendor stores (source of truth is there). Not an

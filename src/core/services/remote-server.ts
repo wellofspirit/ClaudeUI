@@ -5,7 +5,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import * as fs from 'node:fs'
 import { WebSocketServer, WebSocket } from 'ws'
-import { getAppPath, serveHostMockup, type HostWindowHandle } from '../host'
+import { getAppPath, hostBuildId, serveHostMockup, type HostWindowHandle } from '../host'
 import { syncCore, addSyncSubscriber, addStreamSubscriber } from './sync-host'
 import { logWsFullSync, logFullSyncBreakdown, type FrameSent } from './sync-stats-log'
 import { SYNC_FULL_CHUNK_CHARS, splitSyncFullJson } from '../shared/sync/sync-full-chunks'
@@ -658,13 +658,17 @@ interface InvokeTransfer {
  * the other.
  */
 function authSuccessFrame(
-  fields: Omit<WsAuthResponse, 'type' | 'ok' | 'invokeChunks'>
+  fields: Omit<WsAuthResponse, 'type' | 'ok' | 'invokeChunks' | 'buildId'>
 ): WsAuthResponse {
+  const build = hostBuildId()
   return {
     type: 'auth-response',
     ok: true,
     ...fields,
-    invokeChunks: { maxChars: INVOKE_CHUNK_MAX_CHARS }
+    invokeChunks: { maxChars: INVOKE_CHUNK_MAX_CHARS },
+    // Authenticated sockets only: a build id names the exact build, which the
+    // unauthenticated `/remote/auth-info` must never disclose.
+    ...(build ? { buildId: build } : {})
   }
 }
 
@@ -1688,6 +1692,15 @@ export class RemoteServer {
       this.tlsRetryTimer = undefined
     }
     this.tlsRetryAttempt = 0
+  }
+
+  /**
+   * The listener is bound and accepting. Not `getStatus().running`, which turns
+   * true as soon as `start()` creates the server, before `listen()` succeeds:
+   * a relaunched host's health record waits for this (design review ruling 4).
+   */
+  isListening(): boolean {
+    return this.httpServer?.listening === true
   }
 
   /** Get current server status. */

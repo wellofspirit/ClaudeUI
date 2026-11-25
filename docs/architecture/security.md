@@ -137,7 +137,14 @@ Synced state does not travel through a command: a snapshot answers a `sync` fram
 
 Capabilities: `chat`, `session-config`, `config`, `git`, `fs-read`, `shell`, `ide`, `admin`, `enroll`, `host` (desktop shell only). `enroll` is ADR-052's addition and exists to be _separable_ from `admin`: a one-time enrollment link must be able to register a credential and reach nothing else — not chat, not config, not git. `ide` is ADR-064's, separable from `shell` for the same kind of reason one step out: a remote VS Code is shell-EQUIVALENT but it is not a pty, and an operator must be able to want an editor without handing out a raw shell (or the reverse). Like `shell` it is in no static grant set — see §IDE posture. Per-connection **identity** (method, login/credential nickname, connect time) is attached to every command — enabling the audit log and per-client subscriptions (retiring the collective-owner git-watch workaround).
 
-**`admin` is EXACTLY the session-security area** since ADR-056: the `authcfg:*` and `webauthn:*` families, plus their host-anchor twin `remote:*`. The engine-vendor channels that used to carry it — `auth:*`, `account:*`, `shared-provider:*` writes, `vendor-auth:*`, `usage:refresh-prices` — declare `config` now. That is a rename, not a widening: they are desktop-only by their REGISTRATION (a channel is reachable over a transport iff it was registered for it), which is where the guarantee always actually lived. It also removes them from `PINNED_CAPABILITIES`, because `config` is in the base grant set and the pin table's one invariant is that every entry names a capability the base set does not hold.
+**Restarting or updating the host is `admin`** (ADR-119–122): `app:relaunch`, every `app-update:*` write (`check`,
+`download`, `skip`, `apply`, `set-settings`, `set-source`, `trees`, `rebuild`, `cancel-rebuild`) and
+`harness:skip-update`. Their reads (`app-update:state`, `app:relaunch-availability`, `app:restart-impact`,
+`app:last-relaunch`) are `config` and carry no local path; the desktop window's restore record (`app:restore-state`,
+`app:take-restore`) is `host`. Update mode, channel and the rebuild source are host-owned settings: a client's
+`config:save-settings` keeps the host's values.
+
+**`admin` covers the session-security area** since ADR-056 (the `authcfg:*` and `webauthn:*` families, plus their host-anchor twin `remote:*`), alongside the host-changing writes named above and the harness and speech-pack writes (ADR-082, ADR-101). The engine-vendor channels that used to carry it — `auth:*`, `account:*`, `shared-provider:*` writes, `vendor-auth:*`, `usage:refresh-prices` — declare `config` now. That is a rename, not a widening: they are desktop-only by their REGISTRATION (a channel is reachable over a transport iff it was registered for it), which is where the guarantee always actually lived. It also removes them from `PINNED_CAPABILITIES`, because `config` is in the base grant set and the pin table's one invariant is that every entry names a capability the base set does not hold.
 
 ### The registration sweep (S1b, 2026-08-17)
 

@@ -393,6 +393,8 @@ export interface SessionAPI {
   updateHarnesses(): Promise<HarnessStateSnapshot>
   /** Ask upstream for new versions now; resolves with the new state. */
   checkHarnessUpdates(): Promise<HarnessStateSnapshot>
+  /** Stop offering `version` of `id` (an exact version); a newer one is offered. Answers the updates view. */
+  skipHarnessUpdate(id: HarnessId, version: string): Promise<HarnessUpdatesView>
   /** Answer the one-time upgrade sheet (ADR-082 §8): it does not come back. */
   answerHarnessUpgradePrompt(): Promise<HarnessUpgradePromptView>
   generateTitle(conversationText: string): Promise<string | null>

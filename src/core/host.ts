@@ -18,6 +18,15 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AccountsState, AccountRef, OAuthAccount } from '../shared/types'
+import type { RelaunchAvailability, RelaunchResult } from '../shared/relaunch'
+import type { BuildInfo, DevBuildInfo } from '../shared/build-info'
+import type { UpdateTarget } from '../shared/update-manifest'
+import type {
+  AppUpdateEligibility,
+  AppUpdateRebuildProgress,
+  AppUpdateTree,
+  AppUpdateTreeSummary
+} from '../shared/types/app-update'
 
 // ---------------------------------------------------------------------------
 // Window handle
@@ -163,6 +172,134 @@ export function setHostAppVersion(version: string | null): void {
 /** The host's version, or `unknown` when nothing published one (vitest, a script). */
 export function hostAppVersion(): string {
   return hostVersion ?? 'unknown'
+}
+
+// ---------------------------------------------------------------------------
+// The build id (remote clients reload when it changes)
+// ---------------------------------------------------------------------------
+
+let hostBuild: string | null = null
+
+/**
+ * Publish this host's build id (`buildId(readBuildInfo(...))` in
+ * `src/shared/build-info.ts`), or null for a dev run. The remote server sends it
+ * in every successful `auth-response`, so a web client that reconnects to a
+ * different build reloads its page instead of running old JavaScript against a
+ * new host.
+ */
+export function setHostBuildId(id: string | null): void {
+  hostBuild = id
+}
+
+/** The host's build id, or null (a dev host, or nothing published). */
+export function hostBuildId(): string | null {
+  return hostBuild
+}
+
+// ---------------------------------------------------------------------------
+// Relaunch (quit, and have a detached helper start this host again)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the `app:relaunch*` commands need from the host. The desktop wires its
+ * relaunch service (`src/main/services/relaunch/`); the headless server's
+ * `serve` wires `src/server/worker-host.ts`, available only under its monitor
+ * (`src/server/monitor.ts`), so a server nobody could start again answers "not
+ * available" rather than quitting.
+ */
+export interface HostRelaunch {
+  /** Whether a relaunch can start now, and why not. */
+  availability(): RelaunchAvailability
+  /**
+   * Start a relaunch: resolves once the helper is running and the quit is under
+   * way; throws a clear error when refused (the host keeps running).
+   */
+  relaunch(): Promise<void>
+  /** The newest relaunch result for this install, or null. */
+  lastResult(): RelaunchResult | null
+}
+
+let hostRelaunchImpl: HostRelaunch | null = null
+
+/** Publish the host's relaunch (or clear it). Wired in `boot-core` and the server's `main.ts`. */
+export function setHostRelaunch(relaunch: HostRelaunch | null): void {
+  hostRelaunchImpl = relaunch
+}
+
+/** The host's relaunch, or null when this host cannot relaunch itself. */
+export function hostRelaunch(): HostRelaunch | null {
+  return hostRelaunchImpl
+}
+
+// ---------------------------------------------------------------------------
+// ClaudeUI's own updates (auto-update design §3)
+// ---------------------------------------------------------------------------
+
+/**
+ * What differs per host for ClaudeUI's own updates. The core service
+ * (`services/app-update.ts`) finds, verifies and downloads a release; staging
+ * the archive and restarting into it are the host's. Unset (null), the service
+ * reports `supported: false` and does nothing: no checks, no timers, no files.
+ *
+ * Errors any method throws are shown to every client (`app-update:state` is a
+ * `config` read), so their messages must not carry local paths.
+ */
+export interface AppUpdateHost {
+  /** The running build's identity (`services/build-info.ts`). */
+  buildInfo(): BuildInfo | DevBuildInfo
+  /** This host's manifest asset key (e.g. `desktop-darwin-arm64`), or null when none fits. */
+  target(): UpdateTarget | null
+  /** Whether an update can be applied here (writable install, not translocated, ...). */
+  eligibility(): Promise<AppUpdateEligibility>
+  /** Absolute directory the archives are downloaded into (under `~/.claude/ui/updates`). */
+  downloadsDir(): string
+  /** Extract a verified archive and run the platform checks; the id names the result. */
+  stage(archivePath: string, version: string): Promise<{ stagedId: string }>
+  /** Whether an earlier `stage` result is still there and valid (after a restart). */
+  isStaged(stagedId: string, version: string): Promise<boolean>
+  /** Restart into the staged build. */
+  apply(stagedId: string, version: string): Promise<void>
+
+  // ── Local rebuild (optional: the desktop only) ──────────────────────────────
+
+  /** Whether a source checkout to rebuild from is known (cheap; read on every view). */
+  rebuildAvailable?(): boolean
+  /** The checkouts the host itself lists (never a client-supplied path); no paths in the result. */
+  trees?(): Promise<AppUpdateTree[]>
+  /**
+   * Rebuild from the tree `treeId` names. Resolves once the pre-checks passed and
+   * the build started (rejects with the reason one refused it); `done` settles
+   * when the build is staged (the version and commit it carries) or failed. A
+   * cancelled build rejects `done` with an error named `RebuildCancelled`.
+   */
+  rebuild?(
+    treeId: string,
+    onProgress: (progress: AppUpdateRebuildProgress) => void
+  ): Promise<{
+    tree: AppUpdateTreeSummary
+    done: Promise<{ version: string; commit: string | null }>
+  }>
+  /** Stop a running rebuild by its process group (nothing staged); a no-op when none runs. */
+  cancelRebuild?(): Promise<void>
+  /**
+   * Quitting: stop a running rebuild and refuse every later one, including one
+   * still in its pre-checks (it would otherwise spawn a build that outlives the app).
+   */
+  stopRebuild?(): Promise<void>
+  /** Restart into the build the last rebuild staged. */
+  applyRebuild?(): Promise<void>
+}
+
+let hostAppUpdateImpl: AppUpdateHost | null = null
+
+/** Publish the host's update seam (or clear it). Both hosts wire it before core starts. */
+export function setHostAppUpdate(host: AppUpdateHost | null): void {
+  hostAppUpdateImpl = host
+}
+
+/** The host's update seam, or null where this host cannot update itself. */
+export function hostAppUpdate(): AppUpdateHost | null {
+  return hostAppUpdateImpl
 }
 
 // ---------------------------------------------------------------------------

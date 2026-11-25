@@ -444,6 +444,11 @@ const SYNC_CHANNEL_SPECS = {
     canonical: false,
     why: 'An API key was stored or removed in the vault (setApiKey, adoptNativeKey, removeDefinition, disconnectProvider). A payload-free nudge: no provider id and no key, so there is nothing to leak to a remote client; the Usage Analytics tab re-reads `openrouter:status` (a boolean) to show or hide its OpenRouter tab. Replicated because the tab is on every device, and a key saved on the desktop must appear on the phone. Rings like `harness:changed`: a replay costs one status read. No snapshot field.'
   },
+  'app-update:changed': {
+    cls: 'replicated',
+    canonical: false,
+    why: "Auto-update design §3: ClaudeUI's own update state moved (a check started or ended, a download advanced or changed phase, a version was skipped, the update settings changed). A payload-free nudge like `usage-hub:changed`: `app-update:state` is the one shape, read with `config`, and download progress is in it (emitted at most once a second). Replicated because every device shows the Updates panel and an admin phone may drive the download the desktop shows. Rings: a replay costs one state read. No snapshot field."
+  },
   'provider:auth-resolved': {
     cls: 'replicated',
     // `canonical: true` because this flag means exactly "does `applyEvent` change
@@ -598,6 +603,21 @@ const HOST_LOCAL_CHANNEL_SPECS = {
     cls: 'host-local',
     canonical: false,
     why: 'Host lifecycle handshake with the owning renderer.'
+  },
+  'app:collect-restore': {
+    cls: 'host-local',
+    canonical: false,
+    why: "Relaunch handshake: main asks the desktop window for its open session and drafts (answered by `app:restore-state`). A remote client keeps its own across the restart's reload."
+  },
+  'app:relaunch-requested': {
+    cls: 'host-local',
+    canonical: false,
+    why: "The app menu's Relaunch item: the desktop window runs the confirm flow. Window chrome, like the menu itself."
+  },
+  'app:check-updates-requested': {
+    cls: 'host-local',
+    canonical: false,
+    why: "The app menu's Check for Updates item: the desktop window opens the Updates panel and checks. Window chrome, like the menu itself."
   }
 } satisfies Record<string, HostLocalChannelSpec>
 

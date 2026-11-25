@@ -4,7 +4,8 @@ import { useIsMobile } from '../../hooks/useIsMobile'
 import { SettingsDialog, SettingsToggle } from '../SettingsDialog'
 import { settingsTargetFromEvent, type SettingsTarget } from '../SettingsDialog/settings-target'
 import { UsageRing } from './UsagePanel'
-import { HarnessUpdateButton, useHarnessUpdateIndicator } from './HarnessUpdateButton'
+import { UpdatesButton, useUpdatesIndicator } from '../Updates/UpdatesButton'
+import { RebuildMenuItem, RelaunchMenuItem } from './RelaunchMenuItem'
 
 // Lazy: the modal tree + qrcode must not ride the eager App chunk — the mount
 // below is desktop-only, so on the web client THIS modal is unreachable. Its
@@ -49,10 +50,10 @@ export function SettingsPanel(): React.JSX.Element {
   const settings = useSessionStore((s) => s.settings)
   const updateSettings = useSessionStore((s) => s.updateSettings)
   const panelRef = useRef<HTMLDivElement>(null)
-  // The harness update button (ADR-082 §6): left of Remote Access, and while
-  // it shows it takes the footer's `ml-auto`, so Remote and Settings stay
-  // right-aligned (mockup `04c3853c`).
-  const harnessUpdates = useHarnessUpdateIndicator()
+  // The Updates button (ClaudeUI and the harnesses, auto-update design §8):
+  // left of Remote Access, and while it shows it takes the footer's `ml-auto`,
+  // so Remote and Settings stay right-aligned.
+  const updates = useUpdatesIndicator()
 
   // Track remote server status — DESKTOP: the host anchor pushes it to its own
   // window, so read once and subscribe.
@@ -218,6 +219,11 @@ export function SettingsPanel(): React.JSX.Element {
             checked={settings.hideSessionMessages}
             onChange={(v) => updateSettings({ hideSessionMessages: v })}
           />
+          {/* Relaunch ClaudeUI: shown when the host can relaunch and this client holds admin.
+              Rebuild & relaunch…: when the host knows a source checkout; it opens
+              the Updates panel on the rebuild choice. */}
+          <RelaunchMenuItem onChosen={() => setOpen(false)} />
+          <RebuildMenuItem onChosen={() => setOpen(false)} />
           {/* All Settings button */}
           <button
             data-testid="SettingsPanel.allSettings"
@@ -256,7 +262,7 @@ export function SettingsPanel(): React.JSX.Element {
         className="relative border-t border-border/50 flex items-center gap-2.5 text-[11px] text-text-muted"
       >
         <UsageRing />
-        <HarnessUpdateButton indicator={harnessUpdates} />
+        <UpdatesButton indicator={updates} />
         {/* Both platforms raise an overlay; only WHICH one differs. The desktop
             modal renders the access links, which carry channel keys — mounting it
             on a web client would hand a connected device the credentials to admit
@@ -267,7 +273,7 @@ export function SettingsPanel(): React.JSX.Element {
           data-testid="SettingsPanel.remoteAccess"
           onClick={() => setRemoteModalOpen(true)}
           className={`flex items-center gap-1 h-6 rounded-md hover:bg-bg-hover transition-colors cursor-default px-1 ${
-            harnessUpdates.visible ? '' : 'ml-auto'
+            updates.visible ? '' : 'ml-auto'
           }`}
           title={window.api.platform === 'web' ? 'Remote access status' : 'Remote Access'}
         >
@@ -293,8 +299,8 @@ export function SettingsPanel(): React.JSX.Element {
             </span>
           )}
         </button>
-        {/* The indicator above carries `ml-auto` (or the harness update button
-            does, while it shows), so the cog no longer needs the web-only variant
+        {/* The indicator above carries `ml-auto` (or the Updates button does,
+            while it shows), so the cog no longer needs the web-only variant
             it used to take when it was the first item after the usage ring. */}
         <button
           data-testid="SettingsPanel.toggle"

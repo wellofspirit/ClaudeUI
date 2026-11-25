@@ -30,7 +30,11 @@
 import { app, dialog, ipcMain, Notification } from 'electron'
 import type { BrowserWindow } from 'electron'
 import { installDesktopTransport } from './ipc/desktop-transport'
-import { startCoreServices, type CoreServices } from '../core/boot/core-services'
+import {
+  startCoreServices,
+  type CoreServices,
+  type RemoteStartOutcome
+} from '../core/boot/core-services'
 import type { RemoteConfigPatch } from '../core/boot/host-anchor'
 import { RemoteServer } from '../core/services/remote-server'
 import { RemoteDispatcher } from '../core/services/remote-dispatcher'
@@ -42,12 +46,17 @@ import { claudeAuthProvider } from './auth/ClaudeAuthProvider'
 import { engineAuthRegistry } from './auth/EngineAuthRegistry'
 import { getHostWindow } from '../core/services/host-window'
 import {
+  setHostAppUpdate,
   setHostAuth,
   setHostIsPackaged,
   setHostMockup,
   setHostOAuthLoopback,
-  setHostPicker
+  setHostPicker,
+  setHostRelaunch
 } from '../core/host'
+import { desktopHostRelaunch, relaunchService } from './services/relaunch'
+import { createDesktopAppUpdateHost, setDesktopAppUpdateHost } from './services/app-update-host'
+import { appSetting } from '../core/services/app-settings'
 import { routeHttpMockup, serveMockup } from './services/mockup-protocol'
 import type { SessionManager } from '../core/services/session-manager'
 import type { AutomationManager } from '../core/services/automation-manager'
@@ -59,6 +68,8 @@ export interface CoreBoot {
   remoteServer: RemoteServer
   remoteDispatcher: RemoteDispatcher
   automationManager: AutomationManager
+  /** How the boot's remote start attempt ended (the relaunch health record waits for it). */
+  remoteStartSettled: Promise<RemoteStartOutcome>
   /** The quit's first phase: needs the services alive, the coordinator bounds it. */
   prepareStop: CoreServices['prepareStop']
   /** The host-neutral teardown, run inside the confirmed before-quit. */
@@ -73,6 +84,11 @@ export interface BootCoreOptions {
    * reconcile, autostart or force-reserve. See index.ts's comment.
    */
   remoteAccessDisabled: boolean
+  /**
+   * Single-instance enforcement is on (`index.ts`): the update host's boot sweep
+   * runs only then (another copy could be running from a folder it would remove).
+   */
+  singleInstance?: boolean
 }
 
 /** The `remote:*` channels, cleared before re-registering (idempotent boot). */
@@ -93,7 +109,7 @@ const HOST_ANCHOR_CHANNELS = [
  * Boot the window-independent half of the app. Call ONCE, from
  * `app.whenReady()`, before deciding whether to make a window.
  */
-export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
+export function bootCore({ remoteAccessDisabled, singleInstance }: BootCoreOptions): CoreBoot {
   // The desktop transport adapter. Installed FIRST, before any registrar runs —
   // a channel registered while no binder is installed would land in the registry
   // with no `ipcMain` handler behind it, and the renderer would see "no handler
@@ -144,6 +160,26 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
   // client's own loopback and the code comes back by paste-back or device code,
   // so binding the fixed port would only make concurrent sign-ins collide.
   setHostOAuthLoopback(true)
+  // Relaunch (`app:relaunch*`): the desktop's relaunch service, configured by
+  // index.ts once the quit coordinator exists (unavailable until then).
+  setHostRelaunch(desktopHostRelaunch)
+  // ClaudeUI's own updates: a packaged build stages releases and local rebuilds
+  // beside its install and restarts into them through the relaunch service.
+  // `bun run dev` has no install to update (electron-vite owns it): null, so the
+  // update service reports `supported: false` and makes no request.
+  const appUpdateHost = app.isPackaged
+    ? createDesktopAppUpdateHost({
+        platform: process.platform,
+        arch: process.arch,
+        execPath: process.execPath,
+        appPath: app.getAppPath(),
+        relaunch: relaunchService,
+        sourceSetting: () => appSetting('appUpdateSourcePath'),
+        singleInstance: singleInstance === true
+      })
+    : null
+  setDesktopAppUpdateHost(appUpdateHost)
+  setHostAppUpdate(appUpdateHost)
 
   // The desktop-auth dependencies the `auth:*` / `account:*` / `vendor-auth:*`
   // family needs on BOTH transports. `engineAuthRegistry` is populated by the
@@ -235,6 +271,7 @@ export function bootCore({ remoteAccessDisabled }: BootCoreOptions): CoreBoot {
     remoteServer: core.remoteServer,
     remoteDispatcher: core.remoteDispatcher,
     automationManager: core.automationManager,
+    remoteStartSettled: core.remoteStartSettled,
     prepareStop: core.prepareStop,
     stop: core.stop
   }

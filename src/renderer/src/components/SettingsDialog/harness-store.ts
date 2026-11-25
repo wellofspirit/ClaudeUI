@@ -1,11 +1,11 @@
 /**
  * The harness manager's client state (ADR-082 arc 2): one store per client,
  * shared by every surface that shows harnesses (the Installed page's rows and
- * its progress pill, and the sidebar's update button, S6), so they read one
+ * its progress pill, and the sidebar's Updates panel), so they read one
  * snapshot and one install list instead of each subscribing and re-reading on
  * its own.
  *
- * The sidebar button and the app-level upgrade sheet (S7b) keep the store
+ * The sidebar's Updates button and the app-level upgrade sheet (S7b) keep the store
  * subscribed for as long as the app is mounted, so what describes one visit to
  * the Installed page (its errors, the upstream versions it fetched, a
  * detection error) is reset when the page closes (`useHarnessPageVisit`), not
@@ -74,11 +74,9 @@ export interface HarnessStoreState {
   errors: Partial<Record<HarnessId, string>>
   /** A write was refused for want of `admin`. */
   denied: boolean
-  /** This client's Update all is in flight. */
-  updatePending: boolean
   /** This client's Check now is in flight. */
   checkPending: boolean
-  /** Update all, Check now or the update-mode save failed. */
+  /** Check now or the update-mode save failed. */
   updateError: string | null
   /** Update failures this client dismissed (`updateResultKey`). */
   dismissedUpdates: readonly string[]
@@ -104,7 +102,6 @@ const INITIAL: HarnessStoreState = {
   versions: {},
   errors: {},
   denied: false,
-  updatePending: false,
   checkPending: false,
   updateError: null,
   dismissedUpdates: [],
@@ -481,23 +478,6 @@ class HarnessStore {
     this.set({ versions: { ...this.state.versions, [id]: next } })
   }
 
-  /**
-   * Install every available update (ADR-082 §6). Resolves when the host's run
-   * ends; the events and the snapshot carry the progress. A remote invoke that
-   * times out is a run still going on the host, not a failure.
-   */
-  updateAll = async (): Promise<void> => {
-    this.set({ updatePending: true, updateError: null })
-    try {
-      await window.api.updateHarnesses()
-    } catch (error) {
-      this.updateFailed(error)
-    } finally {
-      this.set({ updatePending: false })
-      void this.refresh()
-    }
-  }
-
   /** "Check now": the host asks upstream for new versions. */
   checkUpdates = async (): Promise<void> => {
     this.set({ checkPending: true, updateError: null })
@@ -508,6 +488,18 @@ class HarnessStore {
     } finally {
       this.set({ checkPending: false })
       void this.refresh()
+    }
+  }
+
+  /** "Skip <version>" (the Updates panel): the host stops offering that version of `id`. */
+  skipUpdate = async (id: HarnessId, version: string): Promise<void> => {
+    this.set({ updateError: null })
+    try {
+      const view = await window.api.skipHarnessUpdate(id, version)
+      const snapshot = this.state.snapshot
+      if (snapshot) this.set({ snapshot: { ...snapshot, updates: view } })
+    } catch (error) {
+      this.updateFailed(error)
     }
   }
 

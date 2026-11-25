@@ -310,6 +310,23 @@ describe('chunked invokes (invoke-chunk)', () => {
     })
   })
 
+  it('carries the host build id on an accept, and nothing for a dev host (relaunch arc)', async () => {
+    const { setHostBuildId } = await import('../../host')
+    await boot()
+    const dev = await login()
+    expect(await dev.waitFor('auth-response')).not.toHaveProperty('buildId')
+    setHostBuildId('abc1234@2026-11-24T00:00:00.000Z')
+    try {
+      const built = await login()
+      expect(await built.waitFor('auth-response')).toMatchObject({
+        ok: true,
+        buildId: 'abc1234@2026-11-24T00:00:00.000Z'
+      })
+    } finally {
+      setHostBuildId(null)
+    }
+  })
+
   it('never reaches reassembly before auth', async () => {
     await boot()
     const c = await rawConnect(port)

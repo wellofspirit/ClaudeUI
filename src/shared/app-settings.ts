@@ -20,6 +20,7 @@ import type { AgentColorId, AgentTypeColorOverrides } from './agent-type-colors'
 import type { ContextPressureSetting } from './context-pressure'
 import type { WorktreeProjectChoice } from './worktree-start'
 import type { MediaGenerationSettings } from './media-generation'
+import type { AppUpdateChannelSetting, AppUpdateMode } from './types/app-update'
 import { DEFAULT_AUTONOMY_MODE } from './permission-modes'
 
 export type ThemeId = 'dark' | 'light' | 'monokai'
@@ -176,7 +177,45 @@ export interface AppSettings {
    * by field. Read only through `resolveMediaGeneration` (`shared/media-generation.ts`).
    */
   mediaGeneration?: Partial<MediaGenerationSettings>
+  /**
+   * Which ClaudeUI releases the host offers (`core/services/app-update.ts`). `auto` follows
+   * the running build: a release build's own channel; a local build is `pre-release` when
+   * its base tag is a pre-release, else `stable`. Switching to stable never downgrades.
+   * Host-owned (`HOST_OWNED_SETTINGS`): written only by `app-update:set-settings` (admin).
+   */
+  appUpdateChannel: AppUpdateChannelSetting
+  /**
+   * ClaudeUI updates: `auto` downloads a verified release in the background, `ask` downloads
+   * on a click, `off` never checks. Nothing installs or restarts without a click.
+   * Host-owned (`HOST_OWNED_SETTINGS`): written only by `app-update:set-settings` (admin).
+   */
+  appUpdateMode: AppUpdateMode
+  /**
+   * The ClaudeUI checkout a desktop rebuild lists its worktrees from (an absolute path).
+   * Absent from {@link DEFAULT_SETTINGS}: unset means the build's own `sourcePath` for a
+   * local build, and no rebuild for a release build; the desktop update host owns that rule
+   * (`src/main/services/rebuild/trees.ts`). Host-owned: `config:save-settings` keeps the
+   * value the host already has, because a rebuild runs code from this tree and `config` is a
+   * base remote grant (`saveUiSettings` in `core/ipc/handlers-core.ts`).
+   */
+  appUpdateSourcePath?: string
 }
+
+/**
+ * The app settings only an admin command writes (`app-update:set-source`,
+ * `app-update:set-settings`, in `src/core/ipc/app-update-commands.ts`): the
+ * checkout a rebuild runs code from, and which ClaudeUI releases the host offers
+ * and whether it downloads them. `config:save-settings` is a base remote grant,
+ * so `saveUiSettings` (`src/core/ipc/handlers-core.ts`) keeps the host's values
+ * for these whatever a client sends.
+ */
+export const HOST_OWNED_SETTINGS = [
+  'appUpdateSourcePath',
+  'appUpdateMode',
+  'appUpdateChannel'
+] as const satisfies readonly (keyof AppSettings)[]
+
+export type HostOwnedSetting = (typeof HOST_OWNED_SETTINGS)[number]
 
 /**
  * The default of every key that has one. A required key of {@link AppSettings}
@@ -224,7 +263,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   mockupConnectAllowlist: '',
   mockupAllowHttp: false,
   toolOutputMaxChars: 5000,
-  defaultAutonomyMode: DEFAULT_AUTONOMY_MODE
+  defaultAutonomyMode: DEFAULT_AUTONOMY_MODE,
+  appUpdateChannel: 'auto',
+  appUpdateMode: 'auto'
 }
 
 /**

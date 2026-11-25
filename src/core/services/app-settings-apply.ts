@@ -5,6 +5,7 @@
  *   3. the log level and filter (`logger`)
  *   4. the session idle timeout (the session manager)
  *   5. the media-generation settings, which live opencode sessions re-apply (their ruleset offers our tools)
+ *   6. ClaudeUI's update channel and mode (`appUpdater`: off stops the checks, a change checks again)
  *
  * A new core effect of a setting goes here and nowhere else. It runs once at boot
  * ({@link startApplyingSettings}) and on every `config:settings-changed`, whatever its
@@ -17,6 +18,7 @@ import { appSetting } from './app-settings'
 import { usageFetcher } from './usage-fetcher'
 import { blockUsageService } from './block-usage'
 import { logger } from './logger'
+import { appUpdater } from './app-update'
 
 export interface SettingsHost {
   setSessionTimeout(ms: number): void
@@ -38,6 +40,9 @@ export function applySettings(): void {
   const mediaChanged = lastMediaKey !== undefined && lastMediaKey !== mediaKey
   lastMediaKey = mediaKey
   if (mediaChanged) host?.notifyMediaSettingsChanged?.()
+  // A no-op until the updater started (boot applies once before that), and when
+  // neither the channel nor the mode moved.
+  appUpdater.settingsChanged()
 }
 
 /** Boot: name the session manager, apply once. Called by `registerSessionIpc` after the canonical seed. */

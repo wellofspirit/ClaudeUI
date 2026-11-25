@@ -307,19 +307,34 @@ export async function connectRemoteClient(opts: ConnectOptions): Promise<RemoteC
   return client
 }
 
-/** Pick an ephemeral port (for tests that need a real TCP port). */
+/** Ports this file handed out; the next search starts after them. */
+let portCursor = 0
+
+/**
+ * A free TCP port for a test that must name its port (a pinned-port restart).
+ *
+ * Not `listen(0)`: the port such a probe releases is the OS's next ephemeral
+ * pick, so a parallel test file's own `listen(0)` could be handed it before this
+ * test binds it (EADDRINUSE under full-suite load). Ports come instead from a
+ * band per vitest worker below every OS's ephemeral range (Linux 32768+, macOS
+ * and Windows 49152+), which no `listen(0)` ever returns; a port something else
+ * holds (a leaked server, a Windows reserved range) is skipped.
+ */
 export async function ephemeralPort(): Promise<number> {
   const net = await import('node:net')
-  return new Promise<number>((resolve, reject) => {
-    const srv = net.createServer()
-    srv.unref()
-    srv.on('error', reject)
-    srv.listen(0, () => {
-      const addr = srv.address()
-      srv.close(() => {
-        if (typeof addr === 'object' && addr && 'port' in addr) resolve((addr as any).port)
-        else reject(new Error('Could not allocate ephemeral port'))
-      })
+  const pool = Number(process.env.VITEST_POOL_ID ?? process.env.VITEST_WORKER_ID ?? 1) || 1
+  const BAND = 250
+  const base = 20000 + (pool % 48) * BAND
+  const canBind = (port: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const srv = net.createServer()
+      srv.unref()
+      srv.once('error', () => resolve(false))
+      srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)))
     })
-  })
+  for (let i = 0; i < BAND; i++) {
+    const port = base + (portCursor++ % BAND)
+    if (await canBind(port)) return port
+  }
+  throw new Error(`No free test port in ${base}-${base + BAND - 1}`)
 }

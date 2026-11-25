@@ -187,6 +187,10 @@ jobs:
         run: |
           bun run typecheck
           bunx electron-vite build
+          bun scripts/stamp-build-info.mjs
+        env:
+          CLAUDEUI_BUILD_KIND: release
+          CLAUDEUI_RELEASE_CHANNEL: pre-release
 
       - name: Package (macOS)
         if: matrix.platform == 'mac'
@@ -195,10 +199,17 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
+      # The install marker (src/shared/install-marker.ts) the relaunch helper and
+      # the deletion gate check. Before signing, so the signature seals it.
+      - name: Stamp install marker (macOS)
+        if: matrix.platform == 'mac'
+        run: bun scripts/stamp-install-marker.mjs "${{ matrix.build_dir }}/ClaudeUI.app" --platform mac
+
       # Signs with the self-signed "ClaudeUI Dev" identity when the MAC_CERT_*
       # secrets are configured, so TCC grants (mic, App Management, ...) keyed on
-      # identifier + certificate root survive updates. Falls back to ad-hoc when
-      # the secrets are absent (forks), which re-prompts on every build.
+      # identifier + certificate root survive updates. Without the secrets the
+      # build fails (ADR-119): an ad-hoc update would fail every user's check of
+      # the running app's designated requirement.
       - name: Import signing identity (macOS)
         if: matrix.platform == 'mac'
         env:
@@ -206,8 +217,8 @@ jobs:
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
         run: |
           if [ -z "$MAC_CERT_P12" ]; then
-            echo "MAC_CERT_P12 secret not set; falling back to ad-hoc signing."
-            exit 0
+            echo "MAC_CERT_P12 secret not set: a release must be signed with the certificate, because an ad-hoc update would fail every user's signature check." >&2
+            exit 1
           fi
           security create-keychain -p "" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
@@ -245,6 +256,12 @@ jobs:
         if: matrix.platform == 'win'
         run: |
           bunx electron-builder --win --dir
+
+      # Lists the packaged folder's top-level names, so it runs after packaging
+      # and before the zip.
+      - name: Stamp install marker (Windows)
+        if: matrix.platform == 'win'
+        run: bun scripts/stamp-install-marker.mjs "${{ matrix.build_dir }}" --platform win
 
       - name: Zip build output (macOS)
         if: matrix.platform == 'mac'
@@ -299,6 +316,7 @@ jobs:
           cp -r dist/server-bin/. "$STAGE/"
           mkdir "$STAGE/vendor"
           cp -r vendor/claude-cli "$STAGE/vendor/claude-cli"
+          bun scripts/stamp-install-marker.mjs "$STAGE" --platform server
           zip -r -y "$STAGE.zip" "$STAGE"
 
       # pwsh does not abort on a non-zero NATIVE exit code, and only the last
@@ -324,6 +342,8 @@ jobs:
           Copy-Item -Recurse -Path dist/server-bin -Destination $stage
           New-Item -ItemType Directory -Path "$stage/vendor" | Out-Null
           Copy-Item -Recurse -Path vendor/claude-cli -Destination "$stage/vendor/claude-cli"
+          bun scripts/stamp-install-marker.mjs $stage --platform server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
 
       - name: Upload server artifact
@@ -413,8 +433,12 @@ jobs:
       - name: Build server executable
         run: |
           bunx electron-vite build
+          bun scripts/stamp-build-info.mjs
           bun run build:server:compile
           ./dist/server-bin/claudeui-server --help > /dev/null
+        env:
+          CLAUDEUI_BUILD_KIND: release
+          CLAUDEUI_RELEASE_CHANNEL: pre-release
 
       # tar (not a bare upload): actions/upload-artifact strips the executable
       # bit, so modes survive only INSIDE the tarball, which is uploaded and
@@ -424,6 +448,7 @@ jobs:
           STAGE="claudeui-server-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}"
           mkdir "$STAGE"
           cp -r dist/server-bin/. "$STAGE/"
+          bun scripts/stamp-install-marker.mjs "$STAGE" --platform server
           tar -czf "$STAGE.tar.gz" "$STAGE"
 
       - name: Upload artifact
@@ -435,14 +460,27 @@ jobs:
   release:
     needs: [version, build, server]
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
+
+      # Hashes the assets and signs the manifest the in-app updater verifies.
+      # The key is visible to this step only.
+      - name: Sign update manifest
+        run: >
+          bun scripts/release/update-manifest.mjs --dir artifacts
+          --version ${{ needs.version.outputs.version }} --channel pre-release
+          --out-dir artifacts
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
 
       - name: Create pre-release
         # Pinned by commit: tags are movable. Re-vet before bumping.

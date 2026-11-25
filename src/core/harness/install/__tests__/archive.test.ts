@@ -10,7 +10,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { gzipSync } from 'node:zlib'
-import { ArchiveError, extractTarGz, extractZip, safeEntryPath } from '../archive'
+import { ArchiveError, extractTarGz, extractZip, listZipEntries, safeEntryPath } from '../archive'
 import { paxPath, sha256, tar, tarEntry, tgz, zip } from './fixtures'
 
 let tmp: string
@@ -243,5 +243,46 @@ describe('extractZip', () => {
     await expect(extractZip(archive, dest, { limits: { maxEntryBytes: 100 } })).rejects.toThrow(
       /exceeds 100 bytes/
     )
+  })
+})
+
+describe('listZipEntries', () => {
+  it('lists files, folders and links (with their targets, stored or deflated) without extracting', async () => {
+    const f = file(
+      'list.zip',
+      zip([
+        { name: 'App.app/', unixMode: 0o040755 },
+        { name: 'App.app/bin', body: 'exe', unixMode: 0o100755 },
+        { name: 'App.app/Current', body: 'A', unixMode: 0o120777, method: 0 },
+        { name: 'App.app/Lib', body: 'Versions/Current/Lib', unixMode: 0o120777 },
+        { name: 'plain/', body: '' },
+        { name: 'plain/readme.txt', body: 'hi' },
+        { name: 'App.app/fifo', unixMode: 0o010644 }
+      ])
+    )
+    expect(await listZipEntries(f)).toEqual([
+      { name: 'App.app/', type: 'dir', size: 0 },
+      { name: 'App.app/bin', type: 'file', size: 3 },
+      { name: 'App.app/Current', type: 'symlink', size: 1, linkTarget: 'A' },
+      { name: 'App.app/Lib', type: 'symlink', size: 20, linkTarget: 'Versions/Current/Lib' },
+      { name: 'plain/', type: 'dir', size: 0 },
+      { name: 'plain/readme.txt', type: 'file', size: 2 },
+      { name: 'App.app/fifo', type: 'other', size: 0 }
+    ])
+    expect(listing(dest)).toEqual([])
+  })
+
+  it('reports names as stored, unchecked (the caller vets them)', async () => {
+    const f = file('names.zip', zip([{ name: '../../escape', body: 'x' }]))
+    expect((await listZipEntries(f))[0].name).toBe('../../escape')
+  })
+
+  it('refuses a zip it cannot read, and an oversized link target', async () => {
+    await expect(listZipEntries(file('bad.zip', Buffer.from('nope')))).rejects.toThrow(ArchiveError)
+    const big = file(
+      'big.zip',
+      zip([{ name: 'l', body: 'x'.repeat(5000), unixMode: 0o120777, method: 0 }])
+    )
+    await expect(listZipEntries(big)).rejects.toThrow(/oversized link target/)
   })
 })

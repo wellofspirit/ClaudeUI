@@ -34,6 +34,7 @@ import {
   markSyncReady
 } from '../../../core/shared/sync/client-registry'
 import { onNudge } from '../lib/on-nudge'
+import { collectRestoreState } from '../lib/restore-state'
 import { useSessionStore } from '../stores/session-store'
 import { onReplicaApplied, seedWatchedSession, getReplicaState } from '../stores/replica'
 import { loadResumedTranscript } from '../lib/session-history-load'
@@ -515,6 +516,11 @@ export function useClaudeEvents(): void {
           // The modal is up: stop main's 5 s force-quit fallback, the user may take their time.
           window.api.ackQuitPrompt().catch(() => {})
         }
+      }),
+      // A relaunch is about to quit the host: hand main this window's open
+      // session and unsent drafts so the next window can put them back.
+      window.api.onCollectRestore(() => {
+        window.api.restoreState(collectRestoreState()).catch(() => {})
       }),
       // Voice input events
       window.api.onVoiceTranscript((routingId, data) => {

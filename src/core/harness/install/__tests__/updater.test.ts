@@ -145,6 +145,25 @@ describe('computeUpdates', () => {
     ).toEqual([])
   })
 
+  it('a skipped version is not offered; a newer one is, and other harnesses are untouched', () => {
+    const base = {
+      selections: { opencode: managed('latest'), pi: managed('tested') },
+      installed: { opencode: ['1.18.40'], pi: ['0.87.1'] }
+    }
+    expect(
+      computeUpdates(
+        inputs({ ...base, latest: { opencode: '1.18.41' }, skipped: { opencode: '1.18.41' } })
+      )
+    ).toEqual([{ id: 'pi', from: '0.87.1', to: '0.87.4', choice: 'tested' }])
+    expect(
+      computeUpdates(
+        inputs({ ...base, latest: { opencode: '1.18.42' }, skipped: { opencode: '1.18.41' } })
+      ).map((u) => `${u.id}@${u.to}`)
+    ).toEqual(['opencode@1.18.42', 'pi@0.87.4'])
+    // Tested is skipped the same way, until the manifest moves.
+    expect(computeUpdates(inputs({ ...base, skipped: { pi: '0.87.4' } }))).toEqual([])
+  })
+
   it('ignores an upstream answer that is not a version', () => {
     expect(
       computeUpdates(
@@ -343,6 +362,32 @@ describe('Ask me', () => {
     const { updater, install } = setup({ store: { opencode: [], pi: ['0.87.4'] } })
     await expect(updater.updateAll()).resolves.toEqual([])
     expect(install).not.toHaveBeenCalled()
+  })
+})
+
+describe('skipping', () => {
+  it('the view carries the skips; a skip moves the set and tells clients; Automatically never installs it', async () => {
+    let skipped: Partial<Record<HarnessId, string>> = {}
+    const { updater, install, changes } = setup({ mode: 'auto' }, { skipped: () => skipped })
+    skipped = { opencode: '1.18.41' }
+    updater.skipChanged('opencode')
+    expect(changes).toEqual([['opencode']])
+    expect(updater.view().skipped).toEqual({ opencode: '1.18.41' })
+    await updater.check('boot')
+    await updater.idle()
+    expect(install.mock.calls).toEqual([['pi', '0.87.4']])
+  })
+
+  it('a skip store that throws skips nothing', () => {
+    const { updater } = setup(
+      {},
+      {
+        skipped: () => {
+          throw new Error('unreadable')
+        }
+      }
+    )
+    expect(updater.view().skipped).toEqual({})
   })
 })
 

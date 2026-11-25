@@ -19,6 +19,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type { HarnessId, HarnessInstallRecord } from '../../shared/harness-types'
 import { HARNESS_VERSION_RE } from './selection-store'
+import { compareVersions } from '../../shared/version-compare'
 
 export const HARNESS_STORE_ENV = 'CLAUDEUI_HARNESS_STORE'
 
@@ -93,27 +94,8 @@ export function readInstallRecord(id: HarnessId, version: string): HarnessInstal
   }
 }
 
-/**
- * Semver order: numeric major.minor.patch, then a release above its
- * pre-releases, then pre-release tags compared naturally. Build metadata is
- * ignored.
- */
-export function compareVersions(a: string, b: string): number {
-  const split = (v: string): [number[], string | null] => {
-    const [core, ...pre] = v.split('+')[0].split('-')
-    return [core.split('.').map(Number), pre.length ? pre.join('-') : null]
-  }
-  const [ac, ap] = split(a)
-  const [bc, bp] = split(b)
-  for (let i = 0; i < 3; i++) {
-    const d = (ac[i] ?? 0) - (bc[i] ?? 0)
-    if (d !== 0) return d
-  }
-  if (ap === bp) return 0
-  if (ap === null) return 1
-  if (bp === null) return -1
-  return ap.localeCompare(bp, 'en', { numeric: true })
-}
+/** Semver order (`src/shared/version-compare.ts`), re-exported for the core callers. */
+export { compareVersions }
 
 /** Installed versions of `id` for this host, newest first. Never throws. */
 export function installedVersions(id: HarnessId): string[] {
