@@ -665,7 +665,8 @@ describe.skipIf(process.platform !== 'win32')('PowerShell relaunch helper (Windo
     await f.ready()
     expect((await f.result()).status).toBe('ok')
     expect(readHelperPid(f.files.helperPid)).not.toBeNull()
-    expect(fs.existsSync(path.join(f.state, 'lock'))).toBe(false)
+    // The helper writes the result, then releases the lock: wait for the release.
+    await waitFor(() => !fs.existsSync(path.join(f.state, 'lock')), 5000, 'the lock release')
   }, 90_000)
 
   it('a non-ASCII install path: the job is read as UTF-8 and the swap lands', async () => {
