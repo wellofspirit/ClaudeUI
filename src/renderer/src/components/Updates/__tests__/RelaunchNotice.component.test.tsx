@@ -115,6 +115,38 @@ describe('a rebuild that kept the version', () => {
     expect(relaunchNoticeModel(rebuilt({ toBuild: undefined }))?.text).toBe('Rebuilt')
   })
 
+  it('a relaunch into a build made in place names that build (or its version)', () => {
+    const inPlace = rebuilt({ status: 'ok', mode: 'relaunch' })
+    expect(relaunchNoticeModel(inPlace)).toEqual({
+      tone: 'success',
+      text: 'Relaunched into the new build def5678'
+    })
+    expect(relaunchNoticeModel({ ...inPlace, toBuild: undefined })?.text).toBe(
+      'Relaunched into the new build'
+    )
+    // An uncommitted rebuild: the commit is the running one's, so it names nothing new.
+    expect(relaunchNoticeModel({ ...inPlace, toBuild: 'abc1234' })?.text).toBe(
+      'Relaunched into the new build'
+    )
+    expect(relaunchNoticeModel({ ...inPlace, toVersion: '3.9.1' })?.text).toBe(
+      'Relaunched into 3.9.1'
+    )
+    // Never healthy, and nothing to roll back to: a warning, not a success.
+    expect(
+      relaunchNoticeModel({ ...inPlace, status: 'no-health', reason: 'no healthy boot in 90 s' })
+    ).toEqual({
+      tone: 'warning',
+      text: "ClaudeUI restarted, but the new build def5678 didn't report healthy",
+      detail: 'no healthy boot in 90 s'
+    })
+    // A plain relaunch without health stays as it was.
+    expect(relaunchNoticeModel({ ...inPlace, status: 'no-health', source: undefined })?.text).toBe(
+      'Relaunched'
+    )
+    // A plain relaunch (no source) stays plain.
+    expect(relaunchNoticeModel({ ...inPlace, source: undefined })?.text).toBe('Relaunched')
+  })
+
   it('rolled back names both builds', () => {
     expect(
       relaunchNoticeModel(rebuilt({ status: 'rolled-back', reason: 'no healthy boot in 90 s' }))

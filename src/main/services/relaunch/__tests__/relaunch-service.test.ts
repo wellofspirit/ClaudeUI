@@ -8,7 +8,11 @@ vi.mock('../../../../core/services/logger', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
 }))
 
-import { createRelaunchService, type RelaunchServiceDeps } from '../relaunch-service'
+import {
+  createRelaunchService,
+  SIGNING_WINDOW_MS,
+  type RelaunchServiceDeps
+} from '../relaunch-service'
 import { POWERSHELL_HELPER_ARGS_LINE, type HelperCommand } from '../helper-scripts'
 import { createRestoreCollector } from '..'
 import { whenHealthy } from '../health-gate'
@@ -420,6 +424,144 @@ describe.skipIf(onWindows)('requestRelaunch', () => {
     expect(fs.existsSync(restoreFile(state))).toBe(false)
     expect(confirmQuit).toHaveBeenCalledTimes(1)
   })
+
+  describe('a build made in place (the install rebuilt under the running app)', () => {
+    const RUNNING = 'abc1234@2026-11-24T00:00:00.000Z'
+    const NEW = 'def5678@2026-11-25T01:02:03.000Z'
+    const markerFile = (): string =>
+      path.join(install, 'Contents', 'Resources', 'claudeui-install.json')
+    const sealFile = (): string => path.join(install, 'Contents', '_CodeSignature', 'CodeResources')
+    /** Rewrite the install as a build would: the marker, then (when `signed`) the seal after it. */
+    const rebuildInPlace = (buildId: string, version: string, signed = true): void => {
+      makeFakeApp(install, version, 'healthy', { buildId })
+      const markedAt = new Date(Date.now() - 10_000)
+      fs.utimesSync(markerFile(), markedAt, markedAt)
+      if (!signed) return
+      fs.mkdirSync(path.dirname(sealFile()), { recursive: true })
+      fs.writeFileSync(sealFile(), 'sealed')
+    }
+    const lastJob = (): RelaunchJob =>
+      parseJob(
+        JSON.parse(fs.readFileSync(jobFiles(state, readLock(state)!.owner!.token).json, 'utf8'))
+      )!
+
+    it('the same build on disk as running: a plain relaunch, nothing new reported', async () => {
+      rebuildInPlace(RUNNING, '1.0.0')
+      const { svc } = service()
+      expect(svc.availability()).toEqual({ available: true })
+      await svc.requestRelaunch({ mode: 'relaunch' })
+      const job = lastJob()
+      expect(job).toMatchObject({ fromBuild: 'abc1234', toBuild: 'abc1234', toVersion: '1.0.0' })
+      expect(job.source).toBeUndefined()
+    })
+
+    it('another build on disk: offered as new, and the job names it so the notice and reconcile see it', async () => {
+      rebuildInPlace(NEW, '1.1.0-pre.1')
+      const { svc, confirmQuit } = service()
+      expect(svc.availability()).toEqual({
+        available: true,
+        newBuild: { version: '1.1.0-pre.1', commit: 'def5678', builtAt: '2026-11-25T01:02:03.000Z' }
+      })
+      await svc.requestRelaunch({ mode: 'relaunch' })
+      expect(confirmQuit).toHaveBeenCalledTimes(1)
+      // From this process's build id, not the marker (which already names the new one).
+      expect(lastJob()).toMatchObject({
+        mode: 'relaunch',
+        fromVersion: '1.0.0',
+        toVersion: '1.1.0-pre.1',
+        fromBuild: 'abc1234',
+        toBuild: 'def5678',
+        source: 'rebuild',
+        stagedPath: '',
+        backupPath: ''
+      })
+    })
+
+    it('an uncommitted rebuild of the same commit is a new build too, offered without the commit (it names nothing new)', async () => {
+      rebuildInPlace('abc1234@2026-11-25T09:00:00.000Z', '1.0.0')
+      const { svc } = service()
+      expect(svc.availability().newBuild).toEqual({
+        version: '1.0.0',
+        builtAt: '2026-11-25T09:00:00.000Z'
+      })
+      await svc.requestRelaunch({ mode: 'relaunch' })
+      expect(lastJob()).toMatchObject({
+        fromBuild: 'abc1234',
+        toBuild: 'abc1234',
+        source: 'rebuild'
+      })
+    })
+
+    it('a refusal is not cached: Relaunch is offered as soon as a packed build gets its marker', async () => {
+      // Mid-pack: electron-builder has put a bare bundle in place, no marker yet.
+      fs.rmSync(markerFile())
+      const { svc } = service()
+      expect(svc.availability().available).toBe(false)
+      rebuildInPlace(NEW, '1.0.0')
+      expect(svc.availability()).toMatchObject({ available: true, newBuild: { commit: 'def5678' } })
+    })
+
+    it('a build still being made (marked, not yet signed) refuses, and is offered again once sealed', async () => {
+      rebuildInPlace(NEW, '1.0.0', false)
+      const { svc, confirmQuit } = service()
+      expect(svc.availability()).toEqual({
+        available: false,
+        reason: expect.stringMatching(/still being written/)
+      })
+      await expect(svc.requestRelaunch({ mode: 'relaunch' })).rejects.toThrow(/still being written/)
+      expect(confirmQuit).not.toHaveBeenCalled()
+      expect(readLock(state)).toBeNull()
+      // A seal from an earlier build (older than the marker) is still unfinished.
+      fs.mkdirSync(path.dirname(sealFile()), { recursive: true })
+      fs.writeFileSync(sealFile(), 'old')
+      const sealedBefore = new Date(Date.now() - 60_000)
+      fs.utimesSync(sealFile(), sealedBefore, sealedBefore)
+      expect(svc.availability().available).toBe(false)
+      fs.utimesSync(sealFile(), new Date(), new Date())
+      expect(svc.availability()).toMatchObject({ available: true, newBuild: { commit: 'def5678' } })
+    })
+
+    it('a swap is refused while a build made in place is unsigned, and backs that build up once it is', async () => {
+      rebuildInPlace(NEW, '1.0.0', false)
+      const staged = makeFakeApp(
+        siblingPath(install, 'update', '1.2.0', newToken(), 'darwin'),
+        '1.2.0',
+        'healthy',
+        { buildId: '9abcdef@2026-11-26T00:00:00.000Z' }
+      )
+      const swap = {
+        mode: 'swap' as const,
+        stagedPath: staged,
+        toVersion: '1.2.0',
+        source: 'release' as const
+      }
+      const { svc, confirmQuit } = service()
+      await expect(svc.requestRelaunch(swap)).rejects.toThrow(/still being written/)
+      expect(confirmQuit).not.toHaveBeenCalled()
+      fs.mkdirSync(path.dirname(sealFile()), { recursive: true })
+      fs.writeFileSync(sealFile(), 'sealed')
+      await svc.requestRelaunch(swap)
+      // The backup (and a rollback) is the build on disk, not the one this process runs.
+      expect(lastJob()).toMatchObject({ mode: 'swap', fromBuild: 'def5678', toBuild: '9abcdef' })
+    })
+
+    it('a build never signed (build:unpack, a failed codesign) holds restarts off only for a while', async () => {
+      rebuildInPlace(NEW, '1.0.0', false)
+      const later = (ms: number) => service({ now: () => Date.now() + ms }).svc.availability()
+      expect(later(0).available).toBe(false)
+      expect(later(SIGNING_WINDOW_MS)).toMatchObject({
+        available: true,
+        newBuild: { commit: 'def5678' }
+      })
+    })
+
+    it('a running build with no id (or a marker without one) never reports a new build', async () => {
+      rebuildInPlace(NEW, '1.0.0', false)
+      expect(service({ buildId: null }).svc.availability()).toEqual({ available: true })
+      makeFakeApp(install, '1.0.0', 'healthy')
+      expect(service().svc.availability()).toEqual({ available: true })
+    })
+  })
 })
 
 // The Windows path through the service (probes and a fake spawn, no fake
@@ -687,6 +829,7 @@ describe.skipIf(onWindows)('reconcileJobs', () => {
     installKey?: string
     facts?: Pick<RelaunchJob, 'fromBuild' | 'toBuild' | 'source'>
     resultExtra?: Record<string, unknown>
+    mode?: RelaunchJob['mode']
   }): { token: string; backup: string } {
     const token = newToken()
     const backup = backupPathFor(install, '0.9.0', token, 'darwin')
@@ -696,7 +839,7 @@ describe.skipIf(onWindows)('reconcileJobs', () => {
       token,
       pid: 1,
       platform: 'darwin',
-      mode: 'swap',
+      mode: opts.mode ?? 'swap',
       installPath: install,
       installKey: opts.installKey ?? key(),
       stateDir: state,
@@ -738,6 +881,23 @@ describe.skipIf(onWindows)('reconcileJobs', () => {
       now: NOW,
       ...over
     })
+
+  it('an abandoned relaunch into a build made in place (another version) is recovered when that build runs', async () => {
+    const facts = { fromBuild: 'abc1234', toBuild: 'def5678', source: 'rebuild' as const }
+    const { token } = addJob({ mode: 'relaunch', toVersion: '1.1.0-pre.1', facts })
+    // The old version still running: not its target, nothing recorded.
+    expect((await run()).recovered).toEqual([])
+    expect(lastResultFor(state, key())).toBeNull()
+    expect((await run({ runningVersion: '1.1.0-pre.1' })).recovered).toEqual([token])
+    expect(lastResultFor(state, key())).toMatchObject({
+      token,
+      status: 'ok',
+      mode: 'relaunch',
+      toVersion: '1.1.0-pre.1',
+      recovered: true,
+      ...facts
+    })
+  })
 
   it('keeps the newest updated backup for 7 days and removes older ones through the gate', async () => {
     const newest = addJob({ status: 'updated', resultAt: NOW - DAY, backup: true })

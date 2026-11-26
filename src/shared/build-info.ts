@@ -119,6 +119,13 @@ export function buildCommitOf(id: string | null | undefined): string | undefined
   return /^[0-9a-f]{7,40}$/i.test(head) ? head.slice(0, 7).toLowerCase() : undefined
 }
 
+/** The ISO build time a build id carries, or undefined. */
+export function builtAtOf(id: string | null | undefined): string | undefined {
+  if (typeof id !== 'string') return undefined
+  const at = id.slice(id.lastIndexOf('@') + 1)
+  return id.includes('@') && Number.isFinite(Date.parse(at)) ? at : undefined
+}
+
 /** Stable id that changes whenever the build does (a remote client reloads on a change). */
 export function buildId(info: BuildInfo): string {
   const who = info.git.commit ? info.git.commit.slice(0, 7) : info.version

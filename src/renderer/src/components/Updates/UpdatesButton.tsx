@@ -269,6 +269,7 @@ export function UpdatesButton({
           harnessMode={harnessUpdates?.mode}
           version={footerVersion(u.view)}
           canRelaunch={u.relaunch?.available === true}
+          newBuild={u.relaunch?.available ? u.relaunch.newBuild : undefined}
           errors={[...new Set(errors)]}
           onCheck={() => void updatesStore.check()}
           onSettings={() => {

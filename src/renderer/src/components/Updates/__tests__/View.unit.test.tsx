@@ -5,7 +5,7 @@
  * download and an ineligible install.
  */
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import type { HarnessInstallProgress } from '../../../../../shared/harness-types'
 import type { AppUpdateView } from '../../../../../shared/types/app-update'
 import { UpdatesButtonView, UpdatesPanelView, type UpdatesPanelViewProps } from '../View'
@@ -225,6 +225,41 @@ describe('B · restart confirm', () => {
     expect(box).toHaveTextContent('Relaunch ClaudeUI now?')
     expect(box).toHaveTextContent('What is running could not be read.')
     expect(screen.getByTestId('UpdatesPanel.restartNow')).toHaveTextContent('Relaunch now')
+  })
+
+  it('a build made in place: Relaunch names it, and its confirm says there is no rollback', () => {
+    const newBuild = { version: '3.9.1-pre.13', commit: 'def5678', builtAt: CHECKED }
+    const { props, unmount } = renderPanel(stagedView(), { newBuild })
+    const button = screen.getByTestId('UpdatesPanel.relaunch')
+    expect(button).toHaveTextContent('Relaunch into def5678')
+    expect(button).toHaveAttribute('data-id', 'new-build')
+    fireEvent.click(button)
+    expect(props.onRelaunch).toHaveBeenCalled()
+    unmount()
+
+    renderPanel(stagedView(), { newBuild, confirm: { action: 'relaunch', impact: null } })
+    const box = screen.getByTestId('UpdatesPanel.restartConfirm')
+    expect(box).toHaveTextContent('Relaunch into def5678 now?')
+    expect(box).toHaveTextContent('nothing to roll back to')
+    cleanup()
+
+    // The running commit rebuilt (no commit sent): named by its build time; with no time, its version.
+    const builtAt = '2026-11-25T14:32:00.000Z'
+    const time = new Date(builtAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    renderPanel(stagedView(), { newBuild: { version: '3.9.2', builtAt } })
+    expect(screen.getByTestId('UpdatesPanel.relaunch')).toHaveTextContent(
+      `Relaunch into the build from ${time}`
+    )
+    cleanup()
+    renderPanel(stagedView(), { newBuild: { version: '3.9.2' } })
+    expect(screen.getByTestId('UpdatesPanel.relaunch')).toHaveTextContent('Relaunch into 3.9.2')
+    cleanup()
+    // An update's confirm is untouched.
+    renderPanel(stagedView(), {
+      newBuild,
+      confirm: { action: 'update', impact: { workingSessions: 0, terminals: 0, remoteClients: 0 } }
+    })
+    expect(screen.getByTestId('UpdatesPanel.restartConfirm')).not.toHaveTextContent('roll back')
   })
 
   it('while restarting, the button says so and waits', () => {

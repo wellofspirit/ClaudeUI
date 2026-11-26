@@ -7,7 +7,9 @@
  *   unmarked  the same app without a marker;
  *   fail      prints a failed stage and exits 3;
  *   hang      writes its pid to ./pid and waits (stubborn: ignores SIGTERM too).
- * `FAKE_SAY`, when set, is printed as one more output line while packaging.
+ * `FAKE_SAY`, when set, is printed as the last output line: the rebuilder reports
+ * a chunk's last line only, so a line mid-chunk may never be anyone's `lastLine`,
+ * but the report after the build ends always carries the last one.
  */
 export const FAKE_BUILD = String.raw`
 const fs = require('fs')
@@ -37,7 +39,6 @@ fs.writeFileSync(path.join('out', 'build-info.json'), JSON.stringify({
   git: { describe: null, baseTag: null, ahead: null, commit: 'feedface00112233', dirty: false, branch: 'x' }
 }))
 say('[3/4] electron-builder --dir')
-if (process.env.FAKE_SAY) say(process.env.FAKE_SAY)
 const darwin = process.env.FAKE_PLATFORM === 'darwin'
 const app = darwin ? path.join(out, 'mac-arm64', 'ClaudeUI.app') : path.join(out, 'win-unpacked')
 const res = darwin ? path.join(app, 'Contents', 'Resources') : path.join(app, 'resources')
@@ -49,4 +50,5 @@ if (darwin) {
 if (mode !== 'unmarked') fs.writeFileSync(path.join(res, 'claudeui-install.json'), process.env.FAKE_MARKER)
 say('[4/4] stamp install-marker')
 say('build:stage ✓ (4 stages, 0.1s)')
+if (process.env.FAKE_SAY) say(process.env.FAKE_SAY)
 `

@@ -17,7 +17,7 @@ import type {
   HarnessUpdatesView
 } from '../../../../shared/harness-types'
 import { HARNESS_IDS } from '../../../../shared/harness-types'
-import type { RestartImpact } from '../../../../shared/relaunch'
+import type { RebuiltInPlace, RestartImpact } from '../../../../shared/relaunch'
 import { UPDATE_FEED_REPO } from '../../../../shared/update-manifest'
 import {
   HARNESS_LABEL,
@@ -627,4 +627,16 @@ export function updatesButtonModel(input: {
 /** Download progress as the row shows it: `14.2 MB / 22.9 MB`. */
 export function bytesText(received: number, total: number | null): string {
   return total ? `${formatBytes(received)} / ${formatBytes(total)}` : formatBytes(received)
+}
+
+/**
+ * How a build made in place is named: its commit; else (the running commit
+ * rebuilt, or no git) its build time; else its version.
+ */
+export function newBuildName(build: RebuiltInPlace): string {
+  if (build.commit) return build.commit
+  const at = build.builtAt ? new Date(build.builtAt) : null
+  if (at && Number.isFinite(at.getTime()))
+    return `the build from ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+  return build.version
 }

@@ -49,6 +49,9 @@ offered an update. Rotating the key ships the new public key in a release signed
   running from the install), renames the install aside and the staged build in, launches it, and waits up to 90 s for
   a health record that any boot of that install writes once its window loaded and the remote start settled. No health
   after a swap → it rolls back and relaunches the previous build. No exit path leaves the user with nothing running.
+- **Built in place.** A relaunch starts whatever build the install now holds. When a local build was written into the
+  running install, the relaunch is offered and reported as a relaunch into that build, and refused on macOS while the
+  build is not yet signed; there is no rollback, since nothing of the old build is kept (added 2026-11-25).
 - **Ownership.** Every packaged build carries an install marker (`claudeui-install.json`: product, kind, version, build
   id; on Windows the folder's top-level entries). A Windows folder holding anything else is not eligible (a zip
   extracted into Downloads must never be renamed). One deletion gate is the only recursive delete: a sibling of the
