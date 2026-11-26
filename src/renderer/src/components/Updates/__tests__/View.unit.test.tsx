@@ -239,14 +239,22 @@ describe('B · restart confirm', () => {
 
     renderPanel(stagedView(), { newBuild, confirm: { action: 'relaunch', impact: null } })
     const box = screen.getByTestId('UpdatesPanel.restartConfirm')
-    expect(box).toHaveTextContent('Relaunch into build def5678 now?')
+    expect(box).toHaveTextContent('Relaunch into def5678 now?')
     expect(box).toHaveTextContent('nothing to roll back to')
     cleanup()
 
-    // A build without git is named by its version; an update's confirm is untouched.
+    // The running commit rebuilt (no commit sent): named by its build time; with no time, its version.
+    const builtAt = '2026-11-25T14:32:00.000Z'
+    const time = new Date(builtAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    renderPanel(stagedView(), { newBuild: { version: '3.9.2', builtAt } })
+    expect(screen.getByTestId('UpdatesPanel.relaunch')).toHaveTextContent(
+      `Relaunch into the build from ${time}`
+    )
+    cleanup()
     renderPanel(stagedView(), { newBuild: { version: '3.9.2' } })
     expect(screen.getByTestId('UpdatesPanel.relaunch')).toHaveTextContent('Relaunch into 3.9.2')
     cleanup()
+    // An update's confirm is untouched.
     renderPanel(stagedView(), {
       newBuild,
       confirm: { action: 'update', impact: { workingSessions: 0, terminals: 0, remoteClients: 0 } }

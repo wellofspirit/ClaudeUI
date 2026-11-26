@@ -192,8 +192,10 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
   // check probes the parent folder, so a reading is reused briefly. A request
   // always checks afresh.
   let cachedEligibility: { at: number; value: ReturnType<typeof checkEligibility> } | null = null
+  // Only a positive reading is reused: a refusal (a build being packed, with no
+  // marker yet) must clear as soon as the build lands.
   const recentEligibility = (): ReturnType<typeof checkEligibility> => {
-    if (!cachedEligibility || now() - cachedEligibility.at > 30_000)
+    if (!cachedEligibility || !cachedEligibility.value.ok || now() - cachedEligibility.at > 30_000)
       cachedEligibility = { at: now(), value: eligibility() }
     return cachedEligibility.value
   }
@@ -201,6 +203,8 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
   /**
    * The build in the install when it is not this process's (rebuilt in place),
    * read fresh: a build can land at any time. Null when either side has no id.
+   * Any other build counts: a second instance from the same install (only with
+   * single-instance enforcement off) also sees a swap another instance applied.
    */
   function rebuiltInPlace(install: string): RebuiltInPlace | null {
     if (!deps.buildId) return null
@@ -468,6 +472,12 @@ export function createRelaunchService(deps: RelaunchServiceDeps): RelaunchServic
       const newBuild = rebuiltInPlace(e.installPath)
       if (!newBuild) return { available: true }
       if (stillBuilding(e.installPath)) return { available: false, reason: STILL_BUILDING }
+      // The same commit rebuilt (uncommitted changes): the commit names nothing
+      // new, so clients name it by its build time.
+      if (newBuild.commit !== undefined && newBuild.commit === buildCommitOf(deps.buildId)) {
+        const { commit: _same, ...rest } = newBuild
+        return { available: true, newBuild: rest }
+      }
       return { available: true, newBuild }
     },
     eligible(): RelaunchAvailability {

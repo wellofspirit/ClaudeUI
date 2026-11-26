@@ -47,10 +47,13 @@ as-built map: modules, the files they write, the protocols between them, and the
   from the install), swaps when asked, launches the install with the same arguments (macOS: `open -n` plus an
   allowlist of identity, mode and proxy variables), and waits for a health record newer than the job. A swap without
   health after 90 s is rolled back. Results are reconciled by the next boot of that install.
-- **Built in place.** When the install's marker `buildId` differs from the running process's (`bun run build:mac`
-  wrote into the folder ClaudeUI runs from), `app:relaunch-availability` carries `newBuild` (version, short commit,
-  build time) and a relaunch job names that build (`toVersion`, `toBuild`, `source: 'rebuild'`), so the notice reads
-  "Relaunched into the new build <commit>". There is no backup, so no rollback. On macOS a marker newer than
+- **Built in place** (a macOS workflow: on Windows a build cannot overwrite the folder of a running app). When the
+  install's marker `buildId` differs from the running process's (`bun run build:mac` wrote into the folder ClaudeUI
+  runs from), `app:relaunch-availability` carries `newBuild` (version, build time, and the short commit when it is
+  not the running one: an uncommitted rebuild is named by its build time) and a relaunch job names that build
+  (`toVersion`, `toBuild`, `source: 'rebuild'`), so the notice reads "Relaunched into the new build <commit>", or
+  warns when it never reported healthy. There is no backup, so no rollback. A refused eligibility reading is not
+  cached, so Relaunch is offered as soon as the build lands. On macOS a marker newer than
   `_CodeSignature/CodeResources` is a build not yet signed (the build stamps the marker before `codesign`): a
   relaunch, and a swap (whose backup would be that build), is refused until the seal lands, for at most 5 minutes
   after the marker (`build:unpack` never signs). A swap names the install's build as `fromBuild` (what it backs up

@@ -629,7 +629,14 @@ export function bytesText(received: number, total: number | null): string {
   return total ? `${formatBytes(received)} / ${formatBytes(total)}` : formatBytes(received)
 }
 
-/** How a build made in place is named: its commit, else its version. */
+/**
+ * How a build made in place is named: its commit; else (the running commit
+ * rebuilt, or no git) its build time; else its version.
+ */
 export function newBuildName(build: RebuiltInPlace): string {
-  return build.commit ?? build.version
+  if (build.commit) return build.commit
+  const at = build.builtAt ? new Date(build.builtAt) : null
+  if (at && Number.isFinite(at.getTime()))
+    return `the build from ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+  return build.version
 }

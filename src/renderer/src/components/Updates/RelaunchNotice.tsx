@@ -59,16 +59,23 @@ export function relaunchNoticeModel(
   const sameVersion = result.fromVersion === result.toVersion
   switch (result.status) {
     case 'ok':
-    case 'no-health':
+    case 'no-health': {
       // A relaunch into a build made in place (`source: 'rebuild'` on a relaunch).
-      if (result.mode === 'relaunch' && result.source === 'rebuild')
+      if (result.mode !== 'relaunch' || result.source !== 'rebuild')
+        return { tone: 'success', text: 'Relaunched' }
+      // The commit names the build only when it changed (not an uncommitted rebuild).
+      const build =
+        result.toBuild && result.toBuild !== result.fromBuild ? ` ${result.toBuild}` : ''
+      const target = sameVersion ? `the new build${build}` : named(result.toVersion)
+      // No rollback: a build that never came up is not a success, whatever runs now.
+      if (result.status === 'no-health')
         return {
-          tone: 'success',
-          text: sameVersion
-            ? `Relaunched into the new build${result.toBuild ? ` ${result.toBuild}` : ''}`
-            : `Relaunched into ${named(result.toVersion)}`
+          tone: 'warning',
+          text: `ClaudeUI restarted, but ${target} didn't report healthy`,
+          ...reason
         }
-      return { tone: 'success', text: 'Relaunched' }
+      return { tone: 'success', text: `Relaunched into ${target}` }
+    }
     case 'updated':
       if (sameVersion)
         return {

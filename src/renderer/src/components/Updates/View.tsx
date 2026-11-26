@@ -406,7 +406,7 @@ function RestartConfirmBox({
     >
       <div className="text-text-primary font-medium mb-1">
         {inPlace
-          ? `Relaunch into build ${newBuildName(inPlace)} now?`
+          ? `Relaunch into ${newBuildName(inPlace)} now?`
           : relaunch
             ? 'Relaunch ClaudeUI now?'
             : 'Restart ClaudeUI now?'}

@@ -477,13 +477,28 @@ describe.skipIf(onWindows)('requestRelaunch', () => {
       })
     })
 
-    it('an uncommitted rebuild of the same commit is a new build too (the build time differs)', async () => {
+    it('an uncommitted rebuild of the same commit is a new build too, offered without the commit (it names nothing new)', async () => {
       rebuildInPlace('abc1234@2026-11-25T09:00:00.000Z', '1.0.0')
-      expect(service().svc.availability().newBuild).toEqual({
+      const { svc } = service()
+      expect(svc.availability().newBuild).toEqual({
         version: '1.0.0',
-        commit: 'abc1234',
         builtAt: '2026-11-25T09:00:00.000Z'
       })
+      await svc.requestRelaunch({ mode: 'relaunch' })
+      expect(lastJob()).toMatchObject({
+        fromBuild: 'abc1234',
+        toBuild: 'abc1234',
+        source: 'rebuild'
+      })
+    })
+
+    it('a refusal is not cached: Relaunch is offered as soon as a packed build gets its marker', async () => {
+      // Mid-pack: electron-builder has put a bare bundle in place, no marker yet.
+      fs.rmSync(markerFile())
+      const { svc } = service()
+      expect(svc.availability().available).toBe(false)
+      rebuildInPlace(NEW, '1.0.0')
+      expect(svc.availability()).toMatchObject({ available: true, newBuild: { commit: 'def5678' } })
     })
 
     it('a build still being made (marked, not yet signed) refuses, and is offered again once sealed', async () => {
