@@ -81,7 +81,11 @@ describe('versions', () => {
     // No tag: the package version.
     expect(buildVersion({ ...local, comparisonVersion: null })).toBe('3.9.0')
     expect(buildVersion({ kind: 'dev', version: null, comparisonVersion: null })).toBeNull()
-    expect(footerVersion(localView())).toBe('3.9.1-pre.13 +5')
+    expect(footerVersion(localView())).toBe('3.9.1-pre.13 +5 · modified')
+    const clean = localView()
+    expect(footerVersion({ ...clean, current: { ...clean.current, dirty: false } })).toBe(
+      '3.9.1-pre.13 +5'
+    )
     expect(
       footerVersion(appView({ current: { kind: 'dev', version: null, comparisonVersion: null } }))
     ).toBe('dev')

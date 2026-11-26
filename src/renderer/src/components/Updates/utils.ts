@@ -90,10 +90,17 @@ export function buildVersion(current: AppUpdateView['current']): string | null {
   return current.ahead ? `${base} +${current.ahead}` : base
 }
 
-/** The footer's version: {@link buildVersion}, or `dev`. */
+/**
+ * The footer's version: {@link buildVersion}, or `dev`; a local build made from
+ * a tree with uncommitted changes says so (its commit alone does not tell).
+ */
 export function footerVersion(view: AppUpdateView | null): string | null {
   if (!view) return null
-  return buildVersion(view.current) ?? (view.current.kind === 'dev' ? 'dev' : null)
+  const version = buildVersion(view.current)
+  if (!version) return view.current.kind === 'dev' ? 'dev' : null
+  return view.current.kind === 'local' && view.current.dirty === true
+    ? `${version} · modified`
+    : version
 }
 
 // ── The ClaudeUI row ──────────────────────────────────────────────────
