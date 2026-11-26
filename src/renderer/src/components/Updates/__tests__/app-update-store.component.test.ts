@@ -19,7 +19,7 @@ vi.mock('../../../../../core/shared/sync/client-registry', () => ({
   onSyncAnswered: () => () => {}
 }))
 
-import { CHANGED_DEBOUNCE_MS, updatesStore } from '../app-update-store'
+import { CHANGED_DEBOUNCE_MS, RELAUNCH_RECHECK_MS, updatesStore } from '../app-update-store'
 import { harnessStore } from '../../SettingsDialog/harness-store'
 import { appLaterKey, appSection } from '../utils'
 import { CHECKED, appView, stagedView } from './fixtures'
@@ -283,6 +283,66 @@ describe('the panel', () => {
     updatesStore.closePanel()
     updatesStore.openPanel({ rebuild: true })
     expect(updatesStore.getState().trees).toBeNull()
+  })
+
+  it('while open, re-reads the relaunch availability now and then and on focus; closed, never', async () => {
+    await subscribed()
+    vi.useFakeTimers()
+    const reads = (): number => api.relaunchAvailability.mock.calls.length
+    const before = reads()
+    // A build lands in the install while the panel is open.
+    api.relaunchAvailability.mockResolvedValue({
+      available: true,
+      newBuild: { version: '3.9.2', commit: 'def5678' }
+    } as never)
+    updatesStore.openPanel()
+    expect(reads()).toBe(before + 1)
+    await vi.advanceTimersByTimeAsync(RELAUNCH_RECHECK_MS)
+    expect(reads()).toBe(before + 2)
+    expect(updatesStore.getState().relaunch).toMatchObject({ newBuild: { commit: 'def5678' } })
+    window.dispatchEvent(new Event('focus'))
+    expect(reads()).toBe(before + 3)
+    updatesStore.openPanel() // already open: one watch, not two
+    await vi.advanceTimersByTimeAsync(RELAUNCH_RECHECK_MS)
+    expect(reads()).toBe(before + 5)
+
+    updatesStore.closePanel()
+    await vi.advanceTimersByTimeAsync(RELAUNCH_RECHECK_MS * 3)
+    window.dispatchEvent(new Event('focus'))
+    expect(reads()).toBe(before + 5)
+  })
+
+  it('the panel still open when the store is shown again (a remount): the re-reads resume', async () => {
+    await subscribed()
+    vi.useFakeTimers()
+    const reads = (): number => api.relaunchAvailability.mock.calls.length
+    updatesStore.openPanel()
+    unsubscribe!() // the sidebar unmounts; the panel state stays open
+    unsubscribe = null
+    let before = reads()
+    await vi.advanceTimersByTimeAsync(RELAUNCH_RECHECK_MS)
+    expect(reads()).toBe(before)
+    unsubscribe = updatesStore.subscribe(() => {}) // and mounts again
+    before = reads() // the subscribe's own read
+    await vi.advanceTimersByTimeAsync(RELAUNCH_RECHECK_MS)
+    expect(reads()).toBe(before + 1)
+  })
+
+  it('only the newest relaunch read lands', async () => {
+    await subscribed()
+    let answerFirst!: (v: { available: boolean }) => void
+    api.relaunchAvailability.mockImplementationOnce(
+      () => new Promise((resolve) => (answerFirst = resolve))
+    )
+    api.relaunchAvailability.mockResolvedValueOnce({
+      available: true,
+      newBuild: { version: '3.9.2', commit: 'def5678' }
+    } as never)
+    const first = updatesStore.readRelaunch()
+    await updatesStore.readRelaunch()
+    answerFirst({ available: false })
+    await first
+    expect(updatesStore.getState().relaunch).toMatchObject({ available: true })
   })
 
   it('opens on the rebuild choice from the cog menu, and closing clears the confirm', async () => {

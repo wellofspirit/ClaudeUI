@@ -50,6 +50,12 @@ import { impactIsEmpty, type LaterMap } from './utils'
 
 /** `app-update:changed` comes at most once a second during a download; one read answers a burst. */
 export const CHANGED_DEBOUNCE_MS = 100
+/**
+ * While the panel is open, how often it re-reads whether the host can relaunch
+ * (and into which build): a local build can land in the install at any time.
+ * The window regaining focus re-reads at once.
+ */
+export const RELAUNCH_RECHECK_MS = 10_000
 /** A restart the host accepted but that never quit (an abort) gives the buttons back after this. */
 export const RESTART_SETTLE_MS = 60_000
 
@@ -122,6 +128,9 @@ class UpdatesStore {
   private retained = 0
   private offEvents: (() => void) | null = null
   private readSeq = 0
+  private relaunchSeq = 0
+  /** Stops the open panel's relaunch re-reads (the timer and the focus listener). */
+  private stopRelaunchWatch: (() => void) | null = null
   private settleTimer: ReturnType<typeof setTimeout> | null = null
 
   getState = (): UpdatesState => this.state
@@ -155,6 +164,9 @@ class UpdatesStore {
     this.offEvents = onNudge('app-update:changed', () => void this.refresh(), CHANGED_DEBOUNCE_MS)
     void this.refresh()
     void this.readRelaunch()
+    // Shown again with the panel still open (the sidebar remounted across the
+    // mobile breakpoint): its re-reads stopped with the release, so restart them.
+    if (this.state.open) this.watchRelaunch()
   }
 
   private release(): void {
@@ -163,6 +175,7 @@ class UpdatesStore {
     this.offEvents?.()
     this.offEvents = null
     this.readSeq++
+    this.unwatchRelaunch()
     // Nothing shows the store any more (the sidebar collapsed): a pending
     // "restart when staged" must not fire later, whenever it is shown again.
     // The button still offers Restart to update once the build is staged.
@@ -199,14 +212,32 @@ class UpdatesStore {
     }
   }
 
-  /** Whether the host can relaunch now (`app:relaunch-availability`). */
+  /** Whether the host can relaunch now (`app:relaunch-availability`); only the newest read lands. */
   readRelaunch = async (): Promise<void> => {
+    const seq = ++this.relaunchSeq
     try {
       const relaunch = await window.api.relaunchAvailability()
-      this.set({ relaunch })
+      if (seq === this.relaunchSeq) this.set({ relaunch })
     } catch {
-      this.set({ relaunch: { available: false } })
+      if (seq === this.relaunchSeq) this.set({ relaunch: { available: false } })
     }
+  }
+
+  /** While the panel is open: re-read the relaunch availability now and then, and on focus. */
+  private watchRelaunch(): void {
+    if (this.stopRelaunchWatch) return
+    const timer = setInterval(() => void this.readRelaunch(), RELAUNCH_RECHECK_MS)
+    const onFocus = (): void => void this.readRelaunch()
+    window.addEventListener('focus', onFocus)
+    this.stopRelaunchWatch = () => {
+      clearInterval(timer)
+      window.removeEventListener('focus', onFocus)
+    }
+  }
+
+  private unwatchRelaunch(): void {
+    this.stopRelaunchWatch?.()
+    this.stopRelaunchWatch = null
   }
 
   /** The rebuild trees (admin). */
@@ -233,10 +264,12 @@ class UpdatesStore {
       ...(opening ? { trees: null, treesError: null } : {})
     })
     void this.readRelaunch()
+    this.watchRelaunch()
     if (opts.check) void this.check()
   }
 
   closePanel = (): void => {
+    this.unwatchRelaunch()
     if (!this.state.open && !this.state.confirm) return
     this.set({ open: false, rebuildIntent: false, confirm: null, error: null })
   }
@@ -413,6 +446,7 @@ class UpdatesStore {
   resetForTests(): void {
     this.offEvents?.()
     this.offEvents = null
+    this.unwatchRelaunch()
     if (this.settleTimer) clearTimeout(this.settleTimer)
     this.settleTimer = null
     this.listeners.clear()

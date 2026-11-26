@@ -79,13 +79,18 @@ export interface RelaunchJob {
  * pass the caller's whole environment, older ones start the app with the login
  * session's. This allowlist is what guarantees, on every version, that a
  * ClaudeUI started with another profile (HOME, CLAUDE_CONFIG_DIR), a mode
- * switch or a proxy comes back with it. An allowlist, because the job files sit
+ * switch or a proxy comes back with it, with the PATH its tools were found on
+ * (`open -n` from the helper starts the app with launchd's `/usr/bin`, and the
+ * login-shell import at startup does not read `.zshrc`: a ClaudeUI started from
+ * a terminal would lose what that adds, `~/.bun/bin` say, for every agent
+ * session after a relaunch). An allowlist, because the job files sit
  * on disk: nothing credential-shaped beyond what a proxy URL itself carries.
  * Windows needs none (`Start-Process` inherits the helper's environment, which
  * is the app's).
  */
 export const RELAUNCH_ENV_KEYS: readonly string[] = [
   'HOME',
+  'PATH',
   'CLAUDE_CONFIG_DIR',
   'CLAUDEUI_HARNESS_STORE',
   'CLAUDEUI_ALLOW_MULTIPLE_INSTANCES',
