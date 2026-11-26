@@ -259,6 +259,7 @@ describe('job files', () => {
     expect(args).toEqual(['--user-data-dir=/tmp/p q/electron', '--claudeui-headless'])
     const env = {
       HOME: '/tmp/p q',
+      PATH: '/Users/x/.bun/bin:/usr/bin:/bin',
       CLAUDEUI_DISABLE_REMOTE: '1',
       HTTPS_PROXY: 'http://127.0.0.1:9',
       OPENAI_API_KEY: 'sk-secret',
@@ -269,6 +270,8 @@ describe('job files', () => {
       '-n',
       '--env',
       'HOME=/tmp/p q',
+      '--env',
+      'PATH=/Users/x/.bun/bin:/usr/bin:/bin',
       '--env',
       'CLAUDEUI_DISABLE_REMOTE=1',
       '--env',

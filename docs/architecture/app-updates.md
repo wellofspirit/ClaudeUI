@@ -45,7 +45,7 @@ as-built map: modules, the files they write, the protocols between them, and the
   on Windows an attached launcher starts the helper with `Start-Process` from `<t>.helper-args`), collects the restore
   record from the window, and confirms the quit. The helper waits for the old pid (Windows: and for processes running
   from the install), swaps when asked, launches the install with the same arguments (macOS: `open -n` plus an
-  allowlist of identity, mode and proxy variables), and waits for a health record newer than the job. A swap without
+  allowlist of identity, mode and proxy variables and `PATH`), and waits for a health record newer than the job. A swap without
   health after 90 s is rolled back. Results are reconciled by the next boot of that install.
 - **Built in place** (a macOS workflow: on Windows a build cannot overwrite the folder of a running app). When the
   install's marker `buildId` differs from the running process's (`bun run build:mac` wrote into the folder ClaudeUI
